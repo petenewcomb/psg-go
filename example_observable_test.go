@@ -11,31 +11,31 @@ import (
 	"github.com/petenewcomb/psg-go"
 )
 
-// Illustrative example that uses psg to run a few tasks in parallel and produce
-// logging that demonstrate the sequence of events.
-func Example_illustrative() {
+// Define a factory to bind task-specific inputs to generic task functions
+func newTaskFunc(taskName string, msSinceStart func() int64) psg.TaskFunc[string] {
+	return func(context.Context) (string, error) {
+		// Simulate latency
+		if taskName == "A" {
+			// Force A to finish last. Combined with the pool's concurrency
+			// limit this stabilizes the test output
+			time.Sleep(30 * time.Millisecond)
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+		fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
+		// Return mock data
+		return "result for task " + taskName, nil
+	}
+}
+
+// Observable uses psg to run a few tasks and produce logging that demonstrate
+// the sequence of events.
+func Example_observable() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 50ms to make the output stable across runs
 		ms := time.Since(startTime).Milliseconds() / 10
 		return ms * 10
-	}
-
-	// Define a factory to bind task-specific inputs to generic task functions
-	newTaskFunc := func(taskName string) psg.TaskFunc[string] {
-		return func(context.Context) (string, error) {
-			// Simulate latency
-			if taskName == "A" {
-				// Force A to finish last. Combined with the pool's concurrency
-				// limit this stabilizes the test output
-				time.Sleep(30 * time.Millisecond)
-			} else {
-				time.Sleep(10 * time.Millisecond)
-			}
-			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
-			// Return mock data
-			return "result for task " + taskName, nil
-		}
 	}
 
 	// Define a result aggregation function, which will run in
@@ -60,7 +60,8 @@ func Example_illustrative() {
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
 		fmt.Printf("%3dms: launching task %q\n", msSinceStart(), taskName)
-		err := psg.Scatter(ctx, pool, newTaskFunc(taskName), gatherFunc)
+		taskFunc := newTaskFunc(taskName, msSinceStart)
+		err := psg.Scatter(ctx, pool, taskFunc, gatherFunc)
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

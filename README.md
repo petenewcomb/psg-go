@@ -18,7 +18,7 @@ The below shows basic usage without error checking.
 ctx := context.Background()
 pool := psg.NewPool(2)
 job := psg.NewJob(ctx, pool)
-defer job.Cancel()
+defer job.Cancel() // hygiene
 
 newTask := func(s string) psg.TaskFunc[string] {
 	return func(context.Context) (string, error) {

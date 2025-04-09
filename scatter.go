@@ -19,6 +19,11 @@ import (
 // gathering and launch, but only the context associated with the pool's job
 // will be passed to the task.
 //
+// WARNING: Scatter must not be called from within a TaskFunc launched the same
+// job as this may lead to deadlock when a concurrency limit is reached.
+// Instead, call Scatter from the associated GatherFunc after the TaskFunc
+// completes.
+//
 // Scatter will panic if the given pool is not yet associated with a job.
 // Scatter returns a non-nil error if the context is canceled or if a non-nil
 // error is returned by a gather function. If the returned error is non-nil, the

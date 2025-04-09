@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,8 +15,8 @@ import (
 	"github.com/petenewcomb/psg-go"
 )
 
-// Pipeline demonstrates the use of multiple psg pools to re-implement the MD5All
-// function in [errgroup's pipeline example], which itself is a
+// Pipeline demonstrates the use of multiple psg pools to re-implement the
+// MD5All function in [errgroup's pipeline example], which itself is a
 // re-implementation of the MD5All function described in [Go Concurrency
 // Patterns: Pipelines and cancellation].
 //
@@ -57,12 +56,12 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		}
 	}
 
-	// Allow many ioutil.ReadFile tasks to run concurrently since they should
+	// Allow many file reading tasks to run concurrently since they should be
 	// I/O-bound.
 	readerPool := psg.NewPool(100)
 	newReadingTask := func(path string) psg.TaskFunc[[]byte] {
 		return func(ctx context.Context) ([]byte, error) {
-			return ioutil.ReadFile(path)
+			return os.ReadFile(path)
 		}
 	}
 

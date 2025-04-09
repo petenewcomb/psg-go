@@ -14,7 +14,8 @@ import (
 // allows the caller to terminate the environment early and ensure cleanup when
 // the environment is no longer needed. In addition to thread-safe versions of
 // the gathering methods provided by Job, SyncJob provides multi-threaded
-// gathering methods with configurable parallelism.
+// gathering methods with configurable parallelism ([SyncJob.MultiGatherAll] and
+// [SyncJob.MultiTryGatherAll]).
 //
 // A SyncJob must be created with [NewSyncJob], see that function for caveats
 // and important details.

@@ -29,7 +29,8 @@ func NewPool(limit int) *Pool {
 }
 
 // Sets the active concurrency limit for the pool. A negative value means no
-// limit. Zero means no new tasks will be launched (i.e., [Scatter] will block
+// limit (tasks will always be launched regardless of how many are currently
+// running). Zero means no new tasks will be launched (i.e., [Scatter] will block
 // indefinitely) until SetLimit is called with a non-zero value. SetLimit is
 // always thread-safe, even for a Pool in a single-threaded [Job].
 func (p *Pool) SetLimit(limit int) {

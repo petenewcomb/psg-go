@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 )
 
-// `SyncInFlightCounter` is a thread-safe implementation of the
-// `psg.inFlightCounter` interface, suitable when calls to scatter and
-// gather calls in the associated `psg.job` environment may be made from
-// more than one goroutine.
+// SyncInFlightCounter is a thread-safe implementation of the
+// psg.inFlightCounter interface, suitable when calls to scatter and gather in
+// the associated [github.com/petenewcomb/psg-go] job may be made from more than
+// one goroutine.
 type SyncInFlightCounter struct {
 	atomic.Int64
 }

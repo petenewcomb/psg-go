@@ -3,9 +3,10 @@
 
 package state
 
-// `Simple` is a single-threaded implementation of the `psg.inFlightCounter`
-// interface, suitable when all scatter and gather calls in the associated
-// `psg.job` environment will be made from the same goroutine.
+// SimpleInFlightCounter is a single-threaded implementation of the
+// psg.inFlightCounter interface, suitable when all scatter and gather calls in
+// the associated [github.com/petenewcomb/psg-go] job will be made from the same
+// goroutine.
 type SimpleInFlightCounter int64
 
 func (c *SimpleInFlightCounter) Increment() {

@@ -19,12 +19,12 @@ Pipelined scatter-gather, as defined here, comprises three key features:
  3. Concurrency of different groups of tasks can be independently controlled
     (e.g., compute- vs I/O-bound tasks)
 
-Like [errgroup], `psg` "provides synchronization, error propagation, and Context
-cancelation for groups of goroutines working on subtasks of a common task."
-Unlike [errgroup], `psg` goes beyond error and goroutine lifetime management to
-incrementally propagate subtask results and errors back to the common task
-without requiring the user to employ additional channels or synchronization
-constructs.
+Like [`errgroup`][errgroup], `psg` "provides synchronization, error propagation,
+and Context cancelation for groups of goroutines working on subtasks of a common
+task." Unlike `errgroup`, `psg` goes beyond error and goroutine lifetime
+management to incrementally propagate subtask results and errors back to the
+common task without requiring the user to employ additional channels or
+synchronization constructs.
 
 Additional features:
   - Type-safe API using Go generics

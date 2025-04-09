@@ -5,9 +5,8 @@
 # Pipelined Scatter-Gather in Go
 
 `psg` is a Go library that implements a pipelined variant of the scatter-gather
-concurrency pattern. It provides an API that simplifies management of
-asynchronous tasks and their results, even ones that are heterogeneous,
-recursive, or interdependent.
+concurrency pattern. It simplifies management of asynchronous tasks and their
+results, even ones that are heterogeneous, recursive, or interdependent.
 
 ## Hello world
 

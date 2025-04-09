@@ -110,7 +110,7 @@ func (j *SyncJob) multiGatherAll(ctx context.Context, parallelism int, block boo
 
 	var wg sync.WaitGroup
 	wg.Add(parallelism)
-	for _ = range parallelism {
+	for range parallelism {
 		go func() {
 			defer wg.Done()
 			err := j.impl.gatherAll(ctx, block)

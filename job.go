@@ -99,8 +99,8 @@ func (j *Job) makeTaskContext(ctx context.Context) context.Context {
 		newValue = j
 	case *Job:
 		newValue = map[*Job]struct{}{
-			oldValue: struct{}{},
-			j:        struct{}{},
+			oldValue: {},
+			j:        {},
 		}
 	case map[*Job]struct{}:
 		m := make(map[*Job]struct{}, len(oldValue)+1)

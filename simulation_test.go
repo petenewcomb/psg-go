@@ -101,7 +101,7 @@ func repeatedlyExecute(times int, execute func() executionDatapoints) executionD
 	_ = execute()
 	_ = execute()
 
-	for _ = range times {
+	for range times {
 		datapoints := execute()
 		overallDatapoints.maxConcurrencies = append(overallDatapoints.maxConcurrencies, datapoints.maxConcurrencies...)
 		overallDatapoints.overallDurations = append(overallDatapoints.overallDurations, datapoints.overallDurations...)
@@ -243,7 +243,7 @@ func buildSimulatedTasks(t *rapid.T, concurrencyLimit int) (taskCount int, maxTa
 	t.Logf("pathCount: %d", pathCount)
 
 	maxTaskDuration = minExecutionDuration
-	for _ = range pathCount {
+	for range pathCount {
 		pathLength := rapid.IntRange(1, maxPathLength).Draw(t, "pathLength")
 		parent := &rootTask
 		for step := range pathLength {

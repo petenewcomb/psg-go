@@ -195,10 +195,10 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 	// problem, decrementInFlight sends nil values through gatherChannel to wake
 	// waiters whenever the in-flight count reaches zero. The following code
 	// must therefore detect such nil values, re-check the in-flight count, and
-	// retry the recieve if the count has become non-zero.
+	// retry the receive if the count has become non-zero.
 	for j.inFlight.GreaterThanZero() {
-		// The following select statements are identical other than the absense
-		// or presense of a default clause.
+		// The following select statements are identical other than the absence
+		// or presence of a default clause.
 		if block {
 			select {
 			case gather := <-j.gatherChannel:

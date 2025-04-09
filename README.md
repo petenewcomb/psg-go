@@ -9,6 +9,40 @@ concurrency pattern. It provides an API that simplifies management of
 asynchronous tasks and their results, even ones that are heterogeneous,
 recursive, or interdependent.
 
+## Hello world
+
+The below shows basic usage without error checking.  ([playground](https://go.dev/play/p/JTt6gWNNIIV))
+
+``` go
+ctx := context.Background()
+pool := psg.NewPool(2)
+job := psg.NewJob(ctx, pool)
+defer job.Cancel()
+
+newTask := func(s string) psg.TaskFunc[string] {
+	return func(context.Context) (string, error) {
+		time.Sleep(1 * time.Millisecond)
+		return s, nil
+	}
+}
+
+var results []string
+gather := func(ctx context.Context, result string, err error) error {
+	results = append(results, result)
+	return nil
+}
+
+psg.Scatter(ctx, pool, newTask("Hello"), gather)
+psg.Scatter(ctx, pool, newTask("world!"), gather)
+
+job.GatherAll(ctx)
+fmt.Println(strings.Join(results, " "))
+```
+
+For more detailed demonstrations of how `psg` works, see the Observable example
+([source](./example_observable_test.go), [playground](https://go.dev/play/p/rJMfZAS468b))
+and others in the [reference documentation].
+
 ## Features
 
 Pipelined scatter-gather, as defined here, comprises three key features:

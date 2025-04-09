@@ -11,7 +11,8 @@ recursive, or interdependent.
 
 ## Hello world
 
-The below shows basic usage without error checking.  ([playground](https://go.dev/play/p/JTt6gWNNIIV))
+The below shows basic usage without error checking.
+([playground][helloworld-play])
 
 ``` go
 ctx := context.Background()
@@ -40,8 +41,8 @@ fmt.Println(strings.Join(results, " "))
 ```
 
 For more detailed demonstrations of how `psg` works, see the Observable example
-([source](./example_observable_test.go), [playground](https://go.dev/play/p/rJMfZAS468b))
-and others in the [reference documentation].
+([source][observable-source], [playground][observable-play]) and others in the
+[reference documentation][godev].
 
 ## Features
 
@@ -80,11 +81,14 @@ Contributions, including feedback, are welcome! Please feel free to submit an
 [issue][issues] or [pull request][pull requests].
 
 [godev-badge]: https://pkg.go.dev/badge/github.com/petenewcomb/psg-go.svg
-[godev]: https://pkg.go.dev/github.com/petenewcomb/psg-go
+[godev]: https://pkg.go.dev/github.com/petenewcomb/psg-go#section-documentation
 [goreport-badge]: https://goreportcard.com/badge/github.com/petenewcomb/psg-go
 [goreport]: https://goreportcard.com/report/github.com/petenewcomb/psg-go
 [license-badge]: https://img.shields.io/github/license/mashape/apistatus.svg
 [license]: https://opensource.org/licenses/MIT
+[helloworld-play]: https://go.dev/play/p/JTt6gWNNIIV
+[observable-source]: ./example_observable_test.go
+[observable-play]: https://go.dev/play/p/rJMfZAS468b
 [errgroup]: https://pkg.go.dev/golang.org/x/sync/errgroup
 [issues]: https://github.com/petenewcomb/psg-go/issues
 [pull requests]: https://github.com/petenewcomb/psg-go/pulls

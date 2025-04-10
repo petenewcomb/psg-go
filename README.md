@@ -1,5 +1,6 @@
 [![Go Reference][godev-badge]][godev]
 [![Go Report Card][goreport-badge]][goreport]
+[![Build Status][build-badge]][builds]
 [![License][license-badge]][license]
 
 # Pipelined Scatter-Gather in Go
@@ -84,6 +85,8 @@ request][pull requests].
 [godev]: https://pkg.go.dev/github.com/petenewcomb/psg-go#section-documentation
 [goreport-badge]: https://goreportcard.com/badge/github.com/petenewcomb/psg-go
 [goreport]: https://goreportcard.com/report/github.com/petenewcomb/psg-go
+[build-badge]: https://github.com/petenewcomb/ci-go/actions/workflows/build.yml/badge.svg
+[builds]: https://github.com/petenewcomb/ci-go/actions/workflows/build.yml
 [license-badge]: https://img.shields.io/github/license/mashape/apistatus.svg
 [license]: https://opensource.org/licenses/MIT
 [helloworld-play]: https://go.dev/play/p/JTt6gWNNIIV

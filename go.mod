@@ -3,9 +3,10 @@
 
 module github.com/petenewcomb/psg-go
 
-// Go 1.24 is the latest minor version at time of writing and at least 1.23 is
-// required for the generic type aliases used to define TaskFunc and GatherFunc
-go 1.23
+// Go 1.24 is the latest stable release at time of writing and at least 1.23
+// with GOEXPERIMENT=aliastypeparams is required for the generic type aliases
+// used to define TaskFunc and GatherFunc
+go 1.24
 
 require (
 	github.com/addrummond/heap v1.3.1

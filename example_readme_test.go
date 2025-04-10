@@ -13,6 +13,8 @@ import (
 )
 
 // README code snippet
+//
+//nolint:errcheck,unused
 func example_readme() {
 	ctx := context.Background()
 	pool := psg.NewPool(2)

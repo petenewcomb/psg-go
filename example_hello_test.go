@@ -21,6 +21,8 @@ func newTask(s string) psg.TaskFunc[string] {
 
 // "Hello world" example that uses psg to run a couple of tasks and gather their
 // results.
+//
+//nolint:errcheck
 func Example_hello() {
 	ctx := context.Background()
 	pool := psg.NewPool(2)

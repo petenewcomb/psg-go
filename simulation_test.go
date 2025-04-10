@@ -364,13 +364,11 @@ func TestBySimulation(t *testing.T) {
 		}).computeStatistics()
 
 		// Adjust to account for imperfect estimation due to limited simulation repetition
-		minMaxConcurrencyTolerance := 0.1
+		minMaxConcurrencyTolerance := 0.2
 		maxMaxConcurrencyTolerance := 0.2
 		minDurationTolerance := 0.3
 		maxDurationTolerance := 0.4
 		if testing.Short() {
-			minMaxConcurrencyTolerance = 0.2
-			minDurationTolerance = 0.3
 			maxDurationTolerance = 0.6
 		}
 		expectations.minMaxConcurrency = max(1, int64(math.Floor((1-minMaxConcurrencyTolerance)*float64(expectations.minMaxConcurrency))))

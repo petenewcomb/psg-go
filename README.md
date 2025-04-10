@@ -76,8 +76,9 @@ Licensed under the MIT License.
 
 ## Contributing
 
-Contributions, including feedback, are welcome! Please feel free to submit an
-[issue][issues] or [pull request][pull requests].
+Contributions, including feedback, are welcome! Please feel free to start or
+join a [discussion][discussions], create an [issue][issues], or submit a [pull
+request][pull requests].
 
 [godev-badge]: https://pkg.go.dev/badge/github.com/petenewcomb/psg-go.svg
 [godev]: https://pkg.go.dev/github.com/petenewcomb/psg-go#section-documentation
@@ -89,5 +90,6 @@ Contributions, including feedback, are welcome! Please feel free to submit an
 [observable-source]: ./example_observable_test.go
 [observable-play]: https://go.dev/play/p/rJMfZAS468b
 [errgroup]: https://pkg.go.dev/golang.org/x/sync/errgroup
+[discussions]: https://github.com/petenewcomb/psg-go/discussions
 [issues]: https://github.com/petenewcomb/psg-go/issues
 [pull requests]: https://github.com/petenewcomb/psg-go/pulls

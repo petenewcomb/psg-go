@@ -1,5 +1,8 @@
 name: build
 
+permissions:
+  contents: write # for coverage updates on the wiki
+
 on:
   push:
     branches: [main]

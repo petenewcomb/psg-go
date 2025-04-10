@@ -10,6 +10,7 @@ format.
 
 - Dependabot configuration
 - GitHub workflows based on petenewcomb/ci-go
+- Test coverage for expected panic conditions
 
 ### Fixed
 

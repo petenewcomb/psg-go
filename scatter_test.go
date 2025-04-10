@@ -168,15 +168,15 @@ func TestScatterFromTask(t *testing.T) {
 func TestTaskCanScatterToSubJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	
+
 	// Create parent job with pool
 	parentPool := psg.NewPool(1)
 	parentJob := psg.NewJob(ctx, parentPool)
 	defer parentJob.Cancel()
-	
+
 	// Variable to track execution flow
 	subJobTaskRan := false
-	
+
 	err := psg.Scatter(
 		ctx,
 		parentPool,
@@ -185,7 +185,7 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 			subPool := psg.NewPool(1)
 			subJob := psg.NewJob(ctx, subPool)
 			defer subJob.Cancel()
-			
+
 			// This should succeed - scattering a task to the sub-job's pool
 			err := psg.Scatter(
 				ctx,
@@ -201,10 +201,10 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 				},
 			)
 			chk.NoError(err)
-			
+
 			// Gather all results in the sub-job
 			chk.NoError(subJob.GatherAll(ctx))
-			
+
 			return true, nil
 		},
 		func(ctx context.Context, result bool, err error) error {
@@ -213,10 +213,10 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 			return nil
 		},
 	)
-	
+
 	chk.NoError(err)
 	chk.NoError(parentJob.GatherAll(ctx))
-	
+
 	// Verify the sub-job task executed successfully
 	chk.True(subJobTaskRan, "The task in the sub-job should have run")
 }
@@ -224,12 +224,12 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 func TestTaskCannotScatterToParentJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	
+
 	// Create parent job with pool
 	parentPool := psg.NewPool(1)
 	parentJob := psg.NewJob(ctx, parentPool)
 	defer parentJob.Cancel()
-	
+
 	err := psg.Scatter(
 		ctx,
 		parentPool,
@@ -250,7 +250,7 @@ func TestTaskCannotScatterToParentJob(t *testing.T) {
 					},
 				)
 			})
-			
+
 			return true, nil
 		},
 		func(ctx context.Context, result bool, err error) error {
@@ -259,7 +259,7 @@ func TestTaskCannotScatterToParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	
+
 	chk.NoError(err)
 	chk.NoError(parentJob.GatherAll(ctx))
 }

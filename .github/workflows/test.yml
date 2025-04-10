@@ -1,0 +1,5 @@
+name: test
+
+jobs:
+  test:
+    uses: petenewcomb/ci-go/.github/workflows/test.yml@v0.0.1

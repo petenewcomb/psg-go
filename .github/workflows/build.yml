@@ -11,10 +11,6 @@ on:
 
 jobs:
   build:
-    uses: petenewcomb/ci-go/.github/workflows/build.yml@v0.0.1
-    strategy:
-      matrix:
-        go: ['stable'] # drop implicit oldstable until 1.25 release
-
+    uses: petenewcomb/ci-go/.github/workflows/build.yml@v0.0.3
   vuln:
-    uses: petenewcomb/ci-go/.github/workflows/vuln.yml@v0.0.1
+    uses: petenewcomb/ci-go/.github/workflows/vuln.yml@v0.0.3

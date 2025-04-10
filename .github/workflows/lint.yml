@@ -9,4 +9,4 @@ on:
 
 jobs:
   lint:
-    uses: petenewcomb/ci-go/.github/workflows/lint.yml@v0.0.1
+    uses: petenewcomb/ci-go/.github/workflows/lint.yml@v0.0.3

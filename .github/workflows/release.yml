@@ -1,0 +1,7 @@
+name: release
+
+on: workflow_dispatch
+
+jobs:
+  lint:
+    uses: petenewcomb/ci-go/.github/workflows/release.yml@v0.0.1

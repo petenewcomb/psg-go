@@ -11,6 +11,10 @@ format.
 - Dependabot configuration
 - GitHub workflows based on petenewcomb/ci-go
 
+### Fixed
+
+- Require Go 1.24 to avoid need for GOEXPERIMENT=aliastypeparams
+
 ## [0.0.1] - 2025-04-09
 
 ### Added

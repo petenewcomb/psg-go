@@ -244,9 +244,11 @@ func estimateJob(t *rapid.T, plan *Plan, config *JobConfig, simTimeOrigin time.D
 		OverallDuration:      simTime - simTimeOrigin,
 	}
 
-	//chk.Equal(1+plan.SubplanCount, len(estimates))
+	chk.Equal(1+plan.SubplanCount, len(estimates))
 
-	t.Logf("%v %v estimate done: %v", simTime, plan, *estimates[plan])
+	if config.Debug {
+		t.Logf("%v %v estimate done: %v", simTime, plan, *estimates[plan])
+	}
 
 	return estimates
 }

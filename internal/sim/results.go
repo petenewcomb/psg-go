@@ -64,45 +64,23 @@ func (rr *ResultRange) MergeRange(t require.TestingT, r *ResultRange) {
 }
 
 func MergeResultMap(t require.TestingT, dst map[*Plan]*ResultRange, src map[*Plan]*Result) {
-	//chk := require.New(t)
-	if len(dst) == 0 {
-		for p, sr := range src {
-			drr := &ResultRange{}
+	for p, sr := range src {
+		drr := dst[p]
+		if drr == nil {
+			drr = &ResultRange{}
 			dst[p] = drr
-			drr.MergeResult(t, sr)
 		}
-	} else {
-		//chk.Equal(len(dst), len(src))
-		for p, sr := range src {
-			drr := dst[p]
-			//chk.NotNil(drr)
-			if drr == nil {
-				drr = &ResultRange{}
-				dst[p] = drr
-			}
-			drr.MergeResult(t, sr)
-		}
+		drr.MergeResult(t, sr)
 	}
 }
 
 func MergeResultRangeMap(t require.TestingT, dst, src map[*Plan]*ResultRange) {
-	//chk := require.New(t)
-	if len(dst) == 0 {
-		for p, srr := range src {
-			drr := &ResultRange{}
+	for p, srr := range src {
+		drr := dst[p]
+		if drr == nil {
+			drr = &ResultRange{}
 			dst[p] = drr
-			drr.MergeRange(t, srr)
 		}
-	} else {
-		//chk.Equal(len(dst), len(src))
-		for p, srr := range src {
-			drr := dst[p]
-			//chk.NotNil(drr)
-			if drr == nil {
-				drr = &ResultRange{}
-				dst[p] = drr
-			}
-			drr.MergeRange(t, srr)
-		}
+		drr.MergeRange(t, srr)
 	}
 }

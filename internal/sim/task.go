@@ -28,28 +28,28 @@ func (t *Task) Format(f fmt.State, verb rune) {
 	if f.Flag('#') {
 		t.formatInternal(f, "")
 	} else {
-		fmt.Fprintf(f, "Task#%d", t.ID)
+		_, _ = fmt.Fprintf(f, "Task#%d", t.ID)
 	}
 }
 
 func (t *Task) formatInternal(f fmt.State, indent string) {
-	fmt.Fprintf(f, "Task#%d: pool=%d", t.ID, t.Pool)
+	_, _ = fmt.Fprintf(f, "Task#%d: pool=%d", t.ID, t.Pool)
 	t.formatSteps(f, indent+"  ")
 }
 
 func (t *Task) formatSteps(f fmt.State, indent string) {
 	if len(t.SelfTimes) > 0 {
 		for i, subjob := range t.Subjobs {
-			fmt.Fprintf(f, "\n%s%v self time\n%s", indent, t.SelfTimes[i], indent)
+			_, _ = fmt.Fprintf(f, "\n%s%v self time\n%s", indent, t.SelfTimes[i], indent)
 			subjob.formatInternal(f, indent+"  ")
 		}
-		fmt.Fprintf(f, "\n%s%v self time", indent, t.SelfTimes[len(t.SelfTimes)-1])
+		_, _ = fmt.Fprintf(f, "\n%s%v self time", indent, t.SelfTimes[len(t.SelfTimes)-1])
 	}
 	if len(t.GatherTimes) > 0 {
 		for i, child := range t.Children {
-			fmt.Fprintf(f, "\n%s%v gather self time\n%s", indent, t.GatherTimes[i], indent)
+			_, _ = fmt.Fprintf(f, "\n%s%v gather self time\n%s", indent, t.GatherTimes[i], indent)
 			child.formatInternal(f, indent+"  ")
 		}
-		fmt.Fprintf(f, "\n%s%v gather self time", indent, t.GatherTimes[len(t.GatherTimes)-1])
+		_, _ = fmt.Fprintf(f, "\n%s%v gather self time", indent, t.GatherTimes[len(t.GatherTimes)-1])
 	}
 }

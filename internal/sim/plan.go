@@ -219,14 +219,14 @@ func (p *Plan) Format(f fmt.State, verb rune) {
 	if f.Flag('#') {
 		p.formatInternal(f, "  ")
 	} else {
-		fmt.Fprintf(f, "Plan#%d", p.ID)
+		_, _ = fmt.Fprintf(f, "Plan#%d", p.ID)
 	}
 }
 
 func (p *Plan) formatInternal(f fmt.State, indent string) {
-	fmt.Fprintf(f, "Plan#%d: config=%+v", p.ID, p.Config)
+	_, _ = fmt.Fprintf(f, "Plan#%d: config=%+v", p.ID, p.Config)
 	for _, child := range p.RootTasks {
-		fmt.Fprintf(f, "\n%s", indent)
+		_, _ = fmt.Fprintf(f, "\n%s", indent)
 		child.formatInternal(f, indent+"  ")
 	}
 }

@@ -1,0 +1,9 @@
+#!/bin/bash
+
+set -e
+set -x
+
+go vet
+gofmt -s -w .
+golangci-lint run
+go test -short ./...

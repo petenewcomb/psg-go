@@ -69,7 +69,7 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 	}
 
 	c.addResultMap(t, map[*Plan]*Result{
-		c.Plan: &Result{
+		c.Plan: {
 			MaxConcurrencyByPool: maxConcurrencyByPool,
 			OverallDuration:      overallDuration,
 		},
@@ -77,7 +77,7 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 	return c.ResultMap, nil
 }
 
-func (c *controller) addResultMap(t require.TestingT, rm map[*Plan]*Result) error {
+func (c *controller) addResultMap(t require.TestingT, rm map[*Plan]*Result) {
 	chk := require.New(t)
 	c.ResultMapMutex.Lock()
 	defer c.ResultMapMutex.Unlock()
@@ -85,7 +85,6 @@ func (c *controller) addResultMap(t require.TestingT, rm map[*Plan]*Result) erro
 		chk.Nil(c.ResultMap[p])
 		c.ResultMap[p] = r
 	}
-	return nil
 }
 
 func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *Task) {
@@ -146,11 +145,13 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			}
 		}()
 
+		chk := require.New(lt)
+
 		res = &taskResult{
 			Task:               task,
 			ConcurrencyAtStart: concurrency.Add(1),
 		}
-		require.New(lt).Greater(res.ConcurrencyAtStart, int64(0))
+		chk.Greater(res.ConcurrencyAtStart, int64(0))
 		defer func() {
 			res.ConcurrencyAfter = concurrency.Add(-1)
 		}()
@@ -158,12 +159,8 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			if i > 0 {
 				subjobPlan := task.Subjobs[i-1]
 				resultMap, err := Run(lt, ctx, subjobPlan)
-				if err != nil {
-					return res, err
-				}
-				if err := c.addResultMap(lt, resultMap); err != nil {
-					return res, err
-				}
+				chk.NoError(err)
+				c.addResultMap(lt, resultMap)
 			}
 			select {
 			case <-time.After(d):

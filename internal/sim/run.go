@@ -97,7 +97,6 @@ func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *
 	chk := require.New(t)
 	if ge, ok := err.(expectedGatherError); ok {
 		chk.True(ge.task.ReturnErrorFromGather)
-		err = nil
 	} else {
 		chk.NoError(err)
 	}

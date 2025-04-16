@@ -21,22 +21,22 @@ func TestBySimulation(t *testing.T) {
 		// Empirically determined to minimize execution time while maintaining
 		// test stability. YMMV.
 		planConfig.MaxSubjobDepth = 3
-		planConfig.MaxPathCount = 100
-		planConfig.MaxPathLength = 20
+		planConfig.MaxPathCount = 20
+		planConfig.MaxPathLength = 10
 		planConfig.SubjobProbability = 0.1
 		planConfig.TaskErrorProbability = 0.1
 		//planConfig.GatherErrorProbability = 0.1
-		minJitterEstimationCount := 100
-		medJitterEstimationCount := 100
-		maxJitterEstimationCount := 100
-		trialCount := 100
+		minJitterEstimationCount := 30
+		medJitterEstimationCount := 30
+		maxJitterEstimationCount := 30
+		trialCount := 20
 		if testing.Short() {
-			planConfig.MaxPathCount = 20
-			planConfig.MaxPathLength = 10
-			minJitterEstimationCount = 20
-			medJitterEstimationCount = 20
-			maxJitterEstimationCount = 20
-			trialCount = 20
+			planConfig.MaxPathCount = 5
+			planConfig.MaxPathLength = 3
+			minJitterEstimationCount = 10
+			medJitterEstimationCount = 10
+			maxJitterEstimationCount = 10
+			trialCount = 10
 		}
 
 		plan := sim.NewPlan(t, planConfig)

@@ -10,6 +10,7 @@ format.
 
 - Dependabot configuration
 - GitHub workflows based on petenewcomb/ci-go
+- .githooks folder and pre-commit script
 - Test coverage for various expected panic conditions
 - Job.CancelAndWait to ensure that task goroutines have fully shut down
 

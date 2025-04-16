@@ -71,13 +71,20 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	// block until the task is completed.
 	j.inFlight.Increment()
 
+	// Bookkeeping: make sure that the job-scope count incremented above gets
+	// decremented unless the launch actually happens
+	launched := false
+	defer func() {
+		if !launched {
+			j.decrementInFlight()
+		}
+	}()
+
 	// Apply backpressure if launching a new task would exceed the pool's
 	// concurrency limit.
-	for !p.underLimit() {
+	gatheredOne := false
+	for !p.incrementInFlightIfUnderLimit() {
 		if !block {
-			// Bookkeeping: we had incremented the job-scope count above
-			// but are not going to launch after all.
-			j.decrementInFlight()
 			return false, nil
 		}
 		// Gather a result to make room to launch the new task. As long as there
@@ -85,14 +92,24 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 		// by this call. Either way, it's time to re-check the in-flight count
 		// for this pool.
 		if _, err := j.GatherOne(ctx); err != nil {
-			// Bookkeeping: we had incremented the job-scope count above
-			// but are not going to launch after all.
-			j.decrementInFlight()
+			return false, err
+		}
+		gatheredOne = true
+	}
+
+	// Because tasks release their pool-scope in-flight count before they post
+	// results to gather, it's possible that the slot we took above is still
+	// occupied by a goroutine waiting for a gather. The below makes sure that
+	// we don't unnecessarily build up extant goroutines by trying to clean one
+	// up before we start one.
+	if !gatheredOne {
+		if _, err := j.TryGatherOne(ctx); err != nil {
 			return false, err
 		}
 	}
 
 	// Launch the task in a new goroutine.
+	launched = true
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
@@ -104,10 +121,11 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 
 type boundTaskFunc func(ctx context.Context)
 
-func (p *Pool) underLimit() bool {
+func (p *Pool) incrementInFlightIfUnderLimit() bool {
 	limit := p.limit.Load()
 	switch {
 	case limit < 0:
+		p.inFlight.Increment()
 		return true
 	case limit == 0:
 		return false

@@ -15,5 +15,6 @@ on:
 jobs:
   build:
     uses: petenewcomb/ci-go/.github/workflows/build.yml@v0.0.3
+    timeout-minutes: 30
   vuln:
     uses: petenewcomb/ci-go/.github/workflows/vuln.yml@v0.0.3

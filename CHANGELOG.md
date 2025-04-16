@@ -10,12 +10,20 @@ format.
 
 - Dependabot configuration
 - GitHub workflows based on petenewcomb/ci-go
-- Test coverage for expected panic conditions
+- Test coverage for various expected panic conditions
+- Job.CancelAndWait to ensure that task goroutines have fully shut down
+
+### Changed
+
+- TestBySimulation completely refactored to increase correctness, coverage,
+  precision, stability, and maintainablility (#3, #6)
+- SyncJob merged with Job, because in-flight counters must always be thread-safe
+  after all (see below fix for in-flight decrement)
 
 ### Fixed
 
 - Require Go 1.24 to avoid need for GOEXPERIMENT=aliastypeparams
-- Relaxed TestBySimulation minMaxConcurrencyTolerance a bit due to a CI test failure
+- Moved pool in-flight decrement from gather to task to avoid potential deadlock
 
 ## [0.0.1] - 2025-04-09
 

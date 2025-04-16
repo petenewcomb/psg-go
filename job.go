@@ -7,83 +7,60 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"sync"
+
+	"github.com/petenewcomb/psg-go/internal/state"
 )
 
-// Job represents a single-threaded scatter-gather execution environment. It
-// tracks tasks launched with [Scatter] across a set of [Pool] instances and
-// provides the [Job.GatherOne] and [Job.GatherAll] methods for gathering their
-// results. [Job.Cancel] allows the caller to terminate the environment early
-// and ensure cleanup when the environment is no longer needed.
+// Job represents a scatter-gather execution environment. It tracks tasks
+// launched with [Scatter] across a set of [Pool] instances and provides methods
+// for gathering their results. [Job.Cancel] and [Job.CancelAndWait] allow the
+// caller to terminate the environment early and ensure cleanup when the
+// environment is no longer needed.
 //
 // A Job must be created with [NewJob], see that function for caveats and
 // important details.
-//
-// See [SyncJob] and [NewSyncJob] if you need support for multi-threaded
-// scattering and gathering in addition to concurrent task execution.
 type Job struct {
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
 	pools         []*Pool
-	inFlight      inFlightCounter
+	inFlight      state.InFlightCounter
 	gatherChannel chan boundGatherFunc
+	wg            sync.WaitGroup
 }
 
 type boundGatherFunc = func(ctx context.Context) error
 
-// NewJob creates a single-threaded scatter-gather execution environment with
-// the specified context and set of pools. The context passed to NewJob is used
-// as the root of the context that will be passed to all task functions. (See
+// NewJob creates an independent scatter-gather execution environment with the
+// specified context and set of pools. The context passed to NewJob is used as
+// the root of the context that will be passed to all task functions. (See
 // [TaskFunc] and [Job.Cancel] for more detail.)
 //
-// Scattering and gathering from a single thread is the default recommendation
-// for [psg] jobs since its main purpose is to simplify orchestration of
-// asynchronous tasks. It is simplest when all calls to [Scatter],
-// [Job.GatherOne], and [Job.GatherAll] are called from the same goroutine, thus
-// allowing gather functions to safely access and mutate local variables as they
-// process task results.
-//
-// Task functions must still be thread-safe, as they will still be launched in
-// their own separate goroutines.
-//
-// A call to NewJob itself is also not completely thread-safe in that it
-// provides only best-effort checking that the provided pools have not been and
-// are not concurrently being passed to another call to NewJob (or
-// [NewSyncJob]). Though not guaranteed to work across goroutines, a panic will
-// be raised if such pool sharing is detected. Regardless, as long as the sets
-// of pools are distinct, it is safe to call NewJob concurrently from multiple
-// goroutines. Each call will create an independent single-threaded
-// scatter-gather execution environment.
+// Pools may not be shared across jobs. NewJob panics if it detects such
+// sharing, but such detection is not guaranteed to work if the same pool is
+// passed to NewJob calls in different goroutines.
 //
 // Each call to NewJob should typically be followed by a deferred call to
-// [Job.Cancel] to ensure that an early exit from the calling function does not
-// leave any outstanding tasks running.
+// [Job.CancelAndWait] to ensure that an early exit from the calling function
+// does not leave any outstanding goroutines.
 func NewJob(
 	ctx context.Context,
 	pools ...*Pool,
 ) *Job {
-	j := &Job{}
-	j.init(ctx, newSimpleInFlightCounter, pools...)
-	return j
-}
-
-func (j *Job) init(
-	ctx context.Context,
-	newInFlightCounter inFlightCounterFactory,
-	pools ...*Pool,
-) {
 	ctx, cancelFunc := context.WithCancel(ctx)
+	j := &Job{
+		cancelFunc:    cancelFunc,
+		pools:         slices.Clone(pools),
+		gatherChannel: make(chan boundGatherFunc),
+	}
 	j.ctx = j.makeTaskContext(ctx)
-	j.cancelFunc = cancelFunc
-	j.pools = slices.Clone(pools)
-	j.inFlight = newInFlightCounter()
-	j.gatherChannel = make(chan boundGatherFunc)
 	for _, p := range j.pools {
 		if p.job != nil {
 			panic("pool was already registered")
 		}
 		p.job = j
-		p.inFlight = newInFlightCounter()
 	}
+	return j
 }
 
 type taskContextMarkerType struct{}
@@ -148,6 +125,13 @@ func (j *Job) Cancel() {
 	j.cancelFunc()
 }
 
+// CancelAndWait cancels like [Job.Cancel], but then blocks until any
+// outstanding task goroutines exit.
+func (j *Job) CancelAndWait() {
+	j.Cancel()
+	j.wg.Wait()
+}
+
 // GatherOne processes at most a single result from a task previously launched
 // in one of the [Job]'s pools via [Scatter]. It will block until a completed
 // task is available or the context has been canceled. See [Job.TryGatherOne] for a
@@ -162,11 +146,10 @@ func (j *Job) Cancel() {
 //   - false, nil: there were no tasks in flight
 //   - false, non-nil: the argument or job-internal context was canceled
 //
-// If the job was created with [NewSyncJob] and all gather functions are
-// thread-safe, then GatherOne is thread-safe and can be called concurrently
-// from multiple goroutines. Blocking and non-blocking calls may also be mixed,
-// as can calls to GatherOne, [Job.TryGatherOne], [Job.GatherAll], and
-// [Job.TryGatherAll].
+// If all gather functions are thread-safe, then GatherOne is thread-safe and
+// may be called concurrently from multiple goroutines. Blocking and
+// non-blocking calls may also be mixed, as can calls to any of the other gather
+// methods.
 //
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
@@ -237,12 +220,11 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 // Returns nil unless the context is canceled or a task's [GatherFunc] returns a
 // non-nil error.
 //
-// If the job was created with [NewSyncJob] and all gather functions are
-// thread-safe, then GatherAll is thread-safe and can be called concurrently
-// from multiple goroutines. In this case they will collectively process all
-// results, with each call handling a subset. Blocking and non-blocking calls
-// may also be mixed, as can calls to GatherAll, [Job.TryGatherAll], [Job.GatherOne],
-// and [Job.TryGatherOne].
+// If all gather functions are thread-safe, then GatherAll is thread-safe and
+// can be called concurrently from multiple goroutines. In this case they will
+// collectively process all results, with each call handling a subset. Blocking
+// and non-blocking calls may also be mixed, as can calls to any of the other
+// gather methods.
 //
 // NOTE: This method will serially call each gathered task's [GatherFunc] and
 // wait until it returns.
@@ -302,4 +284,51 @@ func (j *Job) wakeGatherers() {
 			return
 		}
 	}
+}
+
+// Job.MultiGatherAll executes [Job.GatherAll] in the specified number of new
+// goroutines, continuing until there are no more tasks in flight or an error
+// occurs. Only the first error detected will be returned, and an error found in
+// one goroutine will be used to cancel all other goroutines. Regardless of
+// error, Job.MultiGatherAll always waits for all launched goroutines to
+// terminate before returning.
+//
+// See [Job.GatherAll] for more information.
+func (j *Job) MultiGatherAll(ctx context.Context, parallelism int) error {
+	return j.multiGatherAll(ctx, parallelism, true)
+}
+
+// MultiTryGatherAll executes [Job.TryGatherAll] in the specified number of new
+// goroutines, continuing until there are no more task results immediately
+// available or an error occurs. Only the first error detected will be returned,
+// and an error found in one goroutine will be used to cancel all other
+// goroutines. Regardless of error, MultiTryGatherAll always waits for all
+// launched goroutines to terminate before returning.
+//
+// See [Job.TryGatherAll] for more information.
+func (j *Job) MultiTryGatherAll(ctx context.Context, parallelism int) error {
+	return j.multiGatherAll(ctx, parallelism, false)
+}
+
+func (j *Job) multiGatherAll(ctx context.Context, parallelism int, block bool) error {
+	if parallelism < 1 {
+		panic("parallelism is less than one")
+	}
+
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(context.Canceled)
+
+	var wg sync.WaitGroup
+	wg.Add(parallelism)
+	for range parallelism {
+		go func() {
+			defer wg.Done()
+			err := j.gatherAll(ctx, block)
+			if err != nil {
+				cancel(err)
+			}
+		}()
+	}
+	wg.Wait()
+	return ctx.Err()
 }

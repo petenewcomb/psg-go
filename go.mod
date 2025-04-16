@@ -10,6 +10,7 @@ go 1.24
 
 require (
 	github.com/addrummond/heap v1.3.1
+	github.com/gammazero/deque v1.0.0
 	github.com/stretchr/testify v1.10.0
 	pgregory.net/rapid v1.2.0
 )

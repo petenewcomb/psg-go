@@ -6,18 +6,20 @@ package psg
 import (
 	"context"
 	"sync/atomic"
+
+	"github.com/petenewcomb/psg-go/internal/state"
 )
 
 // A Pool defines a virtual set of task execution slots and optionally places a
 // limit on its size. Use [Scatter] to launch tasks into a Pool. A Pool must be
-// bound to a [Job] or [SyncJob] before a task can be launched into it.
+// bound to a [Job] before a task can be launched into it.
 //
 // The zero value of Pool is unbound and has a limit of zero. [NewPool]
 // provides a convenient way to create a new pool with a non-zero limit.
 type Pool struct {
 	limit    atomic.Int64
 	job      *Job
-	inFlight inFlightCounter
+	inFlight state.InFlightCounter
 }
 
 // Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
@@ -91,7 +93,11 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	}
 
 	// Launch the task in a new goroutine.
-	go task(j.ctx)
+	j.wg.Add(1)
+	go func() {
+		defer j.wg.Done()
+		task(j.ctx)
+	}()
 
 	return true, nil
 }
@@ -111,18 +117,15 @@ func (p *Pool) underLimit() bool {
 }
 
 func (p *Pool) postGather(gather boundGatherFunc) {
-	wrappedGather := func(ctx context.Context) error {
-		// Decrement the pool's in-flight count BEFORE calling gatherFunc.
-		// This makes it safe for gatherFunc to call `Scatter` with this
-		// same `Pool` instance without deadlock, as there is guaranteed to
-		// be at least one slot available.
-		p.inFlight.Decrement()
-		return gather(ctx)
-	}
+	// Decrement the pool's in-flight count BEFORE waiting on the gather
+	// channel. This makes it safe for gatherFunc to call `Scatter` with this
+	// same `Pool` instance without deadlock, as there is guaranteed to be at
+	// least one slot available.
+	p.inFlight.Decrement()
 
 	j := p.job
 	select {
-	case j.gatherChannel <- wrappedGather:
+	case j.gatherChannel <- gather:
 	case <-j.ctx.Done():
 	}
 }

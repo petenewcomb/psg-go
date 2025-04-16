@@ -7,19 +7,15 @@ import (
 	"sync/atomic"
 )
 
-// SyncInFlightCounter is a thread-safe implementation of the
-// psg.inFlightCounter interface, suitable when calls to scatter and gather in
-// the associated [github.com/petenewcomb/psg-go] job may be made from more than
-// one goroutine.
-type SyncInFlightCounter struct {
+type InFlightCounter struct {
 	atomic.Int64
 }
 
-func (c *SyncInFlightCounter) Increment() {
+func (c *InFlightCounter) Increment() {
 	c.Add(1)
 }
 
-func (c *SyncInFlightCounter) IncrementIfUnder(limit int) bool {
+func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	// Tentatively increment the counter and check against limit. If over limit,
 	// remove the tentative increment and try again if we notice that another
 	// goroutine has made room between the increment and decrement.
@@ -34,14 +30,14 @@ func (c *SyncInFlightCounter) IncrementIfUnder(limit int) bool {
 	return true
 }
 
-func (c *SyncInFlightCounter) Decrement() bool {
+func (c *InFlightCounter) Decrement() bool {
 	newValue := c.Add(-1)
 	if newValue < 0 {
-		panic("no tasks in flight")
+		panic("there were no tasks in flight")
 	}
 	return newValue == 0
 }
 
-func (c *SyncInFlightCounter) GreaterThanZero() bool {
+func (c *InFlightCounter) GreaterThanZero() bool {
 	return c.Load() > 0
 }

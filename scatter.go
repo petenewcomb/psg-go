@@ -10,7 +10,7 @@ import (
 // Scatter initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
 // passed to the provided gather function within a subsequent call to Scatter or
-// any of the gathering methods of [Job] or [SyncJob].
+// any of the gathering methods of [Job].
 //
 // Scatter blocks to delay launch as needed to ensure compliance with the
 // concurrency limit for the given pool. This backpressure is applied by
@@ -130,9 +130,9 @@ func scatter[T any](
 // panic, but this detection works only if the context passed to [Scatter] is
 // the one passed to the TaskFunc or is a subcontext thereof.
 //
-// A TaskFunc may however, create its own sub-[Job] (or [SyncJob]) within which to
-// run concurrent tasks. This serves a different use case: tasks created in such
-// a sub-job should complete or be canceled before the outer TaskFunc returns,
+// A TaskFunc may however, create its own sub-[Job] within which to run
+// concurrent tasks. This serves a different use case: tasks created in such a
+// sub-job should complete or be canceled before the outer TaskFunc returns,
 // while tasks spawned from a GatherFunc on behalf of a TaskFunc necessarily
 // form a sequence (or pipeline). Both patterns can be used together as needed.
 //
@@ -154,6 +154,5 @@ type TaskFunc[T any] = func(context.Context) (T, error)
 //
 // If multiple goroutines may call [Scatter], [Job.GatherOne], or
 // [Job.GatherAll] concurrently, then every GatherFunc used in the job must be
-// thread-safe. In this case the [Job] must also have been created with
-// [NewSyncJob].
+// thread-safe.
 type GatherFunc[T any] = func(context.Context, T, error) error

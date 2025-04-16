@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestJobJobBoundPoolPanic(t *testing.T) {
+func TestJobBoundPoolPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
@@ -27,18 +27,26 @@ func TestJobJobBoundPoolPanic(t *testing.T) {
 	})
 }
 
-func TestJobSyncJobBoundPoolPanic(t *testing.T) {
+func TestMultiGatherAllInvalidParallelism(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-
-	// Create a pool
 	pool := psg.NewPool(1)
+	job := psg.NewJob(ctx, pool)
+	defer job.Cancel()
 
-	// Bind it to a job
-	_ = psg.NewJob(ctx, pool)
+	chk.PanicsWithValue("parallelism is less than one", func() {
+		_ = job.MultiGatherAll(ctx, 0)
+	})
+}
 
-	// Try to bind it to a SyncJob
-	chk.PanicsWithValue("pool was already registered", func() {
-		_ = psg.NewSyncJob(ctx, pool)
+func TestMultiTryGatherAllInvalidParallelism(t *testing.T) {
+	chk := require.New(t)
+	ctx := context.Background()
+	pool := psg.NewPool(1)
+	job := psg.NewJob(ctx, pool)
+	defer job.Cancel()
+
+	chk.PanicsWithValue("parallelism is less than one", func() {
+		_ = job.MultiTryGatherAll(ctx, 0)
 	})
 }

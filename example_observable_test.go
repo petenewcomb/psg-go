@@ -54,7 +54,7 @@ func Example_observable() {
 	// Create a scatter-gather job with the above pool
 	ctx := context.Background()
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	// Launch some tasks
 	fmt.Println("starting job")

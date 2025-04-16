@@ -32,7 +32,7 @@ func TestMultiGatherAllInvalidParallelism(t *testing.T) {
 	ctx := context.Background()
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("parallelism is less than one", func() {
 		_ = job.MultiGatherAll(ctx, 0)
@@ -44,7 +44,7 @@ func TestMultiTryGatherAllInvalidParallelism(t *testing.T) {
 	ctx := context.Background()
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("parallelism is less than one", func() {
 		_ = job.MultiTryGatherAll(ctx, 0)

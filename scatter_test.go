@@ -16,7 +16,7 @@ func TestNilTaskFuncPanic(t *testing.T) {
 	ctx := context.Background()
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		_ = psg.Scatter(
@@ -35,7 +35,7 @@ func TestNilGatherFuncPanic(t *testing.T) {
 	ctx := context.Background()
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("gather function must be non-nil", func() {
 		_ = psg.Scatter(
@@ -75,7 +75,7 @@ func TestNilTaskFuncPanicTryScatter(t *testing.T) {
 	ctx := context.Background()
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		_, _ = psg.TryScatter(
@@ -94,7 +94,7 @@ func TestNilGatherFuncPanicTryScatter(t *testing.T) {
 	ctx := context.Background()
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("gather function must be non-nil", func() {
 		_, _ = psg.TryScatter(
@@ -172,7 +172,7 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 	// Create parent job with pool
 	parentPool := psg.NewPool(1)
 	parentJob := psg.NewJob(ctx, parentPool)
-	defer parentJob.Cancel()
+	defer parentJob.CancelAndWait()
 
 	// Variable to track execution flow
 	subJobTaskRan := false
@@ -184,7 +184,7 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 			// Create a sub-job inside the task
 			subPool := psg.NewPool(1)
 			subJob := psg.NewJob(ctx, subPool)
-			defer subJob.Cancel()
+			defer subJob.CancelAndWait()
 
 			// This should succeed - scattering a task to the sub-job's pool
 			err := psg.Scatter(
@@ -228,7 +228,7 @@ func TestTaskCannotScatterToParentJob(t *testing.T) {
 	// Create parent job with pool
 	parentPool := psg.NewPool(1)
 	parentJob := psg.NewJob(ctx, parentPool)
-	defer parentJob.Cancel()
+	defer parentJob.CancelAndWait()
 
 	err := psg.Scatter(
 		ctx,

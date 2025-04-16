@@ -19,7 +19,7 @@ func example_readme() {
 	ctx := context.Background()
 	pool := psg.NewPool(2)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	newTask := func(s string) psg.TaskFunc[string] {
 		return func(context.Context) (string, error) {

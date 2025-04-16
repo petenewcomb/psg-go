@@ -18,10 +18,10 @@ func ExampleJob_Cancel_outer() {
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
 
-	// This is the standard deferred call to cancel that should almost always
-	// follow creation of a new Job to ensure cleanup. It is not the call to
-	// job.Cancel() that is the subject of this example.
-	defer job.Cancel()
+	// This is the standard deferred call to Job.CancelAndWait that should
+	// almost always follow creation of a new Job to ensure cleanup. It is not
+	// the call to Job.Cancel that is the subject of this example.
+	defer job.CancelAndWait()
 
 	printResult := func(ctx context.Context, result string, err error) error {
 		fmt.Printf("Got %q, err=%v\n", result, err)
@@ -42,7 +42,8 @@ func ExampleJob_Cancel_outer() {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
-	// Launch second task, forcing the first task result to be gathered
+	// Launch second task, which also provides an opportunity for the first task
+	// result to be gathered.
 	fmt.Println("Launching second task")
 	err = psg.Scatter(
 		ctx,
@@ -80,10 +81,10 @@ func ExampleJob_Cancel_task() {
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
 
-	// This is the standard deferred call to cancel that should almost always
-	// follow creation of a new Job to ensure cleanup. It is not the call to
-	// job.Cancel() that is the subject of this example.
-	defer job.Cancel()
+	// This is the standard deferred call to Job.CancelAndWait that should
+	// almost always follow creation of a new Job to ensure cleanup. It is not
+	// the call to Job.Cancel that is the subject of this example.
+	defer job.CancelAndWait()
 
 	printResult := func(ctx context.Context, result string, err error) error {
 		fmt.Printf("Got %q, err=%v\n", result, err)
@@ -104,7 +105,8 @@ func ExampleJob_Cancel_task() {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
-	// Launch second task, forcing the first task result to be gathered
+	// Launch second task, which also provides an opportunity for the first task
+	// result to be gathered.
 	fmt.Println("Launching second task")
 	err = psg.Scatter(
 		ctx,
@@ -142,10 +144,10 @@ func ExampleJob_Cancel_gather() {
 	pool := psg.NewPool(1)
 	job := psg.NewJob(ctx, pool)
 
-	// This is the standard deferred call to cancel that should almost always
-	// follow creation of a new Job to ensure cleanup. It is not the call to
-	// job.Cancel() that is the subject of this example.
-	defer job.Cancel()
+	// This is the standard deferred call to Job.CancelAndWait that should
+	// almost always follow creation of a new Job to ensure cleanup. It is not
+	// the call to Job.Cancel that is the subject of this example.
+	defer job.CancelAndWait()
 
 	printResult := func(ctx context.Context, result string, err error) error {
 		fmt.Printf("Got %q, err=%v\n", result, err)
@@ -168,7 +170,8 @@ func ExampleJob_Cancel_gather() {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
-	// Launch second task, forcing the first task result to be gathered
+	// Launch second task, which also provides an opportunity for the first task
+	// result to be gathered.
 	fmt.Println("Launching second task")
 	err = psg.Scatter(
 		ctx,

@@ -82,7 +82,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// task functions to gather functions, where they will bubble up through the
 	// calls to Scatter or GatherAll.
 	job := psg.NewJob(ctx, readerPool, digesterPool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	// Walk the tree and launch a reading task for each regular file.
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {

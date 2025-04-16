@@ -27,7 +27,7 @@ func Example_hello() {
 	ctx := context.Background()
 	pool := psg.NewPool(2)
 	job := psg.NewJob(ctx, pool)
-	defer job.Cancel()
+	defer job.CancelAndWait()
 
 	var results []string
 	gather := func(ctx context.Context, result string, err error) error {

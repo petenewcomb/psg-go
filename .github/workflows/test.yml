@@ -4,4 +4,4 @@ on: workflow_dispatch
 
 jobs:
   test:
-    uses: petenewcomb/ci-go/.github/workflows/test.yml@v0.0.4
+    uses: petenewcomb/ci-go/.github/workflows/test.yml@v0.0.5

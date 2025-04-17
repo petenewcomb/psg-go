@@ -14,10 +14,10 @@ on:
 
 jobs:
   build:
-    uses: petenewcomb/ci-go/.github/workflows/build.yml@v0.0.4
+    uses: petenewcomb/ci-go/.github/workflows/build.yml@v0.0.5
   lint:
-    uses: petenewcomb/ci-go/.github/workflows/lint.yml@v0.0.4
+    uses: petenewcomb/ci-go/.github/workflows/lint.yml@v0.0.5
   test:
-    uses: petenewcomb/ci-go/.github/workflows/test.yml@v0.0.4
+    uses: petenewcomb/ci-go/.github/workflows/test.yml@v0.0.5
   vuln:
-    uses: petenewcomb/ci-go/.github/workflows/vuln.yml@v0.0.4
+    uses: petenewcomb/ci-go/.github/workflows/vuln.yml@v0.0.5

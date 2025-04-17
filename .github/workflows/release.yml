@@ -4,6 +4,6 @@ on: workflow_dispatch
 
 jobs:
   lint:
-    uses: petenewcomb/ci-go/.github/workflows/release.yml@22c7ba8
+    uses: petenewcomb/ci-go/.github/workflows/release.yml@22c7ba85cef9d711d5060d8cec08e6a8cc0e92e8
     with:
       publishDocs: true

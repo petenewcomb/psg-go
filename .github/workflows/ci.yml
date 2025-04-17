@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 13 * * 6' # run each Saturday at 1pm UTC
+  workflow_dispatch:
+
+jobs:
+  ci:
+    uses: petenewcomb/ci-go/.github/workflows/ci.yml@22c7ba8
+    with:
+      testJobTimeoutMinutes: 30
+      goTestTimeout: '25m'

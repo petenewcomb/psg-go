@@ -1,6 +1,6 @@
 [![Go Reference][godev-badge]][godev]
 [![Go Report Card][goreport-badge]][goreport]
-[![Build Status][build-badge]][builds]
+[![CI][ci-badge]][ci]
 [![Coverage][coverage-badge]][coverage]
 [![License][license-badge]][license]
 
@@ -86,8 +86,8 @@ request][pull requests].
 [godev]: https://pkg.go.dev/github.com/petenewcomb/psg-go#section-documentation
 [goreport-badge]: https://goreportcard.com/badge/github.com/petenewcomb/psg-go
 [goreport]: https://goreportcard.com/report/github.com/petenewcomb/psg-go
-[build-badge]: https://github.com/petenewcomb/psg-go/actions/workflows/build.yml/badge.svg
-[builds]: https://github.com/petenewcomb/psg-go/actions/workflows/build.yml
+[ci-badge]: https://github.com/petenewcomb/psg-go/actions/workflows/ci.yml/badge.svg
+[ci]: https://github.com/petenewcomb/psg-go/actions/workflows/ci.yml
 [coverage-badge]: https://github.com/petenewcomb/psg-go/wiki/coverage.svg
 [coverage]: https://raw.githack.com/wiki/petenewcomb/psg-go/coverage.html
 [license-badge]: https://img.shields.io/github/license/mashape/apistatus.svg

@@ -1,7 +1,9 @@
-name: release
+name: Release
 
 on: workflow_dispatch
 
 jobs:
   lint:
-    uses: petenewcomb/ci-go/.github/workflows/release.yml@v0.0.5
+    uses: petenewcomb/ci-go/.github/workflows/release.yml@22c7ba8
+    with:
+      publishDocs: true

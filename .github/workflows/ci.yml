@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: write # to update coverage report on the wiki
+
 on:
   push:
     branches: [main]

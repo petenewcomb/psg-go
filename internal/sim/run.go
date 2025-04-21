@@ -6,6 +6,7 @@ package sim
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func Run(t require.TestingT, ctx context.Context, plan *Plan) (map[*Plan]*Result, error) {
+func Run(t require.TestingT, ctx context.Context, plan *Plan, debug bool) (map[*Plan]*Result, error) {
 	pools := make([]*psg.Pool, len(plan.Config.ConcurrencyLimits))
 	for i, limit := range plan.Config.ConcurrencyLimits {
 		pools[i] = psg.NewPool(limit)
@@ -25,6 +26,9 @@ func Run(t require.TestingT, ctx context.Context, plan *Plan) (map[*Plan]*Result
 		ConcurrencyByPool:    make([]atomic.Int64, len(pools)),
 		MaxConcurrencyByPool: make([]atomic.Int64, len(pools)),
 		ResultMap:            make(map[*Plan]*Result),
+		MinScatterDelay:      time.Duration(math.MaxInt64),
+		MinGatherDelay:       time.Duration(math.MaxInt64),
+		Debug:                debug,
 	}
 	return c.Run(t, ctx)
 }
@@ -38,30 +42,34 @@ type controller struct {
 	ResultMapMutex       sync.Mutex
 	ResultMap            map[*Plan]*Result
 	StartTime            time.Time
+	MinScatterDelay      time.Duration
+	MinGatherDelay       time.Duration
+	Debug                bool
 }
 
 func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Result, error) {
+	c.StartTime = time.Now()
+	if c.Debug {
+		fmt.Printf("%v starting %v\n", time.Since(c.StartTime), c.Plan)
+	}
+
 	job := psg.NewJob(ctx, c.Pools...)
 	defer job.CancelAndWait()
 
-	c.StartTime = time.Now()
 	for _, task := range c.Plan.RootTasks {
 		c.scatterTask(t, ctx, task)
 	}
 
-	err := job.GatherAll(ctx)
-	overallDuration := time.Since(c.StartTime)
 	chk := require.New(t)
-	if err == nil {
-		gatheredCount := c.GatheredCount.Load()
-		chk.Equal(int64(c.Plan.TaskCount), gatheredCount)
+	err := job.Finish(ctx)
+	overallDuration := time.Since(c.StartTime)
+	if ge, ok := err.(expectedGatherError); ok {
+		chk.True(ge.task.ReturnErrorFromGather)
 	} else {
-		if ge, ok := err.(expectedGatherError); ok {
-			chk.True(ge.task.ReturnErrorFromGather)
-		} else {
-			chk.NoError(err)
-		}
+		chk.NoError(err)
 	}
+	gatheredCount := c.GatheredCount.Load()
+	chk.Equal(int64(c.Plan.TaskCount), gatheredCount)
 
 	maxConcurrencyByPool := make([]int64, len(c.MaxConcurrencyByPool))
 	for i := range len(maxConcurrencyByPool) {
@@ -74,6 +82,9 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 			OverallDuration:      overallDuration,
 		},
 	})
+	if c.Debug {
+		fmt.Printf("%v ended %v with min delays scatter=%v gather=%v\n", overallDuration, c.Plan, c.MinScatterDelay, c.MinGatherDelay)
+	}
 	return c.ResultMap, nil
 }
 
@@ -133,7 +144,10 @@ func (lt *localT) Error() string {
 
 func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.TaskFunc[*taskResult] {
 	lt := &localT{}
+	scatterTime := time.Now()
 	return func(ctx context.Context) (res *taskResult, err error) {
+		c.MinScatterDelay = min(c.MinScatterDelay, time.Since(scatterTime))
+
 		defer func() {
 			if r := recover(); r != nil {
 				if lt, ok := r.(*localT); ok {
@@ -150,14 +164,23 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			Task:               task,
 			ConcurrencyAtStart: concurrency.Add(1),
 		}
+		if c.Debug {
+			fmt.Printf("%v starting %v on pool %d, concurrency now %d\n", time.Since(c.StartTime), task, task.Pool, res.ConcurrencyAtStart)
+		}
 		chk.Greater(res.ConcurrencyAtStart, int64(0))
 		defer func() {
 			res.ConcurrencyAfter = concurrency.Add(-1)
+			elapsedTime := time.Since(c.StartTime)
+			if c.Debug {
+				fmt.Printf("%v ended %v on pool %d, concurrency now %d\n", elapsedTime, task, task.Pool, res.ConcurrencyAfter)
+			}
+			chk.GreaterOrEqual(elapsedTime, task.PathDurationAtTaskEnd)
+			res.TaskEndTime = time.Now()
 		}()
 		for i, d := range task.SelfTimes {
 			if i > 0 {
 				subjobPlan := task.Subjobs[i-1]
-				resultMap, err := Run(lt, ctx, subjobPlan)
+				resultMap, err := Run(lt, ctx, subjobPlan, c.Debug)
 				chk.NoError(err)
 				c.addResultMap(lt, resultMap)
 			}
@@ -178,6 +201,8 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFunc[*taskResult] {
 	chk := require.New(t)
 	return func(ctx context.Context, res *taskResult, err error) error {
+		c.MinGatherDelay = min(c.MinGatherDelay, time.Since(res.TaskEndTime))
+
 		if lt, ok := err.(*localT); ok {
 			lt.DrainTo(t)
 		} else if task.ReturnErrorFromTask {
@@ -188,6 +213,11 @@ func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFun
 
 		pool := task.Pool
 		gatheredCount := c.GatheredCount.Add(1)
+
+		if c.Debug {
+			fmt.Printf("%v gathering %v, gathered count now %d\n", time.Since(c.StartTime), task, gatheredCount)
+		}
+
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
 		chk.Greater(res.ConcurrencyAtStart, int64(0))
 		chk.LessOrEqual(res.ConcurrencyAtStart, int64(c.Plan.Config.ConcurrencyLimits[pool]))
@@ -230,6 +260,7 @@ type taskResult struct {
 	Task               *Task
 	ConcurrencyAtStart int64
 	ConcurrencyAfter   int64
+	TaskEndTime        time.Time
 }
 
 type expectedGatherError struct {

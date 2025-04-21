@@ -15,45 +15,85 @@ import (
 )
 
 type JobConfig struct {
-	JitterUnit time.Duration
-	MinJitter  int
-	MaxJitter  int
-	Debug      bool
+	MinJitter time.Duration
+	MedJitter time.Duration
+	MaxJitter time.Duration
+	Debug     bool
 }
 
 func EstimateJob(t *rapid.T, plan *Plan, trialCount int, config *JobConfig) map[*Plan]*ResultRange {
-	em := make(map[*Plan]*ResultRange)
-	for range trialCount {
-		MergeResultMap(t, em, estimateJob(t, plan, config, 0, ""))
+	chk := require.New(t)
+	estimateMap := make(map[*Plan]*ResultRange)
+
+	var estimateSubjobs func(tasks []*Task)
+	runTrials := func(plan *Plan) {
+		estimateMapLenOrigin := len(estimateMap)
+		estimateSubjobs(plan.RootTasks)
+		rr := &ResultRange{}
+		durations := make([]time.Duration, trialCount)
+		for tr := range trialCount {
+			r := estimateJob(t, plan, config, estimateMap, 0, "")
+			durations[tr] = r.OverallDuration
+			if tr == 0 {
+				rr.MinMaxConcurrencyByPool = slices.Clone(r.MaxConcurrencyByPool)
+				rr.MaxMaxConcurrencyByPool = slices.Clone(r.MaxConcurrencyByPool)
+				rr.MinOverallDuration = r.OverallDuration
+				rr.MaxOverallDuration = r.OverallDuration
+			} else {
+				for i := range len(r.MaxConcurrencyByPool) {
+					rr.MinMaxConcurrencyByPool[i] = min(rr.MinMaxConcurrencyByPool[i], r.MaxConcurrencyByPool[i])
+					rr.MaxMaxConcurrencyByPool[i] = max(rr.MaxMaxConcurrencyByPool[i], r.MaxConcurrencyByPool[i])
+				}
+				rr.MinOverallDuration = min(rr.MinOverallDuration, r.OverallDuration)
+				rr.MaxOverallDuration = max(rr.MaxOverallDuration, r.OverallDuration)
+			}
+		}
+		slices.Sort(durations)
+		rr.MedOverallDuration = durations[len(durations)/2]
+		estimateMap[plan] = rr
+		chk.Equal(1+plan.SubplanCount, len(estimateMap)-estimateMapLenOrigin)
 	}
-	return em
+
+	estimateSubjobs = func(tasks []*Task) {
+		for _, task := range tasks {
+			for _, subjob := range task.Subjobs {
+				runTrials(subjob)
+			}
+			estimateSubjobs(task.Children)
+		}
+	}
+
+	runTrials(plan)
+	return estimateMap
 }
 
-func estimateJob(t *rapid.T, plan *Plan, config *JobConfig, simTimeOrigin time.Duration, indent string) map[*Plan]*Result {
+func estimateJob(
+	t *rapid.T,
+	plan *Plan,
+	config *JobConfig,
+	subjobEstimates map[*Plan]*ResultRange,
+	simTimeOrigin time.Duration,
+	indent string,
+) *Result {
 	simTime := simTimeOrigin
 	chk := require.New(t)
 
-	estimates := make(map[*Plan]*Result)
 	var eventHeap heap.Heap[taskEvent, heap.Min]
 
 	if config.MinJitter < 0 {
 		panic("MinJitter may not be less than zero")
 	}
-	if config.MaxJitter < config.MinJitter {
-		panic("MaxJitter may not be less than MinJitter")
+	if config.MedJitter < config.MinJitter {
+		panic("MedJitter may not be less than MinJitter")
 	}
-	if config.JitterUnit < 0 {
-		panic("JitterUnit may not be less than zero")
+	if config.MaxJitter < config.MedJitter {
+		panic("MaxJitter may not be less than MedJitter")
 	}
 
 	jitter := func() time.Duration {
-		return config.JitterUnit*time.Duration(rapid.IntRange(config.MinJitter, config.MaxJitter-1).Draw(t, "jitterUnits")) +
-			time.Duration(rapid.Int64Range(0, int64(config.JitterUnit)).Draw(t, "jitterNoise"))
-	}
-	if config.MaxJitter == 0 || config.JitterUnit == 0 {
-		jitter = func() time.Duration {
-			return 0
-		}
+		return time.Duration(biasedInt64(
+			int64(config.MinJitter), int64(config.MedJitter), int64(config.MaxJitter),
+		).Draw(t, "jitterNoise"))
 	}
 
 	poolCount := len(plan.Config.ConcurrencyLimits)
@@ -107,13 +147,11 @@ func estimateJob(t *rapid.T, plan *Plan, config *JobConfig, simTimeOrigin time.D
 			if config.Debug {
 				t.Logf("%v%s estimating %v subjob %d of %d", simTime, indent, task, step+1, len(task.Subjobs))
 			}
-			subjobEstimates := estimateJob(t, subjobPlan, config, simTime, indent+"  ")
-			for p, e := range subjobEstimates {
-				chk.Nil(estimates[p])
-				estimates[p] = e
-			}
 			e := subjobEstimates[subjobPlan]
-			endTime += e.OverallDuration + task.SelfTimes[step+1]
+			endTime += time.Duration(biasedInt64(
+				int64(e.MinOverallDuration), int64(e.MedOverallDuration), int64(e.MaxOverallDuration),
+			).Draw(t, "subjobDuration"))
+			endTime += task.SelfTimes[step+1]
 		}
 		heap.PushOrderable(&eventHeap, taskEvent{
 			Time: endTime,
@@ -143,6 +181,7 @@ func estimateJob(t *rapid.T, plan *Plan, config *JobConfig, simTimeOrigin time.D
 			*waiters = slices.Delete(*waiters, wi, wi+1)
 			waiter()
 		}
+		chk.GreaterOrEqual(simTime, task.PathDurationAtTaskEnd)
 		postGather(task)
 	}
 
@@ -161,44 +200,54 @@ func estimateJob(t *rapid.T, plan *Plan, config *JobConfig, simTimeOrigin time.D
 
 	var advanceGather func(task *Task, step int)
 	startGather = func(task *Task) {
+		advanceGather(task, 0)
+	}
+
+	var endGather func(task *Task)
+	advanceGather = func(task *Task, step int) {
 		endTime := simTime + jitter()
-		if config.Debug {
+		if config.Debug && step == 0 {
 			t.Logf("%v%s starting %v gather at %v", simTime, indent, task, endTime)
 		}
-		endTime += task.GatherTimes[0]
-		heap.PushOrderable(&eventHeap, taskEvent{
-			Time: endTime,
-			Func: func() {
-				advanceGather(task, 0)
-			},
-		})
+		endTime += task.GatherTimes[step]
+
+		if step < len(task.Children) {
+			heap.PushOrderable(&eventHeap, taskEvent{
+				Time: endTime,
+				Func: func() {
+					scatterTask(task.Children[step], func() {
+						advanceGather(task, step+1)
+					})
+				},
+			})
+		} else {
+			heap.PushOrderable(&eventHeap, taskEvent{
+				Time: endTime,
+				Func: func() {
+					endGather(task)
+				},
+			})
+		}
 	}
 
 	stoppedGatherThreads := 0
-	advanceGather = func(task *Task, step int) {
-		if step < len(task.Children) {
-			child := task.Children[step]
-			scatterTask(child, func() {
-				advanceGather(task, step+1)
-			})
+	endGather = func(task *Task) {
+		// Gather complete, start next if needed
+		if task.ReturnErrorFromGather {
+			// Do not start next gather nor decrement activeGatherThreadCount
+			if config.Debug {
+				t.Logf("%v%s %v gather returns error, stopping", simTime, indent, task)
+			}
+			stoppedGatherThreads++
 		} else {
-			// Gather complete, start next if needed
-			if task.ReturnErrorFromGather {
-				// Do not start next gather nor decrement activeGatherThreadCount
-				if config.Debug {
-					t.Logf("%v%s %v gather returns error, stopping", simTime, indent, task)
-				}
-				stoppedGatherThreads++
+			if config.Debug {
+				t.Logf("%v%s %v gather complete", simTime, indent, task)
+			}
+			if gatherQueue.Len() == 0 {
+				activeGatherThreadCount--
+				chk.GreaterOrEqual(activeGatherThreadCount, 0)
 			} else {
-				if config.Debug {
-					t.Logf("%v%s %v gather complete", simTime, indent, task)
-				}
-				if gatherQueue.Len() == 0 {
-					activeGatherThreadCount--
-					chk.GreaterOrEqual(activeGatherThreadCount, 0)
-				} else {
-					startGather(gatherQueue.PopFront())
-				}
+				startGather(gatherQueue.PopFront())
 			}
 		}
 	}
@@ -238,19 +287,18 @@ func estimateJob(t *rapid.T, plan *Plan, config *JobConfig, simTimeOrigin time.D
 		t.Logf("%d gathers in queue", gatherQueue.Len())
 	}
 
-	chk.Nil(estimates[plan])
-	estimates[plan] = &Result{
+	result := &Result{
 		MaxConcurrencyByPool: maxConcurrencyByPool,
 		OverallDuration:      simTime - simTimeOrigin,
 	}
 
-	chk.Equal(1+plan.SubplanCount, len(estimates))
+	chk.GreaterOrEqual(result.OverallDuration, plan.MaxPathDuration)
 
 	if config.Debug {
-		t.Logf("%v %v estimate done: %v", simTime, plan, *estimates[plan])
+		t.Logf("%v %v estimate done: %v", simTime, plan, *result)
 	}
 
-	return estimates
+	return result
 }
 
 type taskEvent struct {

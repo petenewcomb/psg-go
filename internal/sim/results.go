@@ -19,6 +19,7 @@ type ResultRange struct {
 	MinMaxConcurrencyByPool []int64
 	MaxMaxConcurrencyByPool []int64
 	MinOverallDuration      time.Duration
+	MedOverallDuration      time.Duration
 	MaxOverallDuration      time.Duration
 }
 

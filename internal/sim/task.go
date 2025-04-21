@@ -12,12 +12,47 @@ import (
 type Task struct {
 	ID                    int
 	Pool                  int
+	Parent                *Task
 	SelfTimes             []time.Duration // one more entry than Subjobs
 	Subjobs               []*Plan
 	GatherTimes           []time.Duration // one more entry than Children
 	Children              []*Task
 	ReturnErrorFromTask   bool
 	ReturnErrorFromGather bool
+	PathDurationAtTaskEnd time.Duration
+}
+
+func (t *Task) ParentGatherDuration() time.Duration {
+	if t.Parent == nil {
+		return 0
+	}
+	var d time.Duration
+	for i, gt := range t.Parent.GatherTimes {
+		if t.Parent.Children[i] == t {
+			break
+		}
+		d += gt
+	}
+	return d
+}
+
+func (t *Task) TaskDuration() time.Duration {
+	var d time.Duration
+	for _, st := range t.SelfTimes {
+		d += st
+	}
+	for _, sj := range t.Subjobs {
+		d += sj.MaxPathDuration
+	}
+	return d
+}
+
+func (t *Task) GatherDuration() time.Duration {
+	var d time.Duration
+	for _, gt := range t.GatherTimes {
+		d += gt
+	}
+	return d
 }
 
 // Format implements fmt.Formatter for pretty-printing a task hierarchy.
@@ -33,7 +68,7 @@ func (t *Task) Format(f fmt.State, verb rune) {
 }
 
 func (t *Task) formatInternal(f fmt.State, indent string) {
-	_, _ = fmt.Fprintf(f, "Task#%d: pool=%d", t.ID, t.Pool)
+	_, _ = fmt.Fprintf(f, "Task#%d: pool=%d minTaskEnd=%v", t.ID, t.Pool, t.PathDurationAtTaskEnd)
 	t.formatSteps(f, indent+"  ")
 }
 

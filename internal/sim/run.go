@@ -49,9 +49,7 @@ type controller struct {
 
 func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Result, error) {
 	c.StartTime = time.Now()
-	if c.Debug {
-		fmt.Printf("%v starting %v\n", time.Since(c.StartTime), c.Plan)
-	}
+	c.debugf("%v starting %v", time.Since(c.StartTime), c.Plan)
 
 	job := psg.NewJob(ctx, c.Pools...)
 	defer job.CancelAndWait()
@@ -82,9 +80,7 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 			OverallDuration:      overallDuration,
 		},
 	})
-	if c.Debug {
-		fmt.Printf("%v ended %v with min delays scatter=%v gather=%v\n", overallDuration, c.Plan, c.MinScatterDelay, c.MinGatherDelay)
-	}
+	c.debugf("%v ended %v with min delays scatter=%v gather=%v", overallDuration, c.Plan, c.MinScatterDelay, c.MinGatherDelay)
 	return c.ResultMap, nil
 }
 
@@ -118,8 +114,6 @@ type localT struct {
 }
 
 func (lt *localT) Errorf(format string, args ...any) {
-	//format = format + "\n%s"
-	//args = append(args, debug.Stack())
 	lt.calls = append(lt.calls, func(t require.TestingT) {
 		t.Errorf(format, args...)
 	})
@@ -164,16 +158,12 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			Task:               task,
 			ConcurrencyAtStart: concurrency.Add(1),
 		}
-		if c.Debug {
-			fmt.Printf("%v starting %v on pool %d, concurrency now %d\n", time.Since(c.StartTime), task, task.Pool, res.ConcurrencyAtStart)
-		}
+		c.debugf("%v starting %v on pool %d, concurrency now %d", time.Since(c.StartTime), task, task.Pool, res.ConcurrencyAtStart)
 		chk.Greater(res.ConcurrencyAtStart, int64(0))
 		defer func() {
 			res.ConcurrencyAfter = concurrency.Add(-1)
 			elapsedTime := time.Since(c.StartTime)
-			if c.Debug {
-				fmt.Printf("%v ended %v on pool %d, concurrency now %d\n", elapsedTime, task, task.Pool, res.ConcurrencyAfter)
-			}
+			c.debugf("%v ended %v on pool %d, concurrency now %d", elapsedTime, task, task.Pool, res.ConcurrencyAfter)
 			chk.GreaterOrEqual(elapsedTime, task.PathDurationAtTaskEnd)
 			res.TaskEndTime = time.Now()
 		}()
@@ -214,9 +204,7 @@ func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFun
 		pool := task.Pool
 		gatheredCount := c.GatheredCount.Add(1)
 
-		if c.Debug {
-			fmt.Printf("%v gathering %v, gathered count now %d\n", time.Since(c.StartTime), task, gatheredCount)
-		}
+		c.debugf("%v gathering %v, gathered count now %d", time.Since(c.StartTime), task, gatheredCount)
 
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
 		chk.Greater(res.ConcurrencyAtStart, int64(0))
@@ -252,6 +240,12 @@ func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFun
 		} else {
 			return nil
 		}
+	}
+}
+
+func (c *controller) debugf(format string, args ...interface{}) {
+	if c.Debug {
+		fmt.Printf(format+"\n", args...)
 	}
 }
 

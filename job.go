@@ -26,7 +26,7 @@ type Job struct {
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
 	pools         []*Pool
-	inFlight      state.PoolInFlightCounter
+	inFlight      state.InFlightCounter
 	gatherChannel chan boundGatherFunc
 	wg            sync.WaitGroup
 	closed        atomic.Bool
@@ -309,32 +309,6 @@ func (j *Job) decrementInFlight() {
 		}
 	}
 }
-
-/*
-func (j *Job) decrementInFlightTasks() {
-	if j.inFlight.DecrementTasks().HadNothingLeftInFlight() {
-		if j.closed.Load() {
-			// Check again now that we know the job is already closed, in case
-			// the job was closed after the decrement AND another increment.
-			if j.inFlight.Status().HadNothingLeftInFlight() {
-				close(j.done)
-			}
-		}
-	}
-}
-
-func (j *Job) decrementInFlightGathers() {
-	if j.inFlight.DecrementGathers().HadNothingLeftInFlight() {
-		if j.closed.Load() {
-			// Check again now that we know the job is already closed, in case
-			// the job was closed after the decrement AND another increment.
-			if j.inFlight.Status().HadNothingLeftInFlight() {
-				close(j.done)
-			}
-		}
-	}
-}
-*/
 
 // Wakes any goroutines that might be waiting on the gatherChannel.
 func (j *Job) wakeGatherers() {

@@ -19,7 +19,7 @@ import (
 type Pool struct {
 	limit    atomic.Int64
 	job      *Job
-	inFlight state.PoolInFlightCounter
+	inFlight state.InFlightCounter
 }
 
 // Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
@@ -133,13 +133,6 @@ func (p *Pool) postGather(gather boundGatherFunc) {
 	p.inFlight.Decrement()
 
 	j := p.job
-
-	// Update the task's state within the job's in-flight counter only AFTER
-	// unblocking a gatherer. If the task is the last one in-flight, flush
-	// out any other gatherers still waiting (and which waited on, since there will be no more
-	// gathers to do
-	//_ = j.inFlight.MoveTaskToGather()
-
 	select {
 	case j.gatherChannel <- gather:
 	case <-j.ctx.Done():

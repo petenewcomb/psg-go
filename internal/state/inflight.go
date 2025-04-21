@@ -7,15 +7,15 @@ import (
 	"sync/atomic"
 )
 
-type PoolInFlightCounter struct {
+type InFlightCounter struct {
 	v atomic.Int64
 }
 
-func (c *PoolInFlightCounter) Increment() {
+func (c *InFlightCounter) Increment() {
 	c.v.Add(1)
 }
 
-func (c *PoolInFlightCounter) IncrementIfUnder(limit int) bool {
+func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	// Tentatively increment the counter and check against limit. If over limit,
 	// remove the tentative increment and try again if we notice that another
 	// goroutine has made room between the increment and decrement.
@@ -30,7 +30,7 @@ func (c *PoolInFlightCounter) IncrementIfUnder(limit int) bool {
 	return true
 }
 
-func (c *PoolInFlightCounter) Decrement() bool {
+func (c *InFlightCounter) Decrement() bool {
 	newValue := c.v.Add(-1)
 	if newValue < 0 {
 		panic("there were no tasks in flight")
@@ -38,6 +38,6 @@ func (c *PoolInFlightCounter) Decrement() bool {
 	return newValue == 0
 }
 
-func (c *PoolInFlightCounter) GreaterThanZero() bool {
+func (c *InFlightCounter) GreaterThanZero() bool {
 	return c.v.Load() > 0
 }

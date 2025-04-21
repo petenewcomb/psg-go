@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -203,39 +202,30 @@ func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
 
 func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 	if block {
-		//fmt.Println("gatherOne: blocking")
 		select {
 		case gather := <-j.gatherChannel:
 			return true, j.executeGather(ctx, gather)
 		case <-ctx.Done():
-			//fmt.Println("gatherOne: ctx.Done()")
 			return false, ctx.Err()
 		case <-j.ctx.Done():
-			//fmt.Println("gatherOne: j.ctx.Done()")
 			return false, j.ctx.Err()
 		case <-j.done:
-			//fmt.Println("gatherOne: j.done")
 			return false, nil
 		}
 	} else {
-		fmt.Println("gatherOne: polling")
 		// Identical to the blocking branch above except replaces <-j.done with
 		// a default clause.
 		select {
 		case gather := <-j.gatherChannel:
 			return true, j.executeGather(ctx, gather)
 		case <-ctx.Done():
-			//fmt.Println("gatherOne: ctx.Done()")
 			return false, ctx.Err()
 		case <-j.ctx.Done():
-			//fmt.Println("gatherOne: j.ctx.Done()")
 			return false, j.ctx.Err()
 		case <-j.done:
-			//fmt.Println("gatherOne: j.done")
 			return false, nil
 		default:
 			// There were no in-flight tasks ready to gather.
-			//fmt.Println("gatherOne: default")
 			return false, nil
 		}
 	}
@@ -290,21 +280,16 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.
 	defer j.decrementInFlight()
-	//fmt.Println("executeGather: starting gather")
-	//defer fmt.Println("executeGather: done with gather")
 	return gather(ctx)
 }
 
 func (j *Job) decrementInFlight() {
 	if j.inFlight.Decrement() {
-		//fmt.Println("decrementInFlight: decremented to zero")
 		if j.closed.Load() {
-			//fmt.Println("decrementInFlight: is closed")
 			// Check again now that we know the job is already closed, in case
 			// the job was closed after the decrement AND another increment.
 			if !j.inFlight.GreaterThanZero() {
 				close(j.done)
-				//fmt.Println("decrementInFlight: closed done channel")
 			}
 		}
 	}
@@ -371,10 +356,8 @@ func (j *Job) multiGatherAll(ctx context.Context, parallelism int, block bool) e
 
 func (j *Job) Finish(ctx context.Context) error {
 	j.closed.Store(true)
-	//fmt.Println("Finish: set closed flag")
 	if !j.inFlight.GreaterThanZero() {
 		close(j.done)
-		//fmt.Println("Finish: closed done channel")
 	}
 	return j.GatherAll(ctx)
 }

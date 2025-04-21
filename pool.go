@@ -70,17 +70,13 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
 	j.inFlight.Increment()
-	//fmt.Println("launch: j.inFlight.Increment()")
 
 	// Bookkeeping: make sure that the job-scope count incremented above gets
 	// decremented unless the launch actually happens
 	launched := false
 	defer func() {
 		if !launched {
-			//fmt.Println("launch: !launched -> j.decrementInFlight()")
 			j.decrementInFlight()
-			//} else {
-			//fmt.Println("launch: launched!")
 		}
 	}()
 

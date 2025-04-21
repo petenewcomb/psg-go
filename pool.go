@@ -19,7 +19,7 @@ import (
 type Pool struct {
 	limit    atomic.Int64
 	job      *Job
-	inFlight state.InFlightCounter
+	inFlight state.PoolInFlightCounter
 }
 
 // Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
@@ -70,19 +70,22 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
 	j.inFlight.Increment()
+	//fmt.Println("launch: j.inFlight.Increment()")
 
 	// Bookkeeping: make sure that the job-scope count incremented above gets
 	// decremented unless the launch actually happens
 	launched := false
 	defer func() {
 		if !launched {
+			//fmt.Println("launch: !launched -> j.decrementInFlight()")
 			j.decrementInFlight()
+			//} else {
+			//fmt.Println("launch: launched!")
 		}
 	}()
 
 	// Apply backpressure if launching a new task would exceed the pool's
 	// concurrency limit.
-	gatheredOne := false
 	for !p.incrementInFlightIfUnderLimit() {
 		if !block {
 			return false, nil
@@ -92,18 +95,6 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 		// by this call. Either way, it's time to re-check the in-flight count
 		// for this pool.
 		if _, err := j.GatherOne(ctx); err != nil {
-			return false, err
-		}
-		gatheredOne = true
-	}
-
-	// Because tasks release their pool-scope in-flight count before they post
-	// results to gather, it's possible that the slot we took above is still
-	// occupied by a goroutine waiting for a gather. The below makes sure that
-	// we don't unnecessarily build up extant goroutines by trying to clean one
-	// up before we start one.
-	if !gatheredOne {
-		if _, err := j.TryGatherOne(ctx); err != nil {
 			return false, err
 		}
 	}
@@ -142,6 +133,13 @@ func (p *Pool) postGather(gather boundGatherFunc) {
 	p.inFlight.Decrement()
 
 	j := p.job
+
+	// Update the task's state within the job's in-flight counter only AFTER
+	// unblocking a gatherer. If the task is the last one in-flight, flush
+	// out any other gatherers still waiting (and which waited on, since there will be no more
+	// gathers to do
+	//_ = j.inFlight.MoveTaskToGather()
+
 	select {
 	case j.gatherChannel <- gather:
 	case <-j.ctx.Done():

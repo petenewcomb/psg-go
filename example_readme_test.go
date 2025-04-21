@@ -37,6 +37,6 @@ func example_readme() {
 	psg.Scatter(ctx, pool, newTask("Hello"), gather)
 	psg.Scatter(ctx, pool, newTask("world!"), gather)
 
-	job.GatherAll(ctx)
+	job.Finish(ctx)
 	fmt.Println(strings.Join(results, " "))
 }

@@ -162,7 +162,7 @@ func TestScatterFromTask(t *testing.T) {
 		},
 	)
 	chk.NoError(err)
-	chk.NoError(job.GatherAll(ctx))
+	chk.NoError(job.Finish(ctx))
 }
 
 func TestTaskCanScatterToSubJob(t *testing.T) {
@@ -203,7 +203,7 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 			chk.NoError(err)
 
 			// Gather all results in the sub-job
-			chk.NoError(subJob.GatherAll(ctx))
+			chk.NoError(subJob.Finish(ctx))
 
 			return true, nil
 		},
@@ -215,7 +215,7 @@ func TestTaskCanScatterToSubJob(t *testing.T) {
 	)
 
 	chk.NoError(err)
-	chk.NoError(parentJob.GatherAll(ctx))
+	chk.NoError(parentJob.Finish(ctx))
 
 	// Verify the sub-job task executed successfully
 	chk.True(subJobTaskRan, "The task in the sub-job should have run")
@@ -261,5 +261,5 @@ func TestTaskCannotScatterToParentJob(t *testing.T) {
 	)
 
 	chk.NoError(err)
-	chk.NoError(parentJob.GatherAll(ctx))
+	chk.NoError(parentJob.Finish(ctx))
 }

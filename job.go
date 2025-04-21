@@ -5,9 +5,11 @@ package psg
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
@@ -24,9 +26,11 @@ type Job struct {
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
 	pools         []*Pool
-	inFlight      state.InFlightCounter
+	inFlight      state.PoolInFlightCounter
 	gatherChannel chan boundGatherFunc
 	wg            sync.WaitGroup
+	closed        atomic.Bool
+	done          chan struct{}
 }
 
 type boundGatherFunc = func(ctx context.Context) error
@@ -52,6 +56,7 @@ func NewJob(
 		cancelFunc:    cancelFunc,
 		pools:         slices.Clone(pools),
 		gatherChannel: make(chan boundGatherFunc),
+		done:          make(chan struct{}),
 	}
 	j.ctx = j.makeTaskContext(ctx)
 	for _, p := range j.pools {
@@ -68,30 +73,57 @@ type taskContextMarkerType struct{}
 var taskContextMarkerKey any = taskContextMarkerType{}
 
 func (j *Job) makeTaskContext(ctx context.Context) context.Context {
+	return makeJobContext(ctx, j, taskContextMarkerKey)
+}
+
+func (j *Job) isTaskContext(ctx context.Context) bool {
+	return isJobContext(ctx, j, taskContextMarkerKey)
+}
+
+/*
+type gatherContextMarkerType struct{}
+
+var gatherContextMarkerKey any = gatherContextMarkerType{}
+
+func (j *Job) makeGatherContext(ctx context.Context) context.Context {
+	return makeJobContext(ctx, j, gatherContextMarkerKey)
+}
+
+func (j *Job) isGatherContext(ctx context.Context) bool {
+	return isJobContext(ctx, j, gatherContextMarkerKey)
+}
+*/
+
+func makeJobContext[K any](ctx context.Context, j *Job, key K) context.Context {
 	// Accumulate the jobs to which the context belongs but avoid creating a
 	// collection unless it's needed.
 	var newValue any
-	switch oldValue := ctx.Value(taskContextMarkerKey).(type) {
+	switch oldValue := ctx.Value(key).(type) {
 	case nil:
 		newValue = j
 	case *Job:
+		if oldValue == j {
+			return ctx
+		}
 		newValue = map[*Job]struct{}{
 			oldValue: {},
 			j:        {},
 		}
 	case map[*Job]struct{}:
-		m := make(map[*Job]struct{}, len(oldValue)+1)
-		maps.Copy(m, oldValue)
-		m[j] = struct{}{}
-		newValue = m
+		if _, ok := oldValue[j]; ok {
+			return ctx
+		}
+		newValue := make(map[*Job]struct{}, len(oldValue)+1)
+		maps.Copy(newValue, oldValue)
+		newValue[j] = struct{}{}
 	default:
-		panic("unexpected task context marker value type")
+		panic("unexpected job context marker value type")
 	}
-	return context.WithValue(ctx, taskContextMarkerKey, newValue)
+	return context.WithValue(ctx, key, newValue)
 }
 
-func (j *Job) isTaskContext(ctx context.Context) bool {
-	switch v := ctx.Value(taskContextMarkerKey).(type) {
+func isJobContext[K any](ctx context.Context, j *Job, key K) bool {
+	switch v := ctx.Value(key).(type) {
 	case nil:
 		return false
 	case *Job:
@@ -100,24 +132,24 @@ func (j *Job) isTaskContext(ctx context.Context) bool {
 		_, ok := v[j]
 		return ok
 	default:
-		panic("unexpected task context marker value type")
+		panic("unexpected job context marker value type")
 	}
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
-// Outstanding calls to [Scatter], [Job.GatherOne], and [Job.GatherAll] using
-// the job or any of its pools will fail with [context.Canceled] or other error
-// returned by a [GatherFunc].
+// Outstanding calls to [Scatter], [Job.GatherOne], [Job.GatherAll], or
+// [Job.Finish] using the job or any of its pools will fail with
+// [context.Canceled] or other error returned by a [GatherFunc].
 //
 // While Cancel always returns immediately, any running [TaskFunc] or
 // [GatherFunc] will delay termination of their independent goroutine or caller
-// (i.e., [Scatter], [Job.GatherOne], or [Job.GatherAll]) until it returns. This
-// method cancels the context passed to each [TaskFunc], but not the context
-// passed to each [GatherFunc]. Gather functions instead receive the context
-// passed to the calling [Scatter], [Job.GatherOne], or [Job.GatherAll]
-// function. If it is desirable to transmit a cancelation signal to a running
-// [GatherFunc], one must also cancel any contexts being passed to those
-// callers.
+// (i.e., [Scatter], [Job.GatherOne], [Job.GatherAll], or [Job.Finish]) until it
+// returns. This method cancels the context passed to each [TaskFunc], but not
+// the context passed to each [GatherFunc]. Gather functions instead receive the
+// context passed to the calling [Scatter], [Job.GatherOne], [Job.GatherAll], or
+// [Job.Finish] function. If it is desirable to transmit a cancelation signal to
+// a running [GatherFunc], one must also cancel any contexts being passed to
+// those callers.
 //
 // Cancel is always thread-safe and calling it more than once has no additional
 // effect.
@@ -170,47 +202,43 @@ func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
 }
 
 func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
-	// If multiple goroutines are calling GatherOne concurrently, it's possible
-	// that there are fewer in-flight tasks than there are calling goroutines.
-	// All such goroutines running in parallel might pass the in-flight counter
-	// check, but only some would receive bound gather functions from the
-	// channel -- the rest would potentially block forever. To avoid this
-	// problem, decrementInFlight sends nil values through gatherChannel to wake
-	// waiters whenever the in-flight count reaches zero. The following code
-	// must therefore detect such nil values, re-check the in-flight count, and
-	// retry the receive if the count has become non-zero.
-	for j.inFlight.GreaterThanZero() {
-		// The following select statements are identical other than the absence
-		// or presence of a default clause.
-		if block {
-			select {
-			case gather := <-j.gatherChannel:
-				if gather != nil {
-					return true, j.executeGather(ctx, gather)
-				}
-			case <-ctx.Done():
-				return false, ctx.Err()
-			case <-j.ctx.Done():
-				return false, j.ctx.Err()
-			}
-		} else {
-			select {
-			case gather := <-j.gatherChannel:
-				if gather != nil {
-					return true, j.executeGather(ctx, gather)
-				}
-			case <-ctx.Done():
-				return false, ctx.Err()
-			case <-j.ctx.Done():
-				return false, j.ctx.Err()
-			default:
-				// There were no in-flight tasks ready to gather.
-				return false, nil
-			}
+	if block {
+		//fmt.Println("gatherOne: blocking")
+		select {
+		case gather := <-j.gatherChannel:
+			return true, j.executeGather(ctx, gather)
+		case <-ctx.Done():
+			//fmt.Println("gatherOne: ctx.Done()")
+			return false, ctx.Err()
+		case <-j.ctx.Done():
+			//fmt.Println("gatherOne: j.ctx.Done()")
+			return false, j.ctx.Err()
+		case <-j.done:
+			//fmt.Println("gatherOne: j.done")
+			return false, nil
+		}
+	} else {
+		fmt.Println("gatherOne: polling")
+		// Identical to the blocking branch above except replaces <-j.done with
+		// a default clause.
+		select {
+		case gather := <-j.gatherChannel:
+			return true, j.executeGather(ctx, gather)
+		case <-ctx.Done():
+			//fmt.Println("gatherOne: ctx.Done()")
+			return false, ctx.Err()
+		case <-j.ctx.Done():
+			//fmt.Println("gatherOne: j.ctx.Done()")
+			return false, j.ctx.Err()
+		case <-j.done:
+			//fmt.Println("gatherOne: j.done")
+			return false, nil
+		default:
+			// There were no in-flight tasks ready to gather.
+			//fmt.Println("gatherOne: default")
+			return false, nil
 		}
 	}
-	// There were no in-flight tasks.
-	return false, nil
 }
 
 // GatherAll processes all results from previously scattered tasks, continuing
@@ -258,21 +286,55 @@ func (j *Job) gatherAll(ctx context.Context, block bool) error {
 }
 
 func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
-	// Decrement the environment-wide in-flight counter only after calling
-	// the gather function. This ensures that the in-flight count never
-	// drops to zero before the gather function has had a chance to scatter
-	// new tasks.
+	// Decrement the environment-wide in-flight counter only AFTER calling the
+	// gather function. This ensures that the in-flight count never drops to
+	// zero before the gather function has had a chance to scatter new tasks.
 	defer j.decrementInFlight()
+	//fmt.Println("executeGather: starting gather")
+	//defer fmt.Println("executeGather: done with gather")
 	return gather(ctx)
 }
 
 func (j *Job) decrementInFlight() {
 	if j.inFlight.Decrement() {
-		// The in-flight counter reached zero. Wake up any goroutines waiting on
-		// the gatherChannel, since there's nothing left to gather.
-		j.wakeGatherers()
+		//fmt.Println("decrementInFlight: decremented to zero")
+		if j.closed.Load() {
+			//fmt.Println("decrementInFlight: is closed")
+			// Check again now that we know the job is already closed, in case
+			// the job was closed after the decrement AND another increment.
+			if !j.inFlight.GreaterThanZero() {
+				close(j.done)
+				//fmt.Println("decrementInFlight: closed done channel")
+			}
+		}
 	}
 }
+
+/*
+func (j *Job) decrementInFlightTasks() {
+	if j.inFlight.DecrementTasks().HadNothingLeftInFlight() {
+		if j.closed.Load() {
+			// Check again now that we know the job is already closed, in case
+			// the job was closed after the decrement AND another increment.
+			if j.inFlight.Status().HadNothingLeftInFlight() {
+				close(j.done)
+			}
+		}
+	}
+}
+
+func (j *Job) decrementInFlightGathers() {
+	if j.inFlight.DecrementGathers().HadNothingLeftInFlight() {
+		if j.closed.Load() {
+			// Check again now that we know the job is already closed, in case
+			// the job was closed after the decrement AND another increment.
+			if j.inFlight.Status().HadNothingLeftInFlight() {
+				close(j.done)
+			}
+		}
+	}
+}
+*/
 
 // Wakes any goroutines that might be waiting on the gatherChannel.
 func (j *Job) wakeGatherers() {
@@ -331,4 +393,14 @@ func (j *Job) multiGatherAll(ctx context.Context, parallelism int, block bool) e
 	}
 	wg.Wait()
 	return ctx.Err()
+}
+
+func (j *Job) Finish(ctx context.Context) error {
+	j.closed.Store(true)
+	//fmt.Println("Finish: set closed flag")
+	if !j.inFlight.GreaterThanZero() {
+		close(j.done)
+		//fmt.Println("Finish: closed done channel")
+	}
+	return j.GatherAll(ctx)
 }

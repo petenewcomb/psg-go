@@ -62,7 +62,7 @@ func ExampleJob_Cancel_outer() {
 	job.Cancel()
 
 	// Wait for all tasks to complete
-	if err := job.GatherAll(ctx); err != nil {
+	if err := job.Finish(ctx); err != nil {
 		fmt.Printf("Error while gathering: %v\n", err)
 	}
 
@@ -125,7 +125,7 @@ func ExampleJob_Cancel_task() {
 	}
 
 	// Wait for all tasks to complete
-	if err := job.GatherAll(ctx); err != nil {
+	if err := job.Finish(ctx); err != nil {
 		fmt.Printf("Error while gathering: %v\n", err)
 	}
 
@@ -186,7 +186,7 @@ func ExampleJob_Cancel_gather() {
 	}
 
 	// Wait for all tasks to complete
-	if err := job.GatherAll(ctx); err != nil {
+	if err := job.Finish(ctx); err != nil {
 		fmt.Printf("Error while gathering: %v\n", err)
 	}
 

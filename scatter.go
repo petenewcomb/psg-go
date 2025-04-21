@@ -146,13 +146,13 @@ type TaskFunc[T any] = func(context.Context) (T, error)
 // execution, allowing it to handle both successful and failed task executions.
 //
 // The GatherFunc is called when completed task results are processed by
-// [Scatter], [Job.GatherOne], or [Job.GatherAll]. Execution of a GatherFunc
-// will block processing of subsequent task results, adding to backpressure. If
-// such backpressure is undesirable, consider launching expensive gathering
-// logic in another asynchronous task using [Scatter]. Unlike [TaskFunc], it is
-// safe to call [Scatter] from within a GatherFunc.
+// [Scatter], [Job.GatherOne], [Job.GatherAll], or [Job.Finish]. Execution of a
+// GatherFunc will block processing of subsequent task results, adding to
+// backpressure. If such backpressure is undesirable, consider launching
+// expensive gathering logic in another asynchronous task using [Scatter].
+// Unlike [TaskFunc], it is safe to call [Scatter] from within a GatherFunc.
 //
-// If multiple goroutines may call [Scatter], [Job.GatherOne], or
-// [Job.GatherAll] concurrently, then every GatherFunc used in the job must be
+// If multiple goroutines may call [Scatter], [Job.GatherOne], [Job.GatherAll],
+// or [Job.Finish] concurrently, then every GatherFunc used in the job must be
 // thread-safe.
 type GatherFunc[T any] = func(context.Context, T, error) error

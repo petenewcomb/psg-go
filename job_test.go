@@ -26,27 +26,3 @@ func TestJobBoundPoolPanic(t *testing.T) {
 		_ = psg.NewJob(ctx, pool)
 	})
 }
-
-func TestMultiGatherAllInvalidParallelism(t *testing.T) {
-	chk := require.New(t)
-	ctx := context.Background()
-	pool := psg.NewPool(1)
-	job := psg.NewJob(ctx, pool)
-	defer job.CancelAndWait()
-
-	chk.PanicsWithValue("parallelism is less than one", func() {
-		_ = job.MultiGatherAll(ctx, 0)
-	})
-}
-
-func TestMultiTryGatherAllInvalidParallelism(t *testing.T) {
-	chk := require.New(t)
-	ctx := context.Background()
-	pool := psg.NewPool(1)
-	job := psg.NewJob(ctx, pool)
-	defer job.CancelAndWait()
-
-	chk.PanicsWithValue("parallelism is less than one", func() {
-		_ = job.MultiTryGatherAll(ctx, 0)
-	})
-}

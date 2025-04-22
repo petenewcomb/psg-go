@@ -292,53 +292,6 @@ func (j *Job) wakeGatherers() {
 	}
 }
 
-// Job.MultiGatherAll executes [Job.GatherAll] in the specified number of new
-// goroutines, continuing until there are no more tasks in flight or an error
-// occurs. Only the first error detected will be returned, and an error found in
-// one goroutine will be used to cancel all other goroutines. Regardless of
-// error, Job.MultiGatherAll always waits for all launched goroutines to
-// terminate before returning.
-//
-// See [Job.GatherAll] for more information.
-func (j *Job) MultiGatherAll(ctx context.Context, parallelism int) error {
-	return j.multiGatherAll(ctx, parallelism, true)
-}
-
-// MultiTryGatherAll executes [Job.TryGatherAll] in the specified number of new
-// goroutines, continuing until there are no more task results immediately
-// available or an error occurs. Only the first error detected will be returned,
-// and an error found in one goroutine will be used to cancel all other
-// goroutines. Regardless of error, MultiTryGatherAll always waits for all
-// launched goroutines to terminate before returning.
-//
-// See [Job.TryGatherAll] for more information.
-func (j *Job) MultiTryGatherAll(ctx context.Context, parallelism int) error {
-	return j.multiGatherAll(ctx, parallelism, false)
-}
-
-func (j *Job) multiGatherAll(ctx context.Context, parallelism int, block bool) error {
-	if parallelism < 1 {
-		panic("parallelism is less than one")
-	}
-
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(context.Canceled)
-
-	var wg sync.WaitGroup
-	wg.Add(parallelism)
-	for range parallelism {
-		go func() {
-			defer wg.Done()
-			err := j.gatherAll(ctx, block)
-			if err != nil {
-				cancel(err)
-			}
-		}()
-	}
-	wg.Wait()
-	return ctx.Err()
-}
-
 // Close must be called to signify that no more top-level tasks will be launched
 // and that [Job.GatherAll] should stop blocking to wait for more after the
 // results of all in-flight tasks have been gathered. See [Job.GatherAll] for

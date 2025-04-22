@@ -26,10 +26,10 @@ func TestBySimulation(t *testing.T) {
 		planConfig.MaxPathLength = 10
 		planConfig.TaskErrorProbability = 0.1
 		//planConfig.GatherErrorProbability = 0.1
-		minJitterEstimationCount := 10
-		medJitterEstimationCount := 10
-		maxJitterEstimationCount := 10
-		trialCount := 1
+		minJitterEstimationCount := 30
+		medJitterEstimationCount := 30
+		maxJitterEstimationCount := 30
+		trialCount := 3
 		if testing.Short() {
 			planConfig.MaxPathCount /= 2
 			planConfig.MaxPathLength /= 2

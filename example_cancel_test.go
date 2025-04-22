@@ -6,6 +6,7 @@ package psg_test
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/petenewcomb/psg-go"
 )
@@ -34,6 +35,8 @@ func ExampleJob_Cancel_outer() {
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
+			// Simulate a long-running task
+			time.Sleep(100 * time.Millisecond)
 			return "first task result", nil
 		},
 		printResult,
@@ -42,13 +45,15 @@ func ExampleJob_Cancel_outer() {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
-	// Launch second task, which also provides an opportunity for the first task
-	// result to be gathered.
+	// Launch second task, which must wait for the first result to be gathered
+	// because the pool's concurrency limit is one.
 	fmt.Println("Launching second task")
 	err = psg.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
+			// Simulate a long-running task
+			time.Sleep(100 * time.Millisecond)
 			return "second task result", nil
 		},
 		printResult,
@@ -56,6 +61,10 @@ func ExampleJob_Cancel_outer() {
 	if err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
+
+	// Allow the second task to complete and be waiting for its result to be
+	// gathered.
+	time.Sleep(100 * time.Millisecond)
 
 	// Force cancellation from the outer level before the second task is
 	// gathered.

@@ -67,7 +67,8 @@ func ExampleJob_Cancel_outer() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Force cancellation from the outer level before the second task is
-	// gathered.
+	// gathered, for instance due to an error detected while doing other
+	// top-level work.
 	job.Cancel()
 
 	// Wait for all tasks to complete
@@ -122,7 +123,7 @@ func ExampleJob_Cancel_task() {
 		pool,
 		func(context.Context) (string, error) {
 			// Force cancellation from inside the task. This is a way to cut
-			// stop the overall job due to a fatal error within a task without
+			// short the overall job due to a fatal error within a task without
 			// even waiting for the task result to be gathered.
 			job.Cancel()
 			return "second task result", nil
@@ -160,7 +161,8 @@ func ExampleJob_Cancel_gather() {
 
 	printResult := func(ctx context.Context, result string, err error) error {
 		fmt.Printf("Got %q, err=%v\n", result, err)
-		// Force cancellation
+		// Force cancellation inside gather, for instance because we needed only
+		// one or some of the results and the rest are not needed.
 		job.Cancel()
 		return nil
 	}

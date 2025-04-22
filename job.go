@@ -79,20 +79,6 @@ func (j *Job) isTaskContext(ctx context.Context) bool {
 	return isJobContext(ctx, j, taskContextMarkerKey)
 }
 
-/*
-type gatherContextMarkerType struct{}
-
-var gatherContextMarkerKey any = gatherContextMarkerType{}
-
-func (j *Job) makeGatherContext(ctx context.Context) context.Context {
-	return makeJobContext(ctx, j, gatherContextMarkerKey)
-}
-
-func (j *Job) isGatherContext(ctx context.Context) bool {
-	return isJobContext(ctx, j, gatherContextMarkerKey)
-}
-*/
-
 func makeJobContext[K any](ctx context.Context, j *Job, key K) context.Context {
 	// Accumulate the jobs to which the context belongs but avoid creating a
 	// collection unless it's needed.
@@ -136,19 +122,18 @@ func isJobContext[K any](ctx context.Context, j *Job, key K) bool {
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
-// Outstanding calls to [Scatter], [Job.GatherOne], [Job.GatherAll], or
-// [Job.Finish] using the job or any of its pools will fail with
-// [context.Canceled] or other error returned by a [GatherFunc].
+// Outstanding calls to [Scatter], [Job.GatherOne], [Job.TryGatherOne],
+// [Job.GatherAll], or [Job.TryGatherAll] using the job or any of its pools will
+// fail with [context.Canceled] or other error returned by a [GatherFunc].
 //
 // While Cancel always returns immediately, any running [TaskFunc] or
 // [GatherFunc] will delay termination of their independent goroutine or caller
-// (i.e., [Scatter], [Job.GatherOne], [Job.GatherAll], or [Job.Finish]) until it
-// returns. This method cancels the context passed to each [TaskFunc], but not
-// the context passed to each [GatherFunc]. Gather functions instead receive the
-// context passed to the calling [Scatter], [Job.GatherOne], [Job.GatherAll], or
-// [Job.Finish] function. If it is desirable to transmit a cancelation signal to
-// a running [GatherFunc], one must also cancel any contexts being passed to
-// those callers.
+// until it returns. This method cancels the context passed to each [TaskFunc],
+// but not the context passed to each [GatherFunc]. Gather functions instead
+// receive the context passed to the calling [Scatter], [Job.GatherOne],
+// [Job.TryGatherOne], [Job.GatherAll], or [Job.TryGatherAll] function. If it is
+// desirable to transmit a cancelation signal to a running [GatherFunc], one
+// must also cancel any contexts being passed to those callers.
 //
 // Cancel is always thread-safe and calling it more than once has no additional
 // effect.
@@ -354,10 +339,23 @@ func (j *Job) multiGatherAll(ctx context.Context, parallelism int, block bool) e
 	return ctx.Err()
 }
 
-func (j *Job) Finish(ctx context.Context) error {
+// Close must be called to signify that no more top-level tasks will be launched
+// and that [Job.GatherAll] should stop blocking to wait for more after the
+// results of all in-flight tasks have been gathered. See [Job.GatherAll] for
+// more detail.
+//
+// Close may be called from any goroutine and may safely be called more than
+// once.
+func (j *Job) Close() {
 	j.closed.Store(true)
 	if !j.inFlight.GreaterThanZero() {
 		close(j.done)
 	}
+}
+
+// CloseAndGatherAll closes the job via [Job.Close] and then waits for and
+// gathers the results of all in-flight tasks via [Job.GatherAll].
+func (j *Job) CloseAndGatherAll(ctx context.Context) error {
+	j.Close()
 	return j.GatherAll(ctx)
 }

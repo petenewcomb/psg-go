@@ -13,18 +13,24 @@ format.
 - .githooks folder and pre-commit script
 - Test coverage for various expected panic conditions
 - Job.CancelAndWait to ensure that task goroutines have fully shut down
+- Job.Close and Job.CloseAndGatherAll
 
 ### Changed
 
 - TestBySimulation completely refactored to increase correctness, coverage,
   precision, stability, and maintainablility (#3, #6)
 - SyncJob merged with Job, because in-flight counters must always be thread-safe
-  after all (see below fix for in-flight decrement)
+  after all (see below deadlock fix)
+- GatherAll now returns without error only after a call to Job.Close
 
 ### Fixed
 
 - Require Go 1.24 to avoid need for GOEXPERIMENT=aliastypeparams
-- Moved pool in-flight decrement from gather to task to avoid potential deadlock
+- Deadlock during scatter or gather due to race between counter and channel
+
+### Removed
+
+- Job.MultiGatherAll and Job.TryMultiGatherAll
 
 ## [0.0.1] - 2025-04-09
 

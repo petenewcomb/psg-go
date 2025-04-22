@@ -43,7 +43,7 @@ func Example_observable() {
 	gatherFunc := func(ctx context.Context, result string, err error) error {
 		fmt.Printf("%3dms:   gathering result %q\n", msSinceStart(), result)
 		// Safe because gatherFunc will only ever be called from the current
-		// goroutine within calls to Scatter and Finish below.
+		// goroutine within calls to Scatter and GatherAll below.
 		results = append(results, result)
 		return err
 	}
@@ -70,7 +70,7 @@ func Example_observable() {
 
 	// Wait for all tasks to complete
 	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
-	err := job.Finish(ctx)
+	err := job.CloseAndGatherAll(ctx)
 	if err != nil {
 		fmt.Printf("error during gather: %v\n", err)
 	}

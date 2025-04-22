@@ -10,7 +10,8 @@ import (
 // Scatter initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
 // passed to the provided gather function within a subsequent call to Scatter or
-// any of the gathering methods of [Job].
+// any of the gathering methods of [Job] (i.e., [Job.GatherOne],
+// [Job.TryGatherOne], [Job.GatherAll], or [Job.TryGatherAll]).
 //
 // Scatter blocks to delay launch as needed to ensure compliance with the
 // concurrency limit for the given pool. This backpressure is applied by
@@ -146,13 +147,14 @@ type TaskFunc[T any] = func(context.Context) (T, error)
 // execution, allowing it to handle both successful and failed task executions.
 //
 // The GatherFunc is called when completed task results are processed by
-// [Scatter], [Job.GatherOne], [Job.GatherAll], or [Job.Finish]. Execution of a
-// GatherFunc will block processing of subsequent task results, adding to
-// backpressure. If such backpressure is undesirable, consider launching
-// expensive gathering logic in another asynchronous task using [Scatter].
-// Unlike [TaskFunc], it is safe to call [Scatter] from within a GatherFunc.
+// [Scatter], [Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], or
+// [Job.TryGatherAll]. Execution of a GatherFunc will block processing of
+// subsequent task results, adding to backpressure. If such backpressure is
+// undesirable, consider launching expensive gathering logic in another
+// asynchronous task using [Scatter]. Unlike [TaskFunc], it is safe to call
+// [Scatter] from within a GatherFunc.
 //
-// If multiple goroutines may call [Scatter], [Job.GatherOne], [Job.GatherAll],
-// or [Job.Finish] concurrently, then every GatherFunc used in the job must be
-// thread-safe.
+// If multiple goroutines may call [Scatter], [Job.GatherOne],
+// [Job.TryGatherOne], [Job.GatherAll], or [Job.TryGatherAll] concurrently, then
+// every GatherFunc used in the job must be thread-safe.
 type GatherFunc[T any] = func(context.Context, T, error) error

@@ -59,7 +59,7 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 	}
 
 	chk := require.New(t)
-	err := job.Finish(ctx)
+	err := job.CloseAndGatherAll(ctx)
 	overallDuration := time.Since(c.StartTime)
 	if ge, ok := err.(expectedGatherError); ok {
 		chk.True(ge.task.ReturnErrorFromGather)

@@ -24,12 +24,12 @@ func Run(t require.TestingT, ctx context.Context, plan *Plan, debug bool) (map[*
 		Plan:                 plan,
 		Pools:                pools,
 		ConcurrencyByPool:    make([]atomic.Int64, len(pools)),
-		MaxConcurrencyByPool: make([]atomic.Int64, len(pools)),
+		MaxConcurrencyByPool: make([]atomicMinMaxInt64, len(pools)),
 		ResultMap:            make(map[*Plan]*Result),
-		MinScatterDelay:      time.Duration(math.MaxInt64),
-		MinGatherDelay:       time.Duration(math.MaxInt64),
 		Debug:                debug,
 	}
+	c.MinScatterDelay.Store(math.MaxInt64)
+	c.MinGatherDelay.Store(math.MaxInt64)
 	return c.Run(t, ctx)
 }
 
@@ -37,13 +37,13 @@ type controller struct {
 	Plan                 *Plan
 	Pools                []*psg.Pool
 	ConcurrencyByPool    []atomic.Int64
-	MaxConcurrencyByPool []atomic.Int64
+	MaxConcurrencyByPool []atomicMinMaxInt64
 	GatheredCount        atomic.Int64
 	ResultMapMutex       sync.Mutex
 	ResultMap            map[*Plan]*Result
 	StartTime            time.Time
-	MinScatterDelay      time.Duration
-	MinGatherDelay       time.Duration
+	MinScatterDelay      atomicMinMaxInt64
+	MinGatherDelay       atomicMinMaxInt64
 	Debug                bool
 }
 
@@ -80,7 +80,8 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 			OverallDuration:      overallDuration,
 		},
 	})
-	c.debugf("%v ended %v with min delays scatter=%v gather=%v", overallDuration, c.Plan, c.MinScatterDelay, c.MinGatherDelay)
+	c.debugf("%v ended %v with min delays scatter=%v gather=%v", overallDuration, c.Plan,
+		time.Duration(c.MinScatterDelay.Load()), time.Duration(c.MinGatherDelay.Load()))
 	return c.ResultMap, nil
 }
 
@@ -140,7 +141,7 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 	lt := &localT{}
 	scatterTime := time.Now()
 	return func(ctx context.Context) (res *taskResult, err error) {
-		c.MinScatterDelay = min(c.MinScatterDelay, time.Since(scatterTime))
+		c.MinScatterDelay.UpdateMin(int64(time.Since(scatterTime)))
 
 		defer func() {
 			if r := recover(); r != nil {
@@ -191,7 +192,7 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFunc[*taskResult] {
 	chk := require.New(t)
 	return func(ctx context.Context, res *taskResult, err error) error {
-		c.MinGatherDelay = min(c.MinGatherDelay, time.Since(res.TaskEndTime))
+		c.MinGatherDelay.UpdateMin(int64(time.Since(res.TaskEndTime)))
 
 		if lt, ok := err.(*localT); ok {
 			lt.DrainTo(t)
@@ -212,16 +213,7 @@ func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFun
 		chk.GreaterOrEqual(res.ConcurrencyAfter, int64(0))
 		chk.Less(res.ConcurrencyAfter, int64(c.Plan.Config.ConcurrencyLimits[pool]))
 
-		// Safely update c.MaxConcurrency
-		for {
-			oldMaxConcurrency := c.MaxConcurrencyByPool[pool].Load()
-			if res.ConcurrencyAtStart <= oldMaxConcurrency {
-				break
-			}
-			if c.MaxConcurrencyByPool[pool].CompareAndSwap(oldMaxConcurrency, res.ConcurrencyAtStart) {
-				break
-			}
-		}
+		c.MaxConcurrencyByPool[pool].UpdateMax(res.ConcurrencyAtStart)
 
 		for i, d := range task.GatherTimes {
 			if i > 0 {
@@ -263,4 +255,40 @@ type expectedGatherError struct {
 
 func (e expectedGatherError) Error() string {
 	return fmt.Sprintf("%v gather error", e.task)
+}
+
+type atomicMinMaxInt64 struct {
+	value atomic.Int64
+}
+
+func (mm *atomicMinMaxInt64) Store(x int64) {
+	mm.value.Store(x)
+}
+
+func (mm *atomicMinMaxInt64) Load() int64 {
+	return mm.value.Load()
+}
+
+func (mm *atomicMinMaxInt64) UpdateMax(x int64) {
+	mm.update(x, func(a, b int64) bool {
+		return a > b
+	})
+}
+
+func (mm *atomicMinMaxInt64) UpdateMin(x int64) {
+	mm.update(x, func(a, b int64) bool {
+		return a > b
+	})
+}
+
+func (mm *atomicMinMaxInt64) update(x int64, t func(a, b int64) bool) {
+	for {
+		old := mm.value.Load()
+		if !t(x, old) {
+			break
+		}
+		if mm.value.CompareAndSwap(old, x) {
+			break
+		}
+	}
 }

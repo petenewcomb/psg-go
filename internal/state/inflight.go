@@ -38,6 +38,18 @@ func (c *InFlightCounter) Decrement() bool {
 	return newValue == 0
 }
 
+// DecrementAndCheckIfUnder decrements the counter and checks if the value was under the given limit after decrementing.
+// Returns true if the value after decrementing was under the limit.
+func (c *InFlightCounter) DecrementAndCheckIfUnder(limit int) bool {
+	newValue := c.v.Add(-1)
+	if newValue < 0 {
+		panic("there were no tasks in flight")
+	}
+
+	// Check if new value is under limit
+	return limit < 0 || newValue < int64(limit)
+}
+
 func (c *InFlightCounter) GreaterThanZero() bool {
 	return c.v.Load() > 0
 }

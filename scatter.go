@@ -5,25 +5,22 @@ package psg
 
 import (
 	"context"
-	"fmt"
 )
 
 func scatter[T any](
 	ctx context.Context,
 	pool *Pool,
 	taskFunc TaskFunc[T],
-	blockFunc func(context.Context) error,
+	mode backpressureMode,
 	postResult func(T, error),
 ) (bool, error) {
 	if taskFunc == nil {
 		panic("task function must be non-nil")
 	}
 
-	fmt.Println("scatter()")
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the pool to launch.
-	return pool.launch(ctx, blockFunc, func(ctx context.Context) {
-		fmt.Println("scatter(): func")
+	return pool.launch(ctx, mode, func(ctx context.Context) {
 		// Don't launch if the context has been canceled by the time the
 		// goroutine starts.
 		if ctx.Err() != nil {
@@ -39,9 +36,7 @@ func scatter[T any](
 		// posting a gather to the job's channel or otherwise attempt to
 		// maintain the integrity of the pool or overall job in case of task
 		// panics.
-		fmt.Println("scatter(): calling taskFunc")
 		value, err := taskFunc(ctx)
-		fmt.Println("scatter(): called taskFunc")
 
 		// Decrement the pool's in-flight count BEFORE waiting on the gather
 		// channel. This makes it safe for gatherFunc to call `Scatter` with this
@@ -49,8 +44,6 @@ func scatter[T any](
 		// least one slot available.
 		pool.decrementInFlight()
 
-		fmt.Println("scatter(): postResult")
 		postResult(value, err)
-		fmt.Println("scatter(): postedResult")
 	})
 }

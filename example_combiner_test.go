@@ -79,7 +79,7 @@ func TestExampleCombiner(t *testing.T) {
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
 		fmt.Printf("%3dms: launching task %q\n", msSinceStart(), taskName)
-		err := combiner.Scatter(ctx, pool, newTaskFunc(taskName, msSinceStart))
+		err := combiner.Scatter(ctx, pool, newTaskFunc2(taskName, msSinceStart))
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

@@ -69,14 +69,7 @@ func (g *Gather[T]) Scatter(
 	pool *Pool,
 	taskFunc TaskFunc[T],
 ) error {
-	_, err := g.scatter(ctx, pool, taskFunc, func(ctx context.Context) error {
-		// Gather a result to make room to launch the new task. As long as there
-		// wasn't an error, we don't care whether a task was actually gathered
-		// by this call. Either way, it's time to re-check the in-flight count
-		// for this pool.
-		_, err := pool.job.GatherOne(ctx)
-		return err
-	})
+	_, err := g.scatter(ctx, pool, taskFunc, backpressureGather)
 	return err
 }
 
@@ -95,17 +88,17 @@ func (g *Gather[T]) TryScatter(
 	pool *Pool,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	return g.scatter(ctx, pool, taskFunc, nil)
+	return g.scatter(ctx, pool, taskFunc, backpressureDecline)
 }
 
 func (g *Gather[T]) scatter(
 	ctx context.Context,
 	pool *Pool,
 	taskFunc TaskFunc[T],
-	blockFunc func(context.Context) error,
+	mode backpressureMode,
 ) (bool, error) {
 	j := pool.job
-	return scatter(ctx, pool, taskFunc, blockFunc, func(value T, err error) {
+	return scatter(ctx, pool, taskFunc, mode, func(value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
 		gather := func(ctx context.Context) error {

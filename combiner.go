@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -23,7 +22,6 @@ type Combiner[I any, O any] struct {
 	liveCount        atomic.Int64
 	primaryChannel   chan boundCombinerFunc[I, O]
 	secondaryChannel chan boundCombinerFunc[I, O]
-	blockersChannel  chan chan<- struct{}
 }
 
 type CombinerFunc[I any, O any] func(ctx context.Context, done bool, input I, inputErr error) (emit bool, output O, err error)
@@ -83,9 +81,7 @@ func (c *Combiner[I, O]) Scatter(
 	pool *Pool,
 	taskFunc TaskFunc[I],
 ) error {
-	_, err := c.scatter(ctx, pool, taskFunc, func(ctx context.Context) error {
-		// TODO
-	})
+	_, err := c.scatter(ctx, pool, taskFunc, backpressureWaiter)
 	return err
 }
 
@@ -104,32 +100,27 @@ func (c *Combiner[I, O]) TryScatter(
 	pool *Pool,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	return c.scatter(ctx, pool, taskFunc, nil)
+	return c.scatter(ctx, pool, taskFunc, backpressureDecline)
 }
 
 func (c *Combiner[I, O]) scatter(
 	ctx context.Context,
 	pool *Pool,
 	taskFunc TaskFunc[I],
-	blockFunc func(context.Context) error,
+	mode backpressureMode,
 ) (bool, error) {
 	j := pool.job
-	fmt.Println("Combiner.scatter()")
-	return scatter(ctx, pool, taskFunc, blockFunc, func(input I, err error) {
-		fmt.Println("Combiner.scatter(): func")
+	return scatter(ctx, pool, taskFunc, mode, func(input I, err error) {
 		// Build the combine function, binding the supplied combineFunc to the
 		// result.
 		combine := func(ctx context.Context, combinerFunc CombinerFunc[I, O]) (bool, O, error) {
 			return combinerFunc(ctx, false, input, err)
 		}
 
-		fmt.Println("Combiner.scatter(): got combine")
 		if c.inFlight.Increment() && c.liveCount.Load() == 0 {
-			fmt.Println("Combiner.scatter(): starting first combiner task")
 			// This is the first combine, go ahead and try to launch a task
 			// without waiting for the spawn delay.
 			if c.launchNewCombinerTask(j, combine) {
-				fmt.Println("Combiner.scatter(): started first combiner task")
 				return
 			}
 			// Unable to launch a task (limit is zero or another goroutine beat
@@ -138,21 +129,16 @@ func (c *Combiner[I, O]) scatter(
 
 		// Loop to deal with the case in which we try to launch a task but
 		// cannot.
-		fmt.Println("Combiner.scatter(): blocking")
 		for {
 			// Post the combine, preferring the primary channel.
 			select {
 			case c.primaryChannel <- combine:
-				fmt.Println("Combiner.scatter(): primaryChannel")
 				return
 			case <-time.After(c.spawnDelay):
-				fmt.Println("Combiner.scatter(): spawnDelay")
 				select {
 				case c.secondaryChannel <- combine:
-					fmt.Println("Combiner.scatter(): secondaryChannel")
 					return
 				default:
-					fmt.Println("Combiner.scatter(): launchNewCombinerTask")
 					if c.launchNewCombinerTask(j, combine) {
 						return
 					}
@@ -172,11 +158,9 @@ func (c *Combiner[I, O]) scatter(
 func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc[I, O]) bool {
 	id := c.liveCount.Add(1)
 	if id > c.concurrencyLimit.Load() {
-		fmt.Println("not starting combiner task", id)
 		c.liveCount.Add(-1)
 		return false
 	}
-	fmt.Println("starting combiner task", id)
 	j.combiners.Increment()
 	j.wg.Add(1)
 	go func() {
@@ -264,7 +248,6 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 }
 
 func (c *Combiner[I, O]) postGather(j *Job, value O, err error) {
-	fmt.Println("postGather")
 	// Build the gather function, binding the gatherFunc to the
 	// combiner output.
 	gather := func(ctx context.Context) error {

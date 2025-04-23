@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -290,30 +289,25 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 
 func (j *Job) decrementInFlight() {
 	if j.inFlight.Decrement() {
-		fmt.Println("decrementInFlight(): zero")
 		j.mu.Lock()
 		defer j.mu.Unlock()
 		if j.state == JobStateClosed && !j.inFlight.GreaterThanZero() {
 			j.state = JobStateFlushing
-			fmt.Println("decrementInFlight(): flushing")
 			close(j.flush)
 		}
 		if j.state == JobStateFlushing && !j.combiners.GreaterThanZero() {
 			j.state = JobStateDone
-			fmt.Println("decrementInFlight(): done")
 			close(j.done)
 		}
 	}
 }
 
 func (j *Job) decrementCombiners() {
-	fmt.Println("decrementCombiners()")
 	if j.combiners.Decrement() {
 		j.mu.Lock()
 		defer j.mu.Unlock()
 		if j.state == JobStateFlushing && !j.inFlight.GreaterThanZero() && !j.combiners.GreaterThanZero() {
 			j.state = JobStateDone
-			fmt.Println("decrementCombiners(): done")
 			close(j.done)
 		}
 	}
@@ -339,19 +333,15 @@ func (j *Job) wakeGatherers() {
 // Close may be called from any goroutine and may safely be called more than
 // once.
 func (j *Job) Close() {
-	fmt.Println("Close()")
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.state == JobStateOpen {
 		j.state = JobStateClosed
-		fmt.Println("Close(): closing")
 		if !j.inFlight.GreaterThanZero() {
 			j.state = JobStateFlushing
-			fmt.Println("Close(): flushing")
 			close(j.flush)
 			if !j.combiners.GreaterThanZero() {
 				j.state = JobStateDone
-				fmt.Println("Close(): done")
 				close(j.done)
 			}
 		}

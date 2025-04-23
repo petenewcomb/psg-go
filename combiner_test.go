@@ -11,19 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type mockCombiner[I any, O any] struct {
-	add    func(ctx context.Context, value I, err error) (bool, error)
-	finish func() O
-}
-
-func (c *mockCombiner[I, O]) Add(ctx context.Context, value I, err error) (bool, error) {
-	return c.add(ctx, value, err)
-}
-
-func (c *mockCombiner[I, O]) Finish() O {
-	return c.finish()
-}
-
 func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()

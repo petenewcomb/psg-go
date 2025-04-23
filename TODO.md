@@ -49,6 +49,14 @@
 - [ ] Add WithXxx option methods if appropriate
 - [ ] Ensure all public types and methods have consistent naming
 
+### 6. Context propagation improvements
+- [ ] Modify gather/combiner functions to receive the task's context instead of the job context
+- [ ] Ensure task contexts (passed to Scatter) are automatically canceled when the job context is canceled
+- [ ] Support OpenTelemetry trace propagation through the task-gather chain
+- [ ] Enable task-specific cancelation without affecting other tasks
+- [ ] Allow task-specific data to flow naturally via context without changing interfaces
+- [ ] Add examples demonstrating context propagation use cases
+
 ## Implementation Notes
 
 ### Backpressure Modes

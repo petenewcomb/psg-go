@@ -30,13 +30,13 @@ func Example_hello() {
 	defer job.CancelAndWait()
 
 	var results []string
-	gather := func(ctx context.Context, result string, err error) error {
+	gather := psg.NewGather(func(ctx context.Context, result string, err error) error {
 		results = append(results, result)
 		return nil
-	}
+	})
 
-	psg.Scatter(ctx, pool, newTask("Hello"), gather)
-	psg.Scatter(ctx, pool, newTask("world!"), gather)
+	gather.Scatter(ctx, pool, newTask("Hello"))
+	gather.Scatter(ctx, pool, newTask("world!"))
 
 	job.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))

@@ -11,8 +11,8 @@ type InFlightCounter struct {
 	v atomic.Int64
 }
 
-func (c *InFlightCounter) Increment() {
-	c.v.Add(1)
+func (c *InFlightCounter) Increment() bool {
+	return c.v.Add(1) == 1
 }
 
 func (c *InFlightCounter) IncrementIfUnder(limit int) bool {

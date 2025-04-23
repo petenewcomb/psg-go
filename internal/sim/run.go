@@ -96,12 +96,9 @@ func (c *controller) addResultMap(t require.TestingT, rm map[*Plan]*Result) {
 }
 
 func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *Task) {
-	err := psg.Scatter(
-		ctx,
-		c.Pools[task.Pool],
-		c.newTaskFunc(task, &c.ConcurrencyByPool[task.Pool]),
-		c.newGatherFunc(t, task),
-	)
+	gather := psg.NewGather(c.newGatherFunc(t, task))
+	err := gather.Scatter(ctx, c.Pools[task.Pool],
+		c.newTaskFunc(task, &c.ConcurrencyByPool[task.Pool]))
 	chk := require.New(t)
 	if ge, ok := err.(expectedGatherError); ok {
 		chk.True(ge.task.ReturnErrorFromGather)

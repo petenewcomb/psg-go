@@ -5,10 +5,10 @@ package psg
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
@@ -26,11 +26,24 @@ type Job struct {
 	cancelFunc    context.CancelFunc
 	pools         []*Pool
 	inFlight      state.InFlightCounter
+	combiners     state.InFlightCounter
 	gatherChannel chan boundGatherFunc
 	wg            sync.WaitGroup
-	closed        atomic.Bool
-	done          chan struct{}
+
+	mu    sync.Mutex
+	state JobState
+	flush chan struct{}
+	done  chan struct{}
 }
+
+type JobState int
+
+const (
+	JobStateOpen JobState = iota
+	JobStateClosed
+	JobStateFlushing
+	JobStateDone
+)
 
 type boundGatherFunc = func(ctx context.Context) error
 
@@ -55,6 +68,8 @@ func NewJob(
 		cancelFunc:    cancelFunc,
 		pools:         slices.Clone(pools),
 		gatherChannel: make(chan boundGatherFunc),
+		state:         JobStateOpen,
+		flush:         make(chan struct{}),
 		done:          make(chan struct{}),
 	}
 	j.ctx = j.makeTaskContext(ctx)
@@ -150,7 +165,8 @@ func (j *Job) CancelAndWait() {
 
 // GatherOne processes at most a single result from a task previously launched
 // in one of the [Job]'s pools via [Scatter]. It will block until a completed
-// task is available or the context has been canceled. See [Job.TryGatherOne] for a
+// task is available, the context has been canceled, or another event causes a
+// wake-up (e.g. a call to [Pool.SetLimit]). See [Job.TryGatherOne] for a
 // non-blocking alternative.
 //
 // Returns a boolean flag indicating whether a result was processed and an error
@@ -159,7 +175,8 @@ func (j *Job) CancelAndWait() {
 //   - true, nil: a task completed and was successfully gathered
 //   - true, non-nil: a task completed but the gather function returned a
 //     non-nil error
-//   - false, nil: there were no tasks in flight
+//   - false, nil: the call was woken up but there was no completed task
+//     available
 //   - false, non-nil: the argument or job-internal context was canceled
 //
 // If all gather functions are thread-safe, then GatherOne is thread-safe and
@@ -189,7 +206,10 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 	if block {
 		select {
 		case gather := <-j.gatherChannel:
-			return true, j.executeGather(ctx, gather)
+			if gather != nil {
+				return true, j.executeGather(ctx, gather)
+			}
+			return false, nil
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-j.ctx.Done():
@@ -270,12 +290,31 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 
 func (j *Job) decrementInFlight() {
 	if j.inFlight.Decrement() {
-		if j.closed.Load() {
-			// Check again now that we know the job is already closed, in case
-			// the job was closed after the decrement AND another increment.
-			if !j.inFlight.GreaterThanZero() {
-				close(j.done)
-			}
+		fmt.Println("decrementInFlight(): zero")
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		if j.state == JobStateClosed && !j.inFlight.GreaterThanZero() {
+			j.state = JobStateFlushing
+			fmt.Println("decrementInFlight(): flushing")
+			close(j.flush)
+		}
+		if j.state == JobStateFlushing && !j.combiners.GreaterThanZero() {
+			j.state = JobStateDone
+			fmt.Println("decrementInFlight(): done")
+			close(j.done)
+		}
+	}
+}
+
+func (j *Job) decrementCombiners() {
+	fmt.Println("decrementCombiners()")
+	if j.combiners.Decrement() {
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		if j.state == JobStateFlushing && !j.inFlight.GreaterThanZero() && !j.combiners.GreaterThanZero() {
+			j.state = JobStateDone
+			fmt.Println("decrementCombiners(): done")
+			close(j.done)
 		}
 	}
 }
@@ -300,9 +339,22 @@ func (j *Job) wakeGatherers() {
 // Close may be called from any goroutine and may safely be called more than
 // once.
 func (j *Job) Close() {
-	j.closed.Store(true)
-	if !j.inFlight.GreaterThanZero() {
-		close(j.done)
+	fmt.Println("Close()")
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.state == JobStateOpen {
+		j.state = JobStateClosed
+		fmt.Println("Close(): closing")
+		if !j.inFlight.GreaterThanZero() {
+			j.state = JobStateFlushing
+			fmt.Println("Close(): flushing")
+			close(j.flush)
+			if !j.combiners.GreaterThanZero() {
+				j.state = JobStateDone
+				fmt.Println("Close(): done")
+				close(j.done)
+			}
+		}
 	}
 }
 

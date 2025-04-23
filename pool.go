@@ -44,7 +44,7 @@ func (p *Pool) SetLimit(limit int) {
 	}
 }
 
-func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool, error) {
+func (p *Pool) launch(ctx context.Context, blockFunc func(context.Context) error, task boundTaskFunc) (bool, error) {
 
 	j := p.job
 	if j == nil {
@@ -54,7 +54,7 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	if j.isTaskContext(ctx) {
 		// Don't launch if the provided context is a task context within the
 		// current job, since that may lead to deadlock.
-		panic("psg.Scatter called from within TaskFunc; move call to GatherFunc instead")
+		panic("Scatter called from within TaskFunc; move call to GatherFunc instead")
 	}
 
 	// Don't launch if the provided context has been canceled.
@@ -83,14 +83,14 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	// Apply backpressure if launching a new task would exceed the pool's
 	// concurrency limit.
 	for !p.incrementInFlightIfUnderLimit() {
-		if !block {
+		if blockFunc == nil {
 			return false, nil
 		}
 		// Gather a result to make room to launch the new task. As long as there
 		// wasn't an error, we don't care whether a task was actually gathered
 		// by this call. Either way, it's time to re-check the in-flight count
 		// for this pool.
-		if _, err := j.GatherOne(ctx); err != nil {
+		if err := blockFunc(ctx); err != nil {
 			return false, err
 		}
 	}
@@ -121,16 +121,6 @@ func (p *Pool) incrementInFlightIfUnderLimit() bool {
 	}
 }
 
-func (p *Pool) postGather(gather boundGatherFunc) {
-	// Decrement the pool's in-flight count BEFORE waiting on the gather
-	// channel. This makes it safe for gatherFunc to call `Scatter` with this
-	// same `Pool` instance without deadlock, as there is guaranteed to be at
-	// least one slot available.
+func (p *Pool) decrementInFlight() {
 	p.inFlight.Decrement()
-
-	j := p.job
-	select {
-	case j.gatherChannel <- gather:
-	case <-j.ctx.Done():
-	}
 }

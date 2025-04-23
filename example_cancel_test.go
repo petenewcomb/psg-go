@@ -24,14 +24,16 @@ func ExampleJob_Cancel_outer() {
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	printResult := func(ctx context.Context, result string, err error) error {
-		fmt.Printf("Got %q, err=%v\n", result, err)
-		return nil
-	}
+	printResult := psg.NewGather(
+		func(ctx context.Context, result string, err error) error {
+			fmt.Printf("Got %q, err=%v\n", result, err)
+			return nil
+		},
+	)
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	err := psg.Scatter(
+	err := printResult.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
@@ -39,7 +41,6 @@ func ExampleJob_Cancel_outer() {
 			time.Sleep(100 * time.Millisecond)
 			return "first task result", nil
 		},
-		printResult,
 	)
 	if err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
@@ -48,7 +49,7 @@ func ExampleJob_Cancel_outer() {
 	// Launch second task, which must wait for the first result to be gathered
 	// because the pool's concurrency limit is one.
 	fmt.Println("Launching second task")
-	err = psg.Scatter(
+	err = printResult.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
@@ -56,7 +57,6 @@ func ExampleJob_Cancel_outer() {
 			time.Sleep(100 * time.Millisecond)
 			return "second task result", nil
 		},
-		printResult,
 	)
 	if err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
@@ -96,20 +96,21 @@ func ExampleJob_Cancel_task() {
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	printResult := func(ctx context.Context, result string, err error) error {
-		fmt.Printf("Got %q, err=%v\n", result, err)
-		return nil
-	}
+	printResult := psg.NewGather(
+		func(ctx context.Context, result string, err error) error {
+			fmt.Printf("Got %q, err=%v\n", result, err)
+			return nil
+		},
+	)
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	err := psg.Scatter(
+	err := printResult.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
 			return "first task result", nil
 		},
-		printResult,
 	)
 	if err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
@@ -118,7 +119,7 @@ func ExampleJob_Cancel_task() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be gathered.
 	fmt.Println("Launching second task")
-	err = psg.Scatter(
+	err = printResult.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
@@ -128,7 +129,6 @@ func ExampleJob_Cancel_task() {
 			job.Cancel()
 			return "second task result", nil
 		},
-		printResult,
 	)
 	if err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
@@ -159,23 +159,24 @@ func ExampleJob_Cancel_gather() {
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	printResult := func(ctx context.Context, result string, err error) error {
-		fmt.Printf("Got %q, err=%v\n", result, err)
-		// Force cancellation inside gather, for instance because we needed only
-		// one or some of the results and the rest are not needed.
-		job.Cancel()
-		return nil
-	}
+	printResult := psg.NewGather(
+		func(ctx context.Context, result string, err error) error {
+			fmt.Printf("Got %q, err=%v\n", result, err)
+			// Force cancellation inside gather, for instance because we needed only
+			// one or some of the results and the rest are not needed.
+			job.Cancel()
+			return nil
+		},
+	)
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	err := psg.Scatter(
+	err := printResult.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
 			return "first task result", nil
 		},
-		printResult,
 	)
 	if err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
@@ -184,13 +185,12 @@ func ExampleJob_Cancel_gather() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be gathered.
 	fmt.Println("Launching second task")
-	err = psg.Scatter(
+	err = printResult.Scatter(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
 			return "second task result", nil
 		},
-		printResult,
 	)
 	if err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)

@@ -6,13 +6,14 @@ package psg_test
 import (
 	"context"
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/petenewcomb/psg-go"
 )
 
 // Define a factory to bind task-specific inputs to generic task functions
-func newTaskFunc(taskName string, msSinceStart func() int64) psg.TaskFunc[string] {
+func newTaskFunc2(taskName string, msSinceStart func() int64) psg.TaskFunc[string] {
 	return func(context.Context) (string, error) {
 		// Simulate latency
 		if taskName == "A" {
@@ -28,9 +29,10 @@ func newTaskFunc(taskName string, msSinceStart func() int64) psg.TaskFunc[string
 	}
 }
 
-// Observable uses psg to run a few tasks and produce logging that demonstrate
+// Combiner uses psg to run a few tasks and produce logging that demonstrate
 // the sequence of events.
-func Example_observable() {
+func TestExampleCombiner(t *testing.T) {
+	//func Example_combiner() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 10ms to make the output stable across runs
@@ -38,11 +40,26 @@ func Example_observable() {
 		return ms * 10
 	}
 
+	ctx := context.Background()
+
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Scatter and GatherAll.
-	var results []string
-	gather := psg.NewGather(
-		func(ctx context.Context, result string, err error) error {
+	var results []map[string]int
+	combiner := psg.NewCombiner(ctx, 1,
+		func() psg.CombinerFunc[string, map[string]int] {
+			fmt.Printf("%3dms:   new combiner\n", msSinceStart())
+			m := make(map[string]int)
+			return func(ctx context.Context, done bool, value string, err error) (bool, map[string]int, error) {
+				if done {
+					fmt.Printf("%3dms:   combiner done\n", msSinceStart())
+					return true, m, nil
+				}
+				fmt.Printf("%3dms:   combining %q\n", msSinceStart(), value)
+				m[value]++
+				return false, nil, nil
+			}
+		},
+		func(ctx context.Context, result map[string]int, err error) error {
 			fmt.Printf("%3dms:   gathering result %q\n", msSinceStart(), result)
 			// Safe because gatherFunc will only ever be called from the current
 			// goroutine within calls to Scatter and GatherAll below.
@@ -55,7 +72,6 @@ func Example_observable() {
 	pool := psg.NewPool(2)
 
 	// Create a scatter-gather job with the above pool
-	ctx := context.Background()
 	job := psg.NewJob(ctx, pool)
 	defer job.CancelAndWait()
 
@@ -63,7 +79,7 @@ func Example_observable() {
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
 		fmt.Printf("%3dms: launching task %q\n", msSinceStart(), taskName)
-		err := gather.Scatter(ctx, pool, newTaskFunc(taskName, msSinceStart))
+		err := combiner.Scatter(ctx, pool, newTaskFunc(taskName, msSinceStart))
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

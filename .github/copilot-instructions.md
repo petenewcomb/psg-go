@@ -1,5 +1,7 @@
 # PSG-Go Copilot Instructions
 
+> **Important**: Check the TODO.md file in the repository root for current work-in-progress items and tasks that need attention.
+
 ## Project Overview
 PSG-Go is a Go library that implements a pipelined scatter-gather concurrency pattern. It provides tools for managing concurrent tasks with controlled parallelism, backpressure, and result aggregation.
 

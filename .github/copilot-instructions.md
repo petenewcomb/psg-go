@@ -1,9 +1,42 @@
+# PSG-Go Copilot Instructions
+
+## Project Overview
+PSG-Go is a Go library that implements a pipelined scatter-gather concurrency pattern. It provides tools for managing concurrent tasks with controlled parallelism, backpressure, and result aggregation.
+
+## Key Concepts
+- **Scatter-Gather Pattern**: Tasks are scattered (launched) and their results gathered (processed) asynchronously
+- **Backpressure**: Mechanisms to control resource usage by limiting concurrent task execution
+- **Pool**: Controls concurrency limits for task execution
+- **Job**: Manages the lifecycle of related tasks
+- **Gather**: Processes results from completed tasks
+- **Combiner**: Combines multiple inputs into a single output
+
+## Architecture Guidelines
+1. **Deadlock Prevention**: Any waiting mechanism should have an escape hatch. Be especially careful when:
+   - Tasks need to wait for capacity
+   - Results need to be gathered
+   - The same entity is both launching tasks and processing results
+
+2. **Backpressure Modes**:
+   - `backpressureDecline`: Return without launching when capacity is full (for TryScatter)
+   - `backpressureGather`: Block and gather results to make room (for Scatter)
+   - `backpressureWaiter`: Wait for notification without gathering (for Combiner)
+
+3. **Memory Control**: Always maintain proper constraints on memory usage. 
+   - Limit the number of in-flight tasks
+   - Ensure notification channels are properly sized and cleaned up
+
+4. **Concurrency Safety**:
+   - Ultrathink about concurrency issues, especially regarding potential orders of operations
+   - Consider what happens when operations occur in unexpected sequences
+   - Use atomic operations and proper synchronization
+
 ## Build/Test Commands
 - Use `go vet ./...` to verify code correctness instead of running a build with `go build` unless you really need the executable(s)
 - Run all tests in short mode for general functional validation: `go test -short ./...` as tests may take several minutes to run without `-short`
 - Use `go test -run '^TestOrExampleName$' ./...` with or without `-short` to run a specific test or example
 - Use `go test -coverprofile coverage.out -coverpkg ./...` with or without `-short` to calculate test coverage
-- Remember that `go test` will usually output nothing upon success.  To force it to generate output for all tests run use `-v`.  Also pay attention to the exit code.
+- Remember that `go test` will usually output nothing upon success. To force it to generate output for all tests run use `-v`. Also pay attention to the exit code.
 - Use `go test -race` to engage the race detector, which will slow execution time but detect at least egregious thread safety problems.
 
 ## Code Style
@@ -24,6 +57,20 @@
 - Add explanatory and/or narrative comments to code when there are non-evident details the reader should keep in mind
 - Do not add comments that effectively repeat what the code itself already says effectively
 - Choose names that ensure that code is as self-documenting as possible
+- Field and method naming should clearly indicate purpose
+- Use meaningful types for enum-like constants
+- Buffer channels when waiting for signals that might be sent before receivers are ready
 - Focus not only on achieving intended functionality and behavior but also on making non-intended functionality and behavior impossible
 - Validate user inputs explicitly if invalid inputs could cause delayed or difficult-to-understand errors, outputs, or behaviors 
-- Ultrathink about concurrency issues, especially regarding potential orders of operations
+
+## Testing
+1. Test edge cases involving concurrency limits
+2. Ensure deterministic behavior in tests
+3. Test for deadlocks by running with minimal concurrency limits
+4. Verify cancelation and cleanup work properly
+
+## Common Pitfalls
+1. **Circular Dependencies**: A task cannot gather its own results without deadlocking
+2. **Missed Signals**: Unbuffered channels can miss signals if sent before receivers are listening
+3. **Race Conditions**: Be careful when checking and modifying counters
+4. **Resource Leaks**: Always clean up resources when contexts are canceled

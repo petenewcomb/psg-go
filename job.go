@@ -30,18 +30,18 @@ type Job struct {
 	wg            sync.WaitGroup
 
 	mu    sync.Mutex
-	state JobState
+	state jobState
 	flush chan struct{}
 	done  chan struct{}
 }
 
-type JobState int
+type jobState int
 
 const (
-	JobStateOpen JobState = iota
-	JobStateClosed
-	JobStateFlushing
-	JobStateDone
+	jobStateOpen jobState = iota
+	jobStateClosed
+	jobStateFlushing
+	jobStateDone
 )
 
 type boundGatherFunc = func(ctx context.Context) error
@@ -67,7 +67,7 @@ func NewJob(
 		cancelFunc:    cancelFunc,
 		pools:         slices.Clone(pools),
 		gatherChannel: make(chan boundGatherFunc),
-		state:         JobStateOpen,
+		state:         jobStateOpen,
 		flush:         make(chan struct{}),
 		done:          make(chan struct{}),
 	}
@@ -291,12 +291,12 @@ func (j *Job) decrementInFlight() {
 	if j.inFlight.Decrement() {
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		if j.state == JobStateClosed && !j.inFlight.GreaterThanZero() {
-			j.state = JobStateFlushing
+		if j.state == jobStateClosed && !j.inFlight.GreaterThanZero() {
+			j.state = jobStateFlushing
 			close(j.flush)
 		}
-		if j.state == JobStateFlushing && !j.combiners.GreaterThanZero() {
-			j.state = JobStateDone
+		if j.state == jobStateFlushing && !j.combiners.GreaterThanZero() {
+			j.state = jobStateDone
 			close(j.done)
 		}
 	}
@@ -306,8 +306,8 @@ func (j *Job) decrementCombiners() {
 	if j.combiners.Decrement() {
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		if j.state == JobStateFlushing && !j.inFlight.GreaterThanZero() && !j.combiners.GreaterThanZero() {
-			j.state = JobStateDone
+		if j.state == jobStateFlushing && !j.inFlight.GreaterThanZero() && !j.combiners.GreaterThanZero() {
+			j.state = jobStateDone
 			close(j.done)
 		}
 	}
@@ -335,13 +335,13 @@ func (j *Job) wakeGatherers() {
 func (j *Job) Close() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.state == JobStateOpen {
-		j.state = JobStateClosed
+	if j.state == jobStateOpen {
+		j.state = jobStateClosed
 		if !j.inFlight.GreaterThanZero() {
-			j.state = JobStateFlushing
+			j.state = jobStateFlushing
 			close(j.flush)
 			if !j.combiners.GreaterThanZero() {
-				j.state = JobStateDone
+				j.state = jobStateDone
 				close(j.done)
 			}
 		}

@@ -40,6 +40,7 @@ PSG-Go is a Go library that implements a pipelined scatter-gather concurrency pa
 - Use `go test -coverprofile coverage.out -coverpkg ./...` with or without `-short` to calculate test coverage
 - Remember that `go test` will usually output nothing upon success. To force it to generate output for all tests run use `-v`. Also pay attention to the exit code.
 - Use `go test -race` to engage the race detector, which will slow execution time but detect at least egregious thread safety problems.
+- For debugging command output that disappears quickly or is truncated, use `COMMAND 2>&1 | tee FILE` to capture both stdout and stderr to a file (e.g., `go test ./... 2>&1 | tee test-output.txt` or `.githooks/pre-commit 2>&1 | tee hook-output.txt`).
 
 ## Code Style
 - See .githooks/pre-commit for expectations of code ready to review

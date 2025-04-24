@@ -26,6 +26,7 @@
 - [ ] Test cancellation during various combiner operations
 - [ ] Add stress tests with high concurrency and rapid task creation/completion
 - [ ] Test corner cases around combiner task lingering and timeout
+- [ ] Test Pool.SetLimit functionality with combiners, especially dynamic pool resizing
 - [ ] Ensure no goroutine leaks in any scenario
 
 ### 3. Documentation updates

@@ -3,13 +3,13 @@
 ## Combiner Branch Pre-Merge Tasks
 
 ### 1. Analyze and refactor job shutdown sequence
-- [ ] Review the cleanup process when jobs complete or are canceled
+- [x] Review the cleanup process when jobs complete or are canceled
 - [ ] Ensure all resources are properly released
-- [ ] Verify that flush/done channel signaling works correctly in all scenarios
-- [ ] Check for potential race conditions during shutdown
-- [ ] Consider simplifying the state transition logic in job.decrementInFlight and job.decrementCombiners
+- [x] Verify that flush/done channel signaling works correctly in all scenarios
+- [x] Check for potential race conditions during shutdown
+- [x] ~~Consider simplifying the state transition logic in job.decrementInFlight and job.decrementCombiners~~ Implemented new state machine with atomic operations and combined counter approach
 - [ ] Add debug logging (enabled via flag) to track state transitions for troubleshooting
-- [ ] Ensure combiner tasks are properly cleaned up during cancelation
+- [x] Ensure combiner tasks are properly cleaned up during cancelation
 
 ### 1.1. Explore using Pool for combiner task limiting
 - [ ] Investigate using Pool to limit combiner tasks instead of Combiner having its own limit

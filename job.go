@@ -21,12 +21,12 @@ import (
 // A Job must be created with [NewJob], see that function for caveats and
 // important details.
 type Job struct {
-	ctx           context.Context
-	cancelFunc    context.CancelFunc
-	pools         []*Pool
-	gatherChannel chan boundGatherFunc
-	wg            sync.WaitGroup
-	state         state.JobState
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	pools      []*Pool
+	gatherChan chan boundGatherFunc
+	wg         sync.WaitGroup
+	state      state.JobState
 }
 
 type boundGatherFunc = func(ctx context.Context) error
@@ -49,9 +49,9 @@ func NewJob(
 ) *Job {
 	ctx, cancelFunc := context.WithCancel(ctx)
 	j := &Job{
-		cancelFunc:    cancelFunc,
-		pools:         slices.Clone(pools),
-		gatherChannel: make(chan boundGatherFunc),
+		cancelFunc: cancelFunc,
+		pools:      slices.Clone(pools),
+		gatherChan: make(chan boundGatherFunc),
 	}
 	j.state.Init()
 	j.ctx = j.makeTaskContext(ctx)
@@ -188,7 +188,7 @@ func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
 func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 	if block {
 		select {
-		case gather := <-j.gatherChannel:
+		case gather := <-j.gatherChan:
 			if gather != nil {
 				return true, j.executeGather(ctx, gather)
 			}
@@ -204,7 +204,7 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 		// Identical to the blocking branch above except replaces <-j.state.Done() with
 		// a default clause.
 		select {
-		case gather := <-j.gatherChannel:
+		case gather := <-j.gatherChan:
 			return true, j.executeGather(ctx, gather)
 		case <-ctx.Done():
 			return false, ctx.Err()
@@ -280,11 +280,11 @@ func (j *Job) panicIfDone() {
 	j.state.PanicIfDone()
 }
 
-// Wakes any goroutines that might be waiting on the gatherChannel.
+// Wakes any goroutines that might be waiting on the gather channel.
 func (j *Job) wakeGatherers() {
 	for {
 		select {
-		case j.gatherChannel <- nil:
+		case j.gatherChan <- nil:
 		default:
 			// No more waiters
 			return

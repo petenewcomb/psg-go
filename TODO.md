@@ -10,7 +10,7 @@
 - [x] ~~Consider simplifying the state transition logic in job.decrementInFlight and job.decrementCombiners~~ Implemented new state machine with atomic operations and combined counter approach
 - [x] Refactored job state management into internal/state package
 - [ ] Add debug logging (enabled via flag) to track state transitions for troubleshooting
-- [x] Ensure combiner tasks are properly cleaned up during cancelation
+- [x] Ensure combiner tasks are properly cleaned up during cancellation 
 
 ### 1.1. Explore using Pool for combiner task limiting
 - [ ] Investigate using Pool to limit combiner tasks instead of Combiner having its own limit
@@ -49,6 +49,7 @@
 - [ ] Consider making delay parameters configurable
 
 ### 5. API finalization
+- [ ] Consider what happens if the same Combiner is used to scatter tasks across pools from multiple different jobs, as is possible with Gather.
 - [ ] Review Combiner constructor API for usability
 - [ ] Consider adding helper methods for common combining operations
 - [ ] Ensure consistent error handling across the API

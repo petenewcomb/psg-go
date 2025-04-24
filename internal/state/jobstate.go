@@ -29,8 +29,8 @@ type JobState struct {
 	currentStage  atomic.Int32    // Contains a lifecycleStage value
 	inFlightTasks InFlightCounter // Tracks only executing tasks
 	inFlightTotal InFlightCounter // Tracks both tasks and combiners
-	flush         chan struct{}
-	done          chan struct{}
+	nextFlushChan atomic.Value    // Stores chan struct{} for flush signals
+	doneChan      chan struct{}
 }
 
 // Init initializes an uninitialized JobState to the Open stage, and must be
@@ -39,8 +39,8 @@ type JobState struct {
 // field of Job.
 func (js *JobState) Init() {
 	js.currentStage.Store(int32(stageOpen))
-	js.flush = make(chan struct{})
-	js.done = make(chan struct{})
+	js.nextFlushChan.Store(make(chan struct{}))
+	js.doneChan = make(chan struct{})
 }
 
 // IncrementTasks increments both the task counter and total counter
@@ -90,15 +90,17 @@ func (js *JobState) Close() {
 	}
 }
 
-// Flush returns the channel that will be closed when the job transitions to
-// Flushing.
-func (js *JobState) Flush() <-chan struct{} {
-	return js.flush
+// NextFlush returns a channel that will be closed the next time the number of tasks
+// reaches zero after Close() has been called. This channel should be captured and stored
+// by combiners at creation time, as a new channel will be provided each time tasks
+// complete during the flushing phase.
+func (js *JobState) NextFlush() <-chan struct{} {
+	return js.nextFlushChan.Load().(chan struct{})
 }
 
 // Done returns the channel that will be closed when the job transitions to Done
 func (js *JobState) Done() <-chan struct{} {
-	return js.done
+	return js.doneChan
 }
 
 // PanicIfDone panics if the job is in the done stage
@@ -111,10 +113,24 @@ func (js *JobState) PanicIfDone() {
 // noMoreTasks attempts to transition from Closed to Flushing, and will also
 // advance to Done if appropriate
 func (js *JobState) noMoreTasks() {
-	if js.currentStage.CompareAndSwap(int32(stageClosed), int32(stageFlushing)) {
-		// Successfully changed from Closed to Flushing
-		close(js.flush)
+	currentStage := lifecycleStage(js.currentStage.Load())
+
+	// Try to transition from Closed to Flushing if needed
+	if currentStage == stageClosed {
+		if js.currentStage.CompareAndSwap(int32(stageClosed), int32(stageFlushing)) {
+			currentStage = stageFlushing
+		}
 	}
+
+	// Handle flush channel for flushing state
+	if currentStage == stageFlushing {
+		// Create new channel and swap with old one
+		newFlushCh := make(chan struct{})
+		oldFlushCh := js.nextFlushChan.Swap(newFlushCh).(chan struct{})
+		// Close old channel after replacing it
+		close(oldFlushCh)
+	}
+
 	// If inFlightTotal is zero, there is nothing left to do.
 	if js.inFlightTotal.IsZero() {
 		js.noMoreWork()
@@ -125,6 +141,6 @@ func (js *JobState) noMoreTasks() {
 func (js *JobState) noMoreWork() {
 	if js.currentStage.CompareAndSwap(int32(stageFlushing), int32(stageDone)) {
 		// Successfully changed from Flushing to Done
-		close(js.done)
+		close(js.doneChan)
 	}
 }

@@ -20,8 +20,8 @@ type Combiner[I any, O any] struct {
 	linger           time.Duration
 	inFlight         state.InFlightCounter
 	liveCount        atomic.Int64
-	primaryChannel   chan boundCombinerFunc[I, O]
-	secondaryChannel chan boundCombinerFunc[I, O]
+	primaryChan      chan boundCombinerFunc[I, O]
+	secondaryChan    chan boundCombinerFunc[I, O]
 }
 
 type CombinerFunc[I any, O any] func(ctx context.Context, done bool, input I, inputErr error) (emit bool, output O, err error)
@@ -39,13 +39,13 @@ func NewCombiner[I any, O any](ctx context.Context, concurrencyLimit int, combin
 		panic("gather function must be non-nil")
 	}
 	c := &Combiner[I, O]{
-		ctx:              ctx,
-		newCombinerFunc:  combinerFactory,
-		gatherFunc:       gatherFunc,
-		spawnDelay:       10 * time.Millisecond,
-		linger:           100 * time.Millisecond,
-		primaryChannel:   make(chan boundCombinerFunc[I, O]),
-		secondaryChannel: make(chan boundCombinerFunc[I, O]),
+		ctx:             ctx,
+		newCombinerFunc: combinerFactory,
+		gatherFunc:      gatherFunc,
+		spawnDelay:      10 * time.Millisecond,
+		linger:          100 * time.Millisecond,
+		primaryChan:     make(chan boundCombinerFunc[I, O]),
+		secondaryChan:   make(chan boundCombinerFunc[I, O]),
 	}
 	c.concurrencyLimit.Store(int64(concurrencyLimit))
 	return c
@@ -132,11 +132,11 @@ func (c *Combiner[I, O]) scatter(
 		for {
 			// Post the combine, preferring the primary channel.
 			select {
-			case c.primaryChannel <- combine:
+			case c.primaryChan <- combine:
 				return
 			case <-time.After(c.spawnDelay):
 				select {
-				case c.secondaryChannel <- combine:
+				case c.secondaryChan <- combine:
 					return
 				default:
 					if c.launchNewCombinerTask(j, combine) {
@@ -169,8 +169,11 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 		defer j.state.DecrementCombiners()
 
 		var combinerFunc CombinerFunc[I, O]
-		defer func() {
-			if combinerFunc != nil {
+		needsFlush := false // Track whether the combiner needs to be flushed
+
+		// flush sends any pending results from the combiner if needed
+		flush := func() {
+			if combinerFunc != nil && needsFlush {
 				var dummyInput I
 				emit, output, err := combinerFunc(c.ctx, true, dummyInput, nil)
 				if emit || err != nil {
@@ -178,14 +181,16 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					// in-flight counter will be decremented by the job's
 					// gather. Incrementing the in-flight counter will also keep
 					// the job alive until the gather happens, even though we're
-					// about to decrement the combiner count. (See defer
-					// j.decrementInFlightCombiners() statement just above.)
+					// about to decrement the combiner count.
 					j.state.IncrementTasks()
 					c.postGather(j, output, err)
 				}
-
+				needsFlush = false // Combiner has been flushed
 			}
-		}()
+		}
+
+		// Ensure combiner is flushed when this goroutine terminates
+		defer flush()
 
 		executeCombine := func(combine boundCombinerFunc[I, O]) {
 			if combinerFunc == nil {
@@ -200,6 +205,7 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 				j.state.DecrementTasks()
 			}
 			c.inFlight.Decrement()
+			needsFlush = true // Combiner may need flushing after processing input
 		}
 		if combine != nil {
 			executeCombine(combine)
@@ -212,7 +218,7 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 				// This will keep this goroutine idle unless it's really needed,
 				// thus allowing the linger time to elapse.
 				select {
-				case combine := <-c.secondaryChannel:
+				case combine := <-c.secondaryChan:
 					executeCombine(combine)
 				case <-time.After(c.linger):
 					// This goroutine is no longer needed.
@@ -221,15 +227,18 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					return
 				case <-j.ctx.Done():
 					return
-				case <-j.state.Flush():
+				case <-j.state.Done():
 					return
+				case <-j.state.NextFlush():
+					// Flush the combiner but don't terminate
+					flush()
 				}
 			} else {
 				// Same select as above, but also reads the primary channel
 				select {
-				case combine := <-c.primaryChannel:
+				case combine := <-c.primaryChan:
 					executeCombine(combine)
-				case combine := <-c.secondaryChannel:
+				case combine := <-c.secondaryChan:
 					executeCombine(combine)
 				case <-time.After(c.linger):
 					// This goroutine is no longer needed.
@@ -238,8 +247,11 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					return
 				case <-j.ctx.Done():
 					return
-				case <-j.state.Flush():
+				case <-j.state.Done():
 					return
+				case <-j.state.NextFlush():
+					// Flush the combiner but don't terminate
+					flush()
 				}
 			}
 		}
@@ -256,7 +268,7 @@ func (c *Combiner[I, O]) postGather(j *Job, value O, err error) {
 
 	// Post the gather of the combiner's output to the job's gather channel.
 	select {
-	case j.gatherChannel <- gather:
+	case j.gatherChan <- gather:
 	case <-c.ctx.Done():
 	case <-j.ctx.Done():
 	}

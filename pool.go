@@ -26,17 +26,17 @@ const (
 // The zero value of Pool is unbound and has a limit of zero. [NewPool]
 // provides a convenient way to create a new pool with a non-zero limit.
 type Pool struct {
-	limit          atomic.Int64
-	job            *Job
-	inFlight       state.InFlightCounter
-	waitersChannel chan chan<- struct{}
+	limit       atomic.Int64
+	job         *Job
+	inFlight    state.InFlightCounter
+	waitersChan chan chan<- struct{}
 }
 
 // Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
 // of allowed values and their semantics.
 func NewPool(limit int) *Pool {
 	p := &Pool{
-		waitersChannel: make(chan chan<- struct{}),
+		waitersChan: make(chan chan<- struct{}),
 	}
 	p.limit.Store(int64(limit))
 	return p
@@ -46,12 +46,12 @@ func NewPool(limit int) *Pool {
 // Returns a receive-only channel that will be signaled when capacity is available.
 func (p *Pool) registerWaiter(ctx context.Context) (<-chan struct{}, error) {
 	// Buffer size 1 ensures signals aren't lost if sent before receiver is ready
-	notificationChannel := make(chan struct{}, 1)
+	notifyCh := make(chan struct{}, 1)
 
 	// Register this waiter with the pool
 	select {
-	case p.waitersChannel <- notificationChannel:
-		return notificationChannel, nil
+	case p.waitersChan <- notifyCh:
+		return notifyCh, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-p.job.ctx.Done():
@@ -62,9 +62,9 @@ func (p *Pool) registerWaiter(ctx context.Context) (<-chan struct{}, error) {
 // notifyWaiter signals one waiter (if any) that capacity is available.
 func (p *Pool) notifyWaiter() {
 	select {
-	case notificationChannel := <-p.waitersChannel:
+	case notifyCh := <-p.waitersChan:
 		select {
-		case notificationChannel <- struct{}{}:
+		case notifyCh <- struct{}{}:
 		default:
 			// Receiver might be gone or already notified
 		}

@@ -107,7 +107,7 @@ func (g *Gather[T]) scatter(
 
 		// Post the gather to the job's gather channel.
 		select {
-		case j.gatherChannel <- gather:
+		case j.gatherChan <- gather:
 		case <-j.ctx.Done():
 		}
 	})

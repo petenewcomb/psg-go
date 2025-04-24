@@ -8,7 +8,6 @@ import (
 	"maps"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
@@ -25,25 +24,10 @@ type Job struct {
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
 	pools         []*Pool
-	inFlightTasks state.InFlightCounter
-	inFlightTotal state.InFlightCounter
 	gatherChannel chan boundGatherFunc
 	wg            sync.WaitGroup
-
-	// Contains a jobState value
-	state atomic.Int32
-	flush chan struct{}
-	done  chan struct{}
+	state         state.JobState
 }
-
-type jobState int32
-
-const (
-	jobStateOpen jobState = iota
-	jobStateClosed
-	jobStateFlushing
-	jobStateDone
-)
 
 type boundGatherFunc = func(ctx context.Context) error
 
@@ -68,10 +52,8 @@ func NewJob(
 		cancelFunc:    cancelFunc,
 		pools:         slices.Clone(pools),
 		gatherChannel: make(chan boundGatherFunc),
-		flush:         make(chan struct{}),
-		done:          make(chan struct{}),
 	}
-	j.state.Store(int32(jobStateOpen))
+	j.state.Init()
 	j.ctx = j.makeTaskContext(ctx)
 	for _, p := range j.pools {
 		if p.job != nil {
@@ -215,11 +197,11 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 			return false, ctx.Err()
 		case <-j.ctx.Done():
 			return false, j.ctx.Err()
-		case <-j.done:
+		case <-j.state.Done():
 			return false, nil
 		}
 	} else {
-		// Identical to the blocking branch above except replaces <-j.done with
+		// Identical to the blocking branch above except replaces <-j.state.Done() with
 		// a default clause.
 		select {
 		case gather := <-j.gatherChannel:
@@ -228,7 +210,7 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 			return false, ctx.Err()
 		case <-j.ctx.Done():
 			return false, j.ctx.Err()
-		case <-j.done:
+		case <-j.state.Done():
 			return false, nil
 		default:
 			// There were no in-flight tasks ready to gather.
@@ -289,51 +271,13 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 	// Decrement the environment-wide in-flight counter only AFTER calling the
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.
-	defer j.decrementInFlightTasks()
+	defer j.state.DecrementTasks()
 	return gather(ctx)
 }
 
-func (j *Job) decrementInFlightTasks() {
-	// First, decrement task counter and attempt Closed → Flushing transition if
-	// there are no more remaining.
-	if j.inFlightTasks.Decrement() {
-		// Last task just completed
-		j.tryAdvanceToFlushing()
-	}
-
-	// First, decrement total counter and attempt Flushing → Done transition if
-	// there is no work remaining (no tasks or combiners)
-	if j.inFlightTotal.Decrement() {
-		// Last piece of work just completed (task or combiner)
-		j.tryAdvanceToDone()
-	}
-}
-
-// decrementInFlightCombiners decrements the inFlightTotal counter to track when all work is done
-func (j *Job) decrementInFlightCombiners() {
-	// Check if all work is done for Flushing → Done transition
-	if j.inFlightTotal.Decrement() {
-		// Last piece of work just completed (task or combiner)
-		j.tryAdvanceToDone()
-	}
-}
-
-// incrementInFlightTasks increments both inFlightTotal and inFlightTasks counters
-func (j *Job) incrementInFlightTasks() {
-	j.inFlightTotal.Increment()
-	j.inFlightTasks.Increment()
-}
-
-// incrementInFlightCombiners increments only the inFlightTotal counter
-func (j *Job) incrementInFlightCombiners() {
-	j.inFlightTotal.Increment()
-}
-
-// checkNotDone panics if the job is in the done state
-func (j *Job) checkNotDone(operation string) {
-	if jobState(j.state.Load()) == jobStateDone {
-		panic("cannot " + operation + " on a job that is done")
-	}
+// panicIfDone panics if the job is in the done state
+func (j *Job) panicIfDone() {
+	j.state.PanicIfDone()
 }
 
 // Wakes any goroutines that might be waiting on the gatherChannel.
@@ -362,33 +306,7 @@ func (j *Job) wakeGatherers() {
 //
 // Close may be called from any goroutine and may safely be called more than once.
 func (j *Job) Close() {
-	// Try to transition from Open to Closed
-	if j.state.CompareAndSwap(int32(jobStateOpen), int32(jobStateClosed)) {
-		// Successfully changed from Open to Closed
-		if !j.inFlightTasks.GreaterThanZero() {
-			j.tryAdvanceToFlushing()
-		}
-	}
-}
-
-func (j *Job) tryAdvanceToFlushing() {
-	// Try to transition from Closed to Flushing
-	if j.state.CompareAndSwap(int32(jobStateClosed), int32(jobStateFlushing)) {
-		// Successfully changed from Closed to Flushing
-		close(j.flush)
-	}
-	// If inFlightTotal is zero, there are no active tasks or combiners
-	if !j.inFlightTotal.GreaterThanZero() {
-		j.tryAdvanceToDone()
-	}
-}
-
-func (j *Job) tryAdvanceToDone() {
-	// Try to transition from Flushing to Done
-	if j.state.CompareAndSwap(int32(jobStateFlushing), int32(jobStateDone)) {
-		// Successfully changed from Flushing to Done
-		close(j.done)
-	}
+	j.state.Close()
 }
 
 // CloseAndGatherAll closes the job via [Job.Close] and then waits for and

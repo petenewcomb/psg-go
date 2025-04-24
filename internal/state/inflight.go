@@ -50,6 +50,6 @@ func (c *InFlightCounter) DecrementAndCheckIfUnder(limit int) bool {
 	return limit < 0 || newValue < int64(limit)
 }
 
-func (c *InFlightCounter) GreaterThanZero() bool {
-	return c.v.Load() > 0
+func (c *InFlightCounter) IsZero() bool {
+	return c.v.Load() == 0
 }

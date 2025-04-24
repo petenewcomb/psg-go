@@ -135,16 +135,19 @@ func (p *Pool) launch(ctx context.Context, backpressureMode backpressureMode, ta
 		return false, err
 	}
 
+	// Don't launch if the job is done
+	j.checkNotDone("scatter")
+
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
-	j.inFlight.Increment()
+	j.incrementInFlightTasks()
 
 	// Bookkeeping: make sure that the job-scope count incremented above gets
 	// decremented unless the launch actually happens
 	launched := false
 	defer func() {
 		if !launched {
-			j.decrementInFlight()
+			j.decrementInFlightTasks()
 		}
 	}()
 

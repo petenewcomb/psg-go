@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
@@ -24,18 +25,18 @@ type Job struct {
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
 	pools         []*Pool
-	inFlight      state.InFlightCounter
-	combiners     state.InFlightCounter
+	inFlightTasks state.InFlightCounter
+	inFlightTotal state.InFlightCounter
 	gatherChannel chan boundGatherFunc
 	wg            sync.WaitGroup
 
-	mu    sync.Mutex
-	state jobState
+	// Contains a jobState value
+	state atomic.Int32
 	flush chan struct{}
 	done  chan struct{}
 }
 
-type jobState int
+type jobState int32
 
 const (
 	jobStateOpen jobState = iota
@@ -67,10 +68,10 @@ func NewJob(
 		cancelFunc:    cancelFunc,
 		pools:         slices.Clone(pools),
 		gatherChannel: make(chan boundGatherFunc),
-		state:         jobStateOpen,
 		flush:         make(chan struct{}),
 		done:          make(chan struct{}),
 	}
+	j.state.Store(int32(jobStateOpen))
 	j.ctx = j.makeTaskContext(ctx)
 	for _, p := range j.pools {
 		if p.job != nil {
@@ -164,9 +165,10 @@ func (j *Job) CancelAndWait() {
 
 // GatherOne processes at most a single result from a task previously launched
 // in one of the [Job]'s pools via [Scatter]. It will block until a completed
-// task is available, the context has been canceled, or another event causes a
-// wake-up (e.g. a call to [Pool.SetLimit]). See [Job.TryGatherOne] for a
-// non-blocking alternative.
+// task is available, the provided context or job is canceled, or another event
+// causes a wake-up (e.g. a call to [Pool.SetLimit]).
+// If the job is closed and no tasks remain in flight, it will return immediately.
+// See [Job.TryGatherOne] for a non-blocking alternative.
 //
 // Returns a boolean flag indicating whether a result was processed and an error
 // if one occurred:
@@ -235,9 +237,12 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 	}
 }
 
-// GatherAll processes all results from previously scattered tasks, continuing
-// until there are no more in-flight tasks or an error occurs. It will block to
-// wait for in-flight tasks that are not yet complete.
+// GatherAll processes task results until the job completes or an error occurs.
+// If the job has not been closed, GatherAll will block indefinitely, as new
+// tasks might be added at any time. It will return an error if the provided context
+// or job is canceled. After the job is closed, GatherAll will continue processing
+// tasks until all work completes (including tasks spawned during result processing)
+// and then return.
 //
 // Returns nil unless the context is canceled or a task's [GatherFunc] returns a
 // non-nil error.
@@ -254,10 +259,11 @@ func (j *Job) GatherAll(ctx context.Context) error {
 	return j.gatherAll(ctx, true)
 }
 
-// TryGatherAll processes all results from completed tasks, continuing until
-// there are no more immediately available or an error occurs. Unlike
-// [Job.GatherAll], TryGatherAll will not block to wait for in-flight tasks to
-// complete.
+// TryGatherAll processes all currently available task results without blocking.
+// Unlike [Job.GatherAll], TryGatherAll will return immediately if there are no
+// completed tasks ready to process, regardless of whether the job is closed or
+// whether there are still tasks in flight. It will return an error if the
+// provided context or job is canceled.
 //
 // See GatherAll for information about return values and thread safety.
 //
@@ -283,33 +289,50 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 	// Decrement the environment-wide in-flight counter only AFTER calling the
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.
-	defer j.decrementInFlight()
+	defer j.decrementInFlightTasks()
 	return gather(ctx)
 }
 
-func (j *Job) decrementInFlight() {
-	if j.inFlight.Decrement() {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		if j.state == jobStateClosed && !j.inFlight.GreaterThanZero() {
-			j.state = jobStateFlushing
-			close(j.flush)
-		}
-		if j.state == jobStateFlushing && !j.combiners.GreaterThanZero() {
-			j.state = jobStateDone
-			close(j.done)
-		}
+func (j *Job) decrementInFlightTasks() {
+	// First, decrement task counter and attempt Closed → Flushing transition if
+	// there are no more remaining.
+	if j.inFlightTasks.Decrement() {
+		// Last task just completed
+		j.tryAdvanceToFlushing()
+	}
+
+	// First, decrement total counter and attempt Flushing → Done transition if
+	// there is no work remaining (no tasks or combiners)
+	if j.inFlightTotal.Decrement() {
+		// Last piece of work just completed (task or combiner)
+		j.tryAdvanceToDone()
 	}
 }
 
-func (j *Job) decrementCombiners() {
-	if j.combiners.Decrement() {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		if j.state == jobStateFlushing && !j.inFlight.GreaterThanZero() && !j.combiners.GreaterThanZero() {
-			j.state = jobStateDone
-			close(j.done)
-		}
+// decrementInFlightCombiners decrements the inFlightTotal counter to track when all work is done
+func (j *Job) decrementInFlightCombiners() {
+	// Check if all work is done for Flushing → Done transition
+	if j.inFlightTotal.Decrement() {
+		// Last piece of work just completed (task or combiner)
+		j.tryAdvanceToDone()
+	}
+}
+
+// incrementInFlightTasks increments both inFlightTotal and inFlightTasks counters
+func (j *Job) incrementInFlightTasks() {
+	j.inFlightTotal.Increment()
+	j.inFlightTasks.Increment()
+}
+
+// incrementInFlightCombiners increments only the inFlightTotal counter
+func (j *Job) incrementInFlightCombiners() {
+	j.inFlightTotal.Increment()
+}
+
+// checkNotDone panics if the job is in the done state
+func (j *Job) checkNotDone(operation string) {
+	if jobState(j.state.Load()) == jobStateDone {
+		panic("cannot " + operation + " on a job that is done")
 	}
 }
 
@@ -325,26 +348,46 @@ func (j *Job) wakeGatherers() {
 	}
 }
 
-// Close must be called to signify that no more top-level tasks will be launched
-// and that [Job.GatherAll] should stop blocking to wait for more after the
-// results of all in-flight tasks have been gathered. See [Job.GatherAll] for
-// more detail.
+// Close changes the job's state from open to closed, which allows it to eventually
+// progress to the done state once all tasks complete. When a job is closed,
+// [Job.GatherAll] will return after processing all existing tasks and any tasks
+// they spawn, rather than blocking indefinitely.
 //
-// Close may be called from any goroutine and may safely be called more than
-// once.
+// After a job is closed and all tasks have completed, launching new tasks will panic.
+// Gathering operations will continue to work normally but will always return
+// immediately with no results.
+//
+// Note that tasks can still be added after Close is called but before all tasks
+// have completed.
+//
+// Close may be called from any goroutine and may safely be called more than once.
 func (j *Job) Close() {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.state == jobStateOpen {
-		j.state = jobStateClosed
-		if !j.inFlight.GreaterThanZero() {
-			j.state = jobStateFlushing
-			close(j.flush)
-			if !j.combiners.GreaterThanZero() {
-				j.state = jobStateDone
-				close(j.done)
-			}
+	// Try to transition from Open to Closed
+	if j.state.CompareAndSwap(int32(jobStateOpen), int32(jobStateClosed)) {
+		// Successfully changed from Open to Closed
+		if !j.inFlightTasks.GreaterThanZero() {
+			j.tryAdvanceToFlushing()
 		}
+	}
+}
+
+func (j *Job) tryAdvanceToFlushing() {
+	// Try to transition from Closed to Flushing
+	if j.state.CompareAndSwap(int32(jobStateClosed), int32(jobStateFlushing)) {
+		// Successfully changed from Closed to Flushing
+		close(j.flush)
+	}
+	// If inFlightTotal is zero, there are no active tasks or combiners
+	if !j.inFlightTotal.GreaterThanZero() {
+		j.tryAdvanceToDone()
+	}
+}
+
+func (j *Job) tryAdvanceToDone() {
+	// Try to transition from Flushing to Done
+	if j.state.CompareAndSwap(int32(jobStateFlushing), int32(jobStateDone)) {
+		// Successfully changed from Flushing to Done
+		close(j.done)
 	}
 }
 

@@ -11,6 +11,12 @@
 - [ ] Add debug logging (enabled via flag) to track state transitions for troubleshooting
 - [ ] Ensure combiner tasks are properly cleaned up during cancelation
 
+### 1.1. Explore using Pool for combiner task limiting
+- [ ] Investigate using Pool to limit combiner tasks instead of Combiner having its own limit
+- [ ] Consider pros/cons of combiners and regular tasks sharing a resource pool
+- [ ] Evaluate how this would affect backpressure behavior
+- [ ] Assess impact on API simplicity and usage patterns
+
 ### 2. Flesh out test coverage for combiners
 - [ ] Add more unit tests for Combiner functionality
 - [ ] Include Combiner testing in the simulation test
@@ -56,6 +62,7 @@
 - [ ] Enable task-specific cancelation without affecting other tasks
 - [ ] Allow task-specific data to flow naturally via context without changing interfaces
 - [ ] Add examples demonstrating context propagation use cases
+- [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close()
 
 ## Implementation Notes
 

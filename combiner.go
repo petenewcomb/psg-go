@@ -161,12 +161,12 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 		c.liveCount.Add(-1)
 		return false
 	}
-	j.combiners.Increment()
+	j.incrementInFlightCombiners()
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
 		defer c.liveCount.Add(-1)
-		defer j.decrementCombiners()
+		defer j.decrementInFlightCombiners()
 
 		var combinerFunc CombinerFunc[I, O]
 		defer func() {
@@ -179,8 +179,8 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					// gather. Incrementing the in-flight counter will also keep
 					// the job alive until the gather happens, even though we're
 					// about to decrement the combiner count. (See defer
-					// j.decrementCombiners() statement just above.)
-					j.inFlight.Increment()
+					// j.decrementInFlightCombiners() statement just above.)
+					j.incrementInFlightTasks()
 					c.postGather(j, output, err)
 				}
 
@@ -197,7 +197,7 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 			} else {
 				// Need to decrement the in-flight counter here because we're
 				// not posting a corresponding gather.
-				j.decrementInFlight()
+				j.decrementInFlightTasks()
 			}
 			c.inFlight.Decrement()
 		}

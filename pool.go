@@ -92,14 +92,14 @@ func (p *Pool) SetLimit(limit int) {
 func (p *Pool) waitForCapacity(ctx context.Context) error {
 	j := p.job
 
-	notificationChannel, err := p.registerWaiter(ctx)
+	notifyCh, err := p.registerWaiter(ctx)
 	if err != nil {
 		return err
 	}
 
 	// Wait for capacity notification or context cancellation
 	select {
-	case <-notificationChannel:
+	case <-notifyCh:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

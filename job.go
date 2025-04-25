@@ -324,8 +324,8 @@ func (j *Job) CloseAndGatherAll(ctx context.Context) error {
 // indirectly launches new tasks while processing the flushed results.
 //
 // The callback function is called synchronously from a goroutine calling a gather method
-// ([Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], [Job.TryGatherAll], 
-// [Job.CloseAndGatherAll]), [Gather.Scatter], or [Job.Close] if no tasks are in flight 
+// ([Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], [Job.TryGatherAll],
+// [Job.CloseAndGatherAll]), [Gather.Scatter], or [Job.Close] if no tasks are in flight
 // at the time of closing.
 //
 // If called multiple times, each call replaces any previously registered callback.

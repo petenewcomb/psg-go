@@ -34,9 +34,10 @@ func Example_observable() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 10ms to make the output stable across runs
-		ms := time.Since(startTime).Milliseconds() / 10
-		return ms * 10
+		return (time.Since(startTime).Milliseconds() / 10) * 10
 	}
+
+	ctx := context.Background()
 
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Scatter and GatherAll.
@@ -55,14 +56,12 @@ func Example_observable() {
 	pool := psg.NewPool(2)
 
 	// Create a scatter-gather job with the above pool
-	ctx := context.Background()
 	job := psg.NewJob(ctx, pool)
 	defer job.CancelAndWait()
 
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		fmt.Printf("%3dms: launching task %q\n", msSinceStart(), taskName)
 		err := gather.Scatter(ctx, pool, newTaskFunc(taskName, msSinceStart))
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
@@ -85,11 +84,8 @@ func Example_observable() {
 
 	// Output:
 	// starting job
-	//   0ms: launching task "A"
 	//   0ms: launched task "A"
-	//   0ms: launching task "B"
 	//   0ms: launched task "B"
-	//   0ms: launching task "C"
 	//  10ms:   task "B" complete
 	//  10ms:   gathering result "result for task B"
 	//  10ms: launched task "C"

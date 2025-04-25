@@ -315,3 +315,21 @@ func (j *Job) CloseAndGatherAll(ctx context.Context) error {
 	j.Close()
 	return j.GatherAll(ctx)
 }
+
+// SetFlushListener registers a callback function that will be called each time all
+// tasks have completed and the job is waiting for combiners to emit their results.
+// After the callback returns, the job signals any [CombinerFunc] that has received
+// inputs but hasn't yet emitted its combined results to do so immediately. The callback
+// may be invoked multiple times during a job's lifecycle if a [GatherFunc] directly or
+// indirectly launches new tasks while processing the flushed results.
+//
+// The callback function is called synchronously from a goroutine calling a gather method
+// ([Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], [Job.TryGatherAll], 
+// [Job.CloseAndGatherAll]), [Gather.Scatter], or [Job.Close] if no tasks are in flight 
+// at the time of closing.
+//
+// If called multiple times, each call replaces any previously registered callback.
+// Passing nil removes any existing callback.
+func (j *Job) SetFlushListener(callback func()) {
+	j.state.SetFlushListener(callback)
+}

@@ -9,8 +9,9 @@
 - [x] Check for potential race conditions during shutdown
 - [x] ~~Consider simplifying the state transition logic in job.decrementInFlight and job.decrementCombiners~~ Implemented new state machine with atomic operations and combined counter approach
 - [x] Refactored job state management into internal/state package
-- [ ] Add debug logging (enabled via flag) to track state transitions for troubleshooting
+- [x] Add debug logging (enabled via flag) to track state transitions for troubleshooting
 - [x] Ensure combiner tasks are properly cleaned up during cancellation 
+- [x] Implement RegisterFlusher mechanism with proper cleanup via unregister function
 
 ### 1.1. Explore using Pool for combiner task limiting
 - [ ] Investigate using Pool to limit combiner tasks instead of Combiner having its own limit
@@ -19,8 +20,11 @@
 - [ ] Assess impact on API simplicity and usage patterns
 
 ### 2. Flesh out test coverage for combiners
+- [x] Create Example_combiner test to demonstrate and document combiner behavior
+- [ ] Create benchmarks comparing combiner vs. direct task approach with different batch sizes
+- [ ] Benchmark with increasing numbers of tasks to identify optimal combiner settings
 - [ ] Add more unit tests for Combiner functionality
-- [ ] Include Combiner testing in the simulation test
+- [ ] Include Combiner testing in the simulation test framework
 - [ ] Test edge cases like empty combiners, very large combiner pools
 - [ ] Verify proper integration with Job and Pool components
 - [ ] Test cancellation during various combiner operations
@@ -28,8 +32,11 @@
 - [ ] Test corner cases around combiner task lingering and timeout
 - [ ] Test Pool.SetLimit functionality with combiners, especially dynamic pool resizing
 - [ ] Ensure no goroutine leaks in any scenario
+- [ ] Test memory usage patterns for large combiner workloads
 
 ### 3. Documentation updates
+- [x] Add Example_combiner test showing real-world use case with result aggregation
+- [x] Add job shutdown observability hooks
 - [ ] Add or update doc comments for all new/modified public APIs
 - [ ] Update README with information about the Combiner feature
 - [ ] Add a Combiner example to the README Features section
@@ -43,20 +50,25 @@
 - [ ] Create a playground example for the Combiner
 
 ### 4. Performance optimization
-- [ ] Benchmark Combiner vs regular Scatter/Gather operations
-- [ ] Profile memory usage during heavy combiner operations
-- [ ] Consider adding pool size metrics/stats
+- [ ] Test automatic scaling of combiner task count based on workload
+- [ ] Implement and test SetLimit function for Combiner (similar to Pool.SetLimit)
 - [ ] Analyze whether buffer sizes on channels need tuning
-- [ ] Consider making delay parameters configurable
+- [ ] Consider making delay parameters (spawnDelay, linger) configurable
+- [ ] Profile memory usage during heavy combiner operations
+- [ ] Add metrics/stats for monitoring combiner efficiency and utilization
+- [ ] Benchmark performance with various combiner configurations
 
 ### 5. API finalization
-- [ ] Consider what happens if the same Combiner is used to scatter tasks across pools from multiple different jobs, as is possible with Gather.
-- [ ] Review Combiner constructor API for usability
-- [ ] Consider adding helper methods for common combining operations
-- [ ] Ensure consistent error handling across the API
-- [ ] Consider if time.Duration fields should be exposed/configurable
+- [x] Improve JobState interface with RegisterFlusher pattern
+- [ ] Consider what happens if the same Combiner is used to scatter tasks across pools from multiple different jobs, as is possible with Gather
+- [ ] Review Combiner constructor API for usability 
+- [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
+- [ ] Ensure consistent error handling across the API, especially when tasks fail
+- [ ] Expose configuration options for spawnDelay and linger parameters
 - [ ] Add WithXxx option methods if appropriate
 - [ ] Ensure all public types and methods have consistent naming
+- [ ] Review and document thread-safety guarantees for all public APIs
+- [ ] Test and document behavior when tasks passed to combiners return errors
 
 ### 6. Context propagation improvements
 - [ ] Modify gather/combiner functions to receive the task's context instead of the job context
@@ -64,8 +76,10 @@
 - [ ] Support OpenTelemetry trace propagation through the task-gather chain
 - [ ] Enable task-specific cancelation without affecting other tasks
 - [ ] Allow task-specific data to flow naturally via context without changing interfaces
-- [ ] Add examples demonstrating context propagation use cases
+- [ ] Add examples demonstrating context propagation use cases for all library components
+- [ ] Test context propagation with timeouts, cancelation, and values
 - [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close()
+- [ ] Document best practices for context usage throughout the library
 
 ## Implementation Notes
 

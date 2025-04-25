@@ -65,6 +65,11 @@ func Example_combiner() {
 	job := psg.NewJob(ctx, pool)
 	defer job.CancelAndWait()
 
+	// Set a flush listener to observe when all tasks have completed
+	job.SetFlushListener(func() {
+		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
+	})
+
 	// Launch some tasks
 	fmt.Println("starting job")
 	for i, spec := range []struct {
@@ -108,6 +113,7 @@ func Example_combiner() {
 	//  40ms:   combined "B", result counts now: map[A:1 B:1]
 	//  50ms:   task 2 (50ms -> "A") complete
 	//  60ms:   combined "A", result counts now: map[A:2 B:1]
+	//  60ms: flush: all tasks completed, waiting for combiners
 	//  60ms:   flushing result counts: map[A:2 B:1]
 	//  60ms:   gathering result counts: map[A:2 B:1]
 	//  60ms: gathering complete

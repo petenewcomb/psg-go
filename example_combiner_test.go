@@ -6,61 +6,51 @@ package psg_test
 import (
 	"context"
 	"fmt"
-	"testing"
 	"time"
 
 	"github.com/petenewcomb/psg-go"
 )
 
 // Define a factory to bind task-specific inputs to generic task functions
-func newTaskFunc2(taskName string, msSinceStart func() int64) psg.TaskFunc[string] {
+func newDelayTask(number int, delay time.Duration, result string, msSinceStart func() int64) psg.TaskFunc[string] {
 	return func(context.Context) (string, error) {
-		// Simulate latency
-		if taskName == "A" {
-			// Force A to finish last. Combined with the pool's concurrency
-			// limit this stabilizes the test output
-			time.Sleep(30 * time.Millisecond)
-		} else {
-			time.Sleep(10 * time.Millisecond)
-		}
-		fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
-		// Return mock data
-		return "result for task " + taskName, nil
+		// Simulate a long-running task
+		time.Sleep(delay)
+		fmt.Printf("%3dms:   task %d (%v -> %q) complete\n", msSinceStart(), number, delay, result)
+		return result, nil
 	}
 }
 
-// Combiner uses psg to run a few tasks and produce logging that demonstrate
-// the sequence of events.
-func TestExampleCombiner(t *testing.T) {
-	//func Example_combiner() {
+// Example_combiner demonstrates how combiners can efficiently aggregate
+// results from multiple tasks before emitting a combined result.
+func Example_combiner() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 10ms to make the output stable across runs
-		ms := time.Since(startTime).Milliseconds() / 10
-		return ms * 10
+		return (time.Since(startTime).Milliseconds() / 10) * 10
 	}
 
 	ctx := context.Background()
 
-	// Define a result aggregation function, which will run in the top-level
-	// goroutine from within calls to Scatter and GatherAll.
+	// Define a result aggregation function using a Combiner that counts result occurrences
 	var results []map[string]int
-	combiner := psg.NewCombiner(ctx, 1,
+	resultCounter := psg.NewCombiner(ctx, 1,
 		func() psg.CombinerFunc[string, map[string]int] {
-			fmt.Printf("%3dms:   new combiner\n", msSinceStart())
-			m := make(map[string]int)
-			return func(ctx context.Context, done bool, value string, err error) (bool, map[string]int, error) {
+			fmt.Printf("%3dms:   creating new result counter\n", msSinceStart())
+			counts := make(map[string]int)
+			return func(ctx context.Context, done bool, result string, err error) (bool, map[string]int, error) {
 				if done {
-					fmt.Printf("%3dms:   combiner done\n", msSinceStart())
-					return true, m, nil
+					fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
+					return true, counts, nil
 				}
-				fmt.Printf("%3dms:   combining %q\n", msSinceStart(), value)
-				m[value]++
+				time.Sleep(10 * time.Millisecond)
+				counts[result]++
+				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
 				return false, nil, nil
 			}
 		},
 		func(ctx context.Context, result map[string]int, err error) error {
-			fmt.Printf("%3dms:   gathering result %q\n", msSinceStart(), result)
+			fmt.Printf("%3dms:   gathering result counts: %v\n", msSinceStart(), result)
 			// Safe because gatherFunc will only ever be called from the current
 			// goroutine within calls to Scatter and GatherAll below.
 			results = append(results, result)
@@ -77,13 +67,19 @@ func TestExampleCombiner(t *testing.T) {
 
 	// Launch some tasks
 	fmt.Println("starting job")
-	for _, taskName := range []string{"A", "B", "C"} {
-		fmt.Printf("%3dms: launching task %q\n", msSinceStart(), taskName)
-		err := combiner.Scatter(ctx, pool, newTaskFunc2(taskName, msSinceStart))
+	for i, spec := range []struct {
+		delay  time.Duration
+		result string
+	}{
+		{10 * time.Millisecond, "A"}, // will launch at 0ms, complete at 10ms, combine at 20ms
+		{50 * time.Millisecond, "A"}, // will launch at 0ms, complete at 50ms, combine at 60ms
+		{20 * time.Millisecond, "B"}, // will launch at 10ms, complete at 30ms, combine at 40ms
+	} {
+		err := resultCounter.Scatter(ctx, pool, newDelayTask(i+1, spec.delay, spec.result, msSinceStart))
 		if err != nil {
-			fmt.Printf("error launching task %q: %v\n", taskName, err)
+			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}
-		fmt.Printf("%3dms: launched task %q\n", msSinceStart(), taskName)
+		fmt.Printf("%3dms: launched task %d: (%v -> %q)\n", msSinceStart(), i+1, spec.delay, spec.result)
 	}
 
 	// Wait for all tasks to complete
@@ -96,26 +92,24 @@ func TestExampleCombiner(t *testing.T) {
 
 	// Print the aggregated results
 	for i, result := range results {
-		fmt.Printf("results[%d]=%q\n", i, result)
+		fmt.Printf("results[%d]=%v\n", i, result)
 	}
 
 	// Output:
 	// starting job
-	//   0ms: launching task "A"
-	//   0ms: launched task "A"
-	//   0ms: launching task "B"
-	//   0ms: launched task "B"
-	//   0ms: launching task "C"
-	//  10ms:   task "B" complete
-	//  10ms:   gathering result "result for task B"
-	//  10ms: launched task "C"
+	//   0ms: launched task 1: (10ms -> "A")
+	//   0ms: launched task 2: (50ms -> "A")
+	//  10ms:   task 1 (10ms -> "A") complete
+	//  10ms:   creating new result counter
+	//  10ms: launched task 3: (20ms -> "B")
 	//  10ms: gathering remaining tasks
-	//  20ms:   task "C" complete
-	//  20ms:   gathering result "result for task C"
-	//  30ms:   task "A" complete
-	//  30ms:   gathering result "result for task A"
-	//  30ms: gathering complete
-	// results[0]="result for task B"
-	// results[1]="result for task C"
-	// results[2]="result for task A"
+	//  20ms:   combined "A", result counts now: map[A:1]
+	//  30ms:   task 3 (20ms -> "B") complete
+	//  40ms:   combined "B", result counts now: map[A:1 B:1]
+	//  50ms:   task 2 (50ms -> "A") complete
+	//  60ms:   combined "A", result counts now: map[A:2 B:1]
+	//  60ms:   flushing result counts: map[A:2 B:1]
+	//  60ms:   gathering result counts: map[A:2 B:1]
+	//  60ms: gathering complete
+	// results[0]=map[A:2 B:1]
 }

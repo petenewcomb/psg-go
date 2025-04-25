@@ -49,11 +49,6 @@ func (js *JobState) IncrementTasks() {
 	js.inFlightTasks.Increment()
 }
 
-// IncrementCombiners increments only the total counter
-func (js *JobState) IncrementCombiners() {
-	js.inFlightTotal.Increment()
-}
-
 // DecrementTasks decrements the task counter and attempts stage transitions if needed
 func (js *JobState) DecrementTasks() {
 	// First, decrement task counter and attempt Closed → Flushing transition if
@@ -71,12 +66,14 @@ func (js *JobState) DecrementTasks() {
 	}
 }
 
-// DecrementCombiners decrements only the total counter
-func (js *JobState) DecrementCombiners() {
-	// Check if all work is done for Flushing → Done transition
-	if js.inFlightTotal.Decrement() {
-		// Last piece of work just completed (task or combiner)
-		js.noMoreWork()
+func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister func()) {
+	js.inFlightTotal.Increment()
+	return js.nextFlushChan.Load().(chan struct{}), func() {
+		// Check if all work is done for Flushing → Done transition
+		if js.inFlightTotal.Decrement() {
+			// Last piece of work just completed (task or combiner)
+			js.noMoreWork()
+		}
 	}
 }
 
@@ -88,14 +85,6 @@ func (js *JobState) Close() {
 			js.noMoreTasks()
 		}
 	}
-}
-
-// NextFlush returns a channel that will be closed the next time the number of tasks
-// reaches zero after Close() has been called. This channel should be captured and stored
-// by combiners at creation time, as a new channel will be provided each time tasks
-// complete during the flushing phase.
-func (js *JobState) NextFlush() <-chan struct{} {
-	return js.nextFlushChan.Load().(chan struct{})
 }
 
 // Done returns the channel that will be closed when the job transitions to Done
@@ -125,10 +114,10 @@ func (js *JobState) noMoreTasks() {
 	// Handle flush channel for flushing state
 	if currentStage == stageFlushing {
 		// Create new channel and swap with old one
-		newFlushCh := make(chan struct{})
-		oldFlushCh := js.nextFlushChan.Swap(newFlushCh).(chan struct{})
+		newCh := make(chan struct{})
+		oldCh := js.nextFlushChan.Swap(newCh).(chan struct{})
 		// Close old channel after replacing it
-		close(oldFlushCh)
+		close(oldCh)
 	}
 
 	// If inFlightTotal is zero, there is nothing left to do.

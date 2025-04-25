@@ -161,19 +161,19 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 		c.liveCount.Add(-1)
 		return false
 	}
-	j.state.IncrementCombiners()
+	nextFlushCh, unregisterAsFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
 		defer c.liveCount.Add(-1)
-		defer j.state.DecrementCombiners()
 
-		var combinerFunc CombinerFunc[I, O]
-		needsFlush := false // Track whether the combiner needs to be flushed
+		combinerFunc := c.newCombinerFunc()
 
-		// flush sends any pending results from the combiner if needed
+		// Flush sends any pending results from the combiner if needed. It also
+		// decrements the combiner counter to ensure that the job is not kept
+		// alive if there's nothing left to flush.
 		flush := func() {
-			if combinerFunc != nil && needsFlush {
+			if nextFlushCh != nil {
 				var dummyInput I
 				emit, output, err := combinerFunc(c.ctx, true, dummyInput, nil)
 				if emit || err != nil {
@@ -185,16 +185,18 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					j.state.IncrementTasks()
 					c.postGather(j, output, err)
 				}
-				needsFlush = false // Combiner has been flushed
+				nextFlushCh = nil
+				unregisterAsFlusher()
 			}
 		}
 
-		// Ensure combiner is flushed when this goroutine terminates
+		// Ensure combiner is flushed as needed when this goroutine terminates.
 		defer flush()
 
 		executeCombine := func(combine boundCombinerFunc[I, O]) {
-			if combinerFunc == nil {
-				combinerFunc = c.newCombinerFunc()
+			if nextFlushCh == nil {
+				// Make sure the job won't terminate before the combiner is flushed
+				nextFlushCh, unregisterAsFlusher = j.state.RegisterFlusher()
 			}
 			emit, output, err := combine(c.ctx, combinerFunc)
 			if emit || err != nil {
@@ -205,14 +207,11 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 				j.state.DecrementTasks()
 			}
 			c.inFlight.Decrement()
-			needsFlush = true // Combiner may need flushing after processing input
 		}
-		if combine != nil {
-			executeCombine(combine)
-		}
+		executeCombine(combine)
 
 		for {
-			if id == c.liveCount.Load() {
+			if id != 1 && id == c.liveCount.Load() {
 				// This is the most recently added live goroutine (and not the
 				// only live goroutine), so read only the secondary channel.
 				// This will keep this goroutine idle unless it's really needed,
@@ -220,18 +219,17 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 				select {
 				case combine := <-c.secondaryChan:
 					executeCombine(combine)
+				case <-nextFlushCh:
+					flush()
 				case <-time.After(c.linger):
 					// This goroutine is no longer needed.
+					return
+				case <-j.state.Done():
 					return
 				case <-c.ctx.Done():
 					return
 				case <-j.ctx.Done():
 					return
-				case <-j.state.Done():
-					return
-				case <-j.state.NextFlush():
-					// Flush the combiner but don't terminate
-					flush()
 				}
 			} else {
 				// Same select as above, but also reads the primary channel
@@ -240,18 +238,17 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					executeCombine(combine)
 				case combine := <-c.secondaryChan:
 					executeCombine(combine)
+				case <-nextFlushCh:
+					flush()
 				case <-time.After(c.linger):
 					// This goroutine is no longer needed.
+					return
+				case <-j.state.Done():
 					return
 				case <-c.ctx.Done():
 					return
 				case <-j.ctx.Done():
 					return
-				case <-j.state.Done():
-					return
-				case <-j.state.NextFlush():
-					// Flush the combiner but don't terminate
-					flush()
 				}
 			}
 		}

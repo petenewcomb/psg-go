@@ -12,10 +12,17 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/stretchr/testify/require"
 )
 
 func Run(t require.TestingT, ctx context.Context, plan *Plan, debug bool) (map[*Plan]*Result, error) {
+	tp := &state.TimerPool{}
+	tp.Init()
+	return run(t, ctx, plan, debug, tp)
+}
+
+func run(t require.TestingT, ctx context.Context, plan *Plan, debug bool, timerPool *state.TimerPool) (map[*Plan]*Result, error) {
 	pools := make([]*psg.Pool, len(plan.Config.ConcurrencyLimits))
 	for i, limit := range plan.Config.ConcurrencyLimits {
 		pools[i] = psg.NewPool(limit)
@@ -27,6 +34,7 @@ func Run(t require.TestingT, ctx context.Context, plan *Plan, debug bool) (map[*
 		MaxConcurrencyByPool: make([]atomicMinMaxInt64, len(pools)),
 		ResultMap:            make(map[*Plan]*Result),
 		Debug:                debug,
+		TimerPool:            timerPool,
 	}
 	c.MinScatterDelay.Store(math.MaxInt64)
 	c.MinGatherDelay.Store(math.MaxInt64)
@@ -45,6 +53,7 @@ type controller struct {
 	MinScatterDelay      atomicMinMaxInt64
 	MinGatherDelay       atomicMinMaxInt64
 	Debug                bool
+	TimerPool            *state.TimerPool
 }
 
 func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Result, error) {
@@ -165,6 +174,8 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			chk.GreaterOrEqual(elapsedTime, task.PathDurationAtTaskEnd)
 			res.TaskEndTime = time.Now()
 		}()
+		timer := c.TimerPool.Get()
+		defer c.TimerPool.Put(timer)
 		for i, d := range task.SelfTimes {
 			if i > 0 {
 				subjobPlan := task.Subjobs[i-1]
@@ -172,8 +183,9 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 				chk.NoError(err)
 				c.addResultMap(lt, resultMap)
 			}
+			timer.Reset(d)
 			select {
-			case <-time.After(d):
+			case <-timer.C:
 			case <-ctx.Done():
 				return res, ctx.Err()
 			}
@@ -212,13 +224,16 @@ func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFun
 
 		c.MaxConcurrencyByPool[pool].UpdateMax(res.ConcurrencyAtStart)
 
+		timer := c.TimerPool.Get()
+		defer c.TimerPool.Put(timer)
 		for i, d := range task.GatherTimes {
 			if i > 0 {
 				child := task.Children[i-1]
 				c.scatterTask(t, ctx, child)
 			}
+			timer.Reset(d)
 			select {
-			case <-time.After(d):
+			case <-timer.C:
 			case <-ctx.Done():
 				return ctx.Err()
 			}

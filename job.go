@@ -27,6 +27,7 @@ type Job struct {
 	gatherChan chan boundGatherFunc
 	wg         sync.WaitGroup
 	state      state.JobState
+	timerPool  state.TimerPool
 }
 
 type boundGatherFunc = func(ctx context.Context) error
@@ -54,6 +55,7 @@ func NewJob(
 		gatherChan: make(chan boundGatherFunc),
 	}
 	j.state.Init()
+	j.timerPool.Init()
 	j.ctx = j.makeTaskContext(ctx)
 	for _, p := range j.pools {
 		if p.job != nil {
@@ -170,7 +172,7 @@ func (j *Job) CancelAndWait() {
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
 func (j *Job) GatherOne(ctx context.Context) (bool, error) {
-	return j.gatherOne(ctx, true)
+	return j.gatherOne(ctx, true, nil, nil)
 }
 
 // TryGatherOne processes at most a single result from a task previously
@@ -182,10 +184,14 @@ func (j *Job) GatherOne(ctx context.Context) (bool, error) {
 //
 // See GatherOne for additional details.
 func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
-	return j.gatherOne(ctx, false)
+	return j.gatherOne(ctx, false, nil, nil)
 }
 
-func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
+func (j *Job) gatherOne(ctx context.Context, block bool, notifyCh <-chan struct{}, combinerCtx context.Context) (bool, error) {
+	var combinerCtxDone <-chan struct{}
+	if combinerCtx != nil {
+		combinerCtxDone = combinerCtx.Done()
+	}
 	if block {
 		select {
 		case gather := <-j.gatherChan:
@@ -193,10 +199,14 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 				return true, j.executeGather(ctx, gather)
 			}
 			return false, nil
+		case <-notifyCh:
+			return false, nil
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-j.ctx.Done():
 			return false, j.ctx.Err()
+		case <-combinerCtxDone:
+			return false, combinerCtx.Err()
 		case <-j.state.Done():
 			return false, nil
 		}
@@ -210,6 +220,8 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 			return false, ctx.Err()
 		case <-j.ctx.Done():
 			return false, j.ctx.Err()
+		case <-combinerCtxDone:
+			return false, combinerCtx.Err()
 		case <-j.state.Done():
 			return false, nil
 		default:
@@ -257,7 +269,7 @@ func (j *Job) TryGatherAll(ctx context.Context) error {
 
 func (j *Job) gatherAll(ctx context.Context, block bool) error {
 	for {
-		ok, err := j.gatherOne(ctx, block)
+		ok, err := j.gatherOne(ctx, block, nil, nil)
 		if err != nil {
 			return err
 		}

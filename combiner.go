@@ -22,9 +22,11 @@ type Combiner[I any, O any] struct {
 	liveCount        atomic.Int64
 	primaryChan      chan boundCombinerFunc[I, O]
 	secondaryChan    chan boundCombinerFunc[I, O]
+	waitingTasks     state.InFlightCounter
+	waiterQueue      state.WaiterQueue
 }
 
-type CombinerFunc[I any, O any] func(ctx context.Context, done bool, input I, inputErr error) (emit bool, output O, err error)
+type CombinerFunc[I any, O any] func(ctx context.Context, flush bool, input I, inputErr error) (emit bool, output O, err error)
 
 type CombinerFactory[I any, O any] = func() CombinerFunc[I, O]
 
@@ -110,6 +112,28 @@ func (c *Combiner[I, O]) scatter(
 	mode backpressureMode,
 ) (bool, error) {
 	j := pool.job
+
+	if !c.waitingTasks.IsZero() {
+		notifyCh := c.waiterQueue.Add()
+
+		// Check again _after_ registering with the queue, so we don't
+		// potentially miss a Notify
+		for !c.waitingTasks.IsZero() {
+			_, err := j.gatherOne(ctx, true, notifyCh, c.ctx)
+			if err != nil {
+				return false, err
+			}
+			select {
+			case <-notifyCh:
+			default:
+				// Recheck waiting task count
+				continue
+			}
+			// Proceed: got notification from the waiterQueue.
+			break
+		}
+	}
+
 	return scatter(ctx, pool, taskFunc, mode, func(input I, err error) {
 		// Build the combine function, binding the supplied combineFunc to the
 		// result.
@@ -127,30 +151,47 @@ func (c *Combiner[I, O]) scatter(
 			// us to it), continue to blocking as usual.
 		}
 
-		// Loop to deal with the case in which we try to launch a task but
-		// cannot.
-		for {
-			// Post the combine, preferring the primary channel.
-			select {
-			case c.primaryChan <- combine:
-				return
-			case <-time.After(c.spawnDelay):
-				select {
-				case c.secondaryChan <- combine:
-					return
-				default:
-					if c.launchNewCombinerTask(j, combine) {
-						return
-					}
-					// Loop and retry
-				}
-			case <-ctx.Done():
-				return
-			case <-c.ctx.Done():
-				return
-			case <-j.ctx.Done():
+		// Attempt to post the combine to the primary channel.
+		select {
+		case c.primaryChan <- combine:
+			return
+		default:
+		}
+
+		// Primary channel is busy. Try the secondary one too and worst
+		// case attempt to launch a new task.
+		select {
+		case c.primaryChan <- combine:
+			return
+		case c.secondaryChan <- combine:
+			return
+		default:
+			if c.launchNewCombinerTask(j, combine) {
 				return
 			}
+		}
+
+		// If we get here, the primary and secondary channels were busy and we
+		// hit the limit of how many combiner tasks we can launch. Increment the
+		// waiting task count to signal Scatter to apply backpressure.
+		c.waitingTasks.Increment()
+		defer func() {
+			c.waitingTasks.Decrement()
+			c.waiterQueue.Notify()
+		}()
+
+		// Then block until we can post or a context gets canceled.
+		select {
+		case c.primaryChan <- combine:
+			return
+		case c.secondaryChan <- combine:
+			return
+		case <-ctx.Done():
+			return
+		case <-c.ctx.Done():
+			return
+		case <-j.ctx.Done():
+			return
 		}
 	})
 }
@@ -210,7 +251,10 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 		}
 		executeCombine(combine)
 
+		timer := j.timerPool.Get()
+		defer j.timerPool.Put(timer)
 		for {
+			timer.Reset(c.linger)
 			if id != 1 && id == c.liveCount.Load() {
 				// This is the most recently added live goroutine (and not the
 				// only live goroutine), so read only the secondary channel.
@@ -221,7 +265,7 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					executeCombine(combine)
 				case <-nextFlushCh:
 					flush()
-				case <-time.After(c.linger):
+				case <-timer.C:
 					// This goroutine is no longer needed.
 					return
 				case <-j.state.Done():
@@ -240,7 +284,7 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 					executeCombine(combine)
 				case <-nextFlushCh:
 					flush()
-				case <-time.After(c.linger):
+				case <-timer.C:
 					// This goroutine is no longer needed.
 					return
 				case <-j.state.Done():
@@ -255,6 +299,10 @@ func (c *Combiner[I, O]) launchNewCombinerTask(j *Job, combine boundCombinerFunc
 	}()
 	return true
 }
+
+// ISSUE: if Combiner.Scatter is being called in a loop and we post a gather,
+// the Scatter calls will end up blocking because nothing's gathering, since
+// Combiner.Scatter does not gather.
 
 func (c *Combiner[I, O]) postGather(j *Job, value O, err error) {
 	// Build the gather function, binding the gatherFunc to the

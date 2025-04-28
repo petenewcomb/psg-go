@@ -29,48 +29,15 @@ type Pool struct {
 	limit       atomic.Int64
 	job         *Job
 	inFlight    state.InFlightCounter
-	waitersChan chan chan<- struct{}
+	waiterQueue state.WaiterQueue
 }
 
 // Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
 // of allowed values and their semantics.
 func NewPool(limit int) *Pool {
-	p := &Pool{
-		waitersChan: make(chan chan<- struct{}),
-	}
+	p := &Pool{}
 	p.limit.Store(int64(limit))
 	return p
-}
-
-// registerWaiter registers for notification when capacity becomes available.
-// Returns a receive-only channel that will be signaled when capacity is available.
-func (p *Pool) registerWaiter(ctx context.Context) (<-chan struct{}, error) {
-	// Buffer size 1 ensures signals aren't lost if sent before receiver is ready
-	notifyCh := make(chan struct{}, 1)
-
-	// Register this waiter with the pool
-	select {
-	case p.waitersChan <- notifyCh:
-		return notifyCh, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-p.job.ctx.Done():
-		return nil, p.job.ctx.Err()
-	}
-}
-
-// notifyWaiter signals one waiter (if any) that capacity is available.
-func (p *Pool) notifyWaiter() {
-	select {
-	case notifyCh := <-p.waitersChan:
-		select {
-		case notifyCh <- struct{}{}:
-		default:
-			// Receiver might be gone or already notified
-		}
-	default:
-		// No waiters
-	}
 }
 
 // Sets the active concurrency limit for the pool. A negative value means no
@@ -91,21 +58,9 @@ func (p *Pool) SetLimit(limit int) {
 // Returns nil when capacity might be available, or an error if waiting was interrupted.
 func (p *Pool) waitForCapacity(ctx context.Context) error {
 	j := p.job
-
-	notifyCh, err := p.registerWaiter(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Wait for capacity notification or context cancellation
-	select {
-	case <-notifyCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-j.ctx.Done():
-		return j.ctx.Err()
-	}
+	notifyCh := p.waiterQueue.Add()
+	_, err := j.gatherOne(ctx, true, notifyCh, nil)
+	return err
 }
 
 func (p *Pool) launch(ctx context.Context, backpressureMode backpressureMode, task boundTaskFunc) (bool, error) {
@@ -202,6 +157,6 @@ func (p *Pool) incrementInFlightIfUnderLimit() bool {
 func (p *Pool) decrementInFlight() {
 	if p.inFlight.DecrementAndCheckIfUnder(int(p.limit.Load())) {
 		// Signal any waiting tasks that don't use gather-based backpressure
-		p.notifyWaiter()
+		p.waiterQueue.Notify()
 	}
 }

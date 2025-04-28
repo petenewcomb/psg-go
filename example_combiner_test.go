@@ -38,8 +38,8 @@ func Example_combiner() {
 		func() psg.CombinerFunc[string, map[string]int] {
 			fmt.Printf("%3dms:   creating new result counter\n", msSinceStart())
 			counts := make(map[string]int)
-			return func(ctx context.Context, done bool, result string, err error) (bool, map[string]int, error) {
-				if done {
+			return func(ctx context.Context, flush bool, result string, err error) (bool, map[string]int, error) {
+				if flush {
 					fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
 					return true, counts, nil
 				}

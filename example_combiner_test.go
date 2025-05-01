@@ -36,14 +36,19 @@ func Example_combiner() {
 	var results []map[string]int
 	resultCounter := psg.NewCombiner(ctx, 1,
 		func() psg.CombinerFunc[string, map[string]int] {
-			fmt.Printf("%3dms:   creating new result counter\n", msSinceStart())
-			counts := make(map[string]int)
+			var counts map[string]int
 			return func(ctx context.Context, flush bool, result string, err error) (bool, map[string]int, error) {
 				if flush {
 					fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-					return true, counts, nil
+					c := counts
+					counts = nil
+					return true, c, nil
 				}
 				time.Sleep(10 * time.Millisecond)
+				if counts == nil {
+					fmt.Printf("%3dms:   creating new result count map\n", msSinceStart())
+					counts = make(map[string]int)
+				}
 				counts[result]++
 				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
 				return false, nil, nil
@@ -105,9 +110,9 @@ func Example_combiner() {
 	//   0ms: launched task 1: (10ms -> "A")
 	//   0ms: launched task 2: (50ms -> "A")
 	//  10ms:   task 1 (10ms -> "A") complete
-	//  10ms:   creating new result counter
 	//  10ms: launched task 3: (20ms -> "B")
 	//  10ms: gathering remaining tasks
+	//  20ms:   creating new result count map
 	//  20ms:   combined "A", result counts now: map[A:1]
 	//  30ms:   task 3 (20ms -> "B") complete
 	//  40ms:   combined "B", result counts now: map[A:1 B:1]

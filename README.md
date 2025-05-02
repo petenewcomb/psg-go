@@ -17,29 +17,32 @@ The below shows basic usage without error checking.
 ([playground][helloworld-play])
 
 ``` go
-ctx := context.Background()
-pool := psg.NewPool(2)
-job := psg.NewJob(ctx, pool)
-defer job.CancelAndWait() // hygiene
+	ctx := context.Background()
+	pool := psg.NewPool(2)
+	job := psg.NewJob(ctx, pool)
+	defer job.CancelAndWait() // hygiene
 
-newTask := func(s string) psg.TaskFunc[string] {
-	return func(context.Context) (string, error) {
-		time.Sleep(1 * time.Millisecond)
-		return s, nil
+	// Binds a string to a task function that returns the string after a short delay.
+	newTask := func(s string) psg.TaskFunc[string] {
+		return func(context.Context) (string, error) {
+			time.Sleep(1 * time.Millisecond)
+			return s, nil
+		}
 	}
-}
 
-var results []string
-gather := func(ctx context.Context, result string, err error) error {
-	results = append(results, result)
-	return nil
-}
+	var results []string
+	gather := psg.NewGather(
+		func(ctx context.Context, result string, err error) error {
+			results = append(results, result)
+			return nil
+		},
+	)
 
-psg.Scatter(ctx, pool, newTask("Hello"), gather)
-psg.Scatter(ctx, pool, newTask("world!"), gather)
+	gather.Scatter(ctx, pool, newTask("Hello"))
+	gather.Scatter(ctx, pool, newTask("world!"))
 
-job.CloseAndGatherAll(ctx)
-fmt.Println(strings.Join(results, " "))
+	job.CloseAndGatherAll(ctx)
+	fmt.Println(strings.Join(results, " "))
 ```
 
 For more detailed demonstrations of how `psg` works, see the Observable example

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	// Superfluous alias needed to work around
+	// https://github.com/golang/go/issues/12794
+	psg "github.com/petenewcomb/psg-go"
 )
 
 // Demonstrates job cancellation from the outer layer.

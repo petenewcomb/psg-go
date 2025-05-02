@@ -8,18 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	// Superfluous alias needed to work around
+	// https://github.com/golang/go/issues/12794
+	psg "github.com/petenewcomb/psg-go"
 )
-
-// Define a factory to bind task-specific inputs to generic task functions
-func newDelayTask(number int, delay time.Duration, result string, msSinceStart func() int64) psg.TaskFunc[string] {
-	return func(context.Context) (string, error) {
-		// Simulate a long-running task
-		time.Sleep(delay)
-		fmt.Printf("%3dms:   task %d (%v -> %q) complete\n", msSinceStart(), number, delay, result)
-		return result, nil
-	}
-}
 
 // Example_combiner demonstrates how combiners can efficiently aggregate
 // results from multiple tasks before emitting a combined result.
@@ -32,7 +24,19 @@ func ExampleNewCombiner() {
 
 	ctx := context.Background()
 
-	// Define a result aggregation function using a Combiner that counts result occurrences
+	// Define a factory to bind task-specific inputs and resources into a
+	// generic task function
+	newTask := func(number int, delay time.Duration, result string) psg.TaskFunc[string] {
+		return func(context.Context) (string, error) {
+			// Simulate a long-running task
+			time.Sleep(delay)
+			fmt.Printf("%3dms:   task %d (%v -> %q) complete\n", msSinceStart(), number, delay, result)
+			return result, nil
+		}
+	}
+
+	// Define a result aggregation function using a Combiner that counts result
+	// occurrences
 	var results []map[string]int
 	resultCounter := psg.NewCombiner(ctx, 1,
 		func() psg.CombinerFunc[string, map[string]int] {
@@ -85,7 +89,7 @@ func ExampleNewCombiner() {
 		{50 * time.Millisecond, "A"}, // will launch at 0ms, complete at 50ms, combine at 60ms
 		{20 * time.Millisecond, "B"}, // will launch at 10ms, complete at 30ms, combine at 40ms
 	} {
-		err := resultCounter.Scatter(ctx, pool, newDelayTask(i+1, spec.delay, spec.result, msSinceStart))
+		err := resultCounter.Scatter(ctx, pool, newTask(i+1, spec.delay, spec.result))
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

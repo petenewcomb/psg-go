@@ -8,25 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	// Superfluous alias needed to work around
+	// https://github.com/golang/go/issues/12794
+	psg "github.com/petenewcomb/psg-go"
 )
-
-// Define a factory to bind task-specific inputs to generic task functions
-func newTaskFunc(taskName string, msSinceStart func() int64) psg.TaskFunc[string] {
-	return func(context.Context) (string, error) {
-		// Simulate latency
-		if taskName == "A" {
-			// Force A to finish last. Combined with the pool's concurrency
-			// limit this stabilizes the test output
-			time.Sleep(30 * time.Millisecond)
-		} else {
-			time.Sleep(10 * time.Millisecond)
-		}
-		fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
-		// Return mock data
-		return "result for task " + taskName, nil
-	}
-}
 
 // Observable uses psg to run a few tasks and produce logging that demonstrate
 // the sequence of events.
@@ -38,6 +23,24 @@ func Example_observable() {
 	}
 
 	ctx := context.Background()
+
+	// Define a factory to bind task-specific inputs and resources into a
+	// generic task function
+	newTaskFunc := func(taskName string) psg.TaskFunc[string] {
+		return func(context.Context) (string, error) {
+			// Simulate latency
+			if taskName == "A" {
+				// Force A to finish last. Combined with the pool's concurrency
+				// limit this stabilizes the test output
+				time.Sleep(30 * time.Millisecond)
+			} else {
+				time.Sleep(10 * time.Millisecond)
+			}
+			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
+			// Return mock data
+			return "result for task " + taskName, nil
+		}
+	}
 
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Scatter and GatherAll.
@@ -62,7 +65,7 @@ func Example_observable() {
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		err := gather.Scatter(ctx, pool, newTaskFunc(taskName, msSinceStart))
+		err := gather.Scatter(ctx, pool, newTaskFunc(taskName))
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

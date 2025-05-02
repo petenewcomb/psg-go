@@ -19,10 +19,14 @@
 - [ ] Evaluate how this would affect backpressure behavior
 - [ ] Assess impact on API simplicity and usage patterns
 
+### 1.2. Explore other refactoring for implementation clarity 
+- [ ] make Pool only about resource limiting
+- [ ] clean up messy internal gatherOne interface
+
 ### 2. Flesh out test coverage for combiners
 - [x] Create Example_combiner test to demonstrate and document combiner behavior
-- [ ] Create benchmarks comparing combiner vs. direct task approach with different batch sizes
-- [ ] Benchmark with increasing numbers of tasks to identify optimal combiner settings
+- [x] Create benchmarks comparing combiner vs. direct task approach with different batch sizes
+- [x] Benchmark with increasing numbers of tasks to identify optimal combiner settings
 - [ ] Add more unit tests for Combiner functionality
 - [ ] Include Combiner testing in the simulation test framework
 - [ ] Test edge cases like empty combiners, very large combiner pools
@@ -56,7 +60,7 @@
 - [ ] Consider making delay parameters (spawnDelay, linger) configurable
 - [ ] Profile memory usage during heavy combiner operations
 - [ ] Add metrics/stats for monitoring combiner efficiency and utilization
-- [ ] Benchmark performance with various combiner configurations
+- [x] Benchmark performance with various combiner configurations
 
 ### 5. API finalization
 - [x] Improve JobState interface with RegisterFlusher pattern
@@ -69,6 +73,8 @@
 - [ ] Ensure all public types and methods have consistent naming
 - [ ] Review and document thread-safety guarantees for all public APIs
 - [ ] Test and document behavior when tasks passed to combiners return errors
+- [ ] Should "Combiner" be "Combine" (noun->verb) to parallel "Gather" (which a verb; the noun form would be Gatherer) 
+- [ ] Should "Combine/Combiner" be built from a "Gather" and therefore not require a GatherFunc arg itself?
 
 ### 6. Context propagation improvements
 - [ ] Modify gather/combiner functions to receive the task's context instead of the job context

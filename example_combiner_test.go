@@ -23,7 +23,7 @@ func newDelayTask(number int, delay time.Duration, result string, msSinceStart f
 
 // Example_combiner demonstrates how combiners can efficiently aggregate
 // results from multiple tasks before emitting a combined result.
-func Example_combiner() {
+func ExampleNewCombiner() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 10ms to make the output stable across runs

@@ -5,7 +5,7 @@ package psg
 
 import (
 	"context"
-	"sync/atomic"
+	"fmt"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
@@ -17,16 +17,18 @@ import (
 // The zero value of Pool is unbound and has a limit of zero. [NewPool]
 // provides a convenient way to create a new pool with a non-zero limit.
 type Pool struct {
-	limit    atomic.Int64
-	job      *Job
-	inFlight state.InFlightCounter
+	concurrencyLimit state.DynamicValue[int]
+	job              *Job
+	inFlight         state.InFlightCounter
+	waiterQueue      state.WaiterQueue
 }
 
 // Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
 // of allowed values and their semantics.
 func NewPool(limit int) *Pool {
 	p := &Pool{}
-	p.limit.Store(int64(limit))
+	p.concurrencyLimit.Init(limit)
+	p.inFlight.Name = fmt.Sprintf("Pool(%p).inFlight", p)
 	return p
 }
 
@@ -36,26 +38,11 @@ func NewPool(limit int) *Pool {
 // indefinitely) until SetLimit is called with a non-zero value. SetLimit is
 // always thread-safe, even for a Pool in a single-threaded [Job].
 func (p *Pool) SetLimit(limit int) {
-	if p.limit.Swap(int64(limit)) == 0 && limit != 0 {
-		j := p.job
-		if j != nil {
-			j.wakeGatherers()
-		}
-	}
+	p.concurrencyLimit.Store(limit)
 }
 
-func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool, error) {
-
+func (p *Pool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTaskFunc) (bool, error) {
 	j := p.job
-	if j == nil {
-		panic("pool not bound to a job")
-	}
-
-	if j.isTaskContext(ctx) {
-		// Don't launch if the provided context is a task context within the
-		// current job, since that may lead to deadlock.
-		panic("psg.Scatter called from within TaskFunc; move call to GatherFunc instead")
-	}
 
 	// Don't launch if the provided context has been canceled.
 	if err := ctx.Err(); err != nil {
@@ -67,36 +54,47 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 		return false, err
 	}
 
-	// Register the task with the job to make sure that any calls to gather will
-	// block until the task is completed.
-	j.inFlight.Increment()
-
-	// Bookkeeping: make sure that the job-scope count incremented above gets
-	// decremented unless the launch actually happens
-	launched := false
-	defer func() {
-		if !launched {
-			j.decrementInFlight()
-		}
-	}()
-
-	// Apply backpressure if launching a new task would exceed the pool's
-	// concurrency limit.
-	for !p.incrementInFlightIfUnderLimit() {
-		if !block {
+	// Try to add to the pool
+	limit, _ := p.concurrencyLimit.Load()
+	if !p.incrementInFlightIfUnder(limit) {
+		if applyBackpressure == nil {
 			return false, nil
 		}
-		// Gather a result to make room to launch the new task. As long as there
-		// wasn't an error, we don't care whether a task was actually gathered
-		// by this call. Either way, it's time to re-check the in-flight count
-		// for this pool.
-		if _, err := j.GatherOne(ctx); err != nil {
-			return false, err
+
+		type waitResult struct {
+			Proceed bool
+			Work    workFunc
+		}
+		wait := func() (waitResult, error) {
+			waiter := p.waiterQueue.Add()
+			defer waiter.Close()
+
+			// Check again after registering as a waiter, in case capacity
+			// became available between the last check and this one.
+			limit, limitChangeCh := p.concurrencyLimit.Load()
+			if p.incrementInFlightIfUnder(limit) {
+				return waitResult{Proceed: true}, nil
+			}
+			work, err := applyBackpressure(ctx, ctx, waiter, limitChangeCh)
+			return waitResult{Work: work}, err
+		}
+		for {
+			res, err := wait()
+			if err != nil {
+				return false, err
+			}
+			if res.Work != nil {
+				if err := res.Work(ctx); err != nil {
+					return false, err
+				}
+			}
+			if res.Proceed {
+				break
+			}
 		}
 	}
 
 	// Launch the task in a new goroutine.
-	launched = true
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
@@ -106,10 +104,11 @@ func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool
 	return true, nil
 }
 
+type backpressureFunc func(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error)
+
 type boundTaskFunc func(ctx context.Context)
 
-func (p *Pool) incrementInFlightIfUnderLimit() bool {
-	limit := p.limit.Load()
+func (p *Pool) incrementInFlightIfUnder(limit int) bool {
 	switch {
 	case limit < 0:
 		p.inFlight.Increment()
@@ -117,20 +116,14 @@ func (p *Pool) incrementInFlightIfUnderLimit() bool {
 	case limit == 0:
 		return false
 	default:
-		return p.inFlight.IncrementIfUnder(int(limit))
+		return p.inFlight.IncrementIfUnder(limit)
 	}
 }
 
-func (p *Pool) postGather(gather boundGatherFunc) {
-	// Decrement the pool's in-flight count BEFORE waiting on the gather
-	// channel. This makes it safe for gatherFunc to call `Scatter` with this
-	// same `Pool` instance without deadlock, as there is guaranteed to be at
-	// least one slot available.
-	p.inFlight.Decrement()
-
-	j := p.job
-	select {
-	case j.gatherChannel <- gather:
-	case <-j.ctx.Done():
+func (p *Pool) decrementInFlight() {
+	limit, _ := p.concurrencyLimit.Load()
+	if p.inFlight.DecrementAndCheckIfUnder(limit) {
+		// Signal any waiting tasks
+		p.waiterQueue.Notify()
 	}
 }

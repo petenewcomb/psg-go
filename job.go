@@ -8,7 +8,6 @@ import (
 	"maps"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
@@ -22,14 +21,13 @@ import (
 // A Job must be created with [NewJob], see that function for caveats and
 // important details.
 type Job struct {
-	ctx           context.Context
-	cancelFunc    context.CancelFunc
-	pools         []*Pool
-	inFlight      state.InFlightCounter
-	gatherChannel chan boundGatherFunc
-	wg            sync.WaitGroup
-	closed        atomic.Bool
-	done          chan struct{}
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	pools      []*Pool
+	gatherChan chan boundGatherFunc
+	wg         sync.WaitGroup
+	state      state.JobState
+	timerPool  state.TimerPool
 }
 
 type boundGatherFunc = func(ctx context.Context) error
@@ -52,12 +50,13 @@ func NewJob(
 ) *Job {
 	ctx, cancelFunc := context.WithCancel(ctx)
 	j := &Job{
-		cancelFunc:    cancelFunc,
-		pools:         slices.Clone(pools),
-		gatherChannel: make(chan boundGatherFunc),
-		done:          make(chan struct{}),
+		cancelFunc: cancelFunc,
+		pools:      slices.Clone(pools),
+		gatherChan: make(chan boundGatherFunc),
 	}
-	j.ctx = j.makeTaskContext(ctx)
+	j.state.Init()
+	j.timerPool.Init()
+	j.ctx = withJob(ctx, j)
 	for _, p := range j.pools {
 		if p.job != nil {
 			panic("pool was already registered")
@@ -67,23 +66,15 @@ func NewJob(
 	return j
 }
 
-type taskContextMarkerType struct{}
+type jobContextValueType struct{}
 
-var taskContextMarkerKey any = taskContextMarkerType{}
+var jobContextValueKey any = jobContextValueType{}
 
-func (j *Job) makeTaskContext(ctx context.Context) context.Context {
-	return makeJobContext(ctx, j, taskContextMarkerKey)
-}
-
-func (j *Job) isTaskContext(ctx context.Context) bool {
-	return isJobContext(ctx, j, taskContextMarkerKey)
-}
-
-func makeJobContext[K any](ctx context.Context, j *Job, key K) context.Context {
+func withJob(ctx context.Context, j *Job) context.Context {
 	// Accumulate the jobs to which the context belongs but avoid creating a
 	// collection unless it's needed.
 	var newValue any
-	switch oldValue := ctx.Value(key).(type) {
+	switch oldValue := ctx.Value(jobContextValueKey).(type) {
 	case nil:
 		newValue = j
 	case *Job:
@@ -102,13 +93,13 @@ func makeJobContext[K any](ctx context.Context, j *Job, key K) context.Context {
 		maps.Copy(newValue, oldValue)
 		newValue[j] = struct{}{}
 	default:
-		panic("unexpected job context marker value type")
+		panic("unexpected job context value type")
 	}
-	return context.WithValue(ctx, key, newValue)
+	return context.WithValue(ctx, jobContextValueKey, newValue)
 }
 
-func isJobContext[K any](ctx context.Context, j *Job, key K) bool {
-	switch v := ctx.Value(key).(type) {
+func includesJob(ctx context.Context, j *Job) bool {
+	switch v := ctx.Value(jobContextValueKey).(type) {
 	case nil:
 		return false
 	case *Job:
@@ -117,7 +108,7 @@ func isJobContext[K any](ctx context.Context, j *Job, key K) bool {
 		_, ok := v[j]
 		return ok
 	default:
-		panic("unexpected job context marker value type")
+		panic("unexpected job context value type")
 	}
 }
 
@@ -150,8 +141,10 @@ func (j *Job) CancelAndWait() {
 
 // GatherOne processes at most a single result from a task previously launched
 // in one of the [Job]'s pools via [Scatter]. It will block until a completed
-// task is available or the context has been canceled. See [Job.TryGatherOne] for a
-// non-blocking alternative.
+// task is available, the provided context or job is canceled, or another event
+// causes a wake-up (e.g. a call to [Pool.SetLimit]).
+// If the job is closed and no tasks remain in flight, it will return immediately.
+// See [Job.TryGatherOne] for a non-blocking alternative.
 //
 // Returns a boolean flag indicating whether a result was processed and an error
 // if one occurred:
@@ -159,7 +152,8 @@ func (j *Job) CancelAndWait() {
 //   - true, nil: a task completed and was successfully gathered
 //   - true, non-nil: a task completed but the gather function returned a
 //     non-nil error
-//   - false, nil: there were no tasks in flight
+//   - false, nil: the call was woken up but there was no completed task
+//     available
 //   - false, non-nil: the argument or job-internal context was canceled
 //
 // If all gather functions are thread-safe, then GatherOne is thread-safe and
@@ -170,7 +164,46 @@ func (j *Job) CancelAndWait() {
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
 func (j *Job) GatherOne(ctx context.Context) (bool, error) {
-	return j.gatherOne(ctx, true)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.gatherOneAndDoTheWork(ctx, ctx)
+}
+
+func (j *Job) gatherOneAndDoTheWork(ctx, ctx2 context.Context) (bool, error) {
+	res, err := j.gatherOne(ctx, ctx2, state.Waiter{}, nil)
+	if res.Work != nil {
+		err = res.Work(ctx)
+	}
+	return res.GatheredOne, err
+}
+
+type gatherOneResult struct {
+	GatheredOne    bool
+	WaiterNotified bool
+	Work           workFunc
+}
+
+// Returns true if the waiter was notified or a non-nil boundGatherFunc if a result was gathered.
+func (j *Job) gatherOne(ctx, ctx2 context.Context, waiter state.Waiter, limitCh <-chan struct{}) (gatherOneResult, error) {
+	var res gatherOneResult
+	var err error
+	select {
+	case gather := <-j.gatherChan:
+		res.GatheredOne = true
+		res.Work = func(ctx context.Context) error {
+			return j.executeGather(ctx, gather)
+		}
+	case <-waiter.Done():
+		res.WaiterNotified = true
+	case <-limitCh:
+	case <-ctx.Done():
+		err = ctx.Err()
+	case <-ctx2.Done():
+		err = ctx2.Err()
+	case <-j.ctx.Done():
+		err = j.ctx.Err()
+	case <-j.state.Done():
+	}
+	return res, err
 }
 
 // TryGatherOne processes at most a single result from a task previously
@@ -182,43 +215,34 @@ func (j *Job) GatherOne(ctx context.Context) (bool, error) {
 //
 // See GatherOne for additional details.
 func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
-	return j.gatherOne(ctx, false)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.tryGatherOne(ctx, ctx)
 }
 
-func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
-	if block {
-		select {
-		case gather := <-j.gatherChannel:
-			return true, j.executeGather(ctx, gather)
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-j.ctx.Done():
-			return false, j.ctx.Err()
-		case <-j.done:
-			return false, nil
-		}
-	} else {
-		// Identical to the blocking branch above except replaces <-j.done with
-		// a default clause.
-		select {
-		case gather := <-j.gatherChannel:
-			return true, j.executeGather(ctx, gather)
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-j.ctx.Done():
-			return false, j.ctx.Err()
-		case <-j.done:
-			return false, nil
-		default:
-			// There were no in-flight tasks ready to gather.
-			return false, nil
-		}
+func (j *Job) tryGatherOne(ctx, ctx2 context.Context) (bool, error) {
+	select {
+	case gather := <-j.gatherChan:
+		return true, j.executeGather(ctx, gather)
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-ctx2.Done():
+		return false, ctx2.Err()
+	case <-j.ctx.Done():
+		return false, j.ctx.Err()
+	case <-j.state.Done():
+		return false, nil
+	default:
+		// There were no in-flight tasks ready to gather.
+		return false, nil
 	}
 }
 
-// GatherAll processes all results from previously scattered tasks, continuing
-// until there are no more in-flight tasks or an error occurs. It will block to
-// wait for in-flight tasks that are not yet complete.
+// GatherAll processes task results until the job completes or an error occurs.
+// If the job has not been closed, GatherAll will block indefinitely, as new
+// tasks might be added at any time. It will return an error if the provided context
+// or job is canceled. After the job is closed, GatherAll will continue processing
+// tasks until all work completes (including tasks spawned during result processing)
+// and then return.
 //
 // Returns nil unless the context is canceled or a task's [GatherFunc] returns a
 // non-nil error.
@@ -232,25 +256,28 @@ func (j *Job) gatherOne(ctx context.Context, block bool) (bool, error) {
 // NOTE: This method will serially call each gathered task's [GatherFunc] and
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
-	return j.gatherAll(ctx, true)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.gatherAll(ctx, ctx, j.gatherOneAndDoTheWork)
 }
 
-// TryGatherAll processes all results from completed tasks, continuing until
-// there are no more immediately available or an error occurs. Unlike
-// [Job.GatherAll], TryGatherAll will not block to wait for in-flight tasks to
-// complete.
+// TryGatherAll processes all currently available task results without blocking.
+// Unlike [Job.GatherAll], TryGatherAll will return immediately if there are no
+// completed tasks ready to process, regardless of whether the job is closed or
+// whether there are still tasks in flight. It will return an error if the
+// provided context or job is canceled.
 //
 // See GatherAll for information about return values and thread safety.
 //
 // NOTE: If completed tasks are available, this method must still call each
 // task's [GatherFunc] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
-	return j.gatherAll(ctx, false)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.gatherAll(ctx, ctx, j.tryGatherOne)
 }
 
-func (j *Job) gatherAll(ctx context.Context, block bool) error {
+func (j *Job) gatherAll(ctx, ctx2 context.Context, gatherOne func(ctx, ctx2 context.Context) (bool, error)) error {
 	for {
-		ok, err := j.gatherOne(ctx, block)
+		ok, err := gatherOne(ctx, ctx2)
 		if err != nil {
 			return err
 		}
@@ -264,46 +291,30 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 	// Decrement the environment-wide in-flight counter only AFTER calling the
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.
-	defer j.decrementInFlight()
+	defer j.state.DecrementTasks()
 	return gather(ctx)
 }
 
-func (j *Job) decrementInFlight() {
-	if j.inFlight.Decrement() {
-		if j.closed.Load() {
-			// Check again now that we know the job is already closed, in case
-			// the job was closed after the decrement AND another increment.
-			if !j.inFlight.GreaterThanZero() {
-				close(j.done)
-			}
-		}
-	}
+// panicIfDone panics if the job is in the done state
+func (j *Job) panicIfDone() {
+	j.state.PanicIfDone()
 }
 
-// Wakes any goroutines that might be waiting on the gatherChannel.
-func (j *Job) wakeGatherers() {
-	for {
-		select {
-		case j.gatherChannel <- nil:
-		default:
-			// No more waiters
-			return
-		}
-	}
-}
-
-// Close must be called to signify that no more top-level tasks will be launched
-// and that [Job.GatherAll] should stop blocking to wait for more after the
-// results of all in-flight tasks have been gathered. See [Job.GatherAll] for
-// more detail.
+// Close changes the job's state from open to closed, which allows it to eventually
+// progress to the done state once all tasks complete. When a job is closed,
+// [Job.GatherAll] will return after processing all existing tasks and any tasks
+// they spawn, rather than blocking indefinitely.
 //
-// Close may be called from any goroutine and may safely be called more than
-// once.
+// After a job is closed and all tasks have completed, launching new tasks will panic.
+// Gathering operations will continue to work normally but will always return
+// immediately with no results.
+//
+// Note that tasks can still be added after Close is called but before all tasks
+// have completed.
+//
+// Close may be called from any goroutine and may safely be called more than once.
 func (j *Job) Close() {
-	j.closed.Store(true)
-	if !j.inFlight.GreaterThanZero() {
-		close(j.done)
-	}
+	j.state.Close()
 }
 
 // CloseAndGatherAll closes the job via [Job.Close] and then waits for and
@@ -311,4 +322,22 @@ func (j *Job) Close() {
 func (j *Job) CloseAndGatherAll(ctx context.Context) error {
 	j.Close()
 	return j.GatherAll(ctx)
+}
+
+// SetFlushListener registers a callback function that will be called each time all
+// tasks have completed and the job is waiting for combiners to emit their results.
+// After the callback returns, the job signals any [CombinerFunc] that has received
+// inputs but hasn't yet emitted its combined results to do so immediately. The callback
+// may be invoked multiple times during a job's lifecycle if a [GatherFunc] directly or
+// indirectly launches new tasks while processing the flushed results.
+//
+// The callback function is called synchronously from a goroutine calling a gather method
+// ([Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], [Job.TryGatherAll],
+// [Job.CloseAndGatherAll]), [Gather.Scatter], or [Job.Close] if no tasks are in flight
+// at the time of closing.
+//
+// If called multiple times, each call replaces any previously registered callback.
+// Passing nil removes any existing callback.
+func (j *Job) SetFlushListener(callback func()) {
+	j.state.SetFlushListener(callback)
 }

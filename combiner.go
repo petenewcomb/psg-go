@@ -51,7 +51,7 @@ func NewCombiner[I any, O any](ctx context.Context, concurrencyLimit int, combin
 		primaryChan:     make(chan boundCombinerFunc[I, O]),
 		secondaryChan:   make(chan boundCombinerFunc[I, O]),
 	}
-	c.concurrencyLimit.Init(concurrencyLimit)
+	c.concurrencyLimit.Store(concurrencyLimit)
 	c.inFlight.Name = fmt.Sprintf("Combiner(%p).inFlight", c)
 	c.waitingCombines.Name = fmt.Sprintf("Combiner(%p).waitingCombines", c)
 	return c

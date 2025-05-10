@@ -27,7 +27,7 @@ type Pool struct {
 // of allowed values and their semantics.
 func NewPool(limit int) *Pool {
 	p := &Pool{}
-	p.concurrencyLimit.Init(limit)
+	p.concurrencyLimit.Store(limit)
 	p.inFlight.Name = fmt.Sprintf("Pool(%p).inFlight", p)
 	return p
 }

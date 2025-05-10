@@ -1,4 +1,4 @@
-module github.com/petenewcomb/psg-go/internal/charts
+module main
 
 go 1.24
 

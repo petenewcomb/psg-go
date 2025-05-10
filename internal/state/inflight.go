@@ -8,20 +8,35 @@ import (
 )
 
 type InFlightCounter struct {
-	v atomic.Int64
+	Name string
+	v    atomic.Int64
 }
 
 func (c *InFlightCounter) Increment() bool {
-	return c.v.Add(1) == 1
+	newValue := c.v.Add(1)
+
+	return newValue == 1
+}
+
+func (c *InFlightCounter) IsUnder(limit int) bool {
+	value := c.v.Load()
+
+	return value < int64(limit)
 }
 
 func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
+
+	log := func(x int64, msg string) int64 {
+
+		return x
+	}
+
 	// Tentatively increment the counter and check against limit. If over limit,
 	// remove the tentative increment and try again if we notice that another
 	// goroutine has made room between the increment and decrement.
-	for c.v.Add(1) > int64(limit) {
+	for log(c.v.Add(1), "incremented value:") > int64(limit) {
 		// Back out tentative increment and re-check.
-		if c.v.Add(-1) >= int64(limit) {
+		if log(c.v.Add(-1), "decremented value:") >= int64(limit) {
 			// Still at or over limit.
 			return false
 		}
@@ -35,6 +50,7 @@ func (c *InFlightCounter) Decrement() bool {
 	if newValue < 0 {
 		panic("there were no tasks in flight")
 	}
+
 	return newValue == 0
 }
 
@@ -51,5 +67,7 @@ func (c *InFlightCounter) DecrementAndCheckIfUnder(limit int) bool {
 }
 
 func (c *InFlightCounter) IsZero() bool {
-	return c.v.Load() == 0
+	value := c.v.Load()
+
+	return value == 0
 }

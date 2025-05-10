@@ -274,14 +274,14 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 // a continuous stream of data with gather-only vs. combiner approaches
 func BenchmarkCombinerThroughput(b *testing.B) {
 	// Run with different worker configurations
-	poolSize := 2 // for generator tasks
+	usableCores := runtime.NumCPU() - 1 // reserve one for the main thread
 	for _, workload := range []string{"processing", "waiting"} {
 		for _, workloadDuration := range []time.Duration{
 			10 * time.Microsecond,
 			100 * time.Microsecond,
 			1 * time.Millisecond,
 		} {
-			for _, flushPeriod := range []time.Duration{
+			for fpi, flushPeriod := range []time.Duration{
 				workloadDuration,
 				10 * workloadDuration,
 				100 * workloadDuration,
@@ -292,7 +292,12 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 					1, 2, 3, 4, 8,
 				} {
 
-					if workload == "processing" && combinerLimit > (runtime.NumCPU()-poolSize-1) {
+					// Only need to run direct and gather-only once to cover all flush periods
+					if combinerLimit < 1 && fpi > 0 {
+						continue
+					}
+
+					if workload == "processing" && combinerLimit > usableCores {
 						// Skip this configuration since the hardware is not capable
 						// of running it without CPU contention
 						break
@@ -316,16 +321,18 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						combinerLimit,
 					)
 
+					burnCPU := func(d time.Duration) {
+						deadline := time.Now().Add(d)
+						x := 0.0
+						for time.Now().Before(deadline) {
+							x = math.Sqrt(x + 33)
+						}
+					}
+
 					var simulateWork func(d time.Duration)
 					switch workload {
 					case "processing":
-						simulateWork = func(d time.Duration) {
-							deadline := time.Now().Add(d)
-							x := 0.0
-							for time.Now().Before(deadline) {
-								x = math.Sqrt(x + 33)
-							}
-						}
+						simulateWork = burnCPU
 					case "waiting":
 						simulateWork = time.Sleep
 					}
@@ -334,119 +341,143 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						ctx, cancel := context.WithCancel(context.Background())
 						defer cancel()
 
-						pool := psg.NewPool(poolSize)
+						pool := psg.NewPool(-1)
 						job := psg.NewJob(ctx, pool)
 						defer job.CancelAndWait()
 
-						overallSum := 0.0
-						gatherFunc := func(ctx context.Context, value float64, err error) error {
+						type aggregatedResult struct {
+							Time        time.Time
+							Count       int64
+							DurationSum time.Duration
+							LatencySum  time.Duration
+							LatencyMax  time.Duration
+						}
+						var overallResult aggregatedResult
+						gatherFunc := func(ctx context.Context, value aggregatedResult, err error) error {
 							if err != nil {
 								return err
 							}
+							workStartTime := time.Now()
 							simulateWork(workloadDuration)
-							overallSum += value
+							overallResult.Time = time.Now()
+							overallResult.Count += value.Count
+							overallResult.DurationSum += value.DurationSum + overallResult.Time.Sub(workStartTime)
+							timeSinceValue := overallResult.Time.Sub(value.Time)
+							overallResult.LatencySum += time.Duration(value.Count)*timeSinceValue + value.LatencySum
+							overallResult.LatencyMax = max(overallResult.LatencyMax, value.LatencyMax+timeSinceValue)
 							return nil
 						}
 
+						gatherFuncAdapter := func(ctx context.Context, value time.Time, err error) error {
+							aggRes := aggregatedResult{
+								Time:  value,
+								Count: 1,
+							}
+							return gatherFunc(ctx, aggRes, err)
+						}
+
 						// Setup processing - either gather-only or with combiner
-						var scatter func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[float64]) error
+						var scatter func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[time.Time]) error
 						switch {
 						case combinerLimit < 0:
-							scatter = func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[float64]) error {
+							scatter = func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[time.Time]) error {
 								value, err := task(ctx)
-								return gatherFunc(ctx, value, err)
+								return gatherFuncAdapter(ctx, value, err)
 							}
 						case combinerLimit == 0:
-							scatter = psg.NewGather(gatherFunc).Scatter
+							scatter = psg.NewGather(gatherFuncAdapter).Scatter
 						default:
-							newCombinerFunc := func() psg.CombinerFunc[float64, float64] {
-								sum := 0.0
+							newCombinerFunc := func() psg.CombinerFunc[time.Time, aggregatedResult] {
+								var combinedResult aggregatedResult
 								nextFlushTime := time.Now().Add(flushPeriod)
-								return func(ctx context.Context, flush bool, value float64, err error) (bool, float64, error) {
+								return func(ctx context.Context, flush bool, value time.Time, err error) (bool, aggregatedResult, error) {
 									if err != nil {
-										return true, 0, err
+										return true, aggregatedResult{}, err
 									}
 
 									if !flush {
+										workStartTime := time.Now()
 										simulateWork(workloadDuration)
-										sum += value
+										combinedResult.Time = time.Now()
+										combinedResult.Count++
+										combinedResult.DurationSum += combinedResult.Time.Sub(workStartTime)
+										timeSinceValue := combinedResult.Time.Sub(value)
+										combinedResult.LatencySum += timeSinceValue
+										combinedResult.LatencyMax = max(combinedResult.LatencyMax, timeSinceValue)
 									}
 
 									now := time.Now()
 									if flush || now.After(nextFlushTime) {
-										oldSum := sum
-										sum = 0
+										resultToFlush := combinedResult
+										combinedResult = aggregatedResult{}
 										nextFlushTime = now.Add(flushPeriod)
-										return true, oldSum, nil
+										return true, resultToFlush, nil
 									}
 
-									return false, 0, nil
+									return false, aggregatedResult{}, nil
 								}
 							}
 
 							combiner := psg.NewCombiner(ctx, combinerLimit, newCombinerFunc, gatherFunc)
-							scatter = func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[float64]) error {
+							scatter = func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[time.Time]) error {
 								if err := combiner.Scatter(ctx, pool, task); err != nil {
 									return err
-								}
-								// Gather greedily inside the benchmark
-								for false {
-									ok, err := job.TryGatherOne(ctx)
-									if err != nil {
-										b.Fatalf("Error: %v", err)
-									}
-									if !ok {
-										break
-									}
 								}
 								return nil
 							}
 						}
 
 						var tasksRun atomic.Int64
-						taskFunc := func(context.Context) (float64, error) {
+						taskFunc := func(context.Context) (time.Time, error) {
 							tasksRun.Add(1)
-							return 1.0, nil
+							return time.Now(), nil
 						}
 
-						tasksLaunched := 0
+						var tasksLaunched int64
 						op := func() {
-							oldSum := overallSum
-							for overallSum == oldSum {
-								if err := scatter(ctx, pool, taskFunc); err != nil {
-									b.Fatalf("Error: %v", err)
-								}
-								tasksLaunched++
+							if err := scatter(ctx, pool, taskFunc); err != nil {
+								b.Fatalf("Error: %v", err)
 							}
+							tasksLaunched++
 						}
 
 						// Warmup
-						warmupEnd := time.Now().Add(10 * time.Millisecond)
+						warmupEnd := time.Now().Add(10 * workloadDuration)
 						for time.Now().Before(warmupEnd) {
 							op()
 						}
 
 						tasksLaunchedOrigin := tasksLaunched
 						tasksRunOrigin := tasksRun.Load()
-						overallSumOrigin := overallSum
+						overallResultOrigin := overallResult
+						overallResult.LatencyMax = 0
 						for b.Loop() {
-							op()
+							oldCount := overallResult.Count
+							for overallResult.Count == oldCount {
+								op()
+							}
 						}
+
 						// We purposefully do not run job.CloseAndGatherAll
 						// here, to avoid inflating overallSum with data
 						// gathered outside the benchmarking loop.
 
 						tasksLaunched -= tasksLaunchedOrigin
 						tasksRun.Add(int64(-tasksRunOrigin))
-						overallSum -= float64(overallSumOrigin)
+						overallResult.Count -= overallResultOrigin.Count
+						overallResult.DurationSum -= overallResultOrigin.DurationSum
+						overallResult.LatencySum -= overallResultOrigin.LatencySum
 
 						b.ReportAllocs()
 						b.ReportMetric(float64(tasksLaunched)/float64(b.N), "launched/op")
-						b.ReportMetric((float64(tasksLaunched)-overallSum)/float64(b.N), "canceled/op")
+						b.ReportMetric(float64(tasksLaunched-overallResult.Count)/float64(b.N), "canceled/op")
 						b.ReportMetric(float64(tasksRun.Load())/float64(b.N), "run/op")
 						b.ReportMetric(float64(int64(tasksLaunched)-tasksRun.Load())/float64(b.N), "dropped/op")
-						b.ReportMetric(overallSum/float64(b.N), "completed/op")
-						b.ReportMetric(overallSum/b.Elapsed().Seconds(), "completed/s")
+						b.ReportMetric(float64(overallResult.Count)/float64(b.N), "completed/op")
+						b.ReportMetric(float64(overallResult.Count)/b.Elapsed().Seconds(), "completed/s")
+						b.ReportMetric(float64(overallResult.LatencyMax.Nanoseconds()), "max-latency-ns")
+						b.ReportMetric(float64(overallResult.LatencySum.Nanoseconds())/float64(b.N), "avg-latency-ns/op")
+						b.ReportMetric(float64(overallResult.DurationSum.Nanoseconds())/float64(b.N), "avg-duration-ns/op")
 					})
 				}
 			}

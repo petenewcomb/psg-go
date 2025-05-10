@@ -5,6 +5,8 @@ package psg
 
 import (
 	"context"
+
+	"github.com/petenewcomb/psg-go/internal/state"
 )
 
 // A GatherFunc is a function that processes the result of a completed
@@ -69,7 +71,10 @@ func (g *Gather[T]) Scatter(
 	pool *Pool,
 	taskFunc TaskFunc[T],
 ) error {
-	_, err := g.scatter(ctx, pool, taskFunc, backpressureGather)
+	launched, err := g.scatter(ctx, pool, true, taskFunc)
+	if !launched && err == nil {
+		panic("task function was not launched, but no error was returned")
+	}
 	return err
 }
 
@@ -88,17 +93,34 @@ func (g *Gather[T]) TryScatter(
 	pool *Pool,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	return g.scatter(ctx, pool, taskFunc, backpressureDecline)
+	return g.scatter(ctx, pool, false, taskFunc)
 }
 
 func (g *Gather[T]) scatter(
 	ctx context.Context,
 	pool *Pool,
+	block bool,
 	taskFunc TaskFunc[T],
-	mode backpressureMode,
 ) (bool, error) {
+	vetScatter(ctx, pool, taskFunc)
+
 	j := pool.job
-	return scatter(ctx, pool, taskFunc, mode, func(value T, err error) {
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	bp := getBackpressureProvider(ctx, j)
+
+	if err := yieldBeforeScatter(ctx, ctx, bp); err != nil {
+		return false, err
+	}
+
+	var bpf backpressureFunc
+	if block {
+		bpf = func(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
+			res, err := bp.Block(ctx, ctx2, waiter, limitChangeCh)
+			return res.Work, err
+		}
+	}
+
+	return scatter(ctx, pool, taskFunc, bpf, func(value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
 		gather := func(ctx context.Context) error {

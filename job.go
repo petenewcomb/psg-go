@@ -56,7 +56,7 @@ func NewJob(
 	}
 	j.state.Init()
 	j.timerPool.Init()
-	j.ctx = j.makeTaskContext(ctx)
+	j.ctx = withJob(ctx, j)
 	for _, p := range j.pools {
 		if p.job != nil {
 			panic("pool was already registered")
@@ -66,23 +66,15 @@ func NewJob(
 	return j
 }
 
-type taskContextMarkerType struct{}
+type jobContextValueType struct{}
 
-var taskContextMarkerKey any = taskContextMarkerType{}
+var jobContextValueKey any = jobContextValueType{}
 
-func (j *Job) makeTaskContext(ctx context.Context) context.Context {
-	return makeJobContext(ctx, j, taskContextMarkerKey)
-}
-
-func (j *Job) isTaskContext(ctx context.Context) bool {
-	return isJobContext(ctx, j, taskContextMarkerKey)
-}
-
-func makeJobContext[K any](ctx context.Context, j *Job, key K) context.Context {
+func withJob(ctx context.Context, j *Job) context.Context {
 	// Accumulate the jobs to which the context belongs but avoid creating a
 	// collection unless it's needed.
 	var newValue any
-	switch oldValue := ctx.Value(key).(type) {
+	switch oldValue := ctx.Value(jobContextValueKey).(type) {
 	case nil:
 		newValue = j
 	case *Job:
@@ -101,13 +93,13 @@ func makeJobContext[K any](ctx context.Context, j *Job, key K) context.Context {
 		maps.Copy(newValue, oldValue)
 		newValue[j] = struct{}{}
 	default:
-		panic("unexpected job context marker value type")
+		panic("unexpected job context value type")
 	}
-	return context.WithValue(ctx, key, newValue)
+	return context.WithValue(ctx, jobContextValueKey, newValue)
 }
 
-func isJobContext[K any](ctx context.Context, j *Job, key K) bool {
-	switch v := ctx.Value(key).(type) {
+func includesJob(ctx context.Context, j *Job) bool {
+	switch v := ctx.Value(jobContextValueKey).(type) {
 	case nil:
 		return false
 	case *Job:
@@ -116,7 +108,7 @@ func isJobContext[K any](ctx context.Context, j *Job, key K) bool {
 		_, ok := v[j]
 		return ok
 	default:
-		panic("unexpected job context marker value type")
+		panic("unexpected job context value type")
 	}
 }
 
@@ -172,7 +164,46 @@ func (j *Job) CancelAndWait() {
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
 func (j *Job) GatherOne(ctx context.Context) (bool, error) {
-	return j.gatherOne(ctx, true, nil, nil)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.gatherOneAndDoTheWork(ctx, ctx)
+}
+
+func (j *Job) gatherOneAndDoTheWork(ctx, ctx2 context.Context) (bool, error) {
+	res, err := j.gatherOne(ctx, ctx2, state.Waiter{}, nil)
+	if res.Work != nil {
+		err = res.Work(ctx)
+	}
+	return res.GatheredOne, err
+}
+
+type gatherOneResult struct {
+	GatheredOne    bool
+	WaiterNotified bool
+	Work           workFunc
+}
+
+// Returns true if the waiter was notified or a non-nil boundGatherFunc if a result was gathered.
+func (j *Job) gatherOne(ctx, ctx2 context.Context, waiter state.Waiter, limitCh <-chan struct{}) (gatherOneResult, error) {
+	var res gatherOneResult
+	var err error
+	select {
+	case gather := <-j.gatherChan:
+		res.GatheredOne = true
+		res.Work = func(ctx context.Context) error {
+			return j.executeGather(ctx, gather)
+		}
+	case <-waiter.Done():
+		res.WaiterNotified = true
+	case <-limitCh:
+	case <-ctx.Done():
+		err = ctx.Err()
+	case <-ctx2.Done():
+		err = ctx2.Err()
+	case <-j.ctx.Done():
+		err = j.ctx.Err()
+	case <-j.state.Done():
+	}
+	return res, err
 }
 
 // TryGatherOne processes at most a single result from a task previously
@@ -184,50 +215,25 @@ func (j *Job) GatherOne(ctx context.Context) (bool, error) {
 //
 // See GatherOne for additional details.
 func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
-	return j.gatherOne(ctx, false, nil, nil)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.tryGatherOne(ctx, ctx)
 }
 
-func (j *Job) gatherOne(ctx context.Context, block bool, notifyCh <-chan struct{}, combinerCtx context.Context) (bool, error) {
-	var combinerCtxDone <-chan struct{}
-	if combinerCtx != nil {
-		combinerCtxDone = combinerCtx.Done()
-	}
-	if block {
-		select {
-		case gather := <-j.gatherChan:
-			if gather != nil {
-				return true, j.executeGather(ctx, gather)
-			}
-			return false, nil
-		case <-notifyCh:
-			return false, nil
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-j.ctx.Done():
-			return false, j.ctx.Err()
-		case <-combinerCtxDone:
-			return false, combinerCtx.Err()
-		case <-j.state.Done():
-			return false, nil
-		}
-	} else {
-		// Identical to the blocking branch above except replaces <-j.state.Done() with
-		// a default clause.
-		select {
-		case gather := <-j.gatherChan:
-			return true, j.executeGather(ctx, gather)
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-j.ctx.Done():
-			return false, j.ctx.Err()
-		case <-combinerCtxDone:
-			return false, combinerCtx.Err()
-		case <-j.state.Done():
-			return false, nil
-		default:
-			// There were no in-flight tasks ready to gather.
-			return false, nil
-		}
+func (j *Job) tryGatherOne(ctx, ctx2 context.Context) (bool, error) {
+	select {
+	case gather := <-j.gatherChan:
+		return true, j.executeGather(ctx, gather)
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-ctx2.Done():
+		return false, ctx2.Err()
+	case <-j.ctx.Done():
+		return false, j.ctx.Err()
+	case <-j.state.Done():
+		return false, nil
+	default:
+		// There were no in-flight tasks ready to gather.
+		return false, nil
 	}
 }
 
@@ -250,7 +256,8 @@ func (j *Job) gatherOne(ctx context.Context, block bool, notifyCh <-chan struct{
 // NOTE: This method will serially call each gathered task's [GatherFunc] and
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
-	return j.gatherAll(ctx, true)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.gatherAll(ctx, ctx, j.gatherOneAndDoTheWork)
 }
 
 // TryGatherAll processes all currently available task results without blocking.
@@ -264,12 +271,13 @@ func (j *Job) GatherAll(ctx context.Context) error {
 // NOTE: If completed tasks are available, this method must still call each
 // task's [GatherFunc] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
-	return j.gatherAll(ctx, false)
+	ctx = withDefaultBackpressureProvider(ctx, j)
+	return j.gatherAll(ctx, ctx, j.tryGatherOne)
 }
 
-func (j *Job) gatherAll(ctx context.Context, block bool) error {
+func (j *Job) gatherAll(ctx, ctx2 context.Context, gatherOne func(ctx, ctx2 context.Context) (bool, error)) error {
 	for {
-		ok, err := j.gatherOne(ctx, block, nil, nil)
+		ok, err := gatherOne(ctx, ctx2)
 		if err != nil {
 			return err
 		}
@@ -290,18 +298,6 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 // panicIfDone panics if the job is in the done state
 func (j *Job) panicIfDone() {
 	j.state.PanicIfDone()
-}
-
-// Wakes any goroutines that might be waiting on the gather channel.
-func (j *Job) wakeGatherers() {
-	for {
-		select {
-		case j.gatherChan <- nil:
-		default:
-			// No more waiters
-			return
-		}
-	}
 }
 
 // Close changes the job's state from open to closed, which allows it to eventually

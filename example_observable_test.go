@@ -29,12 +29,13 @@ func Example_observable() {
 	newTaskFunc := func(taskName string) psg.TaskFunc[string] {
 		return func(context.Context) (string, error) {
 			// Simulate latency
-			if taskName == "A" {
-				// Force A to finish last. Combined with the pool's concurrency
-				// limit this stabilizes the test output
-				time.Sleep(30 * time.Millisecond)
-			} else {
+			switch taskName {
+			case "A":
+				time.Sleep(60 * time.Millisecond)
+			case "B":
 				time.Sleep(10 * time.Millisecond)
+			case "C":
+				time.Sleep(30 * time.Millisecond)
 			}
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
@@ -47,7 +48,8 @@ func Example_observable() {
 	var results []string
 	gather := psg.NewGather(
 		func(ctx context.Context, result string, err error) error {
-			fmt.Printf("%3dms:   gathering result %q\n", msSinceStart(), result)
+			time.Sleep(10 * time.Millisecond)
+			fmt.Printf("%3dms:   gathered result %q\n", msSinceStart(), result)
 			// Safe because gatherFunc will only ever be called from the current
 			// goroutine within calls to Scatter and GatherAll below.
 			results = append(results, result)
@@ -72,6 +74,9 @@ func Example_observable() {
 		fmt.Printf("%3dms: launched task %q\n", msSinceStart(), taskName)
 	}
 
+	// Wait a bit to ensure stable output
+	time.Sleep(10 * time.Millisecond)
+
 	// Wait for all tasks to complete
 	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
 	err := job.CloseAndGatherAll(ctx)
@@ -90,14 +95,14 @@ func Example_observable() {
 	//   0ms: launched task "A"
 	//   0ms: launched task "B"
 	//  10ms:   task "B" complete
-	//  10ms:   gathering result "result for task B"
 	//  10ms: launched task "C"
-	//  10ms: gathering remaining tasks
-	//  20ms:   task "C" complete
-	//  20ms:   gathering result "result for task C"
-	//  30ms:   task "A" complete
-	//  30ms:   gathering result "result for task A"
-	//  30ms: gathering complete
+	//  20ms: gathering remaining tasks
+	//  30ms:   gathered result "result for task B"
+	//  40ms:   task "C" complete
+	//  50ms:   gathered result "result for task C"
+	//  60ms:   task "A" complete
+	//  70ms:   gathered result "result for task A"
+	//  70ms: gathering complete
 	// results[0]="result for task B"
 	// results[1]="result for task C"
 	// results[2]="result for task A"

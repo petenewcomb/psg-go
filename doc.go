@@ -22,3 +22,5 @@
 // synchronization barriers between stages and that neither over- nor
 // under-utilize multiple distinct groups of resources.
 package psg
+
+//go:generate go run -C internal/cmd/charts ./... ../../../bench.txt

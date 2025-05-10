@@ -14,29 +14,31 @@
 - [x] Implement RegisterFlusher mechanism with proper cleanup via unregister function
 
 ### 1.1. Explore using Pool for combiner task limiting
-- [ ] Investigate using Pool to limit combiner tasks instead of Combiner having its own limit
-- [ ] Consider pros/cons of combiners and regular tasks sharing a resource pool
-- [ ] Evaluate how this would affect backpressure behavior
-- [ ] Assess impact on API simplicity and usage patterns
+- [x] Investigate using Pool to limit combiner tasks instead of Combiner having its own limit
+- [x] Consider pros/cons of combiners and regular tasks sharing a resource pool
+- [x] Evaluate how this would affect backpressure behavior
+- [x] Assess impact on API simplicity and usage patterns
+- Conclusion: combiners and tasks must not share a resource pool as there's no way to reliably prevent deadlock
 
 ### 1.2. Explore other refactoring for implementation clarity 
 - [ ] make Pool only about resource limiting
-- [ ] clean up messy internal gatherOne interface
+- [x] clean up messy internal gatherOne interface
+- [ ] separate Pool-ness out from Combiner, allowing multiple combiners to share a concurrency limit
 
 ### 2. Flesh out test coverage for combiners
 - [x] Create Example_combiner test to demonstrate and document combiner behavior
 - [x] Create benchmarks comparing combiner vs. direct task approach with different batch sizes
 - [x] Benchmark with increasing numbers of tasks to identify optimal combiner settings
-- [ ] Add more unit tests for Combiner functionality
-- [ ] Include Combiner testing in the simulation test framework
-- [ ] Test edge cases like empty combiners, very large combiner pools
-- [ ] Verify proper integration with Job and Pool components
-- [ ] Test cancellation during various combiner operations
-- [ ] Add stress tests with high concurrency and rapid task creation/completion
+- [x] Add more unit tests for Combiner functionality
+- [x] Include Combiner testing in the simulation test framework
+- [x] Test edge cases like empty combiners, very large combiner pools
+- [x] Verify proper integration with Job and Pool components
+- [x] Test cancellation during various combiner operations
+- [x] Add stress tests with high concurrency and rapid task creation/completion
 - [ ] Test corner cases around combiner task lingering and timeout
 - [ ] Test Pool.SetLimit functionality with combiners, especially dynamic pool resizing
 - [ ] Ensure no goroutine leaks in any scenario
-- [ ] Test memory usage patterns for large combiner workloads
+- [x] Test memory usage patterns for large combiner workloads
 
 ### 3. Documentation updates
 - [x] Add Example_combiner test showing real-world use case with result aggregation
@@ -56,10 +58,10 @@
 ### 4. Performance optimization
 - [ ] Test automatic scaling of combiner task count based on workload
 - [ ] Implement and test SetLimit function for Combiner (similar to Pool.SetLimit)
-- [ ] Analyze whether buffer sizes on channels need tuning
-- [ ] Consider making delay parameters (spawnDelay, linger) configurable
-- [ ] Profile memory usage during heavy combiner operations
-- [ ] Add metrics/stats for monitoring combiner efficiency and utilization
+- [x] Analyze whether buffer sizes on channels need tuning
+- [ ] Make delay parameters (spawnDelay, linger) configurable
+- [x] Profile memory usage during heavy combiner operations
+- [x] Add metrics/stats for monitoring combiner efficiency and utilization
 - [x] Benchmark performance with various combiner configurations
 
 ### 5. API finalization
@@ -67,7 +69,7 @@
 - [ ] Consider what happens if the same Combiner is used to scatter tasks across pools from multiple different jobs, as is possible with Gather
 - [ ] Review Combiner constructor API for usability 
 - [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
-- [ ] Ensure consistent error handling across the API, especially when tasks fail
+- [x] Ensure consistent error handling across the API, especially when tasks fail
 - [ ] Expose configuration options for spawnDelay and linger parameters
 - [ ] Add WithXxx option methods if appropriate
 - [ ] Ensure all public types and methods have consistent naming

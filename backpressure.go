@@ -34,10 +34,10 @@ func withBackpressureProvider(ctx context.Context, bp backpressureProvider) cont
 	return context.WithValue(ctx, backpressureProviderContextValueKey, bp)
 }
 
-func withPoolBackpressureProvider(ctx context.Context, p *Pool) context.Context {
+func withTaskPoolBackpressureProvider(ctx context.Context, p *TaskPool) context.Context {
 	j := p.job
 	if j == nil {
-		panic("pool not bound to a job")
+		panic("task pool not bound to a job")
 	}
 	return withDefaultBackpressureProvider(ctx, j)
 }

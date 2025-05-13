@@ -9,16 +9,16 @@ import (
 
 func vetScatter[T any](
 	ctx context.Context,
-	pool *Pool,
+	taskPool *TaskPool,
 	taskFunc TaskFunc[T],
 ) {
 	if taskFunc == nil {
 		panic("task function must be non-nil")
 	}
 
-	j := pool.job
+	j := taskPool.job
 	if j == nil {
-		panic("pool not bound to a job")
+		panic("task pool not bound to a job")
 	}
 
 	if includesJob(ctx, j) {
@@ -35,12 +35,12 @@ func vetScatter[T any](
 
 func scatter[T any](
 	ctx context.Context,
-	pool *Pool,
+	taskPool *TaskPool,
 	taskFunc TaskFunc[T],
 	backpressureFunc backpressureFunc,
 	postResult func(T, error),
 ) (launched bool, err error) {
-	j := pool.job
+	j := taskPool.job
 
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
@@ -55,8 +55,8 @@ func scatter[T any](
 	}()
 
 	// Bind the task and gather functions together into a top-level function for
-	// the new goroutine and hand it to the pool to launch.
-	return pool.launch(ctx, backpressureFunc, func(ctx context.Context) {
+	// the new goroutine and hand it to the task pool to launch.
+	return taskPool.launch(ctx, backpressureFunc, func(ctx context.Context) {
 		// Don't launch if the context has been canceled by the time the
 		// goroutine starts.
 		if ctx.Err() != nil {
@@ -70,15 +70,15 @@ func scatter[T any](
 		// returning normally with whatever results they want to pass to the
 		// GatherFunc to represent the failure. We therefore do not defer
 		// posting a gather to the job's channel or otherwise attempt to
-		// maintain the integrity of the pool or overall job in case of task
+		// maintain the integrity of the task pool or overall job in case of task
 		// panics.
 		value, err := taskFunc(ctx)
 
-		// Decrement the pool's in-flight count BEFORE waiting on the gather
+		// Decrement the task pool's in-flight count BEFORE waiting on the gather
 		// channel. This makes it safe for gatherFunc to call `Scatter` with this
-		// same `Pool` instance without deadlock, as there is guaranteed to be at
+		// same `TaskPool` instance without deadlock, as there is guaranteed to be at
 		// least one slot available.
-		pool.decrementInFlight()
+		taskPool.decrementInFlight()
 
 		postResult(value, err)
 	})
@@ -86,7 +86,7 @@ func scatter[T any](
 
 // This function is designed to be called before scattering a new task to
 // preemptively gather or gather results from completed tasks. This smooths
-// execution and adds backpressure that enables operation with unlimited pools.
+// execution and adds backpressure that enables operation with unlimited task pools.
 // Gathering up to 2 here balances between catching up and pausing for too long
 // during a scatter.
 func yieldBeforeScatter(ctx, ctx2 context.Context, bp backpressureProvider) error {

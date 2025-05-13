@@ -40,7 +40,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Run digesting tasks in a Pool limited to the number of cores available to
 	// the program, since it should be CPU-bound.
-	digesterPool := psg.NewPool(runtime.NumCPU())
+	digesterPool := psg.NewTaskPool(runtime.NumCPU())
 	newDigestingTask := func(data []byte) psg.TaskFunc[[md5.Size]byte] {
 		return func(ctx context.Context) ([md5.Size]byte, error) {
 			return md5.Sum(data), nil
@@ -60,7 +60,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Allow many file reading tasks to run concurrently since they should be
 	// I/O-bound.
-	readerPool := psg.NewPool(100)
+	readerPool := psg.NewTaskPool(100)
 	newReadingTask := func(path string) psg.TaskFunc[[]byte] {
 		return func(ctx context.Context) ([]byte, error) {
 			return os.ReadFile(path)

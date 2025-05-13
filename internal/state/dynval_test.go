@@ -230,8 +230,8 @@ func TestDynamicValue_StressRaceDetection(t *testing.T) {
 
 	// Start readers
 	for id := 0; id < numReaders; id++ {
+		data := &readerData[id]
 		go func() {
-			data := &readerData[id]
 			defer func() {
 				data.endTime = time.Now()
 				readerWg.Done()
@@ -276,8 +276,8 @@ func TestDynamicValue_StressRaceDetection(t *testing.T) {
 
 	// Start writers
 	for id := 0; id < numWriters; id++ {
+		data := &writerData[id]
 		go func() {
-			data := &writerData[id]
 			defer func() {
 				data.endTime = time.Now()
 				writerWg.Done()
@@ -374,7 +374,7 @@ func TestDynamicValue_StressRaceDetection(t *testing.T) {
 	t.Logf("Min/Avg/Max unique values per reader: %d/%.1f/%d",
 		minObserved, float64(totalUniqueValues)/float64(numReaders), maxObserved)
 	t.Logf("Readers that saw initial zero value: %d of %d", totalWithZeroValues, numReaders)
-	t.Logf("Time overlap: readers and writers all ran concurrently for %v", readerWriterOverlap)
+	t.Logf("Time overlap: all readers and all writers ran concurrently for %v", readerWriterOverlap)
 
 	// Calculate percentage of total possible values that were observed collectively
 	totalPossibleValues := numWriters * iterations

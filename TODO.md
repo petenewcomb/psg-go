@@ -20,10 +20,11 @@
 - [x] Assess impact on API simplicity and usage patterns
 - Conclusion: combiners and tasks must not share a resource pool as there's no way to reliably prevent deadlock
 
-### 1.2. Explore other refactoring for implementation clarity 
-- [ ] make Pool only about resource limiting
+### 1.2. Explore other refactoring for implementation clarity
+- [x] make Pool only about resource limiting (renamed to TaskPool)
 - [x] clean up messy internal gatherOne interface
-- [ ] separate Pool-ness out from Combiner, allowing multiple combiners to share a concurrency limit
+- [x] separate Pool-ness out from Combiner, allowing multiple combiners to share a concurrency limit (implemented CombinerPool)
+- [x] initial refactoring of backpressure modes into abstracted provider pattern
 
 ### 2. Flesh out test coverage for combiners
 - [x] Create Example_combiner test to demonstrate and document combiner behavior
@@ -35,48 +36,66 @@
 - [x] Verify proper integration with Job and Pool components
 - [x] Test cancellation during various combiner operations
 - [x] Add stress tests with high concurrency and rapid task creation/completion
-- [ ] Test corner cases around combiner task lingering and timeout
-- [ ] Test Pool.SetLimit functionality with combiners, especially dynamic pool resizing
+- [ ] Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
+- [ ] Test automatic flushing behavior based on timeout settings
+- [ ] Test TaskPool.SetLimit and CombinerPool.SetLimit functionality, especially dynamic pool resizing
 - [ ] Ensure no goroutine leaks in any scenario
+- [ ] Add comprehensive tests for the new heap implementation
 - [x] Test memory usage patterns for large combiner workloads
 
 ### 3. Documentation updates
 - [x] Add Example_combiner test showing real-world use case with result aggregation
 - [x] Add job shutdown observability hooks
-- [ ] Add or update doc comments for all new/modified public APIs
-- [ ] Update README with information about the Combiner feature
+- [ ] Complete review and update of doc comments for all new/modified public APIs
+- [x] Document the new Combiner interface and FuncCombiner implementation
+- [x] Document the Combine type and its relationship with Gather
+- [x] Document CombinerPool and renamed TaskPool
+- [x] Document the configuration options (idleTimeout, minHoldTime, maxHoldTime, spawnDelay)
+- [x] Update documentation for configuration methods with standardized language
+- [ ] Update README with information about the new combining architecture
 - [ ] Add a Combiner example to the README Features section
 - [ ] Update CHANGELOG to document:
-  - [ ] Addition of Combiner type and functionality
+  - [ ] Refactoring of Combiner into interface
+  - [ ] Addition of CombinerPool type
+  - [ ] Renaming of Pool to TaskPool
+  - [ ] Implementation of time-based flushing with min/max hold times
+  - [ ] Implementation of callback-based emission pattern
   - [ ] Implementation of backpressure modes
   - [ ] Fix for deadlock in circular task dependencies
   - [ ] Improvements to notification system
-- [ ] Ensure example code properly demonstrates Combiner usage
-- [ ] Document the configuration options (spawnDelay, linger, etc.)
-- [ ] Create a playground example for the Combiner
+- [x] Ensure example code properly demonstrates new Combiner interface and Combine type
+- [ ] Create a playground example for the new combining architecture
 
 ### 4. Performance optimization
 - [ ] Test automatic scaling of combiner task count based on workload
-- [ ] Implement and test SetLimit function for Combiner (similar to Pool.SetLimit)
+- [x] Implement SetLimit function for both TaskPool and CombinerPool
+- [ ] Add tests for SetLimit functionality for both TaskPool and CombinerPool
 - [x] Analyze whether buffer sizes on channels need tuning
-- [ ] Make delay parameters (spawnDelay, linger) configurable
+- [x] Make delay parameters configurable (implemented idleTimeout, minHoldTime, maxHoldTime)
+- [x] Review and potentially adjust or remove spawnDelay parameter (implemented SetSpawnDelay)
 - [x] Profile memory usage during heavy combiner operations
 - [x] Add metrics/stats for monitoring combiner efficiency and utilization
 - [x] Benchmark performance with various combiner configurations
 
 ### 5. API finalization
 - [x] Improve JobState interface with RegisterFlusher pattern
-- [ ] Consider what happens if the same Combiner is used to scatter tasks across pools from multiple different jobs, as is possible with Gather
-- [ ] Review Combiner constructor API for usability 
+- [ ] Consider what happens if the same Combine is used to scatter tasks across pools from multiple different jobs, as is possible with Gather
+- [x] Refactor Combiner into interface and separate CombinerPool (renamed Pool to TaskPool)
+- [x] Implement callback-based emission pattern instead of boolean returns
+- [x] Create FuncCombiner for simpler functional implementations
+- [x] Implement Combine type to link Gather with Combiner instance
 - [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
 - [x] Ensure consistent error handling across the API, especially when tasks fail
-- [ ] Expose configuration options for spawnDelay and linger parameters
-- [ ] Add WithXxx option methods if appropriate
-- [ ] Ensure all public types and methods have consistent naming
-- [ ] Review and document thread-safety guarantees for all public APIs
+- [x] Expose configuration options for delay parameters (idleTimeout, minHoldTime, maxHoldTime, spawnDelay)
+- [ ] Examine further refactoring opportunities (moving contents of boundCombiner.CombineFunc and FlushFunc to proper methods)
+- [x] Ensure all public types and methods have consistent naming
+- [x] Update documentation for configuration methods with standardized language
+- [ ] Review and document thread-safety guarantees for remaining public APIs
 - [ ] Test and document behavior when tasks passed to combiners return errors
-- [ ] Should "Combiner" be "Combine" (noun->verb) to parallel "Gather" (which a verb; the noun form would be Gatherer) 
-- [ ] Should "Combine/Combiner" be built from a "Gather" and therefore not require a GatherFunc arg itself?
+- [x] Rename Combiner to reflect verb form (similar to Gather)
+- [x] Build Combine from a Gather instance to create natural task→combine→gather flow
+- [ ] Make task pools dynamically addable to a job (i.e., by taking a job as an argument to NewTaskPool) and remove the pools argument from NewJob
+- [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
 
 ### 6. Context propagation improvements
 - [ ] Modify gather/combiner functions to receive the task's context instead of the job context

@@ -13,7 +13,7 @@ import (
 )
 
 // Job represents a scatter-gather execution environment. It tracks tasks
-// launched with [Scatter] across a set of [Pool] instances and provides methods
+// launched with [Scatter] across a set of [TaskPool] instances and provides methods
 // for gathering their results. [Job.Cancel] and [Job.CancelAndWait] allow the
 // caller to terminate the environment early and ensure cleanup when the
 // environment is no longer needed.
@@ -23,7 +23,7 @@ import (
 type Job struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
-	pools      []*Pool
+	taskPools  []*TaskPool
 	gatherChan chan boundGatherFunc
 	wg         sync.WaitGroup
 	state      state.JobState
@@ -33,12 +33,12 @@ type Job struct {
 type boundGatherFunc = func(ctx context.Context) error
 
 // NewJob creates an independent scatter-gather execution environment with the
-// specified context and set of pools. The context passed to NewJob is used as
+// specified context and set of task pools. The context passed to NewJob is used as
 // the root of the context that will be passed to all task functions. (See
 // [TaskFunc] and [Job.Cancel] for more detail.)
 //
-// Pools may not be shared across jobs. NewJob panics if it detects such
-// sharing, but such detection is not guaranteed to work if the same pool is
+// TaskPools may not be shared across jobs. NewJob panics if it detects such
+// sharing, but such detection is not guaranteed to work if the same task pool is
 // passed to NewJob calls in different goroutines.
 //
 // Each call to NewJob should typically be followed by a deferred call to
@@ -46,20 +46,20 @@ type boundGatherFunc = func(ctx context.Context) error
 // does not leave any outstanding goroutines.
 func NewJob(
 	ctx context.Context,
-	pools ...*Pool,
+	taskPools ...*TaskPool,
 ) *Job {
 	ctx, cancelFunc := context.WithCancel(ctx)
 	j := &Job{
 		cancelFunc: cancelFunc,
-		pools:      slices.Clone(pools),
+		taskPools:  slices.Clone(taskPools),
 		gatherChan: make(chan boundGatherFunc),
 	}
 	j.state.Init()
 	j.timerPool.Init()
 	j.ctx = withJob(ctx, j)
-	for _, p := range j.pools {
+	for _, p := range j.taskPools {
 		if p.job != nil {
-			panic("pool was already registered")
+			panic("task pool was already registered")
 		}
 		p.job = j
 	}
@@ -114,7 +114,7 @@ func includesJob(ctx context.Context, j *Job) bool {
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
 // Outstanding calls to [Scatter], [Job.GatherOne], [Job.TryGatherOne],
-// [Job.GatherAll], or [Job.TryGatherAll] using the job or any of its pools will
+// [Job.GatherAll], or [Job.TryGatherAll] using the job or any of its task pools will
 // fail with [context.Canceled] or other error returned by a [GatherFunc].
 //
 // While Cancel always returns immediately, any running [TaskFunc] or
@@ -140,9 +140,9 @@ func (j *Job) CancelAndWait() {
 }
 
 // GatherOne processes at most a single result from a task previously launched
-// in one of the [Job]'s pools via [Scatter]. It will block until a completed
+// in one of the [Job]'s task pools via [Scatter]. It will block until a completed
 // task is available, the provided context or job is canceled, or another event
-// causes a wake-up (e.g. a call to [Pool.SetLimit]).
+// causes a wake-up (e.g. a call to [TaskPool.SetLimit]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
 // See [Job.TryGatherOne] for a non-blocking alternative.
 //
@@ -207,7 +207,7 @@ func (j *Job) gatherOne(ctx, ctx2 context.Context, waiter state.Waiter, limitCh 
 }
 
 // TryGatherOne processes at most a single result from a task previously
-// launched in one of the [Job]'s pools via [Scatter]. Unlike [Job.GatherOne], it
+// launched in one of the [Job]'s task pools via [Scatter]. Unlike [Job.GatherOne], it
 // will not block if a completed task is not immediately available.
 //
 // Return values are the same as GatherOne, except that false, nil means that

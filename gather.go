@@ -48,10 +48,10 @@ func NewGather[T any](
 // [Job.GatherAll], or [Job.TryGatherAll]).
 //
 // Scatter blocks to delay launch as needed to ensure compliance with the
-// concurrency limit for the given pool. This backpressure is applied by
+// concurrency limit for the given task pool. This backpressure is applied by
 // gathering other tasks in the job until the a slot becomes available. The
 // context passed to Scatter may be used to cancel (e.g., with a timeout) both
-// gathering and launch, but only the context associated with the pool's job
+// gathering and launch, but only the context associated with the task pool's job
 // will be passed to the task.
 //
 // WARNING: Scatter must not be called from within a TaskFunc launched the same
@@ -59,7 +59,7 @@ func NewGather[T any](
 // Instead, call Scatter from the associated GatherFunc after the TaskFunc
 // completes.
 //
-// Scatter will panic if the given pool is not yet associated with a job.
+// Scatter will panic if the given task pool is not yet associated with a job.
 // Scatter returns a non-nil error if the context is canceled or if a non-nil
 // error is returned by a gather function. If the returned error is non-nil, the
 // task function supplied to the call will not have been launched will therefore
@@ -68,10 +68,10 @@ func NewGather[T any](
 // See [TaskFunc] and [GatherFunc] for important caveats and additional detail.
 func (g *Gather[T]) Scatter(
 	ctx context.Context,
-	pool *Pool,
+	taskPool *TaskPool,
 	taskFunc TaskFunc[T],
 ) error {
-	launched, err := g.scatter(ctx, pool, true, taskFunc)
+	launched, err := g.scatter(ctx, taskPool, true, taskFunc)
 	if !launched && err == nil {
 		panic("task function was not launched, but no error was returned")
 	}
@@ -80,31 +80,31 @@ func (g *Gather[T]) Scatter(
 
 // TryScatter attempts to initiate asynchronous execution of the provided task
 // function in a new goroutine like [Scatter]. Unlike Scatter, TryScatter will
-// return instead of blocking if the given pool is already at its concurrency
+// return instead of blocking if the given task pool is already at its concurrency
 // limit.
 //
 // Returns (true, nil) if the task was successfully launched, (false, nil) if
-// the pool was at its limit, and (false, non-nil) if the task could not be
+// the task pool was at its limit, and (false, non-nil) if the task could not be
 // launched for any other reason.
 //
 // See Scatter for more detail about how scattering works.
 func (g *Gather[T]) TryScatter(
 	ctx context.Context,
-	pool *Pool,
+	taskPool *TaskPool,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	return g.scatter(ctx, pool, false, taskFunc)
+	return g.scatter(ctx, taskPool, false, taskFunc)
 }
 
 func (g *Gather[T]) scatter(
 	ctx context.Context,
-	pool *Pool,
+	taskPool *TaskPool,
 	block bool,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	vetScatter(ctx, pool, taskFunc)
+	vetScatter(ctx, taskPool, taskFunc)
 
-	j := pool.job
+	j := taskPool.job
 	ctx = withDefaultBackpressureProvider(ctx, j)
 	bp := getBackpressureProvider(ctx, j)
 
@@ -120,7 +120,7 @@ func (g *Gather[T]) scatter(
 		}
 	}
 
-	return scatter(ctx, pool, taskFunc, bpf, func(value T, err error) {
+	return scatter(ctx, taskPool, taskFunc, bpf, func(value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
 		gather := func(ctx context.Context) error {

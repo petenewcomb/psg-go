@@ -31,7 +31,7 @@ type GatherConfig struct {
 // Gather represents a simulated gather
 type Gather struct {
 	ID           int
-	GatherIndex  int
+	Index        int
 	Func         *Func
 	pathDuration time.Duration
 }
@@ -56,7 +56,7 @@ func (g *Gather) Format(fs fmt.State, verb rune) {
 
 func (g *Gather) Dump(fs fmt.State, indent string) {
 	name := fmt.Sprint(g)
-	_, _ = fmt.Fprintf(fs, "%s:\n%s", name, indent)
+	_, _ = fmt.Fprintf(fs, "%s: index=%d\n%s", name, g.Index, indent)
 	g.Func.Dump(fs, indent, name)
 	_, _ = fmt.Fprintf(fs, "\n%s%s ends at %v", indent, name, g.PathDuration())
 }

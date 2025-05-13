@@ -5,30 +5,28 @@ package psg
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/petenewcomb/psg-go/internal/state"
 )
 
-// A Pool defines a virtual set of task execution slots and optionally places a
-// limit on its size. Use [Scatter] to launch tasks into a Pool. A Pool must be
+// A TaskPool defines a virtual set of task execution slots and optionally places a
+// limit on its size. Use [Scatter] to launch tasks into a TaskPool. A TaskPool must be
 // bound to a [Job] before a task can be launched into it.
 //
-// The zero value of Pool is unbound and has a limit of zero. [NewPool]
+// The zero value of TaskPool is unbound and has a limit of zero. [NewTaskPool]
 // provides a convenient way to create a new pool with a non-zero limit.
-type Pool struct {
+type TaskPool struct {
 	concurrencyLimit state.DynamicValue[int]
 	job              *Job
 	inFlight         state.InFlightCounter
 	waiterQueue      state.WaiterQueue
 }
 
-// Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
+// Creates a new [TaskPool] with the given limit. See [TaskPool.SetLimit] for the range
 // of allowed values and their semantics.
-func NewPool(limit int) *Pool {
-	p := &Pool{}
+func NewTaskPool(limit int) *TaskPool {
+	p := &TaskPool{}
 	p.concurrencyLimit.Store(limit)
-	p.inFlight.Name = fmt.Sprintf("Pool(%p).inFlight", p)
 	return p
 }
 
@@ -36,12 +34,12 @@ func NewPool(limit int) *Pool {
 // limit (tasks will always be launched regardless of how many are currently
 // running). Zero means no new tasks will be launched (i.e., [Scatter] will block
 // indefinitely) until SetLimit is called with a non-zero value. SetLimit is
-// always thread-safe, even for a Pool in a single-threaded [Job].
-func (p *Pool) SetLimit(limit int) {
+// always thread-safe, even for a TaskPool in a single-threaded [Job].
+func (p *TaskPool) SetLimit(limit int) {
 	p.concurrencyLimit.Store(limit)
 }
 
-func (p *Pool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTaskFunc) (bool, error) {
+func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTaskFunc) (bool, error) {
 	j := p.job
 
 	// Don't launch if the provided context has been canceled.
@@ -108,7 +106,7 @@ type backpressureFunc func(ctx, ctx2 context.Context, waiter state.Waiter, limit
 
 type boundTaskFunc func(ctx context.Context)
 
-func (p *Pool) incrementInFlightIfUnder(limit int) bool {
+func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
 	switch {
 	case limit < 0:
 		p.inFlight.Increment()
@@ -120,7 +118,7 @@ func (p *Pool) incrementInFlightIfUnder(limit int) bool {
 	}
 }
 
-func (p *Pool) decrementInFlight() {
+func (p *TaskPool) decrementInFlight() {
 	limit, _ := p.concurrencyLimit.Load()
 	if p.inFlight.DecrementAndCheckIfUnder(limit) {
 		// Signal any waiting tasks

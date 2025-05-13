@@ -16,70 +16,73 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func Run(t require.TestingT, ctx context.Context, plan *Plan, debug bool) (map[*Plan]*Result, error) {
+func Run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error {
 	tp := &state.TimerPool{}
 	tp.Init()
-	return run(t, ctx, plan, debug, tp)
+	return run(ctx, t, plan, debug, tp)
 }
 
-func run(t require.TestingT, ctx context.Context, plan *Plan, debug bool, timerPool *state.TimerPool) (map[*Plan]*Result, error) {
-	pools := make([]*psg.Pool, len(plan.Pools))
-	for i, poolPlan := range plan.Pools {
-		pools[i] = psg.NewPool(poolPlan.ConcurrencyLimit)
+func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerPool *state.TimerPool) error {
+	taskPools := make([]*psg.TaskPool, len(plan.TaskPools))
+	for i, taskPoolPlan := range plan.TaskPools {
+		taskPools[i] = psg.NewTaskPool(taskPoolPlan.ConcurrencyLimit)
 
 	}
 	c := &controller{
-		Ctx:                  ctx,
-		Plan:                 plan,
-		Pools:                pools,
-		ConcurrencyByPool:    make([]atomic.Int64, len(pools)),
-		MaxConcurrencyByPool: make([]atomicMinMaxInt64, len(pools)),
-		Gathers:              make([]*psg.Gather[*taskResult], plan.GatherCount),
-		Combiners:            make([]*psg.Combiner[*taskResult, *taskResult], len(plan.Combiners)),
-		ResultMap:            make(map[*Plan]*Result),
-		Debug:                debug,
-		TimerPool:            timerPool,
+		Ctx:                          ctx,
+		Plan:                         plan,
+		TaskPools:                    taskPools,
+		ConcurrencyByTaskPool:        make([]atomic.Int64, len(taskPools)),
+		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(taskPools)),
+		Gathers:                      make([]*psg.Gather[*taskResult], plan.GatherCount),
+		Combines:                     make([]*psg.Combine[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
+		CombinerPools:                make([]*psg.CombinerPool, len(plan.CombinerPools)),
+		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
+		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
+		Debug:                        debug,
+		TimerPool:                    timerPool,
 	}
 	c.MinScatterDelay.Store(math.MaxInt64)
 	c.MinGatherDelay.Store(math.MaxInt64)
 	c.MinCombineDelay.Store(math.MaxInt64)
 	c.MinCombineGatherDelay.Store(math.MaxInt64)
-	return c.Run(t, ctx)
+	return c.Run(ctx, t)
 }
 
 type controller struct {
-	Ctx                   context.Context
-	Plan                  *Plan
-	Pools                 []*psg.Pool
-	ConcurrencyByPool     []atomic.Int64
-	MaxConcurrencyByPool  []atomicMinMaxInt64
-	GathersLock           sync.Mutex
-	Gathers               []*psg.Gather[*taskResult]
-	CombinersLock         sync.Mutex
-	Combiners             []*psg.Combiner[*taskResult, *taskResult]
-	GatheredCount         atomic.Int64
-	ResultMapMutex        sync.Mutex
-	ResultMap             map[*Plan]*Result
-	StartTime             time.Time
-	MinScatterDelay       atomicMinMaxInt64
-	MinGatherDelay        atomicMinMaxInt64
-	MinCombineDelay       atomicMinMaxInt64
-	MinCombineGatherDelay atomicMinMaxInt64
-	Debug                 bool
-	TimerPool             *state.TimerPool
+	Ctx                          context.Context
+	Plan                         *Plan
+	TaskPools                    []*psg.TaskPool
+	ConcurrencyByTaskPool        []atomic.Int64
+	MaxConcurrencyByTaskPool     []atomicMinMaxInt64
+	GathersLock                  sync.Mutex
+	Gathers                      []*psg.Gather[*taskResult]
+	CombinesLock                 sync.Mutex
+	Combines                     []*psg.Combine[*taskResult, *combineResult]
+	CombinerPools                []*psg.CombinerPool
+	ConcurrencyByCombinerPool    []atomic.Int64
+	MaxConcurrencyByCombinerPool []atomicMinMaxInt64
+	GatheredCount                atomic.Int64
+	StartTime                    time.Time
+	MinScatterDelay              atomicMinMaxInt64
+	MinGatherDelay               atomicMinMaxInt64
+	MinCombineDelay              atomicMinMaxInt64
+	MinCombineGatherDelay        atomicMinMaxInt64
+	Debug                        bool
+	TimerPool                    *state.TimerPool
 }
 
-func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Result, error) {
+func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 	c.StartTime = time.Now()
 	c.debugf("starting %v", c.Plan)
 
-	job := psg.NewJob(ctx, c.Pools...)
+	job := psg.NewJob(ctx, c.TaskPools...)
 	//defer job.CancelAndWait()
 
 	for _, step := range c.Plan.Steps {
 		switch step := step.(type) {
 		case Scatter:
-			c.scatterTask(t, ctx, step.Task)
+			c.scatterTask(ctx, t, step.Task)
 		default:
 			panic(fmt.Sprintf("unknown step type %T", step))
 		}
@@ -97,57 +100,40 @@ func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Re
 			chk.NoError(err)
 		}
 	}
-	overallDuration := time.Since(c.StartTime)
 
 	gatheredCount := c.GatheredCount.Load()
 	chk.Equal(int64(c.Plan.TaskCount), gatheredCount)
 
-	maxConcurrencyByPool := make([]int64, len(c.MaxConcurrencyByPool))
-	for i := range len(maxConcurrencyByPool) {
-		maxConcurrencyByPool[i] = c.MaxConcurrencyByPool[i].Load()
+	maxConcurrencyByTaskPool := make([]int64, len(c.MaxConcurrencyByTaskPool))
+	for i := range len(maxConcurrencyByTaskPool) {
+		maxConcurrencyByTaskPool[i] = c.MaxConcurrencyByTaskPool[i].Load()
 	}
 
-	c.addResultMap(t, map[*Plan]*Result{
-		c.Plan: {
-			MaxConcurrencyByPool: maxConcurrencyByPool,
-			OverallDuration:      overallDuration,
-		},
-	})
 	c.debugf("ended %v with min delays scatter=%v gather=%v combine=%v combineGather=%v", c.Plan,
 		time.Duration(c.MinScatterDelay.Load()),
 		time.Duration(c.MinGatherDelay.Load()),
 		time.Duration(c.MinCombineDelay.Load()),
 		time.Duration(c.MinCombineGatherDelay.Load()),
 	)
-	return c.ResultMap, nil
+	return nil
 }
 
-func (c *controller) addResultMap(t require.TestingT, rm map[*Plan]*Result) {
-	chk := require.New(t)
-	c.ResultMapMutex.Lock()
-	defer c.ResultMapMutex.Unlock()
-	for p, r := range rm {
-		chk.Nil(c.ResultMap[p])
-		c.ResultMap[p] = r
-	}
-}
-
-func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *Task) {
+func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *Task) {
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
 		gather := func() *psg.Gather[*taskResult] {
 			c.GathersLock.Lock()
 			defer c.GathersLock.Unlock()
-			gather := c.Gathers[rh.GatherIndex]
+			gather := c.Gathers[rh.Index]
 			if gather == nil {
 				gather = psg.NewGather(c.newGatherFunc(t))
-				c.Gathers[rh.GatherIndex] = gather
+				c.Gathers[rh.Index] = gather
 			}
 			return gather
 		}()
 		for {
-			err := gather.Scatter(ctx, c.Pools[task.PoolIndex],
-				c.newTaskFunc(task, &c.ConcurrencyByPool[task.PoolIndex]))
+			err := gather.Scatter(ctx, c.TaskPools[task.PoolIndex],
+				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break
 			}
@@ -159,24 +145,35 @@ func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *
 			}
 		}
 	case *Combine:
-		combiner := func() *psg.Combiner[*taskResult, *taskResult] {
-			c.CombinersLock.Lock()
-			defer c.CombinersLock.Unlock()
-			combiner := c.Combiners[rh.CombinerIndex]
-			if combiner == nil {
-				combiner = psg.NewCombiner(
-					c.Ctx,
-					c.Plan.Combiners[rh.CombinerIndex].ConcurrencyLimit,
-					c.newCombinerFactory(t),
-					c.newCombinerGatherFunc(t),
+		combine := func() *psg.Combine[*taskResult, *combineResult] {
+			c.CombinesLock.Lock()
+			defer c.CombinesLock.Unlock()
+			combine := c.Combines[rh.Index]
+			if combine == nil {
+				// Create a gather for the combiner output
+				gather := psg.NewGather(c.newCombinerGatherFunc(t))
+
+				combinerPoolIndex := c.Plan.CombinerPoolIndexes[rh.Index]
+				combinerPool := c.CombinerPools[combinerPoolIndex]
+				if combinerPool == nil {
+					// Create a combiner pool with the concurrency limit
+					combinerPool = psg.NewCombinerPool(c.Ctx, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit)
+					c.CombinerPools[combinerPoolIndex] = combinerPool
+				}
+
+				// Create a combine operation that uses the gather and factory
+				combine = psg.NewCombine(
+					gather,
+					combinerPool,
+					c.newCombinerFactory(t, rh.Index),
 				)
-				c.Combiners[rh.CombinerIndex] = combiner
+				c.Combines[rh.Index] = combine
 			}
-			return combiner
+			return combine
 		}()
 		for {
-			err := combiner.Scatter(ctx, c.Pools[task.PoolIndex],
-				c.newTaskFunc(task, &c.ConcurrencyByPool[task.PoolIndex]))
+			err := combine.Scatter(ctx, c.TaskPools[task.PoolIndex],
+				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break
 			}
@@ -192,70 +189,63 @@ func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *
 	}
 }
 
-type syncT struct {
-	mu    sync.Mutex
+type localT struct {
 	calls []func(require.TestingT)
 }
 
-func (st *syncT) Errorf(format string, args ...any) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.calls = append(st.calls, func(t require.TestingT) {
+func (lt *localT) Errorf(format string, args ...any) {
+	lt.calls = append(lt.calls, func(t require.TestingT) {
 		t.Errorf(format, args...)
 	})
 }
 
-func (st *syncT) FailNow() {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.calls = append(st.calls, func(t require.TestingT) {
+func (lt *localT) FailNow() {
+	lt.calls = append(lt.calls, func(t require.TestingT) {
 		t.FailNow()
 	})
-	panic(st)
+	panic(localTPanicType{})
 }
 
-func (st *syncT) DrainTo(t require.TestingT) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	for _, call := range st.calls {
+func (lt *localT) DrainTo(t require.TestingT) {
+	for _, call := range lt.calls {
 		call(t)
 	}
 }
 
-func (st *syncT) Error() string {
-	return "syncT passthrough error"
+type localTPanicType struct{}
+
+func recoverLocalTPanic(f func()) {
+	if r := recover(); r != nil {
+		if _, ok := r.(localTPanicType); ok {
+			if f != nil {
+				f()
+			}
+		} else {
+			panic(r)
+		}
+	}
 }
 
 func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.TaskFunc[*taskResult] {
-	lt := &syncT{}
 	scatterTime := time.Now()
 	return func(ctx context.Context) (res *taskResult, err error) {
 		c.MinScatterDelay.UpdateMin(int64(time.Since(scatterTime)))
-
-		defer func() {
-			if r := recover(); r != nil {
-				if lt, ok := r.(*syncT); ok {
-					err = lt
-				} else {
-					panic(r)
-				}
-			}
-		}()
-
-		chk := require.New(lt)
 
 		res = &taskResult{
 			Task:               task,
 			ConcurrencyAtStart: concurrency.Add(1),
 		}
+		defer recoverLocalTPanic(nil)
+
+		t := &res.T
+		chk := require.New(t)
+
 		c.debugf("starting %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAtStart)
 		chk.Greater(res.ConcurrencyAtStart, int64(0))
 		defer func() {
 			res.ConcurrencyAfter = concurrency.Add(-1)
 			c.debugf("ended %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAfter)
-			elapsedTime := time.Since(c.StartTime)
-			chk.GreaterOrEqual(elapsedTime, task.PathDuration())
-			res.TaskEndTime = time.Now()
+			res.EndTime = time.Now()
 		}()
 		timer := c.TimerPool.Get()
 		defer c.TimerPool.Put(timer)
@@ -271,9 +261,8 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 				}
 			case Subjob:
 				c.debugf("%v subjob %v", task, step.Plan)
-				resultMap, err := Run(lt, ctx, step.Plan, c.Debug)
+				err := run(ctx, t, step.Plan, c.Debug, c.TimerPool)
 				chk.NoError(err)
-				c.addResultMap(lt, resultMap)
 			default:
 				panic(fmt.Sprintf("unknown step type %T", step))
 			}
@@ -287,9 +276,11 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 }
 
 func (c *controller) newGatherFunc(t require.TestingT) psg.GatherFunc[*taskResult] {
-	chk := require.New(t)
-	return func(ctx context.Context, res *taskResult, err error) error {
-		c.MinGatherDelay.UpdateMin(int64(time.Since(res.TaskEndTime)))
+	return func(ctx context.Context, res *taskResult, err error) (retErr error) {
+		c.MinGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
+
+		res.T.DrainTo(t)
+		chk := require.New(t)
 
 		c.updateTaskStats(t, res, err)
 
@@ -311,97 +302,120 @@ func (c *controller) newGatherFunc(t require.TestingT) psg.GatherFunc[*taskResul
 	}
 }
 
-func (c *controller) newCombinerFactory(t require.TestingT) psg.CombinerFactory[*taskResult, *taskResult] {
-	chk := require.New(t)
-	return func() psg.CombinerFunc[*taskResult, *taskResult] {
-		return func(ctx context.Context, flush bool, res *taskResult, err error) (bool, *taskResult, error) {
-			if flush {
-				return false, nil, nil
-			}
+func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) psg.CombinerFactory[*taskResult, *combineResult] {
+	return func() psg.Combiner[*taskResult, *combineResult] {
+		cRes := &combineResult{}
+		flush := func(ctx context.Context, combine *Combine, err error, emit psg.CombinerEmitFunc[*combineResult]) {
+			cRes.Index = combineIndex
+			cRes.Combine = combine
+			cRes.EndTime = time.Now()
+			emit(ctx, cRes, err)
+			cRes = &combineResult{}
+		}
+		return psg.FuncCombiner[*taskResult, *combineResult]{
+			CombineFunc: func(ctx context.Context, tRes *taskResult, err error, emit psg.CombinerEmitFunc[*combineResult]) {
+				c.MinCombineDelay.UpdateMin(int64(time.Since(tRes.EndTime)))
 
-			c.MinCombineDelay.UpdateMin(int64(time.Since(res.TaskEndTime)))
+				defer recoverLocalTPanic(func() { flush(ctx, nil, nil, emit) })
+				t := &cRes.T
+				tRes.T.DrainTo(t)
+				chk := require.New(t)
 
-			c.updateTaskStats(t, res, err)
+				c.updateTaskStats(t, tRes, err)
 
-			task := res.Task
-			combine := task.ResultHandler.(*Combine)
+				task := tRes.Task
+				combine := task.ResultHandler.(*Combine)
 
-			if combine.FlushHandler == nil {
-				gatheredCount := c.GatheredCount.Add(1)
-				c.debugf("combining %v, gathered count now %d", task, gatheredCount)
-				chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
-			} else {
-				c.debugf("combining %v, not incrementing gathered count until flush", task)
-			}
+				if cRes.TaskCount == 0 {
+					cRes.Index = combine.Index
+				} else {
+					chk.Equal(cRes.Index, combine.Index)
+				}
 
-			if err := c.executeGatherOrCombineFunc(t, ctx, combine, combine.Func); err != nil {
-				return false, nil, err
-			}
-			emit := true
-			if combine.FlushHandler == nil {
-				emit = false
-				res = nil
-			}
-			if combine.Func.ReturnError {
-				return emit, res, ExpectedCombineError{combine}
-			} else {
-				return emit, res, nil
-			}
+				err = c.executeGatherOrCombineFunc(t, ctx, combine, combine.Func)
+				if err == nil && combine.Func.ReturnError {
+					err = ExpectedCombineError{combine}
+				}
+
+				cRes.TaskCount++
+
+				if combine.FlushHandler != nil || err != nil {
+					flush(ctx, combine, err, emit)
+				}
+			},
+			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[*combineResult]) {
+				if cRes.TaskCount > 0 {
+					flush(ctx, nil, nil, emit)
+				}
+			},
 		}
 	}
 }
 
-func (c *controller) newCombinerGatherFunc(t require.TestingT) psg.GatherFunc[*taskResult] {
-	return func(ctx context.Context, res *taskResult, err error) error {
-		if res == nil {
-			return nil
-		}
+func (c *controller) newCombinerGatherFunc(t require.TestingT) psg.GatherFunc[*combineResult] {
+	return func(ctx context.Context, res *combineResult, err error) error {
+		c.MinCombineGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
 
-		c.MinCombineGatherDelay.UpdateMin(int64(time.Since(res.TaskEndTime)))
-
+		res.T.DrainTo(t)
 		chk := require.New(t)
-		combine := res.Task.ResultHandler.(*Combine)
-		if st, ok := err.(*syncT); ok {
-			st.DrainTo(t)
-		} else if combine.Func.ReturnError {
-			chk.Error(err)
-		} else {
+
+		combine := res.Combine
+		if combine == nil {
+			// Flush independent of combine case (i.e., linger timeout or job shutdown)
 			chk.NoError(err)
+		} else {
+			// FlushHandler and/or combine error case
+			if combine.Func.ReturnError {
+				chk.Error(err)
+				if ce, ok := err.(ExpectedCombineError); ok {
+					chk.Equal(combine.Func, ce.Func)
+				} else {
+					chk.NoError(err)
+				}
+				err = nil // reset for return value
+			} else {
+				chk.NotNil(combine.FlushHandler)
+				chk.NoError(err)
+			}
+			if combine.FlushHandler != nil {
+				gather := combine.FlushHandler.(*Gather)
+				if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
+					return err
+				}
+				if gather.Func.ReturnError {
+					err = ExpectedGatherError{gather}
+				} else {
+					err = nil
+				}
+			}
 		}
 
-		gather := combine.FlushHandler.(*Gather)
-
-		gatheredCount := c.GatheredCount.Add(1)
-		c.debugf("gathering %v, gathered count now %d", combine, gatheredCount)
+		gatheredCount := c.GatheredCount.Add(int64(res.TaskCount))
+		c.debugf("gathering %d combined tasks from CombineIndex#%d, gathered count now %d", res.TaskCount, res.Index, gatheredCount)
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
 
-		if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
-			return err
-		}
-		if gather.Func.ReturnError {
-			return ExpectedGatherError{gather}
-		} else {
-			return nil
-		}
+		return err
 	}
 }
 
 func (c *controller) updateTaskStats(t require.TestingT, res *taskResult, err error) {
 	chk := require.New(t)
 	task := res.Task
-	if st, ok := err.(*syncT); ok {
-		st.DrainTo(t)
-	} else if task.Func.ReturnError {
+	if task.Func.ReturnError {
 		chk.Error(err)
 	} else {
 		chk.NoError(err)
 	}
-	pool := task.PoolIndex
+
+	taskPool := task.PoolIndex
 	chk.Greater(res.ConcurrencyAtStart, int64(0))
-	chk.LessOrEqual(res.ConcurrencyAtStart, int64(c.Plan.Pools[pool].ConcurrencyLimit))
+	chk.LessOrEqual(res.ConcurrencyAtStart, int64(c.Plan.TaskPools[taskPool].ConcurrencyLimit))
 	chk.GreaterOrEqual(res.ConcurrencyAfter, int64(0))
-	chk.Less(res.ConcurrencyAfter, int64(c.Plan.Pools[pool].ConcurrencyLimit))
-	c.MaxConcurrencyByPool[pool].UpdateMax(res.ConcurrencyAtStart)
+	chk.Less(res.ConcurrencyAfter, int64(c.Plan.TaskPools[taskPool].ConcurrencyLimit))
+	c.MaxConcurrencyByTaskPool[taskPool].UpdateMax(res.ConcurrencyAtStart)
+
+	elapsedTime := res.EndTime.Sub(c.StartTime)
+	chk.GreaterOrEqual(elapsedTime, task.PathDuration())
 }
 
 func (c *controller) executeGatherOrCombineFunc(t require.TestingT, ctx context.Context, rh ResultHandler, fn *Func) error {
@@ -420,12 +434,11 @@ func (c *controller) executeGatherOrCombineFunc(t require.TestingT, ctx context.
 			}
 		case Subjob:
 			c.debugf("%v subjob %v", rh, step.Plan)
-			resultMap, err := Run(t, ctx, step.Plan, c.Debug)
+			err := run(ctx, t, step.Plan, c.Debug, c.TimerPool)
 			chk.NoError(err)
-			c.addResultMap(t, resultMap)
 		case Scatter:
 			c.debugf("%v scatter %v", rh, step.Task)
-			c.scatterTask(t, ctx, step.Task)
+			c.scatterTask(ctx, t, step.Task)
 		default:
 			panic(fmt.Sprintf("unknown step type %T", step))
 		}
@@ -440,12 +453,22 @@ func (c *controller) debugf(format string, args ...interface{}) {
 	}
 }
 
-// Result represents the result of executing a simulated task.
+// taskResult represents the result of executing a simulated task.
 type taskResult struct {
+	T                  localT
 	Task               *Task
 	ConcurrencyAtStart int64
 	ConcurrencyAfter   int64
-	TaskEndTime        time.Time
+	EndTime            time.Time
+}
+
+// combineResult represents a result emitted by a simulated combiner.
+type combineResult struct {
+	T         localT
+	Index     int
+	Combine   *Combine
+	TaskCount int
+	EndTime   time.Time
 }
 
 type ExpectedGatherError struct {

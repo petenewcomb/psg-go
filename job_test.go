@@ -16,13 +16,13 @@ func TestJobBoundPoolPanic(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a pool
-	pool := psg.NewPool(1)
+	pool := psg.NewTaskPool(1)
 
 	// Bind it to a job
 	_ = psg.NewJob(ctx, pool)
 
 	// Try to bind it to another job
-	chk.PanicsWithValue("pool was already registered", func() {
+	chk.PanicsWithValue("task pool was already registered", func() {
 		_ = psg.NewJob(ctx, pool)
 	})
 }

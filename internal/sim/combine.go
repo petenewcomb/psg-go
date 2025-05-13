@@ -8,13 +8,8 @@ import (
 	"time"
 )
 
-type CombineConfig struct {
-	Func         FuncConfig
-	ScatterCount BiasedIntConfig
-	Flush        BiasedBoolConfig
-}
-
 var defaultCombineConfig = CombineConfig{
+	Count: BiasedIntConfig{Min: 1, Med: 5, Max: 20},
 	Func: FuncConfig{
 		SelfTime: BiasedDurationConfig{Min: 0, Med: 10 * time.Microsecond, Max: 10 * time.Millisecond},
 		Subjob: FuncSubjobConfig{
@@ -26,13 +21,20 @@ var defaultCombineConfig = CombineConfig{
 	Flush:        BiasedBoolConfig{Probability: 0.05},
 }
 
+type CombineConfig struct {
+	Count        BiasedIntConfig
+	Func         FuncConfig
+	ScatterCount BiasedIntConfig
+	Flush        BiasedBoolConfig
+}
+
 // Combine represents a simulated combine
 type Combine struct {
-	ID            int
-	CombinerIndex int
-	Func          *Func
-	FlushHandler  ResultHandler
-	pathDuration  time.Duration
+	ID           int
+	Index        int
+	Func         *Func
+	FlushHandler ResultHandler
+	pathDuration time.Duration
 }
 
 var _ ResultHandler = &Combine{}
@@ -55,7 +57,7 @@ func (c *Combine) Format(fs fmt.State, verb rune) {
 
 func (c *Combine) Dump(fs fmt.State, indent string) {
 	name := fmt.Sprint(c)
-	_, _ = fmt.Fprintf(fs, "%s:\n%s", name, indent)
+	_, _ = fmt.Fprintf(fs, "%s: index=%d flush=%v\n%s", name, c.Index, c.FlushHandler, indent)
 	c.Func.Dump(fs, indent, name)
 	_, _ = fmt.Fprintf(fs, "\n%s%s ends at %v", indent, name, c.PathDuration())
 }

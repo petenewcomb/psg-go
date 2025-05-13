@@ -19,26 +19,41 @@ import (
 func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	pool := psg.NewPool(1)
-	job := psg.NewJob(ctx, pool)
+	taskPool := psg.NewTaskPool(1)
+	job := psg.NewJob(ctx, taskPool)
 	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
-		gather := psg.NewCombiner(ctx, 1,
-			func() psg.CombinerFunc[int, int] {
-				return func(ctx context.Context, flush bool, value int, err error) (bool, int, error) {
-					chk.NoError(err)
-					return true, 0, nil
+		// Create a gather
+		gather := psg.NewGather(func(ctx context.Context, result int, err error) error {
+			chk.NoError(err)
+			return nil
+		})
+
+		// Create a combiner taskPool
+		combinerPool := psg.NewCombinerPool(ctx, 1)
+
+		// Create a combine operation
+		combine := psg.NewCombine(
+			gather,
+			combinerPool,
+			func() psg.Combiner[int, int] {
+				return psg.FuncCombiner[int, int]{
+					CombineFunc: func(ctx context.Context, value int, err error, emit psg.CombinerEmitFunc[int]) {
+						chk.NoError(err)
+						emit(ctx, 0, nil)
+					},
+					FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[int]) {
+						// No-op in this test
+					},
 				}
 			},
-			func(ctx context.Context, result int, err error) error {
-				chk.NoError(err)
-				return nil
-			},
 		)
-		_ = gather.Scatter(
+
+		// Should panic with nil task function
+		_ = combine.Scatter(
 			ctx,
-			pool,
+			taskPool,
 			nil, // Nil TaskFunc should panic
 		)
 	})
@@ -47,8 +62,8 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 func TestCombinerScatterNilGatherFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	pool := psg.NewPool(1)
-	job := psg.NewJob(ctx, pool)
+	taskPool := psg.NewTaskPool(1)
+	job := psg.NewJob(ctx, taskPool)
 	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("gather function must be non-nil", func() {
@@ -56,14 +71,14 @@ func TestCombinerScatterNilGatherFuncPanic(t *testing.T) {
 	})
 }
 
-func TestCombinerScatterPoolNotBoundPanic(t *testing.T) {
+func TestCombinerScatterTaskPoolNotBoundPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
-	// Create a pool but don't associate it with a job
-	pool := psg.NewPool(1)
+	// Create a task pool but don't associate it with a job
+	taskPool := psg.NewTaskPool(1)
 
-	chk.PanicsWithValue("pool not bound to a job", func() {
+	chk.PanicsWithValue("task pool not bound to a job", func() {
 		gather := psg.NewGather(
 			func(ctx context.Context, result int, err error) error {
 				return nil
@@ -71,7 +86,7 @@ func TestCombinerScatterPoolNotBoundPanic(t *testing.T) {
 		)
 		_ = gather.Scatter(
 			ctx,
-			pool,
+			taskPool,
 			func(ctx context.Context) (int, error) {
 				return 0, nil
 			},
@@ -82,8 +97,8 @@ func TestCombinerScatterPoolNotBoundPanic(t *testing.T) {
 func TestCombinerTryScatterNilTaskFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	pool := psg.NewPool(1)
-	job := psg.NewJob(ctx, pool)
+	taskPool := psg.NewTaskPool(1)
+	job := psg.NewJob(ctx, taskPool)
 	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
@@ -94,20 +109,20 @@ func TestCombinerTryScatterNilTaskFuncPanic(t *testing.T) {
 		)
 		_, _ = gather.TryScatter(
 			ctx,
-			pool,
+			taskPool,
 			nil, // Nil TaskFunc should panic
 		)
 	})
 }
 
-func TestCombinerTryScatterPoolNotBoundPanic(t *testing.T) {
+func TestCombinerTryScatterTaskPoolNotBoundPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
-	// Create a pool but don't associate it with a job
-	pool := psg.NewPool(1)
+	// Create a task pool but don't associate it with a job
+	taskPool := psg.NewTaskPool(1)
 
-	chk.PanicsWithValue("pool not bound to a job", func() {
+	chk.PanicsWithValue("task pool not bound to a job", func() {
 		gather := psg.NewGather(
 			func(ctx context.Context, result int, err error) error {
 				return nil
@@ -115,7 +130,7 @@ func TestCombinerTryScatterPoolNotBoundPanic(t *testing.T) {
 		)
 		_, _ = gather.TryScatter(
 			ctx,
-			pool,
+			taskPool,
 			func(ctx context.Context) (int, error) {
 				return 0, nil
 			},
@@ -126,8 +141,8 @@ func TestCombinerTryScatterPoolNotBoundPanic(t *testing.T) {
 func TestCombinerScatterFromTask(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	pool := psg.NewPool(1)
-	job := psg.NewJob(ctx, pool)
+	taskPool := psg.NewTaskPool(1)
+	job := psg.NewJob(ctx, taskPool)
 
 	gather := psg.NewGather(
 		func(ctx context.Context, result int, err error) error {
@@ -137,7 +152,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	)
 	err := gather.Scatter(
 		ctx,
-		pool,
+		taskPool,
 		func(ctx context.Context) (int, error) {
 			chk.PanicsWithValue("Scatter called from within TaskFunc; move call to GatherFunc instead", func() {
 				innerGather := psg.NewGather(
@@ -149,7 +164,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 				)
 				chk.NoError(innerGather.Scatter(
 					ctx,
-					pool,
+					taskPool,
 					func(ctx context.Context) (int, error) {
 						chk.Fail("should not get here")
 						return 0, nil
@@ -167,9 +182,9 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
-	// Create parent job with pool
-	parentPool := psg.NewPool(1)
-	parentJob := psg.NewJob(ctx, parentPool)
+	// Create parent job with task pool
+	parentTaskPool := psg.NewTaskPool(1)
+	parentJob := psg.NewJob(ctx, parentTaskPool)
 	defer parentJob.CancelAndWait()
 
 	// Variable to track execution flow
@@ -184,14 +199,14 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	)
 	err := gather.Scatter(
 		ctx,
-		parentPool,
+		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
 			// Create a sub-job inside the task
-			subPool := psg.NewPool(1)
-			subJob := psg.NewJob(ctx, subPool)
+			subTaskPool := psg.NewTaskPool(1)
+			subJob := psg.NewJob(ctx, subTaskPool)
 			defer subJob.CancelAndWait()
 
-			// This should succeed - scattering a task to the sub-job's pool
+			// This should succeed - scattering a task to the sub-job's task pool
 			gather := psg.NewGather(
 				func(ctx context.Context, result bool, err error) error {
 					chk.NoError(err)
@@ -201,7 +216,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 			)
 			err := gather.Scatter(
 				ctx,
-				subPool,
+				subTaskPool,
 				func(ctx context.Context) (bool, error) {
 					subJobTaskRan = true
 					return true, nil
@@ -227,9 +242,9 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
-	// Create parent job with pool
-	parentPool := psg.NewPool(1)
-	parentJob := psg.NewJob(ctx, parentPool)
+	// Create parent job with task pool
+	parentTaskPool := psg.NewTaskPool(1)
+	parentJob := psg.NewJob(ctx, parentTaskPool)
 	defer parentJob.CancelAndWait()
 
 	gather := psg.NewGather(
@@ -241,22 +256,22 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	)
 	err := gather.Scatter(
 		ctx,
-		parentPool,
+		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
-			// This should panic - attempting to scatter to the parent job's pool
+			// This should panic - attempting to scatter to the parent job's task pool
 			// while inside a task of that same job
 			innerGather := psg.NewGather(
 				func(ctx context.Context, result bool, err error) error {
-					chk.Fail("Should not get here - parent pool gather should not run")
+					chk.Fail("Should not get here - parent task pool gather should not run")
 					return nil
 				},
 			)
 			chk.PanicsWithValue("Scatter called from within TaskFunc; move call to GatherFunc instead", func() {
 				_ = innerGather.Scatter(
 					ctx,
-					parentPool,
+					parentTaskPool,
 					func(ctx context.Context) (bool, error) {
-						chk.Fail("Should not get here - parent pool task should not run")
+						chk.Fail("Should not get here - parent task pool task should not run")
 						return false, nil
 					},
 				)
@@ -341,8 +356,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						ctx, cancel := context.WithCancel(context.Background())
 						defer cancel()
 
-						pool := psg.NewPool(-1)
-						job := psg.NewJob(ctx, pool)
+						taskPool := psg.NewTaskPool(-1)
+						job := psg.NewJob(ctx, taskPool)
 						defer job.CancelAndWait()
 
 						type aggregatedResult struct {
@@ -377,25 +392,32 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						// Setup processing - either gather-only or with combiner
-						var scatter func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[time.Time]) error
+						var scatter func(ctx context.Context, taskPool *psg.TaskPool, task psg.TaskFunc[time.Time]) error
 						switch {
 						case combinerLimit < 0:
-							scatter = func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[time.Time]) error {
+							scatter = func(ctx context.Context, taskPool *psg.TaskPool, task psg.TaskFunc[time.Time]) error {
 								value, err := task(ctx)
 								return gatherFuncAdapter(ctx, value, err)
 							}
 						case combinerLimit == 0:
 							scatter = psg.NewGather(gatherFuncAdapter).Scatter
 						default:
-							newCombinerFunc := func() psg.CombinerFunc[time.Time, aggregatedResult] {
+							gather := psg.NewGather(gatherFunc)
+							combinerPool := psg.NewCombinerPool(ctx, combinerLimit)
+							combine := psg.NewCombine(gather, combinerPool, func() psg.Combiner[time.Time, aggregatedResult] {
 								var combinedResult aggregatedResult
 								nextFlushTime := time.Now().Add(flushPeriod)
-								return func(ctx context.Context, flush bool, value time.Time, err error) (bool, aggregatedResult, error) {
-									if err != nil {
-										return true, aggregatedResult{}, err
-									}
+								flush := func(ctx context.Context, emit psg.CombinerEmitFunc[aggregatedResult]) {
+									emit(ctx, combinedResult, nil)
+									combinedResult = aggregatedResult{}
+									nextFlushTime = time.Now().Add(flushPeriod)
+								}
+								return psg.FuncCombiner[time.Time, aggregatedResult]{
+									CombineFunc: func(ctx context.Context, value time.Time, err error, emit psg.CombinerEmitFunc[aggregatedResult]) {
+										if err != nil {
+											emit(ctx, aggregatedResult{}, err)
+										}
 
-									if !flush {
 										workStartTime := time.Now()
 										simulateWork(workloadDuration)
 										combinedResult.Time = time.Now()
@@ -404,23 +426,15 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 										timeSinceValue := combinedResult.Time.Sub(value)
 										combinedResult.LatencySum += timeSinceValue
 										combinedResult.LatencyMax = max(combinedResult.LatencyMax, timeSinceValue)
-									}
-
-									now := time.Now()
-									if flush || now.After(nextFlushTime) {
-										resultToFlush := combinedResult
-										combinedResult = aggregatedResult{}
-										nextFlushTime = now.Add(flushPeriod)
-										return true, resultToFlush, nil
-									}
-
-									return false, aggregatedResult{}, nil
+										if time.Now().After(nextFlushTime) {
+											flush(ctx, emit)
+										}
+									},
+									FlushFunc: flush,
 								}
-							}
-
-							combiner := psg.NewCombiner(ctx, combinerLimit, newCombinerFunc, gatherFunc)
-							scatter = func(ctx context.Context, pool *psg.Pool, task psg.TaskFunc[time.Time]) error {
-								if err := combiner.Scatter(ctx, pool, task); err != nil {
+							})
+							scatter = func(ctx context.Context, taskPool *psg.TaskPool, task psg.TaskFunc[time.Time]) error {
+								if err := combine.Scatter(ctx, taskPool, task); err != nil {
 									return err
 								}
 								return nil
@@ -435,7 +449,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 						var tasksLaunched int64
 						op := func() {
-							if err := scatter(ctx, pool, taskFunc); err != nil {
+							if err := scatter(ctx, taskPool, taskFunc); err != nil {
 								b.Fatalf("Error: %v", err)
 							}
 							tasksLaunched++

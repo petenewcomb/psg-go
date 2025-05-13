@@ -20,7 +20,7 @@ import (
 //nolint:errcheck
 func Example_hello() {
 	ctx := context.Background()
-	pool := psg.NewPool(2)
+	pool := psg.NewTaskPool(2)
 	job := psg.NewJob(ctx, pool)
 	defer job.CancelAndWait() // hygiene
 

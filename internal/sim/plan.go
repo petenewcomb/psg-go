@@ -12,16 +12,17 @@ import (
 )
 
 type Plan struct {
-	ID              int
-	Pools           []Pool
-	GatherCount     int
-	Combiners       []Combiner
-	Steps           []Step
-	SubjobCount     int
-	SubjobTaskCount int
-	PathCount       int
-	TaskCount       int
-	MaxPathDuration time.Duration
+	ID                  int
+	PathCount           int
+	Steps               []Step
+	MaxPathDuration     time.Duration
+	TaskCount           int
+	CombinerPoolIndexes []int
+	GatherCount         int
+	SubjobCount         int
+	SubjobTaskCount     int
+	TaskPools           []TaskPool
+	CombinerPools       []CombinerPool
 }
 
 // NewPlan creates a hierarchy of simulated tasks for testing.
@@ -31,10 +32,10 @@ func NewPlan(t *rapid.T, config *Config) *Plan {
 }
 
 type idCounters struct {
-	Plan     int
-	Pool     int
-	Combiner int
-	Task     int
+	Plan         int
+	TaskPool     int
+	CombinerPool int
+	Task         int
 }
 
 func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
@@ -47,30 +48,36 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 
 	nextIDsOrigin := *nextIDs
 
-	poolConfig := &planConfig.Pool
-	plan.Pools = make([]Pool, poolConfig.Count.Draw(t, planName+".PoolCount"))
-	for i := range plan.Pools {
-		poolID := nextIDs.Pool
-		nextIDs.Pool++
-		poolName := fmt.Sprintf("Pool#%d", poolID)
-		plan.Pools[i] = Pool{
-			ID:               poolID,
-			ConcurrencyLimit: poolConfig.ConcurrencyLimit.Draw(t, poolName+".ConcurrencyLimit"),
+	taskPoolConfig := &planConfig.TaskPool
+	plan.TaskPools = make([]TaskPool, taskPoolConfig.Count.Draw(t, planName+".TaskPoolCount"))
+	for i := range plan.TaskPools {
+		taskPoolID := nextIDs.TaskPool
+		nextIDs.TaskPool++
+		taskPoolName := fmt.Sprintf("TaskPool#%d", taskPoolID)
+		plan.TaskPools[i] = TaskPool{
+			ID:               taskPoolID,
+			ConcurrencyLimit: taskPoolConfig.ConcurrencyLimit.Draw(t, taskPoolName+".ConcurrencyLimit"),
 		}
 	}
 
 	plan.GatherCount = planConfig.Gather.Count.Draw(t, planName+".GatherCount")
 
-	combinerConfig := &planConfig.Combiner
-	plan.Combiners = make([]Combiner, combinerConfig.Count.Draw(t, planName+".CombinerCount"))
-	for i := range plan.Combiners {
-		combinerID := nextIDs.Combiner
-		nextIDs.Combiner++
-		combinerName := fmt.Sprintf("Combiner#%d", combinerID)
-		plan.Combiners[i] = Combiner{
-			ID:               combinerID,
-			ConcurrencyLimit: combinerConfig.ConcurrencyLimit.Draw(t, combinerName+".ConcurrencyLimit"),
+	combinerPoolConfig := &planConfig.CombinerPool
+	plan.CombinerPools = make([]CombinerPool, combinerPoolConfig.Count.Draw(t, planName+".CombinerPoolCount"))
+	for i := range plan.CombinerPools {
+		combinerPoolID := nextIDs.CombinerPool
+		nextIDs.CombinerPool++
+		combinerPoolName := fmt.Sprintf("CombinerPool#%d", combinerPoolID)
+		plan.CombinerPools[i] = CombinerPool{
+			ID:               combinerPoolID,
+			ConcurrencyLimit: combinerPoolConfig.ConcurrencyLimit.Draw(t, combinerPoolName+".ConcurrencyLimit"),
 		}
+	}
+
+	combineConfig := &planConfig.Combine
+	plan.CombinerPoolIndexes = make([]int, combineConfig.Count.Draw(t, planName+".CombineCount"))
+	for i := range plan.CombinerPoolIndexes {
+		plan.CombinerPoolIndexes[i] = rapid.IntRange(0, len(plan.CombinerPools)-1).Draw(t, fmt.Sprintf("CombineIndex#%d.PoolIndex", i))
 	}
 
 	plan.PathCount = planConfig.Path.Count.Draw(t, planName+".PathCount")
@@ -145,7 +152,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		taskName := fmt.Sprintf("Task#%d", id)
 		return &Task{
 			ID:            id,
-			PoolIndex:     rapid.IntRange(0, len(plan.Pools)-1).Draw(t, taskName+".PoolIndex"),
+			PoolIndex:     rapid.IntRange(0, len(plan.TaskPools)-1).Draw(t, taskName+".PoolIndex"),
 			Func:          newFunc(taskName, &planConfig.Task.Func, nil),
 			ResultHandler: resultHandler,
 		}
@@ -154,9 +161,9 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 	newGather := func(id int, paths []*Path) *Gather {
 		gatherName := fmt.Sprintf("Gather#%d", id)
 		return &Gather{
-			ID:          id,
-			GatherIndex: rapid.IntRange(0, plan.GatherCount-1).Draw(t, gatherName+".GatherIndex"),
-			Func:        newFunc(gatherName, &planConfig.Gather.Func, paths),
+			ID:    id,
+			Index: rapid.IntRange(0, plan.GatherCount-1).Draw(t, gatherName+".Index"),
+			Func:  newFunc(gatherName, &planConfig.Gather.Func, paths),
 		}
 	}
 
@@ -169,10 +176,10 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 			paths = paths[flushScatterCount:]
 		}
 		return &Combine{
-			ID:            id,
-			CombinerIndex: rapid.IntRange(0, len(plan.Combiners)-1).Draw(t, combineName+".CombinerIndex"),
-			Func:          newFunc(combineName, &planConfig.Combine.Func, paths),
-			FlushHandler:  flush,
+			ID:           id,
+			Index:        rapid.IntRange(0, len(plan.CombinerPoolIndexes)-1).Draw(t, combineName+".Index"),
+			Func:         newFunc(combineName, &planConfig.Combine.Func, paths),
+			FlushHandler: flush,
 		}
 	}
 
@@ -335,6 +342,15 @@ func (p *Plan) Dump(fs fmt.State, indent string) {
 	name := fmt.Sprint(p)
 	_, _ = fmt.Fprintf(fs, "%s: pathCount=%d taskCount=%d maxPathDuration=%v", name, p.PathCount, p.TaskCount, p.MaxPathDuration)
 	var t time.Duration
+	for i, tp := range p.TaskPools {
+		_, _ = fmt.Fprintf(fs, "\n%s   TaskPools[%d]: %#v", indent, i, &tp)
+	}
+	for i, cp := range p.CombinerPools {
+		_, _ = fmt.Fprintf(fs, "\n%s   CombinerPools[%d]: %#v", indent, i, &cp)
+	}
+	for i, cpi := range p.CombinerPoolIndexes {
+		_, _ = fmt.Fprintf(fs, "\n%s   Combiners[%d]: pool=%d", indent, i, cpi)
+	}
 	for i, s := range p.Steps {
 		_, _ = fmt.Fprintf(fs, "\n%s%s step %d/%d (+%v): ", indent, name, i+1, len(p.Steps)+1, t)
 		s.Dump(fs, indent)

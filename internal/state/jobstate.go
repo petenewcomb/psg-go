@@ -4,7 +4,6 @@
 package state
 
 import (
-	"fmt"
 	"sync/atomic"
 )
 
@@ -43,8 +42,6 @@ func (js *JobState) Init() {
 	js.currentStage.Store(int32(stageOpen))
 	js.nextFlushChan.Store(make(chan struct{}))
 	js.doneChan = make(chan struct{})
-	js.inFlightTasks.Name = fmt.Sprintf("JobState(%p).inFlightTasks", js)
-	js.inFlightTotal.Name = fmt.Sprintf("JobState(%p).inFlightTotal", js)
 }
 
 // IncrementTasks increments both the task counter and total counter

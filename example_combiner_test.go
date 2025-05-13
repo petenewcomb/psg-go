@@ -14,9 +14,9 @@ import (
 	psg "github.com/petenewcomb/psg-go"
 )
 
-// Example_combiner demonstrates how combiners can efficiently aggregate
+// Example_combine demonstrates how combiners can efficiently aggregate
 // results from multiple tasks before emitting a combined result.
-func ExampleNewCombiner() {
+func ExampleNewCombine() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 10ms to make the output stable across runs
@@ -37,37 +37,51 @@ func ExampleNewCombiner() {
 		}
 	}
 
-	// Define a factory to create new aggregation environments
-	newCombinerFunc := func() psg.CombinerFunc[string, map[string]int] {
-
-		// Aggregation state variable captured by the returned closure
+	newCombiner := func() psg.Combiner[string, map[string]int] {
+		// Aggregation state variable shared between combine and flush
 		var counts map[string]int
 
-		return func(ctx context.Context, flush bool, result string, err error) (bool, map[string]int, error) {
-			if flush {
+		return psg.FuncCombiner[string, map[string]int]{
+			CombineFunc: func(ctx context.Context, result string, err error, emit psg.CombinerEmitFunc[map[string]int]) {
+				time.Sleep(10 * time.Millisecond)
+				if counts == nil {
+					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
+					counts = make(map[string]int)
+				}
+				counts[result]++
+				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
+			},
+			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[map[string]int]) {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-				c := counts
-				counts = nil
-				return true, c, nil
-			}
-			time.Sleep(10 * time.Millisecond)
-			if counts == nil {
-				fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
-				counts = make(map[string]int)
-			}
-			counts[result]++
-			fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
-			return false, nil, nil
+				if counts != nil {
+					emit(ctx, counts, nil)
+					counts = nil
+				}
+			},
 		}
+	}
+
+	// Define the results array
+	var results []map[string]int
+
+	gatherFunc := func(ctx context.Context, result map[string]int, err error) error {
+		fmt.Printf("%3dms:   gathering result counts: %v\n", msSinceStart(), result)
+		// Safe because gatherFunc will only ever be called from the current
+		// goroutine within calls to Scatter and GatherAll below.
+		results = append(results, result)
+		return err
 	}
 
 	ctx := context.Background()
 
 	// Create a task pool with concurrency limit 2
-	pool := psg.NewPool(2)
+	taskPool := psg.NewTaskPool(2)
 
-	// Create a scatter-gather job with the above pool
-	job := psg.NewJob(ctx, pool)
+	// Create a combiner pool with concurrency limit 1
+	combinerPool := psg.NewCombinerPool(ctx, 1)
+
+	// Create a scatter-gather job with the above task pool
+	job := psg.NewJob(ctx, taskPool)
 	defer job.CancelAndWait()
 
 	// Set a flush listener to observe when all tasks have completed
@@ -75,17 +89,11 @@ func ExampleNewCombiner() {
 		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
 	})
 
-	// Define a result aggregation function using a Combiner that counts result occurrences
-	var results []map[string]int
-	resultCounter := psg.NewCombiner(ctx, 1, newCombinerFunc,
-		func(ctx context.Context, result map[string]int, err error) error {
-			fmt.Printf("%3dms:   gathering result counts: %v\n", msSinceStart(), result)
-			// Safe because gatherFunc will only ever be called from the current
-			// goroutine within calls to Scatter and GatherAll below.
-			results = append(results, result)
-			return err
-		},
-	)
+	// Define a result aggregation function and create a combined gather/combine operation
+	gather := psg.NewGather(gatherFunc)
+
+	// Create a Combine operation with the gather function and inline combiner factory
+	combine := psg.NewCombine(gather, combinerPool, newCombiner)
 
 	// Launch some tasks
 	fmt.Println("starting job")
@@ -99,7 +107,7 @@ func ExampleNewCombiner() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, combine at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, combine at 100ms
 	} {
-		err := resultCounter.Scatter(ctx, pool, newTask(i+1, spec.delay, spec.result))
+		err := combine.Scatter(ctx, taskPool, newTask(i+1, spec.delay, spec.result))
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

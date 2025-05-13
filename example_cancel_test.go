@@ -18,7 +18,7 @@ func ExampleJob_Cancel() {
 
 	ctx := context.Background()
 
-	pool := psg.NewPool(1)
+	pool := psg.NewTaskPool(1)
 	job := psg.NewJob(ctx, pool)
 
 	// This is the standard deferred call to Job.CancelAndWait that should
@@ -88,7 +88,7 @@ func ExampleJob_Cancel_task() {
 
 	ctx := context.Background()
 
-	pool := psg.NewPool(1)
+	pool := psg.NewTaskPool(1)
 	job := psg.NewJob(ctx, pool)
 
 	// This is the standard deferred call to Job.CancelAndWait that should

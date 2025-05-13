@@ -33,7 +33,7 @@ func TestBySimulation(t *testing.T) {
 		simulationStart := time.Now()
 		ctx := context.Background()
 		chk := require.New(t)
-		_, err := sim.Run(t, ctx, plan, debug)
+		err := sim.Run(ctx, t, plan, debug)
 		chk.NoError(err)
 		t.Logf("simulation time: %v", time.Since(simulationStart))
 	})

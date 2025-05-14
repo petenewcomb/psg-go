@@ -23,4 +23,4 @@
 // under-utilize multiple distinct groups of resources.
 package psg
 
-//go:generate go run -C internal/cmd/charts ./... ../../../bench.txt
+//go:generate go run -C internal/cmd/chartgen ./... ../../../bench.txt

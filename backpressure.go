@@ -17,13 +17,13 @@ type backpressureProvider interface {
 	// was completed or false if none were available. Returns an error if the
 	// existing activity should be aborted (for instance because a context is
 	// canceled).
-	Yield(ctx, ctx2 context.Context) (bool, error)
+	Yield(ctx context.Context) (bool, error)
 
 	// Returns true when the block was ended by a waiter notification or a
 	// non-nil work function if the block was ended by work being available.
 	// Returns an error if the existing activity should be aborted (for instance
 	// because a context is canceled).
-	Block(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error)
+	Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error)
 }
 
 type backpressureProviderContextValueType struct{}
@@ -45,7 +45,7 @@ func withTaskPoolBackpressureProvider(ctx context.Context, p *TaskPool) context.
 func withDefaultBackpressureProvider(ctx context.Context, j *Job) context.Context {
 	switch bp := ctx.Value(backpressureProviderContextValueKey).(type) {
 	case nil:
-		if j == nil || includesJob(ctx, j) {
+		if j == nil || includesJob(ctx, j, jobContextValueKey) {
 			panic("no psg backpressure provider available")
 		}
 	case backpressureProvider:
@@ -74,12 +74,12 @@ func (bp defaultBackpressureProvider) ForJob(j *Job) bool {
 	return bp.j == j
 }
 
-func (bp defaultBackpressureProvider) Yield(ctx, ctx2 context.Context) (bool, error) {
-	return bp.j.tryGatherOne(ctx, ctx2)
+func (bp defaultBackpressureProvider) Yield(ctx context.Context) (bool, error) {
+	return bp.j.tryGatherOne(ctx)
 }
 
-func (bp defaultBackpressureProvider) Block(ctx, ctx2 context.Context, waiter state.Waiter, limitCh <-chan struct{}) (blockResult, error) {
-	res, err := bp.j.gatherOne(ctx, ctx2, waiter, limitCh)
+func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (blockResult, error) {
+	res, err := bp.j.gatherOne(ctx, waiter, limitCh)
 	return blockResult{
 		WaiterNotified: res.WaiterNotified,
 		Work:           res.Work,

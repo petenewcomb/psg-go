@@ -108,19 +108,19 @@ func (g *Gather[T]) scatter(
 	ctx = withDefaultBackpressureProvider(ctx, j)
 	bp := getBackpressureProvider(ctx, j)
 
-	if err := yieldBeforeScatter(ctx, ctx, bp); err != nil {
+	if err := yieldBeforeScatter(ctx, bp); err != nil {
 		return false, err
 	}
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
-			res, err := bp.Block(ctx, ctx2, waiter, limitChangeCh)
+		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
+			res, err := bp.Block(ctx, waiter, limitChangeCh)
 			return res.Work, err
 		}
 	}
 
-	return scatter(ctx, taskPool, taskFunc, bpf, func(value T, err error) {
+	return scatter(ctx, taskPool, taskFunc, bpf, func(ctx context.Context, value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
 		gather := func(ctx context.Context) error {

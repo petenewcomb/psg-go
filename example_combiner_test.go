@@ -82,7 +82,7 @@ func ExampleNewCombine() {
 	taskPool := psg.NewTaskPool(job, 2)
 
 	// Create a combiner pool with concurrency limit 1
-	combinerPool := psg.NewCombinerPool(ctx, 1)
+	combinerPool := psg.NewCombinerPool(job, 1)
 
 	// Set a flush listener to observe when all tasks have completed
 	job.SetFlushListener(func() {

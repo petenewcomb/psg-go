@@ -43,6 +43,14 @@
 - [ ] Add comprehensive tests for the new heap implementation
 - [x] Test memory usage patterns for large combiner workloads
 
+### 2.1. Post-CombinerPool Refactoring Tests
+- [ ] Test job-binding of CombinerPool, including invalid cases
+- [ ] Test panic recovery in combiners (simulate panics in Combine and Flush)
+- [ ] Test edge cases with cross-job context propagation
+- [ ] Test behavior when combiner factory panics
+- [ ] Test cleanup behavior with mixed TaskPool and CombinerPool operations
+- [ ] Add tests verifying proper shutdown sequence and resource cleanup
+
 ### 3. Documentation updates
 - [x] Add Example_combiner test showing real-world use case with result aggregation
 - [x] Add job shutdown observability hooks
@@ -79,7 +87,7 @@
 
 ### 5. API finalization
 - [x] Improve JobState interface with RegisterFlusher pattern
-- [ ] Consider what happens if the same Combine is used to scatter tasks across pools from multiple different jobs, as is possible with Gather
+- [x] Consider what happens if the same Combine is used to scatter tasks across pools from multiple different jobs, as is possible with Gather (resolved by binding CombinerPool to Job)
 - [x] Refactor Combiner into interface and separate CombinerPool (renamed Pool to TaskPool)
 - [x] Implement callback-based emission pattern instead of boolean returns
 - [x] Create FuncCombiner for simpler functional implementations
@@ -96,6 +104,16 @@
 - [x] Build Combine from a Gather instance to create natural task→combine→gather flow
 - [x] Make task pools dynamically addable to a job (i.e., by taking a job as an argument to NewTaskPool) and remove the pools argument from NewJob
 - [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
+
+### 5.1. Post-CombinerPool Refactoring Enhancements
+- [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext)
+- [ ] Standardize field naming between TaskPool and CombinerPool for consistency (e.g., liveCount vs. liveGoroutineCount)
+- [ ] Verify cross-job Gather safety similar to Combine cross-job safety
+- [ ] Add panic recovery for combiner factory creation
+- [ ] Review race conditions during job shutdown and combiner flushing
+- [ ] Ensure zero-value safety for CombinerPool (panic or validation)
+- [ ] Review potential deadlocks during cleanup, especially with combiners
+- [ ] Update NewCombinerPool documentation to clarify Job binding
 
 ### 6. Context propagation improvements
 - [ ] Modify gather/combiner functions to receive the task's context instead of the job context

@@ -21,7 +21,7 @@ func vetScatter[T any](
 		panic("task pool not bound to a job")
 	}
 
-	if includesJob(ctx, j) {
+	if includesJob(ctx, j, taskContextValueKey) {
 		// Don't launch if the provided context is a task context within the
 		// current job, since that may lead to deadlock.
 		panic("Scatter called from within TaskFunc; move call to GatherFunc instead")
@@ -38,9 +38,10 @@ func scatter[T any](
 	taskPool *TaskPool,
 	taskFunc TaskFunc[T],
 	backpressureFunc backpressureFunc,
-	postResult func(T, error),
+	postResult func(context.Context, T, error),
 ) (launched bool, err error) {
 	j := taskPool.job
+	taskCtx := newTaskContext(ctx, j)
 
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
@@ -57,11 +58,31 @@ func scatter[T any](
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the task pool to launch.
 	return taskPool.launch(ctx, backpressureFunc, func(ctx context.Context) {
-		// Don't launch if the context has been canceled by the time the
+		// Don't launch if the job's context has been canceled by the time the
 		// goroutine starts.
-		if ctx.Err() != nil {
+		if j.ctx.Err() != nil {
 			return
 		}
+
+		// Don't launch if the task's context has been canceled by the time the
+		// goroutine starts.
+		if taskCtx.Err() != nil {
+			return
+		}
+
+		// Make sure that a panic in a task function doesn't compromise the rest
+		// of the job.
+		var value T
+		var err error = ErrTaskPanic
+		defer func() {
+			// Decrement the task pool's in-flight count BEFORE waiting on the gather
+			// channel. This makes it safe for gatherFunc to call `Scatter` with this
+			// same `TaskPool` instance without deadlock, as there is guaranteed to be at
+			// least one slot available.
+			taskPool.decrementInFlight()
+
+			postResult(ctx, value, err)
+		}()
 
 		// Actually execute the task function. Since this is the top-level
 		// function of a goroutine, if the task function panics the whole
@@ -72,15 +93,7 @@ func scatter[T any](
 		// posting a gather to the job's channel or otherwise attempt to
 		// maintain the integrity of the task pool or overall job in case of task
 		// panics.
-		value, err := taskFunc(ctx)
-
-		// Decrement the task pool's in-flight count BEFORE waiting on the gather
-		// channel. This makes it safe for gatherFunc to call `Scatter` with this
-		// same `TaskPool` instance without deadlock, as there is guaranteed to be at
-		// least one slot available.
-		taskPool.decrementInFlight()
-
-		postResult(value, err)
+		value, err = taskFunc(taskCtx)
 	})
 }
 
@@ -89,12 +102,21 @@ func scatter[T any](
 // execution and adds backpressure that enables operation with unlimited task pools.
 // Gathering up to 2 here balances between catching up and pausing for too long
 // during a scatter.
-func yieldBeforeScatter(ctx, ctx2 context.Context, bp backpressureProvider) error {
+func yieldBeforeScatter(ctx context.Context, bp backpressureProvider) error {
 	for range 2 {
-		ok, err := bp.Yield(ctx, ctx2)
+		ok, err := bp.Yield(ctx)
 		if !ok || err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type taskContextValueType struct{}
+
+var taskContextValueKey any = taskContextValueType{}
+
+func newTaskContext(ctx context.Context, j *Job) context.Context {
+	val := j.ctx.Value(jobContextValueKey)
+	return context.WithValue(ctx, taskContextValueKey, val)
 }

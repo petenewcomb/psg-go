@@ -154,11 +154,14 @@ func (c *Combine[I, O]) scatter(
 	vetScatter(ctx, taskPool, taskFunc)
 
 	j := taskPool.job
+	if j != c.combinerPool.job {
+		panic("task and combiner pools are associated with different jobs")
+	}
 
 	ctx = withTaskPoolBackpressureProvider(ctx, taskPool)
 	bp := getBackpressureProvider(ctx, j)
 
-	if err := yieldBeforeScatter(ctx, c.combinerPool.ctx, bp); err != nil {
+	if err := yieldBeforeScatter(ctx, bp); err != nil {
 		return false, err
 	}
 
@@ -178,7 +181,7 @@ func (c *Combine[I, O]) scatter(
 			// and proceed without rechecking waitingCombines. Also pass along
 			// the work function to be executed only after the waiter has been
 			// closed.
-			return bp.Block(ctx, c.combinerPool.ctx, waiter, nil)
+			return bp.Block(ctx, waiter, nil)
 		}
 		for {
 			res, err := wait()
@@ -198,14 +201,14 @@ func (c *Combine[I, O]) scatter(
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
-			res, err := bp.Block(ctx, ctx2, waiter, limitChangeCh)
+		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
+			res, err := bp.Block(ctx, waiter, limitChangeCh)
 			return res.Work, err
 		}
 	}
 
-	return scatter(ctx, taskPool, taskFunc, bpf, func(input I, inputErr error) {
-		c.combinerPool.launch(ctx, j, func(ctx context.Context, cm *combinerMap) {
+	return scatter(ctx, taskPool, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
+		c.combinerPool.launch(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
 			getCombineFunc(cm, j, c)(ctx, input, inputErr)
 		})
@@ -216,18 +219,18 @@ func (c *Combine[I, O]) scatter(
 // backpressure system, allowing tasks to be gathered while waiting for resources
 type combineBackpressureProvider struct {
 	job           *Job
-	tryCombineOne func(ctx, ctx2 context.Context) (bool, error)
-	combineOne    func(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error)
+	tryCombineOne func(ctx context.Context) (bool, error)
+	combineOne    func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error)
 }
 
 func (bp combineBackpressureProvider) ForJob(j *Job) bool {
 	return bp.job == j
 }
 
-func (bp combineBackpressureProvider) Yield(ctx, ctx2 context.Context) (bool, error) {
-	return bp.tryCombineOne(ctx, ctx2)
+func (bp combineBackpressureProvider) Yield(ctx context.Context) (bool, error) {
+	return bp.tryCombineOne(ctx)
 }
 
-func (bp combineBackpressureProvider) Block(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error) {
-	return bp.combineOne(ctx, ctx2, waiter, limitChangeCh)
+func (bp combineBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error) {
+	return bp.combineOne(ctx, waiter, limitChangeCh)
 }

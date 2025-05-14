@@ -14,8 +14,8 @@ import (
 //
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
-	concurrencyLimit state.DynamicValue[int]
 	job              *Job
+	concurrencyLimit state.DynamicValue[int]
 	inFlight         state.InFlightCounter
 	waiterQueue      state.WaiterQueue
 }
@@ -84,7 +84,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 			if p.incrementInFlightIfUnder(limit) {
 				return waitResult{Proceed: true}, nil
 			}
-			work, err := applyBackpressure(ctx, ctx, waiter, limitChangeCh)
+			work, err := applyBackpressure(ctx, waiter, limitChangeCh)
 			return waitResult{Work: work}, err
 		}
 		for {
@@ -107,13 +107,13 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
-		task(j.ctx)
+		task(ctx)
 	}()
 
 	return true, nil
 }
 
-type backpressureFunc func(ctx, ctx2 context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error)
+type backpressureFunc func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error)
 
 type boundTaskFunc func(ctx context.Context)
 

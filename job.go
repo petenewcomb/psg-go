@@ -57,10 +57,15 @@ type jobContextValueType struct{}
 var jobContextValueKey any = jobContextValueType{}
 
 func withJob(ctx context.Context, j *Job) context.Context {
+	oldValue := ctx.Value(taskContextValueKey)
+	if oldValue == nil {
+		oldValue = ctx.Value(jobContextValueKey)
+	}
+
 	// Accumulate the jobs to which the context belongs but avoid creating a
 	// collection unless it's needed.
 	var newValue any
-	switch oldValue := ctx.Value(jobContextValueKey).(type) {
+	switch oldValue := oldValue.(type) {
 	case nil:
 		newValue = j
 	case *Job:
@@ -84,18 +89,24 @@ func withJob(ctx context.Context, j *Job) context.Context {
 	return context.WithValue(ctx, jobContextValueKey, newValue)
 }
 
-func includesJob(ctx context.Context, j *Job) bool {
-	switch v := ctx.Value(jobContextValueKey).(type) {
-	case nil:
-		return false
-	case *Job:
-		return v == j
-	case map[*Job]struct{}:
-		_, ok := v[j]
-		return ok
-	default:
-		panic("unexpected job context value type")
+func includesJob(ctx context.Context, j *Job, keys ...any) bool {
+	for _, key := range keys {
+		switch v := ctx.Value(key).(type) {
+		case nil:
+		case *Job:
+			if v == j {
+				return true
+			}
+		case map[*Job]struct{}:
+			_, ok := v[j]
+			if ok {
+				return true
+			}
+		default:
+			panic("unexpected job context value type")
+		}
 	}
+	return false
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
@@ -151,11 +162,20 @@ func (j *Job) CancelAndWait() {
 // [GatherFunc] and wait until it returns.
 func (j *Job) GatherOne(ctx context.Context) (bool, error) {
 	ctx = withDefaultBackpressureProvider(ctx, j)
-	return j.gatherOneAndDoTheWork(ctx, ctx)
+	return j.gatherOneAndDoTheWork(ctx)
 }
 
-func (j *Job) gatherOneAndDoTheWork(ctx, ctx2 context.Context) (bool, error) {
-	res, err := j.gatherOne(ctx, ctx2, state.Waiter{}, nil)
+func (j *Job) vetGather(ctx context.Context) {
+	if includesJob(ctx, j, taskContextValueKey) {
+		// Don't launch if the provided context is a task context within the
+		// current job, since that may lead to deadlock.
+		panic("Gather called from within TaskFunc of the same or a parent Job")
+	}
+}
+
+func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
+	j.vetGather(ctx)
+	res, err := j.gatherOne(ctx, state.Waiter{}, nil)
 	if res.Work != nil {
 		err = res.Work(ctx)
 	}
@@ -169,7 +189,7 @@ type gatherOneResult struct {
 }
 
 // Returns true if the waiter was notified or a non-nil boundGatherFunc if a result was gathered.
-func (j *Job) gatherOne(ctx, ctx2 context.Context, waiter state.Waiter, limitCh <-chan struct{}) (gatherOneResult, error) {
+func (j *Job) gatherOne(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (gatherOneResult, error) {
 	var res gatherOneResult
 	var err error
 	select {
@@ -181,13 +201,11 @@ func (j *Job) gatherOne(ctx, ctx2 context.Context, waiter state.Waiter, limitCh 
 	case <-waiter.Done():
 		res.WaiterNotified = true
 	case <-limitCh:
+	case <-j.state.Done():
 	case <-ctx.Done():
 		err = ctx.Err()
-	case <-ctx2.Done():
-		err = ctx2.Err()
 	case <-j.ctx.Done():
 		err = j.ctx.Err()
-	case <-j.state.Done():
 	}
 	return res, err
 }
@@ -202,21 +220,20 @@ func (j *Job) gatherOne(ctx, ctx2 context.Context, waiter state.Waiter, limitCh 
 // See GatherOne for additional details.
 func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
 	ctx = withDefaultBackpressureProvider(ctx, j)
-	return j.tryGatherOne(ctx, ctx)
+	return j.tryGatherOne(ctx)
 }
 
-func (j *Job) tryGatherOne(ctx, ctx2 context.Context) (bool, error) {
+func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
+	j.vetGather(ctx)
 	select {
 	case gather := <-j.gatherChan:
 		return true, j.executeGather(ctx, gather)
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case <-ctx2.Done():
-		return false, ctx2.Err()
-	case <-j.ctx.Done():
-		return false, j.ctx.Err()
 	case <-j.state.Done():
 		return false, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-j.ctx.Done():
+		return false, j.ctx.Err()
 	default:
 		// There were no in-flight tasks ready to gather.
 		return false, nil
@@ -243,7 +260,7 @@ func (j *Job) tryGatherOne(ctx, ctx2 context.Context) (bool, error) {
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
 	ctx = withDefaultBackpressureProvider(ctx, j)
-	return j.gatherAll(ctx, ctx, j.gatherOneAndDoTheWork)
+	return j.gatherAll(ctx, j.gatherOneAndDoTheWork)
 }
 
 // TryGatherAll processes all currently available task results without blocking.
@@ -258,12 +275,12 @@ func (j *Job) GatherAll(ctx context.Context) error {
 // task's [GatherFunc] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
 	ctx = withDefaultBackpressureProvider(ctx, j)
-	return j.gatherAll(ctx, ctx, j.tryGatherOne)
+	return j.gatherAll(ctx, j.tryGatherOne)
 }
 
-func (j *Job) gatherAll(ctx, ctx2 context.Context, gatherOne func(ctx, ctx2 context.Context) (bool, error)) error {
+func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context) (bool, error)) error {
 	for {
-		ok, err := gatherOne(ctx, ctx2)
+		ok, err := gatherOne(ctx)
 		if err != nil {
 			return err
 		}

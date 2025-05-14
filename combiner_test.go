@@ -31,7 +31,7 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 		})
 
 		// Create a combiner taskPool
-		combinerPool := psg.NewCombinerPool(ctx, 1)
+		combinerPool := psg.NewCombinerPool(job, 1)
 
 		// Create a combine operation
 		combine := psg.NewCombine(
@@ -356,7 +356,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							scatter = psg.NewGather(gatherFuncAdapter).Scatter
 						default:
 							gather := psg.NewGather(gatherFunc)
-							combinerPool := psg.NewCombinerPool(ctx, combinerLimit)
+							combinerPool := psg.NewCombinerPool(job, combinerLimit)
 							combine := psg.NewCombine(gather, combinerPool, func() psg.Combiner[time.Time, aggregatedResult] {
 								var combinedResult aggregatedResult
 								nextFlushTime := time.Now().Add(flushPeriod)

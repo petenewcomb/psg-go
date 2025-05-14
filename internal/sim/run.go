@@ -26,18 +26,13 @@ func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerP
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 
-	taskPools := make([]*psg.TaskPool, len(plan.TaskPools))
-	for i, taskPoolPlan := range plan.TaskPools {
-		taskPools[i] = psg.NewTaskPool(job, taskPoolPlan.ConcurrencyLimit)
-
-	}
 	c := &controller{
 		Ctx:                          ctx,
 		Plan:                         plan,
 		Job:                          job,
-		TaskPools:                    taskPools,
-		ConcurrencyByTaskPool:        make([]atomic.Int64, len(taskPools)),
-		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(taskPools)),
+		TaskPools:                    make([]*psg.TaskPool, len(plan.TaskPools)),
+		ConcurrencyByTaskPool:        make([]atomic.Int64, len(plan.TaskPools)),
+		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(plan.TaskPools)),
 		Gathers:                      make([]*psg.Gather[*taskResult], plan.GatherCount),
 		Combines:                     make([]*psg.Combine[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
 		CombinerPools:                make([]*psg.CombinerPool, len(plan.CombinerPools)),
@@ -57,6 +52,7 @@ type controller struct {
 	Ctx                          context.Context
 	Plan                         *Plan
 	Job                          *psg.Job
+	TaskPoolsLock                sync.Mutex
 	TaskPools                    []*psg.TaskPool
 	ConcurrencyByTaskPool        []atomic.Int64
 	MaxConcurrencyByTaskPool     []atomicMinMaxInt64
@@ -120,6 +116,17 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 	return nil
 }
 
+func (c *controller) getTaskPool(index int) *psg.TaskPool {
+	c.TaskPoolsLock.Lock()
+	defer c.TaskPoolsLock.Unlock()
+	pool := c.TaskPools[index]
+	if pool == nil {
+		pool = psg.NewTaskPool(c.Job, c.Plan.TaskPools[index].ConcurrencyLimit)
+		c.TaskPools[index] = pool
+	}
+	return pool
+}
+
 func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *Task) {
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
@@ -134,7 +141,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 			return gather
 		}()
 		for {
-			err := gather.Scatter(ctx, c.TaskPools[task.PoolIndex],
+			err := gather.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break
@@ -159,7 +166,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 				combinerPool := c.CombinerPools[combinerPoolIndex]
 				if combinerPool == nil {
 					// Create a combiner pool with the concurrency limit
-					combinerPool = psg.NewCombinerPool(c.Ctx, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit)
+					combinerPool = psg.NewCombinerPool(c.Job, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit)
 					c.CombinerPools[combinerPoolIndex] = combinerPool
 				}
 
@@ -174,7 +181,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 			return combine
 		}()
 		for {
-			err := combine.Scatter(ctx, c.TaskPools[task.PoolIndex],
+			err := combine.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break

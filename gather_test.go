@@ -207,3 +207,90 @@ func TestGatherScatterTaskFuncCannotGatherScatterToParentJob(t *testing.T) {
 	chk.NoError(err)
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }
+
+func TestGatherScatterTaskFuncCannotGather(t *testing.T) {
+	chk := require.New(t)
+	ctx := context.Background()
+
+	// Create parent job with pool
+	job := psg.NewJob(ctx)
+	defer job.CancelAndWait()
+	pool := psg.NewTaskPool(job, 1)
+
+	gather := psg.NewGather(
+		func(ctx context.Context, result bool, err error) error {
+			chk.NoError(err)
+			chk.True(result)
+			return nil
+		},
+	)
+	err := gather.Scatter(
+		ctx,
+		pool,
+		func(ctx context.Context) (bool, error) {
+			chk.PanicsWithValue("Gather called from within TaskFunc of the same or a parent Job", func() {
+				_, _ = job.TryGatherOne(ctx)
+			})
+			return true, nil
+		},
+	)
+
+	chk.NoError(err)
+	chk.NoError(job.CloseAndGatherAll(ctx))
+}
+
+func TestGatherScatterTaskFuncCannotGatherParentJob(t *testing.T) {
+	chk := require.New(t)
+	ctx := context.Background()
+
+	// Create parent job with pool
+	parentJob := psg.NewJob(ctx)
+	defer parentJob.CancelAndWait()
+	parentPool := psg.NewTaskPool(parentJob, 1)
+
+	gather := psg.NewGather(
+		func(ctx context.Context, result bool, err error) error {
+			chk.NoError(err)
+			chk.True(result)
+			return nil
+		},
+	)
+	err := gather.Scatter(
+		ctx,
+		parentPool,
+		func(ctx context.Context) (bool, error) {
+			// Create a sub-job inside the task
+			subJob := psg.NewJob(ctx)
+			defer subJob.CancelAndWait()
+			subPool := psg.NewTaskPool(subJob, 1)
+
+			// This should succeed - scattering a task to the sub-job's pool
+			gather := psg.NewGather(
+				func(ctx context.Context, result bool, err error) error {
+					chk.NoError(err)
+					chk.True(result)
+					return nil
+				},
+			)
+			err := gather.Scatter(
+				ctx,
+				subPool,
+				func(ctx context.Context) (bool, error) {
+					chk.PanicsWithValue("Gather called from within TaskFunc of the same or a parent Job", func() {
+						_, _ = parentJob.TryGatherOne(ctx)
+					})
+					return true, nil
+				},
+			)
+			chk.NoError(err)
+
+			// Gather all results in the sub-job
+			chk.NoError(subJob.CloseAndGatherAll(ctx))
+
+			return true, nil
+		},
+	)
+
+	chk.NoError(err)
+	chk.NoError(parentJob.CloseAndGatherAll(ctx))
+}

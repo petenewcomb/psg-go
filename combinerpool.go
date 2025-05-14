@@ -194,13 +194,24 @@ func NewCombinerPool(ctx context.Context, concurrencyLimit int) *CombinerPool {
 	}
 	cp := &CombinerPool{
 		ctx:           ctx,
-		spawnDelay:    0, // Default: no delay in spawning new goroutines
+		spawnDelay:    0,  // Default: no delay in spawning new goroutines
 		idleTimeout:   -1, // Sentinel value: no idle-based exit
 		primaryChan:   make(chan boundCombineFunc),
 		secondaryChan: make(chan boundCombineFunc),
 	}
 	cp.concurrencyLimit.Store(concurrencyLimit)
 	return cp
+}
+
+// SetLimit sets the active concurrency limit for the pool. A negative value means no
+// limit (combiners will always be launched regardless of how many are currently
+// running). Zero means no new combiners will be launched until SetLimit is called
+// with a non-zero value.
+//
+// This method is safe to call at any time. The new limit takes effect immediately
+// for subsequent combiner launches and may unblock existing blocked operations.
+func (cp *CombinerPool) SetLimit(limit int) {
+	cp.concurrencyLimit.Store(limit)
 }
 
 // SetIdleTimeout sets how long excess combiner goroutines can remain idle

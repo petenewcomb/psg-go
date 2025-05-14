@@ -18,13 +18,13 @@ func ExampleJob_Cancel() {
 
 	ctx := context.Background()
 
-	pool := psg.NewTaskPool(1)
-	job := psg.NewJob(ctx, pool)
-
+	job := psg.NewJob(ctx)
 	// This is the standard deferred call to Job.CancelAndWait that should
 	// almost always follow creation of a new Job to ensure cleanup. It is not
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
+
+	pool := psg.NewTaskPool(job, 1)
 
 	printResult := psg.NewGather(
 		func(ctx context.Context, result string, err error) error {
@@ -88,13 +88,13 @@ func ExampleJob_Cancel_task() {
 
 	ctx := context.Background()
 
-	pool := psg.NewTaskPool(1)
-	job := psg.NewJob(ctx, pool)
-
+	job := psg.NewJob(ctx)
 	// This is the standard deferred call to Job.CancelAndWait that should
 	// almost always follow creation of a new Job to ensure cleanup. It is not
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
+
+	pool := psg.NewTaskPool(job, 1)
 
 	printResult := psg.NewGather(
 		func(ctx context.Context, result string, err error) error {

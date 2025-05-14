@@ -10,11 +10,9 @@ import (
 )
 
 // A TaskPool defines a virtual set of task execution slots and optionally places a
-// limit on its size. Use [Scatter] to launch tasks into a TaskPool. A TaskPool must be
-// bound to a [Job] before a task can be launched into it.
+// limit on its size. Use [Scatter] to launch tasks into a TaskPool.
 //
-// The zero value of TaskPool is unbound and has a limit of zero. [NewTaskPool]
-// provides a convenient way to create a new pool with a non-zero limit.
+// TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
 	concurrencyLimit state.DynamicValue[int]
 	job              *Job
@@ -22,10 +20,21 @@ type TaskPool struct {
 	waiterQueue      state.WaiterQueue
 }
 
-// Creates a new [TaskPool] with the given limit. See [TaskPool.SetLimit] for the range
-// of allowed values and their semantics.
-func NewTaskPool(limit int) *TaskPool {
-	p := &TaskPool{}
+// Creates a new [TaskPool] bound to the specified job with the given concurrency limit.
+// See [TaskPool.SetLimit] for the range of allowed values and their semantics.
+//
+// Panics if the job is nil or in the done state.
+func NewTaskPool(job *Job, limit int) *TaskPool {
+	if job == nil {
+		panic("job must be non-nil")
+	}
+
+	// Check if the job is done
+	job.panicIfDone()
+
+	p := &TaskPool{
+		job: job,
+	}
 	p.concurrencyLimit.Store(limit)
 	return p
 }
@@ -33,8 +42,10 @@ func NewTaskPool(limit int) *TaskPool {
 // Sets the active concurrency limit for the pool. A negative value means no
 // limit (tasks will always be launched regardless of how many are currently
 // running). Zero means no new tasks will be launched (i.e., [Scatter] will block
-// indefinitely) until SetLimit is called with a non-zero value. SetLimit is
-// always thread-safe, even for a TaskPool in a single-threaded [Job].
+// indefinitely) until SetLimit is called with a non-zero value.
+//
+// This method is safe to call at any time. The new limit takes effect immediately
+// for subsequent task launches and may unblock existing blocked Scatter calls.
 func (p *TaskPool) SetLimit(limit int) {
 	p.concurrencyLimit.Store(limit)
 }

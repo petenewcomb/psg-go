@@ -74,15 +74,15 @@ func ExampleNewCombine() {
 
 	ctx := context.Background()
 
+	// Create a scatter-gather job
+	job := psg.NewJob(ctx)
+	defer job.CancelAndWait()
+
 	// Create a task pool with concurrency limit 2
-	taskPool := psg.NewTaskPool(2)
+	taskPool := psg.NewTaskPool(job, 2)
 
 	// Create a combiner pool with concurrency limit 1
 	combinerPool := psg.NewCombinerPool(ctx, 1)
-
-	// Create a scatter-gather job with the above task pool
-	job := psg.NewJob(ctx, taskPool)
-	defer job.CancelAndWait()
 
 	// Set a flush listener to observe when all tasks have completed
 	job.SetFlushListener(func() {

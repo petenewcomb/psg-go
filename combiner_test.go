@@ -19,9 +19,9 @@ import (
 func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	taskPool := psg.NewTaskPool(1)
-	job := psg.NewJob(ctx, taskPool)
+	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
+	taskPool := psg.NewTaskPool(job, 1)
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		// Create a gather
@@ -62,8 +62,7 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 func TestCombinerScatterNilGatherFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	taskPool := psg.NewTaskPool(1)
-	job := psg.NewJob(ctx, taskPool)
+	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 
 	chk.PanicsWithValue("gather function must be non-nil", func() {
@@ -71,35 +70,12 @@ func TestCombinerScatterNilGatherFuncPanic(t *testing.T) {
 	})
 }
 
-func TestCombinerScatterTaskPoolNotBoundPanic(t *testing.T) {
-	chk := require.New(t)
-	ctx := context.Background()
-
-	// Create a task pool but don't associate it with a job
-	taskPool := psg.NewTaskPool(1)
-
-	chk.PanicsWithValue("task pool not bound to a job", func() {
-		gather := psg.NewGather(
-			func(ctx context.Context, result int, err error) error {
-				return nil
-			},
-		)
-		_ = gather.Scatter(
-			ctx,
-			taskPool,
-			func(ctx context.Context) (int, error) {
-				return 0, nil
-			},
-		)
-	})
-}
-
 func TestCombinerTryScatterNilTaskFuncPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	taskPool := psg.NewTaskPool(1)
-	job := psg.NewJob(ctx, taskPool)
+	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
+	taskPool := psg.NewTaskPool(job, 1)
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		gather := psg.NewGather(
@@ -115,34 +91,11 @@ func TestCombinerTryScatterNilTaskFuncPanic(t *testing.T) {
 	})
 }
 
-func TestCombinerTryScatterTaskPoolNotBoundPanic(t *testing.T) {
-	chk := require.New(t)
-	ctx := context.Background()
-
-	// Create a task pool but don't associate it with a job
-	taskPool := psg.NewTaskPool(1)
-
-	chk.PanicsWithValue("task pool not bound to a job", func() {
-		gather := psg.NewGather(
-			func(ctx context.Context, result int, err error) error {
-				return nil
-			},
-		)
-		_, _ = gather.TryScatter(
-			ctx,
-			taskPool,
-			func(ctx context.Context) (int, error) {
-				return 0, nil
-			},
-		)
-	})
-}
-
 func TestCombinerScatterFromTask(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	taskPool := psg.NewTaskPool(1)
-	job := psg.NewJob(ctx, taskPool)
+	job := psg.NewJob(ctx)
+	taskPool := psg.NewTaskPool(job, 1)
 
 	gather := psg.NewGather(
 		func(ctx context.Context, result int, err error) error {
@@ -183,9 +136,9 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with task pool
-	parentTaskPool := psg.NewTaskPool(1)
-	parentJob := psg.NewJob(ctx, parentTaskPool)
+	parentJob := psg.NewJob(ctx)
 	defer parentJob.CancelAndWait()
+	parentTaskPool := psg.NewTaskPool(parentJob, 1)
 
 	// Variable to track execution flow
 	subJobTaskRan := false
@@ -202,9 +155,9 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
 			// Create a sub-job inside the task
-			subTaskPool := psg.NewTaskPool(1)
-			subJob := psg.NewJob(ctx, subTaskPool)
+			subJob := psg.NewJob(ctx)
 			defer subJob.CancelAndWait()
+			subTaskPool := psg.NewTaskPool(subJob, 1)
 
 			// This should succeed - scattering a task to the sub-job's task pool
 			gather := psg.NewGather(
@@ -243,9 +196,9 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with task pool
-	parentTaskPool := psg.NewTaskPool(1)
-	parentJob := psg.NewJob(ctx, parentTaskPool)
+	parentJob := psg.NewJob(ctx)
 	defer parentJob.CancelAndWait()
+	parentTaskPool := psg.NewTaskPool(parentJob, 1)
 
 	gather := psg.NewGather(
 		func(ctx context.Context, result bool, err error) error {
@@ -356,9 +309,9 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						ctx, cancel := context.WithCancel(context.Background())
 						defer cancel()
 
-						taskPool := psg.NewTaskPool(-1)
-						job := psg.NewJob(ctx, taskPool)
+						job := psg.NewJob(ctx)
 						defer job.CancelAndWait()
+						taskPool := psg.NewTaskPool(job, -1)
 
 						type aggregatedResult struct {
 							Time        time.Time

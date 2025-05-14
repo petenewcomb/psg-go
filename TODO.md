@@ -87,14 +87,14 @@
 - [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
 - [x] Ensure consistent error handling across the API, especially when tasks fail
 - [x] Expose configuration options for delay parameters (idleTimeout, minHoldTime, maxHoldTime, spawnDelay)
-- [ ] Examine further refactoring opportunities (moving contents of boundCombiner.CombineFunc and FlushFunc to proper methods)
+- [x] Examine further refactoring opportunities (decided to keep boundCombiner.CombineFunc and FlushFunc as is)
 - [x] Ensure all public types and methods have consistent naming
 - [x] Update documentation for configuration methods with standardized language
 - [ ] Review and document thread-safety guarantees for remaining public APIs
 - [ ] Test and document behavior when tasks passed to combiners return errors
 - [x] Rename Combiner to reflect verb form (similar to Gather)
 - [x] Build Combine from a Gather instance to create natural task→combine→gather flow
-- [ ] Make task pools dynamically addable to a job (i.e., by taking a job as an argument to NewTaskPool) and remove the pools argument from NewJob
+- [x] Make task pools dynamically addable to a job (i.e., by taking a job as an argument to NewTaskPool) and remove the pools argument from NewJob
 - [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
 
 ### 6. Context propagation improvements

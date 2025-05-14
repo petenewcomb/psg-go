@@ -23,14 +23,18 @@ func Run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error 
 }
 
 func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerPool *state.TimerPool) error {
+	job := psg.NewJob(ctx)
+	defer job.CancelAndWait()
+
 	taskPools := make([]*psg.TaskPool, len(plan.TaskPools))
 	for i, taskPoolPlan := range plan.TaskPools {
-		taskPools[i] = psg.NewTaskPool(taskPoolPlan.ConcurrencyLimit)
+		taskPools[i] = psg.NewTaskPool(job, taskPoolPlan.ConcurrencyLimit)
 
 	}
 	c := &controller{
 		Ctx:                          ctx,
 		Plan:                         plan,
+		Job:                          job,
 		TaskPools:                    taskPools,
 		ConcurrencyByTaskPool:        make([]atomic.Int64, len(taskPools)),
 		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(taskPools)),
@@ -52,6 +56,7 @@ func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerP
 type controller struct {
 	Ctx                          context.Context
 	Plan                         *Plan
+	Job                          *psg.Job
 	TaskPools                    []*psg.TaskPool
 	ConcurrencyByTaskPool        []atomic.Int64
 	MaxConcurrencyByTaskPool     []atomicMinMaxInt64
@@ -76,9 +81,6 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 	c.StartTime = time.Now()
 	c.debugf("starting %v", c.Plan)
 
-	job := psg.NewJob(ctx, c.TaskPools...)
-	//defer job.CancelAndWait()
-
 	for _, step := range c.Plan.Steps {
 		switch step := step.(type) {
 		case Scatter:
@@ -90,7 +92,7 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 
 	chk := require.New(t)
 	for {
-		err := job.CloseAndGatherAll(ctx)
+		err := c.Job.CloseAndGatherAll(ctx)
 		if err == nil {
 			break
 		}

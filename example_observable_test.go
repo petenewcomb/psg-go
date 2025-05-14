@@ -57,12 +57,12 @@ func Example_observable() {
 		},
 	)
 
-	// Create a scatter-gather pool with concurrency limit 2
-	pool := psg.NewTaskPool(2)
-
-	// Create a scatter-gather job with the above pool
-	job := psg.NewJob(ctx, pool)
+	// Create a scatter-gather job
+	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
+
+	// Create a task pool with concurrency limit 2
+	pool := psg.NewTaskPool(job, 2)
 
 	// Launch some tasks
 	fmt.Println("starting job")

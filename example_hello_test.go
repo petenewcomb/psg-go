@@ -20,9 +20,9 @@ import (
 //nolint:errcheck
 func Example_hello() {
 	ctx := context.Background()
-	pool := psg.NewTaskPool(2)
-	job := psg.NewJob(ctx, pool)
+	job := psg.NewJob(ctx)
 	defer job.CancelAndWait() // hygiene
+	pool := psg.NewTaskPool(job, 2)
 
 	// Binds a string to a task function that returns the string after a short delay.
 	newTask := func(s string) psg.TaskFunc[string] {

@@ -6,7 +6,6 @@ package psg
 import (
 	"context"
 	"maps"
-	"slices"
 	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/state"
@@ -23,7 +22,6 @@ import (
 type Job struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
-	taskPools  []*TaskPool
 	gatherChan chan boundGatherFunc
 	wg         sync.WaitGroup
 	state      state.JobState
@@ -33,36 +31,24 @@ type Job struct {
 type boundGatherFunc = func(ctx context.Context) error
 
 // NewJob creates an independent scatter-gather execution environment with the
-// specified context and set of task pools. The context passed to NewJob is used as
-// the root of the context that will be passed to all task functions. (See
-// [TaskFunc] and [Job.Cancel] for more detail.)
+// specified context. The context passed to NewJob is used as the root of the
+// context that will be passed to all task functions. (See [TaskFunc] and
+// [Job.Cancel] for more detail.)
 //
-// TaskPools may not be shared across jobs. NewJob panics if it detects such
-// sharing, but such detection is not guaranteed to work if the same task pool is
-// passed to NewJob calls in different goroutines.
+// Use [NewTaskPool] to create task pools bound to this job.
 //
 // Each call to NewJob should typically be followed by a deferred call to
 // [Job.CancelAndWait] to ensure that an early exit from the calling function
 // does not leave any outstanding goroutines.
-func NewJob(
-	ctx context.Context,
-	taskPools ...*TaskPool,
-) *Job {
+func NewJob(ctx context.Context) *Job {
 	ctx, cancelFunc := context.WithCancel(ctx)
 	j := &Job{
 		cancelFunc: cancelFunc,
-		taskPools:  slices.Clone(taskPools),
 		gatherChan: make(chan boundGatherFunc),
 	}
 	j.state.Init()
 	j.timerPool.Init()
 	j.ctx = withJob(ctx, j)
-	for _, p := range j.taskPools {
-		if p.job != nil {
-			panic("task pool was already registered")
-		}
-		p.job = j
-	}
 	return j
 }
 

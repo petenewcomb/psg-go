@@ -12,3 +12,6 @@ func (e constError) Error() string {
 const ErrTaskPanic = constError("task panicked")
 const ErrCombinePanic = constError("combine panicked")
 const ErrCombinerFlushPanic = constError("combiner flush panicked")
+const ErrCombinerFactoryPanic = constError("combiner factory panicked")
+
+const errJobDone = constError("job done")

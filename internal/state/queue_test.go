@@ -11,11 +11,11 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestSyncQueueWithRapid uses rapid state machine testing to verify queue correctness
-func TestSyncQueueWithRapid(t *testing.T) {
+// TestQueueWithRapid uses rapid state machine testing to verify queue correctness
+func TestQueueWithRapid(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// The system under test
-		q := state.SyncQueue[int]{}
+		q := state.Queue[int]{}
 
 		// The model (reference implementation)
 		var model []int
@@ -74,8 +74,8 @@ func TestSyncQueueWithRapid(t *testing.T) {
 }
 
 // Add a basic functional test to verify operations directly
-func TestSyncQueueBasicFunctionality(t *testing.T) {
-	q := state.SyncQueue[int]{}
+func TestQueueBasicFunctionality(t *testing.T) {
+	q := state.Queue[int]{}
 
 	// Test empty queue
 	require.Equal(t, 0, q.Len())

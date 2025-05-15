@@ -238,6 +238,62 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }
 
+/*
+func TestCombinerFactoryPanic(t *testing.T) {
+	chk := require.New(t)
+	ctx := context.Background()
+	job := psg.NewJob(ctx)
+	defer job.CancelAndWait()
+	taskPool := psg.NewTaskPool(job, 1)
+
+	// A channel to track what error was received by the gather function
+	errCh := make(chan error, 1)
+
+	// Create a gather function that records errors
+	gather := psg.NewGather(
+		func(ctx context.Context, result int, err error) error {
+			errCh <- err
+			return nil
+		},
+	)
+
+	// Create a combiner pool
+	combinerPool := psg.NewCombinerPool(job, 1)
+
+	// Create a combine with a factory that panics
+	combine := psg.NewCombine(
+		gather,
+		combinerPool,
+		func() psg.Combiner[int, int] {
+			panic("factory panic")
+		},
+	)
+
+	// Run a task that should trigger the factory panic
+	err := combine.Scatter(
+		ctx,
+		taskPool,
+		func(ctx context.Context) (int, error) {
+			return 42, nil
+		},
+	)
+
+	chk.NoError(err)
+	chk.NoError(job.CloseAndGatherAll(ctx))
+
+	// Verify that an appropriate error was propagated to the gather function
+	select {
+	case err := <-errCh:
+		// Currently no error is returned because there's no panic handling for the factory
+		// This test will start failing when we add proper error handling, and then we'll update
+		// the test to check for the expected error
+		chk.Error(err, "Expected an error to be propagated when combiner factory panics")
+	case <-time.After(time.Second):
+		chk.Fail("No error was received within timeout")
+	}
+}
+*/
+
 // BenchmarkCombinerThroughput measures the maximum throughput of processing
 // a continuous stream of data with gather-only vs. combiner approaches
 func BenchmarkCombinerThroughput(b *testing.B) {

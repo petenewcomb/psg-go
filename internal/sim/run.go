@@ -313,13 +313,16 @@ func (c *controller) newGatherFunc(t require.TestingT) psg.GatherFunc[*taskResul
 
 func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) psg.CombinerFactory[*taskResult, *combineResult] {
 	return func() psg.Combiner[*taskResult, *combineResult] {
-		cRes := &combineResult{}
+		cRes := &combineResult{
+			Index: combineIndex,
+		}
 		flush := func(ctx context.Context, combine *Combine, err error, emit psg.CombinerEmitFunc[*combineResult]) {
-			cRes.Index = combineIndex
 			cRes.Combine = combine
 			cRes.EndTime = time.Now()
 			emit(ctx, cRes, err)
-			cRes = &combineResult{}
+			cRes = &combineResult{
+				Index: cRes.Index,
+			}
 		}
 		return psg.FuncCombiner[*taskResult, *combineResult]{
 			CombineFunc: func(ctx context.Context, tRes *taskResult, err error, emit psg.CombinerEmitFunc[*combineResult]) {
@@ -335,11 +338,7 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 				task := tRes.Task
 				combine := task.ResultHandler.(*Combine)
 
-				if cRes.TaskCount == 0 {
-					cRes.Index = combine.Index
-				} else {
-					chk.Equal(cRes.Index, combine.Index)
-				}
+				chk.Equal(cRes.Index, combine.Index)
 
 				err = c.executeGatherOrCombineFunc(t, ctx, combine, combine.Func)
 				if err == nil && combine.Func.ReturnError {

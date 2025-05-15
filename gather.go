@@ -114,9 +114,9 @@ func (g *Gather[T]) scatter(
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
-			res, err := bp.Block(ctx, waiter, limitChangeCh)
-			return res.Work, err
+		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) error {
+			_, err := bp.Block(ctx, waiter, limitChangeCh)
+			return err
 		}
 	}
 

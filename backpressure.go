@@ -13,17 +13,16 @@ import (
 type backpressureProvider interface {
 	ForJob(*Job) bool
 
-	// Allows a pending non-blocking activity to execute. Returns true if one
-	// was completed or false if none were available. Returns an error if the
-	// existing activity should be aborted (for instance because a context is
+	// Allows a pending operation to execute. Returns true if there might be
+	// more pending operations to execute, false if not. Returns an error if the
+	// yielding activity should be aborted (for instance because a context is
 	// canceled).
-	Yield(ctx context.Context) (bool, error)
+	Yield(context.Context) (bool, error)
 
-	// Returns true when the block was ended by a waiter notification or a
-	// non-nil work function if the block was ended by work being available.
-	// Returns an error if the existing activity should be aborted (for instance
-	// because a context is canceled).
-	Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error)
+	// Returns true when the block was ended by waiter notification, false
+	// otherwise. Returns an error if the waiting activity should be aborted
+	// (for instance because a context is canceled).
+	Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error)
 }
 
 type backpressureProviderContextValueType struct{}
@@ -78,17 +77,6 @@ func (bp defaultBackpressureProvider) Yield(ctx context.Context) (bool, error) {
 	return bp.j.tryGatherOne(ctx)
 }
 
-func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (blockResult, error) {
-	res, err := bp.j.gatherOne(ctx, waiter, limitCh)
-	return blockResult{
-		WaiterNotified: res.WaiterNotified,
-		Work:           res.Work,
-	}, err
+func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (bool, error) {
+	return bp.j.gatherOne(ctx, waiter, limitCh)
 }
-
-type blockResult struct {
-	WaiterNotified bool
-	Work           workFunc
-}
-
-type workFunc func(context.Context) error

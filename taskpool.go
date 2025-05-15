@@ -70,11 +70,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 			return false, nil
 		}
 
-		type waitResult struct {
-			Proceed bool
-			Work    workFunc
-		}
-		wait := func() (waitResult, error) {
+		wait := func() (bool, error) {
 			waiter := p.waiterQueue.Add()
 			defer waiter.Close()
 
@@ -82,22 +78,17 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 			// became available between the last check and this one.
 			limit, limitChangeCh := p.concurrencyLimit.Load()
 			if p.incrementInFlightIfUnder(limit) {
-				return waitResult{Proceed: true}, nil
+				return true, nil
 			}
-			work, err := applyBackpressure(ctx, waiter, limitChangeCh)
-			return waitResult{Work: work}, err
+			err := applyBackpressure(ctx, waiter, limitChangeCh)
+			return false, err
 		}
 		for {
-			res, err := wait()
+			proceed, err := wait()
 			if err != nil {
 				return false, err
 			}
-			if res.Work != nil {
-				if err := res.Work(ctx); err != nil {
-					return false, err
-				}
-			}
-			if res.Proceed {
+			if proceed {
 				break
 			}
 		}
@@ -113,7 +104,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 	return true, nil
 }
 
-type backpressureFunc func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error)
+type backpressureFunc func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) error
 
 type boundTaskFunc func(ctx context.Context)
 

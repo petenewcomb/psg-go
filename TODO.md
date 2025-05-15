@@ -73,6 +73,7 @@
   - [ ] Improvements to notification system
 - [x] Ensure example code properly demonstrates new Combiner interface and Combine type
 - [ ] Create a playground example for the new combining architecture
+- [ ] Clearly show the reentrancy effect of scattering or gathering within combiners and gather functions, esp. given that combiners may also be flushed
 
 ### 4. Performance optimization
 - [ ] Test automatic scaling of combiner task count based on workload

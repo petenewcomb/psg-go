@@ -26,9 +26,12 @@ type Job struct {
 	wg         sync.WaitGroup
 	state      state.JobState
 	timerPool  state.TimerPool
+	workQueue  state.SyncQueue[gatherWorkFunc]
 }
 
 type boundGatherFunc = func(ctx context.Context) error
+
+type gatherWorkFunc func(context.Context) error
 
 // NewJob creates an independent scatter-gather execution environment with the
 // specified context. The context passed to NewJob is used as the root of the
@@ -149,8 +152,7 @@ func (j *Job) CancelAndWait() {
 //   - true, nil: a task completed and was successfully gathered
 //   - true, non-nil: a task completed but the gather function returned a
 //     non-nil error
-//   - false, nil: the call was woken up but there was no completed task
-//     available
+//   - false, nil: the job is done and therefore nothing is left to gather
 //   - false, non-nil: the argument or job-internal context was canceled
 //
 // If all gather functions are thread-safe, then GatherOne is thread-safe and
@@ -173,41 +175,84 @@ func (j *Job) vetGather(ctx context.Context) {
 	}
 }
 
+type gatherContextValueType struct{}
+
+var gatherContextValueKey gatherContextValueType
+
+func (j *Job) inGather(ctx context.Context) bool {
+	inGather := false
+	switch v := ctx.Value(gatherContextValueKey).(type) {
+	case *Job:
+		inGather = v == j
+	case nil:
+	default:
+		panic("unexpected gather context value type")
+	}
+	return inGather
+}
+
+func (j *Job) processOutstandingWork(ctx context.Context) error {
+	for {
+		work, ok := j.workQueue.PopFront()
+		if !ok {
+			return nil
+		}
+		if err := work(ctx); err != nil {
+			return err
+		}
+	}
+}
+
 func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 	j.vetGather(ctx)
-	res, err := j.gatherOne(ctx, state.Waiter{}, nil)
-	if res.Work != nil {
-		err = res.Work(ctx)
+
+	inGatherAlready := j.inGather(ctx)
+
+	if !inGatherAlready {
+		// Modify ctx for the rest of the function, not just for this block
+		ctx = context.WithValue(ctx, gatherContextValueKey, j)
+
+		if err := j.processOutstandingWork(ctx); err != nil {
+			return true, err
+		}
 	}
-	return res.GatheredOne, err
+
+	_, err := j.gatherOne(ctx, state.Waiter{}, nil)
+
+	jobDone := false
+	if err == errJobDone {
+		jobDone = true
+		err = nil
+	}
+
+	if err == nil && !inGatherAlready {
+		err = j.processOutstandingWork(ctx)
+		if err != nil {
+			return true, err
+		}
+	}
+
+	return !jobDone, err
 }
 
-type gatherOneResult struct {
-	GatheredOne    bool
-	WaiterNotified bool
-	Work           workFunc
-}
-
-// Returns true if the waiter was notified or a non-nil boundGatherFunc if a result was gathered.
-func (j *Job) gatherOne(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (gatherOneResult, error) {
-	var res gatherOneResult
-	var err error
+// Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
+func (j *Job) gatherOne(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (bool, error) {
 	select {
 	case gather := <-j.gatherChan:
-		res.GatheredOne = true
-		res.Work = func(ctx context.Context) error {
+		j.workQueue.PushBack(func(ctx context.Context) error {
 			return j.executeGather(ctx, gather)
-		}
+		})
 	case <-waiter.Done():
-		res.WaiterNotified = true
+		return true, nil
 	case <-limitCh:
 	case <-j.state.Done():
+		return false, errJobDone
 	case <-ctx.Done():
-		err = ctx.Err()
+		return false, ctx.Err()
 	case <-j.ctx.Done():
-		err = j.ctx.Err()
+		return false, j.ctx.Err()
 	}
-	return res, err
+	return false, nil
 }
 
 // TryGatherOne processes at most a single result from a task previously
@@ -225,9 +270,22 @@ func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
 
 func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 	j.vetGather(ctx)
+
+	inGatherAlready := j.inGather(ctx)
+	if !inGatherAlready {
+		// Modify ctx for the rest of the function, not just for this block
+		ctx = context.WithValue(ctx, gatherContextValueKey, j)
+
+		if err := j.processOutstandingWork(ctx); err != nil {
+			return true, err
+		}
+	}
+
 	select {
 	case gather := <-j.gatherChan:
-		return true, j.executeGather(ctx, gather)
+		j.workQueue.PushBack(func(ctx context.Context) error {
+			return j.executeGather(ctx, gather)
+		})
 	case <-j.state.Done():
 		return false, nil
 	case <-ctx.Done():
@@ -238,6 +296,12 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 		// There were no in-flight tasks ready to gather.
 		return false, nil
 	}
+
+	var err error
+	if !inGatherAlready {
+		err = j.processOutstandingWork(ctx)
+	}
+	return true, err
 }
 
 // GatherAll processes task results until the job completes or an error occurs.

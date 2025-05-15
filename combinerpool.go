@@ -244,6 +244,8 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 		var goroutineCtx context.Context
 
 		var cm combinerMap
+		type combineWorkFunc func(ctx context.Context)
+		var workQueue state.Queue[combineWorkFunc]
 
 		// More forward references
 		var executeCombine func(ctx context.Context, combine boundCombineFunc)
@@ -279,17 +281,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 			return true, nil
 		}
 
-		type combineOneResult struct {
-			GatheredOne    bool
-			WaiterNotified bool
-			TimedOut       bool
-			JobDone        bool
-			Work           func(context.Context)
-		}
-		combineOne := func(ctx context.Context, timerCh <-chan time.Time, waiter state.Waiter, limitChangeCh <-chan struct{}) (combineOneResult, error) {
-			var res combineOneResult
-			var err error
-
+		combineOne := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
 			// Check if any combiners need to be flushed due to deadlines and
 			// set up flush deadline timer if needed
 			now := time.Now()
@@ -312,39 +304,38 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 
 			select {
 			case combine := <-primaryCh:
-				res.GatheredOne = true
-				res.Work = func(ctx context.Context) {
+				workQueue.PushBack(func(ctx context.Context) {
 					executeCombine(ctx, combine)
-				}
+				})
 			case combine := <-cp.secondaryChan:
-				res.GatheredOne = true
-				res.Work = func(ctx context.Context) {
+				workQueue.PushBack(func(ctx context.Context) {
 					executeCombine(ctx, combine)
-				}
+				})
 			case <-nextJobFlushCh:
-				res.Work = flushAll
+				workQueue.PushBack(flushAll)
 			case <-flushDeadlineTimerCh:
-				// A combiner has reached its deadline - flush it
-				bc := cm.NextToFlush()
-				if bc != nil && !time.Now().Before(bc.FlushDeadline) {
-					res.Work = bc.FlushFunc
+				// A combiner has reached its deadline
+				for {
+					bc := cm.NextToFlush()
+					if bc == nil || time.Now().Before(bc.FlushDeadline) {
+						break
+					}
+					workQueue.PushBack(bc.FlushFunc)
 				}
-			case <-timerCh:
+			case <-idleTimerCh:
 				// This goroutine is no longer needed.
-				res.TimedOut = true
+				return false, errIdleTimeout
 			case <-waiter.Done():
-				// Retry per backpressureProvider.Block
-				res.WaiterNotified = true
+				return true, nil
 			case <-limitChangeCh:
-				// Retry per backpressureProvider.Block
 			case <-j.state.Done():
-				res.JobDone = true
+				return false, errIdleTimeout
 			case <-ctx.Done():
-				err = ctx.Err()
+				return false, ctx.Err()
 			case <-goroutineCtx.Done():
-				err = goroutineCtx.Err()
+				return false, goroutineCtx.Err()
 			}
-			return res, err
+			return false, nil
 		}
 
 		bp := combineBackpressureProvider{
@@ -352,19 +343,8 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 			tryCombineOne: func(ctx context.Context) (bool, error) {
 				return tryCombineOne(ctx)
 			},
-			combineOne: func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error) {
-				res, err := combineOne(ctx, nil, waiter, limitChangeCh)
-				var work workFunc
-				if res.Work != nil {
-					work = func(ctx context.Context) error {
-						res.Work(ctx)
-						return nil
-					}
-				}
-				return blockResult{
-					WaiterNotified: res.WaiterNotified,
-					Work:           work,
-				}, err
+			combineOne: func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
+				return combineOne(ctx, nil, waiter, limitChangeCh)
 			},
 		}
 		goroutineCtx = withBackpressureProvider(j.ctx, bp)
@@ -393,40 +373,45 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 		}
 		executeCombine(goroutineCtx, combine)
 
-		var timer *time.Timer
+		var idleTimer *time.Timer
 		for {
-			if isSecondary {
+			for {
+				work, ok := workQueue.PopFront()
+				if !ok {
+					break
+				}
+				work(goroutineCtx)
+			}
+
+			if !isSecondary {
 				isSecondary = cp.secondaryElected.CompareAndSwap(false, true)
 				if isSecondary {
 					primaryCh = nil
-					timer = j.timerPool.Get()
-					defer j.timerPool.Put(timer)
+					idleTimer = j.timerPool.Get()
+					defer j.timerPool.Put(idleTimer)
 					defer cp.secondaryElected.Store(false)
 				}
 			}
 
-			var timerCh <-chan time.Time
+			var idleTimerCh <-chan time.Time
 			if isSecondary {
 				// Capture the current idle timeout value to ensure consistency
 				idleTimeout := cp.idleTimeout
-
 				if idleTimeout >= 0 {
 					// This is the goroutine that has elected itself to read only
 					// the secondary channel. This will keep this goroutine idle
 					// unless it's really needed, thus allowing the idle timeout to
 					// elapse (if enabled).
-					timer.Reset(idleTimeout)
-					timerCh = timer.C
+					idleTimer.Reset(idleTimeout)
+					idleTimerCh = idleTimer.C
 				}
 			}
 
-			// Ignore errors from combineOne, since they would only be due to
-			// canceled contexts
-			res, err := combineOne(goroutineCtx, timerCh, state.Waiter{}, nil)
-			if res.Work != nil {
-				res.Work(goroutineCtx)
-			}
-			if res.TimedOut || res.JobDone || err != nil {
+			// No need to report errors from combineOne, since they would only
+			// be due to canceled contexts. Other errors are posted to be
+			// gathered.
+			_, err := combineOne(goroutineCtx, idleTimerCh, state.Waiter{}, nil)
+			if err != nil {
 				// This goroutine should exit.
 				return
 			}
@@ -434,6 +419,8 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 	}()
 	return true
 }
+
+const errIdleTimeout = constError("idle timeout reached")
 
 type boundCombineFunc func(ctx context.Context, cm *combinerMap)
 

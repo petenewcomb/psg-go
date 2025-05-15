@@ -166,14 +166,14 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	if !c.combinerPool.waitingCombines.IsZero() {
-		wait := func() (blockResult, error) {
+		wait := func() (bool, error) {
 			waiter := c.combinerPool.waiterQueue.Add()
 			defer waiter.Close()
 
 			// Check again _after_ registering with the queue, so we don't
 			// potentially miss a notification.
 			if c.combinerPool.waitingCombines.IsZero() {
-				return blockResult{WaiterNotified: true}, nil
+				return true, nil
 			}
 
 			// bp.Block will return true only if we got a notification from the
@@ -184,16 +184,11 @@ func (c *Combine[I, O]) scatter(
 			return bp.Block(ctx, waiter, nil)
 		}
 		for {
-			res, err := wait()
+			waiterNotified, err := wait()
 			if err != nil {
 				return false, err
 			}
-			if res.Work != nil {
-				if err := res.Work(ctx); err != nil {
-					return false, err
-				}
-			}
-			if res.WaiterNotified {
+			if waiterNotified {
 				break
 			}
 		}
@@ -201,9 +196,9 @@ func (c *Combine[I, O]) scatter(
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (workFunc, error) {
-			res, err := bp.Block(ctx, waiter, limitChangeCh)
-			return res.Work, err
+		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) error {
+			_, err := bp.Block(ctx, waiter, limitChangeCh)
+			return err
 		}
 	}
 
@@ -220,7 +215,7 @@ func (c *Combine[I, O]) scatter(
 type combineBackpressureProvider struct {
 	job           *Job
 	tryCombineOne func(ctx context.Context) (bool, error)
-	combineOne    func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error)
+	combineOne    func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error)
 }
 
 func (bp combineBackpressureProvider) ForJob(j *Job) bool {
@@ -231,6 +226,6 @@ func (bp combineBackpressureProvider) Yield(ctx context.Context) (bool, error) {
 	return bp.tryCombineOne(ctx)
 }
 
-func (bp combineBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (blockResult, error) {
+func (bp combineBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
 	return bp.combineOne(ctx, waiter, limitChangeCh)
 }

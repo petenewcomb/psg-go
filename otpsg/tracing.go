@@ -8,7 +8,6 @@ import (
 
 	"github.com/petenewcomb/psg-go"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // TracedTask adds spans with the given operation name to a task function.

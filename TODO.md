@@ -105,6 +105,14 @@
 - [x] Build Combine from a Gather instance to create natural task→combine→gather flow
 - [x] Make task pools dynamically addable to a job (i.e., by taking a job as an argument to NewTaskPool) and remove the pools argument from NewJob
 - [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
+- [ ] Hooks and instrumentation:
+  - [x] Demonstrate context propagation via results (otpsg module example)
+  - [x] Provide examples for wrapping user functions (task, gather, combiner)
+  - [ ] Add generic hooks in core PSG for key lifecycle events
+  - [ ] Add metrics hooks for pool resource utilization (in-flight tasks, queue depth)
+  - [ ] Add hooks for job-level monitoring and statistics
+  - [ ] Create standard interfaces for instrumentation providers
+- [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
 
 ### 5.1. Post-CombinerPool Refactoring Enhancements
 - [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext)
@@ -117,12 +125,14 @@
 - [ ] Update NewCombinerPool documentation to clarify Job binding
 
 ### 6. Context propagation improvements
-- [ ] Modify gather/combiner functions to receive the task's context instead of the job context
-- [ ] Ensure task contexts (passed to Scatter) are automatically canceled when the job context is canceled
-- [ ] Support OpenTelemetry trace propagation through the task-gather chain
-- [ ] Enable task-specific cancelation without affecting other tasks
-- [ ] Allow task-specific data to flow naturally via context without changing interfaces
-- [ ] Add examples demonstrating context propagation use cases for all library components
+- [x] Decide on context approach: keep gather/combiner functions receiving caller's context, not task's context
+- [x] Determine how task contexts relate to job cancellation: maintain separate cancellation paths
+- [x] Support OpenTelemetry trace propagation through the task-gather chain (demonstrated in otpsg module)
+- [x] Decide that task-specific cancelation should be implemented by users externally
+- [ ] Add examples of how users can implement task-specific cancelation domains
+- [x] Allow task-specific data to flow naturally via user-defined result types (demonstrated in otpsg module)
+- [x] Add examples demonstrating context value propagation (otpsg examples)
+- [ ] Add examples demonstrating cancelation domain management
 - [ ] Test context propagation with timeouts, cancelation, and values
 - [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close()
-- [ ] Document best practices for context usage throughout the library
+- [x] Document best practices for context usage throughout the library

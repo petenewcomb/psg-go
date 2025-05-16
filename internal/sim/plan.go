@@ -8,331 +8,322 @@ import (
 	"slices"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
 
 type Plan struct {
-	ID              int
-	SubplanCount    int
-	Config          PlanConfig
-	PathCount       int
-	TaskCount       int
-	SubjobTaskCount int
-	MaxPathDuration time.Duration
-	RootTasks       []*Task
-}
-
-type PlanConfig struct {
-	ConcurrencyLimits                  []int
-	MaxGatherThreadCount               int
-	SubjobProbability                  float64
-	MaxSubjobCount                     int
-	MaxSubjobDepth                     int
-	MaxPathCount                       int
-	MaxPathLength                      int
-	MinNewIntermediateChildProbability float64
-	MaxNewIntermediateChildProbability float64
-	MinTaskDuration                    time.Duration
-	MedTaskDuration                    time.Duration
-	MaxTaskDuration                    time.Duration
-	TaskErrorProbability               float64
-	MinGatherDuration                  time.Duration
-	MedGatherDuration                  time.Duration
-	MaxGatherDuration                  time.Duration
-	GatherErrorProbability             float64
-	OverallDurationBudget              time.Duration
-}
-
-var DefaultPlanConfig = PlanConfig{
-	ConcurrencyLimits:                  []int{1},
-	MaxGatherThreadCount:               1,
-	SubjobProbability:                  0.1,
-	MaxSubjobCount:                     2,
-	MaxSubjobDepth:                     3,
-	MaxPathCount:                       100,
-	MaxPathLength:                      10,
-	MinNewIntermediateChildProbability: 0,
-	MaxNewIntermediateChildProbability: 0.1,
-	MinTaskDuration:                    10 * time.Microsecond,
-	MedTaskDuration:                    10_000 * time.Microsecond,
-	MaxTaskDuration:                    200_000 * time.Microsecond,
-	TaskErrorProbability:               0.0,
-	MinGatherDuration:                  10 * time.Microsecond,
-	MedGatherDuration:                  100 * time.Microsecond,
-	MaxGatherDuration:                  1000 * time.Microsecond,
-	GatherErrorProbability:             0.0,
-	OverallDurationBudget:              500 * time.Millisecond,
-}
-
-var nextIDs idCounters
-
-func NewPlanConfig(t *rapid.T) *PlanConfig {
-	config := &PlanConfig{}
-	*config = DefaultPlanConfig
-	config.ConcurrencyLimits = rapid.SliceOfN(
-		rapid.Custom(func(t *rapid.T) int {
-			mpc := 10 // max pool concurrency
-			// bias toward pool size of 2
-			return 2 + rapid.IntRange(-1, mpc-2).Draw(t, "concurrencyLimit")
-		}), 1, 3).Draw(t, "concurrencyLimits")
-	//config.MaxGatherThreadCount = rapid.IntRange(1, 3).Draw(t, "maxGatherThreadCount")
-	return config
+	ID                  int
+	PathCount           int
+	Steps               []Step
+	MaxPathDuration     time.Duration
+	TaskCount           int
+	CombinerPoolIndexes []int
+	GatherCount         int
+	SubjobCount         int
+	SubjobTaskCount     int
+	TaskPools           []TaskPool
+	CombinerPools       []CombinerPool
 }
 
 // NewPlan creates a hierarchy of simulated tasks for testing.
-func NewPlan(t *rapid.T, config *PlanConfig) *Plan {
-	plan := newPlan(t, config, &nextIDs, 0)
-	t.Logf("NewPlan: %#v", plan)
-	return plan
-}
-
-func newPlan(t *rapid.T, config *PlanConfig, nextIDs *idCounters, depth int) *Plan {
-	plan := &Plan{
-		ID:     nextIDs.Plan,
-		Config: *config,
-	}
-	//t.Logf("NewPlanConfig: %+v", plan.Config)
-	nextIDs.Plan++
-	nextIDsOrigin := *nextIDs
-
-	config = &plan.Config // use copy from here on out
-
-	chk := require.New(t)
-
-	var minConcurrencyLimit int
-	chk.Greater(len(config.ConcurrencyLimits), 0)
-	for i, limit := range config.ConcurrencyLimits {
-		chk.Greater(limit, 0)
-		if i == 0 || limit < minConcurrencyLimit {
-			minConcurrencyLimit = limit
-		}
-	}
-
-	chk.Greater(config.MedTaskDuration, time.Duration(0))
-	chk.LessOrEqual(config.MinTaskDuration, config.MedTaskDuration)
-	chk.LessOrEqual(config.MedTaskDuration, config.MaxTaskDuration)
-
-	chk.Greater(config.MedGatherDuration, time.Duration(0))
-	chk.LessOrEqual(config.MinGatherDuration, config.MedGatherDuration)
-	chk.LessOrEqual(config.MedGatherDuration, config.MaxGatherDuration)
-
-	minStepDuration := config.MinTaskDuration + config.MinGatherDuration
-	medStepDuration := config.MedTaskDuration + config.MedGatherDuration
-	maxStepDuration := config.MaxTaskDuration + config.MaxGatherDuration
-
-	maxPathLength := int64(config.MaxPathLength)
-	chk.Greater(maxPathLength, int64(0))
-	if minStepDuration > 0 {
-		maxPathLength = min(int64(config.OverallDurationBudget/minStepDuration), maxPathLength)
-	}
-
-	medPathLength := int64(1)
-	if medStepDuration > 0 {
-		medPathLength = min(int64(config.OverallDurationBudget/medStepDuration), maxPathLength)
-	}
-	medPathDuration := time.Duration(medPathLength) * medStepDuration
-
-	budgetedPaths := int64(minConcurrencyLimit)
-	if medPathDuration > 0 {
-		budgetedPaths = max(1, min(
-			int64(config.OverallDurationBudget)*int64(minConcurrencyLimit)/int64(medPathDuration),
-			int64(config.MaxPathCount),
-		))
-	}
-	plan.PathCount = int(biasedInt64(1, max(1, budgetedPaths/2), budgetedPaths).Draw(t, "pathCount"))
-
-	newIntermediateChildProbability := rapid.Float64Range(
-		config.MinNewIntermediateChildProbability, config.MaxNewIntermediateChildProbability,
-	).Draw(t, "newIntermediateChildProbability")
-	createNewIntermediateChild := func() bool {
-		return BiasedBool(newIntermediateChildProbability).Draw(t, "createNewIntermediateChild")
-	}
-
-	newTask := func(plan *Plan, parent *Task, pathDurationBudget time.Duration) *Task {
-		task := &Task{
-			ID:                    nextIDs.Task,
-			Pool:                  rapid.IntRange(0, len(config.ConcurrencyLimits)-1).Draw(t, "poolIndex"),
-			Parent:                parent,
-			ReturnErrorFromTask:   BiasedBool(config.TaskErrorProbability).Draw(t, "returnErrorFromTask"),
-			ReturnErrorFromGather: BiasedBool(config.GatherErrorProbability).Draw(t, "returnErrorFromGather"),
-		}
-		nextIDs.Task++
-		parent.Children = append(parent.Children, task)
-
-		totalSelfTime := min(
-			time.Duration(biasedInt64(
-				int64(config.MinTaskDuration),
-				int64(config.MedTaskDuration),
-				int64(config.MaxTaskDuration),
-			).Draw(t, "totalSelfTime")),
-			pathDurationBudget,
-		)
-
-		task.PathDurationAtTaskEnd = parent.PathDurationAtTaskEnd + totalSelfTime
-
-		totalGatherTime := min(
-			time.Duration(biasedInt64(
-				int64(config.MinGatherDuration),
-				int64(config.MedGatherDuration),
-				int64(config.MaxGatherDuration),
-			).Draw(t, "totalGatherTime")),
-			pathDurationBudget-totalSelfTime,
-		)
-
-		// Maybe add subjobs
-		if config.MaxSubjobDepth > 0 {
-			subjobDurationBudget := pathDurationBudget - totalSelfTime - totalGatherTime
-			for subjobDurationBudget >= medStepDuration &&
-				BiasedBool(config.SubjobProbability).Draw(t, "addSubjob") {
-				subjobConfig := plan.Config
-				subjobConfig.MaxSubjobDepth--
-				subjobConfig.OverallDurationBudget = time.Duration(
-					biasedInt64(
-						int64(medStepDuration), int64(max(medStepDuration, subjobDurationBudget/2)), int64(subjobDurationBudget),
-					).Draw(t, "subjobDurationBudget"),
-				)
-				subjobPlan := newPlan(t, &subjobConfig, nextIDs, depth+1)
-				task.Subjobs = append(task.Subjobs, subjobPlan)
-				subjobDurationBudget -= subjobPlan.MaxPathDuration
-				plan.SubjobTaskCount += subjobPlan.TaskCount + subjobPlan.SubjobTaskCount
-			}
-		}
-
-		// Interleave self time and subjobs
-		task.SelfTimes = make([]time.Duration, len(task.Subjobs)+1)
-		for i := range len(task.SelfTimes) - 1 {
-			st := time.Duration(
-				biasedInt64(
-					0,
-					int64(totalSelfTime)/int64(len(task.SelfTimes)-i),
-					int64(totalSelfTime),
-				).Draw(t, "selfTimeChunk"),
-			)
-			task.SelfTimes[i] = st
-			totalSelfTime -= st
-		}
-		task.SelfTimes[len(task.SelfTimes)-1] = totalSelfTime
-
-		// GatherTimes will be interleaved with Children later, after Children
-		// has been populated. For now, just record the total gather time.
-		task.GatherTimes = []time.Duration{totalGatherTime}
-
-		return task
-	}
-
-	var addPath func(parent *Task, maxSteps int, pathDurationBudget time.Duration) time.Duration
-	addPath = func(parent *Task, maxSteps int, pathDurationBudget time.Duration) time.Duration {
-		if maxSteps <= 0 || pathDurationBudget <= 0 {
-			return parent.PathDurationAtTaskEnd + parent.GatherDuration()
-		}
-		var child *Task
-		if len(parent.Children) == 0 || pathDurationBudget <= medStepDuration || createNewIntermediateChild() {
-			child = newTask(plan, parent, pathDurationBudget)
-		} else {
-			// Avoid rapid.SampledFrom because it will print the long-form (%#v)
-			// representation of the task in the log.
-			child = parent.Children[rapid.IntRange(0, len(parent.Children)-1).Draw(t, "child")]
-		}
-		return addPath(child, maxSteps-1, pathDurationBudget-child.TaskDuration())
-	}
-
-	var rootTask Task
-	for range plan.PathCount {
-		// Decide on a duration (length) for this particular path
-		pathDurationBudget := time.Duration(biasedInt64(
-			int64(medStepDuration),
-			int64(min(maxStepDuration, config.OverallDurationBudget)),
-			int64(max(maxStepDuration, config.OverallDurationBudget)),
-		).Draw(t, "pathDurationBudget"))
-
-		pathDuration := addPath(&rootTask, config.MaxPathLength, pathDurationBudget)
-
-		plan.MaxPathDuration = max(plan.MaxPathDuration, pathDuration)
-	}
-
-	var populateChildGatherTimes func(parent *Task)
-	populateChildGatherTimes = func(parent *Task) {
-		for _, child := range parent.Children {
-			totalGatherTime := child.GatherTimes[0]
-			child.GatherTimes = slices.Grow(child.GatherTimes[:0], len(child.Children)+1)[:len(child.Children)+1]
-			for i := range len(child.Children) {
-				gt := time.Duration(
-					biasedInt64(
-						0,
-						int64(totalGatherTime)/int64(len(child.GatherTimes)-i),
-						int64(totalGatherTime),
-					).Draw(t, "gatherTimeChunk"),
-				)
-				child.GatherTimes[i] = gt
-				totalGatherTime -= gt
-			}
-			child.GatherTimes[len(child.GatherTimes)-1] = totalGatherTime
-			populateChildGatherTimes(child)
-		}
-	}
-	populateChildGatherTimes(&rootTask)
-
-	// Create a root GatherTimes slice of the appropriate length so that
-	// recalculateChildPathDurations doesn't get tripped up.
-	rootTask.GatherTimes = make([]time.Duration, len(rootTask.Children)+1)
-
-	// Recalculate accurate path durations now that the gather times have been
-	// interleaved with the children.
-	var recalculateChildPathDurations func(parent *Task)
-	plan.MaxPathDuration = 0
-	recalculateChildPathDurations = func(parent *Task) {
-		if len(parent.Children) == 0 {
-			plan.MaxPathDuration = max(plan.MaxPathDuration, parent.PathDurationAtTaskEnd+parent.GatherDuration())
-			return
-		}
-		var parentGatherDuration time.Duration
-		for i, child := range parent.Children {
-			parentGatherDuration += parent.GatherTimes[i]
-			child.PathDurationAtTaskEnd = parent.PathDurationAtTaskEnd + parentGatherDuration + child.TaskDuration()
-			recalculateChildPathDurations(child)
-		}
-	}
-	recalculateChildPathDurations(&rootTask)
-
-	t.Logf("%v: nextIDs: %#v  nextIDsOrigin: %#v  subjobTaskCount: %d", plan, nextIDs, nextIDsOrigin, plan.SubjobTaskCount)
-	plan.TaskCount = nextIDs.Task - nextIDsOrigin.Task - plan.SubjobTaskCount
-	plan.SubplanCount = nextIDs.Plan - nextIDsOrigin.Plan
-	plan.RootTasks = rootTask.Children
-
-	return plan
+func NewPlan(t *rapid.T, config *Config) *Plan {
+	var nextIDs idCounters
+	return newPlan(t, config, &nextIDs)
 }
 
 type idCounters struct {
-	Plan int
-	Task int
+	Plan         int
+	TaskPool     int
+	CombinerPool int
+	Task         int
 }
 
-func biasedInt64(minVal, medVal, maxVal int64) *rapid.Generator[int64] {
-	if medVal < minVal || maxVal < medVal {
-		panic("invalid biasedInt64 parameters")
+func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
+	planID := nextIDs.Plan
+	nextIDs.Plan++
+	planName := fmt.Sprintf("Plan#%d", planID)
+	plan := &Plan{
+		ID: planID,
 	}
-	return rapid.Custom(func(t *rapid.T) int64 {
-		return medVal + rapid.Int64Range(minVal-medVal, maxVal-medVal).Draw(t, "biasedInt64")
-	})
-}
 
-func (p *Plan) AppendSubplans(s []*Plan) []*Plan {
-	for _, t := range p.RootTasks {
-		s = p.appendTaskSubplans(s, t)
-	}
-	return s
-}
+	nextIDsOrigin := *nextIDs
 
-func (p *Plan) appendTaskSubplans(s []*Plan, t *Task) []*Plan {
-	for _, sp := range t.Subjobs {
-		s = append(s, sp)
-		s = sp.AppendSubplans(s)
+	taskPoolConfig := &planConfig.TaskPool
+	plan.TaskPools = make([]TaskPool, taskPoolConfig.Count.Draw(t, planName+".TaskPoolCount"))
+	for i := range plan.TaskPools {
+		taskPoolID := nextIDs.TaskPool
+		nextIDs.TaskPool++
+		taskPoolName := fmt.Sprintf("TaskPool#%d", taskPoolID)
+		plan.TaskPools[i] = TaskPool{
+			ID:               taskPoolID,
+			ConcurrencyLimit: taskPoolConfig.ConcurrencyLimit.Draw(t, taskPoolName+".ConcurrencyLimit"),
+		}
 	}
-	for _, t := range t.Children {
-		s = p.appendTaskSubplans(s, t)
+
+	plan.GatherCount = planConfig.Gather.Count.Draw(t, planName+".GatherCount")
+
+	combinerPoolConfig := &planConfig.CombinerPool
+	plan.CombinerPools = make([]CombinerPool, combinerPoolConfig.Count.Draw(t, planName+".CombinerPoolCount"))
+	for i := range plan.CombinerPools {
+		combinerPoolID := nextIDs.CombinerPool
+		nextIDs.CombinerPool++
+		combinerPoolName := fmt.Sprintf("CombinerPool#%d", combinerPoolID)
+		plan.CombinerPools[i] = CombinerPool{
+			ID:               combinerPoolID,
+			ConcurrencyLimit: combinerPoolConfig.ConcurrencyLimit.Draw(t, combinerPoolName+".ConcurrencyLimit"),
+		}
 	}
-	return s
+
+	combineConfig := &planConfig.Combine
+	plan.CombinerPoolIndexes = make([]int, combineConfig.Count.Draw(t, planName+".CombineCount"))
+	for i := range plan.CombinerPoolIndexes {
+		plan.CombinerPoolIndexes[i] = rapid.IntRange(0, len(plan.CombinerPools)-1).Draw(t, fmt.Sprintf("CombineIndex#%d.PoolIndex", i))
+	}
+
+	plan.PathCount = planConfig.Path.Count.Draw(t, planName+".PathCount")
+	t.Logf("%s: pathCount=%d", planName, plan.PathCount)
+	paths := make([]*Path, plan.PathCount)
+
+	newFunc := func(name string, funcConfig *FuncConfig, scatters []*Path) *Func {
+		fn := &Func{
+			ReturnError: funcConfig.ReturnError.Draw(t, name+".ReturnError"),
+		}
+
+		var subjobPlan *Plan
+		if planConfig.Subjob.MaxDepth > 0 && funcConfig.Subjob.Add.Draw(t, name+".Subjob.Add") {
+			subjobConfig := *planConfig
+			subjobConfig.Subjob.MaxDepth--
+			subjobConfig.Path.Length.Med = max(subjobConfig.Path.Length.Min, subjobConfig.Path.Length.Med/planConfig.Subjob.MaxDepth)
+			subjobPlan = newPlan(t, &subjobConfig, nextIDs)
+			plan.SubjobTaskCount += subjobPlan.TaskCount + subjobPlan.SubjobTaskCount
+		}
+
+		selfTime := funcConfig.SelfTime.Draw(t, name+".SelfTime")
+
+		stepCount := 2*len(scatters) + 1
+		if subjobPlan != nil {
+			stepCount += 2
+		}
+		fn.Steps = make([]Step, 0, stepCount)
+
+		if subjobPlan != nil {
+			fn.Steps = append(fn.Steps, Subjob{Plan: subjobPlan})
+		}
+		for _, s := range scatters {
+			fn.Steps = append(fn.Steps, Scatter{Task: s.RootTask})
+		}
+		permutedSteps := rapid.Permutation(fn.Steps).Draw(t, name+".StepsPermutation")
+
+		remainingSelfTimeDuration := selfTime
+		remainingSelfTimeChunks := len(permutedSteps) + 1
+		fn.Steps = fn.Steps[:0]
+		for i := range stepCount {
+			var step Step
+			if i%2 == 0 {
+				var stepTime time.Duration
+				if remainingSelfTimeChunks == 1 {
+					stepTime = remainingSelfTimeDuration
+				} else {
+					c := BiasedDurationConfig{
+						Med: remainingSelfTimeDuration / time.Duration(remainingSelfTimeChunks),
+						Max: remainingSelfTimeDuration,
+					}
+					stepTime = c.Draw(t, fmt.Sprintf("%s.Step[%d].SelfTime", name, i))
+				}
+				remainingSelfTimeChunks--
+				remainingSelfTimeDuration -= stepTime
+				step = SelfTime(stepTime)
+			} else {
+				step = permutedSteps[i/2]
+			}
+			fn.Steps = append(fn.Steps, step)
+		}
+
+		return fn
+	}
+
+	newTaskID := func() int {
+		id := nextIDs.Task
+		nextIDs.Task++
+		return id
+	}
+
+	newTask := func(id int, resultHandler ResultHandler) *Task {
+		taskName := fmt.Sprintf("Task#%d", id)
+		return &Task{
+			ID:            id,
+			PoolIndex:     rapid.IntRange(0, len(plan.TaskPools)-1).Draw(t, taskName+".PoolIndex"),
+			Func:          newFunc(taskName, &planConfig.Task.Func, nil),
+			ResultHandler: resultHandler,
+		}
+	}
+
+	newGather := func(id int, paths []*Path) *Gather {
+		gatherName := fmt.Sprintf("Gather#%d", id)
+		return &Gather{
+			ID:    id,
+			Index: rapid.IntRange(0, plan.GatherCount-1).Draw(t, gatherName+".Index"),
+			Func:  newFunc(gatherName, &planConfig.Gather.Func, paths),
+		}
+	}
+
+	newCombine := func(id int, paths []*Path) *Combine {
+		combineName := fmt.Sprintf("Combine#%d", id)
+		var flush ResultHandler
+		if planConfig.Combine.Flush.Draw(t, combineName+".Flush") {
+			flushScatterCount := (&BiasedIntConfig{Med: len(paths) / 2, Max: len(paths)}).Draw(t, combineName+".FlushScatterCount")
+			flush = newGather(id, paths[:flushScatterCount])
+			paths = paths[flushScatterCount:]
+		}
+		return &Combine{
+			ID:           id,
+			Index:        rapid.IntRange(0, len(plan.CombinerPoolIndexes)-1).Draw(t, combineName+".Index"),
+			Func:         newFunc(combineName, &planConfig.Combine.Func, paths),
+			FlushHandler: flush,
+		}
+	}
+
+	newGatherTask := func(id int, paths []*Path) *Task {
+		return newTask(id, newGather(id, paths))
+	}
+
+	newCombineTask := func(id int, paths []*Path) *Task {
+		return newTask(id, newCombine(id, paths))
+	}
+
+	// Collect the next set of paths to be scattered from a new parent task's
+	// gather or combine function. Returns the new parent task and the size of
+	// the set.
+	pathGroupID := 0
+	nextGroupTask := func(availablePaths []*Path) (*Task, []*Path) {
+		id := newTaskID()
+		t.Logf("%s: nextGroupTask", planName)
+		useCombine := planConfig.Task.UseCombine.Draw(t, fmt.Sprintf("Task#%d.UseCombine", id))
+		t.Logf("%s: nextGroupTask useCombine=%v", planName, useCombine)
+		var sizeConfig BiasedIntConfig
+		var newGroupTask func(int, []*Path) *Task
+		if useCombine {
+			sizeConfig = planConfig.Combine.ScatterCount
+			newGroupTask = newCombineTask
+		} else {
+			sizeConfig = planConfig.Gather.ScatterCount
+			newGroupTask = newGatherTask
+		}
+		size := 0
+		if len(availablePaths) > 0 {
+			sizeConfig.Min = max(1, min(sizeConfig.Min, len(availablePaths)))
+			sizeConfig.Med = max(1, min(sizeConfig.Med, len(availablePaths)))
+			sizeConfig.Max = max(1, min(sizeConfig.Max, len(availablePaths)))
+			size = sizeConfig.Draw(t, fmt.Sprintf("%s.PathGroup#%d.Size", planName, pathGroupID))
+		}
+		group := availablePaths[:size]
+		task := newGroupTask(id, group)
+		t.Logf("%v -> %v", task, group)
+		t.Logf("%#v", task)
+		return task, availablePaths[size:]
+	}
+
+	t.Logf("%s: making initial paths", planName)
+
+	// Initialize paths with leaf tasks, will build from leaves to roots
+	for i := range paths {
+		t.Logf("%s: making path %d", planName, i)
+		pathName := fmt.Sprintf("%s.Path[%d]", planName, i)
+		leafTask, _ := nextGroupTask(nil)
+		paths[i] = &Path{
+			RemainingLength: planConfig.Path.Length.Draw(t, pathName+".Length"),
+			RootTask:        leafTask,
+		}
+	}
+
+	t.Logf("%s: building path tree", planName)
+
+	// Build the path tree from the leaves to the root by repeatedly grouping
+	// some of the paths with the most growth remaining into a gather or combine
+	// until none need further growth.
+	nextPermutationNumber := 0
+	for len(paths) > 0 {
+		// Put the longest remaining lengths at the end
+		slices.SortStableFunc(paths, func(a, b *Path) int {
+			return a.RemainingLength - b.RemainingLength
+		})
+
+		t.Logf("paths = %v", paths)
+
+		// Find the set of paths that share the longest remaining length
+		last := len(paths) - 1
+		first := last - 1
+		remainingLength := paths[last].RemainingLength
+		for first >= 0 && paths[first].RemainingLength == remainingLength {
+			first--
+		}
+		first++ // Will always have gone back one too far
+
+		// Permute the set of paths that share the longest remaining length
+		t.Logf("permuting candidates starting at index %d of %d: %d", first, len(paths), nextPermutationNumber)
+		permutationGenerator := rapid.Permutation(paths[first:])
+		t.Logf("got permutationGenerator: %d", nextPermutationNumber)
+		permutedCandidates := permutationGenerator.Draw(t, fmt.Sprintf("%s.PathsPermutation[%d]", planName, nextPermutationNumber))
+		t.Logf("permuted candidates: %d", nextPermutationNumber)
+		nextPermutationNumber++
+
+		// Create a task with a gather or combine that will scatter some number
+		// of tasks from the end of the list of paths.
+		task, remainingCandidates := nextGroupTask(permutedCandidates)
+
+		remainingLength--
+		if remainingLength == 0 {
+			// This set of paths is complete, add the new task to the plan's
+			// root-level steps
+			paths = paths[:len(paths)-len(permutedCandidates)]
+			plan.Steps = append(plan.Steps, Scatter{Task: task})
+		} else {
+			// Collapse the group down to one element and update it to hold the
+			// new task
+			paths = append(paths[:len(paths)-len(permutedCandidates)], &Path{
+				RemainingLength: remainingLength,
+				RootTask:        task,
+			})
+		}
+		paths = append(paths, remainingCandidates...)
+	}
+
+	plan.Steps = rapid.Permutation(plan.Steps).Draw(t, planName+".StepsPermutation")
+
+	var setPathDurations func(pathDuration time.Duration, steps []Step) time.Duration
+	setPathDurations = func(pathDuration time.Duration, steps []Step) time.Duration {
+		for _, step := range steps {
+			switch step := step.(type) {
+			case SelfTime:
+				// Nothing special to do
+			case Subjob:
+				// Nothing special to do
+			case Scatter:
+				step.Task.pathDuration = setPathDurations(pathDuration, step.Task.Func.Steps)
+				switch rh := step.Task.ResultHandler.(type) {
+				case *Gather:
+					rh.pathDuration = setPathDurations(step.Task.pathDuration, rh.Func.Steps)
+				case *Combine:
+					rh.pathDuration = setPathDurations(step.Task.pathDuration, rh.Func.Steps)
+				default:
+					panic(fmt.Sprintf("unknown ResultHandler type: %T", step))
+				}
+			default:
+				panic(fmt.Sprintf("unknown Step type: %T", step))
+			}
+			pathDuration += step.Duration()
+		}
+		if pathDuration > plan.MaxPathDuration {
+			plan.MaxPathDuration = pathDuration
+		}
+		return pathDuration
+	}
+	setPathDurations(0, plan.Steps)
+
+	plan.TaskCount = nextIDs.Task - nextIDsOrigin.Task - plan.SubjobTaskCount
+	plan.SubjobCount = nextIDs.Plan - nextIDsOrigin.Plan
+
+	return plan
 }
 
 // Format implements fmt.Formatter for pretty-printing a plan.
@@ -341,16 +332,29 @@ func (p *Plan) Format(f fmt.State, verb rune) {
 		panic("unsupported verb")
 	}
 	if f.Flag('#') {
-		p.formatInternal(f, "  ")
+		p.Dump(f, "")
 	} else {
 		_, _ = fmt.Fprintf(f, "Plan#%d", p.ID)
 	}
 }
 
-func (p *Plan) formatInternal(f fmt.State, indent string) {
-	_, _ = fmt.Fprintf(f, "Plan#%d: pathCount=%d taskCount=%d maxPathDuration=%v config=%+v", p.ID, p.PathCount, p.TaskCount, p.MaxPathDuration, p.Config)
-	for _, child := range p.RootTasks {
-		_, _ = fmt.Fprintf(f, "\n%s", indent)
-		child.formatInternal(f, indent+"  ")
+func (p *Plan) Dump(fs fmt.State, indent string) {
+	name := fmt.Sprint(p)
+	_, _ = fmt.Fprintf(fs, "%s: pathCount=%d taskCount=%d maxPathDuration=%v", name, p.PathCount, p.TaskCount, p.MaxPathDuration)
+	var t time.Duration
+	for i, tp := range p.TaskPools {
+		_, _ = fmt.Fprintf(fs, "\n%s   TaskPools[%d]: %#v", indent, i, &tp)
 	}
+	for i, cp := range p.CombinerPools {
+		_, _ = fmt.Fprintf(fs, "\n%s   CombinerPools[%d]: %#v", indent, i, &cp)
+	}
+	for i, cpi := range p.CombinerPoolIndexes {
+		_, _ = fmt.Fprintf(fs, "\n%s   Combiners[%d]: pool=%d", indent, i, cpi)
+	}
+	for i, s := range p.Steps {
+		_, _ = fmt.Fprintf(fs, "\n%s%s step %d/%d (+%v): ", indent, name, i+1, len(p.Steps)+1, t)
+		s.Dump(fs, indent)
+		t += s.Duration()
+	}
+	_, _ = fmt.Fprintf(fs, "\n%s%s step %d/%d (+%v): ends at %v", indent, name, len(p.Steps)+1, len(p.Steps)+1, t, p.MaxPathDuration)
 }

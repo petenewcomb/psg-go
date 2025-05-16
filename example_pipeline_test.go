@@ -38,9 +38,14 @@ func Example_pipeline() {
 // fails or any read operation fails, MD5All returns an error.
 func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error) {
 
+	// Create the scatter-gather job, setting up a deferred call to Cancel to
+	// terminate outstanding tasks in case of error.
+	job := psg.NewJob(ctx)
+	defer job.CancelAndWait()
+
 	// Run digesting tasks in a Pool limited to the number of cores available to
 	// the program, since it should be CPU-bound.
-	digesterPool := psg.NewPool(runtime.NumCPU())
+	digesterPool := psg.NewTaskPool(job, runtime.NumCPU())
 	newDigestingTask := func(data []byte) psg.TaskFunc[[md5.Size]byte] {
 		return func(ctx context.Context) ([md5.Size]byte, error) {
 			return md5.Sum(data), nil
@@ -49,40 +54,33 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestGather := func(path string) psg.GatherFunc[[md5.Size]byte] {
-		return func(ctx context.Context, sum [md5.Size]byte, err error) error {
-			m[path] = sum
-			return nil
-		}
+	newDigestGather := func(path string) *psg.Gather[[md5.Size]byte] {
+		return psg.NewGather(
+			func(ctx context.Context, sum [md5.Size]byte, err error) error {
+				m[path] = sum
+				return nil
+			},
+		)
 	}
 
 	// Allow many file reading tasks to run concurrently since they should be
 	// I/O-bound.
-	readerPool := psg.NewPool(100)
+	readerPool := psg.NewTaskPool(job, 100)
 	newReadingTask := func(path string) psg.TaskFunc[[]byte] {
 		return func(ctx context.Context) ([]byte, error) {
 			return os.ReadFile(path)
 		}
 	}
 
-	// Creates gather functions for reading tasks that launch digesting tasks.
-	newReadGather := func(path string) psg.GatherFunc[[]byte] {
-		return func(ctx context.Context, data []byte, err error) error {
-			return psg.Scatter(
-				ctx,
-				digesterPool,
-				newDigestingTask(data),
-				newDigestGather(path),
-			)
-		}
+	// Creates gathers for reading tasks that launch digesting tasks.
+	newReadGather := func(path string) *psg.Gather[[]byte] {
+		return psg.NewGather(
+			func(ctx context.Context, data []byte, err error) error {
+				return newDigestGather(path).
+					Scatter(ctx, digesterPool, newDigestingTask(data))
+			},
+		)
 	}
-
-	// Create the scatter-gather job, setting up a deferred call to Cancel to
-	// terminate outstanding tasks in case of error. Errors will propagate from
-	// task functions to gather functions, where they will bubble up through the
-	// calls to Scatter or GatherAll.
-	job := psg.NewJob(ctx, readerPool, digesterPool)
-	defer job.CancelAndWait()
 
 	// Walk the tree and launch a reading task for each regular file.
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -92,12 +90,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return psg.Scatter(
-			ctx,
-			readerPool,
-			newReadingTask(path),
-			newReadGather(path),
-		)
+		return newReadGather(path).Scatter(ctx, readerPool, newReadingTask(path))
 	})
 	if err != nil {
 		return nil, err

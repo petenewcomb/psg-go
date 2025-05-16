@@ -14,6 +14,7 @@ format.
 - Test coverage for various expected panic conditions
 - Job.CancelAndWait to ensure that task goroutines have fully shut down
 - Job.Close and Job.CloseAndGatherAll
+- Combiner type for aggregating multiple inputs into single outputs
 
 ### Changed
 
@@ -26,7 +27,7 @@ format.
 ### Fixed
 
 - Require Go 1.24 to avoid need for GOEXPERIMENT=aliastypeparams
-- Deadlock during scatter or gather due to race between counter and channel
+- Fixed deadlocks that could occur when scattering tasks during gather operations
 
 ### Removed
 

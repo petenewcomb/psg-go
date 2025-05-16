@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package state
+package basicq
 
 // Queue is a FIFO queue implemented as a ring buffer
 // that grows as needed. The zero value is ready to use.
@@ -27,13 +27,11 @@ func (q *Queue[T]) PushBack(item T) {
 func (q *Queue[T]) PopFront() (T, bool) {
 	if q.front == q.back {
 		// Queue is empty
-		var zero T
-		return zero, false
+		return *new(T), false
 	}
 
 	item := q.items[q.front]
-	var zero T
-	q.items[q.front] = zero // help GC by clearing the reference
+	q.items[q.front] = *new(T) // help GC by clearing the reference
 	q.front++
 
 	// Reset counters when front reaches capacity to prevent integer overflow on long-running queues
@@ -57,8 +55,7 @@ func (q *Queue[T]) grow() int {
 	var newItems []T
 	if oldCapacity == 0 {
 		// Use default initial slice capacity
-		var zero T
-		newItems = append(q.items, zero)
+		newItems = append(q.items, *new(T))
 		newItems = newItems[:cap(newItems)]
 	} else {
 		newItems = make([]T, oldCapacity*2)

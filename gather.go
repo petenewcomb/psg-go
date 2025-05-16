@@ -6,7 +6,7 @@ package psg
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
 // A GatherFunc is a function that processes the result of a completed
@@ -114,7 +114,7 @@ func (g *Gather[T]) scatter(
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) error {
+		bpf = func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) error {
 			_, err := bp.Block(ctx, waiter, limitChangeCh)
 			return err
 		}

@@ -57,8 +57,7 @@ func (h *Heap[T]) Pop() T {
 // Returns the zero value of T if the heap is empty.
 func (h *Heap[T]) Peek() T {
 	if len(h.impl.items) == 0 {
-		var zero T
-		return zero
+		return *new(T)
 	}
 	return h.impl.items[0]
 }

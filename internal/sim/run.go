@@ -12,17 +12,17 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/stretchr/testify/require"
 )
 
 func Run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error {
-	tp := &state.TimerPool{}
+	tp := &timerp.Pool{}
 	tp.Init()
 	return run(ctx, t, plan, debug, tp)
 }
 
-func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerPool *state.TimerPool) error {
+func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerPool *timerp.Pool) error {
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 
@@ -70,7 +70,7 @@ type controller struct {
 	MinCombineDelay              atomicMinMaxInt64
 	MinCombineGatherDelay        atomicMinMaxInt64
 	Debug                        bool
-	TimerPool                    *state.TimerPool
+	TimerPool                    *timerp.Pool
 }
 
 func (c *controller) Run(ctx context.Context, t require.TestingT) error {

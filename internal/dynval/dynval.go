@@ -1,18 +1,18 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
-package state
+
+package dynval
 
 import "sync/atomic"
 
-type DynamicValue[T any] struct {
+type Value[T any] struct {
 	state atomic.Pointer[dvState[T]]
 }
 
-func (dv *DynamicValue[T]) Load() (T, <-chan struct{}) {
+func (dv *Value[T]) Load() (T, <-chan struct{}) {
 	state := dv.state.Load()
 	if state == nil {
-		var zero T
-		state = newDvState(zero)
+		state = newDvState(*new(T))
 		if !dv.state.CompareAndSwap(nil, state) {
 			state = dv.state.Load()
 		}
@@ -20,7 +20,7 @@ func (dv *DynamicValue[T]) Load() (T, <-chan struct{}) {
 	return state.value, state.changeChan
 }
 
-func (dv *DynamicValue[T]) Store(v T) {
+func (dv *Value[T]) Store(v T) {
 	oldState := dv.state.Swap(&dvState[T]{
 		value:      v,
 		changeChan: make(chan struct{}),

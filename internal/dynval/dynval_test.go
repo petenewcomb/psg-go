@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package state
+package dynval_test
 
 import (
 	"runtime"
@@ -10,12 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/stretchr/testify/require"
 )
 
-func TestDynamicValue_ZeroValue(t *testing.T) {
+func TestValue_ZeroValue(t *testing.T) {
 	chk := require.New(t)
-	var dv DynamicValue[int]
+	var dv dynval.Value[int]
 
 	// Load from zero value should return zero and not panic
 	value, ch := dv.Load()
@@ -23,9 +24,9 @@ func TestDynamicValue_ZeroValue(t *testing.T) {
 	chk.NotNil(ch)
 }
 
-func TestDynamicValue_Store(t *testing.T) {
+func TestValue_Store(t *testing.T) {
 	chk := require.New(t)
-	var dv DynamicValue[int]
+	var dv dynval.Value[int]
 
 	// Store sets the value
 	dv.Store(42)
@@ -38,9 +39,9 @@ func TestDynamicValue_Store(t *testing.T) {
 	chk.Equal(100, value)
 }
 
-func TestDynamicValue_LoadNotification(t *testing.T) {
+func TestValue_LoadNotification(t *testing.T) {
 	chk := require.New(t)
-	var dv DynamicValue[int]
+	var dv dynval.Value[int]
 
 	// Get the initial value and change channel
 	_, changeCh1 := dv.Load()
@@ -79,9 +80,9 @@ func TestDynamicValue_LoadNotification(t *testing.T) {
 	}
 }
 
-func TestDynamicValue_Concurrent(t *testing.T) {
+func TestValue_Concurrent(t *testing.T) {
 	chk := require.New(t)
-	var dv DynamicValue[int]
+	var dv dynval.Value[int]
 
 	const numGoroutines = 10
 	const numIterations = 100
@@ -152,9 +153,9 @@ func TestDynamicValue_Concurrent(t *testing.T) {
 	}
 }
 
-func TestDynamicValue_RapidChanges(t *testing.T) {
+func TestValue_RapidChanges(t *testing.T) {
 	chk := require.New(t)
-	var dv DynamicValue[int]
+	var dv dynval.Value[int]
 
 	// Get the initial change channel
 	_, initialChangeCh := dv.Load()
@@ -177,8 +178,8 @@ func TestDynamicValue_RapidChanges(t *testing.T) {
 	chk.Equal(1000, finalValue)
 }
 
-func TestDynamicValue_StressRaceDetection(t *testing.T) {
-	var dv DynamicValue[int]
+func TestValueConcurrency(t *testing.T) {
+	var dv dynval.Value[int]
 	chk := require.New(t)
 
 	const numReaders = 100
@@ -407,9 +408,9 @@ func TestDynamicValue_StressRaceDetection(t *testing.T) {
 		float64(observedValueCount)*100/float64(totalPossibleValues))
 }
 
-func TestDynamicValue_AliasedChannels(t *testing.T) {
+func TestValue_AliasedChannels(t *testing.T) {
 	chk := require.New(t)
-	var dv DynamicValue[int]
+	var dv dynval.Value[int]
 
 	// Get the value and change channel twice
 	_, changeCh1 := dv.Load()
@@ -447,11 +448,11 @@ func TestDynamicValue_AliasedChannels(t *testing.T) {
 	chk.NotEqual(changeCh1, changeCh3, "Expected different change channels after Store")
 }
 
-func TestDynamicValue_DifferentTypes(t *testing.T) {
+func TestValue_DifferentTypes(t *testing.T) {
 	chk := require.New(t)
 
 	// Test with string
-	var dvString DynamicValue[string]
+	var dvString dynval.Value[string]
 
 	val, ch := dvString.Load()
 	chk.Equal("", val)
@@ -473,7 +474,7 @@ func TestDynamicValue_DifferentTypes(t *testing.T) {
 		Field2 string
 	}
 
-	var dvStruct DynamicValue[testStruct]
+	var dvStruct dynval.Value[testStruct]
 
 	valStruct, _ := dvStruct.Load()
 	chk.Equal(0, valStruct.Field1)

@@ -9,15 +9,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/basicq"
+	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/petenewcomb/psg-go/internal/heap"
 	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
 // CombinerPool manages a pool of goroutines that execute combiners.
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
 type CombinerPool struct {
 	job              *Job
-	concurrencyLimit state.DynamicValue[int]
+	concurrencyLimit dynval.Value[int]
 	spawnDelay       time.Duration
 	idleTimeout      time.Duration
 
@@ -44,7 +47,7 @@ type CombinerPool struct {
 	secondaryElected atomic.Bool
 
 	waitingCombines state.InFlightCounter
-	waiterQueue     state.WaiterQueue
+	waiterQueue     waitq.Queue
 }
 
 // NewCombinerPool creates a new CombinerPool with the specified concurrency limit.
@@ -60,6 +63,7 @@ func NewCombinerPool(job *Job, concurrencyLimit int) *CombinerPool {
 		secondaryChan: make(chan boundCombineFunc),
 	}
 	cp.concurrencyLimit.Store(concurrencyLimit)
+	cp.waiterQueue.Init()
 	return cp
 }
 
@@ -245,7 +249,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 
 		var cm combinerMap
 		type combineWorkFunc func(ctx context.Context)
-		var workQueue state.Queue[combineWorkFunc]
+		var workQueue basicq.Queue[combineWorkFunc]
 
 		// More forward references
 		var executeCombine func(ctx context.Context, combine boundCombineFunc)
@@ -281,7 +285,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 			return true, nil
 		}
 
-		combineOne := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
+		combineOne := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
 			// Check if any combiners need to be flushed due to deadlines and
 			// set up flush deadline timer if needed
 			now := time.Now()
@@ -343,7 +347,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 			tryCombineOne: func(ctx context.Context) (bool, error) {
 				return tryCombineOne(ctx)
 			},
-			combineOne: func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
+			combineOne: func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
 				return combineOne(ctx, nil, waiter, limitChangeCh)
 			},
 		}
@@ -410,7 +414,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 			// No need to report errors from combineOne, since they would only
 			// be due to canceled contexts. Other errors are posted to be
 			// gathered.
-			_, err := combineOne(goroutineCtx, idleTimerCh, state.Waiter{}, nil)
+			_, err := combineOne(goroutineCtx, idleTimerCh, waitq.Waiter{}, nil)
 			if err != nil {
 				// This goroutine should exit.
 				return
@@ -459,7 +463,7 @@ type combinerMapKey struct {
 	Combine any
 }
 
-func getCombineFunc[I any, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBoundCombineFunc[I] {
+func getCombineFunc[I, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBoundCombineFunc[I] {
 	k := combinerMapKey{
 		Job:     j,
 		Combine: c,

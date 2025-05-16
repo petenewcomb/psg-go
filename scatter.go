@@ -112,9 +112,9 @@ func yieldBeforeScatter(ctx context.Context, bp backpressureProvider) error {
 	return nil
 }
 
-type taskContextValueType struct{}
+type taskContextValueKeyType struct{}
 
-var taskContextValueKey any = taskContextValueType{}
+var taskContextValueKey any = taskContextValueKeyType{}
 
 func newTaskContext(ctx context.Context, j *Job) context.Context {
 	val := j.ctx.Value(jobContextValueKey)

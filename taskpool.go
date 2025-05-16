@@ -6,7 +6,9 @@ package psg
 import (
 	"context"
 
+	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
 // A TaskPool defines a virtual set of task execution slots and optionally places a
@@ -15,9 +17,9 @@ import (
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
 	job              *Job
-	concurrencyLimit state.DynamicValue[int]
+	concurrencyLimit dynval.Value[int]
 	inFlight         state.InFlightCounter
-	waiterQueue      state.WaiterQueue
+	waiterQueue      waitq.Queue
 }
 
 // Creates a new [TaskPool] bound to the specified job with the given concurrency limit.
@@ -36,6 +38,7 @@ func NewTaskPool(job *Job, limit int) *TaskPool {
 		job: job,
 	}
 	p.concurrencyLimit.Store(limit)
+	p.waiterQueue.Init()
 	return p
 }
 
@@ -104,7 +107,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 	return true, nil
 }
 
-type backpressureFunc func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) error
+type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) error
 
 type boundTaskFunc func(ctx context.Context)
 

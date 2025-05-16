@@ -1,45 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
-package state
 
-type WaiterQueue struct {
-	q SyncQueue[Waiter]
-}
-
-func (wq *WaiterQueue) Add() Waiter {
-	w := Waiter{
-		wq:         wq,
-		notifyChan: make(chan struct{}, 1),
-	}
-
-	// Add to unbounded queue - never blocks
-
-	wq.q.PushBack(w)
-	return w
-}
-
-// Notify signals the waiter at the front of the queue (if any).
-func (wq *WaiterQueue) Notify() {
-
-	for {
-		w, ok := wq.q.PopFront()
-		if !ok {
-
-			return
-		}
-
-		select {
-		case w.notifyChan <- struct{}{}:
-
-			// The notification was sent.
-			return
-		default:
-
-			// The channel was full, meaning that the waiter was closed. Loop
-			// and try the next one.
-		}
-	}
-}
+package waitq
 
 // A Waiter has the following lifecycle states:
 //
@@ -74,27 +36,23 @@ func (wq *WaiterQueue) Notify() {
 //
 // Waiter variables may be safely copied and are designed to be passed by value.
 type Waiter struct {
-	wq         *WaiterQueue
+	q          *Queue
 	notifyChan chan struct{}
 }
 
 func (w Waiter) Done() <-chan struct{} {
-
 	return w.notifyChan
 }
 
 func (w Waiter) Close() {
-
 	select {
 	case w.notifyChan <- struct{}{}:
-
 		// Filled notifyChan so that if it is still in the queue, Notify knows
 		// that this waiter is no longer listening and can pass the notification
 		// to another.
 	default:
-
 		// notifyChan was full, meaning that this waiter was notified but didn't
 		// receive it. Call Notify to pass the notification to another.
-		w.wq.Notify()
+		w.q.Notify()
 	}
 }

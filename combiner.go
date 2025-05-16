@@ -9,7 +9,7 @@ import (
 
 // Combiner is an interface that defines operations for combining and flushing inputs.
 // It is used to aggregate inputs over time before emitting outputs.
-type Combiner[I any, O any] interface {
+type Combiner[I, O any] interface {
 	// Combine processes a single input and optionally emits an output.
 	// It is called each time a task completes.
 	Combine(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O])
@@ -24,7 +24,7 @@ type CombinerEmitFunc[O any] func(context.Context, O, error)
 // FuncCombiner is a thin wrapper that implements the Combiner interface
 // using function fields. This allows for simple creation of combiners using
 // closures that share state.
-type FuncCombiner[I any, O any] struct {
+type FuncCombiner[I, O any] struct {
 	// CombineFunc is called to process each input
 	CombineFunc func(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O])
 
@@ -47,4 +47,4 @@ func (c FuncCombiner[I, O]) Flush(ctx context.Context, emit CombinerEmitFunc[O])
 }
 
 // CombinerFactory is a function that creates a new Combiner instance.
-type CombinerFactory[I any, O any] = func() Combiner[I, O]
+type CombinerFactory[I, O any] = func() Combiner[I, O]

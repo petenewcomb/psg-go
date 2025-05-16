@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
 // Combine represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
-type Combine[I any, O any] struct {
+type Combine[I, O any] struct {
 	gather          *Gather[O]
 	combinerPool    *CombinerPool
 	combinerFactory CombinerFactory[I, O]
@@ -23,7 +23,7 @@ type Combine[I any, O any] struct {
 
 // NewCombine creates a new Combine operation that uses the specified gather function,
 // combiner pool, and combiner factory.
-func NewCombine[I any, O any](
+func NewCombine[I, O any](
 	gather *Gather[O],
 	combinerPool *CombinerPool,
 	combinerFactory CombinerFactory[I, O],
@@ -58,15 +58,16 @@ func NewCombine[I any, O any](
 // This method is safe to call at any time. However, the timing
 // of when the new value takes effect within a running job is undefined.
 //
-// Panics if min is < -1 or if min > maxHoldTime (when maxHoldTime >= 0).
-func (c *Combine[I, O]) SetMinHoldTime(min time.Duration) {
-	if min < -1 {
-		panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", min))
+// Panics if argument is less than -1 or greater than maxHoldTime (when
+// maxHoldTime >= 0).
+func (c *Combine[I, O]) SetMinHoldTime(d time.Duration) {
+	if d < -1 {
+		panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", d))
 	}
-	if c.maxHoldTime >= 0 && min > c.maxHoldTime {
-		panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)", min, c.maxHoldTime))
+	if c.maxHoldTime >= 0 && d > c.maxHoldTime {
+		panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)", d, c.maxHoldTime))
 	}
-	c.minHoldTime = min
+	c.minHoldTime = d
 }
 
 // SetMaxHoldTime sets the maximum time a combiner will hold any inputs before
@@ -80,15 +81,16 @@ func (c *Combine[I, O]) SetMinHoldTime(min time.Duration) {
 // This method is safe to call at any time. However, the timing
 // of when the new value takes effect within a running job is undefined.
 //
-// Panics if max is < -1 or if max < minHoldTime (when minHoldTime >= 0).
-func (c *Combine[I, O]) SetMaxHoldTime(max time.Duration) {
-	if max < -1 {
-		panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", max))
+// Panics if argument is less than -1 or less than minHoldTime (when minHoldTime
+// >= 0).
+func (c *Combine[I, O]) SetMaxHoldTime(d time.Duration) {
+	if d < -1 {
+		panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", d))
 	}
-	if c.minHoldTime >= 0 && max < c.minHoldTime {
-		panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)", max, c.minHoldTime))
+	if c.minHoldTime >= 0 && d < c.minHoldTime {
+		panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)", d, c.minHoldTime))
 	}
-	c.maxHoldTime = max
+	c.maxHoldTime = d
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
@@ -196,7 +198,7 @@ func (c *Combine[I, O]) scatter(
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) error {
+		bpf = func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) error {
 			_, err := bp.Block(ctx, waiter, limitChangeCh)
 			return err
 		}
@@ -215,7 +217,7 @@ func (c *Combine[I, O]) scatter(
 type combineBackpressureProvider struct {
 	job           *Job
 	tryCombineOne func(ctx context.Context) (bool, error)
-	combineOne    func(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error)
+	combineOne    func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error)
 }
 
 func (bp combineBackpressureProvider) ForJob(j *Job) bool {
@@ -226,6 +228,6 @@ func (bp combineBackpressureProvider) Yield(ctx context.Context) (bool, error) {
 	return bp.tryCombineOne(ctx)
 }
 
-func (bp combineBackpressureProvider) Block(ctx context.Context, waiter state.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
+func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
 	return bp.combineOne(ctx, waiter, limitChangeCh)
 }

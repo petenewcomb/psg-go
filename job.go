@@ -8,7 +8,10 @@ import (
 	"maps"
 	"sync"
 
+	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
 // Job represents a scatter-gather execution environment. It tracks tasks
@@ -25,8 +28,21 @@ type Job struct {
 	gatherChan chan boundGatherFunc
 	wg         sync.WaitGroup
 	state      state.JobState
-	timerPool  state.TimerPool
-	workQueue  state.SyncQueue[gatherWorkFunc]
+	timerPool  timerp.Pool
+
+	// workQueue must be thread-safe only to support multiple goroutines
+	// potentially calling the job's gather methods concurrently, including
+	// indirectly through Gather scatter methods. An alternative approach to
+	// further leverage context values (see gatherContextValueKey) to hold
+	// goroutine-specific work queues is not workable because the work queue
+	// must persist across top-level calls to gather so that an error resulting
+	// from processing one work item can be reported immediately while leaving
+	// remaining work items in queue for future calls to gather methods to
+	// process. These top-level calls are passed contexts not produced by other
+	// psg functions, and to require that they be so would complicate the API in
+	// ways that users should not need to understand. A true goroutine-local
+	// storage capability would be a perfect fit here.
+	workQueue nbcq.Queue[gatherWorkFunc]
 }
 
 type boundGatherFunc = func(ctx context.Context) error
@@ -49,15 +65,16 @@ func NewJob(ctx context.Context) *Job {
 		cancelFunc: cancelFunc,
 		gatherChan: make(chan boundGatherFunc),
 	}
+	j.ctx = withJob(ctx, j)
 	j.state.Init()
 	j.timerPool.Init()
-	j.ctx = withJob(ctx, j)
+	j.workQueue.Init()
 	return j
 }
 
-type jobContextValueType struct{}
+type jobContextValueKeyType struct{}
 
-var jobContextValueKey any = jobContextValueType{}
+var jobContextValueKey any = jobContextValueKeyType{}
 
 func withJob(ctx context.Context, j *Job) context.Context {
 	oldValue := ctx.Value(taskContextValueKey)
@@ -175,9 +192,9 @@ func (j *Job) vetGather(ctx context.Context) {
 	}
 }
 
-type gatherContextValueType struct{}
+type gatherContextValueKeyType struct{}
 
-var gatherContextValueKey gatherContextValueType
+var gatherContextValueKey gatherContextValueKeyType
 
 func (j *Job) inGather(ctx context.Context) bool {
 	inGather := false
@@ -217,7 +234,7 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 		}
 	}
 
-	_, err := j.gatherOne(ctx, state.Waiter{}, nil)
+	_, err := j.gatherOne(ctx, waitq.Waiter{}, nil)
 
 	jobDone := false
 	if err == errJobDone {
@@ -236,7 +253,7 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 }
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
-func (j *Job) gatherOne(ctx context.Context, waiter state.Waiter, limitCh <-chan struct{}) (bool, error) {
+func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	select {
 	case gather := <-j.gatherChan:
 		j.workQueue.PushBack(func(ctx context.Context) error {

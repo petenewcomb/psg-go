@@ -14,11 +14,11 @@ import (
 // Combine represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
 type Combine[I, O any] struct {
-	gather          *Gather[O]
-	combinerPool    *CombinerPool
-	combinerFactory CombinerFactory[I, O]
-	minHoldTime     time.Duration // Minimum time since last combine before auto-flushing
-	maxHoldTime     time.Duration // Maximum time since first combine before auto-flushing
+	gather       *Gather[O]
+	combinerPool *CombinerPool
+	newCombiner  CombinerFactory[I, O]
+	minHoldTime  time.Duration // Minimum time since last combine before auto-flushing
+	maxHoldTime  time.Duration // Maximum time since first combine before auto-flushing
 }
 
 // NewCombine creates a new Combine operation that uses the specified gather function,
@@ -38,11 +38,11 @@ func NewCombine[I, O any](
 		panic("combiner factory must be non-nil")
 	}
 	c := &Combine[I, O]{
-		gather:          gather,
-		combinerPool:    combinerPool,
-		combinerFactory: combinerFactory,
-		minHoldTime:     -1, // Sentinel value: no idle-based flushing
-		maxHoldTime:     -1, // Sentinel value: no absolute deadline
+		gather:       gather,
+		combinerPool: combinerPool,
+		newCombiner:  combinerFactory,
+		minHoldTime:  -1, // Sentinel value: no idle-based flushing
+		maxHoldTime:  -1, // Sentinel value: no absolute deadline
 	}
 	return c
 }
@@ -207,7 +207,7 @@ func (c *Combine[I, O]) scatter(
 	return scatter(ctx, taskPool, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
 		c.combinerPool.launch(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
-			getCombineFunc(cm, j, c)(ctx, input, inputErr)
+			getCombineFunc(ctx, cm, j, c)(ctx, input, inputErr)
 		})
 	})
 }

@@ -3,15 +3,11 @@
 
 package psg
 
-type constError string
+import "github.com/petenewcomb/psg-go/internal/cerr"
 
-func (e constError) Error() string {
-	return string(e)
-}
-
-const ErrTaskPanic = constError("task panicked")
-const ErrCombinePanic = constError("combine panicked")
-const ErrCombinerFlushPanic = constError("combiner flush panicked")
-const ErrCombinerFactoryPanic = constError("combiner factory panicked")
-
-const errJobDone = constError("job done")
+const ErrTaskPanicked = cerr.Error("task panicked")
+const ErrCombinePanicked = cerr.Error("combine panicked")
+const ErrCombinerFlushPanicked = cerr.Error("combiner flush panicked")
+const ErrCombinerFactoryPanicked = cerr.Error("combiner factory panicked")
+const ErrCombinerFactoryReturnedNil = cerr.Error("combiner factory returned nil")
+const ErrJobDone = cerr.Error("job done")

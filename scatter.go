@@ -73,7 +73,7 @@ func scatter[T any](
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.
 		var value T
-		var err error = ErrTaskPanic
+		var err error = ErrTaskPanicked
 		defer func() {
 			// Decrement the task pool's in-flight count BEFORE waiting on the gather
 			// channel. This makes it safe for gatherFunc to call `Scatter` with this

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/basicq"
+	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/petenewcomb/psg-go/internal/heap"
 	"github.com/petenewcomb/psg-go/internal/state"
@@ -333,7 +334,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 				return true, nil
 			case <-limitChangeCh:
 			case <-j.state.Done():
-				return false, errIdleTimeout
+				return false, ErrJobDone
 			case <-ctx.Done():
 				return false, ctx.Err()
 			case <-goroutineCtx.Done():
@@ -424,7 +425,7 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 	return true
 }
 
-const errIdleTimeout = constError("idle timeout reached")
+const errIdleTimeout = cerr.Error("idle timeout reached")
 
 type boundCombineFunc func(ctx context.Context, cm *combinerMap)
 
@@ -463,7 +464,7 @@ type combinerMapKey struct {
 	Combine any
 }
 
-func getCombineFunc[I, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBoundCombineFunc[I] {
+func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, j *Job, c *Combine[I, O]) halfBoundCombineFunc[I] {
 	k := combinerMapKey{
 		Job:     j,
 		Combine: c,
@@ -473,7 +474,6 @@ func getCombineFunc[I, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBou
 	if bc != nil {
 		combineFunc = bc.CombineFunc.(halfBoundCombineFunc[I])
 	} else {
-		combiner := c.combinerFactory()
 		emit := func(ctx context.Context, output O, outputErr error) {
 			// Bind the gatherFunc to the combiner output
 			gather := func(ctx context.Context) error {
@@ -492,6 +492,22 @@ func getCombineFunc[I, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBou
 			case <-j.ctx.Done():
 			}
 		}
+
+		combiner := func() Combiner[I, O] {
+			panicked := true
+			defer func() {
+				if panicked {
+					emit(ctx, *new(O), ErrCombinerFactoryPanicked)
+				}
+			}()
+			combiner := c.newCombiner()
+			panicked = false
+			if combiner == nil {
+				emit(ctx, *new(O), ErrCombinerFactoryReturnedNil)
+				combiner = &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
+			}
+			return combiner
+		}()
 
 		// Initialize the map if needed
 		if cm.m == nil {
@@ -533,7 +549,7 @@ func getCombineFunc[I, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBou
 			defer func() {
 				if !didNotPanic {
 					// Just in case the panic is otherwise suppressed
-					emit(ctx, *new(O), ErrCombinePanic)
+					emit(ctx, *new(O), ErrCombinePanicked)
 				}
 
 				// The job's in-flight task counter must be decremented here
@@ -556,7 +572,7 @@ func getCombineFunc[I, O any](cm *combinerMap, j *Job, c *Combine[I, O]) halfBou
 			defer func() {
 				if !didNotPanic {
 					// Just in case the panic is otherwise suppressed
-					emit(ctx, *new(O), ErrCombinerFlushPanic)
+					emit(ctx, *new(O), ErrCombinerFlushPanicked)
 				}
 			}()
 

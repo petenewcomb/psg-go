@@ -48,3 +48,14 @@ func (c FuncCombiner[I, O]) Flush(ctx context.Context, emit CombinerEmitFunc[O])
 
 // CombinerFactory is a function that creates a new Combiner instance.
 type CombinerFactory[I, O any] = func() Combiner[I, O]
+
+type errCombiner[I, O any] struct {
+	err error
+}
+
+func (c errCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O]) {
+	emit(ctx, *new(O), c.err)
+}
+
+func (c errCombiner[I, O]) Flush(ctx context.Context, emit CombinerEmitFunc[O]) {
+}

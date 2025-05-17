@@ -237,7 +237,7 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 	_, err := j.gatherOne(ctx, waitq.Waiter{}, nil)
 
 	jobDone := false
-	if err == errJobDone {
+	if err == ErrJobDone {
 		jobDone = true
 		err = nil
 	}
@@ -263,7 +263,7 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 		return true, nil
 	case <-limitCh:
 	case <-j.state.Done():
-		return false, errJobDone
+		return false, ErrJobDone
 	case <-ctx.Done():
 		return false, ctx.Err()
 	case <-j.ctx.Done():

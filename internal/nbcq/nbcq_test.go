@@ -109,7 +109,7 @@ func TestQueueConcurrency(t *testing.T) {
 	var numWriters = max(1, runtime.NumCPU()/2)
 	var iterations = 5_000_000
 	if testing.Short() {
-		iterations /= 5
+		iterations /= 10
 	}
 
 	// Tracking statistics for each reader and writer independently

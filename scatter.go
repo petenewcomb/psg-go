@@ -117,6 +117,12 @@ type taskContextValueKeyType struct{}
 var taskContextValueKey any = taskContextValueKeyType{}
 
 func newTaskContext(ctx context.Context, j *Job) context.Context {
-	val := j.ctx.Value(jobContextValueKey)
-	return context.WithValue(ctx, taskContextValueKey, val)
+	taskCtx := j.ctx
+	taskCtx = context.WithValue(taskCtx,
+		taskContextValueKey,
+		j.ctx.Value(jobContextValueKey))
+	taskCtx = context.WithValue(taskCtx,
+		backpressureProviderContextValueKey,
+		ctx.Value(backpressureProviderContextValueKey))
+	return taskCtx
 }

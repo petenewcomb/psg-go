@@ -9,7 +9,7 @@ import (
 	"github.com/petenewcomb/psg-go"
 )
 
-func scatter[T any](ctx context.Context, pool *psg.TaskPool, wf Workflow, taskFn TaskFunc[T],
+func scatter[T any](ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[T],
 	launch func(context.Context, *psg.TaskPool, psg.TaskFunc[result[T]]) (bool, error),
 ) (bool, error) {
 
@@ -19,7 +19,7 @@ func scatter[T any](ctx context.Context, pool *psg.TaskPool, wf Workflow, taskFn
 	launched := false
 	defer func() {
 		if !launched {
-			wf.Unref()
+			wf.unref(ctx)
 		}
 	}()
 

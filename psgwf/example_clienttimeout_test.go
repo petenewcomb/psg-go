@@ -35,17 +35,17 @@ func Example_clientTimeout() {
 	}
 
 	// Create a gather for collecting results
-	gather := psgwf.NewGather(func(ctx context.Context, wf psgwf.Workflow, requestID string, err error) error {
+	gather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
 		fmt.Printf("%2dms [%s] result gathered\n", msSinceStart(), requestID)
 		return nil
 	})
 
 	newRequestTask := func(requestID string) psgwf.TaskFunc[string] {
-		return func(ctx context.Context, wf psgwf.Workflow) (string, error) {
+		return func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			select {
 			case <-time.After(30 * time.Millisecond):
 				fmt.Printf("%2dms [%s] task completed\n", msSinceStart(), requestID)
-			case <-wf.Ctx.Done():
+			case <-wf.Ctx().Done():
 				fmt.Printf("%2dms [%s] workflow cancelled\n", msSinceStart(), requestID)
 			case <-ctx.Done():
 				fmt.Printf("%2dms [%s] job cancelled\n", msSinceStart(), requestID)
@@ -58,7 +58,6 @@ func Example_clientTimeout() {
 	handleRequest := func(requestID string, clientCtx context.Context) {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
-		defer wf.Unref()
 		// Launch operation
 		err := gather.Scatter(context.Background(), pool, wf, newRequestTask(requestID))
 		if err != nil {

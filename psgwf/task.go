@@ -9,9 +9,9 @@ import (
 	"github.com/petenewcomb/psg-go"
 )
 
-type TaskFunc[T any] = func(context.Context, Workflow) (T, error)
+type TaskFunc[T any] = func(context.Context, *Workflow) (T, error)
 
-func wrapTaskFunc[T any](wf Workflow, taskFn TaskFunc[T]) psg.TaskFunc[result[T]] {
+func wrapTaskFunc[T any](wf *Workflow, taskFn TaskFunc[T]) psg.TaskFunc[result[T]] {
 	return func(ctx context.Context) (res result[T], err error) {
 		res.Workflow = wf
 		res.Value, err = taskFn(ctx, wf)
@@ -20,6 +20,6 @@ func wrapTaskFunc[T any](wf Workflow, taskFn TaskFunc[T]) psg.TaskFunc[result[T]
 }
 
 type result[T any] struct {
-	Workflow Workflow
+	Workflow *Workflow
 	Value    T
 }

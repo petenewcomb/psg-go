@@ -31,7 +31,7 @@ func Example() {
 	completed := []string{}
 
 	// Create a gather for collecting results
-	resultGather := psgwf.NewGather(func(ctx context.Context, wf psgwf.Workflow, msg string, err error) error {
+	resultGather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -45,14 +45,13 @@ func Example() {
 	// Simulate handling a request
 	handleRequest := func(requestID string, clientCtx context.Context, sleepTime time.Duration) {
 		wf := psgwf.New(clientCtx)
-		defer wf.Unref()
 
 		// Launch operation for this request
-		err := resultGather.Scatter(clientCtx, pool, wf, func(ctx context.Context, wf psgwf.Workflow) (string, error) {
+		err := resultGather.Scatter(clientCtx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			select {
 			case <-time.After(sleepTime):
 				return fmt.Sprintf("[%s] completed", requestID), nil
-			case <-wf.Ctx.Done():
+			case <-wf.Ctx().Done():
 				return "", fmt.Errorf("[%s] cancelled", requestID)
 			}
 		})

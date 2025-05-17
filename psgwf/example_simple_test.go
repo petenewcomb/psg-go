@@ -24,7 +24,7 @@ func Example_simple() {
 	pool := psg.NewTaskPool(job, 10)
 
 	// Create a gather
-	gather := psgwf.NewGather(func(ctx context.Context, wf psgwf.Workflow, msg string, err error) error {
+	gather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		} else {
@@ -36,10 +36,9 @@ func Example_simple() {
 	// Create a workflow
 	ctx := context.Background()
 	wf := psgwf.New(ctx)
-	defer wf.Unref()
 
 	// Scatter a task
-	err := gather.Scatter(ctx, pool, wf, func(ctx context.Context, wf psgwf.Workflow) (string, error) {
+	err := gather.Scatter(ctx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "Hello from workflow", nil
 	})
 	if err != nil {

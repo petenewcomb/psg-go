@@ -34,7 +34,7 @@ func (c *Combine[I, O]) SetMaxHoldTime(d time.Duration) {
 	c.inner().SetMaxHoldTime(d)
 }
 
-func (c *Combine[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf Workflow, taskFn TaskFunc[I]) error {
+func (c *Combine[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[I]) error {
 	_, err := scatter(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psg.TaskFunc[result[I]]) (bool, error) {
 			err := c.inner().Scatter(ctx, pool, taskFn)
@@ -44,7 +44,7 @@ func (c *Combine[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf Work
 	return err
 }
 
-func (c *Combine[I, O]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf Workflow, taskFn TaskFunc[I]) (bool, error) {
+func (c *Combine[I, O]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[I]) (bool, error) {
 	return scatter(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psg.TaskFunc[result[I]]) (bool, error) {
 			return c.inner().TryScatter(ctx, pool, taskFn)

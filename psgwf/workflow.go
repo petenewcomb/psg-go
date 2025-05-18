@@ -34,7 +34,7 @@ type Workflow struct {
 	afterFuncs []AfterFunc
 }
 
-var wfPool sync.Pool = sync.Pool{
+var wfPool = sync.Pool{
 	New: func() any {
 		return &Workflow{}
 	},

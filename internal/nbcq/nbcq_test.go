@@ -15,33 +15,35 @@ import (
 	"pgregory.net/rapid"
 )
 
+var p = &nbcq.NodePool[int]{}
+
 // Add a basic functional test to verify operations directly
 func TestQueueBasicFunctionality(t *testing.T) {
 	q := nbcq.Queue[int]{}
-	q.Init()
+	q.Init(p)
 
 	// Test empty queue
-	_, ok := q.PopFront()
+	_, ok := q.PopFront(p)
 	require.False(t, ok)
 
 	// Test adding and removing elements
-	q.PushBack(1)
-	q.PushBack(2)
-	q.PushBack(3)
+	q.PushBack(p, 1)
+	q.PushBack(p, 2)
+	q.PushBack(p, 3)
 
-	val, ok := q.PopFront()
+	val, ok := q.PopFront(p)
 	require.True(t, ok)
 	require.Equal(t, 1, val)
 
-	val, ok = q.PopFront()
+	val, ok = q.PopFront(p)
 	require.True(t, ok)
 	require.Equal(t, 2, val)
 
-	val, ok = q.PopFront()
+	val, ok = q.PopFront(p)
 	require.True(t, ok)
 	require.Equal(t, 3, val)
 
-	_, ok = q.PopFront()
+	_, ok = q.PopFront(p)
 	require.False(t, ok)
 }
 
@@ -51,7 +53,7 @@ func TestQueueWithRapid(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// The system under test
 		q := nbcq.Queue[int]{}
-		q.Init()
+		q.Init(p)
 
 		// The model (reference implementation)
 		var model []int
@@ -63,7 +65,7 @@ func TestQueueWithRapid(t *testing.T) {
 				val := rapid.Int().Draw(t, "value")
 
 				// Update actual implementation
-				q.PushBack(val)
+				q.PushBack(p, val)
 
 				// Update model
 				model = append(model, val)
@@ -81,7 +83,7 @@ func TestQueueWithRapid(t *testing.T) {
 				model = model[1:]
 
 				// Get actual value from queue
-				val, ok := q.PopFront()
+				val, ok := q.PopFront(p)
 
 				// Verify the operation succeeded
 				require.True(t, ok, "PopFront failed on non-empty queue")
@@ -92,7 +94,7 @@ func TestQueueWithRapid(t *testing.T) {
 			"": func(t *rapid.T) {
 				// If model is empty, verify queue behaves as empty
 				if len(model) == 0 {
-					_, ok := q.PopFront()
+					_, ok := q.PopFront(p)
 					require.False(t, ok, "PopFront should fail on empty queue")
 				}
 			},
@@ -102,7 +104,7 @@ func TestQueueWithRapid(t *testing.T) {
 
 func TestQueueConcurrency(t *testing.T) {
 	var q nbcq.Queue[int]
-	q.Init()
+	q.Init(p)
 	chk := require.New(t)
 
 	var numReaders = max(1, runtime.NumCPU()/2)
@@ -173,7 +175,7 @@ func TestQueueConcurrency(t *testing.T) {
 			data.startTime = time.Now()
 
 			for {
-				v, ok := q.PopFront()
+				v, ok := q.PopFront(p)
 				if !ok {
 					if writersDone.Load() {
 						break
@@ -215,7 +217,7 @@ func TestQueueConcurrency(t *testing.T) {
 			for v := rangeStart; v < rangeEnd; v++ {
 				// Add one to the value that's pushed to distinguish it from the
 				// zero value.
-				q.PushBack(v + 1)
+				q.PushBack(p, v+1)
 				data.totalWrites++
 			}
 		}()
@@ -305,7 +307,7 @@ func TestQueueConcurrency(t *testing.T) {
 
 	chk.Equal(numWriters*iterations, sumTotalWrites)
 
-	_, ok := q.PopFront()
+	_, ok := q.PopFront(p)
 	chk.False(ok)
 
 	chk.Equal(numWriters*iterations, sumTotalReads)

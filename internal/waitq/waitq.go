@@ -10,7 +10,7 @@ type Queue struct {
 }
 
 func (q *Queue) Init() {
-	q.inner.Init()
+	q.inner.Init(p)
 }
 
 // Add to unbounded queue - never blocks
@@ -19,14 +19,14 @@ func (q *Queue) Add() Waiter {
 		q:          q,
 		notifyChan: make(chan struct{}, 1),
 	}
-	q.inner.PushBack(w)
+	q.inner.PushBack(p, w)
 	return w
 }
 
 // Notify signals the waiter at the front of the queue (if any).
 func (q *Queue) Notify() {
 	for {
-		w, ok := q.inner.PopFront()
+		w, ok := q.inner.PopFront(p)
 		if !ok {
 
 			return
@@ -42,3 +42,5 @@ func (q *Queue) Notify() {
 		}
 	}
 }
+
+var p = &nbcq.NodePool[Waiter]{}

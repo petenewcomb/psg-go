@@ -12,20 +12,17 @@ import (
 // more than a type-safe wrapper over [sync.Pool].
 //
 // [Go 1.23+ behavior]: https://pkg.go.dev/time#NewTimer
-type Pool struct {
-	inner sync.Pool
-}
 
-func (p *Pool) Init() {
-	p.inner.New = func() any {
+var pool = sync.Pool{
+	New: func() any {
 		return time.NewTimer(0)
-	}
+	},
 }
 
-func (p *Pool) Get() *time.Timer {
-	return p.inner.Get().(*time.Timer)
+func Get() *time.Timer {
+	return pool.Get().(*time.Timer)
 }
 
-func (p *Pool) Put(t *time.Timer) {
-	p.inner.Put(t)
+func Put(t *time.Timer) {
+	pool.Put(t)
 }

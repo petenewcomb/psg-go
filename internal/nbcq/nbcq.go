@@ -29,25 +29,15 @@ type node[T any] struct {
 
 // structure queue_t {Head: pointer_t, Tail: pointer_t}
 type Queue[T any] struct {
-	nodePool sync.Pool
-	head     atomicPointer[T]
-	tail     atomicPointer[T]
+	head atomicPointer[T]
+	tail atomicPointer[T]
 }
 
 // initialize(Q: pointer to queue_t)
-func (q *Queue[T]) Init() {
-	q.nodePool.New = func() any {
-		n := &node[T]{}
-		// Since the zero value of atomic.Value is different than the zero value
-		// of pointer[T], we must explicitly store a value to allow CAS
-		// operations that expect the old value to be a zero pointer[T].
-		n.next.Store(pointer[T]{})
-		return n
-	}
-
+func (q *Queue[T]) Init(p *NodePool[T]) {
 	// node = new_node()      // Allocate a free node
 	// node->next.ptr = NULL  // Make it the only node in the linked list
-	node := q.newNode()
+	node := p.get()
 
 	// Q->Head.ptr = Q->Tail.ptr = node	 // Both Head and Tail point to it
 	q.head.Store(pointer[T]{ptr: node})
@@ -55,11 +45,11 @@ func (q *Queue[T]) Init() {
 }
 
 // enqueue(Q: pointer to queue_t, value: data type)
-func (q *Queue[T]) PushBack(value T) {
+func (q *Queue[T]) PushBack(p *NodePool[T], value T) {
 	// E1: node = new_node()      // Allocate a new node from the free list
 	// E2: node->value = value	  // Copy enqueued value into node
 	// E3: node->next.ptr = NULL  // Set next pointer of node to NULL
-	node := q.newNode()
+	node := p.get()
 	node.value.Store(value)
 
 	// E4: loop  // Keep trying until Enqueue is done
@@ -98,7 +88,7 @@ func (q *Queue[T]) PushBack(value T) {
 }
 
 // dequeue(Q: pointer to queue_t, pvalue: pointer to data type): boolean
-func (q *Queue[T]) PopFront() (T, bool) {
+func (q *Queue[T]) PopFront(p *NodePool[T]) (T, bool) {
 	// D1: loop // Keep trying until Dequeue is done
 	for {
 		// D2: head = Q->Head         // Read Head
@@ -156,7 +146,7 @@ func (q *Queue[T]) PopFront() (T, bool) {
 					head.ptr.next.Store(pointer[T]{count: next.count})
 
 					// Stash the node away for reuse.
-					q.nodePool.Put(head.ptr)
+					p.put(head.ptr)
 
 					// D20: return TRUE     // Queue was not empty, dequeue succeeded
 					return value, true
@@ -166,8 +156,24 @@ func (q *Queue[T]) PopFront() (T, bool) {
 	} // D18: endloop
 }
 
-func (q *Queue[T]) newNode() *node[T] {
-	return q.nodePool.Get().(*node[T])
+type NodePool[T any] struct {
+	inner sync.Pool
+}
+
+func (p *NodePool[T]) get() *node[T] {
+	n, _ := p.inner.Get().(*node[T])
+	if n == nil {
+		n = &node[T]{}
+		// Since the zero value of atomic.Value is different than the zero value
+		// of pointer[T], we must explicitly store a value to allow CAS
+		// operations that expect the old value to be a zero pointer[T].
+		n.next.Store(pointer[T]{})
+	}
+	return n
+}
+
+func (p *NodePool[T]) put(n *node[T]) {
+	p.inner.Put(n)
 }
 
 // This implementation depends on Go's implementation of atomic operations for

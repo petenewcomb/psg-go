@@ -17,12 +17,10 @@ import (
 )
 
 func Run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error {
-	tp := &timerp.Pool{}
-	tp.Init()
-	return run(ctx, t, plan, debug, tp)
+	return run(ctx, t, plan, debug)
 }
 
-func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerPool *timerp.Pool) error {
+func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error {
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 
@@ -39,7 +37,6 @@ func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool, timerP
 		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
 		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
 		Debug:                        debug,
-		TimerPool:                    timerPool,
 	}
 	c.MinScatterDelay.Store(math.MaxInt64)
 	c.MinGatherDelay.Store(math.MaxInt64)
@@ -70,7 +67,6 @@ type controller struct {
 	MinCombineDelay              atomicMinMaxInt64
 	MinCombineGatherDelay        atomicMinMaxInt64
 	Debug                        bool
-	TimerPool                    *timerp.Pool
 }
 
 func (c *controller) Run(ctx context.Context, t require.TestingT) error {
@@ -256,8 +252,8 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			c.debugf("ended %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAfter)
 			res.EndTime = time.Now()
 		}()
-		timer := c.TimerPool.Get()
-		defer c.TimerPool.Put(timer)
+		timer := timerp.Get()
+		defer timerp.Put(timer)
 		for _, step := range task.Func.Steps {
 			switch step := step.(type) {
 			case SelfTime:
@@ -270,7 +266,7 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 				}
 			case Subjob:
 				c.debugf("%v subjob %v", task, step.Plan)
-				err := run(ctx, t, step.Plan, c.Debug, c.TimerPool)
+				err := run(ctx, t, step.Plan, c.Debug)
 				chk.NoError(err)
 			default:
 				panic(fmt.Sprintf("unknown step type %T", step))
@@ -428,8 +424,8 @@ func (c *controller) updateTaskStats(t require.TestingT, res *taskResult, err er
 
 func (c *controller) executeGatherOrCombineFunc(t require.TestingT, ctx context.Context, rh ResultHandler, fn *Func) error {
 	chk := require.New(t)
-	timer := c.TimerPool.Get()
-	defer c.TimerPool.Put(timer)
+	timer := timerp.Get()
+	defer timerp.Put(timer)
 	for _, step := range fn.Steps {
 		switch step := step.(type) {
 		case SelfTime:
@@ -442,7 +438,7 @@ func (c *controller) executeGatherOrCombineFunc(t require.TestingT, ctx context.
 			}
 		case Subjob:
 			c.debugf("%v subjob %v", rh, step.Plan)
-			err := run(ctx, t, step.Plan, c.Debug, c.TimerPool)
+			err := run(ctx, t, step.Plan, c.Debug)
 			chk.NoError(err)
 		case Scatter:
 			c.debugf("%v scatter %v", rh, step.Task)

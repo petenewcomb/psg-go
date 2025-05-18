@@ -10,7 +10,6 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/state"
-	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
@@ -28,7 +27,6 @@ type Job struct {
 	gatherChan chan boundGatherFunc
 	wg         sync.WaitGroup
 	state      state.JobState
-	timerPool  timerp.Pool
 
 	// workQueue must be thread-safe only to support multiple goroutines
 	// potentially calling the job's gather methods concurrently, including
@@ -67,10 +65,11 @@ func NewJob(ctx context.Context) *Job {
 	}
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
-	j.timerPool.Init()
-	j.workQueue.Init()
+	j.workQueue.Init(workQueueNodePool)
 	return j
 }
+
+var workQueueNodePool = &nbcq.NodePool[gatherWorkFunc]{}
 
 type jobContextValueKeyType struct{}
 
@@ -210,7 +209,7 @@ func (j *Job) inGather(ctx context.Context) bool {
 
 func (j *Job) processOutstandingWork(ctx context.Context) error {
 	for {
-		work, ok := j.workQueue.PopFront()
+		work, ok := j.workQueue.PopFront(workQueueNodePool)
 		if !ok {
 			return nil
 		}
@@ -256,9 +255,11 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	select {
 	case gather := <-j.gatherChan:
-		j.workQueue.PushBack(func(ctx context.Context) error {
-			return j.executeGather(ctx, gather)
-		})
+		j.workQueue.PushBack(workQueueNodePool,
+			func(ctx context.Context) error {
+				return j.executeGather(ctx, gather)
+			},
+		)
 	case <-waiter.Done():
 		return true, nil
 	case <-limitCh:
@@ -300,9 +301,11 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 
 	select {
 	case gather := <-j.gatherChan:
-		j.workQueue.PushBack(func(ctx context.Context) error {
-			return j.executeGather(ctx, gather)
-		})
+		j.workQueue.PushBack(workQueueNodePool,
+			func(ctx context.Context) error {
+				return j.executeGather(ctx, gather)
+			},
+		)
 	case <-j.state.Done():
 		return false, nil
 	case <-ctx.Done():

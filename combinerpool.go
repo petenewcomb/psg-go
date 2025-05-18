@@ -14,6 +14,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/petenewcomb/psg-go/internal/heap"
 	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
@@ -172,8 +173,8 @@ func (cp *CombinerPool) launch(ctx context.Context, combine boundCombineFunc) {
 		spawnDelay := cp.spawnDelay
 		if cp.spawnDelay > 0 {
 			maybeSpawn := func() bool {
-				spawnDelayTimer := j.timerPool.Get()
-				defer j.timerPool.Put(spawnDelayTimer)
+				spawnDelayTimer := timerp.Get()
+				defer timerp.Put(spawnDelayTimer)
 				spawnDelayTimer.Reset(spawnDelay)
 				select {
 				case cp.primaryChan <- combine:
@@ -298,8 +299,8 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 				}
 				deadline := nextBCToFlush.FlushDeadline
 				if now.Before(deadline) {
-					flushDeadlineTimer := j.timerPool.Get()
-					defer j.timerPool.Put(flushDeadlineTimer)
+					flushDeadlineTimer := timerp.Get()
+					defer timerp.Put(flushDeadlineTimer)
 					flushDeadlineTimer.Reset(deadline.Sub(now))
 					flushDeadlineTimerCh = flushDeadlineTimer.C
 					break
@@ -392,8 +393,8 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 				isSecondary = cp.secondaryElected.CompareAndSwap(false, true)
 				if isSecondary {
 					primaryCh = nil
-					idleTimer = j.timerPool.Get()
-					defer j.timerPool.Put(idleTimer)
+					idleTimer = timerp.Get()
+					defer timerp.Put(idleTimer)
 					defer cp.secondaryElected.Store(false)
 				}
 			}

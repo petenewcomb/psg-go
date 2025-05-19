@@ -7,3 +7,4 @@ go vet
 gofmt -s -w .
 golangci-lint run
 go test -short ./...
+! git status --porcelain -uno | grep '^[^ ][^ ]'

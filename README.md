@@ -7,8 +7,9 @@
 # Pipelined Scatter-Gather in Go
 
 `psg` is a Go library that implements a pipelined variant of the scatter-gather
-concurrency pattern. It simplifies management of asynchronous tasks and their
-results, even ones that are heterogeneous, recursive, or interdependent.
+concurrency pattern. It simplifies management of heterogeneous, recursive, or
+interdependent asynchronous tasks and enables incremental validation and
+aggregation of their results, including errors.
 
 ## Hello world
 
@@ -16,29 +17,31 @@ The below shows basic usage without error checking.
 ([playground][helloworld-play])
 
 ``` go
-ctx := context.Background()
-pool := psg.NewPool(2)
-job := psg.NewJob(ctx, pool)
-defer job.CancelAndWait() // hygiene
+	ctx := context.Background()
+	job := psg.NewJob(ctx)
+	defer job.CancelAndWait() // hygiene
 
-newTask := func(s string) psg.TaskFunc[string] {
-	return func(context.Context) (string, error) {
-		time.Sleep(1 * time.Millisecond)
-		return s, nil
+	// Binds a string to a task function that returns the string after a short delay.
+	newTask := func(s string) psg.TaskFunc[string] {
+		return func(context.Context) (string, error) {
+			time.Sleep(1 * time.Millisecond)
+			return s, nil
+		}
 	}
-}
 
-var results []string
-gather := func(ctx context.Context, result string, err error) error {
-	results = append(results, result)
-	return nil
-}
+	var results []string
+	gather := psg.NewGather(
+		func(ctx context.Context, result string, err error) error {
+			results = append(results, result)
+			return nil
+		},
+	)
 
-psg.Scatter(ctx, pool, newTask("Hello"), gather)
-psg.Scatter(ctx, pool, newTask("world!"), gather)
+	gather.Scatter(ctx, job, newTask("Hello"))
+	gather.Scatter(ctx, job, newTask("world!"))
 
-job.CloseAndGatherAll(ctx)
-fmt.Println(strings.Join(results, " "))
+	job.CloseAndGatherAll(ctx)
+	fmt.Println(strings.Join(results, " "))
 ```
 
 For more detailed demonstrations of how `psg` works, see the Observable example
@@ -53,7 +56,7 @@ Pipelined scatter-gather, as defined here, comprises three key features:
  2. Result processing code can launch new tasks as part of the same job (e.g.,
     recursive crawling or multi-stage operations)
  3. Concurrency of different groups of tasks can be independently controlled
-    (e.g., compute- vs I/O-bound tasks)
+    (e.g., I/O- vs. compute-bound tasks)
 
 Like [`errgroup`][errgroup], `psg` "provides synchronization, error propagation,
 and Context cancelation for groups of goroutines working on subtasks of a common

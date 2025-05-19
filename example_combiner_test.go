@@ -16,7 +16,7 @@ import (
 
 // Example_combine demonstrates how combiners can efficiently aggregate
 // results from multiple tasks before emitting a combined result.
-func ExampleNewCombine() {
+func ExampleCombine() {
 	startTime := time.Now()
 	msSinceStart := func() int64 {
 		// Truncate to the nearest 10ms to make the output stable across runs
@@ -81,8 +81,9 @@ func ExampleNewCombine() {
 	// Create a task pool with concurrency limit 2
 	taskPool := psg.NewTaskPool(job, 2)
 
-	// Create a combiner pool with concurrency limit 1
-	combinerPool := psg.NewCombinerPool(job, 1)
+	// Create a combiner pool and disable the idle timeout
+	combinerPool := psg.NewCombinerPool(job)
+	combinerPool.SetIdleTimeout(-1)
 
 	// Set a flush listener to observe when all tasks have completed
 	job.SetFlushListener(func() {

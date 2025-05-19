@@ -18,8 +18,7 @@ The below shows basic usage without error checking.
 
 ``` go
 	ctx := context.Background()
-	pool := psg.NewPool(2)
-	job := psg.NewJob(ctx, pool)
+	job := psg.NewJob(ctx)
 	defer job.CancelAndWait() // hygiene
 
 	// Binds a string to a task function that returns the string after a short delay.
@@ -38,8 +37,8 @@ The below shows basic usage without error checking.
 		},
 	)
 
-	gather.Scatter(ctx, pool, newTask("Hello"))
-	gather.Scatter(ctx, pool, newTask("world!"))
+	gather.Scatter(ctx, job, newTask("Hello"))
+	gather.Scatter(ctx, job, newTask("world!"))
 
 	job.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))

@@ -7,16 +7,29 @@ import (
 	"context"
 )
 
+// TaskPoolOrJob represents either a TaskPool or a Job.
+// When scattering directly to a Job, tasks are not subject to any concurrency limit.
+type TaskPoolOrJob interface {
+	// job returns the Job associated with this target
+	job() *Job
+	// launch executes a task, potentially waiting if concurrency limits are reached
+	launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error)
+	// withBackpressureProvider returns a context with the appropriate backpressure provider
+	withBackpressureProvider(ctx context.Context) context.Context
+}
+
 func vetScatter[T any](
 	ctx context.Context,
-	taskPool *TaskPool,
+	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
 ) {
 	if taskFunc == nil {
 		panic("task function must be non-nil")
 	}
 
-	j := taskPool.job
+	// If target is nil, job() will panic directly.
+	// If job() returns nil, it's a zero-value TaskPool.
+	j := target.job()
 	if j == nil {
 		panic("task pool not bound to a job")
 	}
@@ -35,12 +48,25 @@ func vetScatter[T any](
 
 func scatter[T any](
 	ctx context.Context,
-	taskPool *TaskPool,
+	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
 	backpressureFunc backpressureFunc,
 	postResult func(context.Context, T, error),
 ) (launched bool, err error) {
-	j := taskPool.job
+	// Don't launch if the task's context has been canceled by the time the
+	// goroutine starts.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	j := target.job()
+
+	// Don't launch if the job's context has been canceled by the time the
+	// goroutine starts.
+	if err := j.ctx.Err(); err != nil {
+		return false, err
+	}
+
 	taskCtx := newTaskContext(ctx, j)
 
 	// Register the task with the job to make sure that any calls to gather will
@@ -56,8 +82,8 @@ func scatter[T any](
 	}()
 
 	// Bind the task and gather functions together into a top-level function for
-	// the new goroutine and hand it to the task pool to launch.
-	return taskPool.launch(ctx, backpressureFunc, func(ctx context.Context) {
+	// the new goroutine and hand it to the target to launch.
+	return target.launch(ctx, backpressureFunc, func(ctx context.Context, taskCompletedFn func()) {
 		// Don't launch if the job's context has been canceled by the time the
 		// goroutine starts.
 		if j.ctx.Err() != nil {
@@ -75,12 +101,9 @@ func scatter[T any](
 		var value T
 		var err error = ErrTaskPanicked
 		defer func() {
-			// Decrement the task pool's in-flight count BEFORE waiting on the gather
-			// channel. This makes it safe for gatherFunc to call `Scatter` with this
-			// same `TaskPool` instance without deadlock, as there is guaranteed to be at
-			// least one slot available.
-			taskPool.decrementInFlight()
-
+			if taskCompletedFn != nil {
+				taskCompletedFn()
+			}
 			postResult(ctx, value, err)
 		}()
 

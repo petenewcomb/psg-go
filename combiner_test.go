@@ -31,7 +31,7 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 		})
 
 		// Create a combiner taskPool
-		combinerPool := psg.NewCombinerPool(job, 1)
+		combinerPool := psg.NewCombinerPool(job)
 
 		// Create a combine operation
 		combine := psg.NewCombine(
@@ -401,10 +401,10 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						// Setup processing - either gather-only or with combiner
-						var scatter func(ctx context.Context, taskPool *psg.TaskPool, task psg.TaskFunc[time.Time]) error
+						var scatter func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error
 						switch {
 						case combinerLimit < 0:
-							scatter = func(ctx context.Context, taskPool *psg.TaskPool, task psg.TaskFunc[time.Time]) error {
+							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error {
 								value, err := task(ctx)
 								return gatherFuncAdapter(ctx, value, err)
 							}
@@ -412,7 +412,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							scatter = psg.NewGather(gatherFuncAdapter).Scatter
 						default:
 							gather := psg.NewGather(gatherFunc)
-							combinerPool := psg.NewCombinerPool(job, combinerLimit)
+							combinerPool := psg.NewCombinerPool(job)
+							combinerPool.SetLimit(combinerLimit)
 							combine := psg.NewCombine(gather, combinerPool, func() psg.Combiner[time.Time, aggregatedResult] {
 								var combinedResult aggregatedResult
 								nextFlushTime := time.Now().Add(flushPeriod)
@@ -442,8 +443,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									FlushFunc: flush,
 								}
 							})
-							scatter = func(ctx context.Context, taskPool *psg.TaskPool, task psg.TaskFunc[time.Time]) error {
-								if err := combine.Scatter(ctx, taskPool, task); err != nil {
+							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error {
+								if err := combine.Scatter(ctx, target, task); err != nil {
 									return err
 								}
 								return nil

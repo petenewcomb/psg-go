@@ -43,6 +43,16 @@ type Job struct {
 	workQueue nbcq.Queue[gatherWorkFunc]
 }
 
+// job returns the Job itself to satisfy the TaskPoolOrJob interface.
+func (j *Job) job() *Job {
+	return j
+}
+
+// withBackpressureProvider returns a context with the default backpressure provider for this Job
+func (j *Job) withBackpressureProvider(ctx context.Context) context.Context {
+	return withDefaultBackpressureProvider(ctx, j)
+}
+
 type boundGatherFunc = func(ctx context.Context) error
 
 type gatherWorkFunc func(context.Context) error
@@ -372,6 +382,26 @@ func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context)
 			return nil
 		}
 	}
+}
+
+func (j *Job) startTask(ctx context.Context, taskFn func(context.Context)) {
+	// Launch the task in a new goroutine.
+	j.wg.Add(1)
+	go func() {
+		defer j.wg.Done()
+		taskFn(ctx)
+	}()
+}
+
+// launch executes a task immediately without any concurrency constraints.
+// Implements the TaskPoolOrJob interface.
+func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error) {
+	// Launch the task immediately without any pool tracking
+	j.startTask(ctx, func(ctx context.Context) {
+		taskFn(ctx, nil) // No completion callback needed for unlimited tasks
+	})
+
+	return true, nil
 }
 
 func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {

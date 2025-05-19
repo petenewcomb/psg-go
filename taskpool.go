@@ -16,7 +16,7 @@ import (
 //
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
-	job              *Job
+	j                *Job
 	concurrencyLimit dynval.Value[int]
 	inFlight         state.InFlightCounter
 	waiterQueue      waitq.Queue
@@ -35,11 +35,25 @@ func NewTaskPool(job *Job, limit int) *TaskPool {
 	job.panicIfDone()
 
 	p := &TaskPool{
-		job: job,
+		j: job,
 	}
 	p.concurrencyLimit.Store(limit)
 	p.waiterQueue.Init()
 	return p
+}
+
+// job returns the Job associated with this TaskPool.
+// Panics if the TaskPool was not created properly via NewTaskPool.
+func (p *TaskPool) job() *Job {
+	if p.j == nil {
+		panic("task pool not bound to a job")
+	}
+	return p.j
+}
+
+// withBackpressureProvider returns a context with the backpressure provider for this TaskPool
+func (p *TaskPool) withBackpressureProvider(ctx context.Context) context.Context {
+	return p.j.withBackpressureProvider(ctx)
 }
 
 // Sets the active concurrency limit for the pool. A negative value means no
@@ -54,17 +68,7 @@ func (p *TaskPool) SetLimit(limit int) {
 }
 
 func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTaskFunc) (bool, error) {
-	j := p.job
-
-	// Don't launch if the provided context has been canceled.
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-
-	// Don't launch if the job context has been canceled.
-	if err := j.ctx.Err(); err != nil {
-		return false, err
-	}
+	j := p.j
 
 	// Try to add to the pool
 	limit, _ := p.concurrencyLimit.Load()
@@ -97,19 +101,20 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 		}
 	}
 
-	// Launch the task in a new goroutine.
-	j.wg.Add(1)
-	go func() {
-		defer j.wg.Done()
-		task(ctx)
-	}()
+	j.startTask(ctx, func(ctx context.Context) {
+		task(ctx, func() {
+			// Decrement the task pool's in-flight count BEFORE waiting on the gather
+			// channel. This makes it safe for gatherFunc to call `Scatter` with this
+			// same `TaskPool` instance without deadlock, as there is guaranteed to be at
+			// least one slot available.
+			p.decrementInFlight()
+		})
+	})
 
 	return true, nil
 }
 
 type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) error
-
-type boundTaskFunc func(ctx context.Context)
 
 func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
 	switch {

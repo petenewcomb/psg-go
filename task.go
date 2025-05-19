@@ -42,3 +42,5 @@ import (
 // [lexical closure]: https://en.wikipedia.org/wiki/Closure_(computer_programming)
 // [Handling panics]: https://go.dev/ref/spec#Handling_panics
 type TaskFunc[T any] = func(context.Context) (T, error)
+
+type boundTaskFunc func(ctx context.Context, completedFn func())

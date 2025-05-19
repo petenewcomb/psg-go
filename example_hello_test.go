@@ -22,7 +22,6 @@ func Example_hello() {
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait() // hygiene
-	pool := psg.NewTaskPool(job, 2)
 
 	// Binds a string to a task function that returns the string after a short delay.
 	newTask := func(s string) psg.TaskFunc[string] {
@@ -40,8 +39,8 @@ func Example_hello() {
 		},
 	)
 
-	gather.Scatter(ctx, pool, newTask("Hello"))
-	gather.Scatter(ctx, pool, newTask("world!"))
+	gather.Scatter(ctx, job, newTask("Hello"))
+	gather.Scatter(ctx, job, newTask("world!"))
 
 	job.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))

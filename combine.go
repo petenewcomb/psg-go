@@ -98,69 +98,46 @@ func (c *Combine[I, O]) SetMaxHoldTime(d time.Duration) {
 // combined using this Combine's combiner and eventually passed to the associated
 // Gather.
 //
-// Scatter blocks to delay launch as needed to ensure compliance with the
-// concurrency limit for the given task pool. This backpressure is applied by
-// gathering other tasks in the job until a slot becomes available. The
-// context passed to Scatter may be used to cancel (e.g., with a timeout) both
-// gathering and launch, but only the context associated with the task pool's job
-// will be passed to the task.
-//
-// WARNING: Scatter must not be called from within a TaskFunc launched the same
-// job as this may lead to deadlock when a concurrency limit is reached.
-// Instead, call Scatter from the associated GatherFunc after the TaskFunc
-// completes.
-//
-// Scatter will panic if the given task pool is not yet associated with a job.
-// Scatter returns a non-nil error if the context is canceled or if a non-nil
-// error is returned by a gather function. If the returned error is non-nil, the
-// task function supplied to the call will not have been launched will therefore
-// also not result in a call to the Gather's gather function.
-//
-// See [TaskFunc] and [GatherFunc] for important caveats and additional detail.
+// See [Gather.Scatter] for details about backpressure, concurrency limits,
+// context handling, and error behavior.
 func (c *Combine[I, O]) Scatter(
 	ctx context.Context,
-	taskPool *TaskPool,
+	target TaskPoolOrJob,
 	taskFunc TaskFunc[I],
 ) error {
-	launched, err := c.scatter(ctx, taskPool, true, taskFunc)
+	launched, err := c.scatter(ctx, target, true, taskFunc)
 	if !launched && err == nil {
 		panic("task function was not launched, but no error was returned")
 	}
 	return err
 }
 
-// TryScatter attempts to initiate asynchronous execution of the provided task
-// function in a new goroutine like [Scatter]. Unlike Scatter, TryScatter will
-// return instead of blocking if the given task pool is already at its concurrency
-// limit.
+// TryScatter is like [Combine.Scatter] but returns instead of blocking if
+// the given target is at its concurrency limit.
 //
-// Returns (true, nil) if the task was successfully launched, (false, nil) if
-// the task pool was at its limit, and (false, non-nil) if the task could not be
-// launched for any other reason.
-//
-// See Scatter for more detail about how scattering works.
+// See [Gather.TryScatter] for details about behavior and return values.
 func (c *Combine[I, O]) TryScatter(
 	ctx context.Context,
-	taskPool *TaskPool,
+	target TaskPoolOrJob,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	return c.scatter(ctx, taskPool, false, taskFunc)
+	return c.scatter(ctx, target, false, taskFunc)
 }
 
 func (c *Combine[I, O]) scatter(
 	ctx context.Context,
-	taskPool *TaskPool,
+	target TaskPoolOrJob,
 	block bool,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	vetScatter(ctx, taskPool, taskFunc)
+	vetScatter(ctx, target, taskFunc)
 
-	j := taskPool.job
+	j := target.job()
 	if j != c.combinerPool.job {
-		panic("task and combiner pools are associated with different jobs")
+		panic("target and combiner pools are associated with different jobs")
 	}
 
-	ctx = withTaskPoolBackpressureProvider(ctx, taskPool)
+	ctx = target.withBackpressureProvider(ctx)
 	bp := getBackpressureProvider(ctx, j)
 
 	if err := yieldBeforeScatter(ctx, bp); err != nil {
@@ -204,7 +181,7 @@ func (c *Combine[I, O]) scatter(
 		}
 	}
 
-	return scatter(ctx, taskPool, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
+	return scatter(ctx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
 		c.combinerPool.launch(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
 			getCombineFunc(ctx, cm, j, c)(ctx, input, inputErr)

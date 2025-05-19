@@ -53,7 +53,7 @@ type CombinerPool struct {
 }
 
 // NewCombinerPool creates a new CombinerPool with the specified concurrency limit.
-func NewCombinerPool(job *Job, concurrencyLimit int) *CombinerPool {
+func NewCombinerPool(job *Job) *CombinerPool {
 	if job == nil {
 		panic("job is nil")
 	}
@@ -64,7 +64,7 @@ func NewCombinerPool(job *Job, concurrencyLimit int) *CombinerPool {
 		primaryChan:   make(chan boundCombineFunc),
 		secondaryChan: make(chan boundCombineFunc),
 	}
-	cp.concurrencyLimit.Store(concurrencyLimit)
+	cp.concurrencyLimit.Store(-1) // unlimited by default
 	cp.waiterQueue.Init()
 	return cp
 }
@@ -231,7 +231,7 @@ func (cp *CombinerPool) launch(ctx context.Context, combine boundCombineFunc) {
 }
 
 func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine boundCombineFunc) bool {
-	if cp.liveGoroutineCount.Add(1) > int64(concurrencyLimit) {
+	if cp.liveGoroutineCount.Add(1) > int64(concurrencyLimit) && concurrencyLimit >= 0 {
 		cp.liveGoroutineCount.Add(-1)
 		return false
 	}

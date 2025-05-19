@@ -26,7 +26,8 @@ type CombinerPool struct {
 	spawnDelay       time.Duration
 	idleTimeout      time.Duration
 
-	liveGoroutineCount atomic.Int64
+	liveGoroutineCount      atomic.Int64
+	lastGoroutineExitedChan atomic.Value // chan struct{}
 
 	// Scattered tasks first attempt to post their results to primaryChan. If a
 	// combiner goroutine is not immediately available, the task will
@@ -58,13 +59,17 @@ func NewCombinerPool(job *Job) *CombinerPool {
 		panic("job is nil")
 	}
 	cp := &CombinerPool{
-		job:           job,
-		spawnDelay:    0,  // Default: no delay in spawning new goroutines
-		idleTimeout:   -1, // Sentinel value: no idle-based exit
+		job: job,
+
+		// Empirically determined but not widely validated, YMMV.
+		spawnDelay:  10 * time.Microsecond,
+		idleTimeout: 1000 * time.Microsecond,
+
 		primaryChan:   make(chan boundCombineFunc),
 		secondaryChan: make(chan boundCombineFunc),
 	}
 	cp.concurrencyLimit.Store(-1) // unlimited by default
+	cp.lastGoroutineExitedChan.Store(make(chan struct{}))
 	cp.waiterQueue.Init()
 	return cp
 }
@@ -151,6 +156,8 @@ func (cp *CombinerPool) launch(ctx context.Context, combine boundCombineFunc) {
 	for {
 		concurrencyLimit, concurrencyLimitChangeCh := cp.concurrencyLimit.Load()
 
+		lastGoroutineExitedCh := cp.lastGoroutineExitedChan.Load().(chan struct{})
+
 		if cp.liveGoroutineCount.Load() == 0 {
 			// This is the first combine, go ahead and try to launch a task
 			// without waiting for the spawn delay.
@@ -219,6 +226,10 @@ func (cp *CombinerPool) launch(ctx context.Context, combine boundCombineFunc) {
 			case <-concurrencyLimitChangeCh:
 				// The concurrency limit changed, so loop and retry
 				return false
+			case <-lastGoroutineExitedCh:
+				// A combiner goroutine (perhaps the last one) exited while we
+				// were waiting, loop and retry to create a new one if needed.
+				return false
 			case <-ctx.Done():
 			case <-j.ctx.Done():
 			}
@@ -238,8 +249,12 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 	nextJobFlushCh, unregisterAsJobFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
 	go func() {
-		defer j.wg.Done()
-		defer cp.liveGoroutineCount.Add(-1)
+		defer func() {
+			if cp.liveGoroutineCount.Add(-1) == 0 {
+				close(cp.lastGoroutineExitedChan.Swap(make(chan struct{})).(chan struct{}))
+			}
+			j.wg.Done()
+		}()
 
 		var isSecondary bool
 
@@ -329,7 +344,9 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 					workQueue.PushBack(bc.FlushFunc)
 				}
 			case <-idleTimerCh:
-				// This goroutine is no longer needed.
+				// This goroutine is no longer needed. Notify any potential
+				// waiters and exit. Combiners will be flushed via the deferred
+				// call to flushAll below.
 				return false, errIdleTimeout
 			case <-waiter.Done():
 				return true, nil

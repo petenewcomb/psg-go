@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -297,8 +298,25 @@ func TestCombinerFactoryPanic(t *testing.T) {
 // BenchmarkCombinerThroughput measures the maximum throughput of processing
 // a continuous stream of data with gather-only vs. combiner approaches
 func BenchmarkCombinerThroughput(b *testing.B) {
+	combinerLimits := []int{
+		-2, // direct
+		-1, // combine, unlimited
+		0,  // gather-only
+		1, 2, 3, 4,
+	}
+	availableCores := runtime.NumCPU()
+	for {
+		prevLimit := combinerLimits[len(combinerLimits)-1]
+		if prevLimit >= availableCores {
+			break
+		}
+		combinerLimits = append(combinerLimits, prevLimit*2)
+	}
+	combinerLimits = append(combinerLimits, availableCores, availableCores*2)
+	slices.Sort(combinerLimits)
+	combinerLimits = slices.Compact(combinerLimits)
+
 	// Run with different worker configurations
-	usableCores := runtime.NumCPU() - 1 // reserve one for the main thread
 	for _, workload := range []string{"processing", "waiting"} {
 		for _, workloadDuration := range []time.Duration{
 			10 * time.Microsecond,
@@ -310,28 +328,17 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 				10 * workloadDuration,
 				100 * workloadDuration,
 			} {
-				for _, combinerLimit := range []int{
-					-1, // direct
-					0,  // gather-only
-					1, 2, 3, 4, 8,
-				} {
-
+				for _, combinerLimit := range combinerLimits {
 					// Only need to run direct and gather-only once to cover all flush periods
-					if combinerLimit < 1 && fpi > 0 {
+					if (combinerLimit == -2 || combinerLimit == 0) && fpi > 0 {
 						continue
 					}
 
-					if workload == "processing" && combinerLimit > usableCores {
-						// Skip this configuration since the hardware is not capable
-						// of running it without CPU contention
-						break
-					}
-
 					var method string
-					switch {
-					case combinerLimit < 0:
+					switch combinerLimit {
+					case -2:
 						method = "direct"
-					case combinerLimit == 0:
+					case 0:
 						method = "gatherOnly"
 					default:
 						method = "combine"
@@ -402,13 +409,13 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 						// Setup processing - either gather-only or with combiner
 						var scatter func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error
-						switch {
-						case combinerLimit < 0:
+						switch combinerLimit {
+						case -2:
 							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error {
 								value, err := task(ctx)
 								return gatherFuncAdapter(ctx, value, err)
 							}
-						case combinerLimit == 0:
+						case 0:
 							scatter = psg.NewGather(gatherFuncAdapter).Scatter
 						default:
 							gather := psg.NewGather(gatherFunc)
@@ -465,12 +472,25 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							tasksLaunched++
 						}
 
-						// Warmup
-						warmupEnd := time.Now().Add(10 * workloadDuration)
-						for time.Now().Before(warmupEnd) {
-							op()
+						opCount := 0
+						lagStillUnstable := func() bool {
+							if opCount == 0 {
+								opCount = 1
+								return true
+							}
+							lag := tasksLaunched - overallResult.Count
+							lagRatio := float64(lag) / float64(tasksLaunched)
+							opCount++
+							return lagRatio > 0.01
 						}
 
+						// Warmup phase - run until the lag stabilizes to ensure steady state
+						for lagStillUnstable() {
+							oldCount := overallResult.Count
+							for overallResult.Count == oldCount {
+								op()
+							}
+						}
 						tasksLaunchedOrigin := tasksLaunched
 						tasksRunOrigin := tasksRun.Load()
 						overallResultOrigin := overallResult

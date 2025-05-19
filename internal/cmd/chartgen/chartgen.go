@@ -135,7 +135,7 @@ func savePlot(c *chart, p *plot.Plot) error {
 	}
 
 	// Save the plot
-	if err := p.Save(9*vg.Inch, 6*vg.Inch, "charts/"+c.FileBasename+".svg"); err != nil {
+	if err := p.Save(14*vg.Inch, 6*vg.Inch, "charts/"+c.FileBasename+".svg"); err != nil {
 		return err
 	}
 
@@ -290,10 +290,8 @@ func main() {
 		}
 	}
 
-	flushPeriodKeys := make([]FlushPeriodKey, 0, len(flushPeriodKeySet))
 	flushPeriods := make(map[FlushPeriodKey]time.Duration)
 	for flushPeriodKey := range flushPeriodKeySet {
-		flushPeriodKeys = append(flushPeriodKeys, flushPeriodKey)
 		d, err := time.ParseDuration(flushPeriodKey.Get(flushPeriodP.Fields()[0]))
 		if err != nil {
 			log.Fatalf("Error parsing workload duration %q: %v\n", d, err)
@@ -350,7 +348,15 @@ func main() {
 		concurrencyLimits[methodKey] = x
 	}
 	slices.SortFunc(methodKeys, func(a, b MethodKey) int {
-		d := concurrencyLimits[a] - concurrencyLimits[b]
+		av := concurrencyLimits[a]
+		if av == -1 {
+			av = math.MaxInt / 2
+		}
+		bv := concurrencyLimits[b]
+		if bv == -1 {
+			bv = math.MaxInt / 2
+		}
+		d := av - bv
 		switch {
 		case d < 0:
 			return -1
@@ -438,7 +444,7 @@ func main() {
 						}
 						data.Reference = dataByMethodWorkloadDurationFlushPeriodUnit[directMethodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
 						if data.Reference == nil {
-							log.Fatalf("can't find reference for CombinerThroughput/workload=%v/duration=%v/flushPeriod=%v/method=%v/combinerLimit=%v-12 %v",
+							log.Fatalf("can't find reference for CombinerThroughput/workload=%v/duration=%v/flushPeriod=%v/method=%v/combinerLimit=%v-N %v",
 								workloadKey.Get(workloadP.Fields()[0]),
 								workloadDurationKey.Get(workloadDurationP.Fields()[0]),
 								flushPeriodKey.Get(flushPeriodP.Fields()[0]),
@@ -539,7 +545,11 @@ func main() {
 			case "gatherOnly":
 				methodDisplayName = "Gather Only"
 			case "combine":
-				methodDisplayName = fmt.Sprintf("Combine (limit %d)", concurrencyLimit)
+				if concurrencyLimit == -1 {
+					methodDisplayName = "Combine (unlimited)"
+				} else {
+					methodDisplayName = fmt.Sprintf("Combine (limit %d)", concurrencyLimit)
+				}
 			default:
 				methodDisplayName = fmt.Sprintf("%s (limit %d)", methodName, concurrencyLimit)
 			}
@@ -620,19 +630,15 @@ func main() {
 					speedupPoints.XYs[pointIndex].X = workloadDuration
 					speedupPoints.XYs[pointIndex].Y = y
 
-					plus := data.Summary.Hi - data.Summary.Center
-					minus := data.Summary.Center - data.Summary.Lo
-					refPlus := data.Reference.Summary.Hi - data.Reference.Summary.Center
-					refMinus := data.Reference.Summary.Center - data.Reference.Summary.Lo
-					variance := math.Sqrt((plus*minus)/(data.Summary.Center*data.Summary.Center) +
-						(refPlus*refMinus)/(data.Reference.Summary.Center*data.Reference.Summary.Center))
-					speedupPoints.YErrors[pointIndex].High = variance
-					speedupPoints.YErrors[pointIndex].Low = variance
+					plus := (data.Summary.Hi - data.Summary.Center) / data.Reference.Summary.Center
+					minus := (data.Summary.Center - data.Summary.Lo) / data.Reference.Summary.Center
+					speedupPoints.YErrors[pointIndex].High = plus
+					speedupPoints.YErrors[pointIndex].Low = minus
 
 					speedupPoints.Labels[pointIndex] = formatSummary(&benchmath.Summary{
 						Center: y,
-						Hi:     y + variance,
-						Lo:     y - variance,
+						Hi:     y + plus,
+						Lo:     y - minus,
 					}, benchunit.Decimal)
 				}()
 

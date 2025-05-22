@@ -19,7 +19,7 @@ import (
 )
 
 // Empirically determined but not widely validated, YMMV. Subject to change as broader experience is gained.
-const DefaultCombinerThroughputMeasurementWindow = 50 * time.Microsecond
+const DefaultCombinerThroughputMeasurementWindow = 50 * time.Millisecond
 
 // Empirically determined but not widely validated, YMMV. Subject to change as broader experience is gained.
 const DefaultCombinerGoroutineIdleTimeout = 10 * time.Millisecond

@@ -477,8 +477,6 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						}
 
-						fmt.Println("starting measurement")
-
 						tasksLaunchedOrigin := totalTasksLaunched
 						overallResultOrigin := overallResult
 						overallResult.LatencyMax = 0

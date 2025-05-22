@@ -5,39 +5,45 @@ package state
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/petenewcomb/psg-go/internal/basicq"
 )
 
 type CombinerPoolState struct {
 	completedCount atomic.Int64 // monotonic
 	waitTime       atomic.Int64 // monotonic time.Duration
 
-	mu                          sync.Mutex
-	throughputMeasurementWindow time.Duration
-	launchedGoroutineCount      int
-	perf                        cpPerfSample
-	perfHistory                 basicq.Queue[cpPerfSample]
-	waitChan                    chan struct{}
+	mu                     sync.Mutex
+	launchedGoroutineCount int
+	timeOrigin             time.Time
+	completedCountOrigin   int64
+	waitTimeOrigin         time.Duration
+	alpha                  float64
+	current                cpPerfSample
+	past                   cpPerfSample
+	waitChan               chan struct{}
 }
 
 type cpPerfSample struct {
-	liveGoroutineCount   int
-	timeOrigin           time.Time
-	completedCountOrigin int64
-	waitTimeOrigin       time.Duration
+	liveGoroutineCount int
+	throughput         float64
+	utilization        float64
 }
 
 func (cps *CombinerPoolState) SetThroughputMeasurementWindow(d time.Duration) {
 	if d <= 0 {
 		panic(fmt.Sprintf("invalid throughput measurement window %v: must be > 0", d))
 	}
+
+	tau := float64(d)
+	alpha := 1 - math.Exp(-1/tau)
+
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.throughputMeasurementWindow = d
+
+	cps.alpha = alpha
 }
 
 func (cps *CombinerPoolState) IncrementCompleted() {
@@ -56,7 +62,7 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine(limit int) <-chan struct{} {
 	defer cps.mu.Unlock()
 
 	if cps.waitChan == nil {
-		cps.perf.timeOrigin = time.Now()
+		cps.timeOrigin = time.Now()
 		cps.waitChan = make(chan struct{}, 1)
 	}
 
@@ -69,93 +75,20 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine(limit int) <-chan struct{} {
 		return nil
 	}
 
-	throughputMeasurementWindow := cps.throughputMeasurementWindow
-	if throughputMeasurementWindow <= 0 {
-		panic("uninitialized or invalid throughput measurement window")
-	}
+	cps.updateStats()
 
-	now := time.Now()
-	cps.trimPerfHistory(now, throughputMeasurementWindow)
-
-	curCompletedCount := cps.completedCount.Load()
-	curWaitTime := time.Duration(cps.waitTime.Load())
-
-	remainingWindowDuration := throughputMeasurementWindow
-	sample := cps.perf
-	remainingSampleDuration := now.Sub(sample.timeOrigin)
-	remainingCompletedCount := float64(curCompletedCount - sample.completedCountOrigin)
-	remainingWaitTime := curWaitTime - sample.waitTimeOrigin
-	windowIndex := 0
-	sampleIndex := cps.perfHistory.Len()
-	var liveGoroutineTime [2]time.Duration
-	var completedCount [2]float64
-	var waitTime [2]time.Duration
-	var windowDuration [2]time.Duration
-	for {
-		if remainingSampleDuration <= remainingWindowDuration {
-			// Accumulate
-			liveGoroutineTime[windowIndex] += remainingSampleDuration * time.Duration(sample.liveGoroutineCount)
-			completedCount[windowIndex] += remainingCompletedCount
-			waitTime[windowIndex] += remainingWaitTime
-			windowDuration[windowIndex] += remainingSampleDuration
-
-			// Move to next sample
-			sampleIndex--
-			if sampleIndex < 0 {
-				break
-			}
-			laterSample := sample
-			sample = cps.perfHistory.Peek(sampleIndex)
-			remainingSampleDuration = laterSample.timeOrigin.Sub(sample.timeOrigin)
-			remainingCompletedCount = float64(laterSample.completedCountOrigin - sample.completedCountOrigin)
-			remainingWaitTime = laterSample.waitTimeOrigin - sample.waitTimeOrigin
-		} else {
-			// Accumulate
-			liveGoroutineTime[windowIndex] += remainingWindowDuration * time.Duration(sample.liveGoroutineCount)
-
-			proratedCompletedCount := remainingCompletedCount * float64(remainingWindowDuration) / float64(remainingSampleDuration)
-			completedCount[windowIndex] += proratedCompletedCount
-			remainingCompletedCount -= proratedCompletedCount
-
-			proratedWaitTime := remainingWaitTime * remainingWindowDuration / remainingSampleDuration
-			waitTime[windowIndex] += proratedWaitTime
-			remainingWaitTime -= proratedWaitTime
-
-			windowDuration[windowIndex] += remainingWindowDuration
-			remainingSampleDuration -= remainingWindowDuration
-
-			// Move to next window
-			windowIndex++
-			if windowIndex >= len(windowDuration) {
-				break
-			}
-			remainingWindowDuration = throughputMeasurementWindow
-		}
-	}
-
-	if min(liveGoroutineTime[0], liveGoroutineTime[1]) < throughputMeasurementWindow {
-		// Not enough data to make a decision yet
+	if cps.current.utilization < 0.6 {
+		// We've got capacity to spare.
 		return cps.waitChan
 	}
 
-	/*
-		effectiveLiveGoroutineCount := float64(liveGoroutineTime[0]) / float64(windowDuration[0])
-		if completedCount[0] < 0 {
-			// Make sure we've seen at least one completion
-			return cps.waitChan
-		}
-	*/
-
-	if waitTime[0] >= throughputMeasurementWindow {
-		// At least one goroutine has been idle for the measurement window: hold
-		// off launching new goroutines for now
-		return cps.waitChan
+	moreGoroutinesPerEachThroughput := cps.current.throughput / float64(cps.current.liveGoroutineCount)
+	fewerGoroutinesPerEachThroughput := cps.past.throughput / float64(cps.past.liveGoroutineCount)
+	if cps.current.liveGoroutineCount < cps.past.liveGoroutineCount {
+		moreGoroutinesPerEachThroughput, fewerGoroutinesPerEachThroughput = fewerGoroutinesPerEachThroughput, moreGoroutinesPerEachThroughput
 	}
 
-	idealCompletedRatePerGoroutine := completedCount[0] / float64(liveGoroutineTime[0]-waitTime[0])
-	previousIdealCompletedRatePerGoroutine := completedCount[1] / float64(liveGoroutineTime[1]-waitTime[1])
-
-	if idealCompletedRatePerGoroutine < previousIdealCompletedRatePerGoroutine {
+	if moreGoroutinesPerEachThroughput < fewerGoroutinesPerEachThroughput {
 		// Past point of improvement, don't go any further.
 		return cps.waitChan
 	}
@@ -167,37 +100,46 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine(limit int) <-chan struct{} {
 func (cps *CombinerPoolState) GoroutineStarted() {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.pushPerfHistory()
-	cps.perf.liveGoroutineCount++
-	//fmt.Println("goroutine started:", cps.perf.liveGoroutineCount)
+	cps.updateStats()
+	cps.past = cps.current
+	cps.current.liveGoroutineCount++
+	//fmt.Println("goroutine started:", cps.current.liveGoroutineCount)
 	cps.notifyWaiter()
 }
 
 func (cps *CombinerPoolState) GoroutineExited() {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	if cps.perf.liveGoroutineCount <= 0 {
+	if cps.current.liveGoroutineCount <= 0 {
 		panic("underflow")
 	}
-	cps.pushPerfHistory()
-	cps.perf.liveGoroutineCount--
+	cps.updateStats()
+	cps.past = cps.current
+	cps.current.liveGoroutineCount--
 	cps.launchedGoroutineCount--
-	//fmt.Println("goroutine exited:", cps.perf.liveGoroutineCount)
+	//fmt.Println("goroutine exited:", cps.current.liveGoroutineCount)
 	cps.notifyWaiter()
 }
 
-func (cps *CombinerPoolState) trimPerfHistory(now time.Time, throughputMeasurementWindow time.Duration) {
-	for cps.perfHistory.Len() > 1 && now.Sub(cps.perfHistory.Peek(1).timeOrigin) >= 2*throughputMeasurementWindow {
-		_, _ = cps.perfHistory.PopFront()
-	}
-}
-
-func (cps *CombinerPoolState) pushPerfHistory() {
+func (cps *CombinerPoolState) updateStats() {
 	now := time.Now()
-	cps.trimPerfHistory(now, cps.throughputMeasurementWindow)
-	cps.perfHistory.PushBack(cps.perf)
-	cps.perf.timeOrigin = time.Now()
-	cps.perf.completedCountOrigin = cps.completedCount.Load()
+	elapsedTime := now.Sub(cps.timeOrigin)
+	cps.timeOrigin = now
+	residualFactor := math.Pow(1-cps.alpha, float64(elapsedTime))
+
+	curCompletedCount := cps.completedCount.Load()
+	completedCount := curCompletedCount - cps.completedCountOrigin
+	cps.completedCountOrigin = curCompletedCount
+	cps.current.throughput = cps.alpha*float64(completedCount) + residualFactor*cps.current.throughput
+
+	curWaitTime := time.Duration(cps.waitTime.Load())
+	waitTime := curWaitTime - cps.waitTimeOrigin
+	cps.waitTimeOrigin = curWaitTime
+	// Utilization should be calculated as (elapsedTime-waitTime)/elapsedTime,
+	// but we also want it to be considered a constant for the time period
+	// rather than an impulse. Therefore we must multiply it by elapsedTime,
+	// which cancels out and leaves us with just elapsedTime-waitTime below.
+	cps.current.utilization = cps.alpha*float64(elapsedTime-waitTime) + residualFactor*cps.current.utilization
 }
 
 func (cps *CombinerPoolState) notifyWaiter() {

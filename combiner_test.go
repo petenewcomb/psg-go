@@ -9,7 +9,6 @@ import (
 	"math"
 	"runtime"
 	"slices"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -458,41 +457,29 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						}
 
-						var tasksRun atomic.Int64
 						taskFunc := func(context.Context) (time.Time, error) {
-							tasksRun.Add(1)
 							return time.Now(), nil
 						}
 
-						var tasksLaunched int64
+						var totalTasksLaunched int64
 						op := func() {
 							if err := scatter(ctx, taskPool, taskFunc); err != nil {
 								b.Fatalf("Error: %v", err)
 							}
-							tasksLaunched++
+							totalTasksLaunched++
 						}
 
-						opCount := 0
-						lagStillUnstable := func() bool {
-							if opCount == 0 {
-								opCount = 1
-								return true
-							}
-							lag := tasksLaunched - overallResult.Count
-							lagRatio := float64(lag) / float64(tasksLaunched)
-							opCount++
-							return lagRatio > 0.01
-						}
-
-						// Warmup phase - run until the lag stabilizes to ensure steady state
-						for lagStillUnstable() {
+						warmupEnd := time.Now().Add(10 * psg.DefaultCombinerThroughputMeasurementWindow)
+						for time.Now().Before(warmupEnd) {
 							oldCount := overallResult.Count
 							for overallResult.Count == oldCount {
 								op()
 							}
 						}
-						tasksLaunchedOrigin := tasksLaunched
-						tasksRunOrigin := tasksRun.Load()
+
+						fmt.Println("starting measurement")
+
+						tasksLaunchedOrigin := totalTasksLaunched
 						overallResultOrigin := overallResult
 						overallResult.LatencyMax = 0
 						for b.Loop() {
@@ -503,25 +490,27 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						// We purposefully do not run job.CloseAndGatherAll
-						// here, to avoid inflating overallSum with data
-						// gathered outside the benchmarking loop.
+						// before capturing results to avoid inflating
+						// overallSum with data gathered outside the
+						// benchmarking loop.
 
-						tasksLaunched -= tasksLaunchedOrigin
-						tasksRun.Add(int64(-tasksRunOrigin))
-						overallResult.Count -= overallResultOrigin.Count
-						overallResult.DurationSum -= overallResultOrigin.DurationSum
-						overallResult.LatencySum -= overallResultOrigin.LatencySum
+						tasksLaunched := totalTasksLaunched - tasksLaunchedOrigin
+						resultCount := overallResult.Count - overallResultOrigin.Count
+						resultDurationSum := overallResult.DurationSum - overallResultOrigin.DurationSum
+						resultLatencyMax := overallResult.LatencyMax
+						resultLatencySum := overallResult.LatencySum - overallResultOrigin.LatencySum
+
+						// Now call CloseAndGatherAll to make sure nothing was lost.
+						require.NoError(b, job.CloseAndGatherAll(ctx))
+						require.Equal(b, totalTasksLaunched, overallResult.Count)
 
 						b.ReportAllocs()
 						b.ReportMetric(float64(tasksLaunched)/float64(b.N), "launched/op")
-						b.ReportMetric(float64(tasksLaunched-overallResult.Count)/float64(b.N), "canceled/op")
-						b.ReportMetric(float64(tasksRun.Load())/float64(b.N), "run/op")
-						b.ReportMetric(float64(int64(tasksLaunched)-tasksRun.Load())/float64(b.N), "dropped/op")
-						b.ReportMetric(float64(overallResult.Count)/float64(b.N), "completed/op")
-						b.ReportMetric(float64(overallResult.Count)/b.Elapsed().Seconds(), "completed/s")
-						b.ReportMetric(float64(overallResult.LatencyMax.Nanoseconds()), "max-latency-ns")
-						b.ReportMetric(float64(overallResult.LatencySum.Nanoseconds())/float64(b.N), "avg-latency-ns/op")
-						b.ReportMetric(float64(overallResult.DurationSum.Nanoseconds())/float64(b.N), "avg-duration-ns/op")
+						b.ReportMetric(float64(resultCount)/float64(b.N), "completed/op")
+						b.ReportMetric(float64(resultCount)/b.Elapsed().Seconds(), "completed/s")
+						b.ReportMetric(float64(resultLatencyMax.Nanoseconds()), "max-latency-ns")
+						b.ReportMetric(float64(resultLatencySum.Nanoseconds())/float64(b.N), "avg-latency-ns/op")
+						b.ReportMetric(float64(resultDurationSum.Nanoseconds())/float64(b.N), "avg-duration-ns/op")
 					})
 				}
 			}

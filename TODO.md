@@ -85,6 +85,8 @@
 - [x] Profile memory usage during heavy combiner operations
 - [x] Add metrics/stats for monitoring combiner efficiency and utilization
 - [x] Benchmark performance with various combiner configurations
+- [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
+- [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
 ### 5. API finalization
 - [x] Improve JobState interface with RegisterFlusher pattern

@@ -18,22 +18,27 @@ import (
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
+// Empirically determined but not widely validated, YMMV. Subject to change as broader experience is gained.
+const DefaultCombinerThroughputMeasurementWindow = 50 * time.Microsecond
+
+// Empirically determined but not widely validated, YMMV. Subject to change as broader experience is gained.
+const DefaultCombinerGoroutineIdleTimeout = 10 * time.Millisecond
+
 // CombinerPool manages a pool of goroutines that execute combiners.
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
 type CombinerPool struct {
 	job              *Job
 	concurrencyLimit dynval.Value[int]
-	spawnDelay       time.Duration
 	idleTimeout      time.Duration
 
+	// CombinerPoolState hosts the data and core logic for managing the pool of
+	// goroutines to maximize throughput while minimizes the number of
+	// outstanding goroutines and therefore duplication of individual combiners.
 	state state.CombinerPoolState
 
 	// Scattered tasks first attempt to post their results to primaryChan. If a
 	// combiner goroutine is not immediately available, the task will
-	// concurrently try posting to both primaryChan and secondaryChan for the
-	// period of time defined by spawnDelay before attempting to launch a new
-	// goroutine. If concurrencyLimit disallows launch, the task will continue
-	// to try posting to both channels indefinitely.
+	// concurrently try posting to both primaryChan and secondaryChan.
 	//
 	// Only one goroutine at a time can elect itself "secondary". Once elected,
 	// the secondary goroutine no longer listens to primaryChan and will
@@ -58,16 +63,13 @@ func NewCombinerPool(job *Job) *CombinerPool {
 		panic("job is nil")
 	}
 	cp := &CombinerPool{
-		job: job,
-
-		// Empirically determined but not widely validated, YMMV.
-		spawnDelay:  0,
-		idleTimeout: 10 * time.Millisecond,
-
+		job:           job,
+		idleTimeout:   DefaultCombinerGoroutineIdleTimeout,
 		primaryChan:   make(chan boundCombineFunc),
 		secondaryChan: make(chan boundCombineFunc),
 	}
 	cp.concurrencyLimit.Store(-1) // unlimited by default
+	cp.state.SetThroughputMeasurementWindow(DefaultCombinerThroughputMeasurementWindow)
 	cp.combineWaiters.Init()
 	return cp
 }
@@ -97,16 +99,15 @@ func (cp *CombinerPool) SetLimit(limit int) {
 // data is lost, but may result in smaller batches than expected if goroutines
 // frequently exit due to idleness.
 //
-// A value of -1 (the default) disables idle timeouts completely, causing all goroutines
-// to remain alive until the job completes. This maximizes combining efficiency but
-// uses more resources.
-//
-// A value of 0 means goroutines may exit as soon as they become idle.
-//
-// A positive value specifies how long a goroutine should wait while idle before exiting.
-// Shorter timeouts reduce resource usage but may require more frequent spawning of new
-// goroutines and result in more frequent flushing. Longer timeouts keep goroutines
-// available for longer but use more resources.
+// A positive value specifies how long a goroutine should wait while idle before
+// exiting. Shorter timeouts reduce resource usage but may require more frequent
+// spawning of new goroutines and result in more frequent flushing. Longer
+// timeouts keep goroutines available for longer but use more resources. A value
+// of -1 disables idle timeouts completely, causing all goroutines to remain
+// alive until the job completes. This maximizes combining efficiency but uses
+// more resources. A value of 0 means goroutines may exit as soon as they become
+// idle, though is perhaps useful only when testing edge cases. The default
+// value is [DefaultCombinerGoroutineIdleTimeout].
 //
 // This method is safe to call at any time. However, the timing
 // of when the new value takes effect within a running job is undefined.
@@ -117,38 +118,41 @@ func (cp *CombinerPool) SetIdleTimeout(timeout time.Duration) {
 	cp.idleTimeout = timeout
 }
 
-// SetSpawnDelay sets the delay before spawning new combiner goroutines when
-// existing goroutines are busy. This controls how quickly the pool responds to
-// increased load by creating new combiners.
+// SetThroughputMeasurementWindow sets the period of time over which combiner
+// throughput is measured as input to the algorithm that determines whether or
+// not to launch new combiner goroutines (if allowed by the concurrency limit).
+// This algorithm works to maximize overall throughput while minimizing the
+// number of combiner goroutines.
 //
 // Each combiner goroutine combines values independently, and more goroutines
 // means more independent combiners. This increases parallelism but may result
 // in more, smaller batches of combined values.
 //
-// A value of 0 (the default) means new goroutines are created immediately
-// when needed, up to the concurrency limit. This maximizes responsiveness to
-// sudden increases in load.
+// When a combiner pool begins receiving results from tasks, it will immediately
+// start the first goroutine but must then wait for a measurement window period
+// to pass before it can launch a second, which it will do only if the first is
+// highly utilized. One more measurement window period must pass before the
+// algorithm may launch a third. The third will be launched only if both running
+// goroutines are highly utilized and the second improved overall throughput. A
+// fourth will be started only if the third also improved throughput, and so on.
+// Higher values for this setting will therefore slow ramp-up but reduce
+// overshoot and fluctuation, conversely, lower values will speed initial
+// ramp-up but may cause jitter that can dramatically reduce throughput due to
+// both resource contention and excessive gather load due to combiner flushes as
+// superfluous goroutines exit.
 //
-// A positive value introduces a delay before spawning each new goroutine,
-// allowing existing goroutines a chance to catch up. This can lead to better
-// batching efficiency at the cost of higher latency during load spikes.
+// The default value for this setting is
+// [DefaultCombinerThroughputMeasurementWindow].
 //
-// During the delay period, the pool will continue trying to send the combine
-// operation to existing goroutines. Only if no goroutine becomes available
-// during the delay will a new one be created.
-//
-// This method is safe to call at any time. However, the timing
-// of when the new value takes effect within a running job is undefined.
-func (cp *CombinerPool) SetSpawnDelay(delay time.Duration) {
-	if delay < 0 {
-		panic(fmt.Sprintf("invalid spawn delay %v: must be >= 0", delay))
-	}
-	cp.spawnDelay = delay
+// This method is safe to call at any time and its value will take effect
+// immediately. If the value is raised, spawning of new goroutines will be
+// delayed as described for ramp-up above until data to cover the new window
+// size can be gathered.
+func (cp *CombinerPool) SetThroughputMeasurementWindow(d time.Duration) {
+	cp.state.SetThroughputMeasurementWindow(d)
 }
 
 func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
-	cp.state.IncrementPending()
-
 	// Attempt to post the combine to the primary channel.
 	select {
 	case cp.primaryChan <- combine:
@@ -183,7 +187,7 @@ func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFun
 	for {
 		concurrencyLimit, concurrencyLimitChangeCh := cp.concurrencyLimit.Load()
 
-		spawnWaitCh := cp.state.ShouldSpawnGoroutine(cp.spawnDelay, concurrencyLimit)
+		spawnWaitCh := cp.state.ShouldSpawnGoroutine(concurrencyLimit)
 		if spawnWaitCh == nil {
 			cp.spawnNewCombiner(combine)
 			return
@@ -306,13 +310,15 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				workQueue.PushBack(flushAll)
 			case <-flushDeadlineTimerCh:
 				// A combiner has reached its deadline
-				for {
-					bc := cm.NextToFlush()
-					if bc == nil || time.Now().Before(bc.FlushDeadline) {
-						break
+				workQueue.PushBack(func(ctx context.Context) {
+					for {
+						bc := cm.NextToFlush()
+						if bc == nil || time.Now().Before(bc.FlushDeadline) {
+							break
+						}
+						bc.FlushFunc(ctx)
 					}
-					workQueue.PushBack(bc.FlushFunc)
-				}
+				})
 			case <-idleTimerCh:
 				// This goroutine is no longer needed. Notify any potential
 				// waiters and exit. Combiners will be flushed via the deferred

@@ -45,6 +45,18 @@ func (q *Queue[T]) PopFront() (T, bool) {
 	return item, true
 }
 
+func (q *Queue[T]) Peek(i int) T {
+	if i < 0 || i >= q.Len() {
+		panic("index out of range")
+	}
+	return q.items[(q.front+i)%q.capacity()]
+}
+
+// Len returns the number of elements in the queue
+func (q *Queue[T]) Len() int {
+	return q.back - q.front
+}
+
 func (q *Queue[T]) capacity() int {
 	return len(q.items)
 }
@@ -69,9 +81,4 @@ func (q *Queue[T]) grow() int {
 	}
 	q.items = newItems
 	return q.capacity()
-}
-
-// Len returns the number of elements in the queue
-func (q *Queue[T]) Len() int {
-	return q.back - q.front
 }

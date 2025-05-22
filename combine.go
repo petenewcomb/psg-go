@@ -146,7 +146,7 @@ func (c *Combine[I, O]) scatter(
 
 	if !c.combinerPool.waitingCombines.IsZero() {
 		wait := func() (bool, error) {
-			waiter := c.combinerPool.waiterQueue.Add()
+			waiter := c.combinerPool.combineWaiters.Add()
 			defer waiter.Close()
 
 			// Check again _after_ registering with the queue, so we don't
@@ -182,7 +182,7 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	return scatter(ctx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
-		c.combinerPool.launch(ctx, func(ctx context.Context, cm *combinerMap) {
+		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
 			getCombineFunc(ctx, cm, j, c)(ctx, input, inputErr)
 		})

@@ -26,8 +26,7 @@ type CombinerPool struct {
 	spawnDelay       time.Duration
 	idleTimeout      time.Duration
 
-	liveGoroutineCount      atomic.Int64
-	lastGoroutineExitedChan atomic.Value // chan struct{}
+	state state.CombinerPoolState
 
 	// Scattered tasks first attempt to post their results to primaryChan. If a
 	// combiner goroutine is not immediately available, the task will
@@ -50,7 +49,7 @@ type CombinerPool struct {
 	secondaryElected atomic.Bool
 
 	waitingCombines state.InFlightCounter
-	waiterQueue     waitq.Queue
+	combineWaiters  waitq.Queue
 }
 
 // NewCombinerPool creates a new CombinerPool with the specified concurrency limit.
@@ -62,15 +61,14 @@ func NewCombinerPool(job *Job) *CombinerPool {
 		job: job,
 
 		// Empirically determined but not widely validated, YMMV.
-		spawnDelay:  10 * time.Microsecond,
-		idleTimeout: 1000 * time.Microsecond,
+		spawnDelay:  0,
+		idleTimeout: 10 * time.Millisecond,
 
 		primaryChan:   make(chan boundCombineFunc),
 		secondaryChan: make(chan boundCombineFunc),
 	}
 	cp.concurrencyLimit.Store(-1) // unlimited by default
-	cp.lastGoroutineExitedChan.Store(make(chan struct{}))
-	cp.waiterQueue.Init()
+	cp.combineWaiters.Init()
 	return cp
 }
 
@@ -148,113 +146,80 @@ func (cp *CombinerPool) SetSpawnDelay(delay time.Duration) {
 	cp.spawnDelay = delay
 }
 
-func (cp *CombinerPool) launch(ctx context.Context, combine boundCombineFunc) {
+func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
+	cp.state.IncrementPending()
 
-	j := cp.job
+	// Attempt to post the combine to the primary channel.
+	select {
+	case cp.primaryChan <- combine:
+		return
+	case <-ctx.Done():
+		return
+	case <-cp.job.ctx.Done():
+		return
+	default:
+	}
 
-	// Loop in case the concurrency limit changes
+	// Attempt to post the combine to the primary or secondary channels.
+	select {
+	case cp.primaryChan <- combine:
+		return
+	case cp.secondaryChan <- combine:
+		return
+	case <-ctx.Done():
+		return
+	case <-cp.job.ctx.Done():
+		return
+	default:
+	}
+
+	waiting := false
+	defer func() {
+		if waiting {
+			cp.waitingCombines.Decrement()
+			cp.combineWaiters.Notify()
+		}
+	}()
 	for {
 		concurrencyLimit, concurrencyLimitChangeCh := cp.concurrencyLimit.Load()
 
-		lastGoroutineExitedCh := cp.lastGoroutineExitedChan.Load().(chan struct{})
-
-		if cp.liveGoroutineCount.Load() == 0 {
-			// This is the first combine, go ahead and try to launch a task
-			// without waiting for the spawn delay.
-			if cp.launchNewCombiner(j, concurrencyLimit, combine) {
-				return
-			}
-			// Unable to launch a task (limit is zero or another goroutine beat
-			// us to it), continue to blocking as usual.
+		spawnWaitCh := cp.state.ShouldSpawnGoroutine(cp.spawnDelay, concurrencyLimit)
+		if spawnWaitCh == nil {
+			cp.spawnNewCombiner(combine)
+			return
 		}
 
-		// Attempt to post the combine to the primary channel.
+		// If we get here, the primary and secondary channels were busy and we
+		// hit the limit of how many combiner tasks we can launch or need to
+		// wait before we can spawn another. Increment the waiting task count to
+		// signal Scatter to apply backpressure.
+		if !waiting {
+			cp.waitingCombines.Increment()
+			waiting = true
+		}
+
+		// Block until we can post or it's time to retry
 		select {
 		case cp.primaryChan <- combine:
 			return
-		default:
-		}
-
-		// Primary channel is busy. Try the secondary one too and worst
-		// case attempt to launch a new task.
-		spawnDelay := cp.spawnDelay
-		if cp.spawnDelay > 0 {
-			maybeSpawn := func() bool {
-				spawnDelayTimer := timerp.Get()
-				defer timerp.Put(spawnDelayTimer)
-				spawnDelayTimer.Reset(spawnDelay)
-				select {
-				case cp.primaryChan <- combine:
-					return true
-				case cp.secondaryChan <- combine:
-					return true
-				case <-spawnDelayTimer.C:
-					return cp.launchNewCombiner(j, concurrencyLimit, combine)
-				}
-			}
-			if maybeSpawn() {
-				return
-			}
-		} else {
-			select {
-			case cp.primaryChan <- combine:
-				return
-			case cp.secondaryChan <- combine:
-				return
-			default:
-				if cp.launchNewCombiner(j, concurrencyLimit, combine) {
-					return
-				}
-			}
-		}
-
-		// Return true if we're done, false if we should loop and retry.
-		wait := func() bool {
-			// If we get here, the primary and secondary channels were busy and we
-			// hit the limit of how many combiner tasks we can launch. Increment the
-			// waiting task count to signal Scatter to apply backpressure.
-			cp.waitingCombines.Increment()
-			defer func() {
-				cp.waitingCombines.Decrement()
-				cp.waiterQueue.Notify()
-			}()
-
-			// Then block until we can post or a context gets canceled.
-			select {
-			case cp.primaryChan <- combine:
-			case cp.secondaryChan <- combine:
-			case <-concurrencyLimitChangeCh:
-				// The concurrency limit changed, so loop and retry
-				return false
-			case <-lastGoroutineExitedCh:
-				// A combiner goroutine (perhaps the last one) exited while we
-				// were waiting, loop and retry to create a new one if needed.
-				return false
-			case <-ctx.Done():
-			case <-j.ctx.Done():
-			}
-			return true
-		}
-		if wait() {
-			break
+		case cp.secondaryChan <- combine:
+			return
+		case <-spawnWaitCh:
+		case <-concurrencyLimitChangeCh:
+		case <-ctx.Done():
+			return
+		case <-cp.job.ctx.Done():
+			return
 		}
 	}
 }
 
-func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine boundCombineFunc) bool {
-	if cp.liveGoroutineCount.Add(1) > int64(concurrencyLimit) && concurrencyLimit >= 0 {
-		cp.liveGoroutineCount.Add(-1)
-		return false
-	}
+func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
+	j := cp.job
 	nextJobFlushCh, unregisterAsJobFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
 	go func() {
-		defer func() {
-			if cp.liveGoroutineCount.Add(-1) == 0 {
-				close(cp.lastGoroutineExitedChan.Swap(make(chan struct{})).(chan struct{}))
-			}
-			j.wg.Done()
-		}()
+		defer j.wg.Done()
 
 		var isSecondary bool
 
@@ -322,6 +287,11 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 				}
 				nextBCToFlush.FlushFunc(ctx)
 			}
+
+			waitStart := time.Now()
+			defer func() {
+				cp.state.AddWaitTime(time.Since(waitStart))
+			}()
 
 			select {
 			case combine := <-primaryCh:
@@ -393,7 +363,12 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 				nextJobFlushCh, unregisterAsJobFlusher = j.state.RegisterFlusher()
 			}
 			combine(ctx, &cm)
+			cp.state.IncrementCompleted()
 		}
+
+		cp.state.GoroutineStarted()
+		defer cp.state.GoroutineExited()
+
 		executeCombine(goroutineCtx, combine)
 
 		var idleTimer *time.Timer
@@ -440,7 +415,6 @@ func (cp *CombinerPool) launchNewCombiner(j *Job, concurrencyLimit int, combine 
 			}
 		}
 	}()
-	return true
 }
 
 const errIdleTimeout = cerr.Error("idle timeout reached")

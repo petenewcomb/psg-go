@@ -115,6 +115,8 @@
   - [ ] Add hooks for job-level monitoring and statistics
   - [ ] Create standard interfaces for instrumentation providers
 - [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
+- [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
+- [ ] use Options-style configuration at least for CombinerPool
 
 ### 5.1. Post-CombinerPool Refactoring Enhancements
 - [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext)

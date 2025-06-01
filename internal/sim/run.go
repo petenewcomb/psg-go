@@ -163,7 +163,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 				if combinerPool == nil {
 					// Create a combiner pool with the concurrency limit
 					combinerPool = psg.NewCombinerPool(c.Job)
-					combinerPool.SetLimit(c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit)
+					combinerPool.SetLimits(0, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit)
 					c.CombinerPools[combinerPoolIndex] = combinerPool
 				}
 

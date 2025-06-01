@@ -108,7 +108,8 @@ func (g *Gather[T]) scatter(
 	vetScatter(ctx, target, taskFunc)
 
 	j := target.job()
-	ctx = withDefaultBackpressureProvider(ctx, j)
+	ctx, cancel := withDefaultBackpressureProvider(ctx, j)
+	defer cancel()
 	bp := getBackpressureProvider(ctx, j)
 
 	if err := yieldBeforeScatter(ctx, bp); err != nil {
@@ -133,7 +134,7 @@ func (g *Gather[T]) scatter(
 		// Post the gather to the job's gather channel.
 		select {
 		case j.gatherChan <- gather:
-		case <-j.ctx.Done():
+		case <-ctx.Done():
 		}
 	})
 }

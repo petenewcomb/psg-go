@@ -52,7 +52,7 @@ func (p *TaskPool) job() *Job {
 }
 
 // withBackpressureProvider returns a context with the backpressure provider for this TaskPool
-func (p *TaskPool) withBackpressureProvider(ctx context.Context) context.Context {
+func (p *TaskPool) withBackpressureProvider(ctx context.Context) (context.Context, context.CancelFunc) {
 	return p.j.withBackpressureProvider(ctx)
 }
 
@@ -101,7 +101,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 		}
 	}
 
-	j.startTask(ctx, func(ctx context.Context) {
+	j.startTask(func(ctx context.Context) {
 		task(ctx, func() {
 			// Decrement the task pool's in-flight count BEFORE waiting on the gather
 			// channel. This makes it safe for gatherFunc to call `Scatter` with this

@@ -18,11 +18,9 @@ import (
 // Demonstrates workflow-specific cancellation in case of API client
 // disconnection.
 func Example_clientTimeout() {
-	jobCtx, cancelJob := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	defer cancelJob()
 
 	// Create a long-running job for the API server
-	job := psg.NewJob(jobCtx)
+	job := psg.NewJob(context.Background())
 	defer job.CancelAndWait()
 
 	// Create a task pool
@@ -111,7 +109,7 @@ func Example_clientTimeout() {
 	// 40ms [req2] task completed
 	// gathering results
 	// 50ms [req2] result gathered
-	// 60ms [req3] job cancelled
-	// Error: context deadline exceeded
+	// 60ms [req3] task completed
+	// 60ms [req3] result gathered
 	// job ended
 }

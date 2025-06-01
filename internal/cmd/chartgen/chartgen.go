@@ -22,7 +22,10 @@ import (
 	"gonum.org/v1/plot"
 	"gonum.org/v1/plot/palette/brewer"
 	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/plotutil"
 	"gonum.org/v1/plot/vg"
+	"gonum.org/v1/plot/vg/draw"
+	"gonum.org/v1/plot/vg/vgsvg"
 )
 
 type seriesPoints struct {
@@ -68,6 +71,34 @@ func setupPlot(c *chart) *plot.Plot {
 
 	p.X.Scale = plot.LogScale{}
 
+	p.BackgroundColor = color.Transparent
+
+	return p
+}
+
+func plotScatter(c *chart) error {
+	p := setupPlot(c)
+
+	palette, err := brewer.GetPalette(brewer.TypeQualitative, "Paired", len(c.SeriesLabels))
+	if err != nil {
+		return err
+	}
+	plotutil.DefaultColors = palette.Colors()
+
+	series := make([]any, 0, 2*len(c.SeriesLabels))
+	for i, label := range c.SeriesLabels {
+		series = append(series, label, c.SeriesPoints[i])
+	}
+	plotutil.AddScatters(p, series...)
+
+	//p.Add(plotter.NewGlyphBoxes())
+
+	return savePlot(c, p, 10.0/6.0)
+}
+
+func plotBars(c *chart) error {
+	p := setupPlot(c)
+
 	xTicks := make([]plot.Tick, len(c.XTickLabels))
 	for i := range c.XTickLabels {
 		t := &xTicks[i]
@@ -75,17 +106,6 @@ func setupPlot(c *chart) *plot.Plot {
 		t.Value = c.XTickPositions[i]
 	}
 	p.X.Tick.Marker = plot.ConstantTicks(xTicks)
-
-	p.Legend.Top = true
-	p.Legend.Left = true
-	p.Legend.Padding = 1 * vg.Millimeter
-	p.BackgroundColor = color.Transparent
-
-	return p
-}
-
-func plotBars(c *chart) error {
-	p := setupPlot(c)
 
 	palette, err := brewer.GetPalette(brewer.TypeQualitative, "Paired", len(c.SeriesLabels))
 	if err != nil {
@@ -121,21 +141,59 @@ func plotBars(c *chart) error {
 		p.Legend.Add(label, bc)
 	}
 
+	p.Y.Max *= c.YAxisGrowFactor
+
 	//p.Add(plotter.NewGlyphBoxes())
 
-	return savePlot(c, p)
+	return savePlot(c, p, 16.0/6.0)
 }
 
-func savePlot(c *chart, p *plot.Plot) error {
-	p.Y.Max *= c.YAxisGrowFactor
+func savePlot(c *chart, p *plot.Plot, aspect float64) error {
+	height := 6 * vg.Inch
+	width := vg.Length(aspect * float64(height))
+	svg := vgsvg.New(width, height)
+	dc := draw.New(svg)
+
+	p.Legend.Top = true
+	p.Legend.Left = true
+	p.Legend.Padding = vg.Points(6)
+	// Calculate the width of the legend.
+	r := p.Legend.Rectangle(dc)
+	legendHeight := r.Max.Y - r.Min.Y
+	legendHeight += p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding
+	legendWidth := r.Max.X - r.Min.X + p.Legend.Padding/2
+	ddc := p.DataCanvas(dc)
+	ldc := draw.Crop(dc, dc.Max.X-legendWidth, 0, 0, -(ddc.Max.Y-ddc.Min.Y)/2+legendHeight/2)
+	p.Legend.Draw(ldc)
+
+	r = p.Legend.Rectangle(ldc)
+	//r.Max.X += p.Legend.Padding / 2
+	r.Max.Y += p.Legend.Padding / 2
+	r.Min.Y -= p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding/2
+	ldc.StrokeLines(draw.LineStyle{
+		Color: color.Gray{128},
+		Width: vg.Points(1),
+	}, []vg.Point{
+		{X: r.Min.X, Y: r.Min.Y}, {X: r.Min.X, Y: r.Max.Y}, {X: r.Max.X, Y: r.Max.Y},
+		{X: r.Max.X, Y: r.Min.Y}, {X: r.Min.X, Y: r.Min.Y},
+	})
+
+	p.Legend = plot.NewLegend()
+	dc = draw.Crop(dc, 0, -legendWidth-vg.Points(16), 0, 0) // Make space for the legend.
+	p.Draw(dc)
 
 	// Create directory if it doesn't exist
 	if err := os.MkdirAll("charts", 0755); err != nil {
 		return err
 	}
 
-	// Save the plot
-	if err := p.Save(14*vg.Inch, 6*vg.Inch, "charts/"+c.FileBasename+".svg"); err != nil {
+	w, err := os.Create("charts/" + c.FileBasename + ".svg")
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+
+	if _, err = svg.WriteTo(w); err != nil {
 		return err
 	}
 
@@ -148,6 +206,7 @@ type WorkloadDurationKey struct{ benchproc.Key }
 type FlushPeriodKey struct{ benchproc.Key }
 
 type Data struct {
+	Values     []float64
 	Sample     benchmath.Sample
 	Summary    benchmath.Summary
 	Reference  *Data
@@ -215,12 +274,13 @@ func main() {
 		}
 
 		for _, v := range res.Values {
+			v.Value, v.Unit = benchunit.Tidy(v.Value, v.Unit)
 			data := dataByUnit[v.Unit]
 			if data == nil {
 				data = &Data{}
 				dataByUnit[v.Unit] = data
 			}
-			data.Sample.Values = append(data.Sample.Values, v.Value)
+			data.Values = append(data.Values, v.Value)
 		}
 
 		residue := residueP.Project(res)
@@ -432,7 +492,7 @@ func main() {
 			for workloadDurationKey, dataByFlushPeriodUnit := range dataByDurationFlushPeriodUnit {
 				for flushPeriodKey, dataByUnit := range dataByFlushPeriodUnit {
 					for unit, data := range dataByUnit {
-						data.Sample = *benchmath.NewSample(data.Sample.Values, &thresholds)
+						data.Sample = *benchmath.NewSample(data.Values, &thresholds)
 						for _, w := range data.Sample.Warnings {
 							log.Fatalf("sample warning: %v", w)
 						}
@@ -444,6 +504,7 @@ func main() {
 						}
 						data.Reference = dataByMethodWorkloadDurationFlushPeriodUnit[directMethodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
 						if data.Reference == nil {
+							fmt.Println(unit, dataByMethodWorkloadDurationFlushPeriodUnit[directMethodKey][workloadKey][workloadDurationKey][flushPeriodKey])
 							log.Fatalf("can't find reference for CombinerThroughput/workload=%v/duration=%v/flushPeriod=%v/method=%v/combinerLimit=%v-N %v",
 								workloadKey.Get(workloadP.Fields()[0]),
 								workloadDurationKey.Get(workloadDurationP.Fields()[0]),
@@ -482,6 +543,69 @@ func main() {
 			workloadDisplayName = "Processing"
 		case "waiting":
 			workloadDisplayName = "Waiting"
+		}
+
+		for _, workloadDurationKey := range workloadDurationKeys {
+			//workloadDuration := float64(workloadDurations[workloadDurationKey])
+			for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
+				//flushPeriod := float64(flushPeriods[flushPeriodKey])
+
+				workloadDurationString := workloadDurationKey.Get(workloadDurationP.Fields()[0])
+				flushPeriodString := flushPeriodKey.Get(flushPeriodP.Fields()[0])
+
+				chart := chart{
+					Title:           fmt.Sprintf("Throughput vs. P99 Latency\n(%v %s workload flushing every %v)", workloadDurationString, workloadName, flushPeriodString),
+					XAxisLabel:      "P99 Workflow Latency (seconds)",
+					YAxisLabel:      "Workflow Throughput (tasks per second)",
+					SeriesLabels:    make([]string, 0, len(methodKeys)),
+					SeriesPoints:    make([]seriesPoints, 0, len(methodKeys)),
+					FileBasename:    fmt.Sprintf("%s_%v@%v_throughput_vs_latency", workloadName, workloadDurationString, flushPeriodString),
+					YAxisGrowFactor: 1.2,
+				}
+
+				// Create lines for each workload type
+				for _, methodKey := range methodKeys {
+
+					methodName := methodKey.Get(methodP.Fields()[0])
+					concurrencyLimit := concurrencyLimits[methodKey]
+
+					var methodDisplayName string
+					switch methodName {
+					case "direct":
+						//methodDisplayName = "Direct Call"
+						continue
+					case "gatherOnly":
+						//methodDisplayName = "Gather Only"
+						continue
+					case "combine":
+						if concurrencyLimit == -1 {
+							methodDisplayName = "Unlimited"
+						} else {
+							methodDisplayName = fmt.Sprintf("Limit %d", concurrencyLimit)
+						}
+					default:
+						methodDisplayName = fmt.Sprintf("%s (limit %d)", methodName, concurrencyLimit)
+					}
+
+					chart.SeriesLabels = append(chart.SeriesLabels, methodDisplayName)
+					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey]
+					throughput := data["completed/s"].Values
+					latency := data["p99-workflow-latency-sec"].Values
+
+					var points seriesPoints
+					points.XYs = make(plotter.XYs, len(latency))
+					for i, x := range latency {
+						points.XYs[i].X = x
+						points.XYs[i].Y = throughput[i]
+					}
+					chart.SeriesPoints = append(chart.SeriesPoints, points)
+
+				}
+
+				if err := plotScatter(&chart); err != nil {
+					log.Fatalf("Error creating chart: %v", err)
+				}
+			}
 		}
 
 		throughputChart := chart{
@@ -596,7 +720,6 @@ func main() {
 
 					throughputPoints.XYs[pointIndex].X = flushPeriod
 					throughputPoints.XYs[pointIndex].Y = data.Summary.Center
-
 					throughputPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center
 					throughputPoints.YErrors[pointIndex].Low = data.Summary.Center - data.Summary.Lo
 

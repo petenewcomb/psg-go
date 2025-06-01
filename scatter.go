@@ -15,7 +15,7 @@ type TaskPoolOrJob interface {
 	// launch executes a task, potentially waiting if concurrency limits are reached
 	launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error)
 	// withBackpressureProvider returns a context with the appropriate backpressure provider
-	withBackpressureProvider(ctx context.Context) context.Context
+	withBackpressureProvider(ctx context.Context) (context.Context, context.CancelFunc)
 }
 
 func vetScatter[T any](
@@ -53,21 +53,9 @@ func scatter[T any](
 	backpressureFunc backpressureFunc,
 	postResult func(context.Context, T, error),
 ) (launched bool, err error) {
-	// Don't launch if the task's context has been canceled by the time the
-	// goroutine starts.
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-
 	j := target.job()
 
-	// Don't launch if the job's context has been canceled by the time the
-	// goroutine starts.
-	if err := j.ctx.Err(); err != nil {
-		return false, err
-	}
-
-	taskCtx := newTaskContext(ctx, j)
+	bp := getBackpressureProvider(ctx, j)
 
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
@@ -84,17 +72,6 @@ func scatter[T any](
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the target to launch.
 	return target.launch(ctx, backpressureFunc, func(ctx context.Context, taskCompletedFn func()) {
-		// Don't launch if the job's context has been canceled by the time the
-		// goroutine starts.
-		if j.ctx.Err() != nil {
-			return
-		}
-
-		// Don't launch if the task's context has been canceled by the time the
-		// goroutine starts.
-		if taskCtx.Err() != nil {
-			return
-		}
 
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.
@@ -104,6 +81,7 @@ func scatter[T any](
 			if taskCompletedFn != nil {
 				taskCompletedFn()
 			}
+			ctx = withBackpressureProvider(ctx, bp)
 			postResult(ctx, value, err)
 		}()
 
@@ -116,7 +94,7 @@ func scatter[T any](
 		// posting a gather to the job's channel or otherwise attempt to
 		// maintain the integrity of the task pool or overall job in case of task
 		// panics.
-		value, err = taskFunc(taskCtx)
+		value, err = taskFunc(ctx)
 	})
 }
 
@@ -133,19 +111,4 @@ func yieldBeforeScatter(ctx context.Context, bp backpressureProvider) error {
 		}
 	}
 	return nil
-}
-
-type taskContextValueKeyType struct{}
-
-var taskContextValueKey any = taskContextValueKeyType{}
-
-func newTaskContext(ctx context.Context, j *Job) context.Context {
-	taskCtx := j.ctx
-	taskCtx = context.WithValue(taskCtx,
-		taskContextValueKey,
-		j.ctx.Value(jobContextValueKey))
-	taskCtx = context.WithValue(taskCtx,
-		backpressureProviderContextValueKey,
-		ctx.Value(backpressureProviderContextValueKey))
-	return taskCtx
 }

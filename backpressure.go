@@ -33,7 +33,7 @@ func withBackpressureProvider(ctx context.Context, bp backpressureProvider) cont
 	return context.WithValue(ctx, backpressureProviderContextValueKey, bp)
 }
 
-func withDefaultBackpressureProvider(ctx context.Context, j *Job) context.Context {
+func withDefaultBackpressureProvider(ctx context.Context, j *Job) (context.Context, context.CancelFunc) {
 	switch bp := ctx.Value(backpressureProviderContextValueKey).(type) {
 	case nil:
 		if j == nil || includesJob(ctx, j, jobContextValueKey) {
@@ -41,12 +41,17 @@ func withDefaultBackpressureProvider(ctx context.Context, j *Job) context.Contex
 		}
 	case backpressureProvider:
 		if bp.ForJob(j) {
-			return ctx
+			return ctx, func() {}
 		}
 	default:
 		panic(fmt.Sprintf("unexpected backpressure provider type: %T", bp))
 	}
-	return withBackpressureProvider(ctx, defaultBackpressureProvider{j: j})
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(j.ctx, cancel)
+	return withBackpressureProvider(ctx, defaultBackpressureProvider{j: j}), func() {
+		stop()
+		cancel()
+	}
 }
 
 func getBackpressureProvider(ctx context.Context, j *Job) backpressureProvider {

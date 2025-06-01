@@ -41,6 +41,8 @@ type Job struct {
 	// ways that users should not need to understand. A true goroutine-local
 	// storage capability would be a perfect fit here.
 	workQueue nbcq.Queue[gatherWorkFunc]
+
+	taskChan chan func(context.Context)
 }
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
@@ -49,7 +51,7 @@ func (j *Job) job() *Job {
 }
 
 // withBackpressureProvider returns a context with the default backpressure provider for this Job
-func (j *Job) withBackpressureProvider(ctx context.Context) context.Context {
+func (j *Job) withBackpressureProvider(ctx context.Context) (context.Context, context.CancelFunc) {
 	return withDefaultBackpressureProvider(ctx, j)
 }
 
@@ -72,6 +74,7 @@ func NewJob(ctx context.Context) *Job {
 	j := &Job{
 		cancelFunc: cancelFunc,
 		gatherChan: make(chan boundGatherFunc),
+		taskChan:   make(chan func(context.Context)),
 	}
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
@@ -189,7 +192,9 @@ func (j *Job) CancelAndWait() {
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
 func (j *Job) GatherOne(ctx context.Context) (bool, error) {
-	ctx = withDefaultBackpressureProvider(ctx, j)
+	j.vetGather(ctx)
+	ctx, cancel := withDefaultBackpressureProvider(ctx, j)
+	defer cancel()
 	return j.gatherOneAndDoTheWork(ctx)
 }
 
@@ -230,8 +235,6 @@ func (j *Job) processOutstandingWork(ctx context.Context) error {
 }
 
 func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
-	j.vetGather(ctx)
-
 	inGatherAlready := j.inGather(ctx)
 
 	if !inGatherAlready {
@@ -277,8 +280,6 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 		return false, ErrJobDone
 	case <-ctx.Done():
 		return false, ctx.Err()
-	case <-j.ctx.Done():
-		return false, j.ctx.Err()
 	}
 	return false, nil
 }
@@ -292,7 +293,10 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 //
 // See GatherOne for additional details.
 func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
-	ctx = withDefaultBackpressureProvider(ctx, j)
+	j.vetGather(ctx)
+
+	ctx, cancel := withDefaultBackpressureProvider(ctx, j)
+	defer cancel()
 	return j.tryGatherOne(ctx)
 }
 
@@ -320,8 +324,6 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 		return false, nil
 	case <-ctx.Done():
 		return false, ctx.Err()
-	case <-j.ctx.Done():
-		return false, j.ctx.Err()
 	default:
 		// There were no in-flight tasks ready to gather.
 		return false, nil
@@ -353,7 +355,9 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 // NOTE: This method will serially call each gathered task's [GatherFunc] and
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
-	ctx = withDefaultBackpressureProvider(ctx, j)
+	j.vetGather(ctx)
+	ctx, cancel := withDefaultBackpressureProvider(ctx, j)
+	defer cancel()
 	return j.gatherAll(ctx, j.gatherOneAndDoTheWork)
 }
 
@@ -368,7 +372,8 @@ func (j *Job) GatherAll(ctx context.Context) error {
 // NOTE: If completed tasks are available, this method must still call each
 // task's [GatherFunc] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
-	ctx = withDefaultBackpressureProvider(ctx, j)
+	ctx, cancel := withDefaultBackpressureProvider(ctx, j)
+	defer cancel()
 	return j.gatherAll(ctx, j.tryGatherOne)
 }
 
@@ -384,23 +389,44 @@ func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context)
 	}
 }
 
-func (j *Job) startTask(ctx context.Context, taskFn func(context.Context)) {
-	// Launch the task in a new goroutine.
-	j.wg.Add(1)
-	go func() {
-		defer j.wg.Done()
-		taskFn(ctx)
-	}()
+func (j *Job) startTask(taskFn func(context.Context)) {
+	select {
+	case j.taskChan <- taskFn:
+	default:
+		// Launch the task in a new goroutine.
+		j.wg.Add(1)
+		go func() {
+			defer j.wg.Done()
+
+			ctx, cancel := context.WithCancel(j.ctx)
+			defer cancel()
+
+			ctx = context.WithValue(ctx, taskContextValueKey, j.ctx.Value(jobContextValueKey))
+
+			for {
+				taskFn(ctx)
+
+				select {
+				case taskFn = <-j.taskChan:
+				default:
+					return
+				}
+			}
+		}()
+	}
 }
+
+type taskContextValueKeyType struct{}
+
+var taskContextValueKey any = taskContextValueKeyType{}
 
 // launch executes a task immediately without any concurrency constraints.
 // Implements the TaskPoolOrJob interface.
 func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error) {
 	// Launch the task immediately without any pool tracking
-	j.startTask(ctx, func(ctx context.Context) {
+	j.startTask(func(ctx context.Context) {
 		taskFn(ctx, nil) // No completion callback needed for unlimited tasks
 	})
-
 	return true, nil
 }
 

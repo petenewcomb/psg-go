@@ -137,7 +137,8 @@ func (c *Combine[I, O]) scatter(
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	ctx = target.withBackpressureProvider(ctx)
+	ctx, cancel := target.withBackpressureProvider(ctx)
+	defer cancel()
 	bp := getBackpressureProvider(ctx, j)
 
 	if err := yieldBeforeScatter(ctx, bp); err != nil {
@@ -157,9 +158,7 @@ func (c *Combine[I, O]) scatter(
 
 			// bp.Block will return true only if we got a notification from the
 			// waiterQueue, so we can pass that along to break out of the loop
-			// and proceed without rechecking waitingCombines. Also pass along
-			// the work function to be executed only after the waiter has been
-			// closed.
+			// and proceed without rechecking waitingCombines.
 			return bp.Block(ctx, waiter, nil)
 		}
 		for {

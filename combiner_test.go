@@ -9,10 +9,13 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/influxdata/tdigest"
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/internal/ema"
 	"github.com/stretchr/testify/require"
 )
 
@@ -238,62 +241,6 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }
 
-/*
-func TestCombinerFactoryPanic(t *testing.T) {
-	chk := require.New(t)
-	ctx := context.Background()
-	job := psg.NewJob(ctx)
-	defer job.CancelAndWait()
-	taskPool := psg.NewTaskPool(job, 1)
-
-	// A channel to track what error was received by the gather function
-	errCh := make(chan error, 1)
-
-	// Create a gather function that records errors
-	gather := psg.NewGather(
-		func(ctx context.Context, result int, err error) error {
-			errCh <- err
-			return nil
-		},
-	)
-
-	// Create a combiner pool
-	combinerPool := psg.NewCombinerPool(job, 1)
-
-	// Create a combine with a factory that panics
-	combine := psg.NewCombine(
-		gather,
-		combinerPool,
-		func() psg.Combiner[int, int] {
-			panic("factory panic")
-		},
-	)
-
-	// Run a task that should trigger the factory panic
-	err := combine.Scatter(
-		ctx,
-		taskPool,
-		func(ctx context.Context) (int, error) {
-			return 42, nil
-		},
-	)
-
-	chk.NoError(err)
-	chk.NoError(job.CloseAndGatherAll(ctx))
-
-	// Verify that an appropriate error was propagated to the gather function
-	select {
-	case err := <-errCh:
-		// Currently no error is returned because there's no panic handling for the factory
-		// This test will start failing when we add proper error handling, and then we'll update
-		// the test to check for the expected error
-		chk.Error(err, "Expected an error to be propagated when combiner factory panics")
-	case <-time.After(time.Second):
-		chk.Fail("No error was received within timeout")
-	}
-}
-*/
-
 // BenchmarkCombinerThroughput measures the maximum throughput of processing
 // a continuous stream of data with gather-only vs. combiner approaches
 func BenchmarkCombinerThroughput(b *testing.B) {
@@ -375,73 +322,198 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						defer job.CancelAndWait()
 						taskPool := psg.NewTaskPool(job, -1)
 
-						type aggregatedResult struct {
-							Time        time.Time
-							Count       int64
-							DurationSum time.Duration
-							LatencySum  time.Duration
-							LatencyMax  time.Duration
+						type taskResult struct {
+							Time    time.Time
+							Latency time.Duration
 						}
-						var overallResult aggregatedResult
-						gatherFunc := func(ctx context.Context, value aggregatedResult, err error) error {
+
+						type combinedResult struct {
+							Time                time.Time
+							Count               int
+							TaskLatenciesNs     *tdigest.CentroidList
+							LatenciesNs         *tdigest.CentroidList
+							DurationsNs         *tdigest.CentroidList
+							WorkflowLatenciesNs *tdigest.CentroidList
+						}
+
+						tdigestPool := sync.Pool{
+							New: func() any {
+								return tdigest.New()
+							},
+						}
+						newTDigest := func() *tdigest.TDigest {
+							return tdigestPool.Get().(*tdigest.TDigest)
+						}
+						poolTDigest := func(t **tdigest.TDigest) {
+							if *t != nil {
+								(*t).Reset()
+								tdigestPool.Put(*t)
+								*t = nil
+							}
+						}
+
+						centroidListPool := sync.Pool{
+							New: func() any {
+								return &tdigest.CentroidList{}
+							},
+						}
+						newCentroidList := func(c ...tdigest.Centroid) *tdigest.CentroidList {
+							cl := centroidListPool.Get().(*tdigest.CentroidList)
+							*cl = append(*cl, c...)
+							return cl
+						}
+						copyCentroidList := func(t *tdigest.TDigest) *tdigest.CentroidList {
+							cl := centroidListPool.Get().(*tdigest.CentroidList)
+							*cl = t.Centroids(*cl)
+							return cl
+						}
+						poolCentroidList := func(cl *tdigest.CentroidList) {
+							*cl = (*cl)[:0]
+							centroidListPool.Put(cl)
+						}
+
+						totalTasksGathered := 0
+
+						taskLatenciesNs := tdigest.New()
+
+						combineLatenciesNs := tdigest.New()
+						combineDurationsNs := tdigest.New()
+						combineWorkflowLatenciesNs := tdigest.New()
+
+						gatherLatenciesNs := tdigest.New()
+						gatherDurationsNs := tdigest.New()
+
+						workflowLatenciesNs := tdigest.New()
+						workflowDurationsNs := tdigest.New()
+
+						gatherFunc := func(ctx context.Context, combineRes combinedResult, err error) error {
 							if err != nil {
 								return err
 							}
+
 							workStartTime := time.Now()
+							gatherLatencyNs := float64(workStartTime.Sub(combineRes.Time).Nanoseconds())
+							gatherLatenciesNs.Add(gatherLatencyNs, 1.0)
+
 							simulateWork(workloadDuration)
-							overallResult.Time = time.Now()
-							overallResult.Count += value.Count
-							overallResult.DurationSum += value.DurationSum + overallResult.Time.Sub(workStartTime)
-							timeSinceValue := overallResult.Time.Sub(value.Time)
-							overallResult.LatencySum += time.Duration(value.Count)*timeSinceValue + value.LatencySum
-							overallResult.LatencyMax = max(overallResult.LatencyMax, value.LatencyMax+timeSinceValue)
+
+							now := time.Now()
+
+							totalTasksGathered += combineRes.Count
+
+							taskLatenciesNs.AddCentroidList(*combineRes.TaskLatenciesNs)
+							combineLatenciesNs.AddCentroidList(*combineRes.LatenciesNs)
+							combineDurationsNs.AddCentroidList(*combineRes.DurationsNs)
+							combineWorkflowLatenciesNs.AddCentroidList(*combineRes.WorkflowLatenciesNs)
+
+							gatherDurationNs := float64(now.Sub(workStartTime).Nanoseconds())
+							gatherDurationsNs.Add(gatherDurationNs, 1.0)
+
+							for i := range *combineRes.WorkflowLatenciesNs {
+								(*combineRes.WorkflowLatenciesNs)[i].Mean += gatherLatencyNs
+							}
+							workflowLatenciesNs.AddCentroidList(*combineRes.WorkflowLatenciesNs)
+
+							for i := range *combineRes.DurationsNs {
+								(*combineRes.DurationsNs)[i].Mean += gatherDurationNs
+							}
+							workflowDurationsNs.AddCentroidList(*combineRes.DurationsNs)
+
+							poolCentroidList(combineRes.TaskLatenciesNs)
+							poolCentroidList(combineRes.LatenciesNs)
+							poolCentroidList(combineRes.DurationsNs)
+							poolCentroidList(combineRes.WorkflowLatenciesNs)
+
 							return nil
 						}
 
-						gatherFuncAdapter := func(ctx context.Context, value time.Time, err error) error {
-							aggRes := aggregatedResult{
-								Time:  value,
-								Count: 1,
+						gatherFuncAdapter := func(ctx context.Context, task taskResult, err error) error {
+							now := time.Now()
+							taskLatencyNsCentroid := tdigest.Centroid{
+								Mean:   float64(now.Sub(task.Time).Nanoseconds()),
+								Weight: 1.0,
 							}
-							return gatherFunc(ctx, aggRes, err)
+							combined := combinedResult{
+								Time:                now,
+								Count:               1,
+								TaskLatenciesNs:     newCentroidList(taskLatencyNsCentroid),
+								LatenciesNs:         newCentroidList(taskLatencyNsCentroid),
+								DurationsNs:         newCentroidList(tdigest.Centroid{Mean: 0.0, Weight: 1.0}),
+								WorkflowLatenciesNs: newCentroidList(taskLatencyNsCentroid),
+							}
+							return gatherFunc(ctx, combined, err)
 						}
 
 						// Setup processing - either gather-only or with combiner
-						var scatter func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error
+						var scatter func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[taskResult]) error
 						switch combinerLimit {
 						case -2:
-							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error {
-								value, err := task(ctx)
-								return gatherFuncAdapter(ctx, value, err)
+							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[taskResult]) error {
+								taskRes, err := task(ctx)
+								return gatherFuncAdapter(ctx, taskRes, err)
 							}
 						case 0:
 							scatter = psg.NewGather(gatherFuncAdapter).Scatter
 						default:
 							gather := psg.NewGather(gatherFunc)
 							combinerPool := psg.NewCombinerPool(job)
-							combinerPool.SetLimit(combinerLimit)
-							combine := psg.NewCombine(gather, combinerPool, func() psg.Combiner[time.Time, aggregatedResult] {
-								var combinedResult aggregatedResult
+							combinerPool.SetLimits(max(0, combinerLimit), combinerLimit)
+							combine := psg.NewCombine(gather, combinerPool, func() psg.Combiner[taskResult, combinedResult] {
+								count := 0
+								var taskLatenciesNs *tdigest.TDigest
+								var durationsNs *tdigest.TDigest
+								var latenciesNs *tdigest.TDigest
+								var workflowLatenciesNs *tdigest.TDigest
+
 								nextFlushTime := time.Now().Add(flushPeriod)
-								flush := func(ctx context.Context, emit psg.CombinerEmitFunc[aggregatedResult]) {
-									emit(ctx, combinedResult, nil)
-									combinedResult = aggregatedResult{}
+								flush := func(ctx context.Context, emit psg.CombinerEmitFunc[combinedResult]) {
+									if count > 0 {
+										res := combinedResult{
+											Time:                time.Now(),
+											Count:               count,
+											TaskLatenciesNs:     copyCentroidList(taskLatenciesNs),
+											LatenciesNs:         copyCentroidList(latenciesNs),
+											DurationsNs:         copyCentroidList(durationsNs),
+											WorkflowLatenciesNs: copyCentroidList(workflowLatenciesNs),
+										}
+										emit(ctx, res, nil)
+									}
+
+									count = 0
+									poolTDigest(&taskLatenciesNs)
+									poolTDigest(&latenciesNs)
+									poolTDigest(&durationsNs)
+									poolTDigest(&workflowLatenciesNs)
+
 									nextFlushTime = time.Now().Add(flushPeriod)
 								}
-								return psg.FuncCombiner[time.Time, aggregatedResult]{
-									CombineFunc: func(ctx context.Context, value time.Time, err error, emit psg.CombinerEmitFunc[aggregatedResult]) {
+
+								return psg.FuncCombiner[taskResult, combinedResult]{
+									CombineFunc: func(ctx context.Context, taskRes taskResult, err error, emit psg.CombinerEmitFunc[combinedResult]) {
 										if err != nil {
-											emit(ctx, aggregatedResult{}, err)
+											emit(ctx, combinedResult{}, err)
 										}
 
 										workStartTime := time.Now()
+										latency := workStartTime.Sub(taskRes.Time)
+
 										simulateWork(workloadDuration)
-										combinedResult.Time = time.Now()
-										combinedResult.Count++
-										combinedResult.DurationSum += combinedResult.Time.Sub(workStartTime)
-										timeSinceValue := combinedResult.Time.Sub(value)
-										combinedResult.LatencySum += timeSinceValue
-										combinedResult.LatencyMax = max(combinedResult.LatencyMax, timeSinceValue)
+
+										now := time.Now()
+										duration := now.Sub(workStartTime)
+
+										if count == 0 {
+											taskLatenciesNs = newTDigest()
+											latenciesNs = newTDigest()
+											durationsNs = newTDigest()
+											workflowLatenciesNs = newTDigest()
+										}
+										count++
+										taskLatenciesNs.Add(float64(taskRes.Latency.Nanoseconds()), 1.0)
+										latenciesNs.Add(float64(latency.Nanoseconds()), 1.0)
+										durationsNs.Add(float64(duration.Nanoseconds()), 1.0)
+										workflowLatenciesNs.Add(float64((taskRes.Latency + latency).Nanoseconds()), 1.0)
+
 										if time.Now().After(nextFlushTime) {
 											flush(ctx, emit)
 										}
@@ -449,7 +521,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									FlushFunc: flush,
 								}
 							})
-							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[time.Time]) error {
+							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[taskResult]) error {
 								if err := combine.Scatter(ctx, target, task); err != nil {
 									return err
 								}
@@ -457,32 +529,68 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						}
 
-						taskFunc := func(context.Context) (time.Time, error) {
-							return time.Now(), nil
+						newTaskFunc := func(startTime time.Time) psg.TaskFunc[taskResult] {
+							return func(context.Context) (taskResult, error) {
+								now := time.Now()
+								return taskResult{Time: now, Latency: now.Sub(startTime)}, nil
+							}
 						}
 
-						var totalTasksLaunched int64
+						totalTasksLaunched := 0
 						op := func() {
-							if err := scatter(ctx, taskPool, taskFunc); err != nil {
+							if err := scatter(ctx, taskPool, newTaskFunc(time.Now())); err != nil {
 								b.Fatalf("Error: %v", err)
 							}
 							totalTasksLaunched++
 						}
 
-						warmupEnd := time.Now().Add(10 * psg.DefaultCombinerThroughputMeasurementWindow)
-						for time.Now().Before(warmupEnd) {
-							oldCount := overallResult.Count
-							for overallResult.Count == oldCount {
+						tau := ema.Tau(1000 * time.Millisecond)
+						var avgLagRatio ema.State
+						var avgLagRatioTrend ema.State
+						avgLagRatio.EMA = 1.0
+						avgLagRatioTrend.EMA = 1.0
+						var avgThroughput ema.State
+						var avgThroughputTrend ema.State
+						//warmupEnd := time.Now().Add(100 * flushPeriod)
+						//for time.Now().Before(warmupEnd) {
+						lastReportTime := time.Now()
+						lastUpdateTime := time.Now()
+						for math.Abs(avgLagRatioTrend.Get()) > 0.1 || math.Abs(avgThroughputTrend.Get()) > 0.1 {
+							oldCount := totalTasksGathered
+							for totalTasksGathered == oldCount {
 								op()
+							}
+							now := time.Now()
+							elapsedTime := float64(now.Sub(lastUpdateTime))
+							lastUpdateTime = now
+							tasksGathered := float64(totalTasksGathered - oldCount)
+							lagRatio := float64(totalTasksLaunched-totalTasksGathered) / tasksGathered
+							previousAvgLagRatio := avgLagRatio.Get()
+							avgLagRatio.Update(tau, lagRatio)
+							avgLagRatioTrend.Update(tau, avgLagRatio.Get()-previousAvgLagRatio)
+							previousAvgThroughput := avgThroughput.Get()
+							avgThroughput.Update(tau, tasksGathered/elapsedTime)
+							avgThroughputTrend.Update(tau, avgThroughput.Get()-previousAvgThroughput)
+							if now.Sub(lastReportTime) > time.Second {
+								//fmt.Println(lagRatio, avgLagRatio.Get(), avgLagRatioTrend.Get())
+								lastReportTime = now
 							}
 						}
 
+						//fmt.Println("starting test")
 						tasksLaunchedOrigin := totalTasksLaunched
-						overallResultOrigin := overallResult
-						overallResult.LatencyMax = 0
+						tasksGatheredOrigin := totalTasksGathered
+						taskLatenciesNs.Reset()
+						combineLatenciesNs.Reset()
+						combineDurationsNs.Reset()
+						combineWorkflowLatenciesNs.Reset()
+						gatherLatenciesNs.Reset()
+						gatherDurationsNs.Reset()
+						workflowLatenciesNs.Reset()
+						workflowDurationsNs.Reset()
 						for b.Loop() {
-							oldCount := overallResult.Count
-							for overallResult.Count == oldCount {
+							oldCount := totalTasksGathered
+							for totalTasksGathered == oldCount {
 								op()
 							}
 						}
@@ -493,22 +601,38 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						// benchmarking loop.
 
 						tasksLaunched := totalTasksLaunched - tasksLaunchedOrigin
-						resultCount := overallResult.Count - overallResultOrigin.Count
-						resultDurationSum := overallResult.DurationSum - overallResultOrigin.DurationSum
-						resultLatencyMax := overallResult.LatencyMax
-						resultLatencySum := overallResult.LatencySum - overallResultOrigin.LatencySum
+						tasksGathered := totalTasksGathered - tasksGatheredOrigin
+
+						//fmt.Println("ended test")
 
 						// Now call CloseAndGatherAll to make sure nothing was lost.
 						require.NoError(b, job.CloseAndGatherAll(ctx))
-						require.Equal(b, totalTasksLaunched, overallResult.Count)
+						require.Equal(b, totalTasksLaunched, totalTasksGathered)
 
 						b.ReportAllocs()
 						b.ReportMetric(float64(tasksLaunched)/float64(b.N), "launched/op")
-						b.ReportMetric(float64(resultCount)/float64(b.N), "completed/op")
-						b.ReportMetric(float64(resultCount)/b.Elapsed().Seconds(), "completed/s")
-						b.ReportMetric(float64(resultLatencyMax.Nanoseconds()), "max-latency-ns")
-						b.ReportMetric(float64(resultLatencySum.Nanoseconds())/float64(b.N), "avg-latency-ns/op")
-						b.ReportMetric(float64(resultDurationSum.Nanoseconds())/float64(b.N), "avg-duration-ns/op")
+						b.ReportMetric(float64(tasksGathered)/float64(b.N), "completed/op")
+						b.ReportMetric(float64(tasksGathered)/b.Elapsed().Seconds(), "completed/s")
+
+						b.ReportMetric(taskLatenciesNs.Quantile(0.99), "p99-task-latency-ns")
+						b.ReportMetric(taskLatenciesNs.Quantile(0.50), "p50-task-latency-ns")
+
+						b.ReportMetric(combineLatenciesNs.Quantile(0.99), "p99-combine-latency-ns")
+						b.ReportMetric(combineLatenciesNs.Quantile(0.50), "p50-combine-latency-ns")
+						b.ReportMetric(combineDurationsNs.Quantile(0.99), "p99-combine-duration-ns")
+						b.ReportMetric(combineDurationsNs.Quantile(0.50), "p50-combine-duration-ns")
+						b.ReportMetric(combineWorkflowLatenciesNs.Quantile(0.99), "p99-combine-workflow-latency-ns")
+						b.ReportMetric(combineWorkflowLatenciesNs.Quantile(0.50), "p50-combine-workflow-latency-ns")
+
+						b.ReportMetric(gatherLatenciesNs.Quantile(0.99), "p99-gather-latency-ns")
+						b.ReportMetric(gatherLatenciesNs.Quantile(0.50), "p50-gather-latency-ns")
+						b.ReportMetric(gatherDurationsNs.Quantile(0.99), "p99-gather-duration-ns")
+						b.ReportMetric(gatherDurationsNs.Quantile(0.50), "p50-gather-duration-ns")
+
+						b.ReportMetric(workflowLatenciesNs.Quantile(0.99), "p99-workflow-latency-ns")
+						b.ReportMetric(workflowLatenciesNs.Quantile(0.50), "p50-workflow-latency-ns")
+						b.ReportMetric(workflowDurationsNs.Quantile(0.99), "p99-workflow-duration-ns")
+						b.ReportMetric(workflowDurationsNs.Quantile(0.50), "p50-workflow-duration-ns")
 					})
 				}
 			}

@@ -7,11 +7,19 @@ import (
 	"context"
 	"maps"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
+
+// DefaultTaskWorkerIdleTimeout is the default duration a task worker will wait
+// for new work before exiting. This controls how aggressively workers scale down
+// when load decreases.
+const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 
 // Job represents a scatter-gather execution environment. It tracks tasks
 // launched with [Scatter] across a set of [TaskPool] instances and provides methods
@@ -42,7 +50,8 @@ type Job struct {
 	// storage capability would be a perfect fit here.
 	workQueue nbcq.Queue[gatherWorkFunc]
 
-	taskChan chan func(context.Context)
+	idleWorkers           nbcq.Queue[chan func(context.Context)]
+	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
@@ -74,15 +83,17 @@ func NewJob(ctx context.Context) *Job {
 	j := &Job{
 		cancelFunc: cancelFunc,
 		gatherChan: make(chan boundGatherFunc),
-		taskChan:   make(chan func(context.Context)),
 	}
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
 	j.workQueue.Init(workQueueNodePool)
+	j.idleWorkers.Init(taskWorkerNodePool)
+	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
 	return j
 }
 
 var workQueueNodePool = &nbcq.NodePool[gatherWorkFunc]{}
+var taskWorkerNodePool = &nbcq.NodePool[chan func(context.Context)]{}
 
 type jobContextValueKeyType struct{}
 
@@ -166,6 +177,23 @@ func (j *Job) Cancel() {
 func (j *Job) CancelAndWait() {
 	j.Cancel()
 	j.wg.Wait()
+}
+
+// SetTaskWorkerIdleTimeout sets the duration that idle task workers wait for
+// new work before exiting. This controls how aggressively workers scale down
+// when load decreases.
+//
+// A shorter timeout reduces resource usage during idle periods but may increase
+// overhead when load patterns are bursty. A longer timeout keeps workers alive
+// longer, reducing spawn/teardown overhead but potentially wasting resources.
+//
+// The default value is [DefaultTaskWorkerIdleTimeout].
+//
+// This method is safe to call at any time, but only affects workers that begin
+// waiting after the call. Workers already in their idle timeout will use the
+// previous value.
+func (j *Job) SetTaskWorkerIdleTimeout(timeout time.Duration) {
+	j.taskWorkerIdleTimeout.Store(int64(timeout))
 }
 
 // GatherOne processes at most a single result from a task previously launched
@@ -390,30 +418,82 @@ func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context)
 }
 
 func (j *Job) startTask(taskFn func(context.Context)) {
-	select {
-	case j.taskChan <- taskFn:
-	default:
-		// Launch the task in a new goroutine.
-		j.wg.Add(1)
-		go func() {
-			defer j.wg.Done()
+	// Try to hand off to an idle worker
+	for {
+		workerCh, ok := j.idleWorkers.PopFront(taskWorkerNodePool)
+		if !ok {
+			break // No idle workers available
+		}
 
-			ctx, cancel := context.WithCancel(j.ctx)
-			defer cancel()
+		select {
+		case workerCh <- taskFn:
+			return // Successfully handed off to idle worker
+		default:
+			// Worker channel was closed (worker exited), try next one
+		}
+	}
 
-			ctx = context.WithValue(ctx, taskContextValueKey, j.ctx.Value(jobContextValueKey))
+	// No idle workers available, spawn a new one
+	j.spawnTaskWorker(taskFn)
+}
 
-			for {
-				taskFn(ctx)
+func (j *Job) spawnTaskWorker(initialTask func(context.Context)) {
+	j.wg.Add(1)
+	go func() {
+		defer j.wg.Done()
 
-				select {
-				case taskFn = <-j.taskChan:
-				default:
-					return
+		ctx, cancel := context.WithCancel(j.ctx)
+		defer cancel()
+
+		ctx = context.WithValue(ctx, taskContextValueKey, j.ctx.Value(jobContextValueKey))
+
+		workerCh := make(chan func(context.Context), 1)
+		workerChInQueue := false
+
+		drainWorkerCh := func() {
+			select {
+			case workerCh <- nil:
+				// Successfully filled the channel (if it's still in queue, this prevents others from using it)
+			default:
+				// Channel was already full, drain it and execute any pending work
+				taskFn := <-workerCh
+				if taskFn != nil {
+					taskFn(ctx)
 				}
 			}
-		}()
-	}
+		}
+		defer drainWorkerCh()
+
+		taskFn := initialTask
+		idleTimer := timerp.Get()
+		defer timerp.Put(idleTimer)
+
+		for {
+			// Execute the current task
+			taskFn(ctx)
+
+			// Register as idle and wait for next task with timeout
+			if !workerChInQueue {
+				j.idleWorkers.PushBack(taskWorkerNodePool, workerCh)
+				workerChInQueue = true
+			}
+
+			// Reset timer with current timeout value
+			timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
+
+			select {
+			case taskFn = <-workerCh:
+				workerChInQueue = false
+				// Got new work, continue
+			case <-idleTimer.C:
+				// Timeout - exit to reduce worker count
+				return
+			case <-ctx.Done():
+				// Job cancelled
+				return
+			}
+		}
+	}()
 }
 
 type taskContextValueKeyType struct{}

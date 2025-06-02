@@ -259,7 +259,7 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 			switch step := step.(type) {
 			case SelfTime:
 				c.debugf("%v self time %v", task, step.Duration())
-				timer.Reset(step.Duration())
+				timerp.Reset(timer, step.Duration())
 				select {
 				case <-timer.C:
 				case <-ctx.Done():
@@ -431,7 +431,7 @@ func (c *controller) executeGatherOrCombineFunc(t require.TestingT, ctx context.
 		switch step := step.(type) {
 		case SelfTime:
 			c.debugf("%v self time %v", rh, step.Duration())
-			timer.Reset(step.Duration())
+			timerp.Reset(timer, step.Duration())
 			select {
 			case <-timer.C:
 			case <-ctx.Done():

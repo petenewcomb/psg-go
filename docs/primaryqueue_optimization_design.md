@@ -1,56 +1,218 @@
-# PrimaryQueue Optimization Design
+# Idle Worker Queue Pattern Design
 
 ## Overview
 
-This document describes an optimization to the CombinerPool work distribution mechanism that reduces contention on shared channels by introducing a lock-free queue of dedicated worker channels. The optimization trades a small amount of CPU overhead for significant improvements in throughput and latency at high concurrency levels.
+This document describes a general optimization pattern that eliminates contention on shared channels by replacing them with lock-free queues of idle worker channels. Instead of workers competing for work from a shared channel, idle workers advertise their availability, allowing direct handoff from producers. The pattern trades a small amount of CPU overhead for significant improvements in throughput and latency at high concurrency levels.
 
 ## Problem Context
 
-The CombinerPool manages a dynamic pool of goroutines that execute combine operations. Work distribution previously relied entirely on two shared channels:
-- `primaryChan`: The main channel for distributing work
-- `secondaryChan`: A spillover channel for when the primary is busy
+Many concurrent systems use shared channels for work distribution:
+- Multiple producers send work to a shared channel
+- Multiple workers receive from the same shared channel
 
-Under high concurrency (24+ goroutines), these shared channels become contention bottlenecks. Multiple goroutines compete to send work on the producer side, while multiple combiner goroutines compete to receive work on the consumer side. This contention manifests as increased latency and reduced throughput despite having sufficient processing capacity.
+Under high concurrency (20+ goroutines), these shared channels become contention bottlenecks. Channel operations require synchronization, and as concurrency increases, goroutines spend more time competing for channel access than doing useful work. This manifests as increased latency and reduced throughput despite having sufficient processing capacity.
+
+This pattern appears in several places:
+1. **CombinerPool**: Distributing combine operations to combiner goroutines
+2. **Job.taskChan**: Distributing tasks to worker goroutines
+3. **Job.gatherChan**: Distributing gather operations (potential future optimization)
 
 ## Solution Architecture
 
-The primaryQueue optimization introduces a work-stealing pattern using a lock-free queue:
+The idle worker queue pattern replaces shared channels with a more efficient mechanism:
 
-1. **Dedicated Channels**: Each combiner goroutine gets its own buffered channel (size 1)
-2. **Availability Advertisement**: When idle, combiners push their channel into a lock-free queue
-3. **Direct Handoff**: Work distributors first try to pop an idle combiner's channel for direct work delivery
-4. **Fallback Path**: If no idle combiners are available, fall back to the shared channels
+1. **Dedicated Channels**: Each worker gets its own buffered channel (size 1)
+2. **Availability Advertisement**: When idle, workers push their channel into a lock-free queue
+3. **Direct Handoff**: Producers pop an idle worker's channel for direct work delivery
+4. **No Contention**: Each channel has only one sender and one receiver
 
-This design ensures that in the common case under load, work distribution bypasses the contended shared channels entirely.
+This design ensures that in the common case under load, work distribution involves no contention - just direct handoff between producer and consumer.
 
-### Implementation Details
+## General Pattern
+
+### Core Components
 
 ```go
-// Per-pool lock-free queue of available combiner channels
-primaryQueue nbcq.Queue[chan<- boundCombineFunc]
+// Queue of idle worker channels
+type WorkerPool struct {
+    idleWorkers nbcq.Queue[chan Work]
+}
 
-// Per-combiner dedicated channel and tracking
-primaryQueueCh := make(chan boundCombineFunc, 1)
-primaryQueueChInQueue := false
-
-// Work distribution first tries direct handoff
-func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
-    // Try to find an idle combiner
+// Producer side - finding an idle worker
+func (p *WorkerPool) submitWork(work Work) {
+    // Try to find an idle worker
     for {
-        primaryQueueCh, _ := cp.primaryQueue.PopFront(primaryQueueNodePool)
-        if primaryQueueCh == nil {
-            break
+        workerCh, ok := p.idleWorkers.PopFront(nodePool)
+        if !ok {
+            break // No idle workers
         }
+        
         select {
-        case primaryQueueCh <- combine:
-            return
+        case workerCh <- work:
+            return // Successfully handed off
         default:
-            // Channel not ready, try next
+            // Worker channel closed/full, try next
         }
     }
     
-    // Fall back to shared channels
-    // ... existing implementation
+    // No idle workers available - handle according to needs:
+    // - Spawn new worker
+    // - Fall back to shared channel
+    // - Apply backpressure
+}
+
+// Worker side - advertising availability
+func (p *WorkerPool) runWorker() {
+    workerCh := make(chan Work, 1)
+    workerChInQueue := false
+    
+    // Essential cleanup to mark channel as dead so producers skip it
+    defer func() {
+        select {
+        case workerCh <- nil:
+            // Successfully marked channel as dead
+        default:
+            // Channel full, drain and process the work
+            work := <-workerCh
+            if work != nil {
+                // Process the work that was pending
+                processWork(work)
+            }
+        }
+    }
+    
+    for {
+        // Execute work...
+        
+        // Advertise availability
+        if !workerChInQueue {
+            p.idleWorkers.PushBack(nodePool, workerCh)
+            workerChInQueue = true
+        }
+        
+        // Wait for work
+        select {
+        case work := <-workerCh:
+            workerChInQueue = false
+            // Process work...
+        case <-timeout:
+            return // Scale down
+        }
+    }
+}
+```
+
+### Key Design Elements
+
+1. **Buffer Size 1**: Worker channels have buffer of 1 to enable non-blocking handoff
+2. **Availability Tracking**: `workerChInQueue` flag prevents duplicate queue entries
+3. **Graceful Cleanup**: Workers must drain their channel before exiting
+4. **Closed Channel Handling**: Producers skip over closed/dead worker channels
+
+## Specific Implementations
+
+### 1. CombinerPool (Hybrid with Fallback)
+
+CombinerPool maintains compatibility by keeping shared channels as a fallback:
+
+```go
+func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
+    // First try idle worker queue
+    for {
+        workerCh, _ := cp.primaryQueue.PopFront(primaryQueueNodePool)
+        if workerCh == nil {
+            break
+        }
+        select {
+        case workerCh <- combine:
+            return
+        default:
+            // Worker died, continue
+        }
+    }
+    
+    // Fall back to shared channels for compatibility
+    select {
+    case cp.primaryChan <- combine:
+        return
+    case cp.secondaryChan <- combine:
+        return
+    default:
+        // Apply backpressure...
+    }
+}
+```
+
+### 2. Job.taskChan (Complete Elimination)
+
+Job completely eliminates the shared channel, spawning workers on demand:
+
+```go
+func (j *Job) startTask(taskFn func(context.Context)) {
+    // Only try idle workers
+    for {
+        workerCh, ok := j.idleWorkers.PopFront(taskWorkerNodePool)
+        if !ok {
+            break
+        }
+        select {
+        case workerCh <- taskFn:
+            return
+        default:
+            // Worker died, continue
+        }
+    }
+    
+    // No idle workers - spawn new one with initial task
+    j.spawnTaskWorker(taskFn)
+}
+```
+
+Workers include aggressive scale-down with configurable timeout:
+
+```go
+timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
+select {
+case taskFn = <-workerCh:
+    workerChInQueue = false
+    // Process work
+case <-idleTimer.C:
+    return // Scale down after timeout
+case <-ctx.Done():
+    return // Job cancelled
+}
+```
+
+### 3. waitq Package (Pure Implementation)
+
+The internal waitq package represents the purest form of this pattern - no shared channels at all:
+
+```go
+type Queue struct {
+    inner nbcq.Queue[Waiter]
+}
+
+func (q *Queue) Add() Waiter {
+    w := Waiter{
+        notifyChan: make(chan struct{}, 1), // Each waiter has dedicated channel
+    }
+    q.inner.PushBack(p, w)
+    return w
+}
+
+func (q *Queue) Notify() {
+    for {
+        w, ok := q.inner.PopFront(p)
+        if !ok {
+            return
+        }
+        select {
+        case w.notifyChan <- struct{}{}:
+            return // Notified successfully
+        default:
+            // Waiter was closed, try next
+        }
+    }
 }
 ```
 
@@ -74,20 +236,32 @@ Testing used a high-contention scenario:
 
 ### Results Summary
 
+#### CombinerPool (primaryQueue optimization)
+
 With statistical significance (p < 0.05 for all metrics):
 
-**Throughput Improvement:**
-- Tasks completed per second: +26.11% (8,260 → 10,416 tasks/s)
-
-**Latency Reductions:**
+**Performance Improvements:**
+- Throughput: +26.11% (8,260 → 10,416 tasks/sec)
 - P50 combine latency: -18.78% (19.75µs → 16.04µs)
 - P99 combine latency: -24.00% (163.9µs → 124.6µs)
 - P50 workflow latency: -31.92% (400.9µs → 272.9µs)
-- P99 workflow latency: -8.00% (5.946ms → 5.470ms)
 
-**Resource Usage (per completed task):**
+**Resource Trade-offs (per task):**
 - Allocations: +8.6% (28.01 → 30.41 allocs/task)
-- Memory bytes: -5.5% (1,259 → 1,190 bytes/task)
+- Memory: -5.5% (1,259 → 1,190 bytes/task)
+
+#### Job.taskChan (complete elimination)
+
+**Performance Improvements:**
+- Throughput: +16.29% (10,570 → 12,290 tasks/sec)
+- P50 workflow latency: -13.91% (268.0µs → 230.7µs)
+- P99 workflow latency: -14.47% (5.561ms → 4.756ms)
+
+**Resource Trade-offs (per task):**
+- Memory: +9.9% (1,186 → 1,304 bytes/task)
+- Allocations: +4.2% (30.6 → 31.9 allocs/task)
+
+Note: The increased combine latency (+21%) in Job.taskChan is due to combiners handling 16% more throughput, not a regression.
 
 ### Key Benchmark Results
 

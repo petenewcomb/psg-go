@@ -13,6 +13,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/basicq"
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/heap"
+	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
@@ -52,6 +53,7 @@ type CombinerPool struct {
 	// secondary goroutine resets secondaryElected to false and exits, allowing
 	// a different goroutine to elect itself secondary and continue the idle
 	// detection process.
+	primaryQueue     nbcq.Queue[chan<- boundCombineFunc]
 	primaryChan      chan boundCombineFunc
 	secondaryChan    chan boundCombineFunc
 	secondaryElected atomic.Bool
@@ -78,6 +80,7 @@ func NewCombinerPool(job *Job) *CombinerPool {
 	cp.state.SetHistoryRetentionPeriod(DefaultCombinerPoolHistoryRetentionPeriod)
 	cp.state.SetMinimumReturn(DefaultCombinerPoolMinimumReturn)
 	cp.state.SetGrowthFactors(DefaultCombinerPoolAggressiveGrowthFactor, DefaultCombinerPoolConservativeGrowthFactor)
+	cp.primaryQueue.Init(primaryQueueNodePool)
 	cp.combineWaiters.Init()
 	return cp
 }
@@ -202,7 +205,22 @@ func (cp *CombinerPool) SetGrowthFactors(aggressive, conservative float64) {
 	cp.state.SetGrowthFactors(aggressive, conservative)
 }
 
+var primaryQueueNodePool = &nbcq.NodePool[chan<- boundCombineFunc]{}
+
 func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
+
+	for {
+		primaryQueueCh, _ := cp.primaryQueue.PopFront(primaryQueueNodePool)
+		if primaryQueueCh == nil {
+			break
+		}
+		select {
+		case primaryQueueCh <- combine:
+			return
+		default:
+		}
+	}
+
 	// Attempt to post the combine to the primary channel.
 	select {
 	case cp.primaryChan <- combine:
@@ -307,6 +325,24 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 		var executeCombine func(ctx context.Context, combine boundCombineFunc)
 		var flushAll func(ctx context.Context)
 
+		primaryQueueCh := make(chan boundCombineFunc, 1)
+		primaryQueueChInQueue := false
+
+		tryCombineFromPrimaryQueue := func() bool {
+			if primaryQueueCh != nil {
+				select {
+				case combine := <-primaryQueueCh:
+					primaryQueueChInQueue = false
+					workQueue.PushBack(func(ctx context.Context) {
+						executeCombine(ctx, combine)
+					})
+					return true
+				default:
+				}
+			}
+			return false
+		}
+
 		tryCombineOne := func(ctx context.Context) (bool, error) {
 			now := time.Now()
 			for {
@@ -321,11 +357,24 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				nextBCToFlush.FlushFunc(ctx)
 			}
 
+			if tryCombineFromPrimaryQueue() {
+				return true, nil
+			}
+
 			select {
+			case combine := <-primaryQueueCh:
+				primaryQueueChInQueue = false
+				workQueue.PushBack(func(ctx context.Context) {
+					executeCombine(ctx, combine)
+				})
 			case combine := <-primaryCh:
-				executeCombine(ctx, combine)
+				workQueue.PushBack(func(ctx context.Context) {
+					executeCombine(ctx, combine)
+				})
 			case combine := <-cp.secondaryChan:
-				executeCombine(ctx, combine)
+				workQueue.PushBack(func(ctx context.Context) {
+					executeCombine(ctx, combine)
+				})
 			case <-doneCh:
 				return false, doneChErr
 			case <-ctx.Done():
@@ -367,7 +416,16 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				defer cp.state.SecondaryWaitEnded(waitStartTime)
 			}
 
+			if tryCombineFromPrimaryQueue() {
+				return true, nil
+			}
+
 			select {
+			case combine := <-primaryQueueCh:
+				primaryQueueChInQueue = false
+				workQueue.PushBack(func(ctx context.Context) {
+					executeCombine(ctx, combine)
+				})
 			case combine := <-primaryCh:
 				workQueue.PushBack(func(ctx context.Context) {
 					executeCombine(ctx, combine)
@@ -448,6 +506,18 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 		executeCombine(goroutineCtx, combine)
 
+		drainPrimaryQueueChan := func() {
+			if primaryQueueCh != nil {
+				select {
+				case primaryQueueCh <- nil:
+				default:
+					executeCombine(goroutineCtx, <-primaryQueueCh)
+				}
+				primaryQueueCh = nil
+			}
+		}
+		defer drainPrimaryQueueChan()
+
 		var idleTimer *time.Timer
 		for {
 			for {
@@ -461,6 +531,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			if !isSecondary {
 				isSecondary = cp.secondaryElected.CompareAndSwap(false, true)
 				if isSecondary {
+					drainPrimaryQueueChan()
 					primaryCh = nil
 					idleTimer = timerp.Get()
 					defer timerp.Put(idleTimer)
@@ -479,6 +550,11 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 					// elapse (if enabled).
 					idleTimer.Reset(idleTimeout)
 					idleTimerCh = idleTimer.C
+				}
+			} else {
+				if !primaryQueueChInQueue {
+					cp.primaryQueue.PushBack(primaryQueueNodePool, primaryQueueCh)
+					primaryQueueChInQueue = true
 				}
 			}
 

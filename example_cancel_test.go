@@ -127,6 +127,7 @@ func ExampleJob_Cancel_task() {
 			// short the overall job due to a fatal error within a task without
 			// even waiting for the task result to be gathered.
 			job.Cancel()
+			time.Sleep(10 * time.Millisecond)
 			return "second task result", nil
 		},
 	)

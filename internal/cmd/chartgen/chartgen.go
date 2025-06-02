@@ -309,14 +309,14 @@ func main() {
 			continue
 		}
 
-		// Scale values to match the number of tasks launched during each
+		// Scale values to match the number of tasks completed during each
 		// iteration.
-		if launchedPerOp, ok := res.Value("launched/op"); ok {
-			res.Iters = int(math.Round(float64(res.Iters) * launchedPerOp))
+		if tasksPerOp, ok := res.Value("tasks/op"); ok {
+			res.Iters = int(math.Round(float64(res.Iters) * tasksPerOp))
 			for i := range res.Values {
 				v := &res.Values[i]
 				if strings.HasSuffix(v.Unit, "/op") {
-					v.Value /= launchedPerOp
+					v.Value /= tasksPerOp
 				}
 			}
 		}
@@ -589,7 +589,7 @@ func main() {
 
 					chart.SeriesLabels = append(chart.SeriesLabels, methodDisplayName)
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey]
-					throughput := data["completed/s"].Values
+					throughput := data["tasks/sec"].Values
 					latency := data["p99-workflow-latency-sec"].Values
 
 					var points seriesPoints
@@ -715,7 +715,7 @@ func main() {
 				throughputChart.XTickLabels[pointIndex] = xTickLabel
 
 				func() {
-					unit := "completed/s"
+					unit := "tasks/sec"
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
 
 					throughputPoints.XYs[pointIndex].X = flushPeriod
@@ -746,7 +746,7 @@ func main() {
 				allocBytesChart.XTickLabels[pointIndex] = xTickLabel
 
 				func() {
-					unit := "completed/s"
+					unit := "tasks/sec"
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
 
 					y := data.Summary.Center / data.Reference.Summary.Center

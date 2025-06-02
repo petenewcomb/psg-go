@@ -578,7 +578,6 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						//fmt.Println("starting test")
-						tasksLaunchedOrigin := totalTasksLaunched
 						tasksGatheredOrigin := totalTasksGathered
 						taskLatenciesNs.Reset()
 						combineLatenciesNs.Reset()
@@ -600,7 +599,6 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						// overallSum with data gathered outside the
 						// benchmarking loop.
 
-						tasksLaunched := totalTasksLaunched - tasksLaunchedOrigin
 						tasksGathered := totalTasksGathered - tasksGatheredOrigin
 
 						//fmt.Println("ended test")
@@ -610,9 +608,13 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						require.Equal(b, totalTasksLaunched, totalTasksGathered)
 
 						b.ReportAllocs()
-						b.ReportMetric(float64(tasksLaunched)/float64(b.N), "launched/op")
-						b.ReportMetric(float64(tasksGathered)/float64(b.N), "completed/op")
-						b.ReportMetric(float64(tasksGathered)/b.Elapsed().Seconds(), "completed/s")
+
+						// Throughput - the primary metric for this benchmark
+						b.ReportMetric(float64(tasksGathered)/b.Elapsed().Seconds(), "tasks/sec")
+
+						// Tasks per operation - needed to normalize allocs/op and B/op
+						tasksPerOp := float64(tasksGathered) / float64(b.N)
+						b.ReportMetric(tasksPerOp, "tasks/op")
 
 						b.ReportMetric(taskLatenciesNs.Quantile(0.99), "p99-task-latency-ns")
 						b.ReportMetric(taskLatenciesNs.Quantile(0.50), "p50-task-latency-ns")

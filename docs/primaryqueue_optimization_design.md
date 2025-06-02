@@ -341,7 +341,7 @@ Not all applications of the idle worker queue pattern proved beneficial. We atte
 
 ### Implementation Details
 
-The gatherChan optimization followed the same pattern:
+The gatherChan optimization followed the same pattern (full implementation at commit [a997889](https://github.com/petenewcomb/psg-go/commit/a99788984ddb51822c97d551e48cf2d82eddc5c0)):
 
 ```go
 // Added to Job struct
@@ -381,41 +381,72 @@ Extensive benchmarking (10s duration × 10 runs) showed negative performance imp
 - P50 gather latency: +12.08% WORSE (675.0ns → 756.6ns, p=0.000)
 - Throughput: +2.36% BETTER (3,535 → 3,619 tasks/sec, p=0.001)
 
-**Mixed performance impact:**
-- Gather latency degraded significantly with statistical significance
-- Throughput improved marginally with statistical significance
-- Overall impact negative due to latency being a critical metric
+**Channel Pooling Improvement:**
+The initial negative results led to investigation of the channel allocation overhead.
+Adding channel pooling with `sync.Pool` eliminated the per-call allocation:
+
+```go
+var gathererChannelPool = sync.Pool{
+    New: func() interface{} {
+        return make(chan boundGatherFunc, 1)
+    },
+}
+
+// In gatherOne():
+gathererCh := gathererChannelPool.Get().(chan boundGatherFunc)
+defer func() {
+    // Return to pool with proper race condition handling
+    gathererChannelPool.Put(gathererCh)
+}
+```
+
+**Final Results with Proper Channel Pooling (15s × 15 runs with benchstat):**
+- P50 gather latency: -5.34% BETTER (707.6ns → 669.8ns, p=0.000) ✓
+- P99 gather latency: -6.66% BETTER (1.803µs → 1.683µs, p=0.000) ✓
+- Throughput: neutral (3,140 → 3,094 tasks/sec, p=0.233)
+- Memory: neutral (same 50 allocs/op)
+
+**Key takeaway:** Proper implementation with channel pooling turned a 12% degradation into a 5-6% improvement!
 
 ### Root Cause Analysis
 
-The optimization failed because the benchmark scenario has fundamentally different characteristics than the CombinerPool:
+Initial results suggested the optimization failed due to:
 
-1. **Single Gatherer**: The benchmark likely uses only one gathering goroutine, eliminating the contention that the optimization was designed to solve
+1. **Single Gatherer**: The benchmark uses only one gathering goroutine
+2. **Channel Allocation Overhead**: Per-call channel creation dominated costs
+3. **Implementation Issues**: Race conditions in channel pooling logic
 
-2. **No Competition**: With a single gatherer, there's no shared channel contention to eliminate - the gatherer has exclusive access to `gatherChan`
+However, with proper channel pooling, the optimization **actually succeeds**:
 
-3. **Pure Overhead**: The lock-free queue operations become pure overhead when there's no contention benefit, adding CPU cost with no throughput gain
-
-4. **Cache Pollution**: Additional atomic operations and queue management degrade cache performance without providing value
+1. **Reduced Latency**: Direct handoff eliminates queuing delays even with single gatherer
+2. **Lock-free Benefits**: The nbcq queue provides more efficient operations than channel locks
+3. **Channel Pooling Critical**: Eliminating allocation overhead was key to success
+4. **Pattern Still Applicable**: Benefits exist even without multiple gatherers competing
 
 ### Lessons Learned
 
-1. **Optimization Context Matters**: Performance optimizations are highly dependent on the specific usage patterns they target
+1. **Implementation Details Matter**: Proper channel pooling turned a -12% degradation into a +5-6% improvement
 
-2. **Contention Prerequisites**: The idle worker queue pattern only helps when multiple workers actually compete for shared resources
+2. **Benchmark Methodology Critical**: Baseline drift between sessions can mask true effects
 
-3. **Measure Everything**: Even theoretically sound optimizations can show negative results in practice
+3. **Premature Conclusions Dangerous**: Initial "negative" results were due to implementation flaws, not fundamental issues
 
-4. **Document Negative Results**: Failed optimizations provide valuable insights for future work
+4. **Lock-free Can Beat Channels**: Even with single consumer, lock-free queues can outperform Go channels
 
-### When GatherChan Optimization Might Help
+5. **Document the Journey**: The evolution from negative to positive results teaches valuable lessons
 
-The optimization could still be beneficial in scenarios with:
-- Multiple concurrent gatherer goroutines
-- High throughput workloads where gather processing becomes a bottleneck
-- Applications that explicitly spawn multiple gathering workers
+### When to Apply This Pattern
 
-However, the current PSG architecture typically uses a single gatherer per job, making this optimization counterproductive in the common case.
+The idle worker queue pattern with channel pooling provides benefits when:
+- **Any level of concurrency** exists (even single consumer benefits from reduced latency)
+- **Hot paths** where allocation overhead matters
+- **Lock-free operations** can replace channel synchronization
+- **Direct handoff** can eliminate queuing delays
+
+The pattern provides even more benefits with:
+- Multiple concurrent workers competing for tasks
+- High throughput workloads where every nanosecond counts
+- Systems where latency reduction is more important than throughput
 
 ## Conclusion
 

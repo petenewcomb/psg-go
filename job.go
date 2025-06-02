@@ -101,6 +101,13 @@ var workQueueNodePool = &nbcq.NodePool[gatherWorkFunc]{}
 var taskWorkerNodePool = &nbcq.NodePool[chan func(context.Context)]{}
 var gatherWorkerNodePool = &nbcq.NodePool[chan boundGatherFunc]{}
 
+// Pool for reusing gatherer channels to avoid allocation overhead
+var gathererChannelPool = sync.Pool{
+	New: func() interface{} {
+		return make(chan boundGatherFunc, 1)
+	},
+}
+
 type jobContextValueKeyType struct{}
 
 var jobContextValueKey any = jobContextValueKeyType{}
@@ -313,7 +320,13 @@ func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
 		case gathererCh <- gather:
 			return // Successfully handed off
 		default:
-			// Gatherer channel closed or full, try next
+			// Gatherer channel full, meaning that the gatherer abandoned it.
+			// Drain and put back in the pool, then try the next.
+			nilGather := <-gathererCh
+			if nilGather != nil {
+				panic("gatherer channel was not empty, expected nil")
+			}
+			gathererChannelPool.Put(gathererCh)
 		}
 	}
 
@@ -326,23 +339,27 @@ func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
-	// Create dedicated gatherer channel for idle worker queue optimization
-	gathererCh := make(chan boundGatherFunc, 1)
+	// Get pooled gatherer channel for idle worker queue optimization
+	gathererCh := gathererChannelPool.Get().(chan boundGatherFunc)
 
-	// Essential cleanup to mark channel as dead
+	// Essential cleanup to mark channel as dead and return to pool
 	defer func() {
-		select {
-		case gathererCh <- nil:
-			// Successfully marked channel as dead
-		default:
-			// Channel full, drain and process any pending work
-			gather := <-gathererCh
-			if gather != nil {
+		if gathererCh != nil {
+			select {
+			case gathererCh <- nil:
+				// Successfully marked channel as dead, but it's still in the
+				// queue so we can't put it back in the pool.
+			default:
+				// Channel full, drain and process any pending work
+				gather := <-gathererCh
 				j.workQueue.PushBack(workQueueNodePool,
 					func(ctx context.Context) error {
 						return j.executeGather(ctx, gather)
 					},
 				)
+				// postGather must have pulled it out of the queue and we just
+				// emptied it, so it's safe to return to the pool.
+				gathererChannelPool.Put(gathererCh)
 			}
 		}
 	}()
@@ -352,6 +369,10 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 
 	select {
 	case gather := <-gathererCh:
+		// If we reach here, it means the gatherer channel was dequeued by
+		// postGather and is now empty and ready to be put back in the pool
+		gathererChannelPool.Put(gathererCh)
+		gathererCh = nil
 		j.workQueue.PushBack(workQueueNodePool,
 			func(ctx context.Context) error {
 				return j.executeGather(ctx, gather)

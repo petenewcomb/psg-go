@@ -131,10 +131,7 @@ func (g *Gather[T]) scatter(
 			return g.gatherFunc(ctx, value, err)
 		}
 
-		// Post the gather to the job's gather channel.
-		select {
-		case j.gatherChan <- gather:
-		case <-ctx.Done():
-		}
+		// Post the gather using the idle worker queue optimization
+		j.postGather(ctx, gather)
 	})
 }

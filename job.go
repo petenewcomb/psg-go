@@ -52,6 +52,9 @@ type Job struct {
 
 	idleWorkers           nbcq.Queue[chan func(context.Context)]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
+
+	idleGatherers           nbcq.Queue[chan boundGatherFunc]
+	gatherWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
@@ -89,11 +92,14 @@ func NewJob(ctx context.Context) *Job {
 	j.workQueue.Init(workQueueNodePool)
 	j.idleWorkers.Init(taskWorkerNodePool)
 	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
+	j.idleGatherers.Init(gatherWorkerNodePool)
+	j.gatherWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
 	return j
 }
 
 var workQueueNodePool = &nbcq.NodePool[gatherWorkFunc]{}
 var taskWorkerNodePool = &nbcq.NodePool[chan func(context.Context)]{}
+var gatherWorkerNodePool = &nbcq.NodePool[chan boundGatherFunc]{}
 
 type jobContextValueKeyType struct{}
 
@@ -292,9 +298,65 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 	return !jobDone, err
 }
 
+// postGather attempts to deliver a gather operation to an idle gatherer for
+// direct handoff, falling back to the shared gatherChan if no idle gatherers
+// are available.
+func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
+	// Try to find an idle gatherer for direct handoff
+	for {
+		gathererCh, ok := j.idleGatherers.PopFront(gatherWorkerNodePool)
+		if !ok {
+			break // No idle gatherers
+		}
+
+		select {
+		case gathererCh <- gather:
+			return // Successfully handed off
+		default:
+			// Gatherer channel closed or full, try next
+		}
+	}
+
+	// Fall back to shared channel
+	select {
+	case j.gatherChan <- gather:
+	case <-ctx.Done():
+	}
+}
+
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
+	// Create dedicated gatherer channel for idle worker queue optimization
+	gathererCh := make(chan boundGatherFunc, 1)
+
+	// Essential cleanup to mark channel as dead
+	defer func() {
+		select {
+		case gathererCh <- nil:
+			// Successfully marked channel as dead
+		default:
+			// Channel full, drain and process any pending work
+			gather := <-gathererCh
+			if gather != nil {
+				j.workQueue.PushBack(workQueueNodePool,
+					func(ctx context.Context) error {
+						return j.executeGather(ctx, gather)
+					},
+				)
+			}
+		}
+	}()
+
+	// Register as idle gatherer
+	j.idleGatherers.PushBack(gatherWorkerNodePool, gathererCh)
+
 	select {
+	case gather := <-gathererCh:
+		j.workQueue.PushBack(workQueueNodePool,
+			func(ctx context.Context) error {
+				return j.executeGather(ctx, gather)
+			},
+		)
 	case gather := <-j.gatherChan:
 		j.workQueue.PushBack(workQueueNodePool,
 			func(ctx context.Context) error {

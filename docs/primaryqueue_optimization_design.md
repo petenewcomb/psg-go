@@ -335,8 +335,92 @@ Potential enhancements to explore:
 3. **Channel Pool**: Pre-allocate channels to reduce allocation overhead
 4. **Dynamic Sizing**: Adjust channel buffer size based on workload characteristics
 
+## Negative Results: Job.gatherChan Optimization
+
+Not all applications of the idle worker queue pattern proved beneficial. We attempted to apply the same optimization to `Job.gatherChan`, allowing gatherer goroutines to register as idle workers rather than competing for work from a shared channel.
+
+### Implementation Details
+
+The gatherChan optimization followed the same pattern:
+
+```go
+// Added to Job struct
+idleGatherers           nbcq.Queue[chan boundGatherFunc]
+gatherWorkerIdleTimeout atomic.Int64
+
+// Modified postGather to try idle gatherers first
+func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
+    // Try to find an idle gatherer for direct handoff
+    for {
+        gathererCh, ok := j.idleGatherers.PopFront(gatherWorkerNodePool)
+        if !ok {
+            break // No idle gatherers
+        }
+        
+        select {
+        case gathererCh <- gather:
+            return // Successfully handed off
+        default:
+            // Gatherer channel closed or full, try next
+        }
+    }
+    
+    // Fall back to shared channel
+    select {
+    case j.gatherChan <- gather:
+    case <-ctx.Done():
+    }
+}
+```
+
+### Benchmark Results
+
+Extensive benchmarking (10s duration × 10 runs) showed negative performance impact:
+
+**Benchmark Results (10s × 10 runs with benchstat):**
+- P50 gather latency: +12.08% WORSE (675.0ns → 756.6ns, p=0.000)
+- Throughput: +2.36% BETTER (3,535 → 3,619 tasks/sec, p=0.001)
+
+**Mixed performance impact:**
+- Gather latency degraded significantly with statistical significance
+- Throughput improved marginally with statistical significance
+- Overall impact negative due to latency being a critical metric
+
+### Root Cause Analysis
+
+The optimization failed because the benchmark scenario has fundamentally different characteristics than the CombinerPool:
+
+1. **Single Gatherer**: The benchmark likely uses only one gathering goroutine, eliminating the contention that the optimization was designed to solve
+
+2. **No Competition**: With a single gatherer, there's no shared channel contention to eliminate - the gatherer has exclusive access to `gatherChan`
+
+3. **Pure Overhead**: The lock-free queue operations become pure overhead when there's no contention benefit, adding CPU cost with no throughput gain
+
+4. **Cache Pollution**: Additional atomic operations and queue management degrade cache performance without providing value
+
+### Lessons Learned
+
+1. **Optimization Context Matters**: Performance optimizations are highly dependent on the specific usage patterns they target
+
+2. **Contention Prerequisites**: The idle worker queue pattern only helps when multiple workers actually compete for shared resources
+
+3. **Measure Everything**: Even theoretically sound optimizations can show negative results in practice
+
+4. **Document Negative Results**: Failed optimizations provide valuable insights for future work
+
+### When GatherChan Optimization Might Help
+
+The optimization could still be beneficial in scenarios with:
+- Multiple concurrent gatherer goroutines
+- High throughput workloads where gather processing becomes a bottleneck
+- Applications that explicitly spawn multiple gathering workers
+
+However, the current PSG architecture typically uses a single gatherer per job, making this optimization counterproductive in the common case.
+
 ## Conclusion
 
 The primaryQueue optimization successfully addresses channel contention at high concurrency levels by introducing a work-stealing pattern with dedicated channels. The trade-off of slightly higher CPU usage for significantly better throughput and latency is favorable for systems prioritizing responsiveness. The implementation maintains backward compatibility and gracefully degrades to the original behavior when the optimization cannot help.
 
-This design exemplifies a classic systems optimization: using CPU-intensive lock-free operations to eliminate blocking bottlenecks, resulting in better overall system performance despite higher per-operation cost.
+However, the attempted gatherChan optimization demonstrates that this pattern is not universally beneficial. Performance optimizations must match the specific contention patterns of their target workloads. The negative results from gatherChan optimization reinforce the importance of thorough benchmarking and highlight the context-dependent nature of performance engineering.
+
+This design exemplifies both the power and limitations of systems optimization: using CPU-intensive lock-free operations to eliminate blocking bottlenecks can result in better overall system performance, but only when the bottlenecks actually exist in the target scenario.

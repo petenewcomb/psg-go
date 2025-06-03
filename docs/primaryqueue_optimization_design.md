@@ -452,6 +452,8 @@ The pattern provides even more benefits with:
 
 Following the successful implementation of the idle worker queue pattern, we attempted to create a reusable abstraction called UBCQ (Unbounded Blocking Concurrent Queue) to replace the pattern-specific implementations. The UBCQ package provides a cleaner API with methods like `PushBack`, `PopFront`, and `PopFrontFunc` (which accepts a custom blocking function to avoid creating goroutines for context cancellation).
 
+The full implementation and analysis can be found in commit [226f766](https://github.com/petenewcomb/psg-go/commit/226f766b6e069a9055904ed22486a5b792978b10).
+
 ### UBCQ Integration Results
 
 We integrated UBCQ to replace `Job.gatherChan` and `Job.idleGatherers`. The implementation was straightforward:

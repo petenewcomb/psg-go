@@ -15,7 +15,7 @@ import (
 	"pgregory.net/rapid"
 )
 
-var p = &nbcq.NodePool[int]{}
+var p = &nbcq.Pool[int]{}
 
 // Add a basic functional test to verify operations directly
 func TestQueueBasicFunctionality(t *testing.T) {

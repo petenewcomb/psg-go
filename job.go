@@ -13,6 +13,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/psg-go/internal/ubcq"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
@@ -30,11 +31,11 @@ const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 // A Job must be created with [NewJob], see that function for caveats and
 // important details.
 type Job struct {
-	ctx        context.Context
-	cancelFunc context.CancelFunc
-	gatherChan chan boundGatherFunc
-	wg         sync.WaitGroup
-	state      state.JobState
+	ctx         context.Context
+	cancelFunc  context.CancelFunc
+	gatherQueue ubcq.Queue[boundGatherFunc]
+	wg          sync.WaitGroup
+	state       state.JobState
 
 	// workQueue must be thread-safe only to support multiple goroutines
 	// potentially calling the job's gather methods concurrently, including
@@ -52,9 +53,6 @@ type Job struct {
 
 	idleWorkers           nbcq.Queue[chan func(context.Context)]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
-
-	idleGatherers           nbcq.Queue[chan boundGatherFunc]
-	gatherWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
@@ -85,28 +83,19 @@ func NewJob(ctx context.Context) *Job {
 	ctx, cancelFunc := context.WithCancel(ctx)
 	j := &Job{
 		cancelFunc: cancelFunc,
-		gatherChan: make(chan boundGatherFunc),
 	}
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
-	j.workQueue.Init(workQueueNodePool)
-	j.idleWorkers.Init(taskWorkerNodePool)
+	j.workQueue.Init(workQueuePool)
+	j.idleWorkers.Init(taskWorkerPool)
 	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
-	j.idleGatherers.Init(gatherWorkerNodePool)
-	j.gatherWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
+	j.gatherQueue.Init(gatherQueuePool)
 	return j
 }
 
-var workQueueNodePool = &nbcq.NodePool[gatherWorkFunc]{}
-var taskWorkerNodePool = &nbcq.NodePool[chan func(context.Context)]{}
-var gatherWorkerNodePool = &nbcq.NodePool[chan boundGatherFunc]{}
-
-// Pool for reusing gatherer channels to avoid allocation overhead
-var gathererChannelPool = sync.Pool{
-	New: func() interface{} {
-		return make(chan boundGatherFunc, 1)
-	},
-}
+var workQueuePool = &nbcq.Pool[gatherWorkFunc]{}
+var taskWorkerPool = &nbcq.Pool[chan func(context.Context)]{}
+var gatherQueuePool = &ubcq.Pool[boundGatherFunc]{}
 
 type jobContextValueKeyType struct{}
 
@@ -265,7 +254,7 @@ func (j *Job) inGather(ctx context.Context) bool {
 
 func (j *Job) processOutstandingWork(ctx context.Context) error {
 	for {
-		work, ok := j.workQueue.PopFront(workQueueNodePool)
+		work, ok := j.workQueue.PopFront(workQueuePool)
 		if !ok {
 			return nil
 		}
@@ -305,93 +294,44 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 	return !jobDone, err
 }
 
-// postGather attempts to deliver a gather operation to an idle gatherer for
-// direct handoff, falling back to the shared gatherChan if no idle gatherers
-// are available.
+// postGather sends a gather operation to the gather queue.
 func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
-	// Try to find an idle gatherer for direct handoff
-	for {
-		gathererCh, ok := j.idleGatherers.PopFront(gatherWorkerNodePool)
-		if !ok {
-			break // No idle gatherers
-		}
-
-		select {
-		case gathererCh <- gather:
-			return // Successfully handed off
-		default:
-			// Gatherer channel full, meaning that the gatherer abandoned it.
-			// Drain and put back in the pool, then try the next.
-			nilGather := <-gathererCh
-			if nilGather != nil {
-				panic("gatherer channel was not empty, expected nil")
-			}
-			gathererChannelPool.Put(gathererCh)
-		}
-	}
-
-	// Fall back to shared channel
-	select {
-	case j.gatherChan <- gather:
-	case <-ctx.Done():
-	}
+	j.gatherQueue.PushBack(gatherQueuePool, gather)
 }
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
-	// Get pooled gatherer channel for idle worker queue optimization
-	gathererCh := gathererChannelPool.Get().(chan boundGatherFunc)
-
-	// Essential cleanup to mark channel as dead and return to pool
-	defer func() {
-		if gathererCh != nil {
-			select {
-			case gathererCh <- nil:
-				// Successfully marked channel as dead, but it's still in the
-				// queue so we can't put it back in the pool.
-			default:
-				// Channel full, drain and process any pending work
-				gather := <-gathererCh
-				j.workQueue.PushBack(workQueueNodePool,
-					func(ctx context.Context) error {
-						return j.executeGather(ctx, gather)
-					},
-				)
-				// postGather must have pulled it out of the queue and we just
-				// emptied it, so it's safe to return to the pool.
-				gathererChannelPool.Put(gathererCh)
-			}
+	var waiterNotified bool
+	gather, ok, err := j.gatherQueue.PopFrontFunc(gatherQueuePool, func(ch <-chan boundGatherFunc) (boundGatherFunc, bool, error) {
+		select {
+		case gather := <-ch:
+			return gather, true, nil
+		case <-waiter.Done():
+			waiterNotified = true
+			return nil, false, nil
+		case <-limitCh:
+			return nil, false, nil
+		case <-j.state.Done():
+			return nil, false, ErrJobDone
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
 		}
-	}()
+	})
 
-	// Register as idle gatherer
-	j.idleGatherers.PushBack(gatherWorkerNodePool, gathererCh)
-
-	select {
-	case gather := <-gathererCh:
-		// If we reach here, it means the gatherer channel was dequeued by
-		// postGather and is now empty and ready to be put back in the pool
-		gathererChannelPool.Put(gathererCh)
-		gathererCh = nil
-		j.workQueue.PushBack(workQueueNodePool,
-			func(ctx context.Context) error {
-				return j.executeGather(ctx, gather)
-			},
-		)
-	case gather := <-j.gatherChan:
-		j.workQueue.PushBack(workQueueNodePool,
-			func(ctx context.Context) error {
-				return j.executeGather(ctx, gather)
-			},
-		)
-	case <-waiter.Done():
-		return true, nil
-	case <-limitCh:
-	case <-j.state.Done():
-		return false, ErrJobDone
-	case <-ctx.Done():
-		return false, ctx.Err()
+	if err != nil {
+		return false, err
 	}
+
+	if !ok {
+		return waiterNotified, nil
+	}
+
+	// We got a gather operation, queue it for processing
+	j.workQueue.PushBack(workQueuePool,
+		func(ctx context.Context) error {
+			return j.executeGather(ctx, gather)
+		},
+	)
 	return false, nil
 }
 
@@ -424,20 +364,24 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 		}
 	}
 
-	select {
-	case gather := <-j.gatherChan:
-		j.workQueue.PushBack(workQueueNodePool,
+	gather, ok := j.gatherQueue.TryPopFront(gatherQueuePool)
+	if ok {
+		j.workQueue.PushBack(workQueuePool,
 			func(ctx context.Context) error {
 				return j.executeGather(ctx, gather)
 			},
 		)
-	case <-j.state.Done():
-		return false, nil
-	case <-ctx.Done():
-		return false, ctx.Err()
-	default:
-		// There were no in-flight tasks ready to gather.
-		return false, nil
+	} else {
+		// Check if job is done
+		select {
+		case <-j.state.Done():
+			return false, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		default:
+			// There were no in-flight tasks ready to gather.
+			return false, nil
+		}
 	}
 
 	var err error
@@ -503,7 +447,7 @@ func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context)
 func (j *Job) startTask(taskFn func(context.Context)) {
 	// Try to hand off to an idle worker
 	for {
-		workerCh, ok := j.idleWorkers.PopFront(taskWorkerNodePool)
+		workerCh, ok := j.idleWorkers.PopFront(taskWorkerPool)
 		if !ok {
 			break // No idle workers available
 		}
@@ -557,7 +501,7 @@ func (j *Job) spawnTaskWorker(initialTask func(context.Context)) {
 
 			// Register as idle and wait for next task with timeout
 			if !workerChInQueue {
-				j.idleWorkers.PushBack(taskWorkerNodePool, workerCh)
+				j.idleWorkers.PushBack(taskWorkerPool, workerCh)
 				workerChInQueue = true
 			}
 

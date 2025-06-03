@@ -448,10 +448,46 @@ The pattern provides even more benefits with:
 - High throughput workloads where every nanosecond counts
 - Systems where latency reduction is more important than throughput
 
+## UBCQ Abstraction Attempt
+
+Following the successful implementation of the idle worker queue pattern, we attempted to create a reusable abstraction called UBCQ (Unbounded Blocking Concurrent Queue) to replace the pattern-specific implementations. The UBCQ package provides a cleaner API with methods like `PushBack`, `PopFront`, and `PopFrontFunc` (which accepts a custom blocking function to avoid creating goroutines for context cancellation).
+
+### UBCQ Integration Results
+
+We integrated UBCQ to replace `Job.gatherChan` and `Job.idleGatherers`. The implementation was straightforward:
+- Replaced the channel and idle queue with a single `ubcq.Queue[boundGatherFunc]`
+- Simplified `postGather` to just call `gatherQueue.PushBack()`
+- Used `PopFrontFunc` in `gatherOne` to handle multiple cancellation conditions
+
+However, benchmark results (20s × 20 runs) showed significant regressions:
+
+**Performance Impact:**
+- **Throughput**: -18.51% (3,779 → 3,079 tasks/sec)
+- **Operation time**: +23.78% (524.6µs → 649.3µs)
+- **p50 gather latency**: no significant change (718.5ns → 728.7ns)
+- **p99 gather latency**: +2.78% (1.725µs → 1.773µs)
+- **Memory per task**: +3.0% (949 → 979 bytes/task)
+- **Allocations per task**: +15.3% (25.2 → 29.0 allocs/task)
+
+### Analysis
+
+The UBCQ abstraction introduces overhead through:
+1. **Additional indirection**: The generic queue interface adds method calls and interface conversions
+2. **Memory allocations**: The abstraction requires additional allocations for queue management
+3. **Loss of optimization opportunities**: The hand-tuned implementation could make assumptions that the generic abstraction cannot
+
+This demonstrates an important trade-off in systems programming: abstractions that improve code maintainability and reusability can come at a significant performance cost. For high-performance critical paths like gather operations, the hand-optimized implementation remains superior.
+
 ## Conclusion
 
 The primaryQueue optimization successfully addresses channel contention at high concurrency levels by introducing a work-stealing pattern with dedicated channels. The trade-off of slightly higher CPU usage for significantly better throughput and latency is favorable for systems prioritizing responsiveness. The implementation maintains backward compatibility and gracefully degrades to the original behavior when the optimization cannot help.
 
-However, the attempted gatherChan optimization demonstrates that this pattern is not universally beneficial. Performance optimizations must match the specific contention patterns of their target workloads. The negative results from gatherChan optimization reinforce the importance of thorough benchmarking and highlight the context-dependent nature of performance engineering.
+The evolution of the gatherChan optimization from initial negative results to eventual success (after proper channel pooling) demonstrates the importance of implementation details. Even well-designed patterns can fail without careful attention to allocation overhead and race conditions.
 
-This design exemplifies both the power and limitations of systems optimization: using CPU-intensive lock-free operations to eliminate blocking bottlenecks can result in better overall system performance, but only when the bottlenecks actually exist in the target scenario.
+The UBCQ abstraction attempt further illustrates that while generic, reusable components are valuable for code maintainability, they may not be suitable for performance-critical paths. The ~18% throughput reduction when using UBCQ validates the decision to maintain hand-optimized implementations for core PSG operations.
+
+This design journey exemplifies both the power and limitations of systems optimization:
+- Lock-free operations can eliminate blocking bottlenecks, but only when those bottlenecks actually exist
+- Implementation details matter as much as algorithmic design
+- Generic abstractions, while cleaner, may sacrifice too much performance for critical paths
+- Thorough benchmarking with realistic parameters is essential for making informed decisions

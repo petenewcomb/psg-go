@@ -34,7 +34,7 @@ type Queue[T any] struct {
 }
 
 // initialize(Q: pointer to queue_t)
-func (q *Queue[T]) Init(p *NodePool[T]) {
+func (q *Queue[T]) Init(p *Pool[T]) {
 	// node = new_node()      // Allocate a free node
 	// node->next.ptr = NULL  // Make it the only node in the linked list
 	node := p.get()
@@ -45,7 +45,7 @@ func (q *Queue[T]) Init(p *NodePool[T]) {
 }
 
 // enqueue(Q: pointer to queue_t, value: data type)
-func (q *Queue[T]) PushBack(p *NodePool[T], value T) {
+func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 	// E1: node = new_node()      // Allocate a new node from the free list
 	// E2: node->value = value	  // Copy enqueued value into node
 	// E3: node->next.ptr = NULL  // Set next pointer of node to NULL
@@ -88,7 +88,7 @@ func (q *Queue[T]) PushBack(p *NodePool[T], value T) {
 }
 
 // dequeue(Q: pointer to queue_t, pvalue: pointer to data type): boolean
-func (q *Queue[T]) PopFront(p *NodePool[T]) (T, bool) {
+func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 	// D1: loop // Keep trying until Dequeue is done
 	for {
 		// D2: head = Q->Head         // Read Head
@@ -156,11 +156,11 @@ func (q *Queue[T]) PopFront(p *NodePool[T]) (T, bool) {
 	} // D18: endloop
 }
 
-type NodePool[T any] struct {
+type Pool[T any] struct {
 	inner sync.Pool
 }
 
-func (p *NodePool[T]) get() *node[T] {
+func (p *Pool[T]) get() *node[T] {
 	n, _ := p.inner.Get().(*node[T])
 	if n == nil {
 		n = &node[T]{}
@@ -172,7 +172,7 @@ func (p *NodePool[T]) get() *node[T] {
 	return n
 }
 
-func (p *NodePool[T]) put(n *node[T]) {
+func (p *Pool[T]) put(n *node[T]) {
 	p.inner.Put(n)
 }
 

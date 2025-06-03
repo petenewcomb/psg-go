@@ -43,4 +43,4 @@ func (q *Queue) Notify() {
 	}
 }
 
-var p = &nbcq.NodePool[Waiter]{}
+var p = &nbcq.Pool[Waiter]{}

@@ -3,8 +3,8 @@
 set -e
 set -x
 
-go generate
-go vet
+go generate ./...
+go vet ./...
 gofmt -s -w .
 golangci-lint run
 go test -short ./...

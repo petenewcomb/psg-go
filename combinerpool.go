@@ -80,7 +80,7 @@ func NewCombinerPool(job *Job) *CombinerPool {
 	cp.state.SetHistoryRetentionPeriod(DefaultCombinerPoolHistoryRetentionPeriod)
 	cp.state.SetMinimumReturn(DefaultCombinerPoolMinimumReturn)
 	cp.state.SetGrowthFactors(DefaultCombinerPoolAggressiveGrowthFactor, DefaultCombinerPoolConservativeGrowthFactor)
-	cp.primaryQueue.Init(primaryQueueNodePool)
+	cp.primaryQueue.Init(primaryQueuePool)
 	cp.combineWaiters.Init()
 	return cp
 }
@@ -205,12 +205,12 @@ func (cp *CombinerPool) SetGrowthFactors(aggressive, conservative float64) {
 	cp.state.SetGrowthFactors(aggressive, conservative)
 }
 
-var primaryQueueNodePool = &nbcq.NodePool[chan<- boundCombineFunc]{}
+var primaryQueuePool = &nbcq.Pool[chan<- boundCombineFunc]{}
 
 func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
 
 	for {
-		primaryQueueCh, _ := cp.primaryQueue.PopFront(primaryQueueNodePool)
+		primaryQueueCh, _ := cp.primaryQueue.PopFront(primaryQueuePool)
 		if primaryQueueCh == nil {
 			break
 		}
@@ -553,7 +553,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				}
 			} else {
 				if !primaryQueueChInQueue {
-					cp.primaryQueue.PushBack(primaryQueueNodePool, primaryQueueCh)
+					cp.primaryQueue.PushBack(primaryQueuePool, primaryQueueCh)
 					primaryQueueChInQueue = true
 				}
 			}
@@ -630,11 +630,8 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, j *Job, c *C
 			// until the gather happens.
 			j.state.IncrementTasks()
 
-			// Post the bound gather to the job's gather channel.
-			select {
-			case j.gatherChan <- gather:
-			case <-ctx.Done():
-			}
+			// Post the bound gather to the job's gather queue.
+			j.postGather(ctx, gather)
 		}
 
 		combiner := func() Combiner[I, O] {

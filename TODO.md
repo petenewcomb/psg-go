@@ -88,6 +88,21 @@
 - [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
 - [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
+### 4.1. Idle Worker Queue Pattern Optimizations
+- [x] Implement idle worker queue pattern for CombinerPool to reduce channel contention
+- [x] Achieve 26% throughput improvement and 18-24% latency reduction for CombinerPool
+- [x] Implement idle worker queue pattern for Job.taskChan, eliminating shared channel entirely
+- [x] Achieve 16% throughput improvement and 14% latency reduction for Job.taskChan
+- [x] Investigate applying pattern to Job.gatherChan (initially showed -12% regression)
+- [x] Fix Job.gatherChan implementation with proper channel pooling (achieved 5-6% latency improvement)
+- [x] Document idle worker queue pattern in design doc with performance analysis
+- [x] Create internal ubcq package (unbounded blocking concurrent queue) as cleaner abstraction
+- [x] Add comprehensive correctness tests for ubcq including rapid property testing
+- [x] Integrate ubcq into Job.gatherChan to replace current implementation
+- [x] Benchmark ubcq integration and compare with current gatherChan performance
+- [x] Decision: ubcq abstraction adds ~18% throughput overhead, not suitable for critical paths
+- [ ] Consider applying ubcq pattern to non-critical blocking queue scenarios where cleaner API outweighs performance cost
+
 ### 5. API finalization
 - [x] Improve JobState interface with RegisterFlusher pattern
 - [x] Consider what happens if the same Combine is used to scatter tasks across pools from multiple different jobs, as is possible with Gather (resolved by binding CombinerPool to Job)

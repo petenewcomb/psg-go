@@ -1,0 +1,175 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+// Package rdvq provides a high-performance rendezvous queue.
+// It provides functionality similar to a buffered channel, but unbounded and
+// with optimized direct handoff between producers and consumers.
+package rdvq
+
+import (
+	"context"
+	"sync"
+
+	"github.com/petenewcomb/psg-go/internal/nbcq"
+)
+
+type Queue[T any] struct {
+	sharedChan       chan T
+	waitingReceivers nbcq.Queue[chan T]
+}
+
+// Init initializes the queue. Must be called before first use.
+func (q *Queue[T]) Init(p *Pool[T]) {
+	q.sharedChan = make(chan T)
+	q.waitingReceivers.Init(&p.receiverPool)
+}
+
+// PushFunc is called when PushBackFunc needs to send to the shared channel.
+// It receives the shared channel and should implement custom blocking logic
+// (e.g., selecting on context cancellation).
+type PushFunc[T any] func(ch chan<- T, value T)
+
+// PushBackFunc sends a value to a waiting receiver using custom shared logic.
+// If no waiting receiver is available, it calls pushFn with the shared channel.
+// This allows the caller to implement complex blocking patterns (e.g., context
+// cancellation) without creating additional goroutines.
+// Returns whether the value was sent.
+func (q *Queue[T]) PushBackFunc(ctx context.Context, p *Pool[T], value T, pushFn PushFunc[T]) {
+	// First, try to find a waiting receiver for direct handoff
+	for {
+		receiverCh, ok := q.waitingReceivers.PopFront(&p.receiverPool)
+		if !ok {
+			// No waiting receivers
+			break
+		}
+
+		// Try to send to this receiver
+		select {
+		case receiverCh <- value:
+			// Successfully delivered
+			return
+		default:
+			// receiverCh is full, which means that the receiver abandoned it.
+			// Drain and put back in the pool, then loop and try getting
+			// another.
+			<-receiverCh
+			p.putChan(receiverCh)
+		}
+	}
+
+	// No waiting receivers, use custom push function
+	pushFn(q.sharedChan, value)
+}
+
+// PushBack sends a value to a waiting receiver, or queues the value for a
+// receiver to pick up later. This blocks until the value is sent or the context is cancelled.
+func (q *Queue[T]) PushBack(ctx context.Context, p *Pool[T], value T) {
+	q.PushBackFunc(ctx, p, value, func(ch chan<- T, value T) {
+		select {
+		case ch <- value:
+		case <-ctx.Done():
+		}
+	})
+}
+
+// BlockFunc is called when PopFrontFunc needs to block waiting for a value. It
+// receives two channel on which a value might arrive and should implement
+// custom blocking logic (e.g., selecting on those channels and potentially
+// more). It returns the received value and which channel it came from, else the
+// zero value and nil.
+type BlockFunc[T any] func(dedicatedCh, sharedCh <-chan T) (value T, ch <-chan T)
+
+// ProcessFunc is called with each value dequeued from the queue.
+type ProcessFunc[T any] func(ctx context.Context, value T)
+
+// PopFrontFunc receives values from the queue using custom blocking logic.
+// It calls processFn with each value dequeued (including any drained values
+// from cleanup). If blockFn returns false, PopFrontFunc returns without calling processFn.
+func (q *Queue[T]) PopFrontFunc(ctx context.Context, p *Pool[T], blockFn BlockFunc[T], processFn ProcessFunc[T]) {
+
+	// Prepare to register ourselves as a waiting receiver
+	receiverCh := p.getChan()
+
+	// Essential cleanup to mark channel as dead and return to pool
+	defer func() {
+		if receiverCh != nil {
+			select {
+			case receiverCh <- *new(T):
+				// Successfully marked channel as abandoned, but it's still in
+				// the queue so we can't put it back in the pool.
+			default:
+				// Channel is full, drain the pending work and requeue to be
+				// picked up by the next pop operation.
+				drainedValue := <-receiverCh
+				processFn(ctx, drainedValue)
+				// PushBack must have pulled it out of the queue and we just
+				// emptied it, so it's safe to return to the pool.
+				p.putChan(receiverCh)
+			}
+		}
+	}()
+
+	// Register ourselves as a waiting receiver.
+	q.waitingReceivers.PushBack(&p.receiverPool, receiverCh)
+
+	// Call the custom blocking function
+	value, which := blockFn(receiverCh, q.sharedChan)
+	if which == receiverCh {
+		// PushBack must have pulled it out of the queue and we just
+		// emptied it, so it's safe to return to the pool.
+		p.putChan(receiverCh)
+		// Make sure that the deferred cleanup function knows there's nothing
+		// left to do.
+		receiverCh = nil
+	}
+	if which != nil {
+		processFn(ctx, value)
+	}
+}
+
+// PopFront receives a value from the sent value queue or waits for one to
+// arrive. It blocks until a value is available or the context is cancelled.
+// This is analogous to receiving from a buffered channel.
+func (q *Queue[T]) PopFront(ctx context.Context, p *Pool[T], processFn ProcessFunc[T]) {
+	q.PopFrontFunc(ctx, p, func(dedicatedCh, sharedCh <-chan T) (T, <-chan T) {
+		select {
+		case value := <-dedicatedCh:
+			return value, dedicatedCh
+		case value := <-sharedCh:
+			return value, sharedCh
+		case <-ctx.Done():
+			return *new(T), nil
+		}
+	}, processFn)
+}
+
+// TryPopFront attempts to receive a value without blocking. Calls processFn
+// with the value if one was immediately available, otherwise returns false.
+// Note: processFn may be called up to twice if cleanup drains an abandoned value.
+// This is analogous to a non-blocking channel receive.
+func (q *Queue[T]) TryPopFront(ctx context.Context, p *Pool[T], processFn ProcessFunc[T]) bool {
+	select {
+	case value := <-q.sharedChan:
+		processFn(ctx, value)
+		return true
+	default:
+		return false
+	}
+}
+
+type Pool[T any] struct {
+	receiverPool nbcq.Pool[chan T]
+	chanPool     sync.Pool
+}
+
+func (p *Pool[T]) getChan() chan T {
+	ch, _ := p.chanPool.Get().(chan T)
+	if ch == nil {
+		ch = make(chan T, 1)
+	}
+	return ch
+}
+
+func (p *Pool[T]) putChan(ch chan T) {
+	p.chanPool.Put(ch)
+}

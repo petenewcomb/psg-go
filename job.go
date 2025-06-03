@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/petenewcomb/psg-go/internal/timerp"
-	"github.com/petenewcomb/psg-go/internal/ubcq"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
@@ -33,7 +33,7 @@ const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 type Job struct {
 	ctx         context.Context
 	cancelFunc  context.CancelFunc
-	gatherQueue ubcq.Queue[boundGatherFunc]
+	gatherQueue rdvq.Queue[boundGatherFunc]
 	wg          sync.WaitGroup
 	state       state.JobState
 
@@ -95,7 +95,7 @@ func NewJob(ctx context.Context) *Job {
 
 var workQueuePool = &nbcq.Pool[gatherWorkFunc]{}
 var taskWorkerPool = &nbcq.Pool[chan func(context.Context)]{}
-var gatherQueuePool = &ubcq.Pool[boundGatherFunc]{}
+var gatherQueuePool = &rdvq.Pool[boundGatherFunc]{}
 
 type jobContextValueKeyType struct{}
 
@@ -296,43 +296,42 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 
 // postGather sends a gather operation to the gather queue.
 func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
-	j.gatherQueue.PushBack(gatherQueuePool, gather)
+	j.gatherQueue.PushBack(ctx, gatherQueuePool, gather)
 }
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	var waiterNotified bool
-	gather, ok, err := j.gatherQueue.PopFrontFunc(gatherQueuePool, func(ch <-chan boundGatherFunc) (boundGatherFunc, bool, error) {
+	var err error
+
+	j.gatherQueue.PopFrontFunc(ctx, gatherQueuePool, func(dedicatedCh, fallbackCh <-chan boundGatherFunc) (boundGatherFunc, <-chan boundGatherFunc) {
 		select {
-		case gather := <-ch:
-			return gather, true, nil
+		case gather := <-dedicatedCh:
+			return gather, dedicatedCh
+		case gather := <-fallbackCh:
+			return gather, fallbackCh
 		case <-waiter.Done():
 			waiterNotified = true
-			return nil, false, nil
+			return nil, nil
 		case <-limitCh:
-			return nil, false, nil
+			return nil, nil
 		case <-j.state.Done():
-			return nil, false, ErrJobDone
+			err = ErrJobDone
+			return nil, nil
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			err = ctx.Err()
+			return nil, nil
 		}
+	}, func(ctx context.Context, gather boundGatherFunc) {
+		// We got a gather operation, queue it for processing
+		j.workQueue.PushBack(workQueuePool,
+			func(ctx context.Context) error {
+				return j.executeGather(ctx, gather)
+			},
+		)
 	})
 
-	if err != nil {
-		return false, err
-	}
-
-	if !ok {
-		return waiterNotified, nil
-	}
-
-	// We got a gather operation, queue it for processing
-	j.workQueue.PushBack(workQueuePool,
-		func(ctx context.Context) error {
-			return j.executeGather(ctx, gather)
-		},
-	)
-	return false, nil
+	return waiterNotified, err
 }
 
 // TryGatherOne processes at most a single result from a task previously
@@ -364,25 +363,15 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 		}
 	}
 
-	gather, ok := j.gatherQueue.TryPopFront(gatherQueuePool)
-	if ok {
-		j.workQueue.PushBack(workQueuePool,
-			func(ctx context.Context) error {
-				return j.executeGather(ctx, gather)
-			},
-		)
-	} else {
-		// Check if job is done
-		select {
-		case <-j.state.Done():
-			return false, nil
-		case <-ctx.Done():
-			return false, ctx.Err()
-		default:
-			// There were no in-flight tasks ready to gather.
-			return false, nil
-		}
-	}
+	j.gatherQueue.TryPopFront(ctx, gatherQueuePool,
+		func(ctx context.Context, gather boundGatherFunc) {
+			j.workQueue.PushBack(workQueuePool,
+				func(ctx context.Context) error {
+					return j.executeGather(ctx, gather)
+				},
+			)
+		},
+	)
 
 	var err error
 	if !inGatherAlready {

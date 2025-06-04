@@ -142,6 +142,7 @@
 - [ ] Ensure zero-value safety for CombinerPool (panic or validation)
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Update NewCombinerPool documentation to clarify Job binding
+- [ ] Make sure we're always selecting on the minimum number of channels at a time 
 
 ### 6. Context propagation improvements
 - [x] Decide on context approach: keep gather/combiner functions receiving caller's context, not task's context

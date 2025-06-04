@@ -14,12 +14,14 @@ import (
 )
 
 type Queue[T any] struct {
+	nextValues       nbcq.Queue[T]
 	sharedChan       chan T
 	waitingReceivers nbcq.Queue[chan T]
 }
 
 // Init initializes the queue. Must be called before first use.
 func (q *Queue[T]) Init(p *Pool[T]) {
+	q.nextValues.Init(&p.valuePool)
 	q.sharedChan = make(chan T)
 	q.waitingReceivers.Init(&p.receiverPool)
 }
@@ -34,7 +36,7 @@ type PushFunc[T any] func(ch chan<- T, value T)
 // This allows the caller to implement complex blocking patterns (e.g., context
 // cancellation) without creating additional goroutines.
 // Returns whether the value was sent.
-func (q *Queue[T]) PushBackFunc(ctx context.Context, p *Pool[T], value T, pushFn PushFunc[T]) {
+func (q *Queue[T]) PushBackFunc(p *Pool[T], value T, pushFn PushFunc[T]) {
 	// First, try to find a waiting receiver for direct handoff
 	for {
 		receiverCh, ok := q.waitingReceivers.PopFront(&p.receiverPool)
@@ -63,13 +65,16 @@ func (q *Queue[T]) PushBackFunc(ctx context.Context, p *Pool[T], value T, pushFn
 
 // PushBack sends a value to a waiting receiver, or queues the value for a
 // receiver to pick up later. This blocks until the value is sent or the context is cancelled.
-func (q *Queue[T]) PushBack(ctx context.Context, p *Pool[T], value T) {
-	q.PushBackFunc(ctx, p, value, func(ch chan<- T, value T) {
+func (q *Queue[T]) PushBack(ctx context.Context, p *Pool[T], value T) error {
+	var err error
+	q.PushBackFunc(p, value, func(ch chan<- T, value T) {
 		select {
 		case ch <- value:
 		case <-ctx.Done():
+			err = ctx.Err()
 		}
 	})
+	return err
 }
 
 // BlockFunc is called when PopFrontFunc needs to block waiting for a value. It
@@ -77,15 +82,26 @@ func (q *Queue[T]) PushBack(ctx context.Context, p *Pool[T], value T) {
 // custom blocking logic (e.g., selecting on those channels and potentially
 // more). It returns the received value and which channel it came from, else the
 // zero value and nil.
-type BlockFunc[T any] func(dedicatedCh, sharedCh <-chan T) (value T, ch <-chan T)
+type BlockFunc[T any] func(dedicatedCh, sharedCh <-chan T) BlockResult[T]
 
-// ProcessFunc is called with each value dequeued from the queue.
-type ProcessFunc[T any] func(ctx context.Context, value T)
+type BlockResult[T any] struct {
+	Value         T
+	OK            bool
+	SourceChannel <-chan T
+}
+
+func NewBlockResult[T any](value T, ok bool, sourceCh <-chan T) BlockResult[T] {
+	return BlockResult[T]{Value: value, OK: ok, SourceChannel: sourceCh}
+}
 
 // PopFrontFunc receives values from the queue using custom blocking logic.
 // It calls processFn with each value dequeued (including any drained values
 // from cleanup). If blockFn returns false, PopFrontFunc returns without calling processFn.
-func (q *Queue[T]) PopFrontFunc(ctx context.Context, p *Pool[T], blockFn BlockFunc[T], processFn ProcessFunc[T]) {
+func (q *Queue[T]) PopFrontFunc(p *Pool[T], blockFn BlockFunc[T]) (value T, ok bool) {
+
+	if value, ok = q.nextValues.PopFront(&p.valuePool); ok {
+		return
+	}
 
 	// Prepare to register ourselves as a waiting receiver
 	receiverCh := p.getChan()
@@ -101,7 +117,12 @@ func (q *Queue[T]) PopFrontFunc(ctx context.Context, p *Pool[T], blockFn BlockFu
 				// Channel is full, drain the pending work and requeue to be
 				// picked up by the next pop operation.
 				drainedValue := <-receiverCh
-				processFn(ctx, drainedValue)
+				if ok {
+					q.nextValues.PushBack(&p.valuePool, drainedValue)
+				} else {
+					value = drainedValue
+					ok = true
+				}
 				// PushBack must have pulled it out of the queue and we just
 				// emptied it, so it's safe to return to the pool.
 				p.putChan(receiverCh)
@@ -113,8 +134,8 @@ func (q *Queue[T]) PopFrontFunc(ctx context.Context, p *Pool[T], blockFn BlockFu
 	q.waitingReceivers.PushBack(&p.receiverPool, receiverCh)
 
 	// Call the custom blocking function
-	value, which := blockFn(receiverCh, q.sharedChan)
-	if which == receiverCh {
+	result := blockFn(receiverCh, q.sharedChan)
+	if result.SourceChannel == receiverCh {
 		// PushBack must have pulled it out of the queue and we just
 		// emptied it, so it's safe to return to the pool.
 		p.putChan(receiverCh)
@@ -122,42 +143,46 @@ func (q *Queue[T]) PopFrontFunc(ctx context.Context, p *Pool[T], blockFn BlockFu
 		// left to do.
 		receiverCh = nil
 	}
-	if which != nil {
-		processFn(ctx, value)
-	}
+	return result.Value, result.OK
 }
 
 // PopFront receives a value from the sent value queue or waits for one to
 // arrive. It blocks until a value is available or the context is cancelled.
 // This is analogous to receiving from a buffered channel.
-func (q *Queue[T]) PopFront(ctx context.Context, p *Pool[T], processFn ProcessFunc[T]) {
-	q.PopFrontFunc(ctx, p, func(dedicatedCh, sharedCh <-chan T) (T, <-chan T) {
+func (q *Queue[T]) PopFront(ctx context.Context, p *Pool[T]) (T, error) {
+	var err error
+	value, _ := q.PopFrontFunc(p, func(dedicatedCh, sharedCh <-chan T) BlockResult[T] {
 		select {
 		case value := <-dedicatedCh:
-			return value, dedicatedCh
+			return NewBlockResult(value, true, dedicatedCh)
 		case value := <-sharedCh:
-			return value, sharedCh
+			return NewBlockResult(value, true, sharedCh)
 		case <-ctx.Done():
-			return *new(T), nil
+			err = ctx.Err()
 		}
-	}, processFn)
+		return NewBlockResult(*new(T), false, nil)
+	})
+	return value, err
 }
 
 // TryPopFront attempts to receive a value without blocking. Calls processFn
 // with the value if one was immediately available, otherwise returns false.
 // Note: processFn may be called up to twice if cleanup drains an abandoned value.
 // This is analogous to a non-blocking channel receive.
-func (q *Queue[T]) TryPopFront(ctx context.Context, p *Pool[T], processFn ProcessFunc[T]) bool {
+func (q *Queue[T]) TryPopFront(p *Pool[T]) (T, bool) {
+	if value, ok := q.nextValues.PopFront(&p.valuePool); ok {
+		return value, true
+	}
 	select {
 	case value := <-q.sharedChan:
-		processFn(ctx, value)
-		return true
+		return value, true
 	default:
-		return false
+		return *new(T), false
 	}
 }
 
 type Pool[T any] struct {
+	valuePool    nbcq.Pool[T]
 	receiverPool nbcq.Pool[chan T]
 	chanPool     sync.Pool
 }

@@ -15,17 +15,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var intPool = &rdvq.Pool[int]{}
+var p = &rdvq.Pool[int]{}
 
 func TestQueue_BasicFunctionality(t *testing.T) {
 	var q rdvq.Queue[int]
-	q.Init(intPool)
+	q.Init(p)
 	ctx := context.Background()
 
 	// Test TryPopFront on empty queue
-	ok := q.TryPopFront(ctx, intPool, func(ctx context.Context, value int) {
-		t.Error("Should not receive value from empty queue")
-	})
+	_, ok := q.TryPopFront(p)
 	require.False(t, ok)
 
 	// Test rendezvous pattern - producer blocks until consumer receives
@@ -37,35 +35,29 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 1; i <= 3; i++ {
-			q.PushBack(ctx, intPool, i)
+			_ = q.PushBack(ctx, p, i)
 			values <- i
 		}
 		close(values)
 	}()
 
-	// Consume first value with TryPopFront
-	var val int
 	// Give producer a moment to start
 	time.Sleep(10 * time.Millisecond)
-	ok = q.TryPopFront(ctx, intPool, func(ctx context.Context, value int) {
-		val = value
-	})
+
+	// Consume first value with TryPopFront
+	val, ok := q.TryPopFront(p)
 	require.True(t, ok)
 	require.Equal(t, 1, val)
 	require.Equal(t, 1, <-values)
 
 	// Consume second value with PopFront
-	var received int
-	q.PopFront(ctx, intPool, func(ctx context.Context, value int) {
-		received = value
-	})
-	require.Equal(t, 2, received)
+	val, err := q.PopFront(ctx, p)
+	require.NoError(t, err)
+	require.Equal(t, 2, val)
 	require.Equal(t, 2, <-values)
 
 	// Consume third value with TryPopFront
-	ok = q.TryPopFront(ctx, intPool, func(ctx context.Context, value int) {
-		val = value
-	})
+	val, ok = q.TryPopFront(p)
 	require.True(t, ok)
 	require.Equal(t, 3, val)
 	require.Equal(t, 3, <-values)
@@ -73,15 +65,13 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 	wg.Wait()
 
 	// Queue should be empty now
-	ok = q.TryPopFront(ctx, intPool, func(ctx context.Context, value int) {
-		t.Error("Should not receive value from empty queue")
-	})
+	_, ok = q.TryPopFront(p)
 	require.False(t, ok)
 }
 
 func TestQueue_ContextCancellation(t *testing.T) {
 	var q rdvq.Queue[int]
-	q.Init(intPool)
+	q.Init(p)
 
 	// Test receiver cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,9 +79,8 @@ func TestQueue_ContextCancellation(t *testing.T) {
 	// Start a receiver that will block
 	done := make(chan struct{})
 	go func() {
-		q.PopFront(ctx, intPool, func(ctx context.Context, value int) {
-			t.Error("Should not receive value when cancelled")
-		})
+		_, err := q.PopFront(ctx, p)
+		require.Error(t, err, "Should not receive value when cancelled")
 		close(done)
 	}()
 
@@ -111,15 +100,15 @@ func TestQueue_ContextCancellation(t *testing.T) {
 
 func TestQueue_ReceiverThenSender(t *testing.T) {
 	var q rdvq.Queue[int]
-	q.Init(intPool)
+	q.Init(p)
 	ctx := context.Background()
 
 	// Start receiver first
 	received := make(chan int)
 	go func() {
-		q.PopFront(ctx, intPool, func(ctx context.Context, value int) {
+		if value, err := q.PopFront(ctx, p); err == nil {
 			received <- value
-		})
+		}
 	}()
 
 	// Give receiver time to register
@@ -130,7 +119,7 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		q.PushBack(ctx, intPool, 42)
+		_ = q.PushBack(ctx, p, 42)
 	}()
 	defer wg.Wait()
 
@@ -145,15 +134,15 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 
 func TestQueue_AbandonedReceivers(t *testing.T) {
 	var q rdvq.Queue[int]
-	q.Init(intPool)
+	q.Init(p)
 
 	// Create multiple receivers that abandon their channels
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
-			q.PopFront(ctx, intPool, func(ctx context.Context, value int) {
-				// This will block and then abandon
-			})
+			// This will block and then abandon
+			_, err := q.PopFront(ctx, p)
+			require.Error(t, err)
 		}()
 		time.Sleep(5 * time.Millisecond)
 		cancel()
@@ -162,27 +151,25 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 	// Give time for all receivers to register and abandon
 	time.Sleep(50 * time.Millisecond)
 
-	// Send a value - it should go to fallbackChan since all receivers are abandoned
+	// Send a value - it should go to sharedChan since all receivers are abandoned
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		q.PushBack(ctx, intPool, 99)
+		_ = q.PushBack(ctx, p, 99)
 	}()
 
 	// New receiver should get the value
-	var received int
-	q.PopFront(ctx, intPool, func(ctx context.Context, value int) {
-		received = value
-	})
-	wg.Wait()
+	received, err := q.PopFront(ctx, p)
+	require.NoError(t, err)
 	require.Equal(t, 99, received)
+	wg.Wait()
 }
 
 func TestQueueConcurrency(t *testing.T) {
 	var q rdvq.Queue[int]
-	q.Init(intPool)
+	q.Init(p)
 	ctx := context.Background()
 
 	numReaders := max(1, runtime.NumCPU()/2)
@@ -216,13 +203,12 @@ func TestQueueConcurrency(t *testing.T) {
 			<-startCh
 
 			for {
-				q.PopFront(readerCtx, intPool, func(ctx context.Context, val int) {
-					receivedValueMap[val].Add(1)
-					totalPopped.Add(1)
-				})
-				if readerCtx.Err() != nil {
+				val, err := q.PopFront(readerCtx, p)
+				if err != nil {
 					return // Context cancelled
 				}
+				receivedValueMap[val].Add(1)
+				totalPopped.Add(1)
 				if totalPopped.Load() >= int64(numWriters*iterations) {
 					return
 				}
@@ -239,8 +225,9 @@ func TestQueueConcurrency(t *testing.T) {
 			rangeStart := writerID * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
-				q.PushBack(ctx, intPool, v)
-				totalPushed.Add(1)
+				if err := q.PushBack(ctx, p, v); err != nil {
+					totalPushed.Add(1)
+				}
 			}
 		}(id)
 	}
@@ -273,9 +260,7 @@ func TestQueueConcurrency(t *testing.T) {
 	}
 
 	// Queue should be empty
-	ok := q.TryPopFront(ctx, intPool, func(ctx context.Context, value int) {
-		t.Error("Queue should be empty after all values consumed")
-	})
+	_, ok := q.TryPopFront(p)
 	require.False(t, ok, "Queue should be empty after all values consumed")
 }
 
@@ -285,7 +270,7 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	}
 
 	var q rdvq.Queue[int]
-	q.Init(intPool)
+	q.Init(p)
 
 	const (
 		numGoroutines = 100
@@ -311,22 +296,21 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 			for ctx.Err() == nil {
 				switch id % 3 {
 				case 0: // Pusher
-					q.PushBack(ctx, intPool, int(pushed.Add(1)))
+					_ = q.PushBack(ctx, p, int(pushed.Add(1)))
 
 				case 1: // Normal popper
-					q.PopFront(ctx, intPool, func(ctx context.Context, value int) {
+					if _, err := q.PopFront(ctx, p); err != nil {
 						popped.Add(1)
-					})
+					}
 
 				case 2: // Abandoning popper
 					shortCtx, shortCancel := context.WithTimeout(ctx, time.Microsecond)
-					q.PopFront(shortCtx, intPool, func(ctx context.Context, value int) {
+					if _, err := q.PopFront(shortCtx, p); err != nil {
 						popped.Add(1)
-					})
-					shortCancel()
-					if shortCtx.Err() != nil {
+					} else {
 						abandoned.Add(1)
 					}
+					shortCancel()
 				}
 
 				// Small delay to make the test more realistic
@@ -345,10 +329,7 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	// Drain any remaining values
 	var remaining int64
 	for {
-		ok := q.TryPopFront(ctx, intPool, func(ctx context.Context, value int) {
-			// Just counting, don't need the value
-		})
-		if !ok {
+		if _, ok := q.TryPopFront(p); !ok {
 			break
 		}
 		remaining++

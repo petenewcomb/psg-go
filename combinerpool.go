@@ -13,7 +13,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/basicq"
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/heap"
-	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
@@ -40,21 +40,20 @@ type CombinerPool struct {
 	// and therefore duplication of individual combiners.
 	state state.CombinerPoolState
 
-	// Scattered tasks first attempt to post their results to primaryChan. If a
+	// Scattered tasks first attempt to post their results to primaryQueue. If a
 	// combiner goroutine is not immediately available, the task will
-	// concurrently try posting to both primaryChan and secondaryChan.
+	// concurrently try posting to both primaryQueue and secondaryChan.
 	//
 	// Only one goroutine at a time can elect itself "secondary". Once elected,
-	// the secondary goroutine no longer listens to primaryChan and will
+	// the secondary goroutine no longer listens to primaryQueue and will
 	// therefore receive task results only if the other goroutines are too busy
-	// to immediately receive all results being posted to primaryChan. This
+	// to immediately receive all results being posted to primaryQueue. This
 	// allows the secondary goroutine to detect if its capacity is no longer
 	// needed by staying idle until idleTimeout has passed. If this happens, the
 	// secondary goroutine resets secondaryElected to false and exits, allowing
 	// a different goroutine to elect itself secondary and continue the idle
 	// detection process.
-	primaryQueue     nbcq.Queue[chan<- boundCombineFunc]
-	primaryChan      chan boundCombineFunc
+	primaryQueue     rdvq.Queue[boundCombineFunc]
 	secondaryChan    chan boundCombineFunc
 	secondaryElected atomic.Bool
 
@@ -70,7 +69,6 @@ func NewCombinerPool(job *Job) *CombinerPool {
 	cp := &CombinerPool{
 		job:           job,
 		idleTimeout:   DefaultCombinerPoolIdleTimeout,
-		primaryChan:   make(chan boundCombineFunc),
 		secondaryChan: make(chan boundCombineFunc),
 	}
 	cp.state.SetLimits(0, -1) // unlimited by default
@@ -205,38 +203,27 @@ func (cp *CombinerPool) SetGrowthFactors(aggressive, conservative float64) {
 	cp.state.SetGrowthFactors(aggressive, conservative)
 }
 
-var primaryQueuePool = &nbcq.Pool[chan<- boundCombineFunc]{}
+var primaryQueuePool = &rdvq.Pool[boundCombineFunc]{}
 
 func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
+	cp.primaryQueue.PushBackFunc(primaryQueuePool, combine, func(primaryCh chan<- boundCombineFunc, combine boundCombineFunc) {
+		cp.postCombineSlow(ctx, primaryCh, combine)
+	})
+}
 
-	for {
-		primaryQueueCh, _ := cp.primaryQueue.PopFront(primaryQueuePool)
-		if primaryQueueCh == nil {
-			break
-		}
-		select {
-		case primaryQueueCh <- combine:
-			return
-		default:
-		}
-	}
-
+func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- boundCombineFunc, combine boundCombineFunc) {
 	// Attempt to post the combine to the primary channel.
 	select {
-	case cp.primaryChan <- combine:
-		return
-	case <-ctx.Done():
+	case primaryCh <- combine:
 		return
 	default:
 	}
 
 	// Attempt to post the combine to the primary or secondary channels.
 	select {
-	case cp.primaryChan <- combine:
+	case primaryCh <- combine:
 		return
 	case cp.secondaryChan <- combine:
-		return
-	case <-ctx.Done():
 		return
 	default:
 	}
@@ -267,7 +254,7 @@ func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFun
 
 		// Block until we can post or it's time to retry
 		select {
-		case cp.primaryChan <- combine:
+		case primaryCh <- combine:
 			return
 		case cp.secondaryChan <- combine:
 			return
@@ -286,9 +273,6 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 		defer j.wg.Done()
 
 		var isSecondary bool
-
-		// Will become nil if this goroutine becomes secondary
-		primaryCh := cp.primaryChan
 
 		// backpressureProvider added below
 		goroutineCtx, cancelGoroutineCtx := context.WithCancel(j.ctx)
@@ -325,150 +309,148 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 		var executeCombine func(ctx context.Context, combine boundCombineFunc)
 		var flushAll func(ctx context.Context)
 
-		primaryQueueCh := make(chan boundCombineFunc, 1)
-		primaryQueueChInQueue := false
+		flushToNextDeadline := func() time.Duration {
+			for {
+				nextBCToFlush := cm.NextToFlush()
+				if nextBCToFlush == nil {
+					break
+				}
+				deadline := nextBCToFlush.FlushDeadline
+				timeLeft := time.Until(deadline)
+				if timeLeft > 0 {
+					return timeLeft
+				}
+				workQueue.PushBack(nextBCToFlush.FlushFunc)
+			}
+			return 0
+		}
 
-		tryCombineFromPrimaryQueue := func() bool {
-			if primaryQueueCh != nil {
+		tryCombineOne := func(ctx context.Context) bool {
+			flushToNextDeadline()
+
+			if isSecondary {
 				select {
-				case combine := <-primaryQueueCh:
-					primaryQueueChInQueue = false
+				case combine := <-cp.secondaryChan:
 					workQueue.PushBack(func(ctx context.Context) {
 						executeCombine(ctx, combine)
 					})
 					return true
 				default:
 				}
-			}
-			return false
-		}
-
-		tryCombineOne := func(ctx context.Context) (bool, error) {
-			now := time.Now()
-			for {
-				nextBCToFlush := cm.NextToFlush()
-				if nextBCToFlush == nil {
-					break
-				}
-				deadline := nextBCToFlush.FlushDeadline
-				if now.Before(deadline) {
-					break
-				}
-				nextBCToFlush.FlushFunc(ctx)
+				return false
 			}
 
-			if tryCombineFromPrimaryQueue() {
-				return true, nil
-			}
-
-			select {
-			case combine := <-primaryQueueCh:
-				primaryQueueChInQueue = false
+			// Not secondary
+			combine, ok := cp.primaryQueue.PopFrontFunc(primaryQueuePool,
+				func(dedicatedPrimaryCh, sharedPrimaryCh <-chan boundCombineFunc) rdvq.BlockResult[boundCombineFunc] {
+					select {
+					case combine := <-dedicatedPrimaryCh:
+						return rdvq.NewBlockResult(combine, true, dedicatedPrimaryCh)
+					case combine := <-sharedPrimaryCh:
+						return rdvq.NewBlockResult(combine, true, sharedPrimaryCh)
+					case combine := <-cp.secondaryChan:
+						// Primary may steal from secondary, but not vice-versa
+						return rdvq.NewBlockResult(combine, true, nil)
+					default:
+					}
+					return rdvq.BlockResult[boundCombineFunc]{}
+				},
+			)
+			if ok {
 				workQueue.PushBack(func(ctx context.Context) {
 					executeCombine(ctx, combine)
 				})
-			case combine := <-primaryCh:
-				workQueue.PushBack(func(ctx context.Context) {
-					executeCombine(ctx, combine)
-				})
-			case combine := <-cp.secondaryChan:
-				workQueue.PushBack(func(ctx context.Context) {
-					executeCombine(ctx, combine)
-				})
-			case <-doneCh:
-				return false, doneChErr
-			case <-ctx.Done():
-				return false, ctx.Err()
-			default:
 			}
-			return true, nil
+			return ok
 		}
 
 		combineOne := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
+
 			// Check if any combiners need to be flushed due to deadlines and
 			// set up flush deadline timer if needed
 			var flushDeadlineTimerCh <-chan time.Time
-			for {
-				nextBCToFlush := cm.NextToFlush()
-				if nextBCToFlush == nil {
-					break
-				}
-				deadline := nextBCToFlush.FlushDeadline
-				now := time.Now()
-				if now.Before(deadline) {
-					flushDeadlineTimer := timerp.Get()
-					defer timerp.Put(flushDeadlineTimer)
-					flushDeadlineTimer.Reset(deadline.Sub(now))
-					flushDeadlineTimerCh = flushDeadlineTimer.C
-					break
-				}
-				workQueue.PushBack(nextBCToFlush.FlushFunc)
-			}
-
-			// Don't time out if we have a flush deadline
-			if flushDeadlineTimerCh != nil {
-				idleTimerCh = nil
+			if timeUntilNextDeadline := flushToNextDeadline(); timeUntilNextDeadline > 0 {
+				flushDeadlineTimer := timerp.Get()
+				defer timerp.Put(flushDeadlineTimer)
+				flushDeadlineTimer.Reset(timeUntilNextDeadline)
+				flushDeadlineTimerCh = flushDeadlineTimer.C
 			}
 
 			if isSecondary {
 				waitStartTime := time.Now()
 				cp.state.SecondaryWaitStarted(waitStartTime)
 				defer cp.state.SecondaryWaitEnded(waitStartTime)
-			}
 
-			if tryCombineFromPrimaryQueue() {
-				return true, nil
-			}
-
-			select {
-			case combine := <-primaryQueueCh:
-				primaryQueueChInQueue = false
-				workQueue.PushBack(func(ctx context.Context) {
-					executeCombine(ctx, combine)
-				})
-			case combine := <-primaryCh:
-				workQueue.PushBack(func(ctx context.Context) {
-					executeCombine(ctx, combine)
-				})
-			case combine := <-cp.secondaryChan:
-				workQueue.PushBack(func(ctx context.Context) {
-					executeCombine(ctx, combine)
-				})
-			case <-nextJobFlushCh:
-				workQueue.PushBack(flushAll)
-			case <-flushDeadlineTimerCh:
-				// A combiner has reached its deadline
-				workQueue.PushBack(func(ctx context.Context) {
-					for {
-						bc := cm.NextToFlush()
-						if bc == nil || time.Now().Before(bc.FlushDeadline) {
-							break
-						}
-						bc.FlushFunc(ctx)
+				// Secondary goroutines only listen to secondaryChan and other events
+				select {
+				case combine := <-cp.secondaryChan:
+					workQueue.PushBack(func(ctx context.Context) {
+						executeCombine(ctx, combine)
+					})
+				case <-nextJobFlushCh:
+					workQueue.PushBack(flushAll)
+				case <-flushDeadlineTimerCh:
+					// At least one combiner has reached its flush deadline
+					flushToNextDeadline()
+				case <-idleTimerCh:
+					// This goroutine may no longer be needed. Notify any
+					// potential waiters and exit. Combiners will be flushed via
+					// the deferred call to flushAll below.
+					if cp.state.ShouldExitGoroutine() {
+						return false, errIdleTimeout
 					}
-				})
-			case <-idleTimerCh:
-				// This goroutine is no longer needed. Notify any potential
-				// waiters and exit. Combiners will be flushed via the deferred
-				// call to flushAll below.
-				if cp.state.ShouldExitGoroutine() {
-					return false, errIdleTimeout
+				case <-waiter.Done():
+					return true, nil
+				case <-limitChangeCh:
+				case <-doneCh:
+					return false, doneChErr
+				case <-ctx.Done():
+					return false, ctx.Err()
 				}
-			case <-waiter.Done():
-				return true, nil
-			case <-limitChangeCh:
-			case <-doneCh:
-				return false, doneChErr
-			case <-ctx.Done():
-				return false, ctx.Err()
+				return false, nil
 			}
-			return false, nil
+
+			// Not secondary
+			waiterNotified := false
+			var err error
+			combine, ok := cp.primaryQueue.PopFrontFunc(primaryQueuePool,
+				func(dedicatedCh, sharedCh <-chan boundCombineFunc) rdvq.BlockResult[boundCombineFunc] {
+					select {
+					case combine := <-dedicatedCh:
+						return rdvq.NewBlockResult(combine, true, dedicatedCh)
+					case combine := <-sharedCh:
+						return rdvq.NewBlockResult(combine, true, sharedCh)
+					case combine := <-cp.secondaryChan:
+						// Primary may steal from secondary, but not vice-versa
+						return rdvq.NewBlockResult(combine, true, nil)
+					case <-nextJobFlushCh:
+						workQueue.PushBack(flushAll)
+					case <-flushDeadlineTimerCh:
+						// At least one combiner has reached its deadline
+						flushToNextDeadline()
+					case <-waiter.Done():
+						waiterNotified = true
+					case <-limitChangeCh:
+					case <-doneCh:
+						err = doneChErr
+					case <-ctx.Done():
+						err = ctx.Err()
+					}
+					return rdvq.BlockResult[boundCombineFunc]{}
+				},
+			)
+			if ok {
+				workQueue.PushBack(func(ctx context.Context) {
+					executeCombine(ctx, combine)
+				})
+			}
+			return waiterNotified, err
 		}
 
 		bp := combineBackpressureProvider{
 			job: j,
 			tryCombineOne: func(ctx context.Context) (bool, error) {
-				return tryCombineOne(ctx)
+				return tryCombineOne(ctx), nil
 			},
 			combineOne: func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
 				return combineOne(ctx, nil, waiter, limitChangeCh)
@@ -506,17 +488,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 		executeCombine(goroutineCtx, combine)
 
-		drainPrimaryQueueChan := func() {
-			if primaryQueueCh != nil {
-				select {
-				case primaryQueueCh <- nil:
-				default:
-					executeCombine(goroutineCtx, <-primaryQueueCh)
-				}
-				primaryQueueCh = nil
-			}
-		}
-		defer drainPrimaryQueueChan()
+		// No longer needed with rdvq
 
 		var idleTimer *time.Timer
 		for {
@@ -531,8 +503,6 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			if !isSecondary {
 				isSecondary = cp.secondaryElected.CompareAndSwap(false, true)
 				if isSecondary {
-					drainPrimaryQueueChan()
-					primaryCh = nil
 					idleTimer = timerp.Get()
 					defer timerp.Put(idleTimer)
 					defer cp.secondaryElected.Store(false)
@@ -550,11 +520,6 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 					// elapse (if enabled).
 					idleTimer.Reset(idleTimeout)
 					idleTimerCh = idleTimer.C
-				}
-			} else {
-				if !primaryQueueChInQueue {
-					cp.primaryQueue.PushBack(primaryQueuePool, primaryQueueCh)
-					primaryQueueChInQueue = true
 				}
 			}
 

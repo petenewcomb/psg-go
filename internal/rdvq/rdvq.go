@@ -77,6 +77,22 @@ func (q *Queue[T]) PushBack(ctx context.Context, p *Pool[T], value T) error {
 	return err
 }
 
+// TryPushBack attempts to send a value without blocking.
+// Returns true if the value was sent to a waiting receiver, false otherwise.
+// This is analogous to a non-blocking channel send.
+func (q *Queue[T]) TryPushBack(p *Pool[T], value T) bool {
+	sent := true
+	q.PushBackFunc(p, value, func(ch chan<- T, v T) {
+		select {
+		case ch <- v:
+		default:
+			// No waiting receivers
+			sent = false
+		}
+	})
+	return sent
+}
+
 // BlockFunc is called when PopFrontFunc needs to block waiting for a value. It
 // receives two channel on which a value might arrive and should implement
 // custom blocking logic (e.g., selecting on those channels and potentially

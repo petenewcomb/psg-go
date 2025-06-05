@@ -277,10 +277,10 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	defer cancel()
 
 	var (
-		pushed        atomic.Int64
-		pushFailures  atomic.Int64
-		popped        atomic.Int64
-		popsAbandoned atomic.Int64
+		pushed       atomic.Int64
+		pushFailures atomic.Int64
+		popped       atomic.Int64
+		popAttempts  atomic.Int64
 	)
 
 	// Start goroutines that randomly push, pop, or abandon
@@ -304,10 +304,9 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 
 				case 2: // Abandoning popper
 					shortCtx, shortCancel := context.WithTimeout(ctx, time.Microsecond)
+					popAttempts.Add(1)
 					if _, err := q.PopFront(shortCtx, p); err == nil {
 						popped.Add(1)
-					} else {
-						popsAbandoned.Add(1)
 					}
 					shortCancel()
 				}
@@ -323,7 +322,7 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	cancel()
 	wg.Wait()
 
-	t.Logf("Pushed: %d, Popped: %d, PushFailures: %d, PopsAbandoned: %d", pushed.Load(), popped.Load(), pushFailures.Load(), popsAbandoned.Load())
+	t.Logf("Pushed: %d, Popped: %d, PushFailures: %d, PopAttempts: %d", pushed.Load(), popped.Load(), pushFailures.Load(), popAttempts.Load())
 
 	// Drain any remaining values
 	var remaining int64
@@ -335,8 +334,11 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	}
 
 	// Verify conservation: pushed = popped + remaining
-	if pushed.Load()-pushFailures.Load() != popped.Load()+remaining {
-		t.Errorf("Value conservation failed: pushed=%d, popped=%d",
-			pushed.Load()-pushFailures.Load(), popped.Load()+remaining)
+	actualSuccessfulPushes := pushed.Load() - pushFailures.Load()
+	actualConsumed := popped.Load() + remaining
+	t.Logf("Conservation check: successful_pushes=%d, consumed=%d, remaining=%d", actualSuccessfulPushes, popped.Load(), remaining)
+	if actualSuccessfulPushes != actualConsumed {
+		t.Errorf("Value conservation failed: successful_pushes=%d != consumed=%d (popped=%d + remaining=%d)",
+			actualSuccessfulPushes, actualConsumed, popped.Load(), remaining)
 	}
 }

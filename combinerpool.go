@@ -53,7 +53,7 @@ type CombinerPool struct {
 	// secondary goroutine resets secondaryElected to false and exits, allowing
 	// a different goroutine to elect itself secondary and continue the idle
 	// detection process.
-	primaryQueue     rdvq.Queue[boundCombineFunc]
+	primaryQueue     rdvq.Patient[boundCombineFunc]
 	secondaryChan    chan boundCombineFunc
 	secondaryElected atomic.Bool
 
@@ -342,18 +342,18 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 			// Not secondary
 			combine, ok := cp.primaryQueue.PopFrontFunc(primaryQueuePool,
-				func(dedicatedPrimaryCh, sharedPrimaryCh <-chan boundCombineFunc) rdvq.BlockResult[boundCombineFunc] {
+				func(dedicatedPrimaryCh, sharedPrimaryCh <-chan boundCombineFunc) rdvq.PopSelectResult[boundCombineFunc] {
 					select {
 					case combine := <-dedicatedPrimaryCh:
-						return rdvq.NewBlockResult(combine, true, dedicatedPrimaryCh)
+						return rdvq.NewPopSelectResult(combine, true, dedicatedPrimaryCh)
 					case combine := <-sharedPrimaryCh:
-						return rdvq.NewBlockResult(combine, true, sharedPrimaryCh)
+						return rdvq.NewPopSelectResult(combine, true, sharedPrimaryCh)
 					case combine := <-cp.secondaryChan:
 						// Primary may steal from secondary, but not vice-versa
-						return rdvq.NewBlockResult(combine, true, nil)
+						return rdvq.NewPopSelectResult(combine, true, nil)
 					default:
 					}
-					return rdvq.BlockResult[boundCombineFunc]{}
+					return rdvq.PopSelectResult[boundCombineFunc]{}
 				},
 			)
 			if ok {
@@ -414,15 +414,15 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			waiterNotified := false
 			var err error
 			combine, ok := cp.primaryQueue.PopFrontFunc(primaryQueuePool,
-				func(dedicatedCh, sharedCh <-chan boundCombineFunc) rdvq.BlockResult[boundCombineFunc] {
+				func(dedicatedCh, sharedCh <-chan boundCombineFunc) rdvq.PopSelectResult[boundCombineFunc] {
 					select {
 					case combine := <-dedicatedCh:
-						return rdvq.NewBlockResult(combine, true, dedicatedCh)
+						return rdvq.NewPopSelectResult(combine, true, dedicatedCh)
 					case combine := <-sharedCh:
-						return rdvq.NewBlockResult(combine, true, sharedCh)
+						return rdvq.NewPopSelectResult(combine, true, sharedCh)
 					case combine := <-cp.secondaryChan:
 						// Primary may steal from secondary, but not vice-versa
-						return rdvq.NewBlockResult(combine, true, nil)
+						return rdvq.NewPopSelectResult(combine, true, nil)
 					case <-nextJobFlushCh:
 						workQueue.PushBack(flushAll)
 					case <-flushDeadlineTimerCh:
@@ -436,7 +436,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 					case <-ctx.Done():
 						err = ctx.Err()
 					}
-					return rdvq.BlockResult[boundCombineFunc]{}
+					return rdvq.PopSelectResult[boundCombineFunc]{}
 				},
 			)
 			if ok {

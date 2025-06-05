@@ -33,7 +33,7 @@ const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 type Job struct {
 	ctx         context.Context
 	cancelFunc  context.CancelFunc
-	gatherQueue rdvq.Queue[boundGatherFunc]
+	gatherQueue rdvq.Patient[boundGatherFunc]
 	wg          sync.WaitGroup
 	state       state.JobState
 
@@ -51,7 +51,7 @@ type Job struct {
 	// storage capability would be a perfect fit here.
 	workQueue nbcq.Queue[gatherWorkFunc]
 
-	taskQueue             rdvq.Queue[func(context.Context)]
+	taskQueue             rdvq.Patient[func(context.Context)]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
@@ -305,12 +305,12 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 	var err error
 
 	gather, ok := j.gatherQueue.PopFrontFunc(gatherQueuePool,
-		func(dedicatedCh, sharedCh <-chan boundGatherFunc) rdvq.BlockResult[boundGatherFunc] {
+		func(dedicatedCh, sharedCh <-chan boundGatherFunc) rdvq.PopSelectResult[boundGatherFunc] {
 			select {
 			case gather := <-dedicatedCh:
-				return rdvq.NewBlockResult(gather, true, dedicatedCh)
+				return rdvq.NewPopSelectResult(gather, true, dedicatedCh)
 			case gather := <-sharedCh:
-				return rdvq.NewBlockResult(gather, true, sharedCh)
+				return rdvq.NewPopSelectResult(gather, true, sharedCh)
 			case <-waiter.Done():
 				waiterNotified = true
 			case <-limitCh:
@@ -319,7 +319,7 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 			case <-ctx.Done():
 				err = ctx.Err()
 			}
-			return rdvq.BlockResult[boundGatherFunc]{}
+			return rdvq.PopSelectResult[boundGatherFunc]{}
 		},
 	)
 	if ok {
@@ -463,16 +463,16 @@ func (j *Job) spawnTaskWorker(taskFn func(context.Context)) {
 
 			var ok bool
 			taskFn, ok = j.taskQueue.PopFrontFunc(taskQueuePool,
-				func(dedicatedCh, sharedCh <-chan func(context.Context)) rdvq.BlockResult[func(context.Context)] {
+				func(dedicatedCh, sharedCh <-chan func(context.Context)) rdvq.PopSelectResult[func(context.Context)] {
 					select {
 					case taskFn := <-dedicatedCh:
-						return rdvq.NewBlockResult(taskFn, true, dedicatedCh)
+						return rdvq.NewPopSelectResult(taskFn, true, dedicatedCh)
 					case taskFn := <-sharedCh:
-						return rdvq.NewBlockResult(taskFn, true, sharedCh)
+						return rdvq.NewPopSelectResult(taskFn, true, sharedCh)
 					case <-idleTimer.C:
 					case <-ctx.Done():
 					}
-					return rdvq.BlockResult[func(context.Context)]{}
+					return rdvq.PopSelectResult[func(context.Context)]{}
 				},
 			)
 			if !ok {

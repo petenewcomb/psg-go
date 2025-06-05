@@ -77,21 +77,24 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 			return false, nil
 		}
 
-		wait := func() (bool, error) {
-			waiter := p.waiterQueue.Add()
-			defer waiter.Close()
-
-			// Check again after registering as a waiter, in case capacity
-			// became available between the last check and this one.
-			limit, limitChangeCh := p.concurrencyLimit.Load()
-			if p.incrementInFlightIfUnder(limit) {
-				return true, nil
-			}
-			err := applyBackpressure(ctx, waiter, limitChangeCh)
-			return false, err
-		}
 		for {
-			proceed, err := wait()
+			proceed := false
+			var err error
+			p.waiterQueue.Wait(func(waiter waitq.Waiter) bool {
+				// Check again after registering as a waiter, in case capacity
+				// became available between the last check and this one.
+				limit, limitChangeCh := p.concurrencyLimit.Load()
+				if p.incrementInFlightIfUnder(limit) {
+					proceed = true
+					return false // waiter was not notified
+				}
+
+				var waiterNotified bool
+				waiterNotified, err = applyBackpressure(ctx, waiter, limitChangeCh)
+				// Even though the waiter was notified, we need to reattempt
+				// incrementing the in-flight counter before proceding.
+				return waiterNotified
+			})
 			if err != nil {
 				return false, err
 			}
@@ -114,7 +117,8 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 	return true, nil
 }
 
-type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) error
+// Returns true if the waiter was notified, false otherwise.
+type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error)
 
 func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
 	switch {

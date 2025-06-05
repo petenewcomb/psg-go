@@ -36,23 +36,9 @@ package waitq
 //
 // Waiter variables may be safely copied and are designed to be passed by value.
 type Waiter struct {
-	q          *Queue
-	notifyChan chan struct{}
+	ch <-chan struct{}
 }
 
 func (w Waiter) Done() <-chan struct{} {
-	return w.notifyChan
-}
-
-func (w Waiter) Close() {
-	select {
-	case w.notifyChan <- struct{}{}:
-		// Filled notifyChan so that if it is still in the queue, Notify knows
-		// that this waiter is no longer listening and can pass the notification
-		// to another.
-	default:
-		// notifyChan was full, meaning that this waiter was notified but didn't
-		// receive it. Call Notify to pass the notification to another.
-		w.q.Notify()
-	}
+	return w.ch
 }

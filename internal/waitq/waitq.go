@@ -3,10 +3,10 @@
 
 package waitq
 
-import "github.com/petenewcomb/psg-go/internal/nbcq"
+import "github.com/petenewcomb/psg-go/internal/rdvq"
 
 type Queue struct {
-	inner nbcq.Queue[Waiter]
+	inner rdvq.Optional[struct{}]
 }
 
 func (q *Queue) Init() {
@@ -14,33 +14,23 @@ func (q *Queue) Init() {
 }
 
 // Add to unbounded queue - never blocks
-func (q *Queue) Add() Waiter {
-	w := Waiter{
-		q:          q,
-		notifyChan: make(chan struct{}, 1),
-	}
-	q.inner.PushBack(p, w)
-	return w
+func (q *Queue) Wait(fn func(Waiter) bool) {
+	q.inner.PopFrontFunc(p,
+		func(struct{}) {
+			// There was an orphaned value in the channel, meaning that this
+			// waiter was notified but didn't receive it. Call Notify to pass
+			// the notification to another.
+			q.Notify()
+		},
+		func(ch <-chan struct{}) bool {
+			return fn(Waiter{ch: ch})
+		},
+	)
 }
 
 // Notify signals the waiter at the front of the queue (if any).
 func (q *Queue) Notify() {
-	for {
-		w, ok := q.inner.PopFront(p)
-		if !ok {
-
-			return
-		}
-
-		select {
-		case w.notifyChan <- struct{}{}:
-			// The notification was sent.
-			return
-		default:
-			// The channel was full, meaning that the waiter was closed. Loop
-			// and try the next one.
-		}
-	}
+	q.inner.TryPushBack(p, struct{}{})
 }
 
-var p = &nbcq.Pool[Waiter]{}
+var p = &rdvq.Pool[struct{}]{}

@@ -146,27 +146,31 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	if !c.combinerPool.waitingCombines.IsZero() {
-		wait := func() (bool, error) {
-			waiter := c.combinerPool.combineWaiters.Add()
-			defer waiter.Close()
-
-			// Check again _after_ registering with the queue, so we don't
-			// potentially miss a notification.
-			if c.combinerPool.waitingCombines.IsZero() {
-				return true, nil
-			}
-
-			// bp.Block will return true only if we got a notification from the
-			// waiterQueue, so we can pass that along to break out of the loop
-			// and proceed without rechecking waitingCombines.
-			return bp.Block(ctx, waiter, nil)
-		}
 		for {
-			waiterNotified, err := wait()
+			proceed := false
+			var err error
+			c.combinerPool.combineWaiters.Wait(func(waiter waitq.Waiter) bool {
+				// Check again _after_ registering as a waiter, so we don't
+				// potentially miss a notification.
+				if c.combinerPool.waitingCombines.IsZero() {
+					proceed = true
+					return false // waiter was not notified
+				}
+
+				// bp.Block will return true only if we got a notification from the
+				// waiterQueue, so we can pass that along to break out of the loop
+				// and proceed without rechecking waitingCombines.
+				var waiterNotified bool
+				waiterNotified, err = bp.Block(ctx, waiter, nil)
+				if waiterNotified {
+					proceed = true
+				}
+				return waiterNotified
+			})
 			if err != nil {
 				return false, err
 			}
-			if waiterNotified {
+			if proceed {
 				break
 			}
 		}
@@ -174,10 +178,7 @@ func (c *Combine[I, O]) scatter(
 
 	var bpf backpressureFunc
 	if block {
-		bpf = func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) error {
-			_, err := bp.Block(ctx, waiter, limitChangeCh)
-			return err
-		}
+		bpf = bp.Block
 	}
 
 	return scatter(ctx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {

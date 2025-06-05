@@ -265,10 +265,6 @@ func TestQueueConcurrency(t *testing.T) {
 }
 
 func TestQueue_StressWithAbandonments(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping stress test in short mode")
-	}
-
 	var q rdvq.Queue[int]
 	q.Init(p)
 
@@ -281,9 +277,10 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	defer cancel()
 
 	var (
-		pushed    atomic.Int64
-		popped    atomic.Int64
-		abandoned atomic.Int64
+		pushed        atomic.Int64
+		pushFailures  atomic.Int64
+		popped        atomic.Int64
+		popsAbandoned atomic.Int64
 	)
 
 	// Start goroutines that randomly push, pop, or abandon
@@ -296,19 +293,21 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 			for ctx.Err() == nil {
 				switch id % 3 {
 				case 0: // Pusher
-					_ = q.PushBack(ctx, p, int(pushed.Add(1)))
+					if q.PushBack(ctx, p, int(pushed.Add(1))) != nil {
+						pushFailures.Add(1)
+					}
 
 				case 1: // Normal popper
-					if _, err := q.PopFront(ctx, p); err != nil {
+					if _, err := q.PopFront(ctx, p); err == nil {
 						popped.Add(1)
 					}
 
 				case 2: // Abandoning popper
 					shortCtx, shortCancel := context.WithTimeout(ctx, time.Microsecond)
-					if _, err := q.PopFront(shortCtx, p); err != nil {
+					if _, err := q.PopFront(shortCtx, p); err == nil {
 						popped.Add(1)
 					} else {
-						abandoned.Add(1)
+						popsAbandoned.Add(1)
 					}
 					shortCancel()
 				}
@@ -324,7 +323,7 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	cancel()
 	wg.Wait()
 
-	t.Logf("Pushed: %d, Popped: %d, Abandoned: %d", pushed.Load(), popped.Load(), abandoned.Load())
+	t.Logf("Pushed: %d, Popped: %d, PushFailures: %d, PopsAbandoned: %d", pushed.Load(), popped.Load(), pushFailures.Load(), popsAbandoned.Load())
 
 	// Drain any remaining values
 	var remaining int64
@@ -336,8 +335,8 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	}
 
 	// Verify conservation: pushed = popped + remaining
-	if pushed.Load() != popped.Load()+remaining {
-		t.Errorf("Value conservation failed: pushed=%d, popped=%d, remaining=%d",
-			pushed.Load(), popped.Load(), remaining)
+	if pushed.Load()-pushFailures.Load() != popped.Load()+remaining {
+		t.Errorf("Value conservation failed: pushed=%d, popped=%d",
+			pushed.Load()-pushFailures.Load(), popped.Load()+remaining)
 	}
 }

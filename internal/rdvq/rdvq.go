@@ -133,12 +133,7 @@ func (q *Queue[T]) PopFrontFunc(p *Pool[T], blockFn BlockFunc[T]) (value T, ok b
 				// Channel is full, drain the pending work and requeue to be
 				// picked up by the next pop operation.
 				drainedValue := <-receiverCh
-				if ok {
-					q.nextValues.PushBack(&p.valuePool, drainedValue)
-				} else {
-					value = drainedValue
-					ok = true
-				}
+				q.nextValues.PushBack(&p.valuePool, drainedValue)
 				// PushBack must have pulled it out of the queue and we just
 				// emptied it, so it's safe to return to the pool.
 				p.putChan(receiverCh)
@@ -186,15 +181,16 @@ func (q *Queue[T]) PopFront(ctx context.Context, p *Pool[T]) (T, error) {
 // Note: processFn may be called up to twice if cleanup drains an abandoned value.
 // This is analogous to a non-blocking channel receive.
 func (q *Queue[T]) TryPopFront(p *Pool[T]) (T, bool) {
-	if value, ok := q.nextValues.PopFront(&p.valuePool); ok {
-		return value, true
-	}
-	select {
-	case value := <-q.sharedChan:
-		return value, true
-	default:
-		return *new(T), false
-	}
+	return q.PopFrontFunc(p, func(dedicatedCh, sharedCh <-chan T) BlockResult[T] {
+		select {
+		case value := <-dedicatedCh:
+			return NewBlockResult(value, true, dedicatedCh)
+		case value := <-sharedCh:
+			return NewBlockResult(value, true, sharedCh)
+		default:
+		}
+		return NewBlockResult(*new(T), false, nil)
+	})
 }
 
 type Pool[T any] struct {

@@ -17,14 +17,17 @@ import (
 
 var p = &rdvq.Pool[int]{}
 
-func TestQueue_BasicFunctionality(t *testing.T) {
-	var q rdvq.Patient[int]
+func TestRequired_BasicFunctionality(t *testing.T) {
+	var q rdvq.Required[int]
 	q.Init(p)
 	ctx := context.Background()
 
 	// Test TryPopFront on empty queue
-	_, ok := q.TryPopFront(p)
-	require.False(t, ok)
+	var received []int
+	q.TryPopFront(p, func(value int) {
+		received = append(received, value)
+	})
+	require.Empty(t, received)
 
 	// Test rendezvous pattern - producer blocks until consumer receives
 	values := make(chan int, 3)
@@ -45,32 +48,45 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Consume first value with TryPopFront
-	val, ok := q.TryPopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 1, val)
+	received = nil
+	q.TryPopFront(p, func(value int) {
+		received = append(received, value)
+	})
+	require.Len(t, received, 1)
+	require.Equal(t, 1, received[0])
 	require.Equal(t, 1, <-values)
 
 	// Consume second value with PopFront
-	val, err := q.PopFront(ctx, p)
+	received = nil
+	err := q.PopFront(ctx, p, func(value int) {
+		received = append(received, value)
+	})
 	require.NoError(t, err)
-	require.Equal(t, 2, val)
+	require.Len(t, received, 1)
+	require.Equal(t, 2, received[0])
 	require.Equal(t, 2, <-values)
 
 	// Consume third value with TryPopFront
-	val, ok = q.TryPopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 3, val)
+	received = nil
+	q.TryPopFront(p, func(value int) {
+		received = append(received, value)
+	})
+	require.Len(t, received, 1)
+	require.Equal(t, 3, received[0])
 	require.Equal(t, 3, <-values)
 
 	wg.Wait()
 
 	// Queue should be empty now
-	_, ok = q.TryPopFront(p)
-	require.False(t, ok)
+	received = nil
+	q.TryPopFront(p, func(value int) {
+		received = append(received, value)
+	})
+	require.Empty(t, received)
 }
 
-func TestQueue_ContextCancellation(t *testing.T) {
-	var q rdvq.Patient[int]
+func TestRequired_ContextCancellation(t *testing.T) {
+	var q rdvq.Required[int]
 	q.Init(p)
 
 	// Test receiver cancellation
@@ -79,7 +95,9 @@ func TestQueue_ContextCancellation(t *testing.T) {
 	// Start a receiver that will block
 	done := make(chan struct{})
 	go func() {
-		_, err := q.PopFront(ctx, p)
+		err := q.PopFront(ctx, p, func(value int) {
+			t.Error("Should not receive value when cancelled")
+		})
 		require.Error(t, err, "Should not receive value when cancelled")
 		close(done)
 	}()
@@ -98,17 +116,18 @@ func TestQueue_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestQueue_ReceiverThenSender(t *testing.T) {
-	var q rdvq.Patient[int]
+func TestRequired_ReceiverThenSender(t *testing.T) {
+	var q rdvq.Required[int]
 	q.Init(p)
 	ctx := context.Background()
 
 	// Start receiver first
 	received := make(chan int)
 	go func() {
-		if value, err := q.PopFront(ctx, p); err == nil {
+		err := q.PopFront(ctx, p, func(value int) {
 			received <- value
-		}
+		})
+		require.NoError(t, err)
 	}()
 
 	// Give receiver time to register
@@ -119,7 +138,8 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = q.PushBack(ctx, p, 42)
+		err := q.PushBack(ctx, p, 42)
+		require.NoError(t, err)
 	}()
 	defer wg.Wait()
 
@@ -132,8 +152,8 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	}
 }
 
-func TestQueue_AbandonedReceivers(t *testing.T) {
-	var q rdvq.Patient[int]
+func TestRequired_AbandonedReceivers(t *testing.T) {
+	var q rdvq.Required[int]
 	q.Init(p)
 
 	// Create multiple receivers that abandon their channels
@@ -141,7 +161,9 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			// This will block and then abandon
-			_, err := q.PopFront(ctx, p)
+			err := q.PopFront(ctx, p, func(value int) {
+				t.Error("Should not receive value when cancelled")
+			})
 			require.Error(t, err)
 		}()
 		time.Sleep(5 * time.Millisecond)
@@ -157,18 +179,23 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = q.PushBack(ctx, p, 99)
+		err := q.PushBack(ctx, p, 99)
+		require.NoError(t, err)
 	}()
 
 	// New receiver should get the value
-	received, err := q.PopFront(ctx, p)
+	var received []int
+	err := q.PopFront(ctx, p, func(value int) {
+		received = append(received, value)
+	})
 	require.NoError(t, err)
-	require.Equal(t, 99, received)
+	require.Len(t, received, 1)
+	require.Equal(t, 99, received[0])
 	wg.Wait()
 }
 
-func TestQueueConcurrency(t *testing.T) {
-	var q rdvq.Patient[int]
+func TestRequired_Concurrency(t *testing.T) {
+	var q rdvq.Required[int]
 	q.Init(p)
 	ctx := context.Background()
 
@@ -203,12 +230,13 @@ func TestQueueConcurrency(t *testing.T) {
 			<-startCh
 
 			for {
-				val, err := q.PopFront(readerCtx, p)
+				err := q.PopFront(readerCtx, p, func(val int) {
+					receivedValueMap[val].Add(1)
+					totalPopped.Add(1)
+				})
 				if err != nil {
 					return // Context cancelled
 				}
-				receivedValueMap[val].Add(1)
-				totalPopped.Add(1)
 				if totalPopped.Load() >= int64(numWriters*iterations) {
 					return
 				}
@@ -225,7 +253,7 @@ func TestQueueConcurrency(t *testing.T) {
 			rangeStart := writerID * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
-				if err := q.PushBack(ctx, p, v); err != nil {
+				if err := q.PushBack(ctx, p, v); err == nil {
 					totalPushed.Add(1)
 				}
 			}
@@ -260,12 +288,15 @@ func TestQueueConcurrency(t *testing.T) {
 	}
 
 	// Queue should be empty
-	_, ok := q.TryPopFront(p)
-	require.False(t, ok, "Queue should be empty after all values consumed")
+	var remaining []int
+	q.TryPopFront(p, func(value int) {
+		remaining = append(remaining, value)
+	})
+	require.Empty(t, remaining, "Queue should be empty after all values consumed")
 }
 
-func TestQueue_StressWithAbandonments(t *testing.T) {
-	var q rdvq.Patient[int]
+func TestRequired_StressWithAbandonments(t *testing.T) {
+	var q rdvq.Required[int]
 	q.Init(p)
 
 	const (
@@ -298,14 +329,21 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 					}
 
 				case 1: // Normal popper
-					if _, err := q.PopFront(ctx, p); err == nil {
+					err := q.PopFront(ctx, p, func(value int) {
 						popped.Add(1)
+					})
+					if err != nil && ctx.Err() == nil {
+						// Error but context not cancelled - unexpected
+						t.Errorf("Unexpected PopFront error: %v", err)
 					}
 
 				case 2: // Abandoning popper
 					shortCtx, shortCancel := context.WithTimeout(ctx, time.Microsecond)
-					if _, err := q.PopFront(shortCtx, p); err == nil {
+					err := q.PopFront(shortCtx, p, func(value int) {
 						popped.Add(1)
+					})
+					if err == nil {
+						// Successfully got a value
 					} else {
 						popsAbandoned.Add(1)
 					}
@@ -328,15 +366,53 @@ func TestQueue_StressWithAbandonments(t *testing.T) {
 	// Drain any remaining values
 	var remaining int64
 	for {
-		if _, ok := q.TryPopFront(p); !ok {
+		found := false
+		q.TryPopFront(p, func(value int) {
+			remaining++
+			found = true
+		})
+		if !found {
 			break
 		}
-		remaining++
 	}
 
 	// Verify conservation: pushed = popped + remaining
 	if pushed.Load()-pushFailures.Load() != popped.Load()+remaining {
-		t.Errorf("Value conservation failed: pushed=%d, popped=%d",
-			pushed.Load()-pushFailures.Load(), popped.Load()+remaining)
+		t.Errorf("Value conservation failed: pushed=%d, popped=%d, remaining=%d",
+			pushed.Load()-pushFailures.Load(), popped.Load(), remaining)
+	}
+}
+
+func TestRequired_TryPushBack(t *testing.T) {
+	var q rdvq.Required[int]
+	q.Init(p)
+	ctx := context.Background()
+
+	// TryPushBack should fail when no receivers are waiting
+	success := q.TryPushBack(p, 42)
+	require.False(t, success, "TryPushBack should fail with no waiting receivers")
+
+	// Start a receiver
+	received := make(chan int)
+	go func() {
+		err := q.PopFront(ctx, p, func(value int) {
+			received <- value
+		})
+		require.NoError(t, err)
+	}()
+
+	// Give receiver time to register
+	time.Sleep(10 * time.Millisecond)
+
+	// TryPushBack should succeed now
+	success = q.TryPushBack(p, 42)
+	require.True(t, success, "TryPushBack should succeed with waiting receiver")
+
+	// Verify the value was received
+	select {
+	case val := <-received:
+		require.Equal(t, 42, val)
+	case <-time.After(time.Second):
+		t.Fatal("Receiver did not receive value")
 	}
 }

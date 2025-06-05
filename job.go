@@ -33,7 +33,7 @@ const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 type Job struct {
 	ctx         context.Context
 	cancelFunc  context.CancelFunc
-	gatherQueue rdvq.Patient[boundGatherFunc]
+	gatherQueue rdvq.Required[boundGatherFunc]
 	wg          sync.WaitGroup
 	state       state.JobState
 
@@ -51,7 +51,7 @@ type Job struct {
 	// storage capability would be a perfect fit here.
 	workQueue nbcq.Queue[gatherWorkFunc]
 
-	taskQueue             rdvq.Patient[func(context.Context)]
+	idleWorkers           nbcq.Queue[chan func(context.Context)]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
@@ -87,14 +87,14 @@ func NewJob(ctx context.Context) *Job {
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
 	j.workQueue.Init(workQueuePool)
-	j.taskQueue.Init(taskQueuePool)
+	j.idleWorkers.Init(taskWorkerPool)
 	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
 	j.gatherQueue.Init(gatherQueuePool)
 	return j
 }
 
 var workQueuePool = &nbcq.Pool[gatherWorkFunc]{}
-var taskQueuePool = &rdvq.Pool[func(context.Context)]{}
+var taskWorkerPool = &nbcq.Pool[chan func(context.Context)]{}
 var gatherQueuePool = &rdvq.Pool[boundGatherFunc]{}
 
 type jobContextValueKeyType struct{}
@@ -299,18 +299,27 @@ func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
 	_ = j.gatherQueue.PushBack(ctx, gatherQueuePool, gather)
 }
 
+func (j *Job) queueGather(gather boundGatherFunc) {
+	j.workQueue.PushBack(workQueuePool,
+		func(ctx context.Context) error {
+			return j.executeGather(ctx, gather)
+		},
+	)
+}
+
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	var waiterNotified bool
 	var err error
 
-	gather, ok := j.gatherQueue.PopFrontFunc(gatherQueuePool,
-		func(dedicatedCh, sharedCh <-chan boundGatherFunc) rdvq.PopSelectResult[boundGatherFunc] {
+	j.gatherQueue.PopFrontFunc(gatherQueuePool, j.queueGather,
+		func(dedicatedCh, sharedCh <-chan boundGatherFunc) <-chan boundGatherFunc {
 			select {
 			case gather := <-dedicatedCh:
-				return rdvq.NewPopSelectResult(gather, true, dedicatedCh)
+				j.queueGather(gather)
+				return dedicatedCh
 			case gather := <-sharedCh:
-				return rdvq.NewPopSelectResult(gather, true, sharedCh)
+				j.queueGather(gather)
 			case <-waiter.Done():
 				waiterNotified = true
 			case <-limitCh:
@@ -319,18 +328,9 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 			case <-ctx.Done():
 				err = ctx.Err()
 			}
-			return rdvq.PopSelectResult[boundGatherFunc]{}
+			return nil
 		},
 	)
-	if ok {
-		// We got a gather operation, queue it for processing
-		j.workQueue.PushBack(workQueuePool,
-			func(ctx context.Context) error {
-				return j.executeGather(ctx, gather)
-			},
-		)
-	}
-
 	return waiterNotified, err
 }
 
@@ -363,19 +363,17 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 		}
 	}
 
-	if gather, ok := j.gatherQueue.TryPopFront(gatherQueuePool); ok {
-		j.workQueue.PushBack(workQueuePool,
-			func(ctx context.Context) error {
-				return j.executeGather(ctx, gather)
-			},
-		)
-	}
+	ok := false
+	j.gatherQueue.TryPopFront(gatherQueuePool, func(gather boundGatherFunc) {
+		ok = true
+		j.queueGather(gather)
+	})
 
 	var err error
 	if !inGatherAlready {
 		err = j.processOutstandingWork(ctx)
 	}
-	return true, err
+	return ok, err
 }
 
 // GatherAll processes task results until the job completes or an error occurs.
@@ -433,15 +431,25 @@ func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context)
 
 func (j *Job) startTask(taskFn func(context.Context)) {
 	// Try to hand off to an idle worker
-	if j.taskQueue.TryPushBack(taskQueuePool, taskFn) {
-		return // Successfully handed off to idle worker
+	for {
+		workerCh, ok := j.idleWorkers.PopFront(taskWorkerPool)
+		if !ok {
+			break // No idle workers available
+		}
+
+		select {
+		case workerCh <- taskFn:
+			return // Successfully handed off to idle worker
+		default:
+			// Worker channel was closed (worker exited), try next one
+		}
 	}
 
 	// No idle workers available, spawn a new one
 	j.spawnTaskWorker(taskFn)
 }
 
-func (j *Job) spawnTaskWorker(taskFn func(context.Context)) {
+func (j *Job) spawnTaskWorker(initialTask func(context.Context)) {
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
@@ -451,6 +459,24 @@ func (j *Job) spawnTaskWorker(taskFn func(context.Context)) {
 
 		ctx = context.WithValue(ctx, taskContextValueKey, j.ctx.Value(jobContextValueKey))
 
+		workerCh := make(chan func(context.Context), 1)
+		workerChInQueue := false
+
+		drainWorkerCh := func() {
+			select {
+			case workerCh <- nil:
+				// Successfully filled the channel (if it's still in queue, this prevents others from using it)
+			default:
+				// Channel was already full, drain it and execute any pending work
+				taskFn := <-workerCh
+				if taskFn != nil {
+					taskFn(ctx)
+				}
+			}
+		}
+		defer drainWorkerCh()
+
+		taskFn := initialTask
 		idleTimer := timerp.Get()
 		defer timerp.Put(idleTimer)
 
@@ -458,25 +484,24 @@ func (j *Job) spawnTaskWorker(taskFn func(context.Context)) {
 			// Execute the current task
 			taskFn(ctx)
 
-			// Wait for next task with timeout
+			// Register as idle and wait for next task with timeout
+			if !workerChInQueue {
+				j.idleWorkers.PushBack(taskWorkerPool, workerCh)
+				workerChInQueue = true
+			}
+
+			// Reset timer with current timeout value
 			timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
 
-			var ok bool
-			taskFn, ok = j.taskQueue.PopFrontFunc(taskQueuePool,
-				func(dedicatedCh, sharedCh <-chan func(context.Context)) rdvq.PopSelectResult[func(context.Context)] {
-					select {
-					case taskFn := <-dedicatedCh:
-						return rdvq.NewPopSelectResult(taskFn, true, dedicatedCh)
-					case taskFn := <-sharedCh:
-						return rdvq.NewPopSelectResult(taskFn, true, sharedCh)
-					case <-idleTimer.C:
-					case <-ctx.Done():
-					}
-					return rdvq.PopSelectResult[func(context.Context)]{}
-				},
-			)
-			if !ok {
-				// Timeout or context cancelled - exit to reduce worker count
+			select {
+			case taskFn = <-workerCh:
+				workerChInQueue = false
+				// Got new work, continue
+			case <-idleTimer.C:
+				// Timeout - exit to reduce worker count
+				return
+			case <-ctx.Done():
+				// Job cancelled
 				return
 			}
 		}

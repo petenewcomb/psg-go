@@ -51,7 +51,7 @@ type Job struct {
 	// storage capability would be a perfect fit here.
 	workQueue nbcq.Queue[gatherWorkFunc]
 
-	idleWorkers           nbcq.Queue[chan func(context.Context)]
+	taskQueue             rdvq.Required[func(context.Context)]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
@@ -87,14 +87,14 @@ func NewJob(ctx context.Context) *Job {
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
 	j.workQueue.Init(workQueuePool)
-	j.idleWorkers.Init(taskWorkerPool)
+	j.taskQueue.Init(taskQueuePool)
 	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
 	j.gatherQueue.Init(gatherQueuePool)
 	return j
 }
 
 var workQueuePool = &nbcq.Pool[gatherWorkFunc]{}
-var taskWorkerPool = &nbcq.Pool[chan func(context.Context)]{}
+var taskQueuePool = &rdvq.Pool[func(context.Context)]{}
 var gatherQueuePool = &rdvq.Pool[boundGatherFunc]{}
 
 type jobContextValueKeyType struct{}
@@ -431,25 +431,15 @@ func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context)
 
 func (j *Job) startTask(taskFn func(context.Context)) {
 	// Try to hand off to an idle worker
-	for {
-		workerCh, ok := j.idleWorkers.PopFront(taskWorkerPool)
-		if !ok {
-			break // No idle workers available
-		}
-
-		select {
-		case workerCh <- taskFn:
-			return // Successfully handed off to idle worker
-		default:
-			// Worker channel was closed (worker exited), try next one
-		}
+	if j.taskQueue.TryPushBack(taskQueuePool, taskFn) {
+		return // Successfully handed off to idle worker
 	}
 
 	// No idle workers available, spawn a new one
 	j.spawnTaskWorker(taskFn)
 }
 
-func (j *Job) spawnTaskWorker(initialTask func(context.Context)) {
+func (j *Job) spawnTaskWorker(taskFn func(context.Context)) {
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
@@ -459,51 +449,33 @@ func (j *Job) spawnTaskWorker(initialTask func(context.Context)) {
 
 		ctx = context.WithValue(ctx, taskContextValueKey, j.ctx.Value(jobContextValueKey))
 
-		workerCh := make(chan func(context.Context), 1)
-		workerChInQueue := false
-
-		drainWorkerCh := func() {
-			select {
-			case workerCh <- nil:
-				// Successfully filled the channel (if it's still in queue, this prevents others from using it)
-			default:
-				// Channel was already full, drain it and execute any pending work
-				taskFn := <-workerCh
-				if taskFn != nil {
-					taskFn(ctx)
-				}
-			}
-		}
-		defer drainWorkerCh()
-
-		taskFn := initialTask
 		idleTimer := timerp.Get()
 		defer timerp.Put(idleTimer)
 
-		for {
-			// Execute the current task
+		for taskFn != nil {
+			// Execute the task
 			taskFn(ctx)
+			taskFn = nil
 
-			// Register as idle and wait for next task with timeout
-			if !workerChInQueue {
-				j.idleWorkers.PushBack(taskWorkerPool, workerCh)
-				workerChInQueue = true
-			}
-
-			// Reset timer with current timeout value
+			// Wait for next task with timeout
 			timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
 
-			select {
-			case taskFn = <-workerCh:
-				workerChInQueue = false
-				// Got new work, continue
-			case <-idleTimer.C:
-				// Timeout - exit to reduce worker count
-				return
-			case <-ctx.Done():
-				// Job cancelled
-				return
-			}
+			j.taskQueue.PopFrontFunc(taskQueuePool,
+				func(orphanedTaskFn func(context.Context)) {
+					// Retry this one
+					j.startTask(orphanedTaskFn)
+				},
+				func(dedicatedCh, sharedCh <-chan func(context.Context)) <-chan func(context.Context) {
+					select {
+					case taskFn = <-dedicatedCh:
+						return dedicatedCh
+					case taskFn = <-sharedCh:
+					case <-idleTimer.C:
+					case <-ctx.Done():
+					}
+					return nil
+				},
+			)
 		}
 	}()
 }

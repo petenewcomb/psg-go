@@ -51,7 +51,7 @@ type Job struct {
 	// storage capability would be a perfect fit here.
 	workQueue nbcq.Queue[gatherWorkFunc]
 
-	taskQueue             rdvq.Required[func(context.Context)]
+	taskQueue             rdvq.Optional[func(context.Context)]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 }
 
@@ -462,18 +462,21 @@ func (j *Job) spawnTaskWorker(taskFn func(context.Context)) {
 
 			j.taskQueue.PopFrontFunc(taskQueuePool,
 				func(orphanedTaskFn func(context.Context)) {
-					// Retry this one
-					j.startTask(orphanedTaskFn)
+					if taskFn == nil {
+						taskFn = orphanedTaskFn
+					} else {
+						// Hand this one off to a different or new goroutine
+						j.startTask(orphanedTaskFn)
+					}
 				},
-				func(dedicatedCh, sharedCh <-chan func(context.Context)) <-chan func(context.Context) {
+				func(ch <-chan func(context.Context)) bool {
 					select {
-					case taskFn = <-dedicatedCh:
-						return dedicatedCh
-					case taskFn = <-sharedCh:
+					case taskFn = <-ch:
+						return true
 					case <-idleTimer.C:
 					case <-ctx.Done():
 					}
-					return nil
+					return false
 				},
 			)
 		}

@@ -8,8 +8,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"slices"
-
-	"golang.org/x/exp/constraints"
 )
 
 // AddFunc adds a sample to a reservoir using the reservoir sampling algorithm
@@ -111,9 +109,13 @@ func InterpolatedQuantileFunc[S ~[]E, E any](sample S, count int64, q float64, v
 	return lowerVal*(1-weight) + upperVal*weight
 }
 
+type Numeric interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~float32 | ~float64
+}
+
 // InterpolatedQuantile returns the requested quantile with linear interpolation
 // for numeric samples
-func InterpolatedQuantile[S ~[]E, E constraints.Integer | constraints.Float](sample S, count int64, q float64) float64 {
+func InterpolatedQuantile[S ~[]E, E Numeric](sample S, count int64, q float64) float64 {
 	return InterpolatedQuantileFunc(sample, count, q, func(sample S, index int) float64 {
 		return float64(sample[index])
 	})

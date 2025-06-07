@@ -10,14 +10,18 @@ import (
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
+type backpressureProviderKeyField bool
+type backpressureProviderKey *backpressureProviderKeyField
+
 type backpressureProvider interface {
 	ForJob(*Job) bool
+	Key() backpressureProviderKey
 
 	// Allows a pending operation to execute. Returns true if there might be
 	// more pending operations to execute, false if not. Returns an error if the
 	// yielding activity should be aborted (for instance because a context is
 	// canceled).
-	Yield(context.Context) (bool, error)
+	Yield(vettedContext) (bool, error)
 
 	// Returns true when the block was ended by waiter notification, false
 	// otherwise. Returns an error if the waiting activity should be aborted
@@ -33,7 +37,7 @@ func withBackpressureProvider(ctx context.Context, bp backpressureProvider) cont
 	return context.WithValue(ctx, backpressureProviderContextValueKey, bp)
 }
 
-func withDefaultBackpressureProvider(ctx context.Context, j *Job) (context.Context, context.CancelFunc) {
+func hasBackpressureProviderForJob(ctx context.Context, j *Job) bool {
 	switch bp := ctx.Value(backpressureProviderContextValueKey).(type) {
 	case nil:
 		if j == nil || includesJob(ctx, j, jobContextValueKey) {
@@ -41,17 +45,18 @@ func withDefaultBackpressureProvider(ctx context.Context, j *Job) (context.Conte
 		}
 	case backpressureProvider:
 		if bp.ForJob(j) {
-			return ctx, func() {}
+			return true
 		}
 	default:
 		panic(fmt.Sprintf("unexpected backpressure provider type: %T", bp))
 	}
+	return false
+}
+
+func withNewBackpressureProvider(ctx context.Context, j *Job) context.Context {
 	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(j.ctx, cancel)
-	return withBackpressureProvider(ctx, defaultBackpressureProvider{j: j}), func() {
-		stop()
-		cancel()
-	}
+	context.AfterFunc(j.ctx, cancel)
+	return withBackpressureProvider(ctx, defaultBackpressureProvider{j: j})
 }
 
 func getBackpressureProvider(ctx context.Context, j *Job) backpressureProvider {
@@ -63,15 +68,21 @@ func getBackpressureProvider(ctx context.Context, j *Job) backpressureProvider {
 }
 
 type defaultBackpressureProvider struct {
-	j *Job
+	j   *Job
+	key backpressureProviderKeyField
 }
 
 func (bp defaultBackpressureProvider) ForJob(j *Job) bool {
 	return bp.j == j
 }
 
-func (bp defaultBackpressureProvider) Yield(ctx context.Context) (bool, error) {
-	return bp.j.tryGatherOne(ctx)
+func (bp defaultBackpressureProvider) Key() backpressureProviderKey {
+	return &bp.key
+}
+
+func (bp defaultBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
+	bp.j.vetGather(vetted)
+	return bp.j.tryGatherOne(vetted.ctx)
 }
 
 func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {

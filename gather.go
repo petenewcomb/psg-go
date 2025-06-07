@@ -103,14 +103,12 @@ func (g *Gather[T]) scatter(
 	block bool,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	vetScatter(ctx, target, taskFunc)
-
 	j := target.job()
-	ctx, cancel := withDefaultBackpressureProvider(ctx, j)
-	defer cancel()
-	bp := getBackpressureProvider(ctx, j)
+	vetted := j.vettedContext(ctx)
+	vetScatter(vetted, target, taskFunc)
+	bp := getBackpressureProvider(vetted.ctx, j)
 
-	if err := yieldBeforeScatter(ctx, bp); err != nil {
+	if err := yieldBeforeScatter(vetted, bp); err != nil {
 		return false, err
 	}
 
@@ -119,7 +117,7 @@ func (g *Gather[T]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(ctx, target, taskFunc, bpf, func(ctx context.Context, value T, err error) {
+	return scatter(vetted.ctx, target, taskFunc, bpf, func(ctx context.Context, value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
 		gather := func(ctx context.Context) error {

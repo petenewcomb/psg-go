@@ -15,11 +15,11 @@ type TaskPoolOrJob interface {
 	// launch executes a task, potentially waiting if concurrency limits are reached
 	launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error)
 	// withBackpressureProvider returns a context with the appropriate backpressure provider
-	withBackpressureProvider(ctx context.Context) (context.Context, context.CancelFunc)
+	withBackpressureProvider(ctx context.Context) context.Context
 }
 
 func vetScatter[T any](
-	ctx context.Context,
+	vetted vettedContext,
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
 ) {
@@ -34,7 +34,7 @@ func vetScatter[T any](
 		panic("task pool not bound to a job")
 	}
 
-	if includesJob(ctx, j, taskContextValueKey) {
+	if vetted.hasTaskValue {
 		// Don't launch if the provided context is a task context within the
 		// current job, since that may lead to deadlock.
 		panic("Scatter called from within TaskFunc; move call to GatherFunc instead")
@@ -71,7 +71,7 @@ func scatter[T any](
 
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the target to launch.
-	return target.launch(ctx, backpressureFunc, func(ctx context.Context, taskCompletedFn func()) {
+	return target.launch(ctx, backpressureFunc, func(ctx context.Context, taskCompletedFn func(), ctxWithBP func(backpressureProvider) context.Context) {
 
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.
@@ -81,7 +81,7 @@ func scatter[T any](
 			if taskCompletedFn != nil {
 				taskCompletedFn()
 			}
-			ctx = withBackpressureProvider(ctx, bp)
+			ctx = ctxWithBP(bp)
 			postResult(ctx, value, err)
 		}()
 
@@ -103,9 +103,9 @@ func scatter[T any](
 // execution and adds backpressure that enables operation with unlimited task pools.
 // Gathering up to 2 here balances between catching up and pausing for too long
 // during a scatter.
-func yieldBeforeScatter(ctx context.Context, bp backpressureProvider) error {
+func yieldBeforeScatter(vetted vettedContext, bp backpressureProvider) error {
 	for range 2 {
-		ok, err := bp.Yield(ctx)
+		ok, err := bp.Yield(vetted)
 		if !ok || err != nil {
 			return err
 		}

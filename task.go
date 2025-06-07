@@ -43,4 +43,6 @@ import (
 // [Handling panics]: https://go.dev/ref/spec#Handling_panics
 type TaskFunc[T any] = func(context.Context) (T, error)
 
-type boundTaskFunc func(ctx context.Context, completedFn func())
+type boundTaskFunc func(ctx context.Context, completedFn func(), ctxWithBP func(backpressureProvider) context.Context)
+
+type preparedTaskFunc func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context)

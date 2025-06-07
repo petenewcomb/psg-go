@@ -130,18 +130,16 @@ func (c *Combine[I, O]) scatter(
 	block bool,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	vetScatter(ctx, target, taskFunc)
-
 	j := target.job()
 	if j != c.combinerPool.job {
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	ctx, cancel := target.withBackpressureProvider(ctx)
-	defer cancel()
-	bp := getBackpressureProvider(ctx, j)
+	vetted := j.vettedContext(ctx)
+	vetScatter(vetted, target, taskFunc)
+	bp := getBackpressureProvider(vetted.ctx, j)
 
-	if err := yieldBeforeScatter(ctx, bp); err != nil {
+	if err := yieldBeforeScatter(vetted, bp); err != nil {
 		return false, err
 	}
 
@@ -181,7 +179,7 @@ func (c *Combine[I, O]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(ctx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
+	return scatter(vetted.ctx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
 		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
 			getCombineFunc(ctx, cm, j, c)(ctx, input, inputErr)
@@ -195,14 +193,19 @@ type combineBackpressureProvider struct {
 	job           *Job
 	tryCombineOne func(ctx context.Context) (bool, error)
 	combineOne    func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error)
+	key           backpressureProviderKeyField
 }
 
 func (bp combineBackpressureProvider) ForJob(j *Job) bool {
 	return bp.job == j
 }
 
-func (bp combineBackpressureProvider) Yield(ctx context.Context) (bool, error) {
-	return bp.tryCombineOne(ctx)
+func (bp combineBackpressureProvider) Key() backpressureProviderKey {
+	return &bp.key
+}
+
+func (bp combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
+	return bp.tryCombineOne(vetted.ctx)
 }
 
 func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {

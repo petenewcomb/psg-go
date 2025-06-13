@@ -14,7 +14,9 @@ format.
 - Test coverage for various expected panic conditions
 - Job.CancelAndWait to ensure that task goroutines have fully shut down
 - Job.Close and Job.CloseAndGatherAll
-- Combiner type for aggregating multiple inputs into single outputs
+- Combine, et. al. for scaleable aggregation of task results before passing to gather operations
+- psgwf package providing workflow context propagation and lifecycle management utilities
+- otpsg module providing OpenTelemetry integration and observability patterns
 
 ### Changed
 
@@ -23,6 +25,8 @@ format.
 - SyncJob merged with Job, because in-flight counters must always be thread-safe
   after all (see below deadlock fix)
 - GatherAll now returns without error only after a call to Job.Close
+- Pool renamed to TaskPool for clarity vs. the new CombinerPool type
+- Significant performance improvements: up to 73% throughput increase and 32% memory reduction
 
 ### Fixed
 

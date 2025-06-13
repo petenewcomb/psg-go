@@ -32,7 +32,7 @@ const DefaultCombinerPoolConservativeGrowthFactor = 1.1
 // CombinerPool manages a pool of goroutines that execute combiners.
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
 type CombinerPool struct {
-	job         *Job
+	j           *Job
 	idleTimeout time.Duration
 
 	// CombinerPoolState hosts the data and core logic for managing the pool of
@@ -62,13 +62,14 @@ type CombinerPool struct {
 	combineWaiters  waitq.Queue
 }
 
-// NewCombinerPool creates a new CombinerPool with the specified concurrency limit.
+// NewCombinerPool creates a new CombinerPool bound to the specified job.
+//
+// Panics if the job is nil or in the done state.
 func NewCombinerPool(job *Job) *CombinerPool {
-	if job == nil {
-		panic("job is nil")
-	}
+	// Check if the job is done
+	job.panicIfDone()
 	cp := &CombinerPool{
-		job:           job,
+		j:             job,
 		idleTimeout:   DefaultCombinerPoolIdleTimeout,
 		secondaryChan: make(chan boundCombineFunc),
 	}
@@ -84,6 +85,13 @@ func NewCombinerPool(job *Job) *CombinerPool {
 	return cp
 }
 
+// checkInitialized panics if the CombinerPool was not properly initialized via NewCombinerPool
+func (cp *CombinerPool) checkInitialized() {
+	if cp.j == nil {
+		panic("CombinerPool not initialized: must use NewCombinerPool")
+	}
+}
+
 // SetLimit sets the active concurrency limit for the pool. A negative value means no
 // limit (combiners will always be launched regardless of how many are currently
 // running). Zero means no new combiners will be launched until SetLimit is called
@@ -92,6 +100,7 @@ func NewCombinerPool(job *Job) *CombinerPool {
 // This method is safe to call at any time. The new limit takes effect immediately
 // for subsequent combiner launches and may unblock existing blocked operations.
 func (cp *CombinerPool) SetLimits(minConcurrency, maxConcurrency int) {
+	cp.checkInitialized()
 	cp.state.SetLimits(minConcurrency, maxConcurrency)
 }
 
@@ -122,6 +131,7 @@ func (cp *CombinerPool) SetLimits(minConcurrency, maxConcurrency int) {
 // This method is safe to call at any time. However, the timing
 // of when the new value takes effect within a running job is undefined.
 func (cp *CombinerPool) SetIdleTimeout(timeout time.Duration) {
+	cp.checkInitialized()
 	if timeout < -1 {
 		panic(fmt.Sprintf("invalid idle timeout %v: must be >= -1", timeout))
 	}
@@ -159,6 +169,7 @@ func (cp *CombinerPool) SetIdleTimeout(timeout time.Duration) {
 // delayed as described for ramp-up above until data to cover the new window
 // size can be gathered.
 func (cp *CombinerPool) SetMeasurementTimeConstant(d time.Duration) {
+	cp.checkInitialized()
 	cp.state.SetMeasurementTimeConstant(d)
 }
 
@@ -168,6 +179,7 @@ func (cp *CombinerPool) SetMeasurementTimeConstant(d time.Duration) {
 //
 // The default value is [DefaultCombinerPoolHighUtilizationThreshold].
 func (cp *CombinerPool) SetHighUtilizationThreshold(threshold float64) {
+	cp.checkInitialized()
 	cp.state.SetHighUtilizationThreshold(threshold)
 }
 
@@ -177,6 +189,7 @@ func (cp *CombinerPool) SetHighUtilizationThreshold(threshold float64) {
 //
 // The default value is [DefaultCombinerPoolHistoryRetentionPeriod].
 func (cp *CombinerPool) SetHistoryRetentionPeriod(d time.Duration) {
+	cp.checkInitialized()
 	cp.state.SetHistoryRetentionPeriod(d)
 }
 
@@ -186,6 +199,7 @@ func (cp *CombinerPool) SetHistoryRetentionPeriod(d time.Duration) {
 //
 // The default value is [DefaultCombinerPoolMinimumReturn].
 func (cp *CombinerPool) SetMinimumReturn(ratio float64) {
+	cp.checkInitialized()
 	cp.state.SetMinimumReturn(ratio)
 }
 
@@ -197,6 +211,7 @@ func (cp *CombinerPool) SetMinimumReturn(ratio float64) {
 // The default values are [DefaultCombinerPoolAggressiveGrowthFactor] and
 // [DefaultCombinerPoolConservativeGrowthFactor].
 func (cp *CombinerPool) SetGrowthFactors(aggressive, conservative float64) {
+	cp.checkInitialized()
 	cp.state.SetGrowthFactors(aggressive, conservative)
 }
 
@@ -260,7 +275,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- bo
 }
 
 func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
-	j := cp.job
+	j := cp.j
 	nextJobFlushCh, unregisterAsJobFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
 	go func() {
@@ -665,7 +680,7 @@ type combinerMapKey struct {
 }
 
 func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *Combine[I, O]) halfBoundCombineFunc[I] {
-	j := cp.job
+	j := cp.j
 	k := combinerMapKey{
 		Job:     j,
 		Combine: c,

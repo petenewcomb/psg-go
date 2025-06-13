@@ -14,35 +14,35 @@ import (
 // Combine represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
 type Combine[I, O any] struct {
-	gather       *Gather[O]
-	combinerPool *CombinerPool
-	newCombiner  CombinerFactory[I, O]
-	minHoldTime  time.Duration // Minimum time since last combine before auto-flushing
-	maxHoldTime  time.Duration // Maximum time since first combine before auto-flushing
+	gather      *Gather[O]
+	pool        *CombinerPool
+	newCombiner CombinerFactory[I, O]
+	minHoldTime time.Duration // Minimum time since last combine before auto-flushing
+	maxHoldTime time.Duration // Maximum time since first combine before auto-flushing
 }
 
 // NewCombine creates a new Combine operation that uses the specified gather function,
 // combiner pool, and combiner factory.
 func NewCombine[I, O any](
 	gather *Gather[O],
-	combinerPool *CombinerPool,
+	pool *CombinerPool,
 	combinerFactory CombinerFactory[I, O],
 ) *Combine[I, O] {
 	if gather == nil {
 		panic("gather must be non-nil")
 	}
-	if combinerPool == nil {
+	if pool == nil {
 		panic("combiner pool must be non-nil")
 	}
 	if combinerFactory == nil {
 		panic("combiner factory must be non-nil")
 	}
 	c := &Combine[I, O]{
-		gather:       gather,
-		combinerPool: combinerPool,
-		newCombiner:  combinerFactory,
-		minHoldTime:  -1, // Sentinel value: no idle-based flushing
-		maxHoldTime:  -1, // Sentinel value: no absolute deadline
+		gather:      gather,
+		pool:        pool,
+		newCombiner: combinerFactory,
+		minHoldTime: -1, // Sentinel value: no idle-based flushing
+		maxHoldTime: -1, // Sentinel value: no absolute deadline
 	}
 	return c
 }
@@ -169,7 +169,7 @@ func (c *Combine[I, O]) scatter(
 	block bool,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	if j != c.combinerPool.job {
+	if j != c.pool.j {
 		panic("target and combiner pools are associated with different jobs")
 	}
 
@@ -179,14 +179,14 @@ func (c *Combine[I, O]) scatter(
 		return false, err
 	}
 
-	if !c.combinerPool.waitingCombines.IsZero() {
+	if !c.pool.waitingCombines.IsZero() {
 		for {
 			proceed := false
 			var err error
-			c.combinerPool.combineWaiters.Wait(func(waiter waitq.Waiter) bool {
+			c.pool.combineWaiters.Wait(func(waiter waitq.Waiter) bool {
 				// Check again _after_ registering as a waiter, so we don't
 				// potentially miss a notification.
-				if c.combinerPool.waitingCombines.IsZero() {
+				if c.pool.waitingCombines.IsZero() {
 					proceed = true
 					return false // waiter was not notified
 				}
@@ -216,9 +216,9 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
-		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
+		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
-			combineFn := getCombineFunc(ctx, cm, c.combinerPool, c)
+			combineFn := getCombineFunc(ctx, cm, c.pool, c)
 			combineFn(ctx, input, inputErr)
 		})
 	})

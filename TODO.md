@@ -48,12 +48,8 @@ Items that must be completed before merging to main branch.
 ### 6. Implementation improvements
 - [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext, shift to leveraging vettedContext)
 - [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use inGather/combinerBackpressureProvider to allow new scatters only to finish workflows already started)
-- [ ] Standardize field naming between TaskPool and CombinerPool for consistency (e.g., liveCount vs. liveGoroutineCount)
-- [ ] Add panic recovery for combiner factory creation
 - [ ] Review race conditions during job shutdown and combiner flushing
-- [ ] Ensure zero-value safety for CombinerPool (panic or validation)
 - [ ] Review potential deadlocks during cleanup, especially with combiners
-- [ ] Update NewCombinerPool documentation to clarify Job binding
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 

@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/gcok"
+	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
@@ -39,7 +39,7 @@ type Job struct {
 	cancelFunc  context.CancelFunc
 	gatherQueue rdvq.Required[boundGatherFunc]
 	wg          sync.WaitGroup
-	state       state.JobState
+	state       jobstate.JobState
 	gcMonitor   gcok.Monitor
 
 	// workQueue must be thread-safe only to support multiple goroutines

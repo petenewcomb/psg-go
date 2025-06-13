@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package state
+package cpstate
 
 import (
 	"fmt"
@@ -35,8 +35,8 @@ type CombinerPoolState struct {
 	throughput    ema.EMA // count/time.Duration
 	secondaryUtil ema.EMA // secondary goroutine utilization (0-1)
 
-	// Performance curve for intelligent scaling decisions
-	perfCurves perfCurves
+	// Size controller for intelligent scaling decisions
+	controller controller
 
 	targetGoroutineCount           int
 	spawnedGoroutineCount          int
@@ -49,10 +49,10 @@ type CombinerPoolState struct {
 func (cps *CombinerPoolState) SetLimits(minConcurrency, maxConcurrency int) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.perfCurves.SetLimits(minConcurrency, maxConcurrency)
+	cps.controller.SetLimits(minConcurrency, maxConcurrency)
 
-	// Ask perfCurves if the target should change given new limits
-	newTarget := cps.perfCurves.RecommendTarget()
+	// Ask controller if the target should change given new limits
+	newTarget := cps.controller.RecommendTarget()
 	if newTarget != cps.targetGoroutineCount {
 		cps.targetGoroutineCount = newTarget
 		cps.notifyWaiter()
@@ -62,7 +62,7 @@ func (cps *CombinerPoolState) SetLimits(minConcurrency, maxConcurrency int) {
 func (cps *CombinerPoolState) SetHighUtilizationThreshold(high float64) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.perfCurves.SetHighUtilizationThreshold(high)
+	cps.controller.SetHighUtilizationThreshold(high)
 }
 
 func (cps *CombinerPoolState) SetMeasurementTimeConstant(d time.Duration) {
@@ -77,19 +77,19 @@ func (cps *CombinerPoolState) SetMeasurementTimeConstant(d time.Duration) {
 func (cps *CombinerPoolState) SetHistoryRetentionPeriod(d time.Duration) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.perfCurves.SetRetentionPeriod(d)
+	cps.controller.SetRetentionPeriod(d)
 }
 
 func (cps *CombinerPoolState) SetMinimumReturn(ratio float64) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.perfCurves.SetMinimumReturn(ratio)
+	cps.controller.SetMinimumReturn(ratio)
 }
 
 func (cps *CombinerPoolState) SetGrowthFactors(aggressive, conservative float64) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.perfCurves.SetGrowthFactors(aggressive, conservative)
+	cps.controller.SetGrowthFactors(aggressive, conservative)
 }
 
 func (cps *CombinerPoolState) IncrementCompleted() {
@@ -113,7 +113,7 @@ func (cps *CombinerPoolState) SecondaryWaitEnded(startTime time.Time) {
 
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
 	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	if time.Since(lastUpdate) > min(time.Duration(cps.tau), cps.perfCurves.RetentionPeriod()/2) {
+	if time.Since(lastUpdate) > min(time.Duration(cps.tau), cps.controller.RetentionPeriod()/2) {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -127,7 +127,7 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
 
 	if cps.timeOrigin.Load() == 0 {
 		cps.timeOrigin.Store(int64(time.Since(epoch)))
-		cps.targetGoroutineCount = cps.perfCurves.RecommendTarget()
+		cps.targetGoroutineCount = cps.controller.RecommendTarget()
 		cps.waitChan = make(chan struct{}, 1)
 	}
 
@@ -146,7 +146,7 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
 		return cps.waitChan
 	}
 
-	cps.targetGoroutineCount = cps.perfCurves.RecommendTarget()
+	cps.targetGoroutineCount = cps.controller.RecommendTarget()
 
 	if cps.spawnedGoroutineCount < cps.targetGoroutineCount {
 		cps.spawnedGoroutineCount++
@@ -176,7 +176,7 @@ func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
 		return false
 	}
 
-	cps.targetGoroutineCount = cps.perfCurves.RecommendTarget()
+	cps.targetGoroutineCount = cps.controller.RecommendTarget()
 
 	if cps.spawnedGoroutineCount > cps.targetGoroutineCount {
 		cps.spawnedGoroutineCount--
@@ -198,7 +198,7 @@ func (cps *CombinerPoolState) report(msg string) {
 		cps.throughput.Get()*float64(time.Second),
 		cps.throughput.Get()*float64(time.Second)/float64(cps.liveGoroutineCount),
 		cps.secondaryUtil.Get()*100,
-		&cps.perfCurves,
+		&cps.controller,
 	)
 }
 
@@ -227,7 +227,7 @@ func (cps *CombinerPoolState) GoroutineExited() {
 	cps.liveGoroutineCount--
 
 	if cps.liveGoroutineCount == 0 {
-		cps.perfCurves = perfCurves{} // Reset performance curve
+		cps.controller = controller{} // Reset size controller
 		cps.throughput.Set(0)
 		cps.secondaryUtil.Set(0)
 	}
@@ -274,8 +274,8 @@ func (cps *CombinerPoolState) updateStats() bool {
 		return false
 	}
 
-	// Update performance curve with latest sample
-	cps.perfCurves.AddSample(perfSample{
+	// Update size controller with latest sample
+	cps.controller.AddSample(perfSample{
 		Time:           timeOrigin,
 		GoroutineCount: cps.liveGoroutineCount,
 		Throughput:     cps.throughput.Get(),

@@ -12,9 +12,10 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/basicq"
 	"github.com/petenewcomb/psg-go/internal/cerr"
+	"github.com/petenewcomb/psg-go/internal/cpstate"
 	"github.com/petenewcomb/psg-go/internal/heap"
+	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/petenewcomb/psg-go/internal/state"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
@@ -37,7 +38,7 @@ type CombinerPool struct {
 	// CombinerPoolState hosts the data and core logic for managing the pool of
 	// goroutines to maximize throughput with the minimum number of goroutines
 	// and therefore duplication of individual combiners.
-	state state.CombinerPoolState
+	state cpstate.CombinerPoolState
 
 	// Scattered tasks first attempt to post their results to primaryQueue. If a
 	// combiner goroutine is not immediately available, the task will
@@ -57,7 +58,7 @@ type CombinerPool struct {
 	secondaryChan    chan boundCombineFunc
 	secondaryElected atomic.Bool
 
-	waitingCombines state.InFlightCounter
+	waitingCombines jobstate.InFlightCounter
 	combineWaiters  waitq.Queue
 }
 

@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package state
+package cpstate
 
 import (
 	"math"
@@ -11,9 +11,9 @@ import (
 	"pgregory.net/rapid"
 )
 
-// Helper to create a perfCurves with standard test configuration
-func newTestPerfCurves() *perfCurves {
-	pc := &perfCurves{
+// Helper to create a controller with standard test configuration
+func newTestController() *controller {
+	c := &controller{
 		minConcurrency:           1,
 		maxConcurrency:           -1, // unlimited
 		retentionPeriod:          time.Hour,
@@ -22,82 +22,82 @@ func newTestPerfCurves() *perfCurves {
 		aggressiveGrowthFactor:   2.5,
 		conservativeGrowthFactor: 1.3,
 	}
-	return pc
+	return c
 }
 
 func TestPerfCurvesBasics(t *testing.T) {
 
-	t.Run("empty curves", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		if len(pc.samples) != 0 {
-			t.Errorf("expected empty samples, got %d", len(pc.samples))
+	t.Run("empty controller", func(t *testing.T) {
+		c := newTestController()
+		if len(c.samples) != 0 {
+			t.Errorf("expected empty samples, got %d", len(c.samples))
 		}
 	})
 
 	t.Run("single sample insertion", func(t *testing.T) {
-		pc := newTestPerfCurves()
+		c := newTestController()
 		s := perfSample{
 			Time:           time.Now(),
 			GoroutineCount: 5,
 			Throughput:     1000,
 			SecondaryUtil:  0.5,
 		}
-		pc.AddSample(s)
+		c.AddSample(s)
 
-		if len(pc.samples) != 1 {
-			t.Fatalf("expected 1 sample, got %d", len(pc.samples))
+		if len(c.samples) != 1 {
+			t.Fatalf("expected 1 sample, got %d", len(c.samples))
 		}
-		if pc.samples[0].GoroutineCount != 5 {
-			t.Errorf("expected GoroutineCount=5, got %d", pc.samples[0].GoroutineCount)
+		if c.samples[0].GoroutineCount != 5 {
+			t.Errorf("expected GoroutineCount=5, got %d", c.samples[0].GoroutineCount)
 		}
 	})
 
 	t.Run("samples sorted by goroutine count", func(t *testing.T) {
-		pc := newTestPerfCurves()
+		c := newTestController()
 		now := time.Now()
 
 		// Add samples out of order
-		pc.AddSample(perfSample{
+		c.AddSample(perfSample{
 			Time:           now,
 			GoroutineCount: 10,
 			Throughput:     2000,
 			SecondaryUtil:  0.5,
 		})
-		pc.AddSample(perfSample{
+		c.AddSample(perfSample{
 			Time:           now.Add(time.Second),
 			GoroutineCount: 5,
 			Throughput:     1000,
 			SecondaryUtil:  0.5,
 		})
-		pc.AddSample(perfSample{
+		c.AddSample(perfSample{
 			Time:           now.Add(2 * time.Second),
 			GoroutineCount: 15,
 			Throughput:     2500,
 			SecondaryUtil:  0.5,
 		})
 
-		if len(pc.samples) != 3 {
-			t.Fatalf("expected 3 samples, got %d", len(pc.samples))
+		if len(c.samples) != 3 {
+			t.Fatalf("expected 3 samples, got %d", len(c.samples))
 		}
 
 		// Check sorted order
-		if pc.samples[0].GoroutineCount != 5 {
-			t.Errorf("expected first sample GoroutineCount=5, got %d", pc.samples[0].GoroutineCount)
+		if c.samples[0].GoroutineCount != 5 {
+			t.Errorf("expected first sample GoroutineCount=5, got %d", c.samples[0].GoroutineCount)
 		}
-		if pc.samples[1].GoroutineCount != 10 {
-			t.Errorf("expected second sample GoroutineCount=10, got %d", pc.samples[1].GoroutineCount)
+		if c.samples[1].GoroutineCount != 10 {
+			t.Errorf("expected second sample GoroutineCount=10, got %d", c.samples[1].GoroutineCount)
 		}
-		if pc.samples[2].GoroutineCount != 15 {
-			t.Errorf("expected third sample GoroutineCount=15, got %d", pc.samples[2].GoroutineCount)
+		if c.samples[2].GoroutineCount != 15 {
+			t.Errorf("expected third sample GoroutineCount=15, got %d", c.samples[2].GoroutineCount)
 		}
 	})
 
 	t.Run("update existing goroutine count", func(t *testing.T) {
-		pc := newTestPerfCurves()
+		c := newTestController()
 		now := time.Now()
 
 		// First sample
-		pc.AddSample(perfSample{
+		c.AddSample(perfSample{
 			Time:           now,
 			GoroutineCount: 5,
 			Throughput:     1000,
@@ -105,26 +105,26 @@ func TestPerfCurvesBasics(t *testing.T) {
 		})
 
 		// Update with same goroutine count
-		pc.AddSample(perfSample{
+		c.AddSample(perfSample{
 			Time:           now.Add(time.Second),
 			GoroutineCount: 5,
 			Throughput:     1200,
 			SecondaryUtil:  0.6,
 		})
 
-		if len(pc.samples) != 1 {
-			t.Fatalf("expected 1 sample after update, got %d", len(pc.samples))
+		if len(c.samples) != 1 {
+			t.Fatalf("expected 1 sample after update, got %d", len(c.samples))
 		}
-		if pc.samples[0].Throughput != 1200 {
-			t.Errorf("expected updated Throughput=1200, got %f", pc.samples[0].Throughput)
+		if c.samples[0].Throughput != 1200 {
+			t.Errorf("expected updated Throughput=1200, got %f", c.samples[0].Throughput)
 		}
 	})
 }
 
 func TestFindUtilizationValley(t *testing.T) {
 	t.Run("finds lowest utilization", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.highUtilThreshold = 0.6
+		c := newTestController()
+		c.highUtilThreshold = 0.6
 
 		// Add samples with different utilizations
 		now := time.Now()
@@ -137,18 +137,18 @@ func TestFindUtilizationValley(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		valleyIdx := pc.findUtilizationValley()
+		valleyIdx := c.findUtilizationValley()
 		if valleyIdx != 2 {
 			t.Errorf("expected valley at index 2 (GC=3), got %d", valleyIdx)
 		}
 	})
 
 	t.Run("returns len when all high utilization", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.highUtilThreshold = 0.6
+		c := newTestController()
+		c.highUtilThreshold = 0.6
 
 		// All samples have high utilization
 		samples := []perfSample{
@@ -158,11 +158,11 @@ func TestFindUtilizationValley(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		valleyIdx := pc.findUtilizationValley()
-		if valleyIdx != len(pc.samples) {
+		valleyIdx := c.findUtilizationValley()
+		if valleyIdx != len(c.samples) {
 			t.Errorf("expected valley index = len(samples) when all high, got %d", valleyIdx)
 		}
 	})
@@ -170,8 +170,8 @@ func TestFindUtilizationValley(t *testing.T) {
 
 func TestFindThroughputKnee(t *testing.T) {
 	t.Run("identifies throughput knee", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.minimumReturn = 0.2
+		c := newTestController()
+		c.minimumReturn = 0.2
 
 		// Perfect linear scaling from origin
 		now := time.Now()
@@ -184,10 +184,10 @@ func TestFindThroughputKnee(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		knee := pc.findThroughputKnee()
+		knee := c.findThroughputKnee()
 		// Should detect growth up to index 3 (GC=4)
 		if knee != 3 {
 			t.Errorf("expected knee at index 3, got %d", knee)
@@ -195,8 +195,8 @@ func TestFindThroughputKnee(t *testing.T) {
 	})
 
 	t.Run("handles non-linear scaling", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.minimumReturn = 0.2
+		c := newTestController()
+		c.minimumReturn = 0.2
 
 		// Non-linear pattern
 		samples := []perfSample{
@@ -206,10 +206,10 @@ func TestFindThroughputKnee(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		knee := pc.findThroughputKnee()
+		knee := c.findThroughputKnee()
 		// With minimumReturn=0.2:
 		// 1→2: return=0.5 (acceptable), 2→3: return=0.2 (acceptable)
 		// So knee should be at end (index 3)
@@ -221,16 +221,16 @@ func TestFindThroughputKnee(t *testing.T) {
 
 func TestRecommendTarget(t *testing.T) {
 	t.Run("no samples recommends 1", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		target := pc.RecommendTarget()
+		c := newTestController()
+		target := c.RecommendTarget()
 		if target != 1 {
-			t.Errorf("expected target=1 for empty curves, got %d", target)
+			t.Errorf("expected target=1 for empty controller, got %d", target)
 		}
 	})
 
 	t.Run("valley found recommends conservative exploration", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.highUtilThreshold = 0.6
+		c := newTestController()
+		c.highUtilThreshold = 0.6
 
 		// Create a valley scenario
 		samples := []perfSample{
@@ -241,10 +241,10 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		target := pc.RecommendTarget()
+		target := c.RecommendTarget()
 		// Valley at index 2 (GC=3), knee at end (index 4)
 		// scaleUpWithinGapAt(2): baseGC=3, gap to next=1, so returns 3
 		if target != 3 {
@@ -253,9 +253,9 @@ func TestRecommendTarget(t *testing.T) {
 	})
 
 	t.Run("all linear high util recommends aggressive growth", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.highUtilThreshold = 0.6
-		pc.aggressiveGrowthFactor = 2.5
+		c := newTestController()
+		c.highUtilThreshold = 0.6
+		c.aggressiveGrowthFactor = 2.5
 
 		// All samples linear and high utilization
 		now := time.Now()
@@ -267,10 +267,10 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		target := pc.RecommendTarget()
+		target := c.RecommendTarget()
 		// Should aggressively scale up from 4
 		expectedMin := int(math.Round(4 * 2.5))
 		if target < expectedMin {
@@ -279,9 +279,9 @@ func TestRecommendTarget(t *testing.T) {
 	})
 
 	t.Run("respects max concurrency limit", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.SetLimits(1, 10)
-		pc.aggressiveGrowthFactor = 2.5
+		c := newTestController()
+		c.SetLimits(1, 10)
+		c.aggressiveGrowthFactor = 2.5
 
 		// Would recommend > 10 without limit
 		now := time.Now()
@@ -292,19 +292,19 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		target := pc.RecommendTarget()
+		target := c.RecommendTarget()
 		if target > 10 {
 			t.Errorf("expected target <= maxConcurrency(10), got %d", target)
 		}
 	})
 
 	t.Run("scales down when no linear region found", func(t *testing.T) {
-		pc := newTestPerfCurves()
-		pc.highUtilThreshold = 0.6
-		pc.minimumReturn = 0.2
+		c := newTestController()
+		c.highUtilThreshold = 0.6
+		c.minimumReturn = 0.2
 
 		// High util but no linear scaling from origin
 		now := time.Now()
@@ -315,10 +315,10 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			pc.AddSample(s)
+			c.AddSample(s)
 		}
 
-		target := pc.RecommendTarget()
+		target := c.RecommendTarget()
 		// Should scale down from 5
 		if target >= 5 {
 			t.Errorf("expected scale down from 5, got %d", target)
@@ -330,7 +330,7 @@ func TestRecommendTarget(t *testing.T) {
 func TestPerfCurvesProperties(t *testing.T) {
 	t.Run("samples remain sorted after random insertions", func(t *testing.T) {
 		rapid.Check(t, func(t *rapid.T) {
-			pc := newTestPerfCurves()
+			c := newTestController()
 
 			// Generate random samples
 			numSamples := rapid.IntRange(1, 50).Draw(t, "numSamples")
@@ -339,7 +339,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 				throughput := rapid.Float64Range(10, 10000).Draw(t, "throughput")
 				util := rapid.Float64Range(0.1, 0.95).Draw(t, "utilization")
 
-				pc.AddSample(perfSample{
+				c.AddSample(perfSample{
 					Time:           time.Now(),
 					GoroutineCount: gc,
 					Throughput:     throughput,
@@ -348,11 +348,11 @@ func TestPerfCurvesProperties(t *testing.T) {
 			}
 
 			// Check samples are sorted by goroutine count
-			for i := 1; i < len(pc.samples); i++ {
-				if pc.samples[i-1].GoroutineCount > pc.samples[i].GoroutineCount {
+			for i := 1; i < len(c.samples); i++ {
+				if c.samples[i-1].GoroutineCount > c.samples[i].GoroutineCount {
 					t.Fatalf("samples not sorted: [%d].GC=%d > [%d].GC=%d",
-						i-1, pc.samples[i-1].GoroutineCount,
-						i, pc.samples[i].GoroutineCount)
+						i-1, c.samples[i-1].GoroutineCount,
+						i, c.samples[i].GoroutineCount)
 				}
 			}
 		})
@@ -360,7 +360,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 
 	t.Run("RecommendTarget always respects limits", func(t *testing.T) {
 		rapid.Check(t, func(t *rapid.T) {
-			pc := newTestPerfCurves()
+			c := newTestController()
 
 			// Generate random but valid limits
 			minConcurrency := rapid.IntRange(0, 10).Draw(t, "minConcurrency")
@@ -368,7 +368,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 				rapid.Just(-1), // unlimited
 				rapid.IntRange(max(minConcurrency, 1), 50),
 			).Draw(t, "maxConcurrency")
-			pc.SetLimits(minConcurrency, maxConcurrency)
+			c.SetLimits(minConcurrency, maxConcurrency)
 
 			// Generate some random performance data
 			numSamples := rapid.IntRange(0, 20).Draw(t, "numSamples")
@@ -377,7 +377,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 				throughput := rapid.Float64Range(100, 10000).Draw(t, "throughput")
 				util := rapid.Float64Range(0.1, 0.95).Draw(t, "utilization")
 
-				pc.AddSample(perfSample{
+				c.AddSample(perfSample{
 					Time:           time.Now(),
 					GoroutineCount: gc,
 					Throughput:     throughput,
@@ -385,7 +385,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 				})
 			}
 
-			recommendation := pc.RecommendTarget()
+			recommendation := c.RecommendTarget()
 
 			// Check minimum bound
 			expectedMin := minConcurrency
@@ -407,8 +407,8 @@ func TestPerfCurvesProperties(t *testing.T) {
 
 	t.Run("findThroughputKnee is consistent with tolerance", func(t *testing.T) {
 		rapid.Check(t, func(t *rapid.T) {
-			pc := newTestPerfCurves()
-			pc.minimumReturn = 0.2
+			c := newTestController()
+			c.minimumReturn = 0.2
 
 			// Generate samples with known linear portion
 			linearSamples := rapid.IntRange(2, 10).Draw(t, "linearSamples")
@@ -416,7 +416,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 
 			// Add perfectly linear samples
 			for i := 1; i <= linearSamples; i++ {
-				pc.AddSample(perfSample{
+				c.AddSample(perfSample{
 					GoroutineCount: i,
 					Throughput:     slope * float64(i),
 					SecondaryUtil:  0.5,
@@ -427,14 +427,14 @@ func TestPerfCurvesProperties(t *testing.T) {
 			for i := linearSamples + 1; i <= linearSamples+5; i++ {
 				// Throughput deviates from linear
 				deviation := rapid.Float64Range(0.3, 0.7).Draw(t, "deviation")
-				pc.AddSample(perfSample{
+				c.AddSample(perfSample{
 					GoroutineCount: i,
 					Throughput:     slope * float64(i) * deviation,
 					SecondaryUtil:  0.7,
 				})
 			}
 
-			knee := pc.findThroughputKnee()
+			knee := c.findThroughputKnee()
 
 			// Linear end should be around where we introduced deviation
 			if knee < linearSamples-1 || knee > linearSamples+2 {

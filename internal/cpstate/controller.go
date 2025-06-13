@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package state
+package cpstate
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-type perfCurves struct {
+type controller struct {
 	samples          []perfSample
 	oldestSampleTime time.Time
 
@@ -32,15 +32,15 @@ type perfSample struct {
 }
 
 // Format implements fmt.Formatter
-func (pc *perfCurves) Format(fs fmt.State, verb rune) {
+func (c *controller) Format(fs fmt.State, verb rune) {
 	if verb != 'v' {
 		panic("unsupported verb")
 	}
 	_, _ = fmt.Fprint(fs, "[")
 	sep := ""
-	valley := pc.findUtilizationValley()
-	knee := pc.findThroughputKnee()
-	for i, s := range pc.samples {
+	valley := c.findUtilizationValley()
+	knee := c.findThroughputKnee()
+	for i, s := range c.samples {
 		label := ""
 		switch {
 		case i == valley && i == knee:
@@ -56,8 +56,8 @@ func (pc *perfCurves) Format(fs fmt.State, verb rune) {
 	_, _ = fmt.Fprint(fs, "]")
 }
 
-// SetLimits configures the concurrency limits for the performance curve
-func (pc *perfCurves) SetLimits(minConcurrency, maxConcurrency int) {
+// SetLimits configures the concurrency limits for the size controller
+func (c *controller) SetLimits(minConcurrency, maxConcurrency int) {
 	if minConcurrency < 0 {
 		panic(fmt.Sprintf("invalid minimum concurrency %d: must be >= 0", minConcurrency))
 	}
@@ -67,41 +67,41 @@ func (pc *perfCurves) SetLimits(minConcurrency, maxConcurrency int) {
 	if maxConcurrency >= 0 && minConcurrency > maxConcurrency {
 		panic(fmt.Sprintf("minimum concurrency %d is greater than maximum concurrency %d", minConcurrency, maxConcurrency))
 	}
-	pc.minConcurrency = minConcurrency
-	pc.maxConcurrency = maxConcurrency
+	c.minConcurrency = minConcurrency
+	c.maxConcurrency = maxConcurrency
 }
 
-// SetThresholds configures the utilization thresholds for the performance curve
-func (pc *perfCurves) SetHighUtilizationThreshold(high float64) {
+// SetThresholds configures the utilization thresholds for the size controller
+func (c *controller) SetHighUtilizationThreshold(high float64) {
 	if high < 0 || high > 1 {
 		panic(fmt.Sprintf("invalid high utilization threshold %v: must be between 0 and 1, inclusive", high))
 	}
-	pc.highUtilThreshold = high
+	c.highUtilThreshold = high
 }
 
 // SetRetentionPeriod configures how long performance samples are retained
-func (pc *perfCurves) RetentionPeriod() time.Duration {
-	return pc.retentionPeriod
+func (c *controller) RetentionPeriod() time.Duration {
+	return c.retentionPeriod
 }
 
 // SetRetentionPeriod configures how long performance samples are retained
-func (pc *perfCurves) SetRetentionPeriod(d time.Duration) {
+func (c *controller) SetRetentionPeriod(d time.Duration) {
 	if d <= 0 {
 		panic(fmt.Sprintf("invalid retention period %v: must be > 0", d))
 	}
-	pc.retentionPeriod = d
+	c.retentionPeriod = d
 }
 
 // SetMinimumReturn configures the ratio for throughput knee detection
-func (pc *perfCurves) SetMinimumReturn(ratio float64) {
+func (c *controller) SetMinimumReturn(ratio float64) {
 	if ratio <= 0 || ratio > 1 {
 		panic(fmt.Sprintf("invalid minimum return ratio %v: must be > 0 and <= 1", ratio))
 	}
-	pc.minimumReturn = ratio
+	c.minimumReturn = ratio
 }
 
 // SetGrowthFactors configures the growth factors for scaling decisions
-func (pc *perfCurves) SetGrowthFactors(aggressive, conservative float64) {
+func (c *controller) SetGrowthFactors(aggressive, conservative float64) {
 	if aggressive <= 1 {
 		panic(fmt.Sprintf("invalid aggressive growth factor %v: must be > 1", aggressive))
 	}
@@ -111,63 +111,63 @@ func (pc *perfCurves) SetGrowthFactors(aggressive, conservative float64) {
 	if conservative > aggressive {
 		panic(fmt.Sprintf("conservative growth factor %v cannot be greater than aggressive growth factor %v", conservative, aggressive))
 	}
-	pc.aggressiveGrowthFactor = aggressive
-	pc.conservativeGrowthFactor = conservative
+	c.aggressiveGrowthFactor = aggressive
+	c.conservativeGrowthFactor = conservative
 }
 
-func (pc *perfCurves) AddSample(s perfSample) {
+func (c *controller) AddSample(s perfSample) {
 	// Find where this sample should be inserted/updated in the sorted slice
-	newSampleIndex := pc.findByGoroutineCount(s.GoroutineCount)
-	if newSampleIndex < len(pc.samples) && s.GoroutineCount == pc.samples[newSampleIndex].GoroutineCount {
-		pc.samples[newSampleIndex] = s
+	newSampleIndex := c.findByGoroutineCount(s.GoroutineCount)
+	if newSampleIndex < len(c.samples) && s.GoroutineCount == c.samples[newSampleIndex].GoroutineCount {
+		c.samples[newSampleIndex] = s
 	}
 
-	valleyIndex := pc.findUtilizationValley()
-	kneeIndex := pc.findThroughputKnee()
-	if valleyIndex == len(pc.samples) && kneeIndex == len(pc.samples) {
-		for i := range pc.samples {
-			pc.samples[i].Time = s.Time
+	valleyIndex := c.findUtilizationValley()
+	kneeIndex := c.findThroughputKnee()
+	if valleyIndex == len(c.samples) && kneeIndex == len(c.samples) {
+		for i := range c.samples {
+			c.samples[i].Time = s.Time
 		}
 	} else {
 		refreshAroundInflectionPoint := func(inflectionPointIndex int) {
-			for i := max(0, inflectionPointIndex-2); i <= min(inflectionPointIndex+2, len(pc.samples)-1); i++ {
-				pc.samples[i].Time = s.Time
+			for i := max(0, inflectionPointIndex-2); i <= min(inflectionPointIndex+2, len(c.samples)-1); i++ {
+				c.samples[i].Time = s.Time
 			}
 		}
-		if valleyIndex < len(pc.samples) {
+		if valleyIndex < len(c.samples) {
 			refreshAroundInflectionPoint(valleyIndex)
 		}
-		if kneeIndex < len(pc.samples) {
+		if kneeIndex < len(c.samples) {
 			refreshAroundInflectionPoint(kneeIndex)
 		}
 	}
 
-	oldestValidTime := s.Time.Add(-pc.retentionPeriod)
-	if !pc.oldestSampleTime.IsZero() && !pc.oldestSampleTime.Before(oldestValidTime) {
+	oldestValidTime := s.Time.Add(-c.retentionPeriod)
+	if !c.oldestSampleTime.IsZero() && !c.oldestSampleTime.Before(oldestValidTime) {
 		// Existing samples still valid, just need to insert if new.
-		if newSampleIndex == len(pc.samples) || s.GoroutineCount != pc.samples[newSampleIndex].GoroutineCount {
-			pc.samples = slices.Insert(pc.samples, newSampleIndex, s)
+		if newSampleIndex == len(c.samples) || s.GoroutineCount != c.samples[newSampleIndex].GoroutineCount {
+			c.samples = slices.Insert(c.samples, newSampleIndex, s)
 		}
 		return
 	}
 
 	// Scan to expire old samples while also inserting new sample
-	pc.oldestSampleTime = s.Time
+	c.oldestSampleTime = s.Time
 	j := 0
 	append := func(i int, s perfSample) {
 		if j != i {
-			if j < len(pc.samples) {
-				pc.samples[j] = s
+			if j < len(c.samples) {
+				c.samples[j] = s
 			} else {
-				pc.samples = append(pc.samples, s)
+				c.samples = append(c.samples, s)
 			}
 		}
 		j++
-		if s.Time.Before(pc.oldestSampleTime) {
-			pc.oldestSampleTime = s.Time
+		if s.Time.Before(c.oldestSampleTime) {
+			c.oldestSampleTime = s.Time
 		}
 	}
-	for i, es := range pc.samples {
+	for i, es := range c.samples {
 		if i == newSampleIndex {
 			// Insert new sample or replace existing one with same goroutine count
 			if es.GoroutineCount == s.GoroutineCount {
@@ -182,15 +182,15 @@ func (pc *perfCurves) AddSample(s perfSample) {
 			append(i, es)
 		}
 	}
-	if newSampleIndex == len(pc.samples) {
+	if newSampleIndex == len(c.samples) {
 		append(-1, s)
 	}
-	pc.samples = pc.samples[:j]
+	c.samples = c.samples[:j]
 }
 
-func (pc *perfCurves) findByGoroutineCount(goroutineCount int) int {
+func (c *controller) findByGoroutineCount(goroutineCount int) int {
 	i, _ := slices.BinarySearchFunc(
-		pc.samples,
+		c.samples,
 		goroutineCount,
 		func(s perfSample, goroutineCount int) int {
 			return s.GoroutineCount - goroutineCount
@@ -199,94 +199,94 @@ func (pc *perfCurves) findByGoroutineCount(goroutineCount int) int {
 	return i
 }
 
-func (pc *perfCurves) RecommendTarget() int {
-	target := pc.calculateBestTarget()
+func (c *controller) RecommendTarget() int {
+	target := c.calculateBestTarget()
 	switch {
-	case target < pc.minConcurrency:
-		return pc.minConcurrency
-	case pc.maxConcurrency >= 0 && target > pc.maxConcurrency:
-		return pc.maxConcurrency
+	case target < c.minConcurrency:
+		return c.minConcurrency
+	case c.maxConcurrency >= 0 && target > c.maxConcurrency:
+		return c.maxConcurrency
 	default:
 		return target
 	}
 }
 
-func (pc *perfCurves) calculateBestTarget() int {
+func (c *controller) calculateBestTarget() int {
 
-	valleyIndex := pc.findUtilizationValley()
-	kneeIndex := pc.findThroughputKnee()
+	valleyIndex := c.findUtilizationValley()
+	kneeIndex := c.findThroughputKnee()
 	switch {
 
-	case valleyIndex < len(pc.samples):
+	case valleyIndex < len(c.samples):
 		// Non-high utilization valley found: fine-tune from best known point
 		baseIndex := min(valleyIndex, kneeIndex)
-		if baseIndex < len(pc.samples)-1 {
-			return pc.scaleUpWithinGapAt(baseIndex)
+		if baseIndex < len(c.samples)-1 {
+			return c.scaleUpWithinGapAt(baseIndex)
 		} else {
-			return pc.scaleUpConservatively()
+			return c.scaleUpConservatively()
 		}
 
-	case kneeIndex == len(pc.samples):
-		if len(pc.samples) < 2 {
+	case kneeIndex == len(c.samples):
+		if len(c.samples) < 2 {
 			// Can't determine throughput growth with less than two samples:
 			// explore a bit higher
-			return pc.scaleUpConservatively()
+			return c.scaleUpConservatively()
 		} else {
 			// All samples are high utilization and exhibit good throughput
 			// growth: explore much higher
-			return pc.scaleUpAggressively()
+			return c.scaleUpAggressively()
 		}
 
-	case kneeIndex == 0: // above already ensures that len(pc.samples) > 0
+	case kneeIndex == 0: // above already ensures that len(c.samples) > 0
 		// All samples are high utilization but show at best subpar throughput
 		// growth: explore lower
-		return pc.scaleDown()
+		return c.scaleDown()
 
-	default: // above already ensures that 0 < kneeIndex < len(pc.samples)
+	default: // above already ensures that 0 < kneeIndex < len(c.samples)
 		// Throughput knee found but all samples have high utilization:
 		// fine-tune upward from the knee
-		return pc.scaleUpWithinGapAt(kneeIndex)
+		return c.scaleUpWithinGapAt(kneeIndex)
 	}
 }
 
-// Finds the index of the first non-high-utilization sample or len(pc.samples)
+// Finds the index of the first non-high-utilization sample or len(c.samples)
 // if all samples are high
-func (pc *perfCurves) findUtilizationValley() int {
-	for i, s := range pc.samples {
-		if s.SecondaryUtil < pc.highUtilThreshold {
+func (c *controller) findUtilizationValley() int {
+	for i, s := range c.samples {
+		if s.SecondaryUtil < c.highUtilThreshold {
 			return i
 		}
 	}
-	return len(pc.samples)
+	return len(c.samples)
 }
 
 // scaleUpAggressively returns a goroutine count significantly higher relative
 // to the goroutine count of the highest-goroutine (last) existing sample, or 1
 // if there are no existing samples.
-func (pc *perfCurves) scaleUpAggressively() int {
-	if len(pc.samples) == 0 {
+func (c *controller) scaleUpAggressively() int {
+	if len(c.samples) == 0 {
 		// No samples available, start with 1 goroutine
 		return 1
 	}
-	return pc.scaleUpByFactor(len(pc.samples)-1, pc.aggressiveGrowthFactor)
+	return c.scaleUpByFactor(len(c.samples)-1, c.aggressiveGrowthFactor)
 }
 
 // scaleUpConservatively returns a goroutine count moderately higher relative to
 // the goroutine count of the sample at the given base index, but only if the
 // throughput of the sample is greater than that of the preceding sample. In the
 // latter case, it returns the goroutine count of original sample.
-func (pc *perfCurves) scaleUpConservatively() int {
-	baseIndex := len(pc.samples) - 1
-	if baseIndex > 0 && !pc.throughputStillImprovingAt(baseIndex) {
-		return pc.samples[baseIndex].GoroutineCount // Stay put
+func (c *controller) scaleUpConservatively() int {
+	baseIndex := len(c.samples) - 1
+	if baseIndex > 0 && !c.throughputStillImprovingAt(baseIndex) {
+		return c.samples[baseIndex].GoroutineCount // Stay put
 	}
-	return pc.scaleUpByFactor(baseIndex, pc.conservativeGrowthFactor)
+	return c.scaleUpByFactor(baseIndex, c.conservativeGrowthFactor)
 }
 
-func (pc *perfCurves) scaleUpByFactor(baseIndex int, factor float64) int {
+func (c *controller) scaleUpByFactor(baseIndex int, factor float64) int {
 	baseGC := 0
 	if baseIndex >= 0 {
-		baseGC = pc.samples[baseIndex].GoroutineCount
+		baseGC = c.samples[baseIndex].GoroutineCount
 	}
 	return max(baseGC+1, int(math.Round(float64(baseGC)*factor)))
 }
@@ -296,27 +296,27 @@ func (pc *perfCurves) scaleUpByFactor(baseIndex int, factor float64) int {
 // throughput of the first sample is greater than that of the preceding one.
 // Returns the goroutine count at the base index in the latter case or if there
 // is no gap between it and that of the following sample.
-func (pc *perfCurves) scaleUpWithinGapAt(baseIndex int) int {
-	baseGC := pc.samples[baseIndex].GoroutineCount
-	if !pc.throughputStillImprovingAt(baseIndex) {
+func (c *controller) scaleUpWithinGapAt(baseIndex int) int {
+	baseGC := c.samples[baseIndex].GoroutineCount
+	if !c.throughputStillImprovingAt(baseIndex) {
 		return baseGC
 	}
-	gapSize := pc.samples[baseIndex+1].GoroutineCount - baseGC
+	gapSize := c.samples[baseIndex+1].GoroutineCount - baseGC
 	if gapSize == 1 {
 		return baseGC
 	}
 	return baseGC + min(1, int(math.Round(float64(gapSize)*0.5)))
 }
 
-func (pc *perfCurves) throughputStillImprovingAt(baseIndex int) bool {
-	return baseIndex > 0 && pc.samples[baseIndex-1].Throughput < pc.samples[baseIndex].Throughput
+func (c *controller) throughputStillImprovingAt(baseIndex int) bool {
+	return baseIndex > 0 && c.samples[baseIndex-1].Throughput < c.samples[baseIndex].Throughput
 }
 
 // scaleDown returns a lower goroutine count roughly half that of the
 // lowest-goroutine (first) existing sample, if possible. It will never return a
 // goroutine count less than 1.
-func (pc *perfCurves) scaleDown() int {
-	baseGC := pc.samples[0].GoroutineCount
+func (c *controller) scaleDown() int {
+	baseGC := c.samples[0].GoroutineCount
 	return max(1, min(baseGC-1, int(math.Round(float64(baseGC)*0.5))))
 }
 
@@ -348,10 +348,10 @@ func (pc *perfCurves) scaleDown() int {
 //
 // Returns the index just past the last sample that maintains linearity from
 // origin or 0 if a valid linear sequence from origin cannot be found.
-func (pc *perfCurves) findLinearEnd() int {
+func (c *controller) findLinearEnd() int {
 	// Must ensure that at least two samples are not skipped, for the same
 	// reason as above.
-	maxSkips := min(pc.maxLinearitySkips, len(pc.samples)-2)
+	maxSkips := min(c.maxLinearitySkips, len(c.samples)-2)
 
 	var sumSlopes float64
 	var count int
@@ -360,7 +360,7 @@ func (pc *perfCurves) findLinearEnd() int {
 	skipsUsed := 0
 	linearEnd := 0
 
-	for i, sample := range pc.samples {
+	for i, sample := range c.samples {
 		slope := sample.Throughput / float64(sample.GoroutineCount)
 
 		// Test adding this slope
@@ -373,7 +373,7 @@ func (pc *perfCurves) findLinearEnd() int {
 			meanSlope := testSum / float64(testCount)
 			normalizedRange := (testMax - testMin) / meanSlope
 
-			if normalizedRange > pc.linearityTolerance {
+			if normalizedRange > c.linearityTolerance {
 				if skipsUsed < maxSkips {
 					skipsUsed++
 					continue
@@ -395,17 +395,17 @@ func (pc *perfCurves) findLinearEnd() int {
 }
 */
 
-func (pc *perfCurves) findThroughputKnee() int {
-	for i := 0; i < len(pc.samples)-1; i++ {
-		if !pc.rangeExhibitsAcceptableReturn(&pc.samples[i], &pc.samples[i+1]) {
+func (c *controller) findThroughputKnee() int {
+	for i := 0; i < len(c.samples)-1; i++ {
+		if !c.rangeExhibitsAcceptableReturn(&c.samples[i], &c.samples[i+1]) {
 			return i
 		}
 	}
-	return len(pc.samples)
+	return len(c.samples)
 }
 
-func (pc *perfCurves) rangeExhibitsAcceptableReturn(lower, higher *perfSample) bool {
+func (c *controller) rangeExhibitsAcceptableReturn(lower, higher *perfSample) bool {
 	slope := (higher.Throughput - lower.Throughput) / float64(higher.GoroutineCount-lower.GoroutineCount)
 	returnRate := slope / lower.Throughput
-	return returnRate >= pc.minimumReturn
+	return returnRate >= c.minimumReturn
 }

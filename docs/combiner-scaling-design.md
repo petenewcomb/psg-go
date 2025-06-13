@@ -84,8 +84,8 @@ The algorithm continuously monitors throughput and secondary utilization using e
 
 When stable measurements are available, the algorithm:
 
-1. **Updates the performance curve** with the latest sample, either extending existing segments or creating new ones based on consistency with linear models
-2. **Analyzes the curve** for knee detection and exploration opportunities  
+1. **Updates the size controller** with the latest sample, either extending existing segments or creating new ones based on consistency with linear models
+2. **Analyzes the performance samples** for knee detection and exploration opportunities  
 3. **Makes scaling recommendations** based on current utilization and curve topology
 
 ### Knee Detection and Exploration Strategy
@@ -105,7 +105,7 @@ When no confident knee is found, the algorithm employs **utilization-driven expl
 
 ### Temporal Adaptation
 
-Performance curves have configurable retention periods to handle workload changes. Segments not refreshed within the retention window are discarded, allowing the algorithm to adapt to new conditions without being anchored to obsolete data.
+Size controllers have configurable retention periods to handle workload changes. Segments not refreshed within the retention window are discarded, allowing the algorithm to adapt to new conditions without being anchored to obsolete data.
 
 ## Implementation Lessons
 

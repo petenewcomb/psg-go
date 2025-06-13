@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go/internal/dynval"
-	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
@@ -18,7 +18,7 @@ import (
 type TaskPool struct {
 	j                *Job
 	concurrencyLimit dynval.Value[int]
-	inFlight         state.InFlightCounter
+	inFlight         jobstate.InFlightCounter
 	waiterQueue      waitq.Queue
 }
 

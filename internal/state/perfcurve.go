@@ -117,9 +117,6 @@ func (pc *perfCurves) SetGrowthFactors(aggressive, conservative float64) {
 }
 
 func (pc *perfCurves) AddSample(s perfSample) {
-	//fmt.Printf("adding sample %d:%.0f to %v\n", s.GoroutineCount, s.Throughput*float64(time.Second), pc)
-	//defer fmt.Printf("added sample %d:%.0f to %v\n", s.GoroutineCount, s.Throughput*float64(time.Second), pc)
-
 	// Find where this sample should be inserted/updated in the sorted slice
 	newSampleIndex := pc.findByGoroutineCount(s.GoroutineCount)
 	if newSampleIndex < len(pc.samples) && s.GoroutineCount == pc.samples[newSampleIndex].GoroutineCount {
@@ -133,141 +130,63 @@ func (pc *perfCurves) AddSample(s perfSample) {
 			pc.samples[i].Time = s.Time
 		}
 	} else {
-
+		refreshAroundInflectionPoint := func(inflectionPointIndex int) {
+			for i := max(0, inflectionPointIndex-2); i <= min(inflectionPointIndex+2, len(pc.samples)-1); i++ {
+				pc.samples[i].Time = s.Time
+			}
+		}
 		if valleyIndex < len(pc.samples) {
-			pc.samples[valleyIndex].Time = s.Time
+			refreshAroundInflectionPoint(valleyIndex)
 		}
-		if valleyIndex+1 < len(pc.samples) {
-			pc.samples[valleyIndex+1].Time = s.Time
-		}
-		if valleyIndex+2 < len(pc.samples) {
-			pc.samples[valleyIndex+2].Time = s.Time
-		}
-		if valleyIndex-1 >= 0 {
-			pc.samples[valleyIndex-1].Time = s.Time
-		}
-		if valleyIndex-2 >= 0 {
-			pc.samples[valleyIndex-2].Time = s.Time
-		}
-
 		if kneeIndex < len(pc.samples) {
-			pc.samples[kneeIndex].Time = s.Time
-		}
-		if kneeIndex+1 < len(pc.samples) {
-			pc.samples[kneeIndex+1].Time = s.Time
-		}
-		if kneeIndex+2 < len(pc.samples) {
-			pc.samples[kneeIndex+2].Time = s.Time
-		}
-		if kneeIndex-1 >= 0 {
-			pc.samples[kneeIndex-1].Time = s.Time
-		}
-		if kneeIndex-2 >= 0 {
-			pc.samples[kneeIndex-2].Time = s.Time
+			refreshAroundInflectionPoint(kneeIndex)
 		}
 	}
 
-	/*
-		if newSampleIndex < len(pc.samples) && s.GoroutineCount == pc.samples[newSampleIndex].GoroutineCount {
-			pc.samples[newSampleIndex] = s
-		}
-		if len(pc.samples) > 2 {
-			pc.samples[0].Time = s.Time
-			pc.samples[1].Time = s.Time
-			for i := 2; i < len(pc.samples); i++ {
-				if pc.rangeExhibitsAcceptableReturn(&pc.samples[i-1], &pc.samples[i]) {
-					//pc.samples[0].Time = s.Time
-					pc.samples[i].Time = s.Time
-				}
-			}
-		}
-	*/
-
-	/*
-		// Proactively refresh timestamps of nearby samples to prevent premature expiration
-		// and maintain performance curve stability bounds around the new sample
-		if newSampleIndex > 0 {
-			referenceSample := &s
-			// Refresh timestamps for samples with lower goroutine counts
-			// Walk backward from insertion point, refreshing timestamps of samples
-			// that still appear to have acceptable performance characteristics
-			for i := newSampleIndex - 1; i >= 0; i-- {
-				//fmt.Printf("refreshing time for lower sample %d\n", pc.samples[i].GoroutineCount)
-				if pc.samples[i].SecondaryUtil > pc.highUtilThreshold &&
-					!pc.rangeExhibitsAcceptableReturn(&pc.samples[i], referenceSample) {
-					break
-				}
-				pc.samples[i].Time = s.Time
-				referenceSample = &pc.samples[i]
-			}
-		}
-
-		// Handle the sample at the insertion point and refresh forward samples
-		if newSampleIndex < len(pc.samples) {
-			referenceSample := &s
-			i := newSampleIndex
-			if pc.samples[newSampleIndex].GoroutineCount == s.GoroutineCount {
-				// Start forward refresh from the next sample (the one after our update)
-				i++
-			}
-			// Refresh timestamps for samples with higher goroutine counts
-			// Continue until we find a sample that shows acceptable return on investment
-			for ; i < len(pc.samples); i++ {
-				//fmt.Printf("refreshing time for higher sample %d\n", pc.samples[i].GoroutineCount)
-				if !pc.rangeExhibitsAcceptableReturn(referenceSample, &pc.samples[i]) {
-					break
-				}
-				pc.samples[i].Time = s.Time
-				referenceSample = &pc.samples[i]
-			}
-		}
-	*/
-
-	// Use the new sample's timestamp for consistent time reference throughout method
 	oldestValidTime := s.Time.Add(-pc.retentionPeriod)
-	if pc.oldestSampleTime.IsZero() || pc.oldestSampleTime.Before(oldestValidTime) {
-		//fmt.Printf("expiring samples (before): %v\n", pc)
-		//defer fmt.Printf("expiring samples (after): %v\n", pc)
-		// Scan to expire old samples while also inserting new sample
-		pc.oldestSampleTime = s.Time
-		j := 0
-		append := func(i int, s perfSample) {
-			if j != i {
-				if j < len(pc.samples) {
-					pc.samples[j] = s
-				} else {
-					pc.samples = append(pc.samples, s)
-				}
-			}
-			j++
-			if s.Time.Before(pc.oldestSampleTime) {
-				pc.oldestSampleTime = s.Time
-			}
+	if !pc.oldestSampleTime.IsZero() && !pc.oldestSampleTime.Before(oldestValidTime) {
+		// Existing samples still valid, just need to insert if new.
+		if newSampleIndex == len(pc.samples) || s.GoroutineCount != pc.samples[newSampleIndex].GoroutineCount {
+			pc.samples = slices.Insert(pc.samples, newSampleIndex, s)
 		}
-		for i, es := range pc.samples {
-			if i == newSampleIndex {
-				// Insert new sample or replace existing one with same goroutine count
-				if es.GoroutineCount == s.GoroutineCount {
-					// Replace existing sample with same goroutine count
-					append(i, s)
-				} else {
-					// Insert new sample before existing one
-					append(-1, s)
-				}
-			} else if !es.Time.Before(oldestValidTime) {
-				// Keep existing sample that hasn't expired
-				append(i, es)
-			}
-		}
-		if newSampleIndex == len(pc.samples) {
-			append(-1, s)
-		}
-		pc.samples = pc.samples[:j]
-
-	} else if newSampleIndex == len(pc.samples) || s.GoroutineCount != pc.samples[newSampleIndex].GoroutineCount {
-		// Existing samples still valid, just need to insert/append
-		pc.samples = slices.Insert(pc.samples, newSampleIndex, s)
+		return
 	}
+
+	// Scan to expire old samples while also inserting new sample
+	pc.oldestSampleTime = s.Time
+	j := 0
+	append := func(i int, s perfSample) {
+		if j != i {
+			if j < len(pc.samples) {
+				pc.samples[j] = s
+			} else {
+				pc.samples = append(pc.samples, s)
+			}
+		}
+		j++
+		if s.Time.Before(pc.oldestSampleTime) {
+			pc.oldestSampleTime = s.Time
+		}
+	}
+	for i, es := range pc.samples {
+		if i == newSampleIndex {
+			// Insert new sample or replace existing one with same goroutine count
+			if es.GoroutineCount == s.GoroutineCount {
+				// Replace existing sample with same goroutine count
+				append(i, s)
+			} else {
+				// Insert new sample before existing one
+				append(-1, s)
+			}
+		} else if !es.Time.Before(oldestValidTime) {
+			// Keep existing sample that hasn't expired
+			append(i, es)
+		}
+	}
+	if newSampleIndex == len(pc.samples) {
+		append(-1, s)
+	}
+	pc.samples = pc.samples[:j]
 }
 
 func (pc *perfCurves) findByGoroutineCount(goroutineCount int) int {

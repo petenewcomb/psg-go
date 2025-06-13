@@ -320,14 +320,11 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 					}
 
 					b.Run(name, func(b *testing.B) {
-						//fmt.Println(time.Now(), "starting benchmark", name)
-
 						ctx, cancel := context.WithCancel(context.Background())
 						defer cancel()
 
 						job := psg.NewJob(ctx)
 						defer func() {
-							//fmt.Println(time.Now(), "cancelling job")
 							job.CancelAndWait()
 						}()
 						taskPool := psg.NewTaskPool(job, -1)
@@ -500,7 +497,6 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								maxConcurrency := 0
 
 								flush := func(ctx context.Context, emit psg.CombinerEmitFunc[combinedResult]) {
-									//fmt.Printf("Flushing %d tasks at depth %d\n", count, maxDepth)
 									if count > 0 {
 										res := combinedResult{
 											Time:                time.Now(),
@@ -597,19 +593,15 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						opTasksGatheredOrigin := totalTasksGathered
 						op := func() int {
 							for {
-								//fmt.Printf("%v: OP calling scatter\n", time.Now())
 								if err := scatter(ctx, taskPool, newTaskFunc(time.Now(), 0)); err != nil {
 									b.Fatalf("Error: %v", err)
 								}
-								//fmt.Printf("%v: OP scatter returned\n", time.Now())
 
 								if totalTasksGathered != opTasksGatheredOrigin {
 									tasksGathered := totalTasksGathered - opTasksGatheredOrigin
 									opTasksGatheredOrigin = totalTasksGathered
-									//fmt.Printf("%v: OP progress! gathered %d tasks\n", time.Now(), tasksGathered)
 									return tasksGathered
 								}
-								//fmt.Printf("%v: OP no progress, totalTasksGathered still %d\n", time.Now(), totalTasksGathered)
 							}
 						}
 
@@ -629,49 +621,11 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							idealThroughput = min(idealCombinerThroughput, idealGatherThroughput)
 						}
 
-						// Warmup
-						/*
-							tau := ema.Tau(1 * time.Second)
-							avgLagPlusOne := ema.Trended{Value: 1, Trend: 0.1}
-							avgThroughput := ema.Trended{Value: ema.EMA(idealThroughput), Trend: -ema.EMA(idealThroughput) / 10}
-							var lastReportTime time.Time
-							lastUpdateTime := time.Now()
-							report := func() {
-								//fmt.Printf("lag=%.0f%+.0f%% throughput=%.0f%+.0f%% combiners=%d\n", avgLagPlusOne.Get()-1, avgLagPlusOne.TrendRatio()*100, avgThroughput.Get(), avgThroughput.TrendRatio()*100, combinerConcurrency.Load())
-							}
-							warmupStartTime := time.Now()
-							for {
-								tasksGathered := float64(op())
-								now := time.Now()
-								elapsedTime := now.Sub(lastUpdateTime)
-								lastUpdateTime = now
-								alpha := tau.Alpha(elapsedTime)
-								lag := float64(totalTasksLaunched.Load() - int64(totalTasksGathered))
-								avgLagPlusOne.Update(alpha, lag+1)
-								avgThroughput.Update(alpha, tasksGathered/elapsedTime.Seconds())
-
-								warmupElapsed := time.Since(warmupStartTime)
-								if warmupElapsed > 3*time.Duration(tau) {
-									//	(warmupElapsed > time.Duration(tau) &&
-									//	avgLagPlusOne.IsStable(0.1) &&
-									//	avgThroughput.IsStable(0.01)) {
-									break
-								}
-
-								if now.Sub(lastReportTime) > time.Second/10 {
-									report()
-									lastReportTime = now
-								}
-							}
-							report()
-						*/
-
 						warmupStartTime := time.Now()
 						for time.Since(warmupStartTime) < time.Second {
 							op()
 						}
 
-						//fmt.Println(time.Now(), "starting test")
 						tasksGatheredOrigin := totalTasksGathered
 						taskLatenciesNs.Reset()
 						combineLatenciesNs.Reset()
@@ -687,7 +641,6 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						for b.Loop() {
 							op()
 						}
-						//fmt.Println(time.Now(), "test ended")
 
 						// We purposefully do not run job.CloseAndGatherAll
 						// before capturing results to avoid inflating
@@ -697,10 +650,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						finalCombinerConcurrency := combinerConcurrency.Load()
 						tasksGathered := float64(totalTasksGathered - tasksGatheredOrigin)
 
-						//fmt.Println("ended test")
-
 						// Now call CloseAndGatherAll to make sure nothing was lost.
-						//fmt.Println(time.Now(), "closing job")
 						require.NoError(b, job.CloseAndGatherAll(ctx))
 						require.Equal(b, totalTasksLaunched.Load(), int64(totalTasksGathered))
 

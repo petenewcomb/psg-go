@@ -123,14 +123,8 @@ func (c *Combine[I, O]) Scatter(
 	if vettedCtx.inGather || isCombinerBackpressureProvider(bp) {
 		// Make sure the job doesn't shut down until this scatter has been done.
 		j.state.IncrementTasks()
-		// bpType := "job"
-		// if isCombinerBackpressureProvider(bp) {
-		// 	bpType = "combiner"
-		// }
-		// fmt.Printf("Combine.Scatter: queuing work (inGather=%v, isCombiner=%v, bp=%s)\n", vettedCtx.inGather, isCombinerBackpressureProvider(bp), bpType)
 		bp.QueueWork(func(ctx context.Context) error {
 			defer j.state.DecrementTasks()
-			// fmt.Printf("Combine.Scatter: executing queued work (bp=%s)\n", bpType)
 			vettedCtx := j.vettedContext(ctx)
 			return doScatter(vettedCtx)
 		})
@@ -139,12 +133,10 @@ func (c *Combine[I, O]) Scatter(
 
 	ctx = j.gatherContext(vettedCtx)
 
-	//fmt.Println("Scatter: calling processOutstandingWork")
 	if err := j.processOutstandingWork(ctx); err != nil {
 		return err
 	}
 
-	//fmt.Println("Scatter: executing scatter")
 	return doScatter(vettedCtx)
 }
 
@@ -162,7 +154,6 @@ func (c *Combine[I, O]) TryScatter(
 	vetScatter(vettedCtx, target, taskFunc)
 
 	if !vettedCtx.inGather {
-		//fmt.Println("TryScatter: calling processOutstandingWork")
 		if err := j.processOutstandingWork(ctx); err != nil {
 			return false, err
 		}

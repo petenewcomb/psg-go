@@ -334,13 +334,10 @@ func (cps *CombinerPoolState) updateStats() bool {
 	}
 
 	// Update performance curve with latest sample
-	throughputValue := cps.throughput.Get()
-	// fmt.Printf("DEBUG: About to upsert - throughput.Get()=%.12f (%.1f/s)\n",
-	// 	throughputValue, throughputValue*float64(time.Second))
 	cps.perfCurves.AddSample(perfSample{
 		Time:           timeOrigin,
 		GoroutineCount: cps.liveGoroutineCount,
-		Throughput:     throughputValue,
+		Throughput:     cps.throughput.Get(),
 		SecondaryUtil:  cps.utilization.Get() - float64(cps.liveGoroutineCount-1),
 		Latency:        time.Duration(max(0, cps.latency.Get()-1)),
 	})

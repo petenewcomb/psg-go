@@ -389,14 +389,11 @@ func (j *Job) gatherContext(vettedCtx vettedContext) context.Context {
 }
 
 func (j *Job) queueWork(workFn workFunc) {
-	// fmt.Printf("%v Job: queueing work to job work queue\n", time.Now())
 	j.workQueue.PushBack(workQueuePool, workItem{
 		id:     j.workCounter.Add(1),
 		workFn: workFn,
 	})
-	// fmt.Printf("%v Job: work queued, about to notify workWaiters\n", time.Now())
 	j.workWaiters.Notify()
-	// fmt.Printf("%v Job: notify SKIPPED (disabled for test)\n", time.Now())
 }
 
 func (j *Job) processOutstandingWork(ctx context.Context) error {
@@ -406,11 +403,9 @@ func (j *Job) processOutstandingWork(ctx context.Context) error {
 		if !ok {
 			break
 		}
-		// fmt.Printf("%v Job: executing work from job work queue (id=%d)\n", time.Now(), work.id)
 		if err := work.workFn(ctx); err != nil {
 			return err
 		}
-		// fmt.Printf("%v Job: finished executing work from job work queue (id=%d)\n", time.Now(), work.id)
 		if work.id >= lastIDToProcess {
 			break
 		}
@@ -428,25 +423,15 @@ func (j *Job) gatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
 		ctx = j.gatherContext(vettedCtx)
 
 		for {
-			// fmt.Printf("%v Job: starting workWaiters.Wait\n", time.Now())
 			var waiterNotified bool
 			j.workWaiters.Wait(func(workWaiter waitq.Waiter) bool {
-				// fmt.Printf("%v Job: workWaiter callback called\n", time.Now())
 				// Process work queue inside the wait to avoid race conditions
-				// fmt.Printf("%v Job: about to call processOutstandingWork\n", time.Now())
 				if err = j.processOutstandingWork(ctx); err != nil {
-					// fmt.Printf("%v Job: processOutstandingWork error: %v\n", time.Now(), err)
 					return false
 				}
-				// fmt.Printf("%v Job: processOutstandingWork completed\n", time.Now())
-
-				// fmt.Printf("%v Job: calling gatherOne with workWaiter\n", time.Now())
 				waiterNotified, err = j.gatherOne(ctx, workWaiter, nil)
-				// fmt.Printf("%v Job: gatherOne returned waiterNotified=%v err=%v\n", time.Now(), waiterNotified, err)
 				return waiterNotified
 			})
-
-			// fmt.Printf("%v Job: workWaiters.Wait returned, waiterNotified=%v err=%v\n", time.Now(), waiterNotified, err)
 			if !waiterNotified || err != nil {
 				break
 			}
@@ -460,26 +445,16 @@ func (j *Job) gatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
 		jobDone = true
 		err = nil
 	}
-
-	// DISABLED: Post-gather work processing - should be redundant with loop-based processing
-	// if err == nil && !vettedCtx.inGather {
-	// 	err = j.processOutstandingWork(ctx)
-	// 	if err != nil {
-	// 		return true, err
-	// 	}
-	// }
-
 	return !jobDone, err
 }
 
 // postGather sends a gather operation to the gather queue.
 func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
-	//fmt.Printf("%v: postGather pushing to gather queue\n", time.Now())
+	// Error can only be due to context cancellation, so safe to ignore here.
 	_ = j.gatherQueue.PushBack(ctx, gatherQueuePool, gather)
 }
 
 func (j *Job) queueGather(gather boundGatherFunc) {
-	//fmt.Printf("%v: queueGather queueing work to job work queue\n", time.Now())
 	j.queueWork(func(ctx context.Context) error {
 		return j.executeGather(ctx, gather)
 	})

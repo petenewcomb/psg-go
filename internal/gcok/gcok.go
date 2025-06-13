@@ -116,7 +116,6 @@ func (m *Monitor) run(interval time.Duration) {
 			}
 
 			newBusy = ratio > threshold
-			//fmt.Printf("busy=%v newBusy=%v ratio=%.1f%% threshold=%.1f%%\n", busy, newBusy, ratio*100, threshold*100)
 		}
 
 		if newBusy != busy {

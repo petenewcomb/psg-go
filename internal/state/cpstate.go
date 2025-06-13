@@ -15,25 +15,25 @@ import (
 
 var epoch = time.Now()
 
+// cpDebug enables detailed combiner pool state reporting.
+const cpDebug = false
+
 type CombinerPoolState struct {
+	// High-frequency atomic counters updated lock-free from multiple goroutines
 	cumulativeCompletedCount atomic.Int64 // monotonic
-	cumulativeLatency        atomic.Int64 // monotonic time.Duration
 	timeOrigin               atomic.Int64 // time.Duration since epoch
 
+	// Mutex protects complex state analysis and scaling decisions
 	mu sync.Mutex
 
-	tau                ema.Tau
-	stabilityThreshold float64
+	tau ema.Tau
 
 	completedCountOrigin int64
-	latencyOrigin        int64
 	secondaryWait        ttrk.TimeTracker
 	secondaryWaitOrigin  time.Duration
 
-	throughput  ema.Trended // count/time.Duration
-	latency     ema.Trended
-	goroutines  ema.Trended
-	utilization ema.Trended
+	throughput    ema.EMA // count/time.Duration
+	secondaryUtil ema.EMA // secondary goroutine utilization (0-1)
 
 	// Performance curve for intelligent scaling decisions
 	perfCurves perfCurves
@@ -74,15 +74,6 @@ func (cps *CombinerPoolState) SetMeasurementTimeConstant(d time.Duration) {
 	cps.tau = ema.Tau(d)
 }
 
-func (cps *CombinerPoolState) SetMeasurementStabilityThreshold(ratio float64) {
-	if ratio <= 0 || ratio > 1 {
-		panic(fmt.Sprintf("invalid stability threshold %v: must be > 0 and <= 1", ratio))
-	}
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.stabilityThreshold = ratio
-}
-
 func (cps *CombinerPoolState) SetHistoryRetentionPeriod(d time.Duration) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
@@ -121,7 +112,8 @@ func (cps *CombinerPoolState) SecondaryWaitEnded(startTime time.Time) {
 }
 
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
-	if time.Since(epoch)-time.Duration(cps.timeOrigin.Load()) > min(time.Duration(cps.tau), cps.perfCurves.RetentionPeriod()/2) {
+	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
+	if time.Since(lastUpdate) > min(time.Duration(cps.tau), cps.perfCurves.RetentionPeriod()/2) {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -194,25 +186,20 @@ func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
 	return false
 }
 
-func (cps *CombinerPoolState) RecordLatency(latency time.Duration) {
-	cps.cumulativeLatency.Add(int64(latency))
-}
-
 func (cps *CombinerPoolState) report(msg string) {
-	/*
-		   fmt.Printf("%-8s\tgoroutines: %d->%d->%d(%.1f)\tthroughput: %.1f/s (%.1f/s each)\tutil: %.1f%%\tlatency: %v\t%v\n",
-			msg+":",
-			cps.spawnedGoroutineCount,
-			cps.liveGoroutineCount,
-			cps.targetGoroutineCount,
-			cps.goroutines.Get(),
-			cps.throughput.Get()*float64(time.Second),
-			cps.throughput.Get()*float64(time.Second)/float64(cps.liveGoroutineCount),
-			(cps.utilization.Get()-float64(cps.liveGoroutineCount-1))*100,
-			time.Duration(max(0, cps.latency.Get()-1)),
-			&cps.perfCurves,
-		)
-	*/
+	if !cpDebug {
+		return
+	}
+	fmt.Printf("%-8s\tgoroutines: %d->%d->%d\tthroughput: %.1f/s (%.1f/s each)\tutil: %.1f%%\t%v\n",
+		msg+":",
+		cps.spawnedGoroutineCount,
+		cps.liveGoroutineCount,
+		cps.targetGoroutineCount,
+		cps.throughput.Get()*float64(time.Second),
+		cps.throughput.Get()*float64(time.Second)/float64(cps.liveGoroutineCount),
+		cps.secondaryUtil.Get()*100,
+		&cps.perfCurves,
+	)
 }
 
 func (cps *CombinerPoolState) GoroutineStarted() {
@@ -221,12 +208,7 @@ func (cps *CombinerPoolState) GoroutineStarted() {
 	if cps.liveGoroutineCount > 0 {
 		cps.updateStats()
 	}
-	oldGoroutineCount := cps.liveGoroutineCount
 	cps.liveGoroutineCount++
-
-	if cps.liveGoroutineCount > 1 {
-		cps.adjustStats(oldGoroutineCount, cps.liveGoroutineCount)
-	}
 
 	cps.latestGoroutineCountChangeTime = time.Now()
 	if cps.liveGoroutineCount == cps.targetGoroutineCount {
@@ -242,15 +224,12 @@ func (cps *CombinerPoolState) GoroutineExited() {
 		panic("underflow")
 	}
 	cps.updateStats()
-	oldGoroutineCount := cps.liveGoroutineCount
 	cps.liveGoroutineCount--
 
 	if cps.liveGoroutineCount == 0 {
 		cps.perfCurves = perfCurves{} // Reset performance curve
-		cps.throughput.Reset(0)
-		cps.utilization.Reset(0)
-	} else {
-		cps.adjustStats(oldGoroutineCount, cps.liveGoroutineCount)
+		cps.throughput.Set(0)
+		cps.secondaryUtil.Set(0)
 	}
 
 	cps.latestGoroutineCountChangeTime = time.Now()
@@ -260,41 +239,10 @@ func (cps *CombinerPoolState) GoroutineExited() {
 	cps.notifyWaiter()
 }
 
-func (cps *CombinerPoolState) adjustStats(oldGoroutineCount int, newGoroutineCount int) {
-	/*
-		if newGoroutineCount < oldGoroutineCount {
-			// Scaling down: assume utilization will be 100% of the remaining capacity
-			cps.utilization.Trend.Set(float64(newGoroutineCount) - cps.utilization.Get())
-			cps.utilization.Set(float64(newGoroutineCount))
-		} else {
-			// Scaling up: assume utilization of the new capacity will be 0%
-			cps.utilization.Trend.Set(float64(oldGoroutineCount) - cps.utilization.Get())
-			cps.utilization.Set(float64(oldGoroutineCount))
-		}
-	*/
-
-	cps.utilization.Set(cps.utilization.Get() + float64(newGoroutineCount-oldGoroutineCount))
-
-	/*
-		oldSecondaryUtil := cps.secondaryUtil.Get()
-		oldTotalUtil := float64(oldGoroutineCount-1) + oldSecondaryUtil
-		newTotalUtil := oldTotalUtil * float64(newGoroutineCount) / float64(oldGoroutineCount)
-
-		newSecondaryUtil := max(0, min(newTotalUtil-float64(newGoroutineCount-1), 1))
-		cps.secondaryUtil.Set(newSecondaryUtil)
-		cps.secondaryUtil.Trend.Set(newSecondaryUtil - oldSecondaryUtil)
-			oldThroughput := cps.throughput.Get()
-			newThroughput := oldThroughput * newTotalUtil / oldTotalUtil
-			cps.throughput.Set(newThroughput)
-			cps.throughput.Trend.Set(newThroughput - oldThroughput)
-	*/
-}
-
 func (cps *CombinerPoolState) updateStats() bool {
 	// Capture raw datapoints
 	now := time.Now()
 	curCompletedCount := cps.cumulativeCompletedCount.Load()
-	curLatency := cps.cumulativeLatency.Load()
 
 	// Calculate deltas, reset origins, and update EMAs
 	timeOrigin := epoch.Add(time.Duration(cps.timeOrigin.Load()))
@@ -307,29 +255,17 @@ func (cps *CombinerPoolState) updateStats() bool {
 	cps.completedCountOrigin = curCompletedCount
 	cps.throughput.Update(alpha, float64(completedCount)/float64(elapsedTime))
 
-	if completedCount == 0 {
-		cps.latency.Update(alpha, cps.latency.Get())
-	} else {
-		latency := curLatency - cps.latencyOrigin
-		cps.latencyOrigin = curLatency
-		cps.latency.Update(alpha, float64(latency+1)/float64(completedCount))
-	}
-
-	cps.goroutines.Update(alpha, float64(cps.liveGoroutineCount))
-
 	cps.secondaryWait.Update(now, timeOrigin)
 	secondaryWait := cps.secondaryWait.CumulativeDuration - cps.secondaryWaitOrigin
 	cps.secondaryWaitOrigin = cps.secondaryWait.CumulativeDuration
 	if secondaryWait > elapsedTime {
 		panic(fmt.Sprintf("%v secondaryWait %d greater than elapsed time %d!", time.Now(), secondaryWait, elapsedTime))
 	}
-	cps.utilization.Update(alpha, float64(time.Duration(cps.liveGoroutineCount)*elapsedTime-secondaryWait)/float64(elapsedTime))
+	// Calculate secondary utilization: fraction of time secondary goroutine was working
+	secondaryUtilization := 1.0 - float64(secondaryWait)/float64(elapsedTime)
+	cps.secondaryUtil.Update(alpha, secondaryUtilization)
 
 	if time.Since(cps.latestGoroutineCountChangeTime) < 3*time.Duration(cps.tau) {
-		//!cps.throughput.IsStable(cps.stabilityThreshold) ||
-		//!cps.latency.IsStable(cps.stabilityThreshold) ||
-		//!cps.utilization.IsStable(cps.stabilityThreshold) ||
-		//!cps.goroutines.IsStable(cps.stabilityThreshold) {
 		return false
 	}
 
@@ -338,12 +274,11 @@ func (cps *CombinerPoolState) updateStats() bool {
 		Time:           timeOrigin,
 		GoroutineCount: cps.liveGoroutineCount,
 		Throughput:     cps.throughput.Get(),
-		SecondaryUtil:  cps.utilization.Get() - float64(cps.liveGoroutineCount-1),
-		Latency:        time.Duration(max(0, cps.latency.Get()-1)),
+		SecondaryUtil:  cps.secondaryUtil.Get(),
 	})
 
-	if now.Sub(epoch)/time.Second != timeOrigin.Sub(epoch)/time.Second {
-		defer cps.report("updated")
+	if cpDebug && now.Sub(epoch)/time.Second != timeOrigin.Sub(epoch)/time.Second {
+		cps.report("updated")
 	}
 
 	return true

@@ -29,7 +29,6 @@ type perfSample struct {
 	GoroutineCount int
 	Throughput     float64
 	SecondaryUtil  float64
-	Latency        time.Duration
 }
 
 // Format implements fmt.Formatter
@@ -51,7 +50,7 @@ func (pc *perfCurves) Format(fs fmt.State, verb rune) {
 		case i == knee:
 			label = "(k)"
 		}
-		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%(%v)", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SecondaryUtil*100, s.Latency)
+		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SecondaryUtil*100)
 		sep = ", "
 	}
 	_, _ = fmt.Fprint(fs, "]")

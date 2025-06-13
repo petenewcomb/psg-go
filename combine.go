@@ -216,13 +216,10 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
-		postStartTime := time.Now()
-		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) time.Duration {
+		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
 			// Create an emit callback to handle output from the combiner
 			combineFn := getCombineFunc(ctx, cm, c.combinerPool, c)
-			latency := time.Since(postStartTime)
 			combineFn(ctx, input, inputErr)
-			return latency
 		})
 	})
 }

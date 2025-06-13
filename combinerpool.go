@@ -21,7 +21,6 @@ import (
 
 // Empirically determined but not widely validated, YMMV. Subject to change as broader experience is gained.
 const DefaultCombinerPoolMeasurementTimeConstant = 50 * time.Millisecond
-const DefaultCombinerPoolMeasurementStabilityThreshold = 0.01
 const DefaultCombinerPoolHistoryRetentionPeriod = 1 * time.Second
 const DefaultCombinerPoolIdleTimeout = 100 * time.Microsecond
 const DefaultCombinerPoolHighUtilizationThreshold = 0.6
@@ -75,7 +74,6 @@ func NewCombinerPool(job *Job) *CombinerPool {
 	cp.state.SetLimits(0, -1) // unlimited by default
 	cp.state.SetHighUtilizationThreshold(DefaultCombinerPoolHighUtilizationThreshold)
 	cp.state.SetMeasurementTimeConstant(DefaultCombinerPoolMeasurementTimeConstant)
-	cp.state.SetMeasurementStabilityThreshold(DefaultCombinerPoolMeasurementStabilityThreshold)
 	cp.state.SetHistoryRetentionPeriod(DefaultCombinerPoolHistoryRetentionPeriod)
 	cp.state.SetMinimumReturn(DefaultCombinerPoolMinimumReturn)
 	cp.state.SetGrowthFactors(DefaultCombinerPoolAggressiveGrowthFactor, DefaultCombinerPoolConservativeGrowthFactor)
@@ -163,10 +161,6 @@ func (cp *CombinerPool) SetMeasurementTimeConstant(d time.Duration) {
 	cp.state.SetMeasurementTimeConstant(d)
 }
 
-func (cp *CombinerPool) SetMeasurementStabilityThreshold(x float64) {
-	cp.state.SetMeasurementStabilityThreshold(x)
-}
-
 // SetHighUtilizationThreshold sets the utilization threshold above which a
 // combiner goroutine is considered highly utilized. This affects when new
 // goroutines are spawned to handle load.
@@ -247,10 +241,10 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- bo
 			waitStartTime = time.Now()
 			cp.waitingCombines.Increment()
 			originalCombine := combine
-			combine = func(ctx context.Context, cm *combinerMap) time.Duration {
+			combine = func(ctx context.Context, cm *combinerMap) {
 				cp.waitingCombines.Decrement()
 				cp.combineWaiters.Notify()
-				return originalCombine(ctx, cm)
+				originalCombine(ctx, cm)
 			}
 		}
 
@@ -526,7 +520,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				// Make sure the job won't terminate before the combiner is flushed
 				nextJobFlushCh, unregisterAsJobFlusher = j.state.RegisterFlusher()
 			}
-			_ = combine(ctx, &cm)
+			combine(ctx, &cm)
 			cp.state.IncrementCompleted()
 		}
 
@@ -635,7 +629,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 const errIdleTimeout = cerr.Error("idle timeout reached")
 
-type boundCombineFunc func(ctx context.Context, cm *combinerMap) time.Duration
+type boundCombineFunc func(ctx context.Context, cm *combinerMap)
 
 type halfBoundCombineFunc[I any] func(ctx context.Context, input I, inputErr error)
 
@@ -695,9 +689,7 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 			j.state.IncrementTasks()
 
 			// Post the bound gather to the job's gather queue.
-			postStartTime := time.Now()
 			j.postGather(ctx, gather)
-			cp.state.RecordLatency(time.Since(postStartTime))
 		}
 
 		combiner := func() Combiner[I, O] {

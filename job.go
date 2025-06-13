@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/gcok"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/state"
@@ -21,6 +22,9 @@ import (
 // for new work before exiting. This controls how aggressively workers scale down
 // when load decreases.
 const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
+
+const DefaultMaxGCTimeRatioThreshold = 0.5 // 50% of total CPU time used for GC
+const DefaultGCTimeUpdateInterval = 1 * time.Second
 
 // Job represents a scatter-gather execution environment. It tracks tasks
 // launched with [Scatter] across a set of [TaskPool] instances and provides methods
@@ -36,6 +40,7 @@ type Job struct {
 	gatherQueue rdvq.Required[boundGatherFunc]
 	wg          sync.WaitGroup
 	state       state.JobState
+	gcMonitor   gcok.Monitor
 
 	// workQueue must be thread-safe only to support multiple goroutines
 	// potentially calling the job's gather methods concurrently, including
@@ -49,13 +54,15 @@ type Job struct {
 	// psg functions, and to require that they be so would complicate the API in
 	// ways that users should not need to understand. A true goroutine-local
 	// storage capability would be a perfect fit here.
-	workQueue nbcq.Queue[gatherWorkFunc]
+	workQueue   nbcq.Queue[workItem]
+	workCounter atomic.Int64
+	workWaiters waitq.Queue
 
 	taskQueue             rdvq.Optional[preparedTaskFunc]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 
-	backpressureCtxCache sync.Map // context.Context -> vettedContext
-	gatherCtxCache       sync.Map // context.Context -> context.Context
+	vettedCtxCache sync.Map // context.Context -> vettedContext
+	gatherCtxCache sync.Map // context.Context -> context.Context
 }
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
@@ -66,19 +73,19 @@ func (j *Job) job() *Job {
 type vettedContext struct {
 	ctx          context.Context
 	hasTaskValue bool // Pre-computed includesJob(ctx, j, taskContextValueKey)
-	hasJobValue  bool // Pre-computed includesJob(ctx, j, jobContextValueKey)
+	inGather     bool
 }
 
 // withBackpressureProvider returns a context with the default backpressure provider for this Job
 func (j *Job) vettedContext(ctx context.Context) vettedContext {
 	// Check cache first to avoid expensive computation
-	if cached, ok := j.backpressureCtxCache.Load(ctx); ok {
+	if cached, ok := j.vettedCtxCache.Load(ctx); ok {
 		return cached.(vettedContext)
 	}
 
 	// Cache miss - compute expensive context checks
 	hasTask := includesJob(ctx, j, taskContextValueKey)
-	hasJob := includesJob(ctx, j, jobContextValueKey)
+	inGather := j.inGather(ctx)
 
 	// Only try to add backpressure provider if context doesn't have task value
 	// (to avoid the panic in hasBackpressureProviderForJob)
@@ -92,29 +99,32 @@ func (j *Job) vettedContext(ctx context.Context) vettedContext {
 		resultCtx = withNewBackpressureProvider(ctx, j)
 	}
 
-	vetted := vettedContext{
+	return j.cacheVettedContext(ctx, vettedContext{
 		ctx:          resultCtx,
 		hasTaskValue: hasTask,
-		hasJobValue:  hasJob,
-	}
+		inGather:     inGather,
+	})
+}
 
+func (j *Job) cacheVettedContext(ctx context.Context, vettedCtx vettedContext) vettedContext {
 	// Use LoadOrStore to handle race condition where another goroutine
 	// might have stored while we were computing
-	if actual, loaded := j.backpressureCtxCache.LoadOrStore(ctx, vetted); loaded {
+	if actual, loaded := j.vettedCtxCache.LoadOrStore(ctx, vettedCtx); loaded {
 		// Another goroutine stored first, use their result
 		return actual.(vettedContext)
 	}
 
 	// We successfully stored our result, set up cleanup
-	// Clean up when either the input context OR the job is cancelled
-	context.AfterFunc(ctx, func() {
-		j.backpressureCtxCache.Delete(ctx)
+	// Clean up when the input context is cancelled, but not after the job is
+	// cancelled
+	stop := context.AfterFunc(ctx, func() {
+		j.vettedCtxCache.Delete(ctx)
 	})
-	context.AfterFunc(j.ctx, func() {
-		j.backpressureCtxCache.Delete(ctx)
+	_ = context.AfterFunc(j.ctx, func() {
+		_ = stop()
 	})
 
-	return vetted
+	return vettedCtx
 }
 
 func (j *Job) withBackpressureProvider(ctx context.Context) context.Context {
@@ -123,7 +133,12 @@ func (j *Job) withBackpressureProvider(ctx context.Context) context.Context {
 
 type boundGatherFunc = func(ctx context.Context) error
 
-type gatherWorkFunc func(context.Context) error
+type workFunc func(context.Context) error
+
+type workItem struct {
+	id     int64
+	workFn workFunc
+}
 
 // NewJob creates an independent scatter-gather execution environment with the
 // specified context. The context passed to NewJob is used as the root of the
@@ -143,13 +158,16 @@ func NewJob(ctx context.Context) *Job {
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
 	j.workQueue.Init(workQueuePool)
+	j.workWaiters.Init()
 	j.taskQueue.Init(taskQueuePool)
 	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
 	j.gatherQueue.Init(gatherQueuePool)
+	j.gcMonitor.SetBusyThreshold(DefaultMaxGCTimeRatioThreshold)
+	j.gcMonitor.SetUpdateInterval(DefaultGCTimeUpdateInterval)
 	return j
 }
 
-var workQueuePool = &nbcq.Pool[gatherWorkFunc]{}
+var workQueuePool = &nbcq.Pool[workItem]{}
 var taskQueuePool = &rdvq.Pool[preparedTaskFunc]{}
 var gatherQueuePool = &rdvq.Pool[boundGatherFunc]{}
 
@@ -228,6 +246,7 @@ func includesJob(ctx context.Context, j *Job, keys ...any) bool {
 // effect.
 func (j *Job) Cancel() {
 	j.cancelFunc()
+	j.gcMonitor.Cancel()
 }
 
 // CancelAndWait cancels like [Job.Cancel], but then blocks until any
@@ -235,6 +254,7 @@ func (j *Job) Cancel() {
 func (j *Job) CancelAndWait() {
 	j.Cancel()
 	j.wg.Wait()
+	j.gcMonitor.Wait()
 }
 
 // SetTaskWorkerIdleTimeout sets the duration that idle task workers wait for
@@ -252,6 +272,31 @@ func (j *Job) CancelAndWait() {
 // previous value.
 func (j *Job) SetTaskWorkerIdleTimeout(timeout time.Duration) {
 	j.taskWorkerIdleTimeout.Store(int64(timeout))
+}
+
+// SetMaxGCTimeRatioThreshold sets the threshold for GC time ratio that triggers
+// backpressure during scatter operations. When the ratio of GC CPU time to total
+// CPU time exceeds this threshold, new scatter operations will be delayed until
+// GC pressure decreases.
+//
+// The threshold must be in the range (0, 1], where 1.0 means 100% of CPU time
+// spent on GC. The default value is [DefaultMaxGCTimeRatioThreshold].
+//
+// Setting this to 0 disables GC-based backpressure entirely.
+func (j *Job) SetMaxGCTimeRatioThreshold(threshold float64) {
+	j.gcMonitor.SetBusyThreshold(threshold)
+}
+
+// SetGCTimeUpdateInterval sets how frequently the Job monitors GC time ratios
+// for backpressure decisions. More frequent updates provide more responsive
+// backpressure but consume more CPU for monitoring.
+//
+// The default value is [DefaultGCTimeUpdateInterval].
+//
+// Setting this to 0 disables GC monitoring entirely, which also disables
+// GC-based backpressure.
+func (j *Job) SetGCTimeUpdateInterval(interval time.Duration) {
+	j.gcMonitor.SetUpdateInterval(interval)
 }
 
 // GatherOne processes at most a single result from a task previously launched
@@ -279,8 +324,7 @@ func (j *Job) SetTaskWorkerIdleTimeout(timeout time.Duration) {
 // [GatherFunc] and wait until it returns.
 func (j *Job) GatherOne(ctx context.Context) (bool, error) {
 	vetted := j.vettedContext(ctx)
-	j.vetGather(vetted)
-	return j.gatherOneAndDoTheWork(vetted.ctx)
+	return j.gatherOneAndDoTheWork(vetted)
 }
 
 func (j *Job) vetGather(vetted vettedContext) {
@@ -307,58 +351,109 @@ func (j *Job) inGather(ctx context.Context) bool {
 	return inGather
 }
 
-func (j *Job) gatherContext(ctx context.Context) context.Context {
-	// Check if already has gather value
-	if j.inGather(ctx) {
-		return ctx
-	}
+func (j *Job) gatherContext(vettedCtx vettedContext) context.Context {
 
-	// Check cache first
-	if cached, ok := j.gatherCtxCache.Load(ctx); ok {
+	// Check cache first to avoid context allocation
+	if cached, ok := j.gatherCtxCache.Load(vettedCtx.ctx); ok {
 		return cached.(context.Context)
 	}
 
-	// Create new gather context
-	gatherCtx := context.WithValue(ctx, gatherContextValueKey, j)
+	// Create new gather context based on vettedCtx
+	gatherCtx := context.WithValue(vettedCtx.ctx, gatherContextValueKey, j)
 
-	// Try to cache it
-	if actual, loaded := j.gatherCtxCache.LoadOrStore(ctx, gatherCtx); loaded {
+	// Use LoadOrStore to handle race condition where another goroutine
+	// might have stored while we were computing
+	if actual, loaded := j.gatherCtxCache.LoadOrStore(vettedCtx.ctx, gatherCtx); loaded {
+		// Another goroutine stored first, use their result
 		return actual.(context.Context)
 	}
 
-	// Clean up cache when context is done
-	context.AfterFunc(ctx, func() {
-		j.gatherCtxCache.Delete(ctx)
+	// We successfully stored our result, set up cleanup
+	// Clean up when the input context is cancelled, but not after the job is
+	// cancelled
+	stop := context.AfterFunc(vettedCtx.ctx, func() {
+		j.gatherCtxCache.Delete(vettedCtx.ctx)
 	})
+	_ = context.AfterFunc(j.ctx, func() {
+		_ = stop()
+	})
+
+	// Pre-populate a vetted context for the gather context
+	vettedGatherCtx := vettedCtx
+	vettedGatherCtx.ctx = gatherCtx
+	vettedGatherCtx.inGather = true
+
+	j.cacheVettedContext(gatherCtx, vettedGatherCtx)
 
 	return gatherCtx
 }
 
+func (j *Job) queueWork(workFn workFunc) {
+	// fmt.Printf("%v Job: queueing work to job work queue\n", time.Now())
+	j.workQueue.PushBack(workQueuePool, workItem{
+		id:     j.workCounter.Add(1),
+		workFn: workFn,
+	})
+	// fmt.Printf("%v Job: work queued, about to notify workWaiters\n", time.Now())
+	j.workWaiters.Notify()
+	// fmt.Printf("%v Job: notify SKIPPED (disabled for test)\n", time.Now())
+}
+
 func (j *Job) processOutstandingWork(ctx context.Context) error {
+	lastIDToProcess := j.workCounter.Load()
 	for {
 		work, ok := j.workQueue.PopFront(workQueuePool)
 		if !ok {
-			return nil
+			break
 		}
-		if err := work(ctx); err != nil {
+		// fmt.Printf("%v Job: executing work from job work queue (id=%d)\n", time.Now(), work.id)
+		if err := work.workFn(ctx); err != nil {
 			return err
 		}
-	}
-}
-
-func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
-	inGatherAlready := j.inGather(ctx)
-
-	if !inGatherAlready {
-		// Use cached gather context instead of creating new one
-		ctx = j.gatherContext(ctx)
-
-		if err := j.processOutstandingWork(ctx); err != nil {
-			return true, err
+		// fmt.Printf("%v Job: finished executing work from job work queue (id=%d)\n", time.Now(), work.id)
+		if work.id >= lastIDToProcess {
+			break
 		}
 	}
+	return nil
+}
 
-	_, err := j.gatherOne(ctx, waitq.Waiter{}, nil)
+func (j *Job) gatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
+
+	j.vetGather(vettedCtx)
+
+	ctx := vettedCtx.ctx
+	var err error
+	if !vettedCtx.inGather {
+		ctx = j.gatherContext(vettedCtx)
+
+		for {
+			// fmt.Printf("%v Job: starting workWaiters.Wait\n", time.Now())
+			var waiterNotified bool
+			j.workWaiters.Wait(func(workWaiter waitq.Waiter) bool {
+				// fmt.Printf("%v Job: workWaiter callback called\n", time.Now())
+				// Process work queue inside the wait to avoid race conditions
+				// fmt.Printf("%v Job: about to call processOutstandingWork\n", time.Now())
+				if err = j.processOutstandingWork(ctx); err != nil {
+					// fmt.Printf("%v Job: processOutstandingWork error: %v\n", time.Now(), err)
+					return false
+				}
+				// fmt.Printf("%v Job: processOutstandingWork completed\n", time.Now())
+
+				// fmt.Printf("%v Job: calling gatherOne with workWaiter\n", time.Now())
+				waiterNotified, err = j.gatherOne(ctx, workWaiter, nil)
+				// fmt.Printf("%v Job: gatherOne returned waiterNotified=%v err=%v\n", time.Now(), waiterNotified, err)
+				return waiterNotified
+			})
+
+			// fmt.Printf("%v Job: workWaiters.Wait returned, waiterNotified=%v err=%v\n", time.Now(), waiterNotified, err)
+			if !waiterNotified || err != nil {
+				break
+			}
+		}
+	} else {
+		_, err = j.gatherOne(ctx, waitq.Waiter{}, nil)
+	}
 
 	jobDone := false
 	if err == ErrJobDone {
@@ -366,27 +461,28 @@ func (j *Job) gatherOneAndDoTheWork(ctx context.Context) (bool, error) {
 		err = nil
 	}
 
-	if err == nil && !inGatherAlready {
-		err = j.processOutstandingWork(ctx)
-		if err != nil {
-			return true, err
-		}
-	}
+	// DISABLED: Post-gather work processing - should be redundant with loop-based processing
+	// if err == nil && !vettedCtx.inGather {
+	// 	err = j.processOutstandingWork(ctx)
+	// 	if err != nil {
+	// 		return true, err
+	// 	}
+	// }
 
 	return !jobDone, err
 }
 
 // postGather sends a gather operation to the gather queue.
 func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
+	//fmt.Printf("%v: postGather pushing to gather queue\n", time.Now())
 	_ = j.gatherQueue.PushBack(ctx, gatherQueuePool, gather)
 }
 
 func (j *Job) queueGather(gather boundGatherFunc) {
-	j.workQueue.PushBack(workQueuePool,
-		func(ctx context.Context) error {
-			return j.executeGather(ctx, gather)
-		},
-	)
+	//fmt.Printf("%v: queueGather queueing work to job work queue\n", time.Now())
+	j.queueWork(func(ctx context.Context) error {
+		return j.executeGather(ctx, gather)
+	})
 }
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
@@ -426,33 +522,31 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 // See GatherOne for additional details.
 func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
 	vetted := j.vettedContext(ctx)
-	j.vetGather(vetted)
-	return j.tryGatherOne(vetted.ctx)
+	return j.tryGatherOneAndDoTheWork(vetted)
 }
 
-func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
+func (j *Job) tryGatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
 
-	inGatherAlready := j.inGather(ctx)
-	if !inGatherAlready {
+	j.vetGather(vettedCtx)
+
+	if !vettedCtx.inGather {
 		// Use cached gather context instead of creating new one
-		ctx = j.gatherContext(ctx)
-
+		ctx := j.gatherContext(vettedCtx)
 		if err := j.processOutstandingWork(ctx); err != nil {
 			return true, err
 		}
 	}
 
+	return j.tryQueueGather(), nil
+}
+
+func (j *Job) tryQueueGather() bool {
 	ok := false
 	j.gatherQueue.TryPopFront(gatherQueuePool, func(gather boundGatherFunc) {
 		ok = true
 		j.queueGather(gather)
 	})
-
-	var err error
-	if !inGatherAlready {
-		err = j.processOutstandingWork(ctx)
-	}
-	return ok, err
+	return ok
 }
 
 // GatherAll processes task results until the job completes or an error occurs.
@@ -475,8 +569,7 @@ func (j *Job) tryGatherOne(ctx context.Context) (bool, error) {
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	j.vetGather(vetted)
-	return j.gatherAll(vetted.ctx, j.gatherOneAndDoTheWork)
+	return j.gatherAll(vetted, j.gatherOneAndDoTheWork)
 }
 
 // TryGatherAll processes all currently available task results without blocking.
@@ -491,13 +584,12 @@ func (j *Job) GatherAll(ctx context.Context) error {
 // task's [GatherFunc] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	j.vetGather(vetted)
-	return j.gatherAll(vetted.ctx, j.tryGatherOne)
+	return j.gatherAll(vetted, j.tryGatherOneAndDoTheWork)
 }
 
-func (j *Job) gatherAll(ctx context.Context, gatherOne func(ctx context.Context) (bool, error)) error {
+func (j *Job) gatherAll(vettedCtx vettedContext, gatherOne func(vettedContext) (bool, error)) error {
 	for {
-		ok, err := gatherOne(ctx)
+		ok, err := gatherOne(vettedCtx)
 		if err != nil {
 			return err
 		}

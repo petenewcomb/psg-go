@@ -43,14 +43,6 @@ func (t *Trended) Project(alpha Alpha) float64 {
 	return t.Value.Project(alpha)
 }
 
-func (t *Trended) GetTrend() float64 {
-	return t.Trend.Get()
-}
-
-func (t *Trended) SetTrend(trend float64) {
-	t.Trend.Set(trend)
-}
-
 func (t *Trended) ProjectTrend(alpha Alpha) float64 {
 	return t.Trend.Project(alpha)
 }

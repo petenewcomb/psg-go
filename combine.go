@@ -105,11 +105,47 @@ func (c *Combine[I, O]) Scatter(
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[I],
 ) error {
-	launched, err := c.scatter(ctx, target, true, taskFunc)
-	if !launched && err == nil {
-		panic("task function was not launched, but no error was returned")
+	j := target.job()
+	vettedCtx := j.vettedContext(ctx)
+	vetScatter(vettedCtx, target, taskFunc)
+
+	doScatter := func(vettedCtx vettedContext) error {
+		launched, err := c.scatter(vettedCtx, j, target, true, taskFunc)
+		if !launched && err == nil {
+			panic("task function was not launched, but no error was returned")
+		}
+		return err
 	}
-	return err
+
+	bp := getBackpressureProvider(vettedCtx.ctx, j)
+
+	// Queue work if we're in a gather context or if we have a combiner backpressure provider
+	if vettedCtx.inGather || isCombinerBackpressureProvider(bp) {
+		// Make sure the job doesn't shut down until this scatter has been done.
+		j.state.IncrementTasks()
+		// bpType := "job"
+		// if isCombinerBackpressureProvider(bp) {
+		// 	bpType = "combiner"
+		// }
+		// fmt.Printf("Combine.Scatter: queuing work (inGather=%v, isCombiner=%v, bp=%s)\n", vettedCtx.inGather, isCombinerBackpressureProvider(bp), bpType)
+		bp.QueueWork(func(ctx context.Context) error {
+			defer j.state.DecrementTasks()
+			// fmt.Printf("Combine.Scatter: executing queued work (bp=%s)\n", bpType)
+			vettedCtx := j.vettedContext(ctx)
+			return doScatter(vettedCtx)
+		})
+		return nil
+	}
+
+	ctx = j.gatherContext(vettedCtx)
+
+	//fmt.Println("Scatter: calling processOutstandingWork")
+	if err := j.processOutstandingWork(ctx); err != nil {
+		return err
+	}
+
+	//fmt.Println("Scatter: executing scatter")
+	return doScatter(vettedCtx)
 }
 
 // TryScatter is like [Combine.Scatter] but returns instead of blocking if
@@ -121,25 +157,34 @@ func (c *Combine[I, O]) TryScatter(
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	return c.scatter(ctx, target, false, taskFunc)
+	j := target.job()
+	vettedCtx := j.vettedContext(ctx)
+	vetScatter(vettedCtx, target, taskFunc)
+
+	if !vettedCtx.inGather {
+		//fmt.Println("TryScatter: calling processOutstandingWork")
+		if err := j.processOutstandingWork(ctx); err != nil {
+			return false, err
+		}
+	}
+
+	return c.scatter(vettedCtx, j, target, false, taskFunc)
 }
 
 func (c *Combine[I, O]) scatter(
-	ctx context.Context,
+	vettedCtx vettedContext,
+	j *Job,
 	target TaskPoolOrJob,
 	block bool,
 	taskFunc TaskFunc[I],
 ) (bool, error) {
-	j := target.job()
 	if j != c.combinerPool.job {
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	vetted := j.vettedContext(ctx)
-	vetScatter(vetted, target, taskFunc)
-	bp := getBackpressureProvider(vetted.ctx, j)
+	bp := getBackpressureProvider(vettedCtx.ctx, j)
 
-	if err := yieldBeforeScatter(vetted, bp); err != nil {
+	if err := yieldBeforeScatter(vettedCtx, bp); err != nil {
 		return false, err
 	}
 
@@ -159,7 +204,7 @@ func (c *Combine[I, O]) scatter(
 				// waiterQueue, so we can pass that along to break out of the loop
 				// and proceed without rechecking waitingCombines.
 				var waiterNotified bool
-				waiterNotified, err = bp.Block(ctx, waiter, nil)
+				waiterNotified, err = bp.Block(vettedCtx.ctx, waiter, nil)
 				if waiterNotified {
 					proceed = true
 				}
@@ -179,10 +224,14 @@ func (c *Combine[I, O]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(vetted.ctx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
-		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
+	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
+		postStartTime := time.Now()
+		c.combinerPool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) time.Duration {
 			// Create an emit callback to handle output from the combiner
-			getCombineFunc(ctx, cm, j, c)(ctx, input, inputErr)
+			combineFn := getCombineFunc(ctx, cm, c.combinerPool, c)
+			latency := time.Since(postStartTime)
+			combineFn(ctx, input, inputErr)
+			return latency
 		})
 	})
 }
@@ -192,7 +241,8 @@ func (c *Combine[I, O]) scatter(
 type combineBackpressureProvider struct {
 	job           *Job
 	tryCombineOne func(ctx context.Context) (bool, error)
-	combineOne    func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error)
+	combineOne    func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+	queueWork     func(workFunc func(context.Context) error)
 	key           backpressureProviderKeyField
 }
 
@@ -208,6 +258,21 @@ func (bp combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) 
 	return bp.tryCombineOne(vetted.ctx)
 }
 
-func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error) {
-	return bp.combineOne(ctx, waiter, limitChangeCh)
+func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+	select {
+	case <-waiter.Done():
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	//return bp.combineOne(ctx, waiter, changeCh)
+}
+
+func (bp combineBackpressureProvider) QueueWork(workFunc func(context.Context) error) {
+	bp.queueWork(workFunc)
+}
+
+func isCombinerBackpressureProvider(bp backpressureProvider) bool {
+	_, ok := bp.(combineBackpressureProvider)
+	return ok
 }

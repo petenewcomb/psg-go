@@ -108,8 +108,8 @@ func Example_scatterGather() {
 	//   0ms Starting tasks
 	//   0ms Quick task started
 	//  10ms Quick task completed
-	//  20ms Quick result
 	//  20ms Failing task started
+	//  30ms Quick result
 	//  30ms Slow task started
 	//  50ms Failing task failed - cancelling workflow
 	//  50ms Error: task failed

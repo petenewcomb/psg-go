@@ -26,7 +26,10 @@ type backpressureProvider interface {
 	// Returns true when the block was ended by waiter notification, false
 	// otherwise. Returns an error if the waiting activity should be aborted
 	// (for instance because a context is canceled).
-	Block(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error)
+	Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+
+	// Queues work to be executed in the appropriate context (job-level or combiner-level)
+	QueueWork(workFunc func(context.Context) error)
 }
 
 type backpressureProviderContextValueKeyType struct{}
@@ -81,10 +84,13 @@ func (bp defaultBackpressureProvider) Key() backpressureProviderKey {
 }
 
 func (bp defaultBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
-	bp.j.vetGather(vetted)
-	return bp.j.tryGatherOne(vetted.ctx)
+	return bp.j.tryQueueGather(), nil
 }
 
 func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	return bp.j.gatherOne(ctx, waiter, limitCh)
+}
+
+func (bp defaultBackpressureProvider) QueueWork(workFunc func(context.Context) error) {
+	bp.j.queueWork(workFunc)
 }

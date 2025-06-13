@@ -206,11 +206,9 @@ type WorkloadDurationKey struct{ benchproc.Key }
 type FlushPeriodKey struct{ benchproc.Key }
 
 type Data struct {
-	Values     []float64
-	Sample     benchmath.Sample
-	Summary    benchmath.Summary
-	Reference  *Data
-	Comparison benchmath.Comparison
+	Values  []float64
+	Sample  benchmath.Sample
+	Summary benchmath.Summary
 }
 
 func main() {
@@ -288,8 +286,8 @@ func main() {
 	}
 
 	// Read the benchmark results.
-	directAndGatherOnlyMatcher := regexp.MustCompile(`/method=(?:direct|gatherOnly)/`)
-	var directAndGatherOnlyResults []*benchfmt.Result
+	gatherOnlyMatcher := regexp.MustCompile(`/method=gatherOnly/`)
+	var gatherOnlyResults []*benchfmt.Result
 	benchFiles := &benchfmt.Files{
 		Paths:       os.Args[1:],
 		AllowStdin:  true,
@@ -323,8 +321,8 @@ func main() {
 
 		// Need to save these to expand and match the appropriate sets of
 		// flushPeriod values later.
-		if directAndGatherOnlyMatcher.Match(res.Name) {
-			directAndGatherOnlyResults = append(directAndGatherOnlyResults, res.Clone())
+		if gatherOnlyMatcher.Match(res.Name) {
+			gatherOnlyResults = append(gatherOnlyResults, res.Clone())
 			continue
 		}
 
@@ -385,10 +383,10 @@ func main() {
 		}
 	}
 
-	// Expand each direct and gatherOnly result to cover all relevant values for
+	// Expand each gatherOnly result to cover all relevant values for
 	// flushPeriod
 	flushPeriodReplacer := regexp.MustCompile(`(/flushPeriod=)[^/]*`)
-	for _, res := range directAndGatherOnlyResults {
+	for _, res := range gatherOnlyResults {
 		workloadDurationKey := WorkloadDurationKey{workloadDurationP.Project(res)}
 		for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
 			res.Name = flushPeriodReplacer.ReplaceAll(res.Name, []byte(`${1}`+flushPeriodKey.Get(flushPeriodP.Fields()[0])))
@@ -474,50 +472,23 @@ func main() {
 		fmt.Printf("warning: results vary in %s\n", nonsingular)
 	}
 
-	var directMethodKey MethodKey
-	for _, methodKey := range methodKeys {
-		if methodKey.Get(methodP.Fields()[0]) == "direct" {
-			directMethodKey = methodKey
-			break
-		}
-	}
-
-	// Connect reference values and do the math over the samples
 	confidence := 0.95
 	thresholds := benchmath.DefaultThresholds
 	connectAndDoMath := func(
 		dataByWorkloadDurationFlushPeriodUnit map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data,
 	) {
-		for workloadKey, dataByDurationFlushPeriodUnit := range dataByWorkloadDurationFlushPeriodUnit {
-			for workloadDurationKey, dataByFlushPeriodUnit := range dataByDurationFlushPeriodUnit {
-				for flushPeriodKey, dataByUnit := range dataByFlushPeriodUnit {
-					for unit, data := range dataByUnit {
+		for _, dataByDurationFlushPeriodUnit := range dataByWorkloadDurationFlushPeriodUnit {
+			for _, dataByFlushPeriodUnit := range dataByDurationFlushPeriodUnit {
+				for _, dataByUnit := range dataByFlushPeriodUnit {
+					for _, data := range dataByUnit {
 						data.Sample = *benchmath.NewSample(data.Values, &thresholds)
 						for _, w := range data.Sample.Warnings {
-							log.Fatalf("sample warning: %v", w)
+							log.Printf("sample warning: %v", w)
 						}
 						data.Summary = benchmath.AssumeNothing.Summary(&data.Sample, confidence)
 						for _, w := range data.Summary.Warnings {
 							if w.Error() != "all samples are equal" {
-								log.Fatalf("summary warning: %v", w)
-							}
-						}
-						data.Reference = dataByMethodWorkloadDurationFlushPeriodUnit[directMethodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
-						if data.Reference == nil {
-							fmt.Println(unit, dataByMethodWorkloadDurationFlushPeriodUnit[directMethodKey][workloadKey][workloadDurationKey][flushPeriodKey])
-							log.Fatalf("can't find reference for CombinerThroughput/workload=%v/duration=%v/flushPeriod=%v/method=%v/combinerLimit=%v-N %v",
-								workloadKey.Get(workloadP.Fields()[0]),
-								workloadDurationKey.Get(workloadDurationP.Fields()[0]),
-								flushPeriodKey.Get(flushPeriodP.Fields()[0]),
-								directMethodKey.Get(methodP.Fields()[0]),
-								directMethodKey.Get(methodP.Fields()[1]),
-								unit,
-							)
-						}
-						data.Comparison = benchmath.AssumeNothing.Compare(&data.Reference.Sample, &data.Sample)
-						for _, w := range data.Comparison.Warnings {
-							if w.Error() != "all samples are equal" {
-								log.Fatalf("comparison: %v", w)
+								log.Printf("summary warning: %v", w)
 							}
 						}
 					}
@@ -525,12 +496,8 @@ func main() {
 			}
 		}
 	}
-	// Prepare the reference values first
-	connectAndDoMath(dataByMethodWorkloadDurationFlushPeriodUnit[directMethodKey])
-	for methodKey, dataByWorkloadDurationFlushPeriodUnit := range dataByMethodWorkloadDurationFlushPeriodUnit {
-		if methodKey != directMethodKey {
-			connectAndDoMath(dataByWorkloadDurationFlushPeriodUnit)
-		}
+	for _, dataByWorkloadDurationFlushPeriodUnit := range dataByMethodWorkloadDurationFlushPeriodUnit {
+		connectAndDoMath(dataByWorkloadDurationFlushPeriodUnit)
 	}
 
 	// Create separate sets of charts for each workload type
@@ -555,7 +522,7 @@ func main() {
 
 				chart := chart{
 					Title:           fmt.Sprintf("Throughput vs. P99 Latency\n(%v %s workload flushing every %v)", workloadDurationString, workloadName, flushPeriodString),
-					XAxisLabel:      "P99 Workflow Latency (seconds)",
+					XAxisLabel:      "P99 Workflow Latency (milliseconds)",
 					YAxisLabel:      "Workflow Throughput (tasks per second)",
 					SeriesLabels:    make([]string, 0, len(methodKeys)),
 					SeriesPoints:    make([]seriesPoints, 0, len(methodKeys)),
@@ -571,9 +538,6 @@ func main() {
 
 					var methodDisplayName string
 					switch methodName {
-					case "direct":
-						//methodDisplayName = "Direct Call"
-						continue
 					case "gatherOnly":
 						//methodDisplayName = "Gather Only"
 						continue
@@ -587,15 +551,18 @@ func main() {
 						methodDisplayName = fmt.Sprintf("%s (limit %d)", methodName, concurrencyLimit)
 					}
 
-					chart.SeriesLabels = append(chart.SeriesLabels, methodDisplayName)
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey]
+					if data == nil {
+						continue
+					}
 					throughput := data["tasks/sec"].Values
 					latency := data["p99-workflow-latency-sec"].Values
 
+					chart.SeriesLabels = append(chart.SeriesLabels, methodDisplayName)
 					var points seriesPoints
 					points.XYs = make(plotter.XYs, len(latency))
 					for i, x := range latency {
-						points.XYs[i].X = x
+						points.XYs[i].X = x * 1000 // scale to millseconds
 						points.XYs[i].Y = throughput[i]
 					}
 					chart.SeriesPoints = append(chart.SeriesPoints, points)
@@ -664,8 +631,6 @@ func main() {
 
 			var methodDisplayName string
 			switch methodName {
-			case "direct":
-				methodDisplayName = "Direct Call"
 			case "gatherOnly":
 				methodDisplayName = "Gather Only"
 			case "combine":
@@ -715,10 +680,14 @@ func main() {
 				throughputChart.XTickLabels[pointIndex] = xTickLabel
 
 				func() {
+					throughputPoints.XYs[pointIndex].X = flushPeriod
+
 					unit := "tasks/sec"
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
 
-					throughputPoints.XYs[pointIndex].X = flushPeriod
 					throughputPoints.XYs[pointIndex].Y = data.Summary.Center
 					throughputPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center
 					throughputPoints.YErrors[pointIndex].Low = data.Summary.Center - data.Summary.Lo
@@ -746,15 +715,20 @@ func main() {
 				allocBytesChart.XTickLabels[pointIndex] = xTickLabel
 
 				func() {
+					speedupPoints.XYs[pointIndex].X = workloadDuration
+
 					unit := "tasks/sec"
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
 
-					y := data.Summary.Center / data.Reference.Summary.Center
-					speedupPoints.XYs[pointIndex].X = workloadDuration
+					referenceThroughput := float64(time.Second) / workloadDuration
+					y := data.Summary.Center / referenceThroughput
 					speedupPoints.XYs[pointIndex].Y = y
 
-					plus := (data.Summary.Hi - data.Summary.Center) / data.Reference.Summary.Center
-					minus := (data.Summary.Center - data.Summary.Lo) / data.Reference.Summary.Center
+					plus := (data.Summary.Hi - data.Summary.Center) / referenceThroughput
+					minus := (data.Summary.Center - data.Summary.Lo) / referenceThroughput
 					speedupPoints.YErrors[pointIndex].High = plus
 					speedupPoints.YErrors[pointIndex].Low = minus
 
@@ -766,10 +740,14 @@ func main() {
 				}()
 
 				func() {
+					allocationsPoints.XYs[pointIndex].X = workloadDuration
+
 					unit := "allocs/op"
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
 
-					allocationsPoints.XYs[pointIndex].X = workloadDuration
 					allocationsPoints.XYs[pointIndex].Y = data.Summary.Center
 
 					allocationsPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center
@@ -779,10 +757,14 @@ func main() {
 				}()
 
 				func() {
+					allocBytesPoints.XYs[pointIndex].X = workloadDuration
+
 					unit := "B/op"
 					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
 
-					allocBytesPoints.XYs[pointIndex].X = workloadDuration
 					allocBytesPoints.XYs[pointIndex].Y = data.Summary.Center
 
 					allocBytesPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center

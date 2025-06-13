@@ -105,9 +105,9 @@ func Example_clientTimeout() {
 	// 10ms [req2] launching workflow
 	// 20ms [req1] workflow cancelled
 	// 30ms [req3] launching workflow
-	// 30ms [req1] result gathered
 	// 40ms [req2] task completed
 	// gathering results
+	// 50ms [req1] result gathered
 	// 50ms [req2] result gathered
 	// 60ms [req3] task completed
 	// 60ms [req3] result gathered

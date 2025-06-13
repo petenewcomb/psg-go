@@ -210,8 +210,11 @@ func TestFindThroughputKnee(t *testing.T) {
 		}
 
 		knee := pc.findThroughputKnee()
-		if knee > 2 {
-			t.Errorf("expected limited throughput knee, got %d", knee)
+		// With minimumReturn=0.2:
+		// 1→2: return=0.5 (acceptable), 2→3: return=0.2 (acceptable)
+		// So knee should be at end (index 3)
+		if knee != 3 {
+			t.Errorf("expected knee at end (index 3), got %d", knee)
 		}
 	})
 }
@@ -242,9 +245,10 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		target := pc.RecommendTarget()
-		// Should explore conservatively from the valley or linear end
-		if target <= 4 || target > 6 {
-			t.Errorf("expected conservative exploration from valley, got %d", target)
+		// Valley at index 2 (GC=3), knee at end (index 4)
+		// scaleUpWithinGapAt(2): baseGC=3, gap to next=1, so returns 3
+		if target != 3 {
+			t.Errorf("expected target=3 from valley exploration, got %d", target)
 		}
 	})
 

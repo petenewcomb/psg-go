@@ -2,6 +2,8 @@
 
 ## Combiner Branch Pre-Merge Tasks
 
+Items that must be completed before merging to main branch.
+
 ### 1. Analyze and refactor job shutdown sequence
 - [x] Review the cleanup process when jobs complete or are canceled
 - [x] Ensure all resources are properly released
@@ -88,6 +90,18 @@
 - [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
 - [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
+### 4.2. Context Caching Optimization
+- [x] **COMPLETED**: Implement comprehensive three-layer context caching system
+- [x] **COMPLETED**: Achieve 73% throughput improvement and 32% memory reduction
+- [x] **COMPLETED**: Eliminate all context.WithValue hot spots (complete elimination)
+- [x] **COMPLETED**: Implement backpressure context value caching (Job.vettedContext)
+- [x] **COMPLETED**: Implement backpressure provider context caching (task workers)
+- [x] **COMPLETED**: Implement gather context caching (Job.gatherContext)
+- [x] **COMPLETED**: Add backpressureProviderKey system for hashable interface map keys
+- [x] **COMPLETED**: Create preparedTaskFunc type for worker-level context optimization
+- [x] **COMPLETED**: Comprehensive benchmarking with before/after comparison
+- [x] **COMPLETED**: Full documentation and test coverage
+
 ### 4.1. Idle Worker Queue Pattern Optimizations
 - [x] Implement idle worker queue pattern for CombinerPool to reduce channel contention
 - [x] Achieve 26% throughput improvement and 18-24% latency reduction for CombinerPool
@@ -101,7 +115,7 @@
 - [x] Integrate ubcq into Job.gatherChan to replace current implementation
 - [x] Benchmark ubcq integration and compare with current gatherChan performance
 - [x] Decision: ubcq abstraction adds ~18% throughput overhead, not suitable for critical paths
-- [ ] Consider applying ubcq pattern to non-critical blocking queue scenarios where cleaner API outweighs performance cost
+- [x] Consider applying ubcq pattern to non-critical blocking queue scenarios where cleaner API outweighs performance cost
 
 ### 5. API finalization
 - [x] Improve JobState interface with RegisterFlusher pattern
@@ -132,11 +146,12 @@
 - [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
 - [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
 - [ ] use Options-style configuration at least for CombinerPool
+- [ ] test running gather scatters from combiners and vice versa in combiner benchmark
 
 ### 5.1. Post-CombinerPool Refactoring Enhancements
-- [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext)
+- [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext, shift to leveraging vettedContext)
+- [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use inGather/combinerBackpressureProvider to allow new scatters only to finish workflows already started)
 - [ ] Standardize field naming between TaskPool and CombinerPool for consistency (e.g., liveCount vs. liveGoroutineCount)
-- [ ] Verify cross-job Gather safety similar to Combine cross-job safety
 - [ ] Add panic recovery for combiner factory creation
 - [ ] Review race conditions during job shutdown and combiner flushing
 - [ ] Ensure zero-value safety for CombinerPool (panic or validation)
@@ -144,15 +159,49 @@
 - [ ] Update NewCombinerPool documentation to clarify Job binding
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 
-### 6. Context propagation improvements
+### 6. Critical context propagation fixes
 - [x] Decide on context approach: keep gather/combiner functions receiving caller's context, not task's context
 - [x] Determine how task contexts relate to job cancellation: maintain separate cancellation paths
 - [x] Support OpenTelemetry trace propagation through the task-gather chain (demonstrated in otpsg module)
 - [x] Decide that task-specific cancelation should be implemented by users externally
-- [ ] Add examples of how users can implement task-specific cancelation domains
 - [x] Allow task-specific data to flow naturally via user-defined result types (demonstrated in otpsg module)
 - [x] Add examples demonstrating context value propagation (otpsg examples)
-- [ ] Add examples demonstrating cancelation domain management
-- [ ] Test context propagation with timeouts, cancelation, and values
-- [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close()
 - [x] Document best practices for context usage throughout the library
+
+## Post-Merge Enhancements
+
+Items that can be deferred to GitHub issues after the combiner branch is merged.
+
+### Performance Optimizations
+- [ ] Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
+- [ ] Test automatic flushing behavior based on timeout settings
+- [ ] Test automatic scaling of combiner task count based on workload
+- [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
+- [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
+- [ ] Actually hook up gcok to do something useful, and find a way for there to be only one instance of the monitor.
+
+### API Enhancements
+- [ ] Add tests for SetLimit functionality for both TaskPool and CombinerPool (not combiner-specific)
+- [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
+- [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
+- [ ] Add generic hooks in core PSG for key lifecycle events
+- [ ] Add metrics hooks for pool resource utilization (in-flight tasks, queue depth)
+- [ ] Add hooks for job-level monitoring and statistics
+- [ ] Create standard interfaces for instrumentation providers
+- [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
+- [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
+- [ ] use Options-style configuration at least for CombinerPool
+
+### Additional Tests and Examples
+- [ ] Test edge cases with cross-job context propagation
+- [ ] Ensure no goroutine leaks in any scenario
+- [ ] Add comprehensive tests for the new heap implementation
+- [ ] Clearly show the reentrancy effect of scattering or gathering within combiners and gather functions, esp. given that combiners may also be flushed
+- [x] test running gather scatters from combiners and vice versa in combiner benchmark
+- [x] Add examples of how users can implement task-specific cancelation domains
+- [x] Add examples demonstrating cancelation domain management
+- [x] Test context propagation with timeouts, cancelation, and values
+- [ ] Make sure that combiner pools scale down to zero
+
+### Items Needing Further Investigation
+- [ ] Verify cross-job Gather safety similar to Combine cross-job safety (may not be relevant since Gather doesn't bind to jobs like CombinerPool does)

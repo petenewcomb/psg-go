@@ -83,6 +83,7 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 	}
 
 	chk := require.New(t)
+	// Loop to handle expected errors from gathers
 	for {
 		err := c.Job.CloseAndGatherAll(ctx)
 		if err == nil {
@@ -136,6 +137,8 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 			}
 			return gather
 		}()
+		// Loop to handle expected errors from gathers that are processed by
+		// Scatter as it applies backpressure
 		for {
 			err := gather.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
@@ -177,6 +180,8 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 			}
 			return combine
 		}()
+		// Loop to handle expected errors from gathers that are processed by
+		// Scatter as it applies backpressure
 		for {
 			err := combine.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))

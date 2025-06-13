@@ -118,7 +118,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 }
 
 // Returns true if the waiter was notified, false otherwise.
-type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, limitChangeCh <-chan struct{}) (bool, error)
+type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
 
 func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
 	switch {

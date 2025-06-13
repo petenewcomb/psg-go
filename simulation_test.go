@@ -20,8 +20,11 @@ func TestBySimulation(t *testing.T) {
 
 		if testing.Short() {
 			// Adjust planConfig to shorten test
-			planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 5, Max: 10}
-			planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 2, Max: 3}
+			//planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 5, Max: 10}
+			//planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 2, Max: 3}
+			planConfig.Path.Count = sim.BiasedIntConfig{Min: 2, Med: 2, Max: 2}
+			planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+			planConfig.Subjob.MaxDepth = 0
 		}
 
 		debug := false

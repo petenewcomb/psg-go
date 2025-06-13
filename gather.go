@@ -5,6 +5,7 @@ package psg
 
 import (
 	"context"
+	// "fmt"
 )
 
 // A GatherFunc is a function that processes the result of a completed
@@ -71,11 +72,47 @@ func (g *Gather[T]) Scatter(
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
 ) error {
-	launched, err := g.scatter(ctx, target, true, taskFunc)
-	if !launched && err == nil {
-		panic("task function was not launched, but no error was returned")
+	j := target.job()
+	vettedCtx := j.vettedContext(ctx)
+	vetScatter(vettedCtx, target, taskFunc)
+
+	doScatter := func(vettedCtx vettedContext) error {
+		launched, err := g.scatter(vettedCtx, j, target, true, taskFunc)
+		if !launched && err == nil {
+			panic("task function was not launched, but no error was returned")
+		}
+		return err
 	}
-	return err
+
+	if vettedCtx.inGather {
+		// Make sure the job doesn't shut down until this scatter has been done.
+		j.state.IncrementTasks()
+		bp := getBackpressureProvider(vettedCtx.ctx, j)
+		// bpType := "job"
+		// if _, ok := bp.(combineBackpressureProvider); ok {
+		// 	bpType = "combiner"
+		// }
+		// fmt.Printf("Gather.Scatter: queuing work (inGather=%v, bp=%s)\n", vettedCtx.inGather, bpType)
+		bp.QueueWork(func(ctx context.Context) error {
+			defer j.state.DecrementTasks()
+			// fmt.Printf("Gather.Scatter: executing queued work (bp=%s)\n", bpType)
+			vettedCtx := j.vettedContext(ctx)
+			return doScatter(vettedCtx)
+		})
+		return nil
+	}
+
+	//defer fmt.Println("Scatter: exiting")
+
+	ctx = j.gatherContext(vettedCtx)
+
+	//fmt.Println("Scatter: calling processOutstandingWork")
+	if err := j.processOutstandingWork(ctx); err != nil {
+		return err
+	}
+
+	//fmt.Println("Scatter: executing scatter")
+	return doScatter(vettedCtx)
 }
 
 // TryScatter attempts to initiate asynchronous execution of the provided task
@@ -94,21 +131,33 @@ func (g *Gather[T]) TryScatter(
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	return g.scatter(ctx, target, false, taskFunc)
+	j := target.job()
+	vettedCtx := j.vettedContext(ctx)
+	vetScatter(vettedCtx, target, taskFunc)
+
+	if !vettedCtx.inGather {
+		//fmt.Println("TryScatter: calling processOutstandingWork")
+		if err := j.processOutstandingWork(ctx); err != nil {
+			return false, err
+		}
+	}
+
+	return g.scatter(vettedCtx, j, target, false, taskFunc)
 }
 
 func (g *Gather[T]) scatter(
-	ctx context.Context,
+	vettedCtx vettedContext,
+	j *Job,
 	target TaskPoolOrJob,
 	block bool,
 	taskFunc TaskFunc[T],
 ) (bool, error) {
-	j := target.job()
-	vetted := j.vettedContext(ctx)
-	vetScatter(vetted, target, taskFunc)
-	bp := getBackpressureProvider(vetted.ctx, j)
+	bp := getBackpressureProvider(vettedCtx.ctx, j)
 
-	if err := yieldBeforeScatter(vetted, bp); err != nil {
+	//defer fmt.Println("Gather.scatter: exiting")
+
+	//fmt.Println("Gather.scatter: calling yieldBeforeScatter")
+	if err := yieldBeforeScatter(vettedCtx, bp); err != nil {
 		return false, err
 	}
 
@@ -117,7 +166,8 @@ func (g *Gather[T]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(vetted.ctx, target, taskFunc, bpf, func(ctx context.Context, value T, err error) {
+	//fmt.Println("Gather.scatter: calling scatter")
+	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
 		gather := func(ctx context.Context) error {

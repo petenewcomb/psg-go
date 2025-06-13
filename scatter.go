@@ -5,6 +5,8 @@ package psg
 
 import (
 	"context"
+
+	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
 // TaskPoolOrJob represents either a TaskPool or a Job.
@@ -47,15 +49,32 @@ func vetScatter[T any](
 }
 
 func scatter[T any](
-	ctx context.Context,
+	vettedCtx vettedContext,
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
-	backpressureFunc backpressureFunc,
+	applyBackpressure backpressureFunc,
 	postResult func(context.Context, T, error),
 ) (launched bool, err error) {
 	j := target.job()
 
-	bp := getBackpressureProvider(ctx, j)
+	bp := getBackpressureProvider(vettedCtx.ctx, j)
+
+	// If the job is too busy, we should wait to scatter the task.
+	for {
+		busy, busyChangeCh := j.gcMonitor.BusySignal()
+		if !busy {
+			break
+		}
+
+		if applyBackpressure == nil {
+			return false, nil
+		}
+
+		_, err = applyBackpressure(vettedCtx.ctx, waitq.Waiter{}, busyChangeCh)
+		if err != nil {
+			return false, err
+		}
+	}
 
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
@@ -71,7 +90,7 @@ func scatter[T any](
 
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the target to launch.
-	return target.launch(ctx, backpressureFunc, func(ctx context.Context, taskCompletedFn func(), ctxWithBP func(backpressureProvider) context.Context) {
+	return target.launch(vettedCtx.ctx, applyBackpressure, func(ctx context.Context, taskCompletedFn func(), ctxWithBP func(backpressureProvider) context.Context) {
 
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.

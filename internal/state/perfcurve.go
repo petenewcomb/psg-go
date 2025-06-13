@@ -29,6 +29,7 @@ type perfSample struct {
 	GoroutineCount int
 	Throughput     float64
 	SecondaryUtil  float64
+	Latency        time.Duration
 }
 
 // Format implements fmt.Formatter
@@ -50,7 +51,7 @@ func (pc *perfCurves) Format(fs fmt.State, verb rune) {
 		case i == knee:
 			label = "(k)"
 		}
-		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SecondaryUtil*100)
+		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%(%v)", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SecondaryUtil*100, s.Latency)
 		sep = ", "
 	}
 	_, _ = fmt.Fprint(fs, "]")
@@ -77,6 +78,11 @@ func (pc *perfCurves) SetHighUtilizationThreshold(high float64) {
 		panic(fmt.Sprintf("invalid high utilization threshold %v: must be between 0 and 1, inclusive", high))
 	}
 	pc.highUtilThreshold = high
+}
+
+// SetRetentionPeriod configures how long performance samples are retained
+func (pc *perfCurves) RetentionPeriod() time.Duration {
+	return pc.retentionPeriod
 }
 
 // SetRetentionPeriod configures how long performance samples are retained
@@ -111,9 +117,118 @@ func (pc *perfCurves) SetGrowthFactors(aggressive, conservative float64) {
 }
 
 func (pc *perfCurves) AddSample(s perfSample) {
-	oldestValidTime := time.Now().Add(-pc.retentionPeriod)
+	//fmt.Printf("adding sample %d:%.0f to %v\n", s.GoroutineCount, s.Throughput*float64(time.Second), pc)
+	//defer fmt.Printf("added sample %d:%.0f to %v\n", s.GoroutineCount, s.Throughput*float64(time.Second), pc)
+
+	// Find where this sample should be inserted/updated in the sorted slice
+	newSampleIndex := pc.findByGoroutineCount(s.GoroutineCount)
+	if newSampleIndex < len(pc.samples) && s.GoroutineCount == pc.samples[newSampleIndex].GoroutineCount {
+		pc.samples[newSampleIndex] = s
+	}
+
+	valleyIndex := pc.findUtilizationValley()
+	kneeIndex := pc.findThroughputKnee()
+	if valleyIndex == len(pc.samples) && kneeIndex == len(pc.samples) {
+		for i := range pc.samples {
+			pc.samples[i].Time = s.Time
+		}
+	} else {
+
+		if valleyIndex < len(pc.samples) {
+			pc.samples[valleyIndex].Time = s.Time
+		}
+		if valleyIndex+1 < len(pc.samples) {
+			pc.samples[valleyIndex+1].Time = s.Time
+		}
+		if valleyIndex+2 < len(pc.samples) {
+			pc.samples[valleyIndex+2].Time = s.Time
+		}
+		if valleyIndex-1 >= 0 {
+			pc.samples[valleyIndex-1].Time = s.Time
+		}
+		if valleyIndex-2 >= 0 {
+			pc.samples[valleyIndex-2].Time = s.Time
+		}
+
+		if kneeIndex < len(pc.samples) {
+			pc.samples[kneeIndex].Time = s.Time
+		}
+		if kneeIndex+1 < len(pc.samples) {
+			pc.samples[kneeIndex+1].Time = s.Time
+		}
+		if kneeIndex+2 < len(pc.samples) {
+			pc.samples[kneeIndex+2].Time = s.Time
+		}
+		if kneeIndex-1 >= 0 {
+			pc.samples[kneeIndex-1].Time = s.Time
+		}
+		if kneeIndex-2 >= 0 {
+			pc.samples[kneeIndex-2].Time = s.Time
+		}
+	}
+
+	/*
+		if newSampleIndex < len(pc.samples) && s.GoroutineCount == pc.samples[newSampleIndex].GoroutineCount {
+			pc.samples[newSampleIndex] = s
+		}
+		if len(pc.samples) > 2 {
+			pc.samples[0].Time = s.Time
+			pc.samples[1].Time = s.Time
+			for i := 2; i < len(pc.samples); i++ {
+				if pc.rangeExhibitsAcceptableReturn(&pc.samples[i-1], &pc.samples[i]) {
+					//pc.samples[0].Time = s.Time
+					pc.samples[i].Time = s.Time
+				}
+			}
+		}
+	*/
+
+	/*
+		// Proactively refresh timestamps of nearby samples to prevent premature expiration
+		// and maintain performance curve stability bounds around the new sample
+		if newSampleIndex > 0 {
+			referenceSample := &s
+			// Refresh timestamps for samples with lower goroutine counts
+			// Walk backward from insertion point, refreshing timestamps of samples
+			// that still appear to have acceptable performance characteristics
+			for i := newSampleIndex - 1; i >= 0; i-- {
+				//fmt.Printf("refreshing time for lower sample %d\n", pc.samples[i].GoroutineCount)
+				if pc.samples[i].SecondaryUtil > pc.highUtilThreshold &&
+					!pc.rangeExhibitsAcceptableReturn(&pc.samples[i], referenceSample) {
+					break
+				}
+				pc.samples[i].Time = s.Time
+				referenceSample = &pc.samples[i]
+			}
+		}
+
+		// Handle the sample at the insertion point and refresh forward samples
+		if newSampleIndex < len(pc.samples) {
+			referenceSample := &s
+			i := newSampleIndex
+			if pc.samples[newSampleIndex].GoroutineCount == s.GoroutineCount {
+				// Start forward refresh from the next sample (the one after our update)
+				i++
+			}
+			// Refresh timestamps for samples with higher goroutine counts
+			// Continue until we find a sample that shows acceptable return on investment
+			for ; i < len(pc.samples); i++ {
+				//fmt.Printf("refreshing time for higher sample %d\n", pc.samples[i].GoroutineCount)
+				if !pc.rangeExhibitsAcceptableReturn(referenceSample, &pc.samples[i]) {
+					break
+				}
+				pc.samples[i].Time = s.Time
+				referenceSample = &pc.samples[i]
+			}
+		}
+	*/
+
+	// Use the new sample's timestamp for consistent time reference throughout method
+	oldestValidTime := s.Time.Add(-pc.retentionPeriod)
 	if pc.oldestSampleTime.IsZero() || pc.oldestSampleTime.Before(oldestValidTime) {
-		// Scan to expire old samples
+		//fmt.Printf("expiring samples (before): %v\n", pc)
+		//defer fmt.Printf("expiring samples (after): %v\n", pc)
+		// Scan to expire old samples while also inserting new sample
 		pc.oldestSampleTime = s.Time
 		j := 0
 		append := func(i int, s perfSample) {
@@ -129,52 +244,29 @@ func (pc *perfCurves) AddSample(s perfSample) {
 				pc.oldestSampleTime = s.Time
 			}
 		}
-		newSampleIndex := -1
 		for i, es := range pc.samples {
-			if newSampleIndex == -1 && s.GoroutineCount <= es.GoroutineCount {
-				append(-1, s)
-				newSampleIndex = j - 1
-			}
-			if s.GoroutineCount != es.GoroutineCount &&
-				!es.Time.Before(oldestValidTime) {
+			if i == newSampleIndex {
+				// Insert new sample or replace existing one with same goroutine count
+				if es.GoroutineCount == s.GoroutineCount {
+					// Replace existing sample with same goroutine count
+					append(i, s)
+				} else {
+					// Insert new sample before existing one
+					append(-1, s)
+				}
+			} else if !es.Time.Before(oldestValidTime) {
+				// Keep existing sample that hasn't expired
 				append(i, es)
 			}
 		}
-		if newSampleIndex == -1 {
+		if newSampleIndex == len(pc.samples) {
 			append(-1, s)
-			newSampleIndex = j - 1
 		}
 		pc.samples = pc.samples[:j]
 
-		// Refresh timestamps near the new sample if we can infer that they are
-		// still valid. This helps improve stability by retaining upper and
-		// lower bounds around a good target.
-		for i := newSampleIndex - 1; i >= 0; i-- {
-			if pc.samples[i].SecondaryUtil < pc.highUtilThreshold ||
-				!pc.rangeExhibitsAcceptableReturn(i, i+1) {
-				break
-			}
-			//fmt.Printf("refreshing time for lower sample %d\n", pc.samples[i].GoroutineCount)
-			pc.samples[i].Time = s.Time
-		}
-		for i := newSampleIndex + 1; i < len(pc.samples); i++ {
-			if pc.rangeExhibitsAcceptableReturn(i-1, i) {
-				break
-			}
-			//fmt.Printf("refreshing time for higher sample %d\n", pc.samples[i].GoroutineCount)
-			pc.samples[i].Time = s.Time
-		}
-	} else {
-		// Existing samples still valid, just need to insert or update
-		i := pc.findByGoroutineCount(s.GoroutineCount)
-		if i < len(pc.samples) && pc.samples[i].GoroutineCount == s.GoroutineCount {
-			pc.samples[i] = s
-		} else {
-			pc.samples = slices.Insert(pc.samples, i, s)
-		}
-		if s.Time.Before(pc.oldestSampleTime) {
-			pc.oldestSampleTime = s.Time
-		}
+	} else if newSampleIndex == len(pc.samples) || s.GoroutineCount != pc.samples[newSampleIndex].GoroutineCount {
+		// Existing samples still valid, just need to insert/append
+		pc.samples = slices.Insert(pc.samples, newSampleIndex, s)
 	}
 }
 
@@ -295,7 +387,7 @@ func (pc *perfCurves) scaleUpWithinGapAt(baseIndex int) int {
 	if gapSize == 1 {
 		return baseGC
 	}
-	return baseGC + int(math.Round(float64(gapSize)*0.5))
+	return baseGC + min(1, int(math.Round(float64(gapSize)*0.5)))
 }
 
 func (pc *perfCurves) throughputStillImprovingAt(baseIndex int) bool {
@@ -387,16 +479,14 @@ func (pc *perfCurves) findLinearEnd() int {
 
 func (pc *perfCurves) findThroughputKnee() int {
 	for i := 0; i < len(pc.samples)-1; i++ {
-		if !pc.rangeExhibitsAcceptableReturn(i, i+1) {
+		if !pc.rangeExhibitsAcceptableReturn(&pc.samples[i], &pc.samples[i+1]) {
 			return i
 		}
 	}
 	return len(pc.samples)
 }
 
-func (pc *perfCurves) rangeExhibitsAcceptableReturn(lowerIndex, higherIndex int) bool {
-	lower := pc.samples[lowerIndex]
-	higher := pc.samples[higherIndex]
+func (pc *perfCurves) rangeExhibitsAcceptableReturn(lower, higher *perfSample) bool {
 	slope := (higher.Throughput - lower.Throughput) / float64(higher.GoroutineCount-lower.GoroutineCount)
 	returnRate := slope / lower.Throughput
 	return returnRate >= pc.minimumReturn

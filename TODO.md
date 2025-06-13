@@ -158,6 +158,9 @@ Items that must be completed before merging to main branch.
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Update NewCombinerPool documentation to clarify Job binding
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
+- [ ] Re-enable select in postCombineSlow to try posting to primaryCh (I think)
+- [ ] Rename perfCurves to something more like "controller"
+- [ ] Maybe split state package into jobstate and cpstate?
 
 ### 6. Critical context propagation fixes
 - [x] Decide on context approach: keep gather/combiner functions receiving caller's context, not task's context

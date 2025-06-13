@@ -2,6 +2,8 @@
 
 > **Important**: Check the TODO.md file in the repository root for current work-in-progress items and tasks that need attention.
 
+> **Meta-instruction**: If you notice the user repeatedly correcting or advising on the same type of issue, proactively suggest adding guidance to these instructions to prevent future repetition.
+
 ## Reference materials
 See `README.md` for a project overview, the `docs` folder for design documentation, and the `benchmarks` for previous investigations.
 
@@ -18,6 +20,7 @@ See `README.md` for a project overview, the `docs` folder for design documentati
 - Remember that `go test` will usually output nothing upon success. To force it to generate output for all tests run use `-v`. Also pay attention to the exit code.
 - Use `go test -race` to engage the race detector, which will slow execution time but detect at least egregious cross-thread data access problems.
 - Avoid adding unrelated untracked files to a commit.  Prefer `git add -u` over `git add .`, or better yet just stage files by naming them explicitly.
+- When running long-duration benchmarks, always set bash timeout greater than the expected duration to account for overhead (including warmup)
 
 ## Code Style
 - See .githooks/pre-commit for expectations of code ready to review

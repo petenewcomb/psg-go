@@ -92,5 +92,9 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - [x] Test context propagation with timeouts, cancelation, and values
 - [ ] Make sure that combiner pools scale down to zero
 
+### Design Documentation
+- [ ] Add an overall design doc that covers the user-facing design of psg.  this would have a more theoretical bent as opposed to the practical focus of what's in doc.go.  This doc would focus on overall theory not specific implementation.
+- [ ] Add a design doc for the implementation of backpressure mechanisms, detailing the interplay of recursion and reentrancy.
+
 ### Items Needing Further Investigation
 - [ ] Verify cross-job Gather safety similar to Combine cross-job safety (may not be relevant since Gather doesn't bind to jobs like CombinerPool does)

@@ -216,14 +216,11 @@ func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFun
 }
 
 func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- boundCombineFunc, combine boundCombineFunc) {
-	// Attempt to post the combine to the primary channel alone.
-	/*
-		select {
-		case primaryCh <- combine:
-			return
-		default:
-		}
-	*/
+
+	// We don't attempt the primary channel alone here since both fast paths
+	// failed, meaning both primary and secondary goroutines are likely busy. At
+	// this point spillage to secondary is warranted, so we use
+	// first-come-first-served among whatever becomes available.
 
 	var waitStartTime time.Time
 	for {

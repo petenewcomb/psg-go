@@ -24,7 +24,9 @@ func Example_tracing() {
 		trace.WithBatcher(exporter),
 	)
 	otel.SetTracerProvider(tp)
-	defer tp.Shutdown(context.Background())
+	defer func() {
+		_ = tp.Shutdown(context.Background())
+	}()
 
 	// Create a root context with a parent span
 	ctx, rootSpan := otel.Tracer("example").Start(context.Background(), "process-request")
@@ -100,7 +102,9 @@ func Example_instrumentedTask() {
 		trace.WithBatcher(exporter),
 	)
 	otel.SetTracerProvider(tp)
-	defer tp.Shutdown(context.Background())
+	defer func() {
+		_ = tp.Shutdown(context.Background())
+	}()
 
 	// Create a PSG job
 	ctx := context.Background()

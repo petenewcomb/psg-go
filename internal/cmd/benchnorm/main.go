@@ -37,10 +37,12 @@ func main() {
 				log.Fatal(err)
 			}
 			if err := processFile(filename, f, writer); err != nil {
-				f.Close()
+				_ = f.Close()
 				log.Fatal(err)
 			}
-			f.Close()
+			if err := f.Close(); err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 }

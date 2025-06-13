@@ -1,11 +1,20 @@
 #!/bin/bash
 
 set -e
-set -x
 
-go vet ./...
-gofmt -s -w .
-golangci-lint run
-go test -short ./...
-go generate ./...
+find . -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
+    set -e
+    cd "${file%/*}"
+    echo "$0: Entering directory \``pwd`'"
+    set -x
+    go mod tidy
+    go vet ./...
+    gofmt -s -w .
+    golangci-lint run
+    go test -short ./...
+    go generate ./...
+); echo; done
+
+echo "$0: Entering directory \``pwd`'"
+set -x
 ! git status --porcelain -uno | grep '^[^ ][^ ]'

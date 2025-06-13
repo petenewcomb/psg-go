@@ -89,7 +89,9 @@ func plotScatter(c *chart) error {
 	for i, label := range c.SeriesLabels {
 		series = append(series, label, c.SeriesPoints[i])
 	}
-	plotutil.AddScatters(p, series...)
+	if err := plotutil.AddScatters(p, series...); err != nil {
+		return err
+	}
 
 	//p.Add(plotter.NewGlyphBoxes())
 
@@ -191,9 +193,12 @@ func savePlot(c *chart, p *plot.Plot, aspect float64) error {
 	if err != nil {
 		return err
 	}
-	defer w.Close()
 
 	if _, err = svg.WriteTo(w); err != nil {
+		return err
+	}
+
+	if err := w.Close(); err != nil {
 		return err
 	}
 
@@ -379,7 +384,7 @@ func main() {
 		if flushPeriodKeysPerWorkloadDuration == -1 {
 			flushPeriodKeysPerWorkloadDuration = len(flushPeriodKeys)
 		} else if len(flushPeriodKeys) != flushPeriodKeysPerWorkloadDuration {
-			log.Fatalf("%v has %d flush period keys, expected %d", len(flushPeriodKeys), flushPeriodKeysPerWorkloadDuration)
+			log.Fatalf("%v has %d flush period keys, expected %d", workloadDurationKey, len(flushPeriodKeys), flushPeriodKeysPerWorkloadDuration)
 		}
 	}
 

@@ -240,6 +240,11 @@ func (cps *CombinerPoolState) GoroutineExited() {
 }
 
 func (cps *CombinerPoolState) updateStats() bool {
+	// No meaningful stats to update with zero goroutines
+	if cps.liveGoroutineCount == 0 {
+		return false
+	}
+
 	// Capture raw datapoints
 	now := time.Now()
 	curCompletedCount := cps.cumulativeCompletedCount.Load()

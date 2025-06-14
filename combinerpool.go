@@ -283,7 +283,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 		isSecondary := false
 
-		// backpressureProvider added below
+		// Create the base goroutine context
 		goroutineCtx, cancelGoroutineCtx := context.WithCancel(j.ctx)
 		// deferred call to cancel below
 
@@ -511,7 +511,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			},
 		}
 
-		goroutineCtx = withBackpressureProvider(goroutineCtx, bp)
+		backpressureCtx := withBackpressureProvider(goroutineCtx, bp)
 
 		// Flush sends any pending results from the combiner if needed. It also
 		// decrements the combiner counter to ensure that the job is not kept
@@ -526,7 +526,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 		}
 
 		// Ensure combiner is flushed as needed when this goroutine terminates.
-		defer flushAll(goroutineCtx)
+		defer flushAll(backpressureCtx)
 
 		executeCombine = func(ctx context.Context, combine boundCombineFunc) {
 			if nextJobFlushCh == nil {
@@ -540,7 +540,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 		cp.state.GoroutineStarted()
 		defer cp.state.GoroutineExited()
 
-		executeCombine(goroutineCtx, combine)
+		executeCombine(backpressureCtx, combine)
 
 		var idleTimer *time.Timer
 
@@ -625,7 +625,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				}
 			}
 
-			if _, err := combineOneAndDoTheWork(goroutineCtx, true, waitq.Waiter{}, nil); err != nil {
+			if _, err := combineOneAndDoTheWork(backpressureCtx, true, waitq.Waiter{}, nil); err != nil {
 				switch err {
 				case ErrJobDone, errIdleTimeout, context.Canceled:
 				default:

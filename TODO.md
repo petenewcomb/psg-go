@@ -16,6 +16,8 @@ Items that must be completed before merging to main branch.
 - [ ] Test behavior when combiner factory panics
 - [ ] Test cleanup behavior with mixed TaskPool and CombinerPool operations
 - [ ] Add tests verifying proper shutdown sequence and resource cleanup
+- [ ] Test and document behavior when tasks passed to combiners return errors
+- [ ] test running gather scatters from combiners and vice versa in combiner benchmark
 
 ### 3. Documentation updates
 - [ ] Complete review and update of doc comments for all new/modified public APIs
@@ -31,19 +33,9 @@ Items that must be completed before merging to main branch.
 - [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
 ### 5. API finalization
-- [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
 - [ ] Review and document thread-safety guarantees for remaining public APIs
-- [ ] Test and document behavior when tasks passed to combiners return errors
-- [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
-- [ ] Hooks and instrumentation:
-  - [ ] Add generic hooks in core PSG for key lifecycle events
-  - [ ] Add metrics hooks for pool resource utilization (in-flight tasks, queue depth)
-  - [ ] Add hooks for job-level monitoring and statistics
-  - [ ] Create standard interfaces for instrumentation providers
-- [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
 - [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
 - [ ] use Options-style configuration at least for CombinerPool
-- [ ] test running gather scatters from combiners and vice versa in combiner benchmark
 
 ### 6. Implementation improvements
 - [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext, shift to leveraging vettedContext)
@@ -66,7 +58,6 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - [ ] Actually hook up gcok to do something useful, and find a way for there to be only one instance of the monitor.
 
 ### API Enhancements
-- [ ] Add tests for SetLimit functionality for both TaskPool and CombinerPool (not combiner-specific)
 - [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
 - [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
 - [ ] Add generic hooks in core PSG for key lifecycle events
@@ -77,16 +68,23 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
 - [ ] use Options-style configuration at least for CombinerPool
 
+### 5. API enhancements
+- [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
+- [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
+- [ ] Hooks and instrumentation:
+  - [ ] Add generic hooks in core PSG for key lifecycle events
+  - [ ] Add metrics hooks for pool resource utilization (in-flight tasks, queue depth)
+  - [ ] Add hooks for job-level monitoring and statistics
+  - [ ] Create standard interfaces for instrumentation providers
+- [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
+
 ### Additional Tests and Examples
 - [ ] Test edge cases with cross-job context propagation
 - [ ] Ensure no goroutine leaks in any scenario
 - [ ] Add comprehensive tests for the new heap implementation
 - [ ] Clearly show the reentrancy effect of scattering or gathering within combiners and gather functions, esp. given that combiners may also be flushed
-- [x] test running gather scatters from combiners and vice versa in combiner benchmark
-- [x] Add examples of how users can implement task-specific cancelation domains
-- [x] Add examples demonstrating cancelation domain management
-- [x] Test context propagation with timeouts, cancelation, and values
 - [ ] Make sure that combiner pools scale down to zero
+- [ ] Add tests for SetLimit functionality for both TaskPool and CombinerPool (not combiner-specific)
 
 ### Design Documentation
 - [ ] Add an overall design doc that covers the user-facing design of psg.  this would have a more theoretical bent as opposed to the practical focus of what's in doc.go.  This doc would focus on overall theory not specific implementation.

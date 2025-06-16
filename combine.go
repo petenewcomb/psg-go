@@ -204,12 +204,9 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
-		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap, queuing bool) {
-			// Create an emit callback to handle output from the combiner
-			if !queuing {
-				combineFn := getCombineFunc(ctx, cm, c.pool, c)
-				combineFn(ctx, input, inputErr)
-			}
+		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
+			combineFn := getCombineFunc(ctx, cm, c.pool, c)
+			combineFn(ctx, input, inputErr)
 		})
 	})
 }

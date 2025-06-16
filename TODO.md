@@ -46,8 +46,9 @@ Items that must be completed before merging to main branch.
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 - [ ] Consider changing JobState.(In|De)crementTasks to JobState.(In|De)crementWork or similar, since it's also used to count pending scatters and gathers (I think)
-- [ ] Replace queuing parameter of boundCombineFunc with pendingCombine wrapper struct that includes a releaseWaiters boolean flag
 - [ ] Reconsider Min/MaxGatherCount on sim.Plan -- it seems that implicit combine flushes will not result in gathers anyway
+- [ ] Make naming of function variables and types consistent - *Func for types, *Fn for variables, etc.
+
 
 ## Post-Merge Enhancements
 

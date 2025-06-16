@@ -31,7 +31,7 @@ func InstrumentedTask[T any](
 func InstrumentedGather[T any](
 	operationName string,
 	gatherFunc func(ctx context.Context, result T, err error) error,
-) *psg.Gather[PropagatedResult[T]] {
+) *psg.GatherOp[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedGather := LoggedGather(operationName, gatherFunc)
@@ -75,7 +75,7 @@ func InstrumentedScatter[T any](
 	ctx context.Context,
 	pool *psg.TaskPool,
 	task psg.TaskFunc[PropagatedResult[T]],
-	gather *psg.Gather[PropagatedResult[T]],
+	gather *psg.GatherOp[PropagatedResult[T]],
 ) error {
 	return gather.Scatter(ctx, pool, task)
 }

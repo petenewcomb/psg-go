@@ -40,21 +40,21 @@ func TracedTask[T any](
 // trace context propagation.
 func TracedGather[T any](
 	operationName string,
-	gatherFunc func(ctx context.Context, result T, err error) error,
-) *psg.Gather[PropagatedResult[T]] {
+	gatherFn func(ctx context.Context, result T, err error) error,
+) *psg.GatherOp[PropagatedResult[T]] {
 	// Create a gather function that adds tracing
-	tracedGatherFunc := func(ctx context.Context, result T, err error) error {
+	tracedGatherFn := func(ctx context.Context, result T, err error) error {
 		// Create span with meaningful name
 		tracer := otel.Tracer("otpsg")
 		ctx, span := tracer.Start(ctx, operationName)
 		defer span.End()
 
 		// Call the original gather function
-		return gatherFunc(ctx, result, err)
+		return gatherFn(ctx, result, err)
 	}
 
 	// Then use the base propagation
-	return PropagateGather(tracedGatherFunc)
+	return PropagateGather(tracedGatherFn)
 }
 
 // TracedCombiner adds spans with the given operation names to a combiner.
@@ -70,7 +70,7 @@ func TracedCombiner[I, O any](
 		innerCombiner := combinerFactory()
 
 		return psg.FuncCombiner[I, O]{
-			CombineFunc: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
+			CombineFn: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, combineOpName)
@@ -79,7 +79,7 @@ func TracedCombiner[I, O any](
 				// Call the original combine function
 				innerCombiner.Combine(ctx, input, inputErr, emit)
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, flushOpName)

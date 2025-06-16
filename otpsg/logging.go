@@ -102,7 +102,7 @@ func LoggedCombiner[I, O any](
 		innerCombiner := combinerFactory()
 
 		return psg.FuncCombiner[I, O]{
-			CombineFunc: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
+			CombineFn: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
 				// Get logger from context or use a default
 				logger := zap.L()
 
@@ -123,7 +123,7 @@ func LoggedCombiner[I, O any](
 					zap.String("component", "otpsg"),
 					zap.Duration("duration", duration))
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
 				// Get logger from context or use a default
 				logger := zap.L()
 

@@ -100,7 +100,7 @@ func MetricsCombiner[I, O any](
 		flushDuration, _ := meter.Float64Histogram(flushMetricName + ".duration")
 
 		return psg.FuncCombiner[I, O]{
-			CombineFunc: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
+			CombineFn: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
 				startTime := time.Now()
 
 				// Track execution
@@ -123,7 +123,7 @@ func MetricsCombiner[I, O any](
 				innerCombiner.Combine(ctx, input, inputErr, emit)
 				didPanic = false
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
 				startTime := time.Now()
 
 				// Track execution

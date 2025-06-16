@@ -10,7 +10,7 @@ import (
 	"github.com/petenewcomb/psg-go"
 )
 
-type Combine[I, O any] psg.Combine[result[I], result[O]]
+type Combine[I, O any] psg.CombineOp[result[I], result[O]]
 
 // Combine creates a psg.Combine that propagates workflow contexts through the combine chain.
 // This ensures workflow context values and cancellation flow from inputs to outputs.
@@ -19,8 +19,8 @@ func NewCombine[I, O any](
 	combinerPool *psg.CombinerPool,
 	combinerFactory CombinerFactory[I, O],
 ) *Combine[I, O] {
-	return (*Combine[I, O])(psg.NewCombine(
-		(*psg.Gather[result[O]])(gather),
+	return (*Combine[I, O])(psg.NewCombineOp(
+		(*psg.GatherOp[result[O]])(gather),
 		combinerPool,
 		wrapCombinerFactory(combinerFactory),
 	))
@@ -52,6 +52,6 @@ func (c *Combine[I, O]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *
 	)
 }
 
-func (c *Combine[I, O]) inner() *psg.Combine[result[I], result[O]] {
-	return (*psg.Combine[result[I], result[O]])(c)
+func (c *Combine[I, O]) inner() *psg.CombineOp[result[I], result[O]] {
+	return (*psg.CombineOp[result[I], result[O]])(c)
 }

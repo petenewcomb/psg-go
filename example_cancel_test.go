@@ -26,7 +26,7 @@ func ExampleJob_Cancel() {
 
 	pool := psg.NewTaskPool(job, 1)
 
-	printResult := psg.NewGather(
+	printResult := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
@@ -96,7 +96,7 @@ func ExampleJob_Cancel_task() {
 
 	pool := psg.NewTaskPool(job, 1)
 
-	printResult := psg.NewGather(
+	printResult := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil

@@ -31,8 +31,8 @@ func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error 
 		TaskPools:                    make([]*psg.TaskPool, len(plan.TaskPools)),
 		ConcurrencyByTaskPool:        make([]atomic.Int64, len(plan.TaskPools)),
 		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(plan.TaskPools)),
-		Gathers:                      make([]*psg.Gather[*taskResult], plan.GatherCount),
-		Combines:                     make([]*psg.Combine[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
+		Gathers:                      make([]*psg.GatherOp[*taskResult], plan.GatherCount),
+		Combines:                     make([]*psg.CombineOp[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
 		CombinerPools:                make([]*psg.CombinerPool, len(plan.CombinerPools)),
 		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
 		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
@@ -54,9 +54,9 @@ type controller struct {
 	ConcurrencyByTaskPool        []atomic.Int64
 	MaxConcurrencyByTaskPool     []atomicMinMaxInt64
 	GathersLock                  sync.Mutex
-	Gathers                      []*psg.Gather[*taskResult]
+	Gathers                      []*psg.GatherOp[*taskResult]
 	CombinesLock                 sync.Mutex
-	Combines                     []*psg.Combine[*taskResult, *combineResult]
+	Combines                     []*psg.CombineOp[*taskResult, *combineResult]
 	CombinerPools                []*psg.CombinerPool
 	ConcurrencyByCombinerPool    []atomic.Int64
 	MaxConcurrencyByCombinerPool []atomicMinMaxInt64
@@ -133,12 +133,12 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
 		c.debugf("Scattering %v to Gather", task)
-		gather := func() *psg.Gather[*taskResult] {
+		gather := func() *psg.GatherOp[*taskResult] {
 			c.GathersLock.Lock()
 			defer c.GathersLock.Unlock()
 			gather := c.Gathers[rh.Index]
 			if gather == nil {
-				gather = psg.NewGather(c.newGatherFunc(t))
+				gather = psg.NewGatherOp(c.newGatherFunc(t))
 				c.Gathers[rh.Index] = gather
 			}
 			return gather
@@ -160,7 +160,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 		}
 	case *Combine:
 		c.debugf("Scattering %v to Combine", task)
-		combine := func() *psg.Combine[*taskResult, *combineResult] {
+		combine := func() *psg.CombineOp[*taskResult, *combineResult] {
 			c.debugf("Getting combine for %v", task)
 			defer c.debugf("Got combine for %v", task)
 			c.CombinesLock.Lock()
@@ -168,7 +168,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 			combine := c.Combines[rh.Index]
 			if combine == nil {
 				// Create a gather for the combiner output
-				gather := psg.NewGather(c.newCombinerGatherFunc(t))
+				gather := psg.NewGatherOp(c.newCombinerGatherFunc(t))
 
 				combinerPoolIndex := c.Plan.CombinerPoolIndexes[rh.Index]
 				combinerPool := c.CombinerPools[combinerPoolIndex]
@@ -180,7 +180,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 				}
 
 				// Create a combine operation that uses the gather and factory
-				combine = psg.NewCombine(
+				combine = psg.NewCombineOp(
 					gather,
 					combinerPool,
 					c.newCombinerFactory(t, rh.Index),
@@ -338,7 +338,7 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 			}
 		}
 		return psg.FuncCombiner[*taskResult, *combineResult]{
-			CombineFunc: func(ctx context.Context, tRes *taskResult, err error, emit psg.CombinerEmitFunc[*combineResult]) {
+			CombineFn: func(ctx context.Context, tRes *taskResult, err error, emit psg.CombinerEmitFunc[*combineResult]) {
 				c.MinCombineDelay.UpdateMin(int64(time.Since(tRes.EndTime)))
 
 				defer recoverLocalTPanic(func() { flush(ctx, nil, nil, emit) })
@@ -364,7 +364,7 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 					flush(ctx, combine, err, emit)
 				}
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[*combineResult]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[*combineResult]) {
 				if cRes.TaskCount > 0 {
 					flush(ctx, nil, nil, emit)
 				}

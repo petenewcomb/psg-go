@@ -36,7 +36,7 @@ const DefaultGCTimeUpdateInterval = 1 * time.Second
 // important details.
 type Job struct {
 	ctx         context.Context
-	cancelFunc  context.CancelFunc
+	cancelFn    context.CancelFunc
 	gatherQueue rdvq.Required[boundGatherFunc]
 	wg          sync.WaitGroup
 	state       jobstate.JobState
@@ -151,7 +151,7 @@ type workItem struct {
 // [Job.CancelAndWait] to ensure that an early exit from the calling function
 // does not leave any outstanding goroutines.
 func NewJob(ctx context.Context) *Job {
-	ctx, cancelFunc := context.WithCancel(ctx)
+	ctx, cancelFn := context.WithCancel(ctx)
 
 	// Reset job-specific context values that shouldn't be inherited from parent jobs
 	// while preserving user-provided context values and jobContextValueKey for cycle detection
@@ -166,7 +166,7 @@ func NewJob(ctx context.Context) *Job {
 	}
 
 	j := &Job{
-		cancelFunc: cancelFunc,
+		cancelFn: cancelFn,
 	}
 	j.ctx = withJob(ctx, j)
 	j.state.Init()
@@ -242,7 +242,7 @@ func includesJob(ctx context.Context, j *Job, keys ...any) bool {
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
-// Outstanding calls to [Scatter], [Job.GatherOne], [Job.TryGatherOne],
+// Outstanding calls to [Scatter], [Job.Gather], [Job.TryGather],
 // [Job.GatherAll], or [Job.TryGatherAll] using the job or any of its task pools will
 // fail with [context.Canceled] or other error returned by a [GatherFunc].
 //
@@ -250,15 +250,15 @@ func includesJob(ctx context.Context, j *Job, keys ...any) bool {
 // [GatherFunc] will delay termination of their independent goroutine or caller
 // until it returns. This method cancels the context passed to each [TaskFunc],
 // but not the context passed to each [GatherFunc]. Gather functions instead
-// receive the context passed to the calling [Scatter], [Job.GatherOne],
-// [Job.TryGatherOne], [Job.GatherAll], or [Job.TryGatherAll] function. If it is
+// receive the context passed to the calling [Scatter], [Job.Gather],
+// [Job.TryGather], [Job.GatherAll], or [Job.TryGatherAll] function. If it is
 // desirable to transmit a cancelation signal to a running [GatherFunc], one
 // must also cancel any contexts being passed to those callers.
 //
 // Cancel is always thread-safe and calling it more than once has no additional
 // effect.
 func (j *Job) Cancel() {
-	j.cancelFunc()
+	j.cancelFn()
 	j.gcMonitor.Cancel()
 }
 
@@ -312,12 +312,12 @@ func (j *Job) SetGCTimeUpdateInterval(interval time.Duration) {
 	j.gcMonitor.SetUpdateInterval(interval)
 }
 
-// GatherOne processes at most a single result from a task previously launched
-// in one of the [Job]'s task pools via [Scatter]. It will block until a completed
-// task is available, the provided context or job is canceled, or another event
-// causes a wake-up (e.g. a call to [TaskPool.SetLimit]).
+// Gather processes outstanding task results and then waits for the next
+// task result from a task previously launched via [Scatter]. It will block until
+// a completed task is available, the provided context or job is canceled, or
+// another event causes a wake-up (e.g. a call to [TaskPool.SetLimit]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
-// See [Job.TryGatherOne] for a non-blocking alternative.
+// See [Job.TryGather] for a non-blocking alternative.
 //
 // Returns a boolean flag indicating whether a result was processed and an error
 // if one occurred:
@@ -328,16 +328,16 @@ func (j *Job) SetGCTimeUpdateInterval(interval time.Duration) {
 //   - false, nil: the job is done and therefore nothing is left to gather
 //   - false, non-nil: the argument or job-internal context was canceled
 //
-// If all gather functions are thread-safe, then GatherOne is thread-safe and
+// If all gather functions are thread-safe, then Gather is thread-safe and
 // may be called concurrently from multiple goroutines. Blocking and
 // non-blocking calls may also be mixed, as can calls to any of the other gather
 // methods.
 //
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
-func (j *Job) GatherOne(ctx context.Context) (bool, error) {
+func (j *Job) Gather(ctx context.Context) (bool, error) {
 	vetted := j.vettedContext(ctx)
-	return j.gatherOneAndDoTheWork(vetted)
+	return j.processWorkAndGather(vetted)
 }
 
 func (j *Job) vetGather(vetted vettedContext) {
@@ -426,7 +426,7 @@ func (j *Job) processOutstandingWork(ctx context.Context) error {
 	return nil
 }
 
-func (j *Job) gatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
+func (j *Job) processWorkAndGather(vettedCtx vettedContext) (bool, error) {
 
 	j.vetGather(vettedCtx)
 
@@ -443,13 +443,13 @@ func (j *Job) gatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
 				}
 				return true
 			})
-			waiterNotified, err = j.gatherOne(ctx, workWaiter, nil)
+			waiterNotified, err = j.gather(ctx, workWaiter, nil)
 			if !waiterNotified || err != nil {
 				break
 			}
 		}
 	} else {
-		_, err = j.gatherOne(ctx, waitq.Waiter{}, nil)
+		_, err = j.gather(ctx, waitq.Waiter{}, nil)
 	}
 
 	jobDone := false
@@ -473,7 +473,7 @@ func (j *Job) queueGather(gather boundGatherFunc) {
 }
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
-func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
+func (j *Job) gather(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	waiterNotified := false
 	var err error
 	j.gatherQueue.PopFrontFunc(gatherQueuePool, j.queueGather,
@@ -501,20 +501,20 @@ func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan
 	return waiterNotified, err
 }
 
-// TryGatherOne processes at most a single result from a task previously
-// launched in one of the [Job]'s task pools via [Scatter]. Unlike [Job.GatherOne], it
-// will not block if a completed task is not immediately available.
+// TryGather processes outstanding task results and then attempts to process
+// the next task result from a task previously launched via [Scatter]. Unlike
+// [Job.Gather], it will not block if a completed task is not immediately available.
 //
-// Return values are the same as GatherOne, except that false, nil means that
+// Return values are the same as Gather, except that false, nil means that
 // there were no tasks ready to gather.
 //
-// See GatherOne for additional details.
-func (j *Job) TryGatherOne(ctx context.Context) (bool, error) {
+// See Gather for additional details.
+func (j *Job) TryGather(ctx context.Context) (bool, error) {
 	vetted := j.vettedContext(ctx)
-	return j.tryGatherOneAndDoTheWork(vetted)
+	return j.processWorkAndTryGather(vetted)
 }
 
-func (j *Job) tryGatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
+func (j *Job) processWorkAndTryGather(vettedCtx vettedContext) (bool, error) {
 
 	j.vetGather(vettedCtx)
 
@@ -558,7 +558,7 @@ func (j *Job) tryQueueGather() bool {
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	return j.gatherAll(vetted, j.gatherOneAndDoTheWork)
+	return j.gatherAll(vetted, j.processWorkAndGather)
 }
 
 // TryGatherAll processes all currently available task results without blocking.
@@ -573,7 +573,7 @@ func (j *Job) GatherAll(ctx context.Context) error {
 // task's [GatherFunc] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	return j.gatherAll(vetted, j.tryGatherOneAndDoTheWork)
+	return j.gatherAll(vetted, j.processWorkAndTryGather)
 }
 
 func (j *Job) gatherAll(vettedCtx vettedContext, gatherOne func(vettedContext) (bool, error)) error {
@@ -713,7 +713,7 @@ func (j *Job) CloseAndGatherAll(ctx context.Context) error {
 // indirectly launches new tasks while processing the flushed results.
 //
 // The callback function is called synchronously from a goroutine calling a gather method
-// ([Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], [Job.TryGatherAll],
+// ([Job.Gather], [Job.TryGather], [Job.GatherAll], [Job.TryGatherAll],
 // [Job.CloseAndGatherAll]), [Gather.Scatter], or [Job.Close] if no tasks are in flight
 // at the time of closing.
 //

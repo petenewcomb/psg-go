@@ -49,8 +49,8 @@ func PropagateTask[T any](
 // set, allowing spans created in the gather function to be properly parented.
 func PropagateGather[T any](
 	gatherFunc func(ctx context.Context, result T, err error) error,
-) *psg.Gather[PropagatedResult[T]] {
-	return psg.NewGather(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
+) *psg.GatherOp[PropagatedResult[T]] {
+	return psg.NewGatherOp(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 		// Create context with propagated trace data
 		propagatedCtx := ctx
 		if wrapped.TraceContext.IsValid() {
@@ -71,7 +71,7 @@ func PropagateCombiner[I, O any](
 		innerCombiner := combinerFactory()
 
 		return psg.FuncCombiner[PropagatedResult[I], PropagatedResult[O]]{
-			CombineFunc: func(ctx context.Context, input PropagatedResult[I], inputErr error, emit psg.CombinerEmitFunc[PropagatedResult[O]]) {
+			CombineFn: func(ctx context.Context, input PropagatedResult[I], inputErr error, emit psg.CombinerEmitFunc[PropagatedResult[O]]) {
 				// Create context with propagated trace data
 				propagatedCtx := ctx
 				if input.TraceContext.IsValid() {
@@ -92,7 +92,7 @@ func PropagateCombiner[I, O any](
 				// Process with inner combiner
 				innerCombiner.Combine(propagatedCtx, input.UserResult, inputErr, wrappedEmit)
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[PropagatedResult[O]]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[PropagatedResult[O]]) {
 				// Extract current trace context for output propagation
 				currentTrace := trace.SpanFromContext(ctx).SpanContext()
 

@@ -11,24 +11,24 @@ import (
 	"github.com/petenewcomb/psg-go/internal/waitq"
 )
 
-// Combine represents an operation that combines inputs and produces outputs.
+// CombineOp represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
-type Combine[I, O any] struct {
-	gather      *Gather[O]
+type CombineOp[I, O any] struct {
+	gatherOp    *GatherOp[O]
 	pool        *CombinerPool
 	newCombiner CombinerFactory[I, O]
 	minHoldTime time.Duration // Minimum time since last combine before auto-flushing
 	maxHoldTime time.Duration // Maximum time since first combine before auto-flushing
 }
 
-// NewCombine creates a new Combine operation that uses the specified gather function,
+// NewCombineOp creates a new CombineOp operation that uses the specified gather function,
 // combiner pool, and combiner factory.
-func NewCombine[I, O any](
-	gather *Gather[O],
+func NewCombineOp[I, O any](
+	gatherOp *GatherOp[O],
 	pool *CombinerPool,
 	combinerFactory CombinerFactory[I, O],
-) *Combine[I, O] {
-	if gather == nil {
+) *CombineOp[I, O] {
+	if gatherOp == nil {
 		panic("gather must be non-nil")
 	}
 	if pool == nil {
@@ -37,8 +37,8 @@ func NewCombine[I, O any](
 	if combinerFactory == nil {
 		panic("combiner factory must be non-nil")
 	}
-	c := &Combine[I, O]{
-		gather:      gather,
+	c := &CombineOp[I, O]{
+		gatherOp:    gatherOp,
 		pool:        pool,
 		newCombiner: combinerFactory,
 		minHoldTime: -1, // Sentinel value: no idle-based flushing
@@ -60,7 +60,7 @@ func NewCombine[I, O any](
 //
 // Panics if argument is less than -1 or greater than maxHoldTime (when
 // maxHoldTime >= 0).
-func (c *Combine[I, O]) SetMinHoldTime(d time.Duration) {
+func (c *CombineOp[I, O]) SetMinHoldTime(d time.Duration) {
 	if d < -1 {
 		panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", d))
 	}
@@ -83,7 +83,7 @@ func (c *Combine[I, O]) SetMinHoldTime(d time.Duration) {
 //
 // Panics if argument is less than -1 or less than minHoldTime (when minHoldTime
 // >= 0).
-func (c *Combine[I, O]) SetMaxHoldTime(d time.Duration) {
+func (c *CombineOp[I, O]) SetMaxHoldTime(d time.Duration) {
 	if d < -1 {
 		panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", d))
 	}
@@ -98,9 +98,9 @@ func (c *Combine[I, O]) SetMaxHoldTime(d time.Duration) {
 // combined using this Combine's combiner and eventually passed to the associated
 // Gather.
 //
-// See [Gather.Scatter] for details about backpressure, concurrency limits,
+// See [GatherOp.Scatter] for details about backpressure, concurrency limits,
 // context handling, and error behavior.
-func (c *Combine[I, O]) Scatter(
+func (c *CombineOp[I, O]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[I],
@@ -140,11 +140,11 @@ func (c *Combine[I, O]) Scatter(
 	return doScatter(vettedCtx)
 }
 
-// TryScatter is like [Combine.Scatter] but returns instead of blocking if
+// TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
 // the given target is at its concurrency limit.
 //
-// See [Gather.TryScatter] for details about behavior and return values.
-func (c *Combine[I, O]) TryScatter(
+// See [GatherOp.TryScatter] for details about behavior and return values.
+func (c *CombineOp[I, O]) TryScatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[I],
@@ -162,7 +162,7 @@ func (c *Combine[I, O]) TryScatter(
 	return c.scatter(vettedCtx, j, target, false, taskFunc)
 }
 
-func (c *Combine[I, O]) scatter(
+func (c *CombineOp[I, O]) scatter(
 	vettedCtx vettedContext,
 	j *Job,
 	target TaskPoolOrJob,
@@ -214,11 +214,11 @@ func (c *Combine[I, O]) scatter(
 // combineBackpressureProvider is used to integrate the combiner pool with the job's
 // backpressure system, allowing tasks to be gathered while waiting for resources
 type combineBackpressureProvider struct {
-	job           *Job
-	tryCombineOne func(ctx context.Context) (bool, error)
-	combineOne    func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
-	queueWork     func(workFunc func(context.Context) error)
-	key           backpressureProviderKeyField
+	job        *Job
+	tryCombine func(ctx context.Context) (bool, error)
+	combine    func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+	queueWork  func(workFn func(context.Context) error)
+	key        backpressureProviderKeyField
 }
 
 func (bp combineBackpressureProvider) ForJob(j *Job) bool {
@@ -230,15 +230,15 @@ func (bp combineBackpressureProvider) Key() backpressureProviderKey {
 }
 
 func (bp combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
-	return bp.tryCombineOne(vetted.ctx)
+	return bp.tryCombine(vetted.ctx)
 }
 
 func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-	return bp.combineOne(ctx, waiter, changeCh)
+	return bp.combine(ctx, waiter, changeCh)
 }
 
-func (bp combineBackpressureProvider) QueueWork(workFunc func(context.Context) error) {
-	bp.queueWork(workFunc)
+func (bp combineBackpressureProvider) QueueWork(workFn func(context.Context) error) {
+	bp.queueWork(workFn)
 }
 
 func isCombinerBackpressureProvider(bp backpressureProvider) bool {

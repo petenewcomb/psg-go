@@ -297,7 +297,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pe
 	}
 }
 
-func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
+func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 	j := cp.j
 	nextJobFlushCh, unregisterAsJobFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
@@ -369,7 +369,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				}
 				// Remove from heap immediately to prevent infinite loop
 				cm.deadlines.Remove(nextBCToFlush)
-				queueWork(nextBCToFlush.FlushFunc)
+				queueWork(nextBCToFlush.FlushFn)
 			}
 			return 0
 		}
@@ -384,7 +384,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			})
 		}
 
-		tryCombineOne := func(ctx context.Context) bool {
+		tryCombine := func(ctx context.Context) bool {
 
 			if isSecondary {
 				gotCombine := false
@@ -432,7 +432,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			return ok
 		}
 
-		combineOne := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+		combine := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
 
 			// Check if any combiners need to be flushed due to deadlines and
 			// set up flush deadline timer if needed
@@ -529,19 +529,19 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			return waiterNotified, err
 		}
 
-		var combineOneAndDoTheWork func(ctx context.Context, topLevel bool, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+		var processWorkAndCombine func(ctx context.Context, topLevel bool, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
 
 		bp := combineBackpressureProvider{
 			job: j,
-			tryCombineOne: func(ctx context.Context) (bool, error) {
-				return tryCombineOne(ctx), nil
+			tryCombine: func(ctx context.Context) (bool, error) {
+				return tryCombine(ctx), nil
 			},
-			combineOne: func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-				return combineOneAndDoTheWork(ctx, false, waiter, changeCh)
+			combine: func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+				return processWorkAndCombine(ctx, false, waiter, changeCh)
 			},
-			queueWork: func(workFunc func(context.Context) error) {
+			queueWork: func(workFn func(context.Context) error) {
 				// Queue scatter functions to be executed later rather than immediately
-				pendingScatters.PushBack(workFunc)
+				pendingScatters.PushBack(workFn)
 			},
 		}
 
@@ -576,7 +576,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 		var idleTimer *time.Timer
 
-		combineOneAndDoTheWork = func(ctx context.Context, topLevel bool, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+		processWorkAndCombine = func(ctx context.Context, topLevel bool, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
 			lastIDToProcess := workCounter
 			for {
 				work, ok := workQueue.PopFront()
@@ -605,16 +605,16 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 			// Execute a pending scatter if this is a top-level call
 			if topLevel {
-				scatterFunc, ok := pendingScatters.PopFront()
+				scatterFn, ok := pendingScatters.PopFront()
 				if ok {
-					if err := scatterFunc(ctx); err != nil {
+					if err := scatterFn(ctx); err != nil {
 						// Analysis: All pending scatter functions originate from scatters called within
 						// combiner execution context. Even if it's a gather.Scatter() call, it uses the
 						// combiner's backpressure provider (not the job's default one).
 						//
 						// The combiner backpressure provider only returns errors from:
-						// - bp.Yield() -> tryCombineOne() -> always returns (bool, nil)
-						// - bp.Block() -> combineOneAndDoTheWork() -> can return context/job cancellation errors
+						// - bp.Yield() -> tryCombine() -> always returns (bool, nil)
+						// - bp.Block() -> processWorkAndCombine() -> can return context/job cancellation errors
 						//
 						// Therefore, the only possible errors are shutdown-related:
 						// - context.Canceled/DeadlineExceeded (context cancellation)
@@ -638,21 +638,21 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			// we need to block.
 			flushToNextDeadline()
 
-			// No need to report errors from combineOne, since they would only
+			// No need to report errors from combine, since they would only
 			// be due to canceled contexts. Other errors are posted to be
 			// gathered.
 			var ok bool
 			var err error
 			if workCounter > lastIDToProcess || (topLevel && pendingScatters.Len() > 0) {
-				// There's still work in the queue OR pending scatters, use tryCombineOne to avoid blocking
-				ok = tryCombineOne(ctx)
+				// There's still work in the queue OR pending scatters, use tryCombine to avoid blocking
+				ok = tryCombine(ctx)
 			} else {
-				ok, err = combineOne(ctx, idleTimerCh, waiter, changeCh)
+				ok, err = combine(ctx, idleTimerCh, waiter, changeCh)
 			}
 			return ok, err
 		}
 
-		executeCombine(backpressureCtx, combine)
+		executeCombine(backpressureCtx, combineFn)
 
 		for {
 			if !isSecondary {
@@ -664,7 +664,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				}
 			}
 
-			if _, err := combineOneAndDoTheWork(backpressureCtx, true, waitq.Waiter{}, nil); err != nil {
+			if _, err := processWorkAndCombine(backpressureCtx, true, waitq.Waiter{}, nil); err != nil {
 				switch err {
 				case ErrJobDone, errIdleTimeout, context.Canceled:
 				default:
@@ -691,8 +691,8 @@ type pendingCombine struct {
 type halfBoundCombineFunc[I any] func(ctx context.Context, input I, inputErr error)
 
 type boundCombiner struct {
-	CombineFunc   any
-	FlushFunc     func(ctx context.Context)
+	CombineFn     any
+	FlushFn       func(ctx context.Context)
 	FirstCombine  time.Time // When first unflushed input was received (for maxHoldTime)
 	FlushDeadline time.Time // The earliest time this combiner should be flushed
 	heapPosition  int       // Position in the deadline heap, 0 if not in heap
@@ -723,21 +723,21 @@ type combinerMapKey struct {
 	Combine any
 }
 
-func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *Combine[I, O]) halfBoundCombineFunc[I] {
+func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *CombineOp[I, O]) halfBoundCombineFunc[I] {
 	j := cp.j
 	k := combinerMapKey{
 		Job:     j,
 		Combine: c,
 	}
 	bc := cm.m[k]
-	var combineFunc halfBoundCombineFunc[I]
+	var combineFn halfBoundCombineFunc[I]
 	if bc != nil {
-		combineFunc = bc.CombineFunc.(halfBoundCombineFunc[I])
+		combineFn = bc.CombineFn.(halfBoundCombineFunc[I])
 	} else {
 		emit := func(ctx context.Context, output O, outputErr error) {
-			// Bind the gatherFunc to the combiner output
-			gather := func(ctx context.Context) error {
-				return c.gather.gatherFunc(ctx, output, outputErr)
+			// Bind the gatherFn to the combiner output
+			gatherFn := func(ctx context.Context) error {
+				return c.gatherOp.gatherFn(ctx, output, outputErr)
 			}
 
 			// The job's in-flight work counter will be decremented by
@@ -746,7 +746,7 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 			j.state.IncrementWork()
 
 			// Post the bound gather to the job's gather queue.
-			j.postGather(ctx, gather)
+			j.postGather(ctx, gatherFn)
 		}
 
 		combiner := func() Combiner[I, O] {
@@ -773,8 +773,8 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 		// Create the boundCombiner first
 		bc = &boundCombiner{}
 
-		// Define the combineFunc with access to bc
-		combineFunc = func(ctx context.Context, input I, inputErr error) {
+		// Define the combineFn with access to bc
+		combineFn = func(ctx context.Context, input I, inputErr error) {
 			now := time.Now()
 
 			// If this is the first combine since last flush, record the time
@@ -817,11 +817,11 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 			didNotPanic = true
 		}
 
-		// Store the combineFunc in the boundCombiner
-		bc.CombineFunc = combineFunc
+		// Store the combineFn in the boundCombiner
+		bc.CombineFn = combineFn
 
-		// Define the FlushFunc with access to bc
-		bc.FlushFunc = func(ctx context.Context) {
+		// Define the FlushFn with access to bc
+		bc.FlushFn = func(ctx context.Context) {
 			// Reset FirstCombine for next batch, but keep combiner in map for reuse
 			bc.FirstCombine = time.Time{}
 
@@ -840,7 +840,7 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 		// Add the boundCombiner to the map
 		cm.m[k] = bc
 	}
-	return combineFunc
+	return combineFn
 }
 
 func (cm *combinerMap) UpdateFlushDeadline(bc *boundCombiner, deadline time.Time) {
@@ -870,7 +870,7 @@ func (cm *combinerMap) Remove(k combinerMapKey, bc *boundCombiner) {
 
 func (cm *combinerMap) FlushAll(ctx context.Context) {
 	for _, bc := range cm.m {
-		bc.FlushFunc(ctx)
+		bc.FlushFn(ctx)
 	}
 	cm.m = nil
 	cm.deadlines = heap.Heap[*boundCombiner]{} // Reset to zero value

@@ -12,37 +12,37 @@ import (
 // execution, allowing it to handle both successful and failed task executions.
 //
 // The GatherFunc is called when completed task results are processed by
-// [Scatter], [Job.GatherOne], [Job.TryGatherOne], [Job.GatherAll], or
+// [Scatter], [Job.Gather], [Job.TryGather], [Job.GatherAll], or
 // [Job.TryGatherAll]. Execution of a GatherFunc will block processing of
 // subsequent task results, adding to backpressure. If such backpressure is
 // undesirable, consider launching expensive gathering logic in another
 // asynchronous task using [Scatter]. Unlike [TaskFunc], it is safe to call
 // [Scatter] from within a GatherFunc.
 //
-// If multiple goroutines may call [Scatter], [Job.GatherOne],
-// [Job.TryGatherOne], [Job.GatherAll], or [Job.TryGatherAll] concurrently, then
+// If multiple goroutines may call [Scatter], [Job.Gather],
+// [Job.TryGather], [Job.GatherAll], or [Job.TryGatherAll] concurrently, then
 // every GatherFunc used in the job must be thread-safe.
 type GatherFunc[T any] = func(context.Context, T, error) error
 
-type Gather[T any] struct {
-	gatherFunc GatherFunc[T]
+type GatherOp[T any] struct {
+	gatherFn GatherFunc[T]
 }
 
-func NewGather[T any](
-	gatherFunc GatherFunc[T],
-) *Gather[T] {
-	if gatherFunc == nil {
+func NewGatherOp[T any](
+	gatherFn GatherFunc[T],
+) *GatherOp[T] {
+	if gatherFn == nil {
 		panic("gather function must be non-nil")
 	}
-	return &Gather[T]{
-		gatherFunc: gatherFunc,
+	return &GatherOp[T]{
+		gatherFn: gatherFn,
 	}
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
-// passed to the Gather within a subsequent call to Scatter or any of the
-// gathering methods of [Job] (i.e., [Job.GatherOne], [Job.TryGatherOne],
+// passed to the GatherOp within a subsequent call to Scatter or any of the
+// gathering methods of [Job] (i.e., [Job.Gather], [Job.TryGather],
 // [Job.GatherAll], or [Job.TryGatherAll]).
 //
 // Before launching a task, Scatter applies backpressure by gathering some
@@ -63,10 +63,10 @@ func NewGather[T any](
 // Scatter returns a non-nil error if the context is canceled or if a non-nil
 // error is returned by a gather function. If the returned error is non-nil, the
 // task function supplied to the call will not have been launched will therefore
-// also not result in a call to the Gather's gather function.
+// also not result in a call to the GatherOp's gather function.
 //
 // See [TaskFunc] and [GatherFunc] for important caveats and additional detail.
-func (g *Gather[T]) Scatter(
+func (g *GatherOp[T]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
@@ -115,7 +115,7 @@ func (g *Gather[T]) Scatter(
 // launched for any other reason.
 //
 // See Scatter for more detail about how scattering works.
-func (g *Gather[T]) TryScatter(
+func (g *GatherOp[T]) TryScatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFunc TaskFunc[T],
@@ -133,7 +133,7 @@ func (g *Gather[T]) TryScatter(
 	return g.scatter(vettedCtx, j, target, false, taskFunc)
 }
 
-func (g *Gather[T]) scatter(
+func (g *GatherOp[T]) scatter(
 	vettedCtx vettedContext,
 	j *Job,
 	target TaskPoolOrJob,
@@ -154,11 +154,11 @@ func (g *Gather[T]) scatter(
 	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, value T, err error) {
 		// Build the gather function, binding the supplied gatherFunc to the
 		// result.
-		gather := func(ctx context.Context) error {
-			return g.gatherFunc(ctx, value, err)
+		gatherFn := func(ctx context.Context) error {
+			return g.gatherFn(ctx, value, err)
 		}
 
 		// Post the gather using the idle worker queue optimization
-		j.postGather(ctx, gather)
+		j.postGather(ctx, gatherFn)
 	})
 }

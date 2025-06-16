@@ -25,24 +25,24 @@ type CombinerEmitFunc[O any] func(context.Context, O, error)
 // using function fields. This allows for simple creation of combiners using
 // closures that share state.
 type FuncCombiner[I, O any] struct {
-	// CombineFunc is called to process each input
-	CombineFunc func(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O])
+	// CombineFn is called to process each input
+	CombineFn func(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O])
 
-	// FlushFunc is called to emit any pending aggregated results
-	FlushFunc func(ctx context.Context, emit CombinerEmitFunc[O])
+	// FlushFn is called to emit any pending aggregated results
+	FlushFn func(ctx context.Context, emit CombinerEmitFunc[O])
 }
 
-// Combine calls the CombineFunc field with the provided arguments.
+// Combine calls the CombineFn field with the provided arguments.
 func (c FuncCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O]) {
-	if c.CombineFunc != nil {
-		c.CombineFunc(ctx, input, inputErr, emit)
+	if c.CombineFn != nil {
+		c.CombineFn(ctx, input, inputErr, emit)
 	}
 }
 
-// Flush calls the FlushFunc field with the provided arguments.
+// Flush calls the FlushFn field with the provided arguments.
 func (c FuncCombiner[I, O]) Flush(ctx context.Context, emit CombinerEmitFunc[O]) {
-	if c.FlushFunc != nil {
-		c.FlushFunc(ctx, emit)
+	if c.FlushFn != nil {
+		c.FlushFn(ctx, emit)
 	}
 }
 

@@ -42,7 +42,7 @@ func ExampleCombine() {
 		var counts map[string]int
 
 		return psg.FuncCombiner[string, map[string]int]{
-			CombineFunc: func(ctx context.Context, result string, err error, emit psg.CombinerEmitFunc[map[string]int]) {
+			CombineFn: func(ctx context.Context, result string, err error, emit psg.CombinerEmitFunc[map[string]int]) {
 				time.Sleep(10 * time.Millisecond)
 				if counts == nil {
 					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
@@ -51,7 +51,7 @@ func ExampleCombine() {
 				counts[result]++
 				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[map[string]int]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[map[string]int]) {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
 				if counts != nil {
 					emit(ctx, counts, nil)
@@ -64,9 +64,9 @@ func ExampleCombine() {
 	// Define the results array
 	var results []map[string]int
 
-	gatherFunc := func(ctx context.Context, result map[string]int, err error) error {
+	gatherFn := func(ctx context.Context, result map[string]int, err error) error {
 		fmt.Printf("%3dms:   gathering result counts: %v\n", msSinceStart(), result)
-		// Safe because gatherFunc will only ever be called from the current
+		// Safe because gatherFn will only ever be called from the current
 		// goroutine within calls to Scatter and GatherAll below.
 		results = append(results, result)
 		return err
@@ -91,10 +91,10 @@ func ExampleCombine() {
 	})
 
 	// Define a result aggregation function and create a combined gather/combine operation
-	gather := psg.NewGather(gatherFunc)
+	gather := psg.NewGatherOp(gatherFn)
 
 	// Create a Combine operation with the gather function and inline combiner factory
-	combine := psg.NewCombine(gather, combinerPool, newCombiner)
+	combine := psg.NewCombineOp(gather, combinerPool, newCombiner)
 
 	// Launch some tasks
 	fmt.Println("starting job")

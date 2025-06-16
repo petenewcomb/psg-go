@@ -24,7 +24,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var flushCount atomic.Int32
 	var gatherCount atomic.Int32
 
-	gather := psg.NewGather(func(ctx context.Context, result int, err error) error {
+	gather := psg.NewGatherOp(func(ctx context.Context, result int, err error) error {
 		t.Logf("GatherFunc called with result %d", result)
 		gatherCount.Add(1)
 		chk.NoError(err)
@@ -34,13 +34,13 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	combinerPool := psg.NewCombinerPool(job)
 	combinerPool.SetLimits(1, 1) // Force exactly 1 goroutine
 
-	combine := psg.NewCombine(gather, combinerPool, func() psg.Combiner[int, int] {
+	combine := psg.NewCombineOp(gather, combinerPool, func() psg.Combiner[int, int] {
 		return psg.FuncCombiner[int, int]{
-			CombineFunc: func(ctx context.Context, value int, err error, emit psg.CombinerEmitFunc[int]) {
+			CombineFn: func(ctx context.Context, value int, err error, emit psg.CombinerEmitFunc[int]) {
 				t.Logf("CombineFunc called with value %d", value)
 				// Don't emit immediately - let maxHoldTime trigger flush
 			},
-			FlushFunc: func(ctx context.Context, emit psg.CombinerEmitFunc[int]) {
+			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[int]) {
 				t.Logf("FlushFunc called")
 				flushCount.Add(1)
 				emit(ctx, 42, nil)

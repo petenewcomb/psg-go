@@ -86,7 +86,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 	t.Logf("%s: pathCount=%d", planName, plan.PathCount)
 	paths := make([]*Path, plan.PathCount)
 
-	newFunc := func(name string, funcConfig *FuncConfig, scatters []*Path) *Func {
+	newFn := func(name string, funcConfig *FuncConfig, scatters []*Path) *Func {
 		fn := &Func{
 			ReturnError: funcConfig.ReturnError.Draw(t, name+".ReturnError"),
 		}
@@ -155,7 +155,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		return &Task{
 			ID:            id,
 			PoolIndex:     rapid.IntRange(0, len(plan.TaskPools)-1).Draw(t, taskName+".PoolIndex"),
-			Func:          newFunc(taskName, &planConfig.Task.Func, nil),
+			Func:          newFn(taskName, &planConfig.Task.Func, nil),
 			ResultHandler: resultHandler,
 		}
 	}
@@ -169,7 +169,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		return &Gather{
 			ID:    id,
 			Index: rapid.IntRange(0, plan.GatherCount-1).Draw(t, gatherName+".Index"),
-			Func:  newFunc(gatherName, &planConfig.Gather.Func, paths),
+			Func:  newFn(gatherName, &planConfig.Gather.Func, paths),
 		}
 	}
 
@@ -190,7 +190,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		return &Combine{
 			ID:           id,
 			Index:        combineIndex,
-			Func:         newFunc(combineName, &planConfig.Combine.Func, paths),
+			Func:         newFn(combineName, &planConfig.Combine.Func, paths),
 			FlushHandler: flush,
 		}
 	}

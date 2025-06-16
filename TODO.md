@@ -36,7 +36,7 @@ Items that must be completed before merging to main branch.
 
 ### 5. API finalization
 - [ ] Review and document thread-safety guarantees for remaining public APIs
-- [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
+ 
 - [ ] use Options-style configuration at least for CombinerPool
 
 ### 6. Implementation improvements
@@ -46,8 +46,7 @@ Items that must be completed before merging to main branch.
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
-- [ ] Reconsider Min/MaxGatherCount on sim.Plan -- it seems that implicit combine flushes will not result in gathers anyway
-- [ ] Make naming of function variables and types consistent - *Func for types, *Fn for variables, etc.
+- [ ] Consider returning ErrJobDone from Gather instead of returning a separate boolean flag.  Either way, update the doc comment to clarify.
 
 
 ## Post-Merge Enhancements

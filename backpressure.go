@@ -29,7 +29,7 @@ type backpressureProvider interface {
 	Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
 
 	// Queues work to be executed in the appropriate context (job-level or combiner-level)
-	QueueWork(workFunc func(context.Context) error)
+	QueueWork(workFn func(context.Context) error)
 }
 
 type backpressureProviderContextValueKeyType struct{}
@@ -88,9 +88,9 @@ func (bp defaultBackpressureProvider) Yield(vetted vettedContext) (bool, error) 
 }
 
 func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
-	return bp.j.gatherOne(ctx, waiter, limitCh)
+	return bp.j.gather(ctx, waiter, limitCh)
 }
 
-func (bp defaultBackpressureProvider) QueueWork(workFunc func(context.Context) error) {
-	bp.j.queueWork(workFunc)
+func (bp defaultBackpressureProvider) QueueWork(workFn func(context.Context) error) {
+	bp.j.queueWork(workFn)
 }

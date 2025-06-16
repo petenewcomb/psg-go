@@ -32,7 +32,7 @@ func Example_hello() {
 	}
 
 	var results []string
-	gather := psg.NewGather(
+	gather := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil

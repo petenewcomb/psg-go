@@ -20,6 +20,8 @@ format.
 
 ### Changed
 
+- `GatherOne()` → `Gather()` and `TryGatherOne()` → `TryGather()`
+- `psg.Gather[T]` → `psg.GatherOp[T]`, `NewGather()` → `NewGatherOp()`
 - TestBySimulation completely refactored to increase correctness, coverage,
   precision, stability, and maintainablility (#3, #6)
 - SyncJob merged with Job, because in-flight counters must always be thread-safe

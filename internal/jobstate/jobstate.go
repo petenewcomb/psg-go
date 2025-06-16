@@ -42,12 +42,12 @@ func (s lifecycleStage) String() string {
 
 // JobState encapsulates the state management for a scatter-gather job
 type JobState struct {
-	currentStage  atomic.Int32    // Contains a lifecycleStage value
-	inFlightTasks InFlightCounter // Tracks only executing tasks
-	inFlightTotal InFlightCounter // Tracks both tasks and combiners
-	nextFlushChan atomic.Value    // Stores chan struct{} for flush signals
-	doneChan      chan struct{}
-	flushListener atomic.Value // Stores func() callback for flush events
+	currentStage    atomic.Int32    // Contains a lifecycleStage value
+	inFlightWork    InFlightCounter // Tracks only executing work
+	totalReferences InFlightCounter // Tracks both work and combiners
+	nextFlushChan   atomic.Value    // Stores chan struct{} for flush signals
+	doneChan        chan struct{}
+	flushListener   atomic.Value // Stores func() callback for flush events
 }
 
 // Init initializes an uninitialized JobState to the Open stage, and must be
@@ -60,39 +60,39 @@ func (js *JobState) Init() {
 	js.doneChan = make(chan struct{})
 }
 
-// IncrementTasks increments both the task counter and total counter
-func (js *JobState) IncrementTasks() {
-	js.inFlightTotal.Increment()
-	js.inFlightTasks.Increment()
+// IncrementWork increments both the work counter and total references counter
+func (js *JobState) IncrementWork() {
+	js.totalReferences.Increment()
+	js.inFlightWork.Increment()
 }
 
-// DecrementTasks decrements the task counter and attempts stage transitions if needed
-func (js *JobState) DecrementTasks() {
-	noMoreTasks := js.inFlightTasks.Decrement()
+// DecrementWork decrements the work counter and attempts stage transitions if needed
+func (js *JobState) DecrementWork() {
+	noMoreWork := js.inFlightWork.Decrement()
 
-	// Decrement the total count and check if it hit zero. If noMoreTasks is true,
-	// js.noMoreTasks will handle the transition logic. But if noMoreTasks is false
-	// and the total counter hit zero, we need to call js.noMoreWork directly to
+	// Decrement the total references count and check if it hit zero. If noMoreWork is true,
+	// js.noMoreWork will handle the transition logic. But if noMoreWork is false
+	// and the total references counter hit zero, we need to call js.noMoreReferences directly to
 	// handle the race condition where flushers complete between the decrement and
-	// the IsZero() check in noMoreTasks().
-	noMoreWork := js.inFlightTotal.Decrement()
+	// the IsZero() check in noMoreWork().
+	noMoreReferences := js.totalReferences.Decrement()
 
-	if noMoreTasks {
-		// Last task just completed.
-		js.noMoreTasks()
-	} else if noMoreWork {
-		// Total counter hit zero but tasks counter didn't - this means flushers completed
+	if noMoreWork {
+		// Last work just completed.
 		js.noMoreWork()
+	} else if noMoreReferences {
+		// Total references counter hit zero but work counter didn't - this means flushers completed
+		js.noMoreReferences()
 	}
 }
 
 func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister func()) {
-	js.inFlightTotal.Increment()
+	js.totalReferences.Increment()
 	return js.nextFlushChan.Load().(chan struct{}), func() {
-		// Check if all work is done for Flushing → Done transition
-		if js.inFlightTotal.Decrement() {
-			// Last piece of work just completed (task or combiner)
-			js.noMoreWork()
+		// Check if all references are done for Flushing → Done transition
+		if js.totalReferences.Decrement() {
+			// Last reference just completed (work or combiner)
+			js.noMoreReferences()
 		}
 	}
 }
@@ -101,8 +101,8 @@ func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister fun
 func (js *JobState) Close() {
 	if js.currentStage.CompareAndSwap(int32(stageOpen), int32(stageClosed)) {
 		// Successfully changed from Open to Closed
-		if js.inFlightTasks.IsZero() {
-			js.noMoreTasks()
+		if js.inFlightWork.IsZero() {
+			js.noMoreWork()
 		}
 	}
 }
@@ -112,7 +112,7 @@ func (js *JobState) Done() <-chan struct{} {
 	return js.doneChan
 }
 
-// SetFlushListener sets the function to be called when all tasks have completed
+// SetFlushListener sets the function to be called when all work has completed
 // and the job is waiting for combiners to emit their results. Pass nil to remove
 // any existing listener.
 func (js *JobState) SetFlushListener(fn func()) {
@@ -126,9 +126,9 @@ func (js *JobState) PanicIfDone() {
 	}
 }
 
-// noMoreTasks attempts to transition from Closed to Flushing, and will also
-// advance to Done by calling noMoreWork if appropriate
-func (js *JobState) noMoreTasks() {
+// noMoreWork attempts to transition from Closed to Flushing, and will also
+// advance to Done by calling noMoreReferences if appropriate
+func (js *JobState) noMoreWork() {
 	currentStage := lifecycleStage(js.currentStage.Load())
 
 	// Try to transition from Closed to Flushing if needed
@@ -138,9 +138,9 @@ func (js *JobState) noMoreTasks() {
 		}
 	}
 
-	// If inFlightTotal is zero, there is nothing left to do.
-	if js.inFlightTotal.IsZero() {
-		js.noMoreWork()
+	// If totalReferences is zero, there is nothing left to do.
+	if js.totalReferences.IsZero() {
+		js.noMoreReferences()
 	} else {
 		// Handle flush channel for flushing state
 		if currentStage == stageFlushing {
@@ -158,8 +158,8 @@ func (js *JobState) noMoreTasks() {
 	}
 }
 
-// noMoreWork attempts to transition from Flushing to Done
-func (js *JobState) noMoreWork() {
+// noMoreReferences attempts to transition from Flushing to Done
+func (js *JobState) noMoreReferences() {
 	if js.currentStage.CompareAndSwap(int32(stageFlushing), int32(stageDone)) {
 		// Successfully changed from Flushing to Done
 		close(js.doneChan)

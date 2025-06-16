@@ -85,10 +85,10 @@ func (g *Gather[T]) Scatter(
 
 	if vettedCtx.inGather {
 		// Make sure the job doesn't shut down until this scatter has been done.
-		j.state.IncrementTasks()
+		j.state.IncrementWork()
 		bp := getBackpressureProvider(vettedCtx.ctx, j)
 		bp.QueueWork(func(ctx context.Context) error {
-			defer j.state.DecrementTasks()
+			defer j.state.DecrementWork()
 			vettedCtx := j.vettedContext(ctx)
 			return doScatter(vettedCtx)
 		})

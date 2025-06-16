@@ -78,13 +78,13 @@ func scatter[T any](
 
 	// Register the task with the job to make sure that any calls to gather will
 	// block until the task is completed.
-	j.state.IncrementTasks()
+	j.state.IncrementWork()
 
 	// Bookkeeping: make sure that the job-scope count incremented above gets
 	// decremented unless the launch actually happens
 	defer func() {
 		if !launched {
-			j.state.DecrementTasks()
+			j.state.DecrementWork()
 		}
 	}()
 

@@ -122,9 +122,9 @@ func (c *Combine[I, O]) Scatter(
 	// Queue work if we're in a gather context or if we have a combiner backpressure provider
 	if vettedCtx.inGather || isCombinerBackpressureProvider(bp) {
 		// Make sure the job doesn't shut down until this scatter has been done.
-		j.state.IncrementTasks()
+		j.state.IncrementWork()
 		bp.QueueWork(func(ctx context.Context) error {
-			defer j.state.DecrementTasks()
+			defer j.state.DecrementWork()
 			vettedCtx := j.vettedContext(ctx)
 			return doScatter(vettedCtx)
 		})

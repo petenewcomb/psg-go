@@ -740,10 +740,10 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 				return c.gather.gatherFunc(ctx, output, outputErr)
 			}
 
-			// The job's in-flight task counter will be decremented by
+			// The job's in-flight work counter will be decremented by
 			// Job.executeGather, so we must increment it to keep the job alive
 			// until the gather happens.
-			j.state.IncrementTasks()
+			j.state.IncrementWork()
 
 			// Post the bound gather to the job's gather queue.
 			j.postGather(ctx, gather)
@@ -808,9 +808,9 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 					emit(ctx, *new(O), ErrCombinePanicked)
 				}
 
-				// The job's in-flight task counter must be decremented here
+				// The job's in-flight work counter must be decremented here
 				// just as it is in Job.executeGather.
-				j.state.DecrementTasks()
+				j.state.DecrementWork()
 			}()
 
 			combiner.Combine(ctx, input, inputErr, emit)

@@ -672,7 +672,7 @@ func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
 	// Decrement the environment-wide in-flight counter only AFTER calling the
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.
-	defer j.state.DecrementTasks()
+	defer j.state.DecrementWork()
 	return gather(ctx)
 }
 

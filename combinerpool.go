@@ -537,7 +537,12 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 				return tryCombine(ctx), nil
 			},
 			combine: func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-				return processWorkAndCombine(ctx, false, waiter, changeCh)
+				ok, err := processWorkAndCombine(ctx, false, waiter, changeCh)
+				if err == errIdleTimeout {
+					// In backpressure so not really idle: ignore
+					err = nil
+				}
+				return ok, err
 			},
 			queueWork: func(workFn func(context.Context) error) {
 				// Queue scatter functions to be executed later rather than immediately

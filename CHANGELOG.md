@@ -22,6 +22,8 @@ format.
 
 - `GatherOne()` → `Gather()` and `TryGatherOne()` → `TryGather()`
 - `psg.Gather[T]` → `psg.GatherOp[T]`, `NewGather()` → `NewGatherOp()`
+- `Job.Gather()` now returns `error` instead of `(bool, error)`, with `ErrJobDone` indicating job completion
+- `Job.TryGather()` and `Job.TryGatherAll()` now return `ErrJobDone` when the job is done
 - TestBySimulation completely refactored to increase correctness, coverage,
   precision, stability, and maintainablility (#3, #6)
 - SyncJob merged with Job, because in-flight counters must always be thread-safe

@@ -319,14 +319,16 @@ func (j *Job) SetGCTimeUpdateInterval(interval time.Duration) {
 // If the job is closed and no tasks remain in flight, it will return immediately.
 // See [Job.TryGather] for a non-blocking alternative.
 //
-// Returns a boolean flag indicating whether a result was processed and an error
-// if one occurred:
+// Returns an error if one occurred:
 //
-//   - true, nil: a task completed and was successfully gathered
-//   - true, non-nil: a task completed but the gather function returned a
-//     non-nil error
-//   - false, nil: the job is done and therefore nothing is left to gather
-//   - false, non-nil: the argument or job-internal context was canceled
+//   - nil: a task completed and was successfully gathered
+//   - ErrJobDone: the job is done and therefore nothing is left to gather
+//   - other error: a task's gather function returned a non-nil error, or the
+//     argument or job-internal context was canceled
+//
+// If a gather function returns an error, the job continues running and you can
+// keep calling Gather to process more tasks (and errors, if any) until you
+// receive ErrJobDone.
 //
 // If all gather functions are thread-safe, then Gather is thread-safe and
 // may be called concurrently from multiple goroutines. Blocking and
@@ -335,9 +337,10 @@ func (j *Job) SetGCTimeUpdateInterval(interval time.Duration) {
 //
 // NOTE: If a task result is gathered, this method will call the task's
 // [GatherFunc] and wait until it returns.
-func (j *Job) Gather(ctx context.Context) (bool, error) {
+func (j *Job) Gather(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	return j.processWorkAndGather(vetted)
+	_, err := j.processWorkAndGather(vetted)
+	return err
 }
 
 func (j *Job) vetGather(vetted vettedContext) {
@@ -452,12 +455,7 @@ func (j *Job) processWorkAndGather(vettedCtx vettedContext) (bool, error) {
 		_, err = j.gather(ctx, waitq.Waiter{}, nil)
 	}
 
-	jobDone := false
-	if err == ErrJobDone {
-		jobDone = true
-		err = nil
-	}
-	return !jobDone, err
+	return err == nil, err
 }
 
 // postGather sends a gather operation to the gather queue.
@@ -505,8 +503,17 @@ func (j *Job) gather(ctx context.Context, waiter waitq.Waiter, limitCh <-chan st
 // the next task result from a task previously launched via [Scatter]. Unlike
 // [Job.Gather], it will not block if a completed task is not immediately available.
 //
-// Return values are the same as Gather, except that false, nil means that
-// there were no tasks ready to gather.
+// Returns a boolean flag indicating whether there might be more task results
+// immediately available to process and an error if one occurred.
+//
+// The error indicates:
+//   - nil: no gather function returned an error
+//   - ErrJobDone: the job is done and no more tasks will ever be available
+//   - other error: a gather function returned an error or the context was canceled
+//
+// If a gather function returns an error, the job continues running and you can
+// keep calling TryGather to process more tasks (and errors, if any) until you
+// receive ErrJobDone.
 //
 // See Gather for additional details.
 func (j *Job) TryGather(ctx context.Context) (bool, error) {
@@ -545,8 +552,10 @@ func (j *Job) tryQueueGather() bool {
 // tasks until all work completes (including tasks spawned during result processing)
 // and then return.
 //
-// Returns nil unless the context is canceled or a task's [GatherFunc] returns a
-// non-nil error.
+// Returns nil when the job is done, or an error if the context is canceled or a
+// task's [GatherFunc] returns a non-nil error. If a gather function returns an
+// error, you can call GatherAll again to continue processing more tasks (and
+// errors, if any) until the job is done (i.e., GatherAll returns nil).
 //
 // If all gather functions are thread-safe, then GatherAll is thread-safe and
 // can be called concurrently from multiple goroutines. In this case they will
@@ -558,16 +567,25 @@ func (j *Job) tryQueueGather() bool {
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	return j.gatherAll(vetted, j.processWorkAndGather)
+	err := j.gatherAll(vetted, j.processWorkAndGather)
+	if err == ErrJobDone {
+		return nil
+	}
+	return err
 }
 
 // TryGatherAll processes all currently available task results without blocking.
 // Unlike [Job.GatherAll], TryGatherAll will return immediately if there are no
 // completed tasks ready to process, regardless of whether the job is closed or
-// whether there are still tasks in flight. It will return an error if the
-// provided context or job is canceled.
+// whether there are still tasks in flight.
 //
-// See GatherAll for information about return values and thread safety.
+// Returns nil when all immediately available tasks have been processed, ErrJobDone
+// when the job is done, or an error if the context is canceled or a task's
+// [GatherFunc] returns a non-nil error. If a gather function returns an error,
+// you can call TryGatherAll again to continue processing more tasks (and errors,
+// if any) until you receive ErrJobDone.
+//
+// See GatherAll for information about thread safety.
 //
 // NOTE: If completed tasks are available, this method must still call each
 // task's [GatherFunc] and wait until it finishes processing.

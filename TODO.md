@@ -36,7 +36,6 @@ Items that must be completed before merging to main branch.
 
 ### 5. API finalization
 - [ ] Review and document thread-safety guarantees for remaining public APIs
- 
 - [ ] use Options-style configuration at least for CombinerPool
 
 ### 6. Implementation improvements
@@ -46,7 +45,6 @@ Items that must be completed before merging to main branch.
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
-- [ ] Consider returning ErrJobDone from Gather instead of returning a separate boolean flag.  Either way, update the doc comment to clarify.
 
 
 ## Post-Merge Enhancements

@@ -231,6 +231,18 @@ func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFun
 	})
 }
 
+func (cp *CombinerPool) releaseWaiters() {
+	if cp.waitingCombines.Decrement() {
+		// No more waiting combines, so release all remaining
+		// combine waiters
+		cp.combineWaiters.NotifyAll()
+	} else {
+		// Release just one combine waiter, since there are still
+		// other waiting combines.
+		cp.combineWaiters.Notify()
+	}
+}
+
 func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- boundCombineFunc, combine boundCombineFunc) {
 
 	// We don't attempt the primary channel alone here since both fast paths
@@ -238,11 +250,15 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- bo
 	// this point spillage to secondary is warranted, so we use
 	// first-come-first-served among whatever becomes available.
 
-	var waitStartTime time.Time
+	originalCombine := combine
+	holdingWaiters := false
 	for {
 		spawnWaitCh := cp.state.ShouldSpawnGoroutine()
 		if spawnWaitCh == nil {
-			cp.spawnNewCombiner(combine)
+			if holdingWaiters {
+				cp.releaseWaiters()
+			}
+			cp.spawnNewCombiner(originalCombine)
 			return
 		}
 
@@ -250,22 +266,33 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- bo
 		// hit the limit of how many combiner tasks we can launch or need to
 		// wait before we can spawn another. Increment the waiting task count to
 		// signal Scatter to apply backpressure.
-		if waitStartTime.IsZero() {
-			waitStartTime = time.Now()
+		if !holdingWaiters {
 			cp.waitingCombines.Increment()
-			originalCombine := combine
-			combine = func(ctx context.Context, cm *combinerMap) {
-				cp.waitingCombines.Decrement()
-				cp.combineWaiters.Notify()
-				originalCombine(ctx, cm)
+			holdingWaiters = true
+			defer func() {
+				if holdingWaiters {
+					cp.releaseWaiters()
+				}
+			}()
+			waitersReleased := false
+			combine = func(ctx context.Context, cm *combinerMap, queuing bool) {
+				if !waitersReleased {
+					waitersReleased = true
+					cp.releaseWaiters()
+				}
+				if !queuing {
+					originalCombine(ctx, cm, false)
+				}
 			}
 		}
 
 		// Block until we can post or it's time to retry
 		select {
 		case primaryCh <- combine:
+			holdingWaiters = false
 			return
 		case cp.secondaryChan <- combine:
+			holdingWaiters = false
 			return
 		case <-spawnWaitCh:
 		case <-ctx.Done():
@@ -352,6 +379,10 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 		}
 
 		queueCombine := func(combine boundCombineFunc) {
+			// Notify the combine that it's being queued so it can release the
+			// waitingCombines count it's holding, if any.
+			combine(nil, nil, true)
+
 			queueWork(func(ctx context.Context) {
 				executeCombine(ctx, combine)
 			})
@@ -426,33 +457,37 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 						waitStartTime := time.Now()
 						cp.state.SecondaryWaitStarted(waitStartTime)
 						defer cp.state.SecondaryWaitEnded(waitStartTime)
-						select {
-						case combine := <-dedicatedCh:
-							queueCombine(combine)
-							return true
-						case combine := <-cp.secondaryChan:
-							queueCombine(combine)
-						case <-nextJobFlushCh:
-							queueWork(flushAll)
-						case <-flushDeadlineTimerCh:
-							// At least one combiner has reached its flush deadline
-							flushToNextDeadline()
-						case <-idleTimerCh:
-							// This goroutine may no longer be needed. Notify any
-							// potential waiters and exit. Combiners will be flushed via
-							// the deferred call to flushAll below.
-							if cp.state.ShouldExitGoroutine() {
-								err = errIdleTimeout
+						dedicatedChWasSource := false
+						waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
+							select {
+							case combine := <-dedicatedCh:
+								queueCombine(combine)
+								dedicatedChWasSource = true
+							case combine := <-cp.secondaryChan:
+								queueCombine(combine)
+							case <-nextJobFlushCh:
+								queueWork(flushAll)
+							case <-flushDeadlineTimerCh:
+								// At least one combiner has reached its flush deadline
+								flushToNextDeadline()
+							case <-idleTimerCh:
+								// This goroutine may no longer be needed. Notify any
+								// potential waiters and exit. Combiners will be flushed via
+								// the deferred call to flushAll below.
+								if cp.state.ShouldExitGoroutine() {
+									err = errIdleTimeout
+								}
+							case <-waitCh:
+								return true
+							case <-changeCh:
+							case <-doneCh:
+								err = doneChErr
+							case <-ctx.Done():
+								err = ctx.Err()
 							}
-						case <-waiter.Done():
-							waiterNotified = true
-						case <-changeCh:
-						case <-doneCh:
-							err = doneChErr
-						case <-ctx.Done():
-							err = ctx.Err()
-						}
-						return false
+							return false
+						})
+						return dedicatedChWasSource
 					},
 				)
 				if err == errIdleTimeout && workQueue.Len() > 0 {
@@ -466,30 +501,33 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 			waiterNotified := false
 			var err error
 			cp.primaryQueue.PopFrontFunc(combineQueuePool, queueCombine,
-				func(dedicatedCh, sharedCh <-chan boundCombineFunc) <-chan boundCombineFunc {
-					select {
-					case combine := <-dedicatedCh:
-						queueCombine(combine)
-						return dedicatedCh
-					case combine := <-sharedCh:
-						queueCombine(combine)
-					case combine := <-cp.secondaryChan:
-						// Primary may steal from secondary, but not vice-versa
-						queueCombine(combine)
-					case <-nextJobFlushCh:
-						queueWork(flushAll)
-					case <-flushDeadlineTimerCh:
-						// At least one combiner has reached its deadline
-						flushToNextDeadline()
-					case <-waiter.Done():
-						waiterNotified = true
-					case <-changeCh:
-					case <-doneCh:
-						err = doneChErr
-					case <-ctx.Done():
-						err = ctx.Err()
-					}
-					return nil
+				func(dedicatedCh, sharedCh <-chan boundCombineFunc) (sourceCh <-chan boundCombineFunc) {
+					waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
+						select {
+						case combine := <-dedicatedCh:
+							queueCombine(combine)
+							sourceCh = dedicatedCh
+						case combine := <-sharedCh:
+							queueCombine(combine)
+						case combine := <-cp.secondaryChan:
+							// Primary may steal from secondary, but not vice-versa
+							queueCombine(combine)
+						case <-nextJobFlushCh:
+							queueWork(flushAll)
+						case <-flushDeadlineTimerCh:
+							// At least one combiner has reached its deadline
+							flushToNextDeadline()
+						case <-waitCh:
+							return true
+						case <-changeCh:
+						case <-doneCh:
+							err = doneChErr
+						case <-ctx.Done():
+							err = ctx.Err()
+						}
+						return false
+					})
+					return sourceCh
 				},
 			)
 			return waiterNotified, err
@@ -533,14 +571,12 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				// Make sure the job won't terminate before the combiner is flushed
 				nextJobFlushCh, unregisterAsJobFlusher = j.state.RegisterFlusher()
 			}
-			combine(ctx, &cm)
+			combine(ctx, &cm, false)
 			cp.state.IncrementCompleted()
 		}
 
 		cp.state.GoroutineStarted()
 		defer cp.state.GoroutineExited()
-
-		executeCombine(backpressureCtx, combine)
 
 		var idleTimer *time.Timer
 
@@ -571,9 +607,10 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				}
 			}
 
-			// Execute one pending scatter if this is a top-level call
+			// Execute a pending scatter if this is a top-level call
 			if topLevel {
-				if scatterFunc, ok := pendingScatters.PopFront(); ok {
+				scatterFunc, ok := pendingScatters.PopFront()
+				if ok {
 					if err := scatterFunc(ctx); err != nil {
 						// Analysis: All pending scatter functions originate from scatters called within
 						// combiner execution context. Even if it's a gather.Scatter() call, it uses the
@@ -592,7 +629,11 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 						// not executed. Gather execution happens later in the job's work queue.
 						//
 						// These are all expected shutdown conditions, so no special handling needed.
-						_ = err
+						switch err {
+						case context.Canceled, context.DeadlineExceeded, ErrJobDone, errIdleTimeout:
+						default:
+							panic(fmt.Sprintf("unexpected error from deferred scatter: %v", err))
+						}
 					}
 				}
 			}
@@ -610,10 +651,12 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 				// There's still work in the queue OR pending scatters, use tryCombineOne to avoid blocking
 				ok = tryCombineOne(ctx)
 			} else {
-				ok, err = combineOne(ctx, idleTimerCh, waitq.Waiter{}, nil)
+				ok, err = combineOne(ctx, idleTimerCh, waiter, changeCh)
 			}
 			return ok, err
 		}
+
+		executeCombine(backpressureCtx, combine)
 
 		for {
 			if !isSecondary {
@@ -642,7 +685,7 @@ func (cp *CombinerPool) spawnNewCombiner(combine boundCombineFunc) {
 
 const errIdleTimeout = cerr.Error("idle timeout reached")
 
-type boundCombineFunc func(ctx context.Context, cm *combinerMap)
+type boundCombineFunc func(ctx context.Context, cm *combinerMap, queuing bool)
 
 type halfBoundCombineFunc[I any] func(ctx context.Context, input I, inputErr error)
 

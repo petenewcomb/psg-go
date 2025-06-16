@@ -4,6 +4,7 @@
 package jobstate
 
 import (
+	"fmt"
 	"sync/atomic"
 )
 
@@ -23,6 +24,21 @@ const (
 	// combiners have completed
 	stageDone
 )
+
+func (s lifecycleStage) String() string {
+	switch s {
+	case stageOpen:
+		return "Open"
+	case stageClosed:
+		return "Closed"
+	case stageFlushing:
+		return "Flushing"
+	case stageDone:
+		return "Done"
+	default:
+		return fmt.Sprintf("Unknown(%d)", int(s))
+	}
+}
 
 // JobState encapsulates the state management for a scatter-gather job
 type JobState struct {
@@ -54,15 +70,19 @@ func (js *JobState) IncrementTasks() {
 func (js *JobState) DecrementTasks() {
 	noMoreTasks := js.inFlightTasks.Decrement()
 
-	// We don't need to worry about whether there's no more work, as
-	// js.noMoreTasks will call js.noMoreWork if needed. The important thing is
-	// that we decrement the total count before calling js.noMoreTasks so that
-	// it knows whether it might need to flush.
-	_ = js.inFlightTotal.Decrement()
+	// Decrement the total count and check if it hit zero. If noMoreTasks is true,
+	// js.noMoreTasks will handle the transition logic. But if noMoreTasks is false
+	// and the total counter hit zero, we need to call js.noMoreWork directly to
+	// handle the race condition where flushers complete between the decrement and
+	// the IsZero() check in noMoreTasks().
+	noMoreWork := js.inFlightTotal.Decrement()
 
 	if noMoreTasks {
 		// Last task just completed.
 		js.noMoreTasks()
+	} else if noMoreWork {
+		// Total counter hit zero but tasks counter didn't - this means flushers completed
+		js.noMoreWork()
 	}
 }
 

@@ -25,6 +25,7 @@ Items that must be completed before merging to main branch.
 - [ ] Add a Combiner example to the README Features section
 - [ ] Create a playground example for the new combining architecture
 - [ ] Clearly show the reentrancy effect of scattering or gathering within combiners and gather functions, esp. given that combiners may also be flushed
+- [ ] Add documentation that compares waitq with condition variables
 
 ### 4. Performance optimization
 - [ ] Test automatic scaling of combiner task count based on workload
@@ -44,6 +45,9 @@ Items that must be completed before merging to main branch.
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
+- [ ] Consider changing JobState.(In|De)crementTasks to JobState.(In|De)crementWork or similar, since it's also used to count pending scatters and gathers (I think)
+- [ ] Replace queuing parameter of boundCombineFunc with pendingCombine wrapper struct that includes a releaseWaiters boolean flag
+- [ ] Reconsider Min/MaxGatherCount on sim.Plan -- it seems that implicit combine flushes will not result in gathers anyway
 
 ## Post-Merge Enhancements
 

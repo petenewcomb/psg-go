@@ -152,6 +152,19 @@ type workItem struct {
 // does not leave any outstanding goroutines.
 func NewJob(ctx context.Context) *Job {
 	ctx, cancelFunc := context.WithCancel(ctx)
+
+	// Reset job-specific context values that shouldn't be inherited from parent jobs
+	// while preserving user-provided context values and jobContextValueKey for cycle detection
+	if ctx.Value(taskContextValueKey) != nil {
+		ctx = context.WithValue(ctx, taskContextValueKey, nil)
+	}
+	if ctx.Value(gatherContextValueKey) != nil {
+		ctx = context.WithValue(ctx, gatherContextValueKey, nil)
+	}
+	if ctx.Value(backpressureProviderContextValueKey) != nil {
+		ctx = context.WithValue(ctx, backpressureProviderContextValueKey, nil)
+	}
+
 	j := &Job{
 		cancelFunc: cancelFunc,
 	}
@@ -421,17 +434,16 @@ func (j *Job) gatherOneAndDoTheWork(vettedCtx vettedContext) (bool, error) {
 	var err error
 	if !vettedCtx.inGather {
 		ctx = j.gatherContext(vettedCtx)
-
 		for {
 			var waiterNotified bool
-			j.workWaiters.Wait(func(workWaiter waitq.Waiter) bool {
+			workWaiter := j.workWaiters.NewWaiter(func() bool {
 				// Process work queue inside the wait to avoid race conditions
 				if err = j.processOutstandingWork(ctx); err != nil {
 					return false
 				}
-				waiterNotified, err = j.gatherOne(ctx, workWaiter, nil)
-				return waiterNotified
+				return true
 			})
+			waiterNotified, err = j.gatherOne(ctx, workWaiter, nil)
 			if !waiterNotified || err != nil {
 				break
 			}
@@ -462,26 +474,28 @@ func (j *Job) queueGather(gather boundGatherFunc) {
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
 func (j *Job) gatherOne(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
-	var waiterNotified bool
+	waiterNotified := false
 	var err error
-
 	j.gatherQueue.PopFrontFunc(gatherQueuePool, j.queueGather,
-		func(dedicatedCh, sharedCh <-chan boundGatherFunc) <-chan boundGatherFunc {
-			select {
-			case gather := <-dedicatedCh:
-				j.queueGather(gather)
-				return dedicatedCh
-			case gather := <-sharedCh:
-				j.queueGather(gather)
-			case <-waiter.Done():
-				waiterNotified = true
-			case <-limitCh:
-			case <-j.state.Done():
-				err = ErrJobDone
-			case <-ctx.Done():
-				err = ctx.Err()
-			}
-			return nil
+		func(dedicatedCh, sharedCh <-chan boundGatherFunc) (sourceCh <-chan boundGatherFunc) {
+			waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
+				select {
+				case gather := <-dedicatedCh:
+					j.queueGather(gather)
+					sourceCh = dedicatedCh
+				case gather := <-sharedCh:
+					j.queueGather(gather)
+				case <-waitCh:
+					return true
+				case <-limitCh:
+				case <-j.state.Done():
+					err = ErrJobDone
+				case <-ctx.Done():
+					err = ctx.Err()
+				}
+				return false
+			})
+			return sourceCh
 		},
 	)
 	return waiterNotified, err

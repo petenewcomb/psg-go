@@ -72,6 +72,14 @@ func (c BiasedBoolConfig) Draw(t *rapid.T, name string) bool {
 			}).Draw(t, name+"(internal)")
 		*/
 		t.Logf("BiasedBoolConfig3: %s: %v", name, val)
-		return val <= p
+
+		// Handle edge cases after drawing from rapid
+		if p <= 0 {
+			return false
+		}
+		if p >= 1 {
+			return true
+		}
+		return val < p
 	}).Draw(t, name)
 }

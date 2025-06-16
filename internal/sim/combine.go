@@ -60,4 +60,9 @@ func (c *Combine) Dump(fs fmt.State, indent string) {
 	_, _ = fmt.Fprintf(fs, "%s: index=%d flush=%v\n%s", name, c.Index, c.FlushHandler, indent)
 	c.Func.Dump(fs, indent, name)
 	_, _ = fmt.Fprintf(fs, "\n%s%s ends at %v", indent, name, c.PathDuration())
+	flushHandlerIndent := indent + "  "
+	if c.FlushHandler != nil {
+		_, _ = fmt.Fprintf(fs, "\n%s", flushHandlerIndent)
+		c.FlushHandler.Dump(fs, flushHandlerIndent)
+	}
 }

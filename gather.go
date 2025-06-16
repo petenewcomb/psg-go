@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	// "fmt"
 )
 
 // A GatherFunc is a function that processes the result of a completed

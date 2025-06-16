@@ -14,23 +14,22 @@ func (q *Queue) Init() {
 }
 
 // Add to unbounded queue - never blocks
-func (q *Queue) Wait(fn func(Waiter) bool) {
-	q.inner.PopFrontFunc(p,
-		func(struct{}) {
-			// There was an orphaned value in the channel, meaning that this
-			// waiter was notified but didn't receive it. Call Notify to pass
-			// the notification to another.
-			q.Notify()
-		},
-		func(ch <-chan struct{}) bool {
-			return fn(Waiter{ch: ch})
-		},
-	)
+func (q *Queue) NewWaiter(verifyFn func() bool) Waiter {
+	return Waiter{
+		q:        q,
+		verifyFn: verifyFn,
+	}
 }
 
 // Notify signals the waiter at the front of the queue (if any).
 func (q *Queue) Notify() {
 	q.inner.TryPushBack(p, struct{}{})
+}
+
+func (q *Queue) NotifyAll() {
+	for q.inner.TryPushBack(p, struct{}{}) {
+		// Keep notifying until we can't anymore
+	}
 }
 
 var p = &rdvq.Pool[struct{}]{}

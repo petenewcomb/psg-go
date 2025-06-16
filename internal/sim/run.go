@@ -85,19 +85,22 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 	chk := require.New(t)
 	// Loop to handle expected errors from gathers
 	for {
+		c.debugf("closing and gathering")
 		err := c.Job.CloseAndGatherAll(ctx)
+		c.debugf("closing and gathering returned %v", err)
 		if err == nil {
 			break
 		}
 		if ge, ok := err.(ExpectedGatherError); ok {
-			chk.True(ge.Func.ReturnError)
+			chk.True(ge.g.Func.ReturnError)
 		} else {
 			chk.NoError(err)
 		}
 	}
 
 	gatheredCount := c.GatheredCount.Load()
-	chk.Equal(int64(c.Plan.TaskCount), gatheredCount)
+	chk.GreaterOrEqual(gatheredCount, int64(c.Plan.MinGatherCount))
+	chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
 	maxConcurrencyByTaskPool := make([]int64, len(c.MaxConcurrencyByTaskPool))
 	for i := range len(maxConcurrencyByTaskPool) {
@@ -125,8 +128,11 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 }
 
 func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *Task) {
+	c.debugf("Scattering %v", task)
+	defer c.debugf("Scattered %v", task)
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
+		c.debugf("Scattering %v to Gather", task)
 		gather := func() *psg.Gather[*taskResult] {
 			c.GathersLock.Lock()
 			defer c.GathersLock.Unlock()
@@ -147,13 +153,16 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 			}
 			chk := require.New(t)
 			if ge, ok := err.(ExpectedGatherError); ok {
-				chk.True(ge.Func.ReturnError)
+				chk.True(ge.g.Func.ReturnError)
 			} else {
 				chk.NoError(err)
 			}
 		}
 	case *Combine:
+		c.debugf("Scattering %v to Combine", task)
 		combine := func() *psg.Combine[*taskResult, *combineResult] {
+			c.debugf("Getting combine for %v", task)
+			defer c.debugf("Got combine for %v", task)
 			c.CombinesLock.Lock()
 			defer c.CombinesLock.Unlock()
 			combine := c.Combines[rh.Index]
@@ -183,14 +192,16 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
+			c.debugf("Calling combine.Scatter for %v", task)
 			err := combine.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
+			c.debugf("Called combine.Scatter for %v: %v", task, err)
 			if err == nil {
 				break
 			}
 			chk := require.New(t)
 			if ge, ok := err.(ExpectedGatherError); ok {
-				chk.True(ge.Func.ReturnError)
+				chk.True(ge.g.Func.ReturnError)
 			} else {
 				chk.NoError(err)
 			}
@@ -378,7 +389,7 @@ func (c *controller) newCombinerGatherFunc(t require.TestingT) psg.GatherFunc[*c
 			if combine.Func.ReturnError {
 				chk.Error(err)
 				if ce, ok := err.(ExpectedCombineError); ok {
-					chk.Equal(combine.Func, ce.Func)
+					chk.Equal(combine.Func, ce.c.Func)
 				} else {
 					chk.NoError(err)
 				}
@@ -402,7 +413,7 @@ func (c *controller) newCombinerGatherFunc(t require.TestingT) psg.GatherFunc[*c
 
 		gatheredCount := c.GatheredCount.Add(int64(res.TaskCount))
 		c.debugf("gathering %d combined tasks from CombineIndex#%d, gathered count now %d", res.TaskCount, res.Index, gatheredCount)
-		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
+		chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
 		return err
 	}
@@ -482,19 +493,19 @@ type combineResult struct {
 }
 
 type ExpectedGatherError struct {
-	*Gather
+	g *Gather
 }
 
 func (e ExpectedGatherError) Error() string {
-	return fmt.Sprintf("%v error", e.Gather)
+	return fmt.Sprintf("expected %v error", e.g)
 }
 
 type ExpectedCombineError struct {
-	*Combine
+	c *Combine
 }
 
 func (e ExpectedCombineError) Error() string {
-	return fmt.Sprintf("%v error", e.Combine)
+	return fmt.Sprintf("expected %v error", e.c)
 }
 
 type atomicMinMaxInt64 struct {

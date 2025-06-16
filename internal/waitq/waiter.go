@@ -36,9 +36,29 @@ package waitq
 //
 // Waiter variables may be safely copied and are designed to be passed by value.
 type Waiter struct {
-	ch <-chan struct{}
+	q        *Queue
+	verifyFn func() bool
 }
 
-func (w Waiter) Done() <-chan struct{} {
-	return w.ch
+func (w Waiter) Wait(selectFn func(ch <-chan struct{}) bool) bool {
+	if w.q == nil {
+		return selectFn(nil)
+	}
+	notified := false
+	w.q.inner.PopFrontFunc(p,
+		func(struct{}) {
+			// There was an orphaned value in the channel, meaning that this
+			// waiter was notified but didn't receive it. Call Notify to pass
+			// the notification to another.
+			w.q.Notify()
+		},
+		func(ch <-chan struct{}) bool {
+			if w.verifyFn != nil && !w.verifyFn() {
+				return false
+			}
+			notified = selectFn(ch)
+			return notified
+		},
+	)
+	return notified
 }

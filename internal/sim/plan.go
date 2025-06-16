@@ -23,6 +23,8 @@ type Plan struct {
 	SubjobTaskCount     int
 	TaskPools           []TaskPool
 	CombinerPools       []CombinerPool
+	MinGatherCount      int // Tasks that will definitely be gathered
+	MaxGatherCount      int // Maximum possible gathers including force-flushes
 }
 
 // NewPlan creates a hierarchy of simulated tasks for testing.
@@ -158,7 +160,11 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		}
 	}
 
+	// Track combiners without FlushHandler per combine index for max gather calculation
+	combineWithoutFlush := make([]int, len(plan.CombinerPoolIndexes))
+
 	newGather := func(id int, paths []*Path) *Gather {
+		plan.MinGatherCount++
 		gatherName := fmt.Sprintf("Gather#%d", id)
 		return &Gather{
 			ID:    id,
@@ -175,9 +181,15 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 			flush = newGather(id, paths[:flushScatterCount])
 			paths = paths[flushScatterCount:]
 		}
+		combineIndex := rapid.IntRange(0, len(plan.CombinerPoolIndexes)-1).Draw(t, combineName+".Index")
+
+		if flush == nil {
+			combineWithoutFlush[combineIndex]++
+		}
+
 		return &Combine{
 			ID:           id,
-			Index:        rapid.IntRange(0, len(plan.CombinerPoolIndexes)-1).Draw(t, combineName+".Index"),
+			Index:        combineIndex,
 			Func:         newFunc(combineName, &planConfig.Combine.Func, paths),
 			FlushHandler: flush,
 		}
@@ -219,7 +231,6 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		group := availablePaths[:size]
 		task := newGroupTask(id, group)
 		t.Logf("%v -> %v", task, group)
-		t.Logf("%#v", task)
 		return task, availablePaths[size:]
 	}
 
@@ -323,6 +334,14 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 	plan.TaskCount = nextIDs.Task - nextIDsOrigin.Task - plan.SubjobTaskCount
 	plan.SubjobCount = nextIDs.Plan - nextIDsOrigin.Plan
 
+	// Calculate MaxGatherCount: MinGatherCount + max possible force-flushes
+	plan.MaxGatherCount = plan.MinGatherCount
+	for combineIndex, count := range combineWithoutFlush {
+		poolIndex := plan.CombinerPoolIndexes[combineIndex]
+		maxForceFlushes := count * plan.CombinerPools[poolIndex].ConcurrencyLimit
+		plan.MaxGatherCount += maxForceFlushes
+	}
+
 	return plan
 }
 
@@ -340,7 +359,7 @@ func (p *Plan) Format(f fmt.State, verb rune) {
 
 func (p *Plan) Dump(fs fmt.State, indent string) {
 	name := fmt.Sprint(p)
-	_, _ = fmt.Fprintf(fs, "%s: pathCount=%d taskCount=%d maxPathDuration=%v", name, p.PathCount, p.TaskCount, p.MaxPathDuration)
+	_, _ = fmt.Fprintf(fs, "%s: pathCount=%d taskCount=%d maxPathDuration=%v minGatherCount=%d maxGatherCount=%d", name, p.PathCount, p.TaskCount, p.MaxPathDuration, p.MinGatherCount, p.MaxGatherCount)
 	var t time.Duration
 	for i, tp := range p.TaskPools {
 		_, _ = fmt.Fprintf(fs, "\n%s   TaskPools[%d]: %#v", indent, i, &tp)

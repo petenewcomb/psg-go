@@ -29,8 +29,8 @@ func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 			// Still at or over limit.
 			return false
 		}
+		// Room might have been made, try again.
 	}
-	// Incremented counter is within limit.
 	return true
 }
 

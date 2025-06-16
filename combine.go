@@ -179,34 +179,22 @@ func (c *Combine[I, O]) scatter(
 		return false, err
 	}
 
-	if !c.pool.waitingCombines.IsZero() {
-		for {
-			proceed := false
-			var err error
-			c.pool.combineWaiters.Wait(func(waiter waitq.Waiter) bool {
-				// Check again _after_ registering as a waiter, so we don't
-				// potentially miss a notification.
-				if c.pool.waitingCombines.IsZero() {
-					proceed = true
-					return false // waiter was not notified
-				}
+	for !c.pool.waitingCombines.IsZero() {
+		waiter := c.pool.combineWaiters.NewWaiter(func() bool {
+			// Check again _after_ registering as a waiter, so we don't
+			// potentially miss a notification.
+			return !c.pool.waitingCombines.IsZero()
+		})
 
-				// bp.Block will return true only if we got a notification from the
-				// waiterQueue, so we can pass that along to break out of the loop
-				// and proceed without rechecking waitingCombines.
-				var waiterNotified bool
-				waiterNotified, err = bp.Block(vettedCtx.ctx, waiter, nil)
-				if waiterNotified {
-					proceed = true
-				}
-				return waiterNotified
-			})
-			if err != nil {
-				return false, err
-			}
-			if proceed {
-				break
-			}
+		// bp.Block will return true only if we got a notification from the
+		// waiterQueue, so we can pass that along to break out of the loop
+		// and proceed without rechecking waitingCombines.
+		waiterNotified, err := bp.Block(vettedCtx.ctx, waiter, nil)
+		if err != nil {
+			return false, err
+		}
+		if waiterNotified {
+			break
 		}
 	}
 
@@ -216,10 +204,12 @@ func (c *Combine[I, O]) scatter(
 	}
 
 	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
-		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
+		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap, queuing bool) {
 			// Create an emit callback to handle output from the combiner
-			combineFn := getCombineFunc(ctx, cm, c.pool, c)
-			combineFn(ctx, input, inputErr)
+			if !queuing {
+				combineFn := getCombineFunc(ctx, cm, c.pool, c)
+				combineFn(ctx, input, inputErr)
+			}
 		})
 	})
 }
@@ -247,13 +237,7 @@ func (bp combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) 
 }
 
 func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-	select {
-	case <-waiter.Done():
-		return true, nil
-	case <-ctx.Done():
-		return false, ctx.Err()
-	}
-	//return bp.combineOne(ctx, waiter, changeCh)
+	return bp.combineOne(ctx, waiter, changeCh)
 }
 
 func (bp combineBackpressureProvider) QueueWork(workFunc func(context.Context) error) {

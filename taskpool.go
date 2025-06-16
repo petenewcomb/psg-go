@@ -71,37 +71,42 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 	j := p.j
 
 	// Try to add to the pool
-	limit, _ := p.concurrencyLimit.Load()
-	if !p.incrementInFlightIfUnder(limit) {
+	for {
+		limit, limitChangeCh := p.concurrencyLimit.Load()
+		if p.incrementInFlightIfUnder(limit) {
+			break
+		}
+
 		if applyBackpressure == nil {
 			return false, nil
 		}
 
-		for {
-			proceed := false
-			var err error
-			p.waiterQueue.Wait(func(waiter waitq.Waiter) bool {
-				// Check again after registering as a waiter, in case capacity
-				// became available between the last check and this one.
-				limit, limitChangeCh := p.concurrencyLimit.Load()
-				if p.incrementInFlightIfUnder(limit) {
-					proceed = true
-					return false // waiter was not notified
-				}
+		incrementSucceeded := false
+		var err error
+		waiter := p.waiterQueue.NewWaiter(func() bool {
+			// Check again after registering as a waiter, in case capacity
+			// became available between the last check and this one. Note that
+			// this overwrites the limitChangeCh at the top of the loop so that
+			// the latest one is passed to applyBackpressure below.
+			limit, limitChangeCh = p.concurrencyLimit.Load()
+			if p.incrementInFlightIfUnder(limit) {
+				incrementSucceeded = true
+				return false // waiter was not notified
+			}
+			return true
+		})
 
-				var waiterNotified bool
-				waiterNotified, err = applyBackpressure(ctx, waiter, limitChangeCh)
-				// Even though the waiter was notified, we need to reattempt
-				// incrementing the in-flight counter before proceding.
-				return waiterNotified
-			})
-			if err != nil {
-				return false, err
-			}
-			if proceed {
-				break
-			}
+		_, err = applyBackpressure(ctx, waiter, limitChangeCh)
+		if err != nil {
+			return false, err
 		}
+
+		if incrementSucceeded {
+			break
+		}
+
+		// Even if the waiter was notified, we need to reattempt incrementing
+		// the in-flight counter before proceding.
 	}
 
 	j.startTask(func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context) {

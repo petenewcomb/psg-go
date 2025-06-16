@@ -18,6 +18,7 @@ Items that must be completed before merging to main branch.
 - [ ] Add tests verifying proper shutdown sequence and resource cleanup
 - [ ] Test and document behavior when tasks passed to combiners return errors
 - [ ] test running gather scatters from combiners and vice versa in combiner benchmark
+- [ ] Thoroughly test multithreaded gathers
 
 ### 3. Documentation updates
 - [ ] Complete review and update of doc comments for all new/modified public APIs
@@ -45,7 +46,6 @@ Items that must be completed before merging to main branch.
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
-- [ ] Consider changing JobState.(In|De)crementTasks to JobState.(In|De)crementWork or similar, since it's also used to count pending scatters and gathers (I think)
 - [ ] Reconsider Min/MaxGatherCount on sim.Plan -- it seems that implicit combine flushes will not result in gathers anyway
 - [ ] Make naming of function variables and types consistent - *Func for types, *Fn for variables, etc.
 

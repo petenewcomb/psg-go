@@ -217,13 +217,13 @@ func (cp *CombinerPool) SetGrowthFactors(aggressive, conservative float64) {
 
 var combineQueuePool = &rdvq.Pool[pendingCombine]{}
 
-func (cp *CombinerPool) postCombine(ctx context.Context, combine boundCombineFunc) {
+func (cp *CombinerPool) postCombine(ctx context.Context, combineFn boundCombineFunc) {
 	if cp.state.MaybeSpawnGoroutine() {
-		cp.spawnNewCombiner(combine)
+		cp.spawnNewCombiner(combineFn)
 		return
 	}
 
-	pc := pendingCombine{fn: combine, releaseWaiters: false}
+	pc := pendingCombine{fn: combineFn, releaseWaiters: false}
 	cp.primaryQueue.PushBackFunc(combineQueuePool, pc, func(primaryCh chan<- pendingCombine, pc pendingCombine) {
 		// Attempt to post to the secondary queue, else fall back to the slow path.
 		if !cp.secondaryQueue.TryPushBack(combineQueuePool, pc) {
@@ -244,7 +244,7 @@ func (cp *CombinerPool) releaseWaiters() {
 	}
 }
 
-func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pendingCombine, combine boundCombineFunc) {
+func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pendingCombine, combineFn boundCombineFunc) {
 
 	// We don't attempt the primary channel alone here since both fast paths
 	// failed, meaning both primary and secondary goroutines are likely busy. At
@@ -263,7 +263,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pe
 	for {
 		spawnWaitCh := cp.state.ShouldSpawnGoroutine()
 		if spawnWaitCh == nil {
-			cp.spawnNewCombiner(combine)
+			cp.spawnNewCombiner(combineFn)
 			return
 		}
 
@@ -278,7 +278,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pe
 
 		// Create pendingCombine with releaseWaiters=true since we incremented the counter
 		pc := pendingCombine{
-			fn:             combine,
+			fn:             combineFn,
 			releaseWaiters: true,
 		}
 
@@ -345,7 +345,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 		var pendingScatters basicq.Queue[pendingScatterFunc]
 
 		// More forward references
-		var executeCombine func(ctx context.Context, combine boundCombineFunc)
+		var executeCombineFn func(ctx context.Context, combineFn boundCombineFunc)
 		var flushAll func(ctx context.Context)
 
 		queueWork := func(workFn combineWorkFunc) {
@@ -380,7 +380,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 			}
 
 			queueWork(func(ctx context.Context) {
-				executeCombine(ctx, pc.fn)
+				executeCombineFn(ctx, pc.fn)
 			})
 		}
 
@@ -533,10 +533,10 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 
 		bp := combineBackpressureProvider{
 			job: j,
-			tryCombine: func(ctx context.Context) (bool, error) {
+			tryCombineFn: func(ctx context.Context) (bool, error) {
 				return tryCombine(ctx), nil
 			},
-			combine: func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+			combineFn: func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
 				ok, err := processWorkAndCombine(ctx, false, waiter, changeCh)
 				if err == errIdleTimeout {
 					// In backpressure so not really idle: ignore
@@ -544,7 +544,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 				}
 				return ok, err
 			},
-			queueWork: func(workFn func(context.Context) error) {
+			queueWorkFn: func(workFn func(context.Context) error) {
 				// Queue scatter functions to be executed later rather than immediately
 				pendingScatters.PushBack(workFn)
 			},
@@ -567,12 +567,12 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 		// Ensure combiner is flushed as needed when this goroutine terminates.
 		defer flushAll(backpressureCtx)
 
-		executeCombine = func(ctx context.Context, combine boundCombineFunc) {
+		executeCombineFn = func(ctx context.Context, combineFn boundCombineFunc) {
 			if nextJobFlushCh == nil {
 				// Make sure the job won't terminate before the combiner is flushed
 				nextJobFlushCh, unregisterAsJobFlusher = j.state.RegisterFlusher()
 			}
-			combine(ctx, &cm)
+			combineFn(ctx, &cm)
 			cp.state.IncrementCompleted()
 		}
 
@@ -657,7 +657,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 			return ok, err
 		}
 
-		executeCombine(backpressureCtx, combineFn)
+		executeCombineFn(backpressureCtx, combineFn)
 
 		for {
 			if !isSecondary {

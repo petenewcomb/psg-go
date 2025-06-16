@@ -27,14 +27,14 @@ type PropagatedResult[T any] struct {
 // The returned task function will extract any existing trace context from the incoming
 // context and attach it to the result for propagation.
 func PropagateTask[T any](
-	taskFunc func(ctx context.Context) (T, error),
+	taskFn func(ctx context.Context) (T, error),
 ) psg.TaskFunc[PropagatedResult[T]] {
 	return func(ctx context.Context) (PropagatedResult[T], error) {
 		// Extract any existing trace context from incoming context
 		existingTraceCtx := trace.SpanFromContext(ctx).SpanContext()
 
 		// Execute original task
-		result, err := taskFunc(ctx)
+		result, err := taskFn(ctx)
 
 		// Wrap result with trace context
 		return PropagatedResult[T]{
@@ -48,7 +48,7 @@ func PropagateTask[T any](
 // The gather function receives a context with the propagated trace context properly
 // set, allowing spans created in the gather function to be properly parented.
 func PropagateGather[T any](
-	gatherFunc func(ctx context.Context, result T, err error) error,
+	gatherFn func(ctx context.Context, result T, err error) error,
 ) *psg.GatherOp[PropagatedResult[T]] {
 	return psg.NewGatherOp(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 		// Create context with propagated trace data
@@ -58,7 +58,7 @@ func PropagateGather[T any](
 		}
 
 		// Call original gather with enhanced context
-		return gatherFunc(propagatedCtx, wrapped.UserResult, err)
+		return gatherFn(propagatedCtx, wrapped.UserResult, err)
 	})
 }
 

@@ -24,7 +24,7 @@ func Example_hello() {
 	defer job.CancelAndWait() // hygiene
 
 	// Binds a string to a task function that returns the string after a short delay.
-	newTask := func(s string) psg.TaskFunc[string] {
+	newTaskFn := func(s string) psg.TaskFunc[string] {
 		return func(context.Context) (string, error) {
 			time.Sleep(1 * time.Millisecond)
 			return s, nil
@@ -32,15 +32,15 @@ func Example_hello() {
 	}
 
 	var results []string
-	gather := psg.NewGatherOp(
+	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
 		},
 	)
 
-	gather.Scatter(ctx, job, newTask("Hello"))
-	gather.Scatter(ctx, job, newTask("world!"))
+	gatherOp.Scatter(ctx, job, newTaskFn("Hello"))
+	gatherOp.Scatter(ctx, job, newTaskFn("world!"))
 
 	job.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))

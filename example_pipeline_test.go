@@ -46,7 +46,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Run digesting tasks in a Pool limited to the number of cores available to
 	// the program, since it should be CPU-bound.
 	digesterPool := psg.NewTaskPool(job, runtime.NumCPU())
-	newDigestingTask := func(data []byte) psg.TaskFunc[[md5.Size]byte] {
+	newDigestingTaskFn := func(data []byte) psg.TaskFunc[[md5.Size]byte] {
 		return func(ctx context.Context) ([md5.Size]byte, error) {
 			return md5.Sum(data), nil
 		}
@@ -54,7 +54,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestGather := func(path string) *psg.GatherOp[[md5.Size]byte] {
+	newDigestGatherOp := func(path string) *psg.GatherOp[[md5.Size]byte] {
 		return psg.NewGatherOp(
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
@@ -66,18 +66,18 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Allow many file reading tasks to run concurrently since they should be
 	// I/O-bound.
 	readerPool := psg.NewTaskPool(job, 100)
-	newReadingTask := func(path string) psg.TaskFunc[[]byte] {
+	newReadingTaskFn := func(path string) psg.TaskFunc[[]byte] {
 		return func(ctx context.Context) ([]byte, error) {
 			return os.ReadFile(path)
 		}
 	}
 
 	// Creates gathers for reading tasks that launch digesting tasks.
-	newReadGather := func(path string) *psg.GatherOp[[]byte] {
+	newReadGatherOp := func(path string) *psg.GatherOp[[]byte] {
 		return psg.NewGatherOp(
 			func(ctx context.Context, data []byte, err error) error {
-				return newDigestGather(path).
-					Scatter(ctx, digesterPool, newDigestingTask(data))
+				return newDigestGatherOp(path).
+					Scatter(ctx, digesterPool, newDigestingTaskFn(data))
 			},
 		)
 	}
@@ -90,7 +90,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadGather(path).Scatter(ctx, readerPool, newReadingTask(path))
+		return newReadGatherOp(path).Scatter(ctx, readerPool, newReadingTaskFn(path))
 	})
 	if err != nil {
 		return nil, err

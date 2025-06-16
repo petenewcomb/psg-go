@@ -109,14 +109,14 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 		// the in-flight counter before proceding.
 	}
 
-	j.startTask(func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context) {
+	j.startTask(func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context) {
 		task(ctx, func() {
 			// Decrement the task pool's in-flight count BEFORE waiting on the gather
 			// channel. This makes it safe for gatherFunc to call `Scatter` with this
 			// same `TaskPool` instance without deadlock, as there is guaranteed to be at
 			// least one slot available.
 			p.decrementInFlight()
-		}, ctxWithBP)
+		}, ctxWithBPFn)
 	})
 
 	return true, nil

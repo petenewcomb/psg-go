@@ -27,7 +27,7 @@ func ExampleCombine() {
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// generic task function
-	newTask := func(number int, delay time.Duration, result string) psg.TaskFunc[string] {
+	newTaskFn := func(number int, delay time.Duration, result string) psg.TaskFunc[string] {
 		return func(context.Context) (string, error) {
 			// Simulate a long-running task
 			time.Sleep(delay)
@@ -91,10 +91,10 @@ func ExampleCombine() {
 	})
 
 	// Define a result aggregation function and create a combined gather/combine operation
-	gather := psg.NewGatherOp(gatherFn)
+	gatherOp := psg.NewGatherOp(gatherFn)
 
 	// Create a Combine operation with the gather function and inline combiner factory
-	combine := psg.NewCombineOp(gather, combinerPool, newCombiner)
+	combineOp := psg.NewCombineOp(gatherOp, combinerPool, newCombiner)
 
 	// Launch some tasks
 	fmt.Println("starting job")
@@ -108,7 +108,7 @@ func ExampleCombine() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, combine at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, combine at 100ms
 	} {
-		err := combine.Scatter(ctx, taskPool, newTask(i+1, spec.delay, spec.result))
+		err := combineOp.Scatter(ctx, taskPool, newTaskFn(i+1, spec.delay, spec.result))
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

@@ -15,7 +15,7 @@ import (
 // This wrapper records count, duration, and error metrics for task execution.
 func MetricsTask[T any](
 	metricName string,
-	taskFunc func(ctx context.Context) (T, error),
+	taskFn func(ctx context.Context) (T, error),
 ) psg.TaskFunc[T] {
 	return func(ctx context.Context) (T, error) {
 		startTime := time.Now()
@@ -29,7 +29,7 @@ func MetricsTask[T any](
 		taskCounter.Add(ctx, 1)
 
 		// Execute task
-		result, err := taskFunc(ctx)
+		result, err := taskFn(ctx)
 
 		// Record duration
 		duration := time.Since(startTime).Seconds()
@@ -49,7 +49,7 @@ func MetricsTask[T any](
 // This wrapper records count, duration, and error metrics for gather execution.
 func MetricsGather[T any](
 	metricName string,
-	gatherFunc func(ctx context.Context, result T, err error) error,
+	gatherFn func(ctx context.Context, result T, err error) error,
 ) psg.GatherFunc[T] {
 	return func(ctx context.Context, result T, err error) error {
 		startTime := time.Now()
@@ -63,7 +63,7 @@ func MetricsGather[T any](
 		gatherCounter.Add(ctx, 1)
 
 		// Execute gather
-		gatherErr := gatherFunc(ctx, result, err)
+		gatherErr := gatherFn(ctx, result, err)
 
 		// Record duration
 		duration := time.Since(startTime).Seconds()

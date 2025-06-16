@@ -133,20 +133,20 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
 		c.debugf("Scattering %v to Gather", task)
-		gather := func() *psg.GatherOp[*taskResult] {
+		gatherOp := func() *psg.GatherOp[*taskResult] {
 			c.GathersLock.Lock()
 			defer c.GathersLock.Unlock()
-			gather := c.Gathers[rh.Index]
-			if gather == nil {
-				gather = psg.NewGatherOp(c.newGatherFunc(t))
-				c.Gathers[rh.Index] = gather
+			gatherOp := c.Gathers[rh.Index]
+			if gatherOp == nil {
+				gatherOp = psg.NewGatherOp(c.newGatherFunc(t))
+				c.Gathers[rh.Index] = gatherOp
 			}
-			return gather
+			return gatherOp
 		}()
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
-			err := gather.Scatter(ctx, c.getTaskPool(task.PoolIndex),
+			err := gatherOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break
@@ -160,15 +160,15 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 		}
 	case *Combine:
 		c.debugf("Scattering %v to Combine", task)
-		combine := func() *psg.CombineOp[*taskResult, *combineResult] {
+		combineOp := func() *psg.CombineOp[*taskResult, *combineResult] {
 			c.debugf("Getting combine for %v", task)
 			defer c.debugf("Got combine for %v", task)
 			c.CombinesLock.Lock()
 			defer c.CombinesLock.Unlock()
-			combine := c.Combines[rh.Index]
-			if combine == nil {
+			combineOp := c.Combines[rh.Index]
+			if combineOp == nil {
 				// Create a gather for the combiner output
-				gather := psg.NewGatherOp(c.newCombinerGatherFunc(t))
+				gatherOp := psg.NewGatherOp(c.newCombinerGatherFunc(t))
 
 				combinerPoolIndex := c.Plan.CombinerPoolIndexes[rh.Index]
 				combinerPool := c.CombinerPools[combinerPoolIndex]
@@ -180,20 +180,20 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 				}
 
 				// Create a combine operation that uses the gather and factory
-				combine = psg.NewCombineOp(
-					gather,
+				combineOp = psg.NewCombineOp(
+					gatherOp,
 					combinerPool,
 					c.newCombinerFactory(t, rh.Index),
 				)
-				c.Combines[rh.Index] = combine
+				c.Combines[rh.Index] = combineOp
 			}
-			return combine
+			return combineOp
 		}()
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
 			c.debugf("Calling combine.Scatter for %v", task)
-			err := combine.Scatter(ctx, c.getTaskPool(task.PoolIndex),
+			err := combineOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			c.debugf("Called combine.Scatter for %v: %v", task, err)
 			if err == nil {

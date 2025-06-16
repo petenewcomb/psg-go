@@ -16,7 +16,7 @@ import (
 // timing information and any errors that occur.
 func LoggedTask[T any](
 	operationName string,
-	taskFunc func(ctx context.Context) (T, error),
+	taskFn func(ctx context.Context) (T, error),
 ) psg.TaskFunc[T] {
 	return func(ctx context.Context) (T, error) {
 		// Get logger from context or use a default
@@ -30,7 +30,7 @@ func LoggedTask[T any](
 
 		// Time the operation
 		startTime := time.Now()
-		result, err := taskFunc(ctx)
+		result, err := taskFn(ctx)
 		duration := time.Since(startTime)
 
 		// Log completion with appropriate level based on success/failure
@@ -56,7 +56,7 @@ func LoggedTask[T any](
 // information and any errors that occur.
 func LoggedGather[T any](
 	operationName string,
-	gatherFunc func(ctx context.Context, result T, err error) error,
+	gatherFn func(ctx context.Context, result T, err error) error,
 ) psg.GatherFunc[T] {
 	return func(ctx context.Context, result T, err error) error {
 		// Get logger from context or use a default
@@ -70,7 +70,7 @@ func LoggedGather[T any](
 
 		// Time the operation
 		startTime := time.Now()
-		gatherErr := gatherFunc(ctx, result, err)
+		gatherErr := gatherFn(ctx, result, err)
 		duration := time.Since(startTime)
 
 		// Log completion with appropriate level based on success/failure

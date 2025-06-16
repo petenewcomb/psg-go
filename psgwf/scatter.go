@@ -10,7 +10,7 @@ import (
 )
 
 func scatter[T any](ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[T],
-	launch func(context.Context, *psg.TaskPool, psg.TaskFunc[result[T]]) (bool, error),
+	launchFn func(context.Context, *psg.TaskPool, psg.TaskFunc[result[T]]) (bool, error),
 ) (bool, error) {
 
 	// unref will happen in wrapGatherFunc or combinerAdapter.combine if launch
@@ -24,6 +24,6 @@ func scatter[T any](ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskF
 	}()
 
 	var err error
-	launched, err = launch(ctx, pool, wrapTaskFunc(wf, taskFn))
+	launched, err = launchFn(ctx, pool, wrapTaskFunc(wf, taskFn))
 	return launched, err
 }

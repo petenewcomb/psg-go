@@ -594,9 +594,9 @@ func (j *Job) TryGatherAll(ctx context.Context) error {
 	return j.gatherAll(vetted, j.processWorkAndTryGather)
 }
 
-func (j *Job) gatherAll(vettedCtx vettedContext, gatherOne func(vettedContext) (bool, error)) error {
+func (j *Job) gatherAll(vettedCtx vettedContext, gatherSomeFn func(vettedContext) (bool, error)) error {
 	for {
-		ok, err := gatherOne(vettedCtx)
+		ok, err := gatherSomeFn(vettedCtx)
 		if err != nil {
 			return err
 		}

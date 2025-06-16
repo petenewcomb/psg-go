@@ -28,7 +28,7 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		// Create a gather
-		gather := psg.NewGatherOp(func(ctx context.Context, result int, err error) error {
+		gatherOp := psg.NewGatherOp(func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		})
@@ -37,8 +37,8 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 		combinerPool := psg.NewCombinerPool(job)
 
 		// Create a combine operation
-		combine := psg.NewCombineOp(
-			gather,
+		combineOp := psg.NewCombineOp(
+			gatherOp,
 			combinerPool,
 			func() psg.Combiner[int, int] {
 				return psg.FuncCombiner[int, int]{
@@ -54,7 +54,7 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 		)
 
 		// Should panic with nil task function
-		_ = combine.Scatter(
+		_ = combineOp.Scatter(
 			ctx,
 			taskPool,
 			nil, // Nil TaskFunc should panic
@@ -81,12 +81,12 @@ func TestCombinerTryScatterNilTaskFuncPanic(t *testing.T) {
 	taskPool := psg.NewTaskPool(job, 1)
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
-		gather := psg.NewGatherOp(
+		gatherOp := psg.NewGatherOp(
 			func(ctx context.Context, result int, err error) error {
 				return nil
 			},
 		)
-		_, _ = gather.TryScatter(
+		_, _ = gatherOp.TryScatter(
 			ctx,
 			taskPool,
 			nil, // Nil TaskFunc should panic
@@ -100,25 +100,25 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	job := psg.NewJob(ctx)
 	taskPool := psg.NewTaskPool(job, 1)
 
-	gather := psg.NewGatherOp(
+	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
 	)
-	err := gather.Scatter(
+	err := gatherOp.Scatter(
 		ctx,
 		taskPool,
 		func(ctx context.Context) (int, error) {
 			chk.PanicsWithValue("Scatter called from within TaskFunc; move call to GatherFunc instead", func() {
-				innerGather := psg.NewGatherOp(
+				innerGatherOp := psg.NewGatherOp(
 					func(ctx context.Context, result int, err error) error {
 						chk.NoError(err)
 						chk.Fail("should not get here")
 						return nil
 					},
 				)
-				chk.NoError(innerGather.Scatter(
+				chk.NoError(innerGatherOp.Scatter(
 					ctx,
 					taskPool,
 					func(ctx context.Context) (int, error) {
@@ -146,14 +146,14 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	gather := psg.NewGatherOp(
+	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
 	)
-	err := gather.Scatter(
+	err := gatherOp.Scatter(
 		ctx,
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
@@ -163,14 +163,14 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 			subTaskPool := psg.NewTaskPool(subJob, 1)
 
 			// This should succeed - scattering a task to the sub-job's task pool
-			gather := psg.NewGatherOp(
+			gatherOp := psg.NewGatherOp(
 				func(ctx context.Context, result bool, err error) error {
 					chk.NoError(err)
 					chk.True(result)
 					return nil
 				},
 			)
-			err := gather.Scatter(
+			err := gatherOp.Scatter(
 				ctx,
 				subTaskPool,
 				func(ctx context.Context) (bool, error) {
@@ -203,27 +203,27 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	defer parentJob.CancelAndWait()
 	parentTaskPool := psg.NewTaskPool(parentJob, 1)
 
-	gather := psg.NewGatherOp(
+	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
 	)
-	err := gather.Scatter(
+	err := gatherOp.Scatter(
 		ctx,
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
 			// This should panic - attempting to scatter to the parent job's task pool
 			// while inside a task of that same job
-			innerGather := psg.NewGatherOp(
+			innerGatherOp := psg.NewGatherOp(
 				func(ctx context.Context, result bool, err error) error {
 					chk.Fail("Should not get here - parent task pool gather should not run")
 					return nil
 				},
 			)
 			chk.PanicsWithValue("Scatter called from within TaskFunc; move call to GatherFunc instead", func() {
-				_ = innerGather.Scatter(
+				_ = innerGatherOp.Scatter(
 					ctx,
 					parentTaskPool,
 					func(ctx context.Context) (bool, error) {
@@ -459,7 +459,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							return nil
 						}
 
-						gatherFuncAdapter := func(ctx context.Context, task taskResult, err error) error {
+						gatherFnAdapter := func(ctx context.Context, task taskResult, err error) error {
 							now := time.Now()
 							taskLatencyNsCentroid := tdigest.Centroid{
 								Mean:   float64(now.Sub(task.Time).Nanoseconds()),
@@ -481,12 +481,12 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 						// Setup processing - either gather-only or with combiner
 						if combinerLimit == 0 {
-							scatter = psg.NewGatherOp(gatherFuncAdapter).Scatter
+							scatter = psg.NewGatherOp(gatherFnAdapter).Scatter
 						} else {
-							gather := psg.NewGatherOp(gatherFn)
+							gatherOp := psg.NewGatherOp(gatherFn)
 							combinerPool := psg.NewCombinerPool(job)
 							combinerPool.SetLimits(max(0, combinerLimit), combinerLimit)
-							combine := psg.NewCombineOp(gather, combinerPool, func() psg.Combiner[taskResult, combinedResult] {
+							combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[taskResult, combinedResult] {
 								maxDepth := 0
 								count := 0
 								var taskLatenciesNs *tdigest.TDigest
@@ -571,10 +571,10 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									FlushFn: flush,
 								}
 							})
-							combine.SetMaxHoldTime(flushPeriod)
+							combineOp.SetMaxHoldTime(flushPeriod)
 
 							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[taskResult]) error {
-								if err := combine.Scatter(ctx, target, task); err != nil {
+								if err := combineOp.Scatter(ctx, target, task); err != nil {
 									return err
 								}
 								return nil

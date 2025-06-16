@@ -47,11 +47,11 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 	// Create a simple task to ensure workflow is used
 	pool := psg.NewTaskPool(job, 1)
-	gather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	err := gather.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "test", nil
 	})
 	require.NoError(t, err)
@@ -108,7 +108,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		// Create new workflow for new tasks
 		newWf := psgwf.New(ctx)
 
-		gather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+		gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 			mu.Lock()
 			newTaskRan = true
 			mu.Unlock()
@@ -116,18 +116,18 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Scatter a new task from within the AfterFunc
-		err := gather.Scatter(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+		err := gatherOp.Scatter(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "new task", nil
 		})
 		require.NoError(t, err)
 	})
 
 	// Run a simple task to use the workflow
-	gather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	err := gather.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "original task", nil
 	})
 	require.NoError(t, err)

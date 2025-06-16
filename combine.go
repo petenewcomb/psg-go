@@ -214,11 +214,11 @@ func (c *CombineOp[I, O]) scatter(
 // combineBackpressureProvider is used to integrate the combiner pool with the job's
 // backpressure system, allowing tasks to be gathered while waiting for resources
 type combineBackpressureProvider struct {
-	job        *Job
-	tryCombine func(ctx context.Context) (bool, error)
-	combine    func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
-	queueWork  func(workFn func(context.Context) error)
-	key        backpressureProviderKeyField
+	job          *Job
+	tryCombineFn func(ctx context.Context) (bool, error)
+	combineFn    func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+	queueWorkFn  func(workFn func(context.Context) error)
+	key          backpressureProviderKeyField
 }
 
 func (bp combineBackpressureProvider) ForJob(j *Job) bool {
@@ -230,15 +230,15 @@ func (bp combineBackpressureProvider) Key() backpressureProviderKey {
 }
 
 func (bp combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
-	return bp.tryCombine(vetted.ctx)
+	return bp.tryCombineFn(vetted.ctx)
 }
 
 func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-	return bp.combine(ctx, waiter, changeCh)
+	return bp.combineFn(ctx, waiter, changeCh)
 }
 
 func (bp combineBackpressureProvider) QueueWork(workFn func(context.Context) error) {
-	bp.queueWork(workFn)
+	bp.queueWorkFn(workFn)
 }
 
 func isCombinerBackpressureProvider(bp backpressureProvider) bool {

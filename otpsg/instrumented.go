@@ -13,11 +13,11 @@ import (
 // This provides a convenient way to apply all instrumentation at once.
 func InstrumentedTask[T any](
 	operationName string,
-	taskFunc func(ctx context.Context) (T, error),
+	taskFn func(ctx context.Context) (T, error),
 ) psg.TaskFunc[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
-	loggedTask := LoggedTask(operationName, taskFunc)
+	loggedTask := LoggedTask(operationName, taskFn)
 
 	// 2. Then add metrics
 	metricsTask := MetricsTask(operationName, loggedTask)
@@ -30,11 +30,11 @@ func InstrumentedTask[T any](
 // This provides a convenient way to apply all instrumentation at once.
 func InstrumentedGather[T any](
 	operationName string,
-	gatherFunc func(ctx context.Context, result T, err error) error,
+	gatherFn func(ctx context.Context, result T, err error) error,
 ) *psg.GatherOp[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
-	loggedGather := LoggedGather(operationName, gatherFunc)
+	loggedGather := LoggedGather(operationName, gatherFn)
 
 	// 2. Then add metrics
 	metricsGather := MetricsGather(operationName, loggedGather)
@@ -68,9 +68,9 @@ func InstrumentedCombiner[I, O any](
 // Example:
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFunc)
-//	gather := otpsg.InstrumentedGather("handle-result", myGatherFunc)
-//	// Instead of gather.Scatter(ctx, pool, task), use:
-//	err := otpsg.InstrumentedScatter(ctx, pool, task, gather)
+//	gatherOp := otpsg.InstrumentedGather("handle-result", myGatherFunc)
+//	// Instead of gatherOp.Scatter(ctx, pool, task), use:
+//	err := otpsg.InstrumentedScatter(ctx, pool, task, gatherOp)
 func InstrumentedScatter[T any](
 	ctx context.Context,
 	pool *psg.TaskPool,

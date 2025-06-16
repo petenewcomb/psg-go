@@ -23,9 +23,9 @@ type TaskPoolOrJob interface {
 func vetScatter[T any](
 	vetted vettedContext,
 	target TaskPoolOrJob,
-	taskFunc TaskFunc[T],
+	taskFn TaskFunc[T],
 ) {
-	if taskFunc == nil {
+	if taskFn == nil {
 		panic("task function must be non-nil")
 	}
 
@@ -51,9 +51,9 @@ func vetScatter[T any](
 func scatter[T any](
 	vettedCtx vettedContext,
 	target TaskPoolOrJob,
-	taskFunc TaskFunc[T],
+	taskFn TaskFunc[T],
 	applyBackpressure backpressureFunc,
-	postResult func(context.Context, T, error),
+	postResultFn func(context.Context, T, error),
 ) (launched bool, err error) {
 	j := target.job()
 
@@ -90,7 +90,7 @@ func scatter[T any](
 
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the target to launch.
-	return target.launch(vettedCtx.ctx, applyBackpressure, func(ctx context.Context, taskCompletedFn func(), ctxWithBP func(backpressureProvider) context.Context) {
+	return target.launch(vettedCtx.ctx, applyBackpressure, func(ctx context.Context, taskCompletedFn func(), ctxWithBPFn func(backpressureProvider) context.Context) {
 
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.
@@ -100,8 +100,8 @@ func scatter[T any](
 			if taskCompletedFn != nil {
 				taskCompletedFn()
 			}
-			ctx = ctxWithBP(bp)
-			postResult(ctx, value, err)
+			ctx = ctxWithBPFn(bp)
+			postResultFn(ctx, value, err)
 		}()
 
 		// Actually execute the task function. Since this is the top-level
@@ -113,7 +113,7 @@ func scatter[T any](
 		// posting a gather to the job's channel or otherwise attempt to
 		// maintain the integrity of the task pool or overall job in case of task
 		// panics.
-		value, err = taskFunc(ctx)
+		value, err = taskFn(ctx)
 	})
 }
 

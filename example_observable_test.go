@@ -46,7 +46,7 @@ func Example_observable() {
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Scatter and GatherAll.
 	var results []string
-	gather := psg.NewGatherOp(
+	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
 			time.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   gathered result %q\n", msSinceStart(), result)
@@ -67,7 +67,7 @@ func Example_observable() {
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		err := gather.Scatter(ctx, pool, newTaskFn(taskName))
+		err := gatherOp.Scatter(ctx, pool, newTaskFn(taskName))
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

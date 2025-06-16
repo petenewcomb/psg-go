@@ -15,10 +15,10 @@ import (
 // trace context propagation.
 func TracedTask[T any](
 	operationName string,
-	taskFunc func(ctx context.Context) (T, error),
+	taskFn func(ctx context.Context) (T, error),
 ) psg.TaskFunc[PropagatedResult[T]] {
 	// Use the base propagator first
-	propagatedTask := PropagateTask(taskFunc)
+	propagatedTask := PropagateTask(taskFn)
 
 	return func(ctx context.Context) (PropagatedResult[T], error) {
 		// Create span with meaningful name
@@ -100,7 +100,7 @@ func TracedCombiner[I, O any](
 // but don't need to propagate context through its result.
 func WithTaskTracing[T any](
 	operationName string,
-	taskFunc func(ctx context.Context) (T, error),
+	taskFn func(ctx context.Context) (T, error),
 ) psg.TaskFunc[T] {
 	return func(ctx context.Context) (T, error) {
 		// Create span with meaningful name
@@ -109,6 +109,6 @@ func WithTaskTracing[T any](
 		defer span.End()
 
 		// Execute original task with traced context
-		return taskFunc(ctx)
+		return taskFn(ctx)
 	}
 }

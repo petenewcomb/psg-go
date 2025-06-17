@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // CombineOp represents an operation that combines inputs and produces outputs.
@@ -27,6 +29,7 @@ func NewCombineOp[I, O any](
 	gatherOp *GatherOp[O],
 	pool *CombinerPool,
 	combinerFactory CombinerFactory[I, O],
+	options ...psgopt.CombineOpOption,
 ) *CombineOp[I, O] {
 	if gatherOp == nil {
 		panic("gather must be non-nil")
@@ -44,53 +47,11 @@ func NewCombineOp[I, O any](
 		minHoldTime: -1, // Sentinel value: no idle-based flushing
 		maxHoldTime: -1, // Sentinel value: no absolute deadline
 	}
+
+	// Apply user options
+	c.SetOptions(options...)
+
 	return c
-}
-
-// SetMinHoldTime sets the minimum time a combiner will hold inputs after the last
-// combine operation before flushing. This is useful for batching inputs that arrive
-// close together in time.
-//
-// A value of -1 (the default) means no idle-based flushing will occur.
-// A value of 0 means flush immediately after each combine.
-// A positive value means wait at least that duration after the last combine before flushing.
-//
-// This method is safe to call at any time. However, the timing
-// of when the new value takes effect within a running job is undefined.
-//
-// Panics if argument is less than -1 or greater than maxHoldTime (when
-// maxHoldTime >= 0).
-func (c *CombineOp[I, O]) SetMinHoldTime(d time.Duration) {
-	if d < -1 {
-		panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", d))
-	}
-	if c.maxHoldTime >= 0 && d > c.maxHoldTime {
-		panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)", d, c.maxHoldTime))
-	}
-	c.minHoldTime = d
-}
-
-// SetMaxHoldTime sets the maximum time a combiner will hold any inputs before
-// flushing, measured from when the first unflushed input was received. This creates
-// an upper bound on result latency.
-//
-// A value of -1 (the default) means no absolute deadline for flushing.
-// A value of 0 means flush immediately (equivalent to no combining).
-// A positive value means wait at most that duration since the first combine before flushing.
-//
-// This method is safe to call at any time. However, the timing
-// of when the new value takes effect within a running job is undefined.
-//
-// Panics if argument is less than -1 or less than minHoldTime (when minHoldTime
-// >= 0).
-func (c *CombineOp[I, O]) SetMaxHoldTime(d time.Duration) {
-	if d < -1 {
-		panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", d))
-	}
-	if c.minHoldTime >= 0 && d < c.minHoldTime {
-		panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)", d, c.minHoldTime))
-	}
-	c.maxHoldTime = d
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
@@ -244,4 +205,44 @@ func (bp combineBackpressureProvider) QueueWork(workFn func(context.Context) err
 func isCombinerBackpressureProvider(bp backpressureProvider) bool {
 	_, ok := bp.(combineBackpressureProvider)
 	return ok
+}
+
+// combineOpConfigWrapper wraps a CombineOp to implement the combineOpConfig interface for options
+type combineOpConfigWrapper[I, O any] struct {
+	combineOp *CombineOp[I, O]
+}
+
+func (w combineOpConfigWrapper[I, O]) Update(changes opts.CombineOpConfigChanges) {
+	// Validate all changes first
+	if changes.MinHoldTime != nil {
+		if *changes.MinHoldTime < -1 {
+			panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", *changes.MinHoldTime))
+		}
+		if w.combineOp.maxHoldTime >= 0 && *changes.MinHoldTime > w.combineOp.maxHoldTime {
+			panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)", *changes.MinHoldTime, w.combineOp.maxHoldTime))
+		}
+	}
+	if changes.MaxHoldTime != nil {
+		if *changes.MaxHoldTime < -1 {
+			panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", *changes.MaxHoldTime))
+		}
+		if w.combineOp.minHoldTime >= 0 && *changes.MaxHoldTime < w.combineOp.minHoldTime {
+			panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)", *changes.MaxHoldTime, w.combineOp.minHoldTime))
+		}
+	}
+
+	// Apply changes
+	if changes.MinHoldTime != nil {
+		w.combineOp.minHoldTime = *changes.MinHoldTime
+	}
+	if changes.MaxHoldTime != nil {
+		w.combineOp.maxHoldTime = *changes.MaxHoldTime
+	}
+}
+
+// SetOptions applies the given configuration options to the combine operation.
+// This method is safe to call at any time. However, the timing of when the new
+// values take effect within a running job is undefined.
+func (c *CombineOp[I, O]) SetOptions(options ...psgopt.CombineOpOption) {
+	opts.ApplyToCombineOp(combineOpConfigWrapper[I, O]{combineOp: c}, options...)
 }

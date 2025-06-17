@@ -73,9 +73,9 @@ func InstrumentedCombiner[I, O any](
 //	err := otpsg.InstrumentedScatter(ctx, pool, task, gatherOp)
 func InstrumentedScatter[T any](
 	ctx context.Context,
-	pool *psg.TaskPool,
+	target psg.TaskPoolOrJob,
 	task psg.TaskFunc[PropagatedResult[T]],
 	gather *psg.GatherOp[PropagatedResult[T]],
 ) error {
-	return gather.Scatter(ctx, pool, task)
+	return gather.Scatter(ctx, target, task)
 }

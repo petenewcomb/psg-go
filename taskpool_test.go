@@ -15,6 +15,6 @@ func TestTaskPoolNilJobPanic(t *testing.T) {
 
 	// Try to create a pool with a nil job
 	chk.PanicsWithValue("job must be non-nil", func() {
-		_ = psg.NewTaskPool(nil, 1)
+		_ = psg.NewTaskPool(nil)
 	})
 }

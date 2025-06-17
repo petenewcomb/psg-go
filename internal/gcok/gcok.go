@@ -11,6 +11,13 @@ import (
 	"github.com/petenewcomb/psg-go/internal/dynval"
 )
 
+// GCConfigChanges holds configuration changes for a GC Monitor.
+// Fields use pointers to distinguish between "not set" (nil) and "set to zero value" (non-nil).
+type GCConfigChanges struct {
+	BusyThreshold  *float64
+	UpdateInterval *time.Duration
+}
+
 type Monitor struct {
 	busy dynval.Value[bool]
 	wg   sync.WaitGroup
@@ -22,49 +29,12 @@ type Monitor struct {
 	done           chan struct{}
 }
 
-func (m *Monitor) SetBusyThreshold(threshold float64) {
-	if threshold <= 0 || threshold > 1 {
-		panic("invalid busy threshold: must be in the range (0, 1]")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.busyThreshold = threshold
-}
-
-// Zero disables updates and forces the busy signal to false.
-func (m *Monitor) SetUpdateInterval(interval time.Duration) {
-	if interval < 0 {
-		panic("invalid update interval: must be zero or greater")
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	wasRunning := m.updateInterval > 0
-	m.updateInterval = interval
-
-	if interval == 0 {
-		m.busy.Store(false)
-		if wasRunning {
-			close(m.done)
-		}
-	} else if !wasRunning {
-		// Start monitoring
-		m.done = make(chan struct{})
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			m.run(interval)
-		}()
-	}
-}
-
 func (m *Monitor) BusySignal() (bool, <-chan struct{}) {
 	return m.busy.Load()
 }
 
 func (m *Monitor) Cancel() {
-	m.SetUpdateInterval(0)
+	m.Update(GCConfigChanges{UpdateInterval: new(time.Duration)}) // *new(time.Duration) is a pointer to zero value
 }
 
 func (m *Monitor) Wait() {
@@ -125,5 +95,48 @@ func (m *Monitor) run(interval time.Duration) {
 
 		prevGCTime = gcTime
 		prevTotalTime = totalTime
+	}
+}
+
+// Update atomically applies configuration changes to the monitor.
+func (m *Monitor) Update(changes GCConfigChanges) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Validate all changes first
+	if changes.BusyThreshold != nil {
+		if *changes.BusyThreshold <= 0 || *changes.BusyThreshold > 1 {
+			panic("invalid busy threshold: must be in the range (0, 1]")
+		}
+	}
+	if changes.UpdateInterval != nil {
+		if *changes.UpdateInterval < 0 {
+			panic("invalid update interval: must be zero or greater")
+		}
+	}
+
+	// Apply threshold change
+	if changes.BusyThreshold != nil {
+		m.busyThreshold = *changes.BusyThreshold
+	}
+
+	// Apply interval change (this is more complex due to goroutine management)
+	if changes.UpdateInterval != nil {
+		wasRunning := m.updateInterval > 0
+		m.updateInterval = *changes.UpdateInterval
+
+		if *changes.UpdateInterval == 0 {
+			m.busy.Store(false)
+			if wasRunning {
+				close(m.done)
+			}
+		} else if !wasRunning {
+			m.done = make(chan struct{})
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				m.run(*changes.UpdateInterval)
+			}()
+		}
 	}
 }

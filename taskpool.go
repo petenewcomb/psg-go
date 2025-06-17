@@ -8,7 +8,9 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
+	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // A TaskPool defines a virtual set of task execution slots and optionally places a
@@ -16,17 +18,18 @@ import (
 //
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
-	j                *Job
-	concurrencyLimit dynval.Value[int]
-	inFlight         jobstate.InFlightCounter
-	waiterQueue      waitq.Queue
+	j              *Job
+	maxConcurrency dynval.Value[int]
+	inFlight       jobstate.InFlightCounter
+	waiterQueue    waitq.Queue
 }
 
-// Creates a new [TaskPool] bound to the specified job with the given concurrency limit.
-// See [TaskPool.SetLimit] for the range of allowed values and their semantics.
+// Creates a new [TaskPool] bound to the specified job with the given options.
+// By default, the pool has unlimited concurrency (subject to other backpressure constraints).
+// Use psgopt.WithMaxConcurrency() to set a specific limit.
 //
 // Panics if the job is nil or in the done state.
-func NewTaskPool(job *Job, limit int) *TaskPool {
+func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	if job == nil {
 		panic("job must be non-nil")
 	}
@@ -37,8 +40,14 @@ func NewTaskPool(job *Job, limit int) *TaskPool {
 	p := &TaskPool{
 		j: job,
 	}
-	p.concurrencyLimit.Store(limit)
 	p.waiterQueue.Init()
+
+	// Set default unlimited concurrency
+	p.maxConcurrency.Store(-1)
+
+	// Apply user options
+	p.SetOptions(options...)
+
 	return p
 }
 
@@ -56,15 +65,20 @@ func (p *TaskPool) withBackpressureProvider(ctx context.Context) context.Context
 	return p.j.withBackpressureProvider(ctx)
 }
 
-// Sets the active concurrency limit for the pool. A negative value means no
-// limit (tasks will always be launched regardless of how many are currently
-// running). Zero means no new tasks will be launched (i.e., [Scatter] will block
-// indefinitely) until SetLimit is called with a non-zero value.
-//
-// This method is safe to call at any time. The new limit takes effect immediately
+// taskPoolConfigWrapper wraps a TaskPool to implement the taskPoolConfig interface for options
+type taskPoolConfigWrapper struct {
+	pool *TaskPool
+}
+
+func (w taskPoolConfigWrapper) SetMaxConcurrency(limit int) {
+	w.pool.maxConcurrency.Store(limit)
+}
+
+// SetOptions applies the given configuration options to the pool.
+// This method is safe to call at any time. Changes take effect immediately
 // for subsequent task launches and may unblock existing blocked Scatter calls.
-func (p *TaskPool) SetLimit(limit int) {
-	p.concurrencyLimit.Store(limit)
+func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
+	opts.ApplyToTaskPool(taskPoolConfigWrapper{pool: p}, options...)
 }
 
 func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTaskFunc) (bool, error) {
@@ -72,7 +86,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 
 	// Try to add to the pool
 	for {
-		limit, limitChangeCh := p.concurrencyLimit.Load()
+		limit, limitChangeCh := p.maxConcurrency.Load()
 		if p.incrementInFlightIfUnder(limit) {
 			break
 		}
@@ -88,7 +102,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 			// became available between the last check and this one. Note that
 			// this overwrites the limitChangeCh at the top of the loop so that
 			// the latest one is passed to applyBackpressure below.
-			limit, limitChangeCh = p.concurrencyLimit.Load()
+			limit, limitChangeCh = p.maxConcurrency.Load()
 			if p.incrementInFlightIfUnder(limit) {
 				incrementSucceeded = true
 				return false // waiter was not notified
@@ -138,7 +152,7 @@ func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
 }
 
 func (p *TaskPool) decrementInFlight() {
-	limit, _ := p.concurrencyLimit.Load()
+	limit, _ := p.maxConcurrency.Load()
 	if p.inFlight.DecrementAndCheckIfUnder(limit) {
 		// Signal any waiting tasks
 		p.waiterQueue.Notify()

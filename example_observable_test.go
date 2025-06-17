@@ -11,6 +11,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Observable uses psg to run a few tasks and produce logging that demonstrate
@@ -62,7 +63,7 @@ func Example_observable() {
 	defer job.CancelAndWait()
 
 	// Create a task pool with concurrency limit 2
-	pool := psg.NewTaskPool(job, 2)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
 
 	// Launch some tasks
 	fmt.Println("starting job")

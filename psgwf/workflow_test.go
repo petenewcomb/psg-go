@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 	"github.com/stretchr/testify/require"
 )
@@ -46,8 +47,8 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	}
 
 	// Create a simple task to ensure workflow is used
-	pool := psg.NewTaskPool(job, 1)
-	gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
+	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
@@ -90,7 +91,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	job := psg.NewJob(context.Background())
 	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job, 2)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
 
 	// Track execution
 	var afterFuncRan, newTaskRan bool
@@ -108,7 +109,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		// Create new workflow for new tasks
 		newWf := psgwf.New(ctx)
 
-		gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+		gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 			mu.Lock()
 			newTaskRan = true
 			mu.Unlock()
@@ -123,7 +124,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	})
 
 	// Run a simple task to use the workflow
-	gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 

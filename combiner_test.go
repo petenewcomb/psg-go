@@ -16,6 +16,7 @@ import (
 
 	"github.com/influxdata/tdigest"
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,7 +25,7 @@ func TestCombinerScatterNilTaskFuncPanic(t *testing.T) {
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
-	taskPool := psg.NewTaskPool(job, 1)
+	taskPool := psg.NewTaskPool(job)
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		// Create a gather
@@ -78,7 +79,7 @@ func TestCombinerTryScatterNilTaskFuncPanic(t *testing.T) {
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
-	taskPool := psg.NewTaskPool(job, 1)
+	taskPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		gatherOp := psg.NewGatherOp(
@@ -98,7 +99,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
-	taskPool := psg.NewTaskPool(job, 1)
+	taskPool := psg.NewTaskPool(job)
 
 	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result int, err error) error {
@@ -141,7 +142,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	// Create parent job with task pool
 	parentJob := psg.NewJob(ctx)
 	defer parentJob.CancelAndWait()
-	parentTaskPool := psg.NewTaskPool(parentJob, 1)
+	parentTaskPool := psg.NewTaskPool(parentJob)
 
 	// Variable to track execution flow
 	subJobTaskRan := false
@@ -160,7 +161,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 			// Create a sub-job inside the task
 			subJob := psg.NewJob(ctx)
 			defer subJob.CancelAndWait()
-			subTaskPool := psg.NewTaskPool(subJob, 1)
+			subTaskPool := psg.NewTaskPool(subJob)
 
 			// This should succeed - scattering a task to the sub-job's task pool
 			gatherOp := psg.NewGatherOp(
@@ -201,7 +202,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	// Create parent job with task pool
 	parentJob := psg.NewJob(ctx)
 	defer parentJob.CancelAndWait()
-	parentTaskPool := psg.NewTaskPool(parentJob, 1)
+	parentTaskPool := psg.NewTaskPool(parentJob)
 
 	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result bool, err error) error {
@@ -327,7 +328,6 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						defer func() {
 							job.CancelAndWait()
 						}()
-						taskPool := psg.NewTaskPool(job, -1)
 
 						type taskResult struct {
 							Time    time.Time
@@ -440,7 +440,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 							// Don't include scatter time in work duration inflation
 							for range max(0, 3-combineRes.Depth) {
-								if err := scatter(ctx, taskPool, newTaskFn(time.Now(), combineRes.Depth+1)); err != nil {
+								if err := scatter(ctx, job, newTaskFn(time.Now(), combineRes.Depth+1)); err != nil {
 									return err
 								}
 							}
@@ -484,8 +484,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							scatter = psg.NewGatherOp(gatherFnAdapter).Scatter
 						} else {
 							gatherOp := psg.NewGatherOp(gatherFn)
-							combinerPool := psg.NewCombinerPool(job)
-							combinerPool.SetLimits(max(0, combinerLimit), combinerLimit)
+							combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(max(0, combinerLimit), combinerLimit))
 							combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[taskResult, combinedResult] {
 								maxDepth := 0
 								count := 0
@@ -553,7 +552,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 										// Don't include scatter time in work duration inflation
 										for range max(0, min(1-count, 3-taskRes.Depth)) {
-											if err := scatter(ctx, taskPool, newTaskFn(time.Now(), taskRes.Depth+1)); err != nil {
+											if err := scatter(ctx, job, newTaskFn(time.Now(), taskRes.Depth+1)); err != nil {
 												emit(ctx, combinedResult{}, err)
 												return
 											}
@@ -571,7 +570,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									FlushFn: flush,
 								}
 							})
-							combineOp.SetMaxHoldTime(flushPeriod)
+							combineOp.SetOptions(psgopt.WithMaxHoldTime(flushPeriod))
 
 							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psg.TaskFunc[taskResult]) error {
 								if err := combineOp.Scatter(ctx, target, task); err != nil {
@@ -593,7 +592,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						opTasksGatheredOrigin := totalTasksGathered
 						op := func() int {
 							for {
-								if err := scatter(ctx, taskPool, newTaskFn(time.Now(), 0)); err != nil {
+								if err := scatter(ctx, job, newTaskFn(time.Now(), 0)); err != nil {
 									b.Fatalf("Error: %v", err)
 								}
 

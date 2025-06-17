@@ -11,15 +11,15 @@ import (
 
 type GatherFunc[T any] = func(context.Context, *Workflow, T, error) error
 
-type Gather[T any] psg.GatherOp[result[T]]
+type GatherOp[T any] psg.GatherOp[result[T]]
 
-// NewGather creates a [psg.Gather] workalike set up to receive and propagate
+// NewGatherOp creates a [psg.GatherOp] workalike set up to receive and propagate
 // workflow context from tasks or combines.
-func NewGather[T any](gatherFn GatherFunc[T]) *Gather[T] {
-	return (*Gather[T])(psg.NewGatherOp(wrapGatherFunc(gatherFn)))
+func NewGatherOp[T any](gatherFn GatherFunc[T]) *GatherOp[T] {
+	return (*GatherOp[T])(psg.NewGatherOp(wrapGatherFunc(gatherFn)))
 }
 
-func (g *Gather[T]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[T]) error {
+func (g *GatherOp[T]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[T]) error {
 	_, err := scatter(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psg.TaskFunc[result[T]]) (bool, error) {
 			err := g.inner().Scatter(ctx, pool, taskFn)
@@ -29,7 +29,7 @@ func (g *Gather[T]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *Workflo
 	return err
 }
 
-func (g *Gather[T]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[T]) (bool, error) {
+func (g *GatherOp[T]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[T]) (bool, error) {
 	return scatter(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psg.TaskFunc[result[T]]) (bool, error) {
 			return g.inner().TryScatter(ctx, pool, taskFn)
@@ -37,7 +37,7 @@ func (g *Gather[T]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Work
 	)
 }
 
-func (g *Gather[T]) inner() *psg.GatherOp[result[T]] {
+func (g *GatherOp[T]) inner() *psg.GatherOp[result[T]] {
 	return (*psg.GatherOp[result[T]])(g)
 }
 

@@ -13,6 +13,7 @@ import (
 	"runtime"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Pipeline demonstrates the use of multiple psg pools to re-implement the
@@ -45,7 +46,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Run digesting tasks in a Pool limited to the number of cores available to
 	// the program, since it should be CPU-bound.
-	digesterPool := psg.NewTaskPool(job, runtime.NumCPU())
+	digesterPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(runtime.NumCPU()))
 	newDigestingTaskFn := func(data []byte) psg.TaskFunc[[md5.Size]byte] {
 		return func(ctx context.Context) ([md5.Size]byte, error) {
 			return md5.Sum(data), nil
@@ -63,9 +64,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		)
 	}
 
-	// Allow many file reading tasks to run concurrently since they should be
-	// I/O-bound.
-	readerPool := psg.NewTaskPool(job, 100)
+	// No need for a pool to limit how many file reading tasks run concurrently
+	// since they should be I/O-bound and will be subject to backpressure from
+	// the digesters.
 	newReadingTaskFn := func(path string) psg.TaskFunc[[]byte] {
 		return func(ctx context.Context) ([]byte, error) {
 			return os.ReadFile(path)
@@ -90,7 +91,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadGatherOp(path).Scatter(ctx, readerPool, newReadingTaskFn(path))
+		return newReadGatherOp(path).Scatter(ctx, job, newReadingTaskFn(path))
 	})
 	if err != nil {
 		return nil, err

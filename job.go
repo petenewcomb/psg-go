@@ -13,18 +13,12 @@ import (
 	"github.com/petenewcomb/psg-go/internal/gcok"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
-
-// DefaultTaskWorkerIdleTimeout is the default duration a task worker will wait
-// for new work before exiting. This controls how aggressively workers scale down
-// when load decreases.
-const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
-
-const DefaultMaxGCTimeRatioThreshold = 0.5 // 50% of total CPU time used for GC
-const DefaultGCTimeUpdateInterval = 1 * time.Second
 
 // Job represents a scatter-gather execution environment. It tracks tasks
 // launched with [Scatter] across a set of [TaskPool] instances and provides methods
@@ -150,7 +144,7 @@ type workItem struct {
 // Each call to NewJob should typically be followed by a deferred call to
 // [Job.CancelAndWait] to ensure that an early exit from the calling function
 // does not leave any outstanding goroutines.
-func NewJob(ctx context.Context) *Job {
+func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	ctx, cancelFn := context.WithCancel(ctx)
 
 	// Reset job-specific context values that shouldn't be inherited from parent jobs
@@ -173,10 +167,20 @@ func NewJob(ctx context.Context) *Job {
 	j.workQueue.Init(workQueuePool)
 	j.workWaiters.Init()
 	j.taskQueue.Init(taskQueuePool)
-	j.taskWorkerIdleTimeout.Store(int64(DefaultTaskWorkerIdleTimeout))
+	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
 	j.gatherQueue.Init(gatherQueuePool)
-	j.gcMonitor.SetBusyThreshold(DefaultMaxGCTimeRatioThreshold)
-	j.gcMonitor.SetUpdateInterval(DefaultGCTimeUpdateInterval)
+
+	// Initialize GC monitor with defaults
+	defaultThreshold := psgopt.DefaultMaxGCTimeRatioThreshold
+	defaultInterval := psgopt.DefaultGCTimeUpdateInterval
+	j.gcMonitor.Update(gcok.GCConfigChanges{
+		BusyThreshold:  &defaultThreshold,
+		UpdateInterval: &defaultInterval,
+	})
+
+	// Apply user options
+	j.SetOptions(options...)
+
 	return j
 }
 
@@ -270,52 +274,10 @@ func (j *Job) CancelAndWait() {
 	j.gcMonitor.Wait()
 }
 
-// SetTaskWorkerIdleTimeout sets the duration that idle task workers wait for
-// new work before exiting. This controls how aggressively workers scale down
-// when load decreases.
-//
-// A shorter timeout reduces resource usage during idle periods but may increase
-// overhead when load patterns are bursty. A longer timeout keeps workers alive
-// longer, reducing spawn/teardown overhead but potentially wasting resources.
-//
-// The default value is [DefaultTaskWorkerIdleTimeout].
-//
-// This method is safe to call at any time, but only affects workers that begin
-// waiting after the call. Workers already in their idle timeout will use the
-// previous value.
-func (j *Job) SetTaskWorkerIdleTimeout(timeout time.Duration) {
-	j.taskWorkerIdleTimeout.Store(int64(timeout))
-}
-
-// SetMaxGCTimeRatioThreshold sets the threshold for GC time ratio that triggers
-// backpressure during scatter operations. When the ratio of GC CPU time to total
-// CPU time exceeds this threshold, new scatter operations will be delayed until
-// GC pressure decreases.
-//
-// The threshold must be in the range (0, 1], where 1.0 means 100% of CPU time
-// spent on GC. The default value is [DefaultMaxGCTimeRatioThreshold].
-//
-// Setting this to 0 disables GC-based backpressure entirely.
-func (j *Job) SetMaxGCTimeRatioThreshold(threshold float64) {
-	j.gcMonitor.SetBusyThreshold(threshold)
-}
-
-// SetGCTimeUpdateInterval sets how frequently the Job monitors GC time ratios
-// for backpressure decisions. More frequent updates provide more responsive
-// backpressure but consume more CPU for monitoring.
-//
-// The default value is [DefaultGCTimeUpdateInterval].
-//
-// Setting this to 0 disables GC monitoring entirely, which also disables
-// GC-based backpressure.
-func (j *Job) SetGCTimeUpdateInterval(interval time.Duration) {
-	j.gcMonitor.SetUpdateInterval(interval)
-}
-
 // Gather processes outstanding task results and then waits for the next
 // task result from a task previously launched via [Scatter]. It will block until
 // a completed task is available, the provided context or job is canceled, or
-// another event causes a wake-up (e.g. a call to [TaskPool.SetLimit]).
+// another event causes a wake-up (e.g. a call to [TaskPool.SetOptions]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
 // See [Job.TryGather] for a non-blocking alternative.
 //
@@ -723,20 +685,25 @@ func (j *Job) CloseAndGatherAll(ctx context.Context) error {
 	return j.GatherAll(ctx)
 }
 
-// SetFlushListener registers a callback function that will be called each time all
-// tasks have completed and the job is waiting for combiners to emit their results.
-// After the callback returns, the job signals any [CombinerFunc] that has received
-// inputs but hasn't yet emitted its combined results to do so immediately. The callback
-// may be invoked multiple times during a job's lifecycle if a [GatherFunc] directly or
-// indirectly launches new tasks while processing the flushed results.
-//
-// The callback function is called synchronously from a goroutine calling a gather method
-// ([Job.Gather], [Job.TryGather], [Job.GatherAll], [Job.TryGatherAll],
-// [Job.CloseAndGatherAll]), [Gather.Scatter], or [Job.Close] if no tasks are in flight
-// at the time of closing.
-//
-// If called multiple times, each call replaces any previously registered callback.
-// Passing nil removes any existing callback.
-func (j *Job) SetFlushListener(callback func()) {
-	j.state.SetFlushListener(callback)
+// jobConfigWrapper wraps a Job to implement the jobConfig interface for options
+type jobConfigWrapper struct {
+	job *Job
+}
+
+func (w jobConfigWrapper) Update(changes opts.JobConfigChanges) {
+	if changes.TaskWorkerIdleTimeout != nil {
+		w.job.taskWorkerIdleTimeout.Store(int64(*changes.TaskWorkerIdleTimeout))
+	}
+	if changes.FlushListener != nil {
+		w.job.state.SetFlushListener(*changes.FlushListener)
+	}
+
+	// Apply GC changes atomically using the embedded GCConfig
+	w.job.gcMonitor.Update(changes.GCConfig)
+}
+
+// SetOptions applies the given configuration options to the job.
+// This method is safe to call at any time and changes take effect immediately.
+func (j *Job) SetOptions(options ...psgopt.JobOption) {
+	opts.ApplyToJob(jobConfigWrapper{job: j}, options...)
 }

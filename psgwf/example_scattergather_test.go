@@ -12,6 +12,7 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -23,7 +24,7 @@ func Example_scatterGather() {
 	defer job.CancelAndWait()
 
 	// Create a task pool with limited concurrency to control timing
-	pool := psg.NewTaskPool(job, 3)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(3))
 
 	startTime := time.Now()
 	msSinceStart := func() int64 {
@@ -32,7 +33,7 @@ func Example_scatterGather() {
 	}
 
 	// Create a gather for collecting results
-	gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("%3dms Error: %v\n", msSinceStart(), err)
 		} else {

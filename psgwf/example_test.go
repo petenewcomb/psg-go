@@ -13,6 +13,7 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -24,14 +25,14 @@ func Example() {
 	defer job.CancelAndWait()
 
 	// Create a task pool
-	pool := psg.NewTaskPool(job, 10)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
 
 	// Track completed operations for ordered output
 	var mu sync.Mutex
 	completed := []string{}
 
 	// Create a gather for collecting results
-	resultGather := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	resultGather := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {

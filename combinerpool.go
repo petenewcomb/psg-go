@@ -18,16 +18,8 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
-
-// Empirically determined but not widely validated, YMMV. Subject to change as broader experience is gained.
-const DefaultCombinerPoolMeasurementTimeConstant = 50 * time.Millisecond
-const DefaultCombinerPoolHistoryRetentionPeriod = 1 * time.Second
-const DefaultCombinerPoolIdleTimeout = 100 * time.Microsecond
-const DefaultCombinerPoolHighUtilizationThreshold = 0.6
-const DefaultCombinerPoolMinimumReturn = 0.01
-const DefaultCombinerPoolAggressiveGrowthFactor = 1.5
-const DefaultCombinerPoolConservativeGrowthFactor = 1.1
 
 // CombinerPool manages a pool of goroutines that execute combiners.
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
@@ -65,20 +57,28 @@ type CombinerPool struct {
 // NewCombinerPool creates a new CombinerPool bound to the specified job.
 //
 // Panics if the job is nil or in the done state.
-func NewCombinerPool(job *Job) *CombinerPool {
+func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPool {
 	// Check if the job is done
 	job.panicIfDone()
 	cp := &CombinerPool{
 		j:             job,
-		idleTimeout:   DefaultCombinerPoolIdleTimeout,
 		secondaryChan: make(chan pendingCombine),
 	}
-	cp.state.SetLimits(0, -1) // unlimited by default
-	cp.state.SetHighUtilizationThreshold(DefaultCombinerPoolHighUtilizationThreshold)
-	cp.state.SetMeasurementTimeConstant(DefaultCombinerPoolMeasurementTimeConstant)
-	cp.state.SetHistoryRetentionPeriod(DefaultCombinerPoolHistoryRetentionPeriod)
-	cp.state.SetMinimumReturn(DefaultCombinerPoolMinimumReturn)
-	cp.state.SetGrowthFactors(DefaultCombinerPoolAggressiveGrowthFactor, DefaultCombinerPoolConservativeGrowthFactor)
+
+	// Apply default configuration
+	cp.state.SetOptions(
+		psgopt.WithConcurrencyBounds(0, -1), // unlimited by default
+		psgopt.WithHighUtilizationThreshold(psgopt.DefaultCombinerPoolHighUtilizationThreshold),
+		psgopt.WithMeasurementTimeConstant(psgopt.DefaultCombinerPoolMeasurementTimeConstant),
+		psgopt.WithHistoryRetentionPeriod(psgopt.DefaultCombinerPoolHistoryRetentionPeriod),
+		psgopt.WithMinThroughputROI(psgopt.DefaultCombinerPoolMinThroughputROI),
+		psgopt.WithGrowthFactors(psgopt.DefaultCombinerPoolAggressiveGrowthFactor, psgopt.DefaultCombinerPoolConservativeGrowthFactor),
+		psgopt.WithIdleTimeout(psgopt.DefaultCombinerPoolIdleTimeout),
+	)
+
+	// Apply user options
+	cp.state.SetOptions(options...)
+
 	cp.primaryQueue.Init(combineQueuePool)
 	cp.secondaryQueue.Init(combineQueuePool)
 	cp.combineWaiters.Init()
@@ -92,127 +92,10 @@ func (cp *CombinerPool) checkInitialized() {
 	}
 }
 
-// SetLimit sets the active concurrency limit for the pool. A negative value means no
-// limit (combiners will always be launched regardless of how many are currently
-// running). Zero means no new combiners will be launched until SetLimit is called
-// with a non-zero value.
-//
-// This method is safe to call at any time. The new limit takes effect immediately
-// for subsequent combiner launches and may unblock existing blocked operations.
-func (cp *CombinerPool) SetLimits(minConcurrency, maxConcurrency int) {
+// SetOptions applies the given configuration options to the pool.
+func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 	cp.checkInitialized()
-	cp.state.SetLimits(minConcurrency, maxConcurrency)
-}
-
-// SetIdleTimeout sets how long excess combiner goroutines can remain idle
-// before exiting. This is used to optimize resource usage by allowing unneeded
-// goroutines to terminate when combiner activity is low.
-//
-// The pool ensures that only one goroutine at a time is subject to the idle timeout,
-// which prevents excessive thrashing when the workload fluctuates. The reciprocal
-// of the idle timeout is the maximum frequency at which goroutines will exit due
-// to idleness (outside of job termination).
-//
-// Note that when any combiner goroutine exits, all combiners it is managing will
-// be flushed regardless of their min/max hold time settings. This ensures no
-// data is lost, but may result in smaller batches than expected if goroutines
-// frequently exit due to idleness.
-//
-// A positive value specifies how long a goroutine should wait while idle before
-// exiting. Shorter timeouts reduce resource usage but may require more frequent
-// spawning of new goroutines and result in more frequent flushing. Longer
-// timeouts keep goroutines available for longer but use more resources. A value
-// of -1 disables idle timeouts completely, causing all goroutines to remain
-// alive until the job completes. This maximizes combining efficiency but uses
-// more resources. A value of 0 means goroutines may exit as soon as they become
-// idle, though is perhaps useful only when testing edge cases. The default
-// value is [DefaultCombinerGoroutineIdleTimeout].
-//
-// This method is safe to call at any time. However, the timing
-// of when the new value takes effect within a running job is undefined.
-func (cp *CombinerPool) SetIdleTimeout(timeout time.Duration) {
-	cp.checkInitialized()
-	if timeout < -1 {
-		panic(fmt.Sprintf("invalid idle timeout %v: must be >= -1", timeout))
-	}
-	cp.idleTimeout = timeout
-}
-
-// SetThroughputMeasurementWindow sets the period of time over which combiner
-// throughput is measured as input to the algorithm that determines whether or
-// not to launch new combiner goroutines (if allowed by the concurrency limit).
-// This algorithm works to maximize overall throughput while minimizing the
-// number of combiner goroutines.
-//
-// Each combiner goroutine combines values independently, and more goroutines
-// means more independent combiners. This increases parallelism but may result
-// in more, smaller batches of combined values.
-//
-// When a combiner pool begins receiving results from tasks, it will immediately
-// start the first goroutine but must then wait for a measurement window period
-// to pass before it can launch a second, which it will do only if the first is
-// highly utilized. One more measurement window period must pass before the
-// algorithm may launch a third. The third will be launched only if both running
-// goroutines are highly utilized and the second improved overall throughput. A
-// fourth will be started only if the third also improved throughput, and so on.
-// Higher values for this setting will therefore slow ramp-up but reduce
-// overshoot and fluctuation, conversely, lower values will speed initial
-// ramp-up but may cause jitter that can dramatically reduce throughput due to
-// both resource contention and excessive gather load due to combiner flushes as
-// superfluous goroutines exit.
-//
-// The default value for this setting is
-// [DefaultCombinerThroughputMeasurementWindow].
-//
-// This method is safe to call at any time and its value will take effect
-// immediately. If the value is raised, spawning of new goroutines will be
-// delayed as described for ramp-up above until data to cover the new window
-// size can be gathered.
-func (cp *CombinerPool) SetMeasurementTimeConstant(d time.Duration) {
-	cp.checkInitialized()
-	cp.state.SetMeasurementTimeConstant(d)
-}
-
-// SetHighUtilizationThreshold sets the utilization threshold above which a
-// combiner goroutine is considered highly utilized. This affects when new
-// goroutines are spawned to handle load.
-//
-// The default value is [DefaultCombinerPoolHighUtilizationThreshold].
-func (cp *CombinerPool) SetHighUtilizationThreshold(threshold float64) {
-	cp.checkInitialized()
-	cp.state.SetHighUtilizationThreshold(threshold)
-}
-
-// SetHistoryRetentionPeriod sets how long performance samples are retained
-// for analysis. Older samples are discarded to adapt to changing workload
-// patterns.
-//
-// The default value is [DefaultCombinerPoolHistoryRetentionPeriod].
-func (cp *CombinerPool) SetHistoryRetentionPeriod(d time.Duration) {
-	cp.checkInitialized()
-	cp.state.SetHistoryRetentionPeriod(d)
-}
-
-// SetMinimumReturn sets the threshold ratio for detecting the throughput knee:
-// the point at which the return from each additional unit of capacity has
-// diminished to the point of no longer being worth the investment.
-//
-// The default value is [DefaultCombinerPoolMinimumReturn].
-func (cp *CombinerPool) SetMinimumReturn(ratio float64) {
-	cp.checkInitialized()
-	cp.state.SetMinimumReturn(ratio)
-}
-
-// SetGrowthFactors sets the multipliers used when scaling up the number
-// of combiner goroutines. The aggressive factor is used when all existing
-// goroutines show high utilization with linear scaling. The conservative
-// factor is used for more cautious scaling.
-//
-// The default values are [DefaultCombinerPoolAggressiveGrowthFactor] and
-// [DefaultCombinerPoolConservativeGrowthFactor].
-func (cp *CombinerPool) SetGrowthFactors(aggressive, conservative float64) {
-	cp.checkInitialized()
-	cp.state.SetGrowthFactors(aggressive, conservative)
+	cp.state.SetOptions(options...)
 }
 
 var combineQueuePool = &rdvq.Pool[pendingCombine]{}

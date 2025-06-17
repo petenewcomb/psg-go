@@ -13,6 +13,7 @@ import (
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,7 +122,7 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 	defer c.TaskPoolsLock.Unlock()
 	pool := c.TaskPools[index]
 	if pool == nil {
-		pool = psg.NewTaskPool(c.Job, c.Plan.TaskPools[index].ConcurrencyLimit)
+		pool = psg.NewTaskPool(c.Job, psgopt.WithMaxConcurrency(c.Plan.TaskPools[index].ConcurrencyLimit))
 		c.TaskPools[index] = pool
 	}
 	return pool
@@ -174,8 +175,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 				combinerPool := c.CombinerPools[combinerPoolIndex]
 				if combinerPool == nil {
 					// Create a combiner pool with the concurrency limit
-					combinerPool = psg.NewCombinerPool(c.Job)
-					combinerPool.SetLimits(0, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit)
+					combinerPool = psg.NewCombinerPool(c.Job, psgopt.WithConcurrencyBounds(0, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit))
 					c.CombinerPools[combinerPoolIndex] = combinerPool
 				}
 

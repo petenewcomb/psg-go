@@ -10,18 +10,22 @@ import (
 	"time"
 )
 
+type controllerConfig struct {
+	MinConcurrency           int
+	MaxConcurrency           int // -1 means unlimited
+	RetentionPeriod          time.Duration
+	HighUtilThreshold        float64
+	MinThroughputROI         float64
+	AggressiveGrowthFactor   float64
+	ConservativeGrowthFactor float64
+}
+
 type controller struct {
 	samples          []perfSample
 	oldestSampleTime time.Time
 
 	// Configuration parameters
-	minConcurrency           int
-	maxConcurrency           int // -1 means unlimited
-	retentionPeriod          time.Duration
-	highUtilThreshold        float64
-	minimumReturn            float64
-	aggressiveGrowthFactor   float64
-	conservativeGrowthFactor float64
+	config controllerConfig
 }
 
 type perfSample struct {
@@ -56,63 +60,14 @@ func (c *controller) Format(fs fmt.State, verb rune) {
 	_, _ = fmt.Fprint(fs, "]")
 }
 
-// SetLimits configures the concurrency limits for the size controller
-func (c *controller) SetLimits(minConcurrency, maxConcurrency int) {
-	if minConcurrency < 0 {
-		panic(fmt.Sprintf("invalid minimum concurrency %d: must be >= 0", minConcurrency))
-	}
-	if maxConcurrency < -1 {
-		panic(fmt.Sprintf("invalid maximum concurrency %d: must be >= -1", maxConcurrency))
-	}
-	if maxConcurrency >= 0 && minConcurrency > maxConcurrency {
-		panic(fmt.Sprintf("minimum concurrency %d is greater than maximum concurrency %d", minConcurrency, maxConcurrency))
-	}
-	c.minConcurrency = minConcurrency
-	c.maxConcurrency = maxConcurrency
+// SetConfig atomically applies a complete controller configuration.
+func (c *controller) SetConfig(config controllerConfig) {
+	c.config = config
 }
 
-// SetThresholds configures the utilization thresholds for the size controller
-func (c *controller) SetHighUtilizationThreshold(high float64) {
-	if high < 0 || high > 1 {
-		panic(fmt.Sprintf("invalid high utilization threshold %v: must be between 0 and 1, inclusive", high))
-	}
-	c.highUtilThreshold = high
-}
-
-// SetRetentionPeriod configures how long performance samples are retained
+// RetentionPeriod returns the current retention period.
 func (c *controller) RetentionPeriod() time.Duration {
-	return c.retentionPeriod
-}
-
-// SetRetentionPeriod configures how long performance samples are retained
-func (c *controller) SetRetentionPeriod(d time.Duration) {
-	if d <= 0 {
-		panic(fmt.Sprintf("invalid retention period %v: must be > 0", d))
-	}
-	c.retentionPeriod = d
-}
-
-// SetMinimumReturn configures the ratio for throughput knee detection
-func (c *controller) SetMinimumReturn(ratio float64) {
-	if ratio <= 0 || ratio > 1 {
-		panic(fmt.Sprintf("invalid minimum return ratio %v: must be > 0 and <= 1", ratio))
-	}
-	c.minimumReturn = ratio
-}
-
-// SetGrowthFactors configures the growth factors for scaling decisions
-func (c *controller) SetGrowthFactors(aggressive, conservative float64) {
-	if aggressive <= 1 {
-		panic(fmt.Sprintf("invalid aggressive growth factor %v: must be > 1", aggressive))
-	}
-	if conservative <= 1 {
-		panic(fmt.Sprintf("invalid conservative growth factor %v: must be > 1", conservative))
-	}
-	if conservative > aggressive {
-		panic(fmt.Sprintf("conservative growth factor %v cannot be greater than aggressive growth factor %v", conservative, aggressive))
-	}
-	c.aggressiveGrowthFactor = aggressive
-	c.conservativeGrowthFactor = conservative
+	return c.config.RetentionPeriod
 }
 
 func (c *controller) AddSample(s perfSample) {
@@ -142,7 +97,7 @@ func (c *controller) AddSample(s perfSample) {
 		}
 	}
 
-	oldestValidTime := s.Time.Add(-c.retentionPeriod)
+	oldestValidTime := s.Time.Add(-c.config.RetentionPeriod)
 	if !c.oldestSampleTime.IsZero() && !c.oldestSampleTime.Before(oldestValidTime) {
 		// Existing samples still valid, just need to insert if new.
 		if newSampleIndex == len(c.samples) || s.GoroutineCount != c.samples[newSampleIndex].GoroutineCount {
@@ -202,10 +157,10 @@ func (c *controller) findByGoroutineCount(goroutineCount int) int {
 func (c *controller) RecommendTarget() int {
 	target := c.calculateBestTarget()
 	switch {
-	case target < c.minConcurrency:
-		return c.minConcurrency
-	case c.maxConcurrency >= 0 && target > c.maxConcurrency:
-		return c.maxConcurrency
+	case target < c.config.MinConcurrency:
+		return c.config.MinConcurrency
+	case c.config.MaxConcurrency >= 0 && target > c.config.MaxConcurrency:
+		return c.config.MaxConcurrency
 	default:
 		return target
 	}
@@ -253,7 +208,7 @@ func (c *controller) calculateBestTarget() int {
 // if all samples are high
 func (c *controller) findUtilizationValley() int {
 	for i, s := range c.samples {
-		if s.SecondaryUtil < c.highUtilThreshold {
+		if s.SecondaryUtil < c.config.HighUtilThreshold {
 			return i
 		}
 	}
@@ -268,7 +223,7 @@ func (c *controller) scaleUpAggressively() int {
 		// No samples available, start with 1 goroutine
 		return 1
 	}
-	return c.scaleUpByFactor(len(c.samples)-1, c.aggressiveGrowthFactor)
+	return c.scaleUpByFactor(len(c.samples)-1, c.config.AggressiveGrowthFactor)
 }
 
 // scaleUpConservatively returns a goroutine count moderately higher relative to
@@ -280,7 +235,7 @@ func (c *controller) scaleUpConservatively() int {
 	if baseIndex > 0 && !c.throughputStillImprovingAt(baseIndex) {
 		return c.samples[baseIndex].GoroutineCount // Stay put
 	}
-	return c.scaleUpByFactor(baseIndex, c.conservativeGrowthFactor)
+	return c.scaleUpByFactor(baseIndex, c.config.ConservativeGrowthFactor)
 }
 
 func (c *controller) scaleUpByFactor(baseIndex int, factor float64) int {
@@ -407,5 +362,5 @@ func (c *controller) findThroughputKnee() int {
 func (c *controller) rangeExhibitsAcceptableReturn(lower, higher *perfSample) bool {
 	slope := (higher.Throughput - lower.Throughput) / float64(higher.GoroutineCount-lower.GoroutineCount)
 	returnRate := slope / lower.Throughput
-	return returnRate >= c.minimumReturn
+	return returnRate >= c.config.MinThroughputROI
 }

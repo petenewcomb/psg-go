@@ -11,6 +11,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Demonstrates job cancellation from the outer layer.
@@ -24,7 +25,7 @@ func ExampleJob_Cancel() {
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	pool := psg.NewTaskPool(job, 1)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
 	printResult := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
@@ -94,7 +95,7 @@ func ExampleJob_Cancel_task() {
 	// the call to Job.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	pool := psg.NewTaskPool(job, 1)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
 	printResult := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {

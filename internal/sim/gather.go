@@ -11,7 +11,7 @@ import (
 var defaultGatherConfig = GatherConfig{
 	Count: BiasedIntConfig{Min: 1, Med: 5, Max: 20},
 	Func: FuncConfig{
-		SelfTime: BiasedDurationConfig{Min: 0, Med: 10 * time.Microsecond, Max: 10 * time.Millisecond},
+		SelfTime: BiasedDurationConfig{Min: 0, Med: 1 * time.Microsecond, Max: 1 * time.Millisecond},
 		Subjob: FuncSubjobConfig{
 			Add: BiasedBoolConfig{Probability: 0.01},
 		},

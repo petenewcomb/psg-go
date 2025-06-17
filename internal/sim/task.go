@@ -10,13 +10,13 @@ import (
 
 var defaultTaskConfig = TaskConfig{
 	Func: FuncConfig{
-		SelfTime: BiasedDurationConfig{Min: 0, Med: 100 * time.Microsecond, Max: 100 * time.Millisecond},
+		SelfTime: BiasedDurationConfig{Min: 0, Med: 10 * time.Microsecond, Max: 10 * time.Millisecond},
 		Subjob: FuncSubjobConfig{
 			Add: BiasedBoolConfig{Probability: 0.05},
 		},
 		ReturnError: BiasedBoolConfig{Probability: 0.05},
 	},
-	UseCombine: BiasedBoolConfig{Probability: 0.3},
+	UseCombine: BiasedBoolConfig{Probability: 0.5},
 }
 
 type TaskConfig struct {

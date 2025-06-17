@@ -12,6 +12,7 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -24,7 +25,7 @@ func Example_clientTimeout() {
 	defer job.CancelAndWait()
 
 	// Create a task pool
-	pool := psg.NewTaskPool(job, 10)
+	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
 
 	startTime := time.Now()
 	msSinceStart := func() int64 {
@@ -33,7 +34,7 @@ func Example_clientTimeout() {
 	}
 
 	// Create a gather for collecting results
-	gatherOp := psgwf.NewGather(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
+	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
 		fmt.Printf("%2dms [%s] result gathered\n", msSinceStart(), requestID)
 		return nil
 	})

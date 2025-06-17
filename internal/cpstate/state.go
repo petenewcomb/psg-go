@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/ema"
+	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/ttrk"
 )
 
@@ -26,7 +27,9 @@ type CombinerPoolState struct {
 	// Mutex protects complex state analysis and scaling decisions
 	mu sync.Mutex
 
-	tau ema.Tau
+	// Configuration
+	tau         ema.Tau
+	idleTimeout time.Duration
 
 	completedCountOrigin int64
 	secondaryWait        ttrk.TimeTracker
@@ -46,10 +49,29 @@ type CombinerPoolState struct {
 	waitChan chan struct{}
 }
 
-func (cps *CombinerPoolState) SetLimits(minConcurrency, maxConcurrency int) {
+// SetOptions atomically applies the given set of configuration options (later options override earlier ones).
+// If validation fails, the method panics and no changes are applied.
+func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	cps.controller.SetLimits(minConcurrency, maxConcurrency)
+
+	// Create a copy of the current configuration
+	newConfig := Config{
+		controllerConfig:        cps.controller.config,
+		IdleTimeout:             cps.idleTimeout,
+		MeasurementTimeConstant: time.Duration(cps.tau),
+	}
+
+	// Apply changes to the copy
+	opts.ApplyToCombinerPool(&newConfig, options...)
+
+	// Validate the new configuration (panics if invalid)
+	newConfig.validate()
+
+	// Apply the validated configuration to the actual state
+	cps.controller.SetConfig(newConfig.controllerConfig)
+	cps.idleTimeout = newConfig.IdleTimeout
+	cps.tau = ema.Tau(newConfig.MeasurementTimeConstant)
 
 	// Ask controller if the target should change given new limits
 	newTarget := cps.controller.RecommendTarget()
@@ -57,39 +79,6 @@ func (cps *CombinerPoolState) SetLimits(minConcurrency, maxConcurrency int) {
 		cps.targetGoroutineCount = newTarget
 		cps.notifyWaiter()
 	}
-}
-
-func (cps *CombinerPoolState) SetHighUtilizationThreshold(high float64) {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.controller.SetHighUtilizationThreshold(high)
-}
-
-func (cps *CombinerPoolState) SetMeasurementTimeConstant(d time.Duration) {
-	if d <= 0 {
-		panic(fmt.Sprintf("invalid tau %v: must be > 0", d))
-	}
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.tau = ema.Tau(d)
-}
-
-func (cps *CombinerPoolState) SetHistoryRetentionPeriod(d time.Duration) {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.controller.SetRetentionPeriod(d)
-}
-
-func (cps *CombinerPoolState) SetMinimumReturn(ratio float64) {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.controller.SetMinimumReturn(ratio)
-}
-
-func (cps *CombinerPoolState) SetGrowthFactors(aggressive, conservative float64) {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.controller.SetGrowthFactors(aggressive, conservative)
 }
 
 func (cps *CombinerPoolState) IncrementCompleted() {

@@ -12,6 +12,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Example_combine demonstrates how combiners can efficiently aggregate
@@ -74,21 +75,17 @@ func ExampleCombine() {
 
 	ctx := context.Background()
 
-	// Create a scatter-gather job
-	job := psg.NewJob(ctx)
+	// Create a scatter-gather job with flush listener to observe when all tasks have completed
+	job := psg.NewJob(ctx, psgopt.WithFlushListener(func() {
+		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
+	}))
 	defer job.CancelAndWait()
 
 	// Create a task pool with concurrency limit 2
-	taskPool := psg.NewTaskPool(job, 2)
+	taskPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
 
 	// Create a combiner pool and disable the idle timeout
-	combinerPool := psg.NewCombinerPool(job)
-	combinerPool.SetIdleTimeout(-1)
-
-	// Set a flush listener to observe when all tasks have completed
-	job.SetFlushListener(func() {
-		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
-	})
+	combinerPool := psg.NewCombinerPool(job, psgopt.WithIdleTimeout(-1))
 
 	// Define a result aggregation function and create a combined gather/combine operation
 	gatherOp := psg.NewGatherOp(gatherFn)

@@ -5,9 +5,8 @@ package sim
 
 var DefaultConfig = Config{
 	Path: PathConfig{
-		Count:  BiasedIntConfig{Min: 1, Med: 10, Max: 20},
+		Count:  BiasedIntConfig{Min: 1, Med: 15, Max: 30},
 		Length: BiasedIntConfig{Min: 1, Med: 3, Max: 5},
-		//Duration: BiasedIntConfig{Min: 0, Med: 10*time.Millisecond, Max: 1 * time.Second},
 	},
 	Task:    defaultTaskConfig,
 	Gather:  defaultGatherConfig,

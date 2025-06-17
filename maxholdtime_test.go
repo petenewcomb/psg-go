@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,8 +32,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		return nil
 	})
 
-	combinerPool := psg.NewCombinerPool(job)
-	combinerPool.SetLimits(1, 1) // Force exactly 1 goroutine
+	combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(1, 1)) // Force exactly 1 goroutine
 
 	combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[int, int] {
 		return psg.FuncCombiner[int, int]{
@@ -49,9 +49,9 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	})
 
 	// Set a short maxHoldTime
-	combineOp.SetMaxHoldTime(100 * time.Millisecond)
+	combineOp.SetOptions(psgopt.WithMaxHoldTime(100 * time.Millisecond))
 
-	taskPool := psg.NewTaskPool(job, 1)
+	taskPool := psg.NewTaskPool(job)
 
 	// Send one input
 	err := combineOp.Scatter(ctx, taskPool, func(ctx context.Context) (int, error) {

@@ -17,6 +17,8 @@ format.
 - Combine, et. al. for scaleable aggregation of task results before passing to gather operations
 - psgwf package providing workflow context propagation and lifecycle management utilities
 - otpsg module providing OpenTelemetry integration and observability patterns
+- Comprehensive options pattern implementation via psgopt package
+- SetOptions methods for atomic configuration updates across all components
 
 ### Changed
 
@@ -31,6 +33,7 @@ format.
 - GatherAll now returns without error only after a call to Job.Close
 - Pool renamed to TaskPool for clarity vs. the new CombinerPool type
 - Significant performance improvements: up to 73% throughput increase and 32% memory reduction
+- Pool.SetLimit → TaskPool.SetOptions with WithMaxConcurrency option
 
 ### Fixed
 

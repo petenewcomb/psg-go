@@ -6,7 +6,6 @@ package otpsg_test
 import (
 	"context"
 	"fmt"
-	"runtime"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/otpsg"
@@ -35,10 +34,6 @@ func Example_tracing() {
 	// Create a PSG job
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
-
-	// Create task pools
-	computePool := psg.NewTaskPool(job, runtime.NumCPU())
-	ioPool := psg.NewTaskPool(job, 10)
 
 	// Define a traced task for data loading
 	loadDataTask := otpsg.TracedTask("load-data", func(ctx context.Context) ([]int, error) {
@@ -73,11 +68,11 @@ func Example_tracing() {
 					return nil
 				})
 
-			return processGather.Scatter(ctx, computePool, processDataTask)
+			return processGather.Scatter(ctx, job, processDataTask)
 		})
 
 	// Start the pipeline by loading data
-	if err := dataGather.Scatter(ctx, ioPool, loadDataTask); err != nil {
+	if err := dataGather.Scatter(ctx, job, loadDataTask); err != nil {
 		fmt.Println("Error:", err)
 	}
 
@@ -110,7 +105,6 @@ func Example_instrumentedTask() {
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job, 1)
 
 	// Create fully instrumented task and gather
 	task := otpsg.InstrumentedTask("calculate-sum",
@@ -129,7 +123,7 @@ func Example_instrumentedTask() {
 		})
 
 	// Use convenience scatter function
-	err := otpsg.InstrumentedScatter(ctx, pool, task, gatherOp)
+	err := otpsg.InstrumentedScatter(ctx, job, task, gatherOp)
 	if err != nil {
 		fmt.Println("Error:", err)
 	}

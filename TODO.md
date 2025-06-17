@@ -7,7 +7,7 @@ Items that must be completed before merging to main branch.
 ### 2. Testing
 - [ ] Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
 - [ ] Test automatic flushing behavior based on timeout settings
-- [ ] Test TaskPool.SetLimit and CombinerPool.SetLimit functionality, especially dynamic pool resizing
+- [ ] Test TaskPool.SetOptions and CombinerPool.SetOptions functionality, especially dynamic pool resizing
 - [ ] Ensure no goroutine leaks in any scenario
 - [ ] Add comprehensive tests for the new heap implementation
 - [ ] Test job-binding of CombinerPool, including invalid cases
@@ -30,13 +30,11 @@ Items that must be completed before merging to main branch.
 
 ### 4. Performance optimization
 - [ ] Test automatic scaling of combiner task count based on workload
-- [ ] Add tests for SetLimit functionality for both TaskPool and CombinerPool
 - [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
 - [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
 ### 5. API finalization
 - [ ] Review and document thread-safety guarantees for remaining public APIs
-- [ ] use Options-style configuration at least for CombinerPool
 
 ### 6. Implementation improvements
 - [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext, shift to leveraging vettedContext)
@@ -52,11 +50,6 @@ Items that must be completed before merging to main branch.
 Items that can be deferred to GitHub issues after the combiner branch is merged.
 
 ### Performance Optimizations
-- [ ] Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
-- [ ] Test automatic flushing behavior based on timeout settings
-- [ ] Test automatic scaling of combiner task count based on workload
-- [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
-- [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 - [ ] Actually hook up gcok to do something useful, and find a way for there to be only one instance of the monitor.
 
 ### API Enhancements
@@ -67,26 +60,11 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - [ ] Add hooks for job-level monitoring and statistics
 - [ ] Create standard interfaces for instrumentation providers
 - [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
-- [ ] consider removing "One" from (Try)?(Gather|Combine)One, since they may gather or combine more than one 
-- [ ] use Options-style configuration at least for CombinerPool
+ 
 
-### 5. API enhancements
-- [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
-- [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
-- [ ] Hooks and instrumentation:
-  - [ ] Add generic hooks in core PSG for key lifecycle events
-  - [ ] Add metrics hooks for pool resource utilization (in-flight tasks, queue depth)
-  - [ ] Add hooks for job-level monitoring and statistics
-  - [ ] Create standard interfaces for instrumentation providers
-- [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
 
 ### Additional Tests and Examples
-- [ ] Test edge cases with cross-job context propagation
-- [ ] Ensure no goroutine leaks in any scenario
-- [ ] Add comprehensive tests for the new heap implementation
-- [ ] Clearly show the reentrancy effect of scattering or gathering within combiners and gather functions, esp. given that combiners may also be flushed
 - [ ] Make sure that combiner pools scale down to zero
-- [ ] Add tests for SetLimit functionality for both TaskPool and CombinerPool (not combiner-specific)
 
 ### Design Documentation
 - [ ] Add an overall design doc that covers the user-facing design of psg.  this would have a more theoretical bent as opposed to the practical focus of what's in doc.go.  This doc would focus on overall theory not specific implementation.

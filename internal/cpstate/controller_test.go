@@ -13,19 +13,20 @@ import (
 
 // Helper to create a controller with standard test configuration
 func newTestController() *controller {
-	c := &controller{
-		minConcurrency:           1,
-		maxConcurrency:           -1, // unlimited
-		retentionPeriod:          time.Hour,
-		highUtilThreshold:        0.6,
-		minimumReturn:            0.2,
-		aggressiveGrowthFactor:   2.5,
-		conservativeGrowthFactor: 1.3,
-	}
+	c := &controller{}
+	c.SetConfig(controllerConfig{
+		MinConcurrency:           1,
+		MaxConcurrency:           -1, // unlimited
+		RetentionPeriod:          time.Hour,
+		HighUtilThreshold:        0.6,
+		MinThroughputROI:         0.2,
+		AggressiveGrowthFactor:   2.5,
+		ConservativeGrowthFactor: 1.3,
+	})
 	return c
 }
 
-func TestPerfCurvesBasics(t *testing.T) {
+func TestControllerBasics(t *testing.T) {
 
 	t.Run("empty controller", func(t *testing.T) {
 		c := newTestController()
@@ -124,7 +125,7 @@ func TestPerfCurvesBasics(t *testing.T) {
 func TestFindUtilizationValley(t *testing.T) {
 	t.Run("finds lowest utilization", func(t *testing.T) {
 		c := newTestController()
-		c.highUtilThreshold = 0.6
+		c.config.HighUtilThreshold = 0.6
 
 		// Add samples with different utilizations
 		now := time.Now()
@@ -148,7 +149,7 @@ func TestFindUtilizationValley(t *testing.T) {
 
 	t.Run("returns len when all high utilization", func(t *testing.T) {
 		c := newTestController()
-		c.highUtilThreshold = 0.6
+		c.config.HighUtilThreshold = 0.6
 
 		// All samples have high utilization
 		samples := []perfSample{
@@ -171,7 +172,7 @@ func TestFindUtilizationValley(t *testing.T) {
 func TestFindThroughputKnee(t *testing.T) {
 	t.Run("identifies throughput knee", func(t *testing.T) {
 		c := newTestController()
-		c.minimumReturn = 0.2
+		c.config.MinThroughputROI = 0.2
 
 		// Perfect linear scaling from origin
 		now := time.Now()
@@ -196,7 +197,7 @@ func TestFindThroughputKnee(t *testing.T) {
 
 	t.Run("handles non-linear scaling", func(t *testing.T) {
 		c := newTestController()
-		c.minimumReturn = 0.2
+		c.config.MinThroughputROI = 0.2
 
 		// Non-linear pattern
 		samples := []perfSample{
@@ -230,7 +231,7 @@ func TestRecommendTarget(t *testing.T) {
 
 	t.Run("valley found recommends conservative exploration", func(t *testing.T) {
 		c := newTestController()
-		c.highUtilThreshold = 0.6
+		c.config.HighUtilThreshold = 0.6
 
 		// Create a valley scenario
 		samples := []perfSample{
@@ -254,8 +255,8 @@ func TestRecommendTarget(t *testing.T) {
 
 	t.Run("all linear high util recommends aggressive growth", func(t *testing.T) {
 		c := newTestController()
-		c.highUtilThreshold = 0.6
-		c.aggressiveGrowthFactor = 2.5
+		c.config.HighUtilThreshold = 0.6
+		c.config.AggressiveGrowthFactor = 2.5
 
 		// All samples linear and high utilization
 		now := time.Now()
@@ -280,8 +281,15 @@ func TestRecommendTarget(t *testing.T) {
 
 	t.Run("respects max concurrency limit", func(t *testing.T) {
 		c := newTestController()
-		c.SetLimits(1, 10)
-		c.aggressiveGrowthFactor = 2.5
+		c.SetConfig(controllerConfig{
+			MinConcurrency:           1,
+			MaxConcurrency:           10,
+			RetentionPeriod:          time.Hour,
+			HighUtilThreshold:        0.6,
+			MinThroughputROI:         0.2,
+			AggressiveGrowthFactor:   2.5,
+			ConservativeGrowthFactor: 1.3,
+		})
 
 		// Would recommend > 10 without limit
 		now := time.Now()
@@ -303,8 +311,8 @@ func TestRecommendTarget(t *testing.T) {
 
 	t.Run("scales down when no linear region found", func(t *testing.T) {
 		c := newTestController()
-		c.highUtilThreshold = 0.6
-		c.minimumReturn = 0.2
+		c.config.HighUtilThreshold = 0.6
+		c.config.MinThroughputROI = 0.2
 
 		// High util but no linear scaling from origin
 		now := time.Now()
@@ -327,7 +335,7 @@ func TestRecommendTarget(t *testing.T) {
 }
 
 // Property-based tests
-func TestPerfCurvesProperties(t *testing.T) {
+func TestControllerProperties(t *testing.T) {
 	t.Run("samples remain sorted after random insertions", func(t *testing.T) {
 		rapid.Check(t, func(t *rapid.T) {
 			c := newTestController()
@@ -368,7 +376,10 @@ func TestPerfCurvesProperties(t *testing.T) {
 				rapid.Just(-1), // unlimited
 				rapid.IntRange(max(minConcurrency, 1), 50),
 			).Draw(t, "maxConcurrency")
-			c.SetLimits(minConcurrency, maxConcurrency)
+			config := c.config
+			config.MinConcurrency = minConcurrency
+			config.MaxConcurrency = maxConcurrency
+			c.SetConfig(config)
 
 			// Generate some random performance data
 			numSamples := rapid.IntRange(0, 20).Draw(t, "numSamples")
@@ -408,7 +419,7 @@ func TestPerfCurvesProperties(t *testing.T) {
 	t.Run("findThroughputKnee is consistent with tolerance", func(t *testing.T) {
 		rapid.Check(t, func(t *rapid.T) {
 			c := newTestController()
-			c.minimumReturn = 0.2
+			c.config.MinThroughputROI = 0.2
 
 			// Generate samples with known linear portion
 			linearSamples := rapid.IntRange(2, 10).Draw(t, "linearSamples")

@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"go.opentelemetry.io/otel"
 )
 
@@ -16,7 +17,7 @@ import (
 func TracedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psg.TaskFunc[PropagatedResult[T]] {
+) psgfn.Task[PropagatedResult[T]] {
 	// Use the base propagator first
 	propagatedTask := PropagateTask(taskFn)
 
@@ -63,14 +64,14 @@ func TracedGather[T any](
 func TracedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
 	// Create a combiner factory that adds tracing
-	tracedFactory := func() psg.Combiner[I, O] {
+	tracedFactory := func() psgfn.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 
-		return psg.FuncCombiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
+		return psgfn.Combiner[I, O]{
+			CombineFn: func(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, combineOpName)
@@ -79,7 +80,7 @@ func TracedCombiner[I, O any](
 				// Call the original combine function
 				innerCombiner.Combine(ctx, input, inputErr, emit)
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[O]) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, flushOpName)
@@ -101,7 +102,7 @@ func TracedCombiner[I, O any](
 func WithTaskTracing[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psg.TaskFunc[T] {
+) psgfn.Task[T] {
 	return func(ctx context.Context) (T, error) {
 		// Create span with meaningful name
 		tracer := otel.Tracer("otpsg")

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +27,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var gatherCount atomic.Int32
 
 	gatherOp := psg.NewGatherOp(func(ctx context.Context, result int, err error) error {
-		t.Logf("GatherFunc called with result %d", result)
+		t.Logf("Gather called with result %d", result)
 		gatherCount.Add(1)
 		chk.NoError(err)
 		return nil
@@ -34,14 +35,14 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(1, 1)) // Force exactly 1 goroutine
 
-	combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[int, int] {
-		return psg.FuncCombiner[int, int]{
-			CombineFn: func(ctx context.Context, value int, err error, emit psg.CombinerEmitFunc[int]) {
-				t.Logf("CombineFunc called with value %d", value)
+	combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psgfn.Combiner[int, int] {
+		return psgfn.Combiner[int, int]{
+			CombineFn: func(ctx context.Context, value int, err error, emit psgfn.Emit[int]) {
+				t.Logf("Combine called with value %d", value)
 				// Don't emit immediately - let maxHoldTime trigger flush
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[int]) {
-				t.Logf("FlushFunc called")
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[int]) {
+				t.Logf("Flush called")
 				flushCount.Add(1)
 				emit(ctx, 42, nil)
 			},

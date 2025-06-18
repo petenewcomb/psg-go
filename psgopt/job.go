@@ -108,9 +108,9 @@ type GCTimeUpdateIntervalOption interface {
 
 // WithFlushListener registers a callback function that will be called each time all
 // tasks have completed and [github.com/petenewcomb/psg-go.Job] is waiting for combiners to emit their results.
-// After the callback returns, the job signals any CombinerFunc that has received
+// After the callback returns, the job signals any Combiner that has received
 // inputs but hasn't yet emitted its combined results to do so immediately. The callback
-// may be invoked multiple times during a job's lifecycle if a GatherFunc directly or
+// may be invoked multiple times during a job's lifecycle if a Gather directly or
 // indirectly launches new tasks while processing the flushed results.
 //
 // The callback function is called synchronously from a goroutine calling a gather method

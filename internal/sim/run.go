@@ -13,6 +13,7 @@ import (
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/require"
 )
@@ -248,7 +249,7 @@ func recoverLocalTPanic(f func()) {
 	}
 }
 
-func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.TaskFunc[*taskResult] {
+func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psgfn.Task[*taskResult] {
 	scatterTime := time.Now()
 	return func(ctx context.Context) (res *taskResult, err error) {
 		c.MinScatterDelay.UpdateMin(int64(time.Since(scatterTime)))
@@ -297,7 +298,7 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.Task
 	}
 }
 
-func (c *controller) newGatherFunc(t require.TestingT) psg.GatherFunc[*taskResult] {
+func (c *controller) newGatherFunc(t require.TestingT) psgfn.Gather[*taskResult] {
 	return func(ctx context.Context, res *taskResult, err error) (retErr error) {
 		c.MinGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
 
@@ -324,12 +325,12 @@ func (c *controller) newGatherFunc(t require.TestingT) psg.GatherFunc[*taskResul
 	}
 }
 
-func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) psg.CombinerFactory[*taskResult, *combineResult] {
-	return func() psg.Combiner[*taskResult, *combineResult] {
+func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) psgfn.CombinerFactory[*taskResult, *combineResult] {
+	return func() psgfn.Combiner[*taskResult, *combineResult] {
 		cRes := &combineResult{
 			Index: combineIndex,
 		}
-		flush := func(ctx context.Context, combine *Combine, err error, emit psg.CombinerEmitFunc[*combineResult]) {
+		flush := func(ctx context.Context, combine *Combine, err error, emit psgfn.Emit[*combineResult]) {
 			cRes.Combine = combine
 			cRes.EndTime = time.Now()
 			emit(ctx, cRes, err)
@@ -337,8 +338,8 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 				Index: cRes.Index,
 			}
 		}
-		return psg.FuncCombiner[*taskResult, *combineResult]{
-			CombineFn: func(ctx context.Context, tRes *taskResult, err error, emit psg.CombinerEmitFunc[*combineResult]) {
+		return psgfn.Combiner[*taskResult, *combineResult]{
+			CombineFn: func(ctx context.Context, tRes *taskResult, err error, emit psgfn.Emit[*combineResult]) {
 				c.MinCombineDelay.UpdateMin(int64(time.Since(tRes.EndTime)))
 
 				defer recoverLocalTPanic(func() { flush(ctx, nil, nil, emit) })
@@ -364,7 +365,7 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 					flush(ctx, combine, err, emit)
 				}
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[*combineResult]) {
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[*combineResult]) {
 				if cRes.TaskCount > 0 {
 					flush(ctx, nil, nil, emit)
 				}
@@ -373,7 +374,7 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 	}
 }
 
-func (c *controller) newCombinerGatherFunc(t require.TestingT) psg.GatherFunc[*combineResult] {
+func (c *controller) newCombinerGatherFunc(t require.TestingT) psgfn.Gather[*combineResult] {
 	return func(ctx context.Context, res *combineResult, err error) error {
 		c.MinCombineGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
 

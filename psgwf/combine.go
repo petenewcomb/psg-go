@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -32,9 +33,9 @@ func (c *CombineOp[I, O]) SetOptions(options ...psgopt.CombineOpOption) {
 	c.inner().SetOptions(options...)
 }
 
-func (c *CombineOp[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[I]) error {
-	_, err := scatter(ctx, pool, wf, taskFn,
-		func(ctx context.Context, pool *psg.TaskPool, taskFn psg.TaskFunc[result[I]]) (bool, error) {
+func (c *CombineOp[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn Task[I]) error {
+	_, err := scatterTask(ctx, pool, wf, taskFn,
+		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I]]) (bool, error) {
 			err := c.inner().Scatter(ctx, pool, taskFn)
 			return err == nil, err
 		},
@@ -42,9 +43,9 @@ func (c *CombineOp[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *W
 	return err
 }
 
-func (c *CombineOp[I, O]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn TaskFunc[I]) (bool, error) {
-	return scatter(ctx, pool, wf, taskFn,
-		func(ctx context.Context, pool *psg.TaskPool, taskFn psg.TaskFunc[result[I]]) (bool, error) {
+func (c *CombineOp[I, O]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn Task[I]) (bool, error) {
+	return scatterTask(ctx, pool, wf, taskFn,
+		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I]]) (bool, error) {
 			return c.inner().TryScatter(ctx, pool, taskFn)
 		},
 	)

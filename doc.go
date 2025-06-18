@@ -30,14 +30,14 @@
 //
 // # Context Propagation in User Code
 //
-//  1. Task Functions: The context passed to TaskFunc should be respected for
+//  1. Task Functions: The context passed to Task should be respected for
 //     cancellation. User code should propagate this context to any operations
 //     performed within the task, rather than creating new, disconnected
 //     contexts. While the job will still function if a task ignores
 //     cancellation, such tasks may continue running until they complete
 //     naturally, even after the job has been canceled.
 //
-//  2. Gather Functions: The context passed to GatherFunc is the context from
+//  2. Gather Functions: The context passed to Gather is the context from
 //     the calling Scatter or Gather* method, not the job's context. User code
 //     should propagate this context, especially when calling Scatter to create
 //     new tasks.
@@ -49,7 +49,7 @@
 //
 // When a job is canceled via Job.Cancel or its context is canceled:
 //
-//  1. All running TaskFuncs receive context cancellation but will run until
+//  1. All running Tasks receive context cancellation but will run until
 //     they return. The library will correctly clean up once they complete.
 //
 //  2. Combiners will be flushed to ensure no data is lost.
@@ -63,7 +63,7 @@
 //
 //  1. Reentrancy Protection: Context values are used to detect and prevent
 //     dangerous calling patterns. For example, calling Scatter from within a
-//     TaskFunc of the same job will panic with a helpful error message.
+//     Task of the same job will panic with a helpful error message.
 //
 //  2. Gather Queuing: Gather operations are queued rather than processed
 //     recursively to prevent stack overflow when gather functions launch new
@@ -87,7 +87,7 @@
 //
 // # Best Practices
 //
-//  1. Always use the provided context in TaskFunc, GatherFunc, and Combiner
+//  1. Always use the provided context in Task, Gather, and Combiner
 //     methods.
 //
 //  2. Follow the pattern of checking ctx.Done() regularly in long-running tasks.
@@ -95,7 +95,7 @@
 //  3. Don't create new root contexts (e.g., context.Background()) within
 //     functions that receive a context from the library.
 //
-//  4. Launch new tasks from GatherFunc or Combiner methods, not from TaskFunc.
+//  4. Launch new tasks from Gather or Combiner methods, not from Task.
 //
 //  5. For tasks that need to create internal concurrency, consider creating a
 //     sub-job within the task rather than calling Scatter directly.

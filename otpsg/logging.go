@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"go.uber.org/zap"
 )
 
@@ -17,7 +17,7 @@ import (
 func LoggedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psg.TaskFunc[T] {
+) psgfn.Task[T] {
 	return func(ctx context.Context) (T, error) {
 		// Get logger from context or use a default
 		// This implementation uses zap, but could be adapted for any logger
@@ -57,7 +57,7 @@ func LoggedTask[T any](
 func LoggedGather[T any](
 	operationName string,
 	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.GatherFunc[T] {
+) psgfn.Gather[T] {
 	return func(ctx context.Context, result T, err error) error {
 		// Get logger from context or use a default
 		logger := zap.L()
@@ -96,13 +96,13 @@ func LoggedGather[T any](
 func LoggedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[I, O] {
-	return func() psg.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[I, O] {
+	return func() psgfn.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 
-		return psg.FuncCombiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
+		return psgfn.Combiner[I, O]{
+			CombineFn: func(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
 				// Get logger from context or use a default
 				logger := zap.L()
 
@@ -123,7 +123,7 @@ func LoggedCombiner[I, O any](
 					zap.String("component", "otpsg"),
 					zap.Duration("duration", duration))
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[O]) {
 				// Get logger from context or use a default
 				logger := zap.L()
 

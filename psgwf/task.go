@@ -6,12 +6,12 @@ package psgwf
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-type TaskFunc[T any] = func(context.Context, *Workflow) (T, error)
+type Task[T any] = func(context.Context, *Workflow) (T, error)
 
-func wrapTaskFunc[T any](wf *Workflow, taskFn TaskFunc[T]) psg.TaskFunc[result[T]] {
+func wrapTask[T any](wf *Workflow, taskFn Task[T]) psgfn.Task[result[T]] {
 	return func(ctx context.Context) (res result[T], err error) {
 		res.Workflow = wf
 		res.Value, err = taskFn(ctx, wf)

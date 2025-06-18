@@ -10,6 +10,7 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -18,7 +19,7 @@ import (
 type CombineOp[I, O any] struct {
 	gatherOp    *GatherOp[O]
 	pool        *CombinerPool
-	newCombiner CombinerFactory[I, O]
+	newCombiner psgfn.CombinerFactory[I, O]
 	minHoldTime time.Duration // Minimum time since last combine before auto-flushing
 	maxHoldTime time.Duration // Maximum time since first combine before auto-flushing
 }
@@ -28,7 +29,7 @@ type CombineOp[I, O any] struct {
 func NewCombineOp[I, O any](
 	gatherOp *GatherOp[O],
 	pool *CombinerPool,
-	combinerFactory CombinerFactory[I, O],
+	combinerFactory psgfn.CombinerFactory[I, O],
 	options ...psgopt.CombineOpOption,
 ) *CombineOp[I, O] {
 	if gatherOp == nil {
@@ -64,14 +65,14 @@ func NewCombineOp[I, O any](
 func (c *CombineOp[I, O]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
-	taskFunc TaskFunc[I],
+	taskFn psgfn.Task[I],
 ) error {
 	j := target.job()
 	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFunc)
+	vetScatter(vettedCtx, target, taskFn)
 
 	doScatter := func(vettedCtx vettedContext) error {
-		launched, err := c.scatter(vettedCtx, j, target, true, taskFunc)
+		launched, err := c.scatter(vettedCtx, j, target, true, taskFn)
 		if !launched && err == nil {
 			panic("task function was not launched, but no error was returned")
 		}
@@ -108,11 +109,11 @@ func (c *CombineOp[I, O]) Scatter(
 func (c *CombineOp[I, O]) TryScatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
-	taskFunc TaskFunc[I],
+	taskFn psgfn.Task[I],
 ) (bool, error) {
 	j := target.job()
 	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFunc)
+	vetScatter(vettedCtx, target, taskFn)
 
 	if !vettedCtx.inGather {
 		if err := j.processOutstandingWork(ctx); err != nil {
@@ -120,7 +121,7 @@ func (c *CombineOp[I, O]) TryScatter(
 		}
 	}
 
-	return c.scatter(vettedCtx, j, target, false, taskFunc)
+	return c.scatter(vettedCtx, j, target, false, taskFn)
 }
 
 func (c *CombineOp[I, O]) scatter(
@@ -128,7 +129,7 @@ func (c *CombineOp[I, O]) scatter(
 	j *Job,
 	target TaskPoolOrJob,
 	block bool,
-	taskFunc TaskFunc[I],
+	taskFn psgfn.Task[I],
 ) (bool, error) {
 	if j != c.pool.j {
 		panic("target and combiner pools are associated with different jobs")
@@ -164,7 +165,7 @@ func (c *CombineOp[I, O]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, input I, inputErr error) {
+	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, input I, inputErr error) {
 		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
 			combineFn := getCombineFunc(ctx, cm, c.pool, c)
 			combineFn(ctx, input, inputErr)

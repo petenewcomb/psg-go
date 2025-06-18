@@ -22,7 +22,7 @@ The below shows basic usage without error checking.
 	defer job.CancelAndWait() // hygiene
 
 	// Binds a string to a task function that returns the string after a short delay.
-	newTaskFn := func(s string) psg.TaskFunc[string] {
+	newTaskFn := func(s string) psgfn.Task[string] {
 		return func(context.Context) (string, error) {
 			time.Sleep(1 * time.Millisecond)
 			return s, nil

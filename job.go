@@ -31,7 +31,7 @@ import (
 type Job struct {
 	ctx         context.Context
 	cancelFn    context.CancelFunc
-	gatherQueue rdvq.Required[boundGatherFunc]
+	gatherQueue rdvq.Required[boundGather]
 	wg          sync.WaitGroup
 	state       jobstate.JobState
 	gcMonitor   gcok.Monitor
@@ -52,12 +52,14 @@ type Job struct {
 	workCounter atomic.Int64
 	workWaiters waitq.Queue
 
-	taskQueue             rdvq.Optional[preparedTaskFunc]
+	taskQueue             rdvq.Optional[pendingTask]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
 
 	vettedCtxCache sync.Map // context.Context -> vettedContext
 	gatherCtxCache sync.Map // context.Context -> context.Context
 }
+
+type pendingTask func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context)
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
 func (j *Job) job() *Job {
@@ -125,7 +127,7 @@ func (j *Job) withBackpressureProvider(ctx context.Context) context.Context {
 	return j.vettedContext(ctx).ctx
 }
 
-type boundGatherFunc = func(ctx context.Context) error
+type boundGather = func(ctx context.Context) error
 
 type workFunc func(context.Context) error
 
@@ -136,7 +138,7 @@ type workItem struct {
 
 // NewJob creates an independent scatter-gather execution environment with the
 // specified context. The context passed to NewJob is used as the root of the
-// context that will be passed to all task functions. (See [TaskFunc] and
+// context that will be passed to all task functions. (See [Task] and
 // [Job.Cancel] for more detail.)
 //
 // Use [NewTaskPool] to create task pools bound to this job.
@@ -185,8 +187,8 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 }
 
 var workQueuePool = &nbcq.Pool[workItem]{}
-var taskQueuePool = &rdvq.Pool[preparedTaskFunc]{}
-var gatherQueuePool = &rdvq.Pool[boundGatherFunc]{}
+var taskQueuePool = &rdvq.Pool[pendingTask]{}
+var gatherQueuePool = &rdvq.Pool[boundGather]{}
 
 type jobContextValueKeyType struct{}
 
@@ -248,15 +250,15 @@ func includesJob(ctx context.Context, j *Job, keys ...any) bool {
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
 // Outstanding calls to [Scatter], [Job.Gather], [Job.TryGather],
 // [Job.GatherAll], or [Job.TryGatherAll] using the job or any of its task pools will
-// fail with [context.Canceled] or other error returned by a [GatherFunc].
+// fail with [context.Canceled] or other error returned by a [Gather].
 //
-// While Cancel always returns immediately, any running [TaskFunc] or
-// [GatherFunc] will delay termination of their independent goroutine or caller
-// until it returns. This method cancels the context passed to each [TaskFunc],
-// but not the context passed to each [GatherFunc]. Gather functions instead
+// While Cancel always returns immediately, any running [Task] or
+// [Gather] will delay termination of their independent goroutine or caller
+// until it returns. This method cancels the context passed to each [Task],
+// but not the context passed to each [Gather]. Gather functions instead
 // receive the context passed to the calling [Scatter], [Job.Gather],
 // [Job.TryGather], [Job.GatherAll], or [Job.TryGatherAll] function. If it is
-// desirable to transmit a cancelation signal to a running [GatherFunc], one
+// desirable to transmit a cancelation signal to a running [Gather], one
 // must also cancel any contexts being passed to those callers.
 //
 // Cancel is always thread-safe and calling it more than once has no additional
@@ -298,7 +300,7 @@ func (j *Job) CancelAndWait() {
 // methods.
 //
 // NOTE: If a task result is gathered, this method will call the task's
-// [GatherFunc] and wait until it returns.
+// [Gather] and wait until it returns.
 func (j *Job) Gather(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
 	_, err := j.processWorkAndGather(vetted)
@@ -309,7 +311,7 @@ func (j *Job) vetGather(vetted vettedContext) {
 	if vetted.hasTaskValue {
 		// Don't launch if the provided context is a task context within the
 		// current job, since that may lead to deadlock.
-		panic("Gather called from within TaskFunc of the same or a parent Job")
+		panic("Gather called from within Task of the same or a parent Job")
 	}
 }
 
@@ -421,12 +423,12 @@ func (j *Job) processWorkAndGather(vettedCtx vettedContext) (bool, error) {
 }
 
 // postGather sends a gather operation to the gather queue.
-func (j *Job) postGather(ctx context.Context, gather boundGatherFunc) {
+func (j *Job) postGather(ctx context.Context, gather boundGather) {
 	// Error can only be due to context cancellation, so safe to ignore here.
 	_ = j.gatherQueue.PushBack(ctx, gatherQueuePool, gather)
 }
 
-func (j *Job) queueGather(gather boundGatherFunc) {
+func (j *Job) queueGather(gather boundGather) {
 	j.queueWork(func(ctx context.Context) error {
 		return j.executeGather(ctx, gather)
 	})
@@ -437,7 +439,7 @@ func (j *Job) gather(ctx context.Context, waiter waitq.Waiter, limitCh <-chan st
 	waiterNotified := false
 	var err error
 	j.gatherQueue.PopFrontFunc(gatherQueuePool, j.queueGather,
-		func(dedicatedCh, sharedCh <-chan boundGatherFunc) (sourceCh <-chan boundGatherFunc) {
+		func(dedicatedCh, sharedCh <-chan boundGather) (sourceCh <-chan boundGather) {
 			waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
 				select {
 				case gather := <-dedicatedCh:
@@ -500,7 +502,7 @@ func (j *Job) processWorkAndTryGather(vettedCtx vettedContext) (bool, error) {
 
 func (j *Job) tryQueueGather() bool {
 	ok := false
-	j.gatherQueue.TryPopFront(gatherQueuePool, func(gather boundGatherFunc) {
+	j.gatherQueue.TryPopFront(gatherQueuePool, func(gather boundGather) {
 		ok = true
 		j.queueGather(gather)
 	})
@@ -515,7 +517,7 @@ func (j *Job) tryQueueGather() bool {
 // and then return.
 //
 // Returns nil when the job is done, or an error if the context is canceled or a
-// task's [GatherFunc] returns a non-nil error. If a gather function returns an
+// task's [Gather] returns a non-nil error. If a gather function returns an
 // error, you can call GatherAll again to continue processing more tasks (and
 // errors, if any) until the job is done (i.e., GatherAll returns nil).
 //
@@ -525,7 +527,7 @@ func (j *Job) tryQueueGather() bool {
 // and non-blocking calls may also be mixed, as can calls to any of the other
 // gather methods.
 //
-// NOTE: This method will serially call each gathered task's [GatherFunc] and
+// NOTE: This method will serially call each gathered task's [Gather] and
 // wait until it returns.
 func (j *Job) GatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
@@ -543,14 +545,14 @@ func (j *Job) GatherAll(ctx context.Context) error {
 //
 // Returns nil when all immediately available tasks have been processed, ErrJobDone
 // when the job is done, or an error if the context is canceled or a task's
-// [GatherFunc] returns a non-nil error. If a gather function returns an error,
+// [Gather] returns a non-nil error. If a gather function returns an error,
 // you can call TryGatherAll again to continue processing more tasks (and errors,
 // if any) until you receive ErrJobDone.
 //
 // See GatherAll for information about thread safety.
 //
 // NOTE: If completed tasks are available, this method must still call each
-// task's [GatherFunc] and wait until it finishes processing.
+// task's [Gather] and wait until it finishes processing.
 func (j *Job) TryGatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
 	return j.gatherAll(vetted, j.processWorkAndTryGather)
@@ -568,7 +570,7 @@ func (j *Job) gatherAll(vettedCtx vettedContext, gatherSomeFn func(vettedContext
 	}
 }
 
-func (j *Job) startTask(taskFn preparedTaskFunc) {
+func (j *Job) startTask(taskFn pendingTask) {
 	// Try to hand off to an idle worker
 	if j.taskQueue.TryPushBack(taskQueuePool, taskFn) {
 		return // Successfully handed off to idle worker
@@ -578,7 +580,7 @@ func (j *Job) startTask(taskFn preparedTaskFunc) {
 	j.spawnTaskWorker(taskFn)
 }
 
-func (j *Job) spawnTaskWorker(taskFn preparedTaskFunc) {
+func (j *Job) spawnTaskWorker(taskFn pendingTask) {
 	j.wg.Add(1)
 	go func() {
 		defer j.wg.Done()
@@ -612,7 +614,7 @@ func (j *Job) spawnTaskWorker(taskFn preparedTaskFunc) {
 			timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
 
 			j.taskQueue.PopFrontFunc(taskQueuePool,
-				func(orphanedTaskFn preparedTaskFunc) {
+				func(orphanedTaskFn pendingTask) {
 					if taskFn == nil {
 						taskFn = orphanedTaskFn
 					} else {
@@ -620,7 +622,7 @@ func (j *Job) spawnTaskWorker(taskFn preparedTaskFunc) {
 						j.startTask(orphanedTaskFn)
 					}
 				},
-				func(ch <-chan preparedTaskFunc) bool {
+				func(ch <-chan pendingTask) bool {
 					select {
 					case taskFn = <-ch:
 						return true
@@ -640,7 +642,7 @@ var taskContextValueKey any = taskContextValueKeyType{}
 
 // launch executes a task immediately without any concurrency constraints.
 // Implements the TaskPoolOrJob interface.
-func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error) {
+func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTask) (launched bool, err error) {
 	// Launch the task immediately without any pool tracking
 	j.startTask(func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context) {
 		taskFn(ctx, nil, ctxWithBP) // No completion callback needed for unlimited tasks
@@ -648,7 +650,7 @@ func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskF
 	return true, nil
 }
 
-func (j *Job) executeGather(ctx context.Context, gather boundGatherFunc) error {
+func (j *Job) executeGather(ctx context.Context, gather boundGather) error {
 	// Decrement the environment-wide in-flight counter only AFTER calling the
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.

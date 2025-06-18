@@ -5,6 +5,8 @@ package psg
 
 import (
 	"context"
+
+	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // Combiner is an interface that defines operations for combining and flushing inputs.
@@ -12,50 +14,20 @@ import (
 type Combiner[I, O any] interface {
 	// Combine processes a single input and optionally emits an output.
 	// It is called each time a task completes.
-	Combine(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O])
+	Combine(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O])
 
 	// Flush is called when the job is completing or when a combiner goroutine
 	// is shutting down. It should emit any pending aggregated results.
-	Flush(ctx context.Context, emit CombinerEmitFunc[O])
+	Flush(ctx context.Context, emit psgfn.Emit[O])
 }
-
-type CombinerEmitFunc[O any] func(context.Context, O, error)
-
-// FuncCombiner is a thin wrapper that implements the Combiner interface
-// using function fields. This allows for simple creation of combiners using
-// closures that share state.
-type FuncCombiner[I, O any] struct {
-	// CombineFn is called to process each input
-	CombineFn func(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O])
-
-	// FlushFn is called to emit any pending aggregated results
-	FlushFn func(ctx context.Context, emit CombinerEmitFunc[O])
-}
-
-// Combine calls the CombineFn field with the provided arguments.
-func (c FuncCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O]) {
-	if c.CombineFn != nil {
-		c.CombineFn(ctx, input, inputErr, emit)
-	}
-}
-
-// Flush calls the FlushFn field with the provided arguments.
-func (c FuncCombiner[I, O]) Flush(ctx context.Context, emit CombinerEmitFunc[O]) {
-	if c.FlushFn != nil {
-		c.FlushFn(ctx, emit)
-	}
-}
-
-// CombinerFactory is a function that creates a new Combiner instance.
-type CombinerFactory[I, O any] = func() Combiner[I, O]
 
 type errCombiner[I, O any] struct {
 	err error
 }
 
-func (c errCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error, emit CombinerEmitFunc[O]) {
+func (c errCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
 	emit(ctx, *new(O), c.err)
 }
 
-func (c errCombiner[I, O]) Flush(ctx context.Context, emit CombinerEmitFunc[O]) {
+func (c errCombiner[I, O]) Flush(ctx context.Context, emit psgfn.Emit[O]) {
 }

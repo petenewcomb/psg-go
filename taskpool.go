@@ -81,7 +81,7 @@ func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 	opts.ApplyToTaskPool(taskPoolConfigWrapper{pool: p}, options...)
 }
 
-func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTaskFunc) (bool, error) {
+func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTask) (bool, error) {
 	j := p.j
 
 	// Try to add to the pool
@@ -125,10 +125,10 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 
 	j.startTask(func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context) {
 		task(ctx, func() {
-			// Decrement the task pool's in-flight count BEFORE waiting on the gather
-			// channel. This makes it safe for gatherFunc to call `Scatter` with this
-			// same `TaskPool` instance without deadlock, as there is guaranteed to be at
-			// least one slot available.
+			// Decrement the task pool's in-flight count BEFORE waiting on the
+			// gather channel. This makes it safe for gather functions to call
+			// `Scatter` with this same `TaskPool` instance without deadlock, as
+			// there is guaranteed to be at least one slot available.
 			p.decrementInFlight()
 		}, ctxWithBPFn)
 	})

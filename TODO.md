@@ -44,7 +44,6 @@ Items that must be completed before merging to main branch.
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 
-
 ## Post-Merge Enhancements
 
 Items that can be deferred to GitHub issues after the combiner branch is merged.
@@ -60,8 +59,6 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - [ ] Add hooks for job-level monitoring and statistics
 - [ ] Create standard interfaces for instrumentation providers
 - [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
- 
-
 
 ### Additional Tests and Examples
 - [ ] Make sure that combiner pools scale down to zero

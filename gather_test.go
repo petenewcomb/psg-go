@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGatherScatterNilTaskFuncPanic(t *testing.T) {
+func TestGatherScatterNilTaskPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
@@ -27,19 +27,19 @@ func TestGatherScatterNilTaskFuncPanic(t *testing.T) {
 		_ = gatherOp.Scatter(
 			ctx,
 			pool,
-			nil, // Nil TaskFunc should panic
+			nil, // Nil Task should panic
 		)
 	})
 }
 
-func TestGatherScatterNilGatherFuncPanic(t *testing.T) {
+func TestGatherScatterNilGatherPanic(t *testing.T) {
 	chk := require.New(t)
 	chk.PanicsWithValue("gather function must be non-nil", func() {
 		psg.NewGatherOp[int](nil)
 	})
 }
 
-func TestGatherTryScatterNilTaskFuncPanic(t *testing.T) {
+func TestGatherTryScatterNilTaskPanic(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
@@ -55,12 +55,12 @@ func TestGatherTryScatterNilTaskFuncPanic(t *testing.T) {
 		_, _ = gatherOp.TryScatter(
 			ctx,
 			pool,
-			nil, // Nil TaskFunc should panic
+			nil, // Nil Task should panic
 		)
 	})
 }
 
-func TestGatherScatterGatherScatterFromTaskFunc(t *testing.T) {
+func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
@@ -77,7 +77,7 @@ func TestGatherScatterGatherScatterFromTaskFunc(t *testing.T) {
 		ctx,
 		pool,
 		func(ctx context.Context) (int, error) {
-			chk.PanicsWithValue("Scatter called from within TaskFunc; move call to GatherFunc instead", func() {
+			chk.PanicsWithValue("Scatter called from within Task; move call to Gather instead", func() {
 				innerGatherOp := psg.NewGatherOp(
 					func(ctx context.Context, result int, err error) error {
 						chk.NoError(err)
@@ -101,7 +101,7 @@ func TestGatherScatterGatherScatterFromTaskFunc(t *testing.T) {
 	chk.NoError(job.CloseAndGatherAll(ctx))
 }
 
-func TestGatherScatterTaskFuncCanGatherScatterToSubJob(t *testing.T) {
+func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
@@ -161,7 +161,7 @@ func TestGatherScatterTaskFuncCanGatherScatterToSubJob(t *testing.T) {
 	chk.True(subJobTaskRan, "The task in the sub-job should have run")
 }
 
-func TestGatherScatterTaskFuncCannotGatherScatterToParentJob(t *testing.T) {
+func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
@@ -189,7 +189,7 @@ func TestGatherScatterTaskFuncCannotGatherScatterToParentJob(t *testing.T) {
 					return nil
 				},
 			)
-			chk.PanicsWithValue("Scatter called from within TaskFunc; move call to GatherFunc instead", func() {
+			chk.PanicsWithValue("Scatter called from within Task; move call to Gather instead", func() {
 				_ = innerGather.Scatter(
 					ctx,
 					parentPool,
@@ -208,7 +208,7 @@ func TestGatherScatterTaskFuncCannotGatherScatterToParentJob(t *testing.T) {
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }
 
-func TestGatherScatterTaskFuncCannotGather(t *testing.T) {
+func TestGatherScatterTaskCannotGather(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
@@ -228,7 +228,7 @@ func TestGatherScatterTaskFuncCannotGather(t *testing.T) {
 		ctx,
 		pool,
 		func(ctx context.Context) (bool, error) {
-			chk.PanicsWithValue("Gather called from within TaskFunc of the same or a parent Job", func() {
+			chk.PanicsWithValue("Gather called from within Task of the same or a parent Job", func() {
 				_, _ = job.TryGather(ctx)
 			})
 			return true, nil
@@ -239,7 +239,7 @@ func TestGatherScatterTaskFuncCannotGather(t *testing.T) {
 	chk.NoError(job.CloseAndGatherAll(ctx))
 }
 
-func TestGatherScatterTaskFuncCannotGatherParentJob(t *testing.T) {
+func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
 
@@ -276,7 +276,7 @@ func TestGatherScatterTaskFuncCannotGatherParentJob(t *testing.T) {
 				ctx,
 				subPool,
 				func(ctx context.Context) (bool, error) {
-					chk.PanicsWithValue("Gather called from within TaskFunc of the same or a parent Job", func() {
+					chk.PanicsWithValue("Gather called from within Task of the same or a parent Job", func() {
 						_, _ = parentJob.TryGather(ctx)
 					})
 					return true, nil

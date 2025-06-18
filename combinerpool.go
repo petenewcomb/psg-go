@@ -100,7 +100,7 @@ func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 
 var combineQueuePool = &rdvq.Pool[pendingCombine]{}
 
-func (cp *CombinerPool) postCombine(ctx context.Context, combineFn boundCombineFunc) {
+func (cp *CombinerPool) postCombine(ctx context.Context, combineFn boundCombine) {
 	if cp.state.MaybeSpawnGoroutine() {
 		cp.spawnNewCombiner(combineFn)
 		return
@@ -127,7 +127,7 @@ func (cp *CombinerPool) releaseWaiters() {
 	}
 }
 
-func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pendingCombine, combineFn boundCombineFunc) {
+func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pendingCombine, combineFn boundCombine) {
 
 	// We don't attempt the primary channel alone here since both fast paths
 	// failed, meaning both primary and secondary goroutines are likely busy. At
@@ -180,7 +180,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pe
 	}
 }
 
-func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
+func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 	j := cp.j
 	nextJobFlushCh, unregisterAsJobFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
@@ -215,23 +215,23 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 		}()
 
 		var cm combinerMap
-		type combineWorkFunc func(ctx context.Context)
+		type combineWork func(ctx context.Context)
 		type combineWorkItem struct {
 			id     int64
-			workFn combineWorkFunc
+			workFn combineWork
 		}
 		var workQueue basicq.Queue[combineWorkItem]
 		var workCounter int64
 
 		// Pending scatter queue for backpressure handling
-		type pendingScatterFunc func(ctx context.Context) error
-		var pendingScatters basicq.Queue[pendingScatterFunc]
+		type pendingScatter func(ctx context.Context) error
+		var pendingScatters basicq.Queue[pendingScatter]
 
 		// More forward references
-		var executeCombineFn func(ctx context.Context, combineFn boundCombineFunc)
+		var executeCombineFn func(ctx context.Context, combineFn boundCombine)
 		var flushAll func(ctx context.Context)
 
-		queueWork := func(workFn combineWorkFunc) {
+		queueWork := func(workFn combineWork) {
 			workCounter++
 			workQueue.PushBack(combineWorkItem{
 				id:     workCounter,
@@ -450,7 +450,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 		// Ensure combiner is flushed as needed when this goroutine terminates.
 		defer flushAll(backpressureCtx)
 
-		executeCombineFn = func(ctx context.Context, combineFn boundCombineFunc) {
+		executeCombineFn = func(ctx context.Context, combineFn boundCombine) {
 			if nextJobFlushCh == nil {
 				// Make sure the job won't terminate before the combiner is flushed
 				nextJobFlushCh, unregisterAsJobFlusher = j.state.RegisterFlusher()
@@ -569,14 +569,14 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombineFunc) {
 
 const errIdleTimeout = cerr.Error("idle timeout reached")
 
-type boundCombineFunc func(ctx context.Context, cm *combinerMap)
+type boundCombine func(ctx context.Context, cm *combinerMap)
 
 type pendingCombine struct {
-	fn             boundCombineFunc
+	fn             boundCombine
 	releaseWaiters bool
 }
 
-type halfBoundCombineFunc[I any] func(ctx context.Context, input I, inputErr error)
+type halfBoundCombine[I any] func(ctx context.Context, input I, inputErr error)
 
 type boundCombiner struct {
 	CombineFn     any
@@ -611,16 +611,16 @@ type combinerMapKey struct {
 	Combine any
 }
 
-func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *CombineOp[I, O]) halfBoundCombineFunc[I] {
+func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *CombineOp[I, O]) halfBoundCombine[I] {
 	j := cp.j
 	k := combinerMapKey{
 		Job:     j,
 		Combine: c,
 	}
 	bc := cm.m[k]
-	var combineFn halfBoundCombineFunc[I]
+	var combineFn halfBoundCombine[I]
 	if bc != nil {
-		combineFn = bc.CombineFn.(halfBoundCombineFunc[I])
+		combineFn = bc.CombineFn.(halfBoundCombine[I])
 	} else {
 		emit := func(ctx context.Context, output O, outputErr error) {
 			// Bind the gatherFn to the combiner output
@@ -644,13 +644,13 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 					emit(ctx, *new(O), ErrCombinerFactoryPanicked)
 				}
 			}()
-			combiner := c.newCombiner()
+			psgfnCombiner := c.newCombiner()
 			panicked = false
-			if combiner == nil {
+			if psgfnCombiner.CombineFn == nil && psgfnCombiner.FlushFn == nil {
 				emit(ctx, *new(O), ErrCombinerFactoryReturnedNil)
-				combiner = &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
+				return &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
 			}
-			return combiner
+			return psgfnCombiner
 		}()
 
 		// Initialize the map if needed

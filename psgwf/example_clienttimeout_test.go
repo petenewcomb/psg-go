@@ -39,7 +39,7 @@ func Example_clientTimeout() {
 		return nil
 	})
 
-	newRequestTaskFn := func(requestID string) psgwf.TaskFunc[string] {
+	newRequestTaskFn := func(requestID string) psgwf.Task[string] {
 		return func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			select {
 			case <-time.After(30 * time.Millisecond):

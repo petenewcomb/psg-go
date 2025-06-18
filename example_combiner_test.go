@@ -12,6 +12,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -28,7 +29,7 @@ func ExampleCombine() {
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// generic task function
-	newTaskFn := func(number int, delay time.Duration, result string) psg.TaskFunc[string] {
+	newTaskFn := func(number int, delay time.Duration, result string) psgfn.Task[string] {
 		return func(context.Context) (string, error) {
 			// Simulate a long-running task
 			time.Sleep(delay)
@@ -38,12 +39,12 @@ func ExampleCombine() {
 		}
 	}
 
-	newCombiner := func() psg.Combiner[string, map[string]int] {
+	newCombiner := func() psgfn.Combiner[string, map[string]int] {
 		// Aggregation state variable shared between combine and flush
 		var counts map[string]int
 
-		return psg.FuncCombiner[string, map[string]int]{
-			CombineFn: func(ctx context.Context, result string, err error, emit psg.CombinerEmitFunc[map[string]int]) {
+		return psgfn.Combiner[string, map[string]int]{
+			CombineFn: func(ctx context.Context, result string, err error, emit psgfn.Emit[map[string]int]) {
 				time.Sleep(10 * time.Millisecond)
 				if counts == nil {
 					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
@@ -52,7 +53,7 @@ func ExampleCombine() {
 				counts[result]++
 				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[map[string]int]) {
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[map[string]int]) {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
 				if counts != nil {
 					emit(ctx, counts, nil)

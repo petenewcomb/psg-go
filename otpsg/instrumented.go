@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // InstrumentedTask combines tracing, metrics, and logging for tasks into a single wrapper.
@@ -14,7 +15,7 @@ import (
 func InstrumentedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psg.TaskFunc[PropagatedResult[T]] {
+) psgfn.Task[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedTask := LoggedTask(operationName, taskFn)
@@ -48,8 +49,8 @@ func InstrumentedGather[T any](
 func InstrumentedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedCombiner := LoggedCombiner(combineOpName, flushOpName, combinerFactory)
@@ -67,14 +68,14 @@ func InstrumentedCombiner[I, O any](
 //
 // Example:
 //
-//	task := otpsg.InstrumentedTask("process-data", myTaskFunc)
-//	gatherOp := otpsg.InstrumentedGather("handle-result", myGatherFunc)
+//	task := otpsg.InstrumentedTask("process-data", myTaskFn)
+//	gatherOp := otpsg.InstrumentedGather("handle-result", myGatherFn)
 //	// Instead of gatherOp.Scatter(ctx, pool, task), use:
 //	err := otpsg.InstrumentedScatter(ctx, pool, task, gatherOp)
 func InstrumentedScatter[T any](
 	ctx context.Context,
 	target psg.TaskPoolOrJob,
-	task psg.TaskFunc[PropagatedResult[T]],
+	task psgfn.Task[PropagatedResult[T]],
 	gather *psg.GatherOp[PropagatedResult[T]],
 ) error {
 	return gather.Scatter(ctx, target, task)

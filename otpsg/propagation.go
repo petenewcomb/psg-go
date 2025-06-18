@@ -10,6 +10,7 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -23,12 +24,12 @@ type PropagatedResult[T any] struct {
 	TraceContext trace.SpanContext
 }
 
-// PropagateTask wraps a TaskFunc to ensure trace context flows through task results.
+// PropagateTask wraps a Task to ensure trace context flows through task results.
 // The returned task function will extract any existing trace context from the incoming
 // context and attach it to the result for propagation.
 func PropagateTask[T any](
 	taskFn func(ctx context.Context) (T, error),
-) psg.TaskFunc[PropagatedResult[T]] {
+) psgfn.Task[PropagatedResult[T]] {
 	return func(ctx context.Context) (PropagatedResult[T], error) {
 		// Extract any existing trace context from incoming context
 		existingTraceCtx := trace.SpanFromContext(ctx).SpanContext()
@@ -65,13 +66,13 @@ func PropagateGather[T any](
 // PropagateCombiner wraps a combiner factory to create combiners that propagate trace context.
 // Both the Combine and Flush methods will properly handle trace context propagation.
 func PropagateCombiner[I, O any](
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
-	return func() psg.Combiner[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	return func() psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]] {
 		innerCombiner := combinerFactory()
 
-		return psg.FuncCombiner[PropagatedResult[I], PropagatedResult[O]]{
-			CombineFn: func(ctx context.Context, input PropagatedResult[I], inputErr error, emit psg.CombinerEmitFunc[PropagatedResult[O]]) {
+		return psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]]{
+			CombineFn: func(ctx context.Context, input PropagatedResult[I], inputErr error, emit psgfn.Emit[PropagatedResult[O]]) {
 				// Create context with propagated trace data
 				propagatedCtx := ctx
 				if input.TraceContext.IsValid() {
@@ -92,7 +93,7 @@ func PropagateCombiner[I, O any](
 				// Process with inner combiner
 				innerCombiner.Combine(propagatedCtx, input.UserResult, inputErr, wrappedEmit)
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[PropagatedResult[O]]) {
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[PropagatedResult[O]]) {
 				// Extract current trace context for output propagation
 				currentTrace := trace.SpanFromContext(ctx).SpanContext()
 

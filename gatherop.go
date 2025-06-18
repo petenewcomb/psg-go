@@ -5,31 +5,16 @@ package psg
 
 import (
 	"context"
+
+	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// A GatherFunc is a function that processes the result of a completed
-// [TaskFunc]. It receives the result and error values from the [TaskFunc]
-// execution, allowing it to handle both successful and failed task executions.
-//
-// The GatherFunc is called when completed task results are processed by
-// [Scatter], [Job.Gather], [Job.TryGather], [Job.GatherAll], or
-// [Job.TryGatherAll]. Execution of a GatherFunc will block processing of
-// subsequent task results, adding to backpressure. If such backpressure is
-// undesirable, consider launching expensive gathering logic in another
-// asynchronous task using [Scatter]. Unlike [TaskFunc], it is safe to call
-// [Scatter] from within a GatherFunc.
-//
-// If multiple goroutines may call [Scatter], [Job.Gather],
-// [Job.TryGather], [Job.GatherAll], or [Job.TryGatherAll] concurrently, then
-// every GatherFunc used in the job must be thread-safe.
-type GatherFunc[T any] = func(context.Context, T, error) error
-
 type GatherOp[T any] struct {
-	gatherFn GatherFunc[T]
+	gatherFn psgfn.Gather[T]
 }
 
 func NewGatherOp[T any](
-	gatherFn GatherFunc[T],
+	gatherFn psgfn.Gather[T],
 ) *GatherOp[T] {
 	if gatherFn == nil {
 		panic("gather function must be non-nil")
@@ -54,9 +39,9 @@ func NewGatherOp[T any](
 // may be used to cancel (e.g., with a timeout) both gathering and launch, but
 // only the context associated with the task's job will be passed to the task.
 //
-// WARNING: Scatter must not be called from within a TaskFunc launched the same
+// WARNING: Scatter must not be called from within a Task launched the same
 // job as this may lead to deadlock when a concurrency limit is reached.
-// Instead, call Scatter from the associated GatherFunc after the TaskFunc
+// Instead, call Scatter from the associated Gather after the Task
 // completes.
 //
 // Scatter will panic if the given task pool is not yet associated with a job.
@@ -65,18 +50,18 @@ func NewGatherOp[T any](
 // task function supplied to the call will not have been launched will therefore
 // also not result in a call to the GatherOp's gather function.
 //
-// See [TaskFunc] and [GatherFunc] for important caveats and additional detail.
+// See [Task] and [Gather] for important caveats and additional detail.
 func (g *GatherOp[T]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
-	taskFunc TaskFunc[T],
+	taskFn psgfn.Task[T],
 ) error {
 	j := target.job()
 	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFunc)
+	vetScatter(vettedCtx, target, taskFn)
 
 	doScatter := func(vettedCtx vettedContext) error {
-		launched, err := g.scatter(vettedCtx, j, target, true, taskFunc)
+		launched, err := g.scatter(vettedCtx, j, target, true, taskFn)
 		if !launched && err == nil {
 			panic("task function was not launched, but no error was returned")
 		}
@@ -118,11 +103,11 @@ func (g *GatherOp[T]) Scatter(
 func (g *GatherOp[T]) TryScatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
-	taskFunc TaskFunc[T],
+	taskFn psgfn.Task[T],
 ) (bool, error) {
 	j := target.job()
 	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFunc)
+	vetScatter(vettedCtx, target, taskFn)
 
 	if !vettedCtx.inGather {
 		if err := j.processOutstandingWork(ctx); err != nil {
@@ -130,7 +115,7 @@ func (g *GatherOp[T]) TryScatter(
 		}
 	}
 
-	return g.scatter(vettedCtx, j, target, false, taskFunc)
+	return g.scatter(vettedCtx, j, target, false, taskFn)
 }
 
 func (g *GatherOp[T]) scatter(
@@ -138,7 +123,7 @@ func (g *GatherOp[T]) scatter(
 	j *Job,
 	target TaskPoolOrJob,
 	block bool,
-	taskFunc TaskFunc[T],
+	taskFn psgfn.Task[T],
 ) (bool, error) {
 	bp := getBackpressureProvider(vettedCtx.ctx, j)
 
@@ -151,8 +136,8 @@ func (g *GatherOp[T]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(vettedCtx, target, taskFunc, bpf, func(ctx context.Context, value T, err error) {
-		// Build the gather function, binding the supplied gatherFunc to the
+	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, value T, err error) {
+		// Build the gather function, binding the supplied gatherFn to the
 		// result.
 		gatherFn := func(ctx context.Context) error {
 			return g.gatherFn(ctx, value, err)

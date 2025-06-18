@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"go.opentelemetry.io/otel"
 )
 
@@ -16,7 +16,7 @@ import (
 func MetricsTask[T any](
 	metricName string,
 	taskFn func(ctx context.Context) (T, error),
-) psg.TaskFunc[T] {
+) psgfn.Task[T] {
 	return func(ctx context.Context) (T, error) {
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")
@@ -50,7 +50,7 @@ func MetricsTask[T any](
 func MetricsGather[T any](
 	metricName string,
 	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.GatherFunc[T] {
+) psgfn.Gather[T] {
 	return func(ctx context.Context, result T, err error) error {
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")
@@ -84,9 +84,9 @@ func MetricsGather[T any](
 func MetricsCombiner[I, O any](
 	combineMetricName string,
 	flushMetricName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[I, O] {
-	return func() psg.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[I, O] {
+	return func() psgfn.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
@@ -99,8 +99,8 @@ func MetricsCombiner[I, O any](
 		flushCounter, _ := meter.Int64Counter(flushMetricName + ".count")
 		flushDuration, _ := meter.Float64Histogram(flushMetricName + ".duration")
 
-		return psg.FuncCombiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error, emit psg.CombinerEmitFunc[O]) {
+		return psgfn.Combiner[I, O]{
+			CombineFn: func(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
 				startTime := time.Now()
 
 				// Track execution
@@ -123,7 +123,7 @@ func MetricsCombiner[I, O any](
 				innerCombiner.Combine(ctx, input, inputErr, emit)
 				didPanic = false
 			},
-			FlushFn: func(ctx context.Context, emit psg.CombinerEmitFunc[O]) {
+			FlushFn: func(ctx context.Context, emit psgfn.Emit[O]) {
 				startTime := time.Now()
 
 				// Track execution

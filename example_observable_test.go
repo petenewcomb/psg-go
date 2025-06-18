@@ -11,6 +11,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -27,7 +28,7 @@ func Example_observable() {
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// generic task function
-	newTaskFn := func(taskName string) psg.TaskFunc[string] {
+	newTaskFn := func(taskName string) psgfn.Task[string] {
 		return func(context.Context) (string, error) {
 			// Simulate latency
 			switch taskName {
@@ -51,7 +52,7 @@ func Example_observable() {
 		func(ctx context.Context, result string, err error) error {
 			time.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   gathered result %q\n", msSinceStart(), result)
-			// Safe because gatherFunc will only ever be called from the current
+			// Safe because gather will only ever be called from the current
 			// goroutine within calls to Scatter and GatherAll below.
 			results = append(results, result)
 			return err

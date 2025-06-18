@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // TaskPoolOrJob represents either a TaskPool or a Job.
@@ -15,15 +16,17 @@ type TaskPoolOrJob interface {
 	// job returns the Job associated with this target
 	job() *Job
 	// launch executes a task, potentially waiting if concurrency limits are reached
-	launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTaskFunc) (launched bool, err error)
+	launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTask) (launched bool, err error)
 	// withBackpressureProvider returns a context with the appropriate backpressure provider
 	withBackpressureProvider(ctx context.Context) context.Context
 }
 
+type boundTask func(ctx context.Context, completedFn func(), ctxWithBP func(backpressureProvider) context.Context)
+
 func vetScatter[T any](
 	vetted vettedContext,
 	target TaskPoolOrJob,
-	taskFn TaskFunc[T],
+	taskFn psgfn.Task[T],
 ) {
 	if taskFn == nil {
 		panic("task function must be non-nil")
@@ -39,7 +42,7 @@ func vetScatter[T any](
 	if vetted.hasTaskValue {
 		// Don't launch if the provided context is a task context within the
 		// current job, since that may lead to deadlock.
-		panic("Scatter called from within TaskFunc; move call to GatherFunc instead")
+		panic("Scatter called from within Task; move call to Gather instead")
 	}
 
 	// Panic if the job is already done. This prevents tasks from being launched
@@ -51,7 +54,7 @@ func vetScatter[T any](
 func scatter[T any](
 	vettedCtx vettedContext,
 	target TaskPoolOrJob,
-	taskFn TaskFunc[T],
+	taskFn psgfn.Task[T],
 	applyBackpressure backpressureFunc,
 	postResultFn func(context.Context, T, error),
 ) (launched bool, err error) {
@@ -109,7 +112,7 @@ func scatter[T any](
 		// program will terminate. The user can avoid this behavior by
 		// recovering from the panic within the task function itself and then
 		// returning normally with whatever results they want to pass to the
-		// GatherFunc to represent the failure. We therefore do not defer
+		// Gather to represent the failure. We therefore do not defer
 		// posting a gather to the job's channel or otherwise attempt to
 		// maintain the integrity of the task pool or overall job in case of task
 		// panics.

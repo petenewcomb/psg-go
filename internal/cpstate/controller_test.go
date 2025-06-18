@@ -17,7 +17,6 @@ func newTestController() *controller {
 	c.SetConfig(controllerConfig{
 		MinConcurrency:           1,
 		MaxConcurrency:           -1, // unlimited
-		RetentionPeriod:          time.Hour,
 		HighUtilThreshold:        0.6,
 		MinThroughputROI:         0.2,
 		AggressiveGrowthFactor:   2.5,
@@ -43,7 +42,7 @@ func TestControllerBasics(t *testing.T) {
 			Throughput:     1000,
 			SecondaryUtil:  0.5,
 		}
-		c.AddSample(s)
+		c.AddSample(time.Hour, s)
 
 		if len(c.samples) != 1 {
 			t.Fatalf("expected 1 sample, got %d", len(c.samples))
@@ -58,19 +57,19 @@ func TestControllerBasics(t *testing.T) {
 		now := time.Now()
 
 		// Add samples out of order
-		c.AddSample(perfSample{
+		c.AddSample(time.Hour, perfSample{
 			Time:           now,
 			GoroutineCount: 10,
 			Throughput:     2000,
 			SecondaryUtil:  0.5,
 		})
-		c.AddSample(perfSample{
+		c.AddSample(time.Hour, perfSample{
 			Time:           now.Add(time.Second),
 			GoroutineCount: 5,
 			Throughput:     1000,
 			SecondaryUtil:  0.5,
 		})
-		c.AddSample(perfSample{
+		c.AddSample(time.Hour, perfSample{
 			Time:           now.Add(2 * time.Second),
 			GoroutineCount: 15,
 			Throughput:     2500,
@@ -98,7 +97,7 @@ func TestControllerBasics(t *testing.T) {
 		now := time.Now()
 
 		// First sample
-		c.AddSample(perfSample{
+		c.AddSample(time.Hour, perfSample{
 			Time:           now,
 			GoroutineCount: 5,
 			Throughput:     1000,
@@ -106,7 +105,7 @@ func TestControllerBasics(t *testing.T) {
 		})
 
 		// Update with same goroutine count
-		c.AddSample(perfSample{
+		c.AddSample(time.Hour, perfSample{
 			Time:           now.Add(time.Second),
 			GoroutineCount: 5,
 			Throughput:     1200,
@@ -138,7 +137,7 @@ func TestFindUtilizationValley(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		valleyIdx := c.findUtilizationValley()
@@ -159,7 +158,7 @@ func TestFindUtilizationValley(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		valleyIdx := c.findUtilizationValley()
@@ -185,7 +184,7 @@ func TestFindThroughputKnee(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		knee := c.findThroughputKnee()
@@ -207,7 +206,7 @@ func TestFindThroughputKnee(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		knee := c.findThroughputKnee()
@@ -242,7 +241,7 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		target := c.RecommendTarget()
@@ -268,7 +267,7 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		target := c.RecommendTarget()
@@ -284,7 +283,6 @@ func TestRecommendTarget(t *testing.T) {
 		c.SetConfig(controllerConfig{
 			MinConcurrency:           1,
 			MaxConcurrency:           10,
-			RetentionPeriod:          time.Hour,
 			HighUtilThreshold:        0.6,
 			MinThroughputROI:         0.2,
 			AggressiveGrowthFactor:   2.5,
@@ -300,7 +298,7 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		target := c.RecommendTarget()
@@ -323,7 +321,7 @@ func TestRecommendTarget(t *testing.T) {
 		}
 
 		for _, s := range samples {
-			c.AddSample(s)
+			c.AddSample(time.Hour, s)
 		}
 
 		target := c.RecommendTarget()
@@ -347,7 +345,7 @@ func TestControllerProperties(t *testing.T) {
 				throughput := rapid.Float64Range(10, 10000).Draw(t, "throughput")
 				util := rapid.Float64Range(0.1, 0.95).Draw(t, "utilization")
 
-				c.AddSample(perfSample{
+				c.AddSample(time.Hour, perfSample{
 					Time:           time.Now(),
 					GoroutineCount: gc,
 					Throughput:     throughput,
@@ -388,7 +386,7 @@ func TestControllerProperties(t *testing.T) {
 				throughput := rapid.Float64Range(100, 10000).Draw(t, "throughput")
 				util := rapid.Float64Range(0.1, 0.95).Draw(t, "utilization")
 
-				c.AddSample(perfSample{
+				c.AddSample(time.Hour, perfSample{
 					Time:           time.Now(),
 					GoroutineCount: gc,
 					Throughput:     throughput,
@@ -427,7 +425,7 @@ func TestControllerProperties(t *testing.T) {
 
 			// Add perfectly linear samples
 			for i := 1; i <= linearSamples; i++ {
-				c.AddSample(perfSample{
+				c.AddSample(time.Hour, perfSample{
 					GoroutineCount: i,
 					Throughput:     slope * float64(i),
 					SecondaryUtil:  0.5,
@@ -438,7 +436,7 @@ func TestControllerProperties(t *testing.T) {
 			for i := linearSamples + 1; i <= linearSamples+5; i++ {
 				// Throughput deviates from linear
 				deviation := rapid.Float64Range(0.3, 0.7).Draw(t, "deviation")
-				c.AddSample(perfSample{
+				c.AddSample(time.Hour, perfSample{
 					GoroutineCount: i,
 					Throughput:     slope * float64(i) * deviation,
 					SecondaryUtil:  0.7,

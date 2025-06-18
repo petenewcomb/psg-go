@@ -28,8 +28,9 @@ type CombinerPoolState struct {
 	mu sync.Mutex
 
 	// Configuration
-	tau         ema.Tau
-	idleTimeout time.Duration
+	tau             ema.Tau
+	idleTimeout     time.Duration
+	retentionPeriod atomic.Int64 // time.Duration
 
 	completedCountOrigin int64
 	secondaryWait        ttrk.TimeTracker
@@ -60,6 +61,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 		controllerConfig:        cps.controller.config,
 		IdleTimeout:             cps.idleTimeout,
 		MeasurementTimeConstant: time.Duration(cps.tau),
+		RetentionPeriod:         time.Duration(cps.retentionPeriod.Load()),
 	}
 
 	// Apply changes to the copy
@@ -72,6 +74,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	cps.controller.SetConfig(newConfig.controllerConfig)
 	cps.idleTimeout = newConfig.IdleTimeout
 	cps.tau = ema.Tau(newConfig.MeasurementTimeConstant)
+	cps.retentionPeriod.Store(int64(newConfig.RetentionPeriod))
 
 	// Ask controller if the target should change given new limits
 	newTarget := cps.controller.RecommendTarget()
@@ -102,7 +105,7 @@ func (cps *CombinerPoolState) SecondaryWaitEnded(startTime time.Time) {
 
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
 	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	if time.Since(lastUpdate) > min(time.Duration(cps.tau), cps.controller.RetentionPeriod()/2) {
+	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -216,7 +219,7 @@ func (cps *CombinerPoolState) GoroutineExited() {
 	cps.liveGoroutineCount--
 
 	if cps.liveGoroutineCount == 0 {
-		cps.controller = controller{} // Reset size controller
+		cps.controller.Reset()
 		cps.throughput.Set(0)
 		cps.secondaryUtil.Set(0)
 	}
@@ -264,7 +267,7 @@ func (cps *CombinerPoolState) updateStats() bool {
 	}
 
 	// Update size controller with latest sample
-	cps.controller.AddSample(perfSample{
+	cps.controller.AddSample(time.Duration(cps.retentionPeriod.Load()), perfSample{
 		Time:           timeOrigin,
 		GoroutineCount: cps.liveGoroutineCount,
 		Throughput:     cps.throughput.Get(),

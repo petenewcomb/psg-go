@@ -13,7 +13,6 @@ import (
 type controllerConfig struct {
 	MinConcurrency           int
 	MaxConcurrency           int // -1 means unlimited
-	RetentionPeriod          time.Duration
 	HighUtilThreshold        float64
 	MinThroughputROI         float64
 	AggressiveGrowthFactor   float64
@@ -65,12 +64,12 @@ func (c *controller) SetConfig(config controllerConfig) {
 	c.config = config
 }
 
-// RetentionPeriod returns the current retention period.
-func (c *controller) RetentionPeriod() time.Duration {
-	return c.config.RetentionPeriod
+func (c *controller) Reset() {
+	c.samples = c.samples[:0]
+	c.oldestSampleTime = time.Time{}
 }
 
-func (c *controller) AddSample(s perfSample) {
+func (c *controller) AddSample(retentionPeriod time.Duration, s perfSample) {
 	// Find where this sample should be inserted/updated in the sorted slice
 	newSampleIndex := c.findByGoroutineCount(s.GoroutineCount)
 	if newSampleIndex < len(c.samples) && s.GoroutineCount == c.samples[newSampleIndex].GoroutineCount {
@@ -97,7 +96,7 @@ func (c *controller) AddSample(s perfSample) {
 		}
 	}
 
-	oldestValidTime := s.Time.Add(-c.config.RetentionPeriod)
+	oldestValidTime := s.Time.Add(-retentionPeriod)
 	if !c.oldestSampleTime.IsZero() && !c.oldestSampleTime.Before(oldestValidTime) {
 		// Existing samples still valid, just need to insert if new.
 		if newSampleIndex == len(c.samples) || s.GoroutineCount != c.samples[newSampleIndex].GoroutineCount {

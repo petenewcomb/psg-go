@@ -13,6 +13,7 @@ import (
 // Config holds the complete configuration state for a CombinerPoolState.
 type Config struct {
 	controllerConfig
+	RetentionPeriod         time.Duration
 	IdleTimeout             time.Duration
 	MeasurementTimeConstant time.Duration
 }

@@ -73,7 +73,9 @@ func (g *GatherOp[T]) Scatter(
 		j.state.IncrementWork()
 		bp := getBackpressureProvider(vettedCtx.ctx, j)
 		bp.QueueWork(func(ctx context.Context) error {
-			defer j.state.DecrementWork()
+			defer func() {
+				j.state.DecrementWork()
+			}()
 			vettedCtx := j.vettedContext(ctx)
 			return doScatter(vettedCtx)
 		})
@@ -82,7 +84,7 @@ func (g *GatherOp[T]) Scatter(
 
 	ctx = j.gatherContext(vettedCtx)
 
-	if err := j.processOutstandingWork(ctx); err != nil {
+	if _, err := j.processOutstandingWork(ctx); err != nil {
 		return err
 	}
 
@@ -110,7 +112,7 @@ func (g *GatherOp[T]) TryScatter(
 	vetScatter(vettedCtx, target, taskFn)
 
 	if !vettedCtx.inGather {
-		if err := j.processOutstandingWork(ctx); err != nil {
+		if _, err := j.processOutstandingWork(ctx); err != nil {
 			return false, err
 		}
 	}
@@ -136,14 +138,18 @@ func (g *GatherOp[T]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, value T, err error) {
+	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, taskWorkerOutboxMap *outboxMap, value T, err error) {
 		// Build the gather function, binding the supplied gatherFn to the
 		// result.
 		gatherFn := func(ctx context.Context) error {
+			defer func() {
+				j.state.DecrementWork()
+			}()
 			return g.gatherFn(ctx, value, err)
 		}
 
-		// Post the gather using the idle worker queue optimization
-		j.postGather(ctx, gatherFn)
+		// Post the gather using the task worker's outbox to the job's gather queue
+		gatherOutbox := OutboxFor[boundGather](taskWorkerOutboxMap, j.gatherOutboxKey())
+		j.postGather(ctx, gatherOutbox, gatherFn)
 	})
 }

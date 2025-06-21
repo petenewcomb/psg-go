@@ -13,6 +13,7 @@ See `README.md` for a project overview, the `docs` folder for design documentati
 - Use atomic operations when possible in hot paths, but ensure proper synchronization everywhere 
 
 ## Build/Test/Source Control Commands
+- Use `goimports` to fix up imports
 - Use `go vet ./...` to verify code correctness instead of running a build with `go build` unless you really need the executable(s)
 - Run all tests in short mode for general functional validation: `go test -short ./...` as tests may take several minutes to run without `-short`
 - Use `go test -run '^TestOrExampleName$' ./...` with or without `-short` to run a specific test or example
@@ -20,7 +21,8 @@ See `README.md` for a project overview, the `docs` folder for design documentati
 - Remember that `go test` will usually output nothing upon success. To force it to generate output for all tests run use `-v`. Also pay attention to the exit code.
 - Use `go test -race` to engage the race detector, which will slow execution time but detect at least egregious cross-thread data access problems.
 - Avoid adding unrelated untracked files to a commit.  Prefer `git add -u` over `git add .`, or better yet just stage files by naming them explicitly.
-- When running long-duration benchmarks, always set bash timeout greater than the expected duration to account for overhead (including warmup)
+- Use `.githooks/pre-commit` to run pre-commit checks before attempting a commit; pay attention to its return code and realize that it may make modifications that mean files must be (re-)staged.
+- When running benchmarks, always set bash timeout greater than the expected duration to account for overhead (including warmup)
 
 ## Code Style
 - See .githooks/pre-commit for expectations of code ready to review

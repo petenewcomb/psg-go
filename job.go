@@ -16,7 +16,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
-	"github.com/petenewcomb/psg-go/internal/waitq"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -50,7 +49,7 @@ type Job struct {
 	// storage capability would be a perfect fit here.
 	workQueue   nbcq.Queue[workItem]
 	workCounter atomic.Int64
-	workWaiters waitq.Queue
+	workWaiters rdvq.Waiters
 
 	taskQueue             rdvq.Optional[pendingTask]
 	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
@@ -59,10 +58,15 @@ type Job struct {
 	gatherCtxCache sync.Map // context.Context -> context.Context
 }
 
-type pendingTask func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context)
+type pendingTask func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap)
 
 // job returns the Job itself to satisfy the TaskPoolOrJob interface.
 func (j *Job) job() *Job {
+	return j
+}
+
+// gatherOutboxKey returns a unique identifier for this Job for gather outbox mapping.
+func (j *Job) gatherOutboxKey() outboxKey[boundGather] {
 	return j
 }
 
@@ -129,7 +133,7 @@ func (j *Job) withBackpressureProvider(ctx context.Context) context.Context {
 
 type boundGather = func(ctx context.Context) error
 
-type workFunc func(context.Context) error
+type workFunc func(context.Context, int64) error
 
 type workItem struct {
 	id     int64
@@ -368,29 +372,39 @@ func (j *Job) gatherContext(vettedCtx vettedContext) context.Context {
 	return gatherCtx
 }
 
-func (j *Job) queueWork(workFn workFunc) {
+func (j *Job) queueWork(workFn workFunc) int64 {
+	id := j.workCounter.Add(1)
 	j.workQueue.PushBack(workQueuePool, workItem{
-		id:     j.workCounter.Add(1),
+		id:     id,
 		workFn: workFn,
 	})
 	j.workWaiters.Notify()
+	return id
 }
 
-func (j *Job) processOutstandingWork(ctx context.Context) error {
+func (j *Job) processOutstandingWork(ctx context.Context) (int64, error) {
 	lastIDToProcess := j.workCounter.Load()
+
+	// This initial value will be returned only if we get nothing from the queue
+	lastIDProcessed := lastIDToProcess
+
+	var err error
 	for {
 		work, ok := j.workQueue.PopFront(workQueuePool)
 		if !ok {
 			break
 		}
-		if err := work.workFn(ctx); err != nil {
-			return err
+
+		lastIDProcessed = work.id
+
+		if err = work.workFn(ctx, work.id); err != nil {
+			break
 		}
 		if work.id >= lastIDToProcess {
 			break
 		}
 	}
-	return nil
+	return lastIDProcessed, err
 }
 
 func (j *Job) processWorkAndGather(vettedCtx vettedContext) (bool, error) {
@@ -400,15 +414,20 @@ func (j *Job) processWorkAndGather(vettedCtx vettedContext) (bool, error) {
 	ctx := vettedCtx.ctx
 	var err error
 	if !vettedCtx.inGather {
+		var lastWorkIDProcessed int64
+		lastWorkIDProcessed, err = j.processOutstandingWork(ctx)
+		if err != nil {
+			return false, err
+		}
+
 		ctx = j.gatherContext(vettedCtx)
 		for {
 			var waiterNotified bool
-			workWaiter := j.workWaiters.NewWaiter(func() bool {
+			workWaiter := j.workWaiters.New(func() bool {
 				// Process work queue inside the wait to avoid race conditions
-				if err = j.processOutstandingWork(ctx); err != nil {
-					return false
-				}
-				return true
+				lastWorkIDAvailable := j.workCounter.Load()
+				workQueueStillEmpty := lastWorkIDAvailable == lastWorkIDProcessed
+				return workQueueStillEmpty
 			})
 			waiterNotified, err = j.gather(ctx, workWaiter, nil)
 			if !waiterNotified || err != nil {
@@ -416,48 +435,50 @@ func (j *Job) processWorkAndGather(vettedCtx vettedContext) (bool, error) {
 			}
 		}
 	} else {
-		_, err = j.gather(ctx, waitq.Waiter{}, nil)
+		_, err = j.gather(ctx, rdvq.Waiter{}, nil)
 	}
 
 	return err == nil, err
 }
 
 // postGather sends a gather operation to the gather queue.
-func (j *Job) postGather(ctx context.Context, gather boundGather) {
+func (j *Job) postGather(ctx context.Context, outbox *rdvq.Outbox[boundGather], gather boundGather) {
 	// Error can only be due to context cancellation, so safe to ignore here.
-	_ = j.gatherQueue.PushBack(ctx, gatherQueuePool, gather)
+	_ = j.gatherQueue.PushBack(ctx, gatherQueuePool, outbox, gather)
 }
 
 func (j *Job) queueGather(gather boundGather) {
-	j.queueWork(func(ctx context.Context) error {
-		return j.executeGather(ctx, gather)
+	j.queueWork(func(ctx context.Context, workID int64) error {
+		return j.executeGather(ctx, workID, gather)
 	})
 }
 
 // Returns true if the waiter was notified, false otherwise.  Returns errJobDone if the job is done.
-func (j *Job) gather(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
+func (j *Job) gather(ctx context.Context, waiter rdvq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	waiterNotified := false
 	var err error
 	j.gatherQueue.PopFrontFunc(gatherQueuePool, j.queueGather,
-		func(dedicatedCh, sharedCh <-chan boundGather) (sourceCh <-chan boundGather) {
-			waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
+		func(inboxCh <-chan boundGather, popWaitCh <-chan struct{}) rdvq.SelectResult {
+			popResult := rdvq.SelectAborted
+			waiter.Wait(func(waiterWaitCh <-chan struct{}) rdvq.SelectResult {
 				select {
-				case gather := <-dedicatedCh:
+				case gather := <-inboxCh:
 					j.queueGather(gather)
-					sourceCh = dedicatedCh
-				case gather := <-sharedCh:
-					j.queueGather(gather)
-				case <-waitCh:
-					return true
+					popResult = rdvq.SelectInboxEmptied
+				case <-popWaitCh:
+					popResult = rdvq.SelectWaitSignaled
+				case <-waiterWaitCh:
+					waiterNotified = true
+					return rdvq.SelectWaitSignaled
 				case <-limitCh:
 				case <-j.state.Done():
 					err = ErrJobDone
 				case <-ctx.Done():
 					err = ctx.Err()
 				}
-				return false
+				return rdvq.SelectAborted
 			})
-			return sourceCh
+			return popResult
 		},
 	)
 	return waiterNotified, err
@@ -492,7 +513,7 @@ func (j *Job) processWorkAndTryGather(vettedCtx vettedContext) (bool, error) {
 	if !vettedCtx.inGather {
 		// Use cached gather context instead of creating new one
 		ctx := j.gatherContext(vettedCtx)
-		if err := j.processOutstandingWork(ctx); err != nil {
+		if _, err := j.processOutstandingWork(ctx); err != nil {
 			return true, err
 		}
 	}
@@ -501,11 +522,10 @@ func (j *Job) processWorkAndTryGather(vettedCtx vettedContext) (bool, error) {
 }
 
 func (j *Job) tryQueueGather() bool {
-	ok := false
-	j.gatherQueue.TryPopFront(gatherQueuePool, func(gather boundGather) {
-		ok = true
+	gather, ok := j.gatherQueue.TryPopFront(gatherQueuePool)
+	if ok {
 		j.queueGather(gather)
-	})
+	}
 	return ok
 }
 
@@ -602,12 +622,15 @@ func (j *Job) spawnTaskWorker(taskFn pendingTask) {
 			return cached
 		}
 
+		// Create the outbox map for this task worker goroutine
+		var taskWorkerOutboxMap outboxMap
+
 		idleTimer := timerp.Get()
 		defer timerp.Put(idleTimer)
 
 		for taskFn != nil {
 			// Execute the task
-			taskFn(ctx, ctxWithBP)
+			taskFn(ctx, ctxWithBP, &taskWorkerOutboxMap)
 			taskFn = nil
 
 			// Wait for next task with timeout
@@ -622,14 +645,14 @@ func (j *Job) spawnTaskWorker(taskFn pendingTask) {
 						j.startTask(orphanedTaskFn)
 					}
 				},
-				func(ch <-chan pendingTask) bool {
+				func(inboxCh <-chan pendingTask) rdvq.SelectResult {
 					select {
-					case taskFn = <-ch:
-						return true
+					case taskFn = <-inboxCh:
+						return rdvq.SelectInboxEmptied
 					case <-idleTimer.C:
 					case <-ctx.Done():
 					}
-					return false
+					return rdvq.SelectAborted
 				},
 			)
 		}
@@ -644,18 +667,18 @@ var taskContextValueKey any = taskContextValueKeyType{}
 // Implements the TaskPoolOrJob interface.
 func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTask) (launched bool, err error) {
 	// Launch the task immediately without any pool tracking
-	j.startTask(func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context) {
-		taskFn(ctx, nil, ctxWithBP) // No completion callback needed for unlimited tasks
+	j.startTask(func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
+		taskFn(ctx, nil, ctxWithBP, taskWorkerOutboxMap) // No completion callback needed for unlimited tasks
 	})
 	return true, nil
 }
 
-func (j *Job) executeGather(ctx context.Context, gather boundGather) error {
+func (j *Job) executeGather(ctx context.Context, workID int64, gather boundGather) error {
 	// Decrement the environment-wide in-flight counter only AFTER calling the
 	// gather function. This ensures that the in-flight count never drops to
 	// zero before the gather function has had a chance to scatter new tasks.
-	defer j.state.DecrementWork()
-	return gather(ctx)
+	err := gather(ctx)
+	return err
 }
 
 // panicIfDone panics if the job is in the done state

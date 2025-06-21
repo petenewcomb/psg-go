@@ -9,6 +9,7 @@ find . -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
     set -x
     go mod tidy
     go vet ./...
+    goimports -w .
     gofmt -s -w .
     golangci-lint run
     go test -short ./...

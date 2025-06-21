@@ -39,29 +39,48 @@ The pattern requires several key components working together:
 
 ## RDVQ: Rendezvous Queue Implementation
 
-The Rendezvous Queue (RDVQ) abstraction encapsulates the idle receiver queue pattern into a reusable component. RDVQ provides a clean API that handles the complexity of coordinating between producers and consumers while eliminating channel contention.
+The Rendezvous Queue (RDVQ) abstraction encapsulates the idle receiver queue pattern into a reusable component with sophisticated overflow handling. RDVQ provides a clean API that handles the complexity of coordinating between producers and consumers while eliminating channel contention and providing "drop-and-go" semantics for bursty workloads.
 
-### The Package Delivery Analogy
+### Two-Tier Architecture
 
-To understand RDVQ's approach, imagine package handoffs in a large park:
+RDVQ operates on a two-tier performance model that gracefully handles different load scenarios:
 
-**Traditional shared channels** are like having everyone meet at one gazebo. All senders and receivers crowd around this single coordination point, creating bottlenecks as activity increases.
+**Tier 1: Direct Handoff (Fastest)**
+- Senders deliver directly to waiting receivers' dedicated channels
+- Zero contention, immediate delivery
+- Equivalent to direct rendezvous in a park
 
-**RDVQ's distributed coordination** allows senders and receivers to spot each other anywhere in the park. When a sender sees a receiver approaching, they can arrange a handoff at a dedicated location. Multiple handoffs happen simultaneously across different areas without interference.
+**Tier 2: Outbox Buffering (With Backpressure)**  
+- When no receivers are immediately available, first overflow item goes to sender's outbox
+- Sender returns immediately without blocking ("drop-and-go" semantics)
+- When outbox is full, subsequent items block on the outbox channel directly
+- Receivers drain outboxes when available
+- Provides per-sender backpressure when system is overwhelmed
+- Maintains flow control and prevents unbounded memory growth
 
-The process works like this:
-1. Receiver announces availability: "I'm walking toward a meeting point"
-2. Sender identifies the receiver: "I see you approaching"  
-3. Sender commits the package: "I'll leave it right here for you"
-4. Receiver retrieves it: "Got it!"
+### The Enhanced Package Delivery Analogy
 
-This is a rendezvous - both parties coordinate for successful handoff, but at their own dedicated location rather than competing for access to a shared one.
+To understand RDVQ's outbox system, imagine an enhanced package delivery scenario:
 
-### Performance Characteristics
+**Traditional shared channels** are like having everyone meet at one crowded gazebo, creating bottlenecks.
 
-RDVQ shows throughput improvements because senders don't block waiting for receivers to complete the handoff. The sender's work is done as soon as they deposit the value in the receiver's dedicated channel, allowing them to move on immediately. This "set down and go" approach provides much lower latency for senders compared to traditional hand-to-hand transfer.
+**RDVQ's two-tier coordination** works like this:
 
-The coordination happens through buffered channels (size 1), but this is an implementation detail. The semantic is still a rendezvous pattern - the queue registration guarantees an active receiver is coming to pick up the value immediately.
+1. **Direct Handoff**: If you see a delivery person approaching, hand off directly at a dedicated location
+2. **Drop Box with Backpressure**: If no delivery person is visible, leave the first package in your personal drop box and continue working. If your drop box is full, wait at your drop box until the delivery person empties it
+
+This system ensures that the first overflow package never causes delays, dramatically improving performance under bursty conditions while still providing backpressure when necessary.
+
+### Performance Characteristics and Race Prevention
+
+RDVQ shows dramatic throughput improvements because:
+
+1. **Senders rarely block**: The outbox system ensures the first overflow item from each sender is non-blocking
+2. **No contention in common case**: Direct handoffs happen at dedicated locations
+3. **Burst tolerance**: Temporary load spikes don't cause sender blocking
+4. **Graceful degradation**: System provides backpressure only when truly overwhelmed
+
+The implementation uses a sophisticated waiter verification system to prevent race conditions between outbox checking and blocking operations. When receivers register to wait, they provide a verification function that re-checks for outbox items after registration but before blocking, ensuring no items are missed.
 
 ### Asymmetric Design
 
@@ -75,7 +94,7 @@ RDVQ's dedicated receiver channels solve both contention problems with a single 
 - Eliminates sender contention by giving each sender their own handoff point
 - Also eliminates receiver contention by giving each receiver their own dedicated channel
 
-The shared channel fallback serves a specific purpose: enabling blocking sends when no receivers are available. This is essential for backpressure and flow control patterns, providing natural rate limiting when receivers can't keep up.
+The outbox backpressure mechanism serves a specific purpose: enabling blocking sends when no receivers are available and the outbox is full. This is essential for backpressure and flow control patterns, providing natural per-sender rate limiting when receivers can't keep up.
 
 ## Implementation Results
 

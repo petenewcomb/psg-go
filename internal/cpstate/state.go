@@ -28,8 +28,8 @@ type CombinerPoolState struct {
 	mu sync.Mutex
 
 	// Configuration
+	idleTimeout     atomic.Int64 // time.Duration
 	tau             ema.Tau
-	idleTimeout     time.Duration
 	retentionPeriod atomic.Int64 // time.Duration
 
 	completedCountOrigin int64
@@ -43,7 +43,7 @@ type CombinerPoolState struct {
 	controller controller
 
 	targetGoroutineCount           int
-	spawnedGoroutineCount          int
+	spawnedGoroutineCount          atomic.Int32
 	liveGoroutineCount             int
 	latestGoroutineCountChangeTime time.Time
 
@@ -59,7 +59,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	// Create a copy of the current configuration
 	newConfig := Config{
 		controllerConfig:        cps.controller.config,
-		IdleTimeout:             cps.idleTimeout,
+		IdleTimeout:             time.Duration(cps.idleTimeout.Load()),
 		MeasurementTimeConstant: time.Duration(cps.tau),
 		RetentionPeriod:         time.Duration(cps.retentionPeriod.Load()),
 	}
@@ -72,7 +72,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 
 	// Apply the validated configuration to the actual state
 	cps.controller.SetConfig(newConfig.controllerConfig)
-	cps.idleTimeout = newConfig.IdleTimeout
+	cps.idleTimeout.Store(int64(newConfig.IdleTimeout))
 	cps.tau = ema.Tau(newConfig.MeasurementTimeConstant)
 	cps.retentionPeriod.Store(int64(newConfig.RetentionPeriod))
 
@@ -84,11 +84,15 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	}
 }
 
+func (cps *CombinerPoolState) IdleTimeout() time.Duration {
+	return time.Duration(cps.idleTimeout.Load())
+}
+
 func (cps *CombinerPoolState) IncrementCompleted() {
 	cps.cumulativeCompletedCount.Add(1)
 }
 
-func (cps *CombinerPoolState) SecondaryWaitStarted(startTime time.Time) {
+func (cps *CombinerPoolState) SpareWaitStarted(startTime time.Time) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	cps.secondaryWait.Started(startTime)
@@ -97,7 +101,7 @@ func (cps *CombinerPoolState) SecondaryWaitStarted(startTime time.Time) {
 	}
 }
 
-func (cps *CombinerPoolState) SecondaryWaitEnded(startTime time.Time) {
+func (cps *CombinerPoolState) SpareWaitEnded(startTime time.Time) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	cps.secondaryWait.Ended(startTime, epoch.Add(time.Duration(cps.timeOrigin.Load())))
@@ -106,6 +110,14 @@ func (cps *CombinerPoolState) SecondaryWaitEnded(startTime time.Time) {
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
 	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
 	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) {
+		return cps.ShouldSpawnGoroutine() == nil
+	}
+	return false
+}
+
+func (cps *CombinerPoolState) ShouldStartFirstGoroutine() bool {
+	// Always do full check if spawned count is zero
+	if cps.spawnedGoroutineCount.Load() == 0 {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -125,11 +137,12 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
 
 	// Spawn immediately if we haven't yet reached target, and don't make
 	// matters worse if we're above target.
+	spawnedCount := int(cps.spawnedGoroutineCount.Load())
 	switch {
-	case cps.spawnedGoroutineCount < cps.targetGoroutineCount:
-		cps.spawnedGoroutineCount++
+	case spawnedCount < cps.targetGoroutineCount:
+		cps.spawnedGoroutineCount.Add(1)
 		return nil
-	case cps.spawnedGoroutineCount > cps.targetGoroutineCount:
+	case spawnedCount > cps.targetGoroutineCount:
 		return cps.waitChan
 	}
 
@@ -140,8 +153,8 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
 
 	cps.targetGoroutineCount = cps.controller.RecommendTarget()
 
-	if cps.spawnedGoroutineCount < cps.targetGoroutineCount {
-		cps.spawnedGoroutineCount++
+	if int(cps.spawnedGoroutineCount.Load()) < cps.targetGoroutineCount {
+		cps.spawnedGoroutineCount.Add(1)
 		cps.report("spawning")
 		return nil
 	}
@@ -155,11 +168,11 @@ func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
 
 	// Exit immediately if we haven't reduced to target yet, and don't make
 	// matters worse if we're below target.
+	spawnedCount := int(cps.spawnedGoroutineCount.Load())
 	switch {
-	case cps.spawnedGoroutineCount > cps.targetGoroutineCount:
-		cps.spawnedGoroutineCount--
+	case spawnedCount > cps.targetGoroutineCount:
 		return true
-	case cps.spawnedGoroutineCount < cps.targetGoroutineCount:
+	case spawnedCount < cps.targetGoroutineCount:
 		return false
 	}
 
@@ -170,8 +183,7 @@ func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
 
 	cps.targetGoroutineCount = cps.controller.RecommendTarget()
 
-	if cps.spawnedGoroutineCount > cps.targetGoroutineCount {
-		cps.spawnedGoroutineCount--
+	if int(cps.spawnedGoroutineCount.Load()) > cps.targetGoroutineCount {
 		cps.report("exiting")
 		return true
 	}
@@ -182,9 +194,10 @@ func (cps *CombinerPoolState) report(msg string) {
 	if !cpDebug {
 		return
 	}
-	fmt.Printf("%-8s\tgoroutines: %d->%d->%d\tthroughput: %.1f/s (%.1f/s each)\tutil: %.1f%%\t%v\n",
+	fmt.Printf("%v %-8s\tgoroutines: %d->%d->%d\tthroughput: %.1f/s (%.1f/s each)\tutil: %.1f%%\t%v\n",
+		time.Now(),
 		msg+":",
-		cps.spawnedGoroutineCount,
+		cps.spawnedGoroutineCount.Load(),
 		cps.liveGoroutineCount,
 		cps.targetGoroutineCount,
 		cps.throughput.Get()*float64(time.Second),
@@ -217,6 +230,10 @@ func (cps *CombinerPoolState) GoroutineExited() {
 	}
 	cps.updateStats()
 	cps.liveGoroutineCount--
+
+	// Always decrement spawned count when a goroutine actually exits
+	// This ensures the atomic counter stays in sync with reality
+	cps.spawnedGoroutineCount.Add(-1)
 
 	if cps.liveGoroutineCount == 0 {
 		cps.controller.Reset()
@@ -271,7 +288,7 @@ func (cps *CombinerPoolState) updateStats() bool {
 		Time:           timeOrigin,
 		GoroutineCount: cps.liveGoroutineCount,
 		Throughput:     cps.throughput.Get(),
-		SecondaryUtil:  cps.secondaryUtil.Get(),
+		SpareUtil:      cps.secondaryUtil.Get(),
 	})
 
 	if cpDebug && now.Sub(epoch)/time.Second != timeOrigin.Sub(epoch)/time.Second {

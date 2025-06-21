@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package waitq
+package rdvq
 
 // A Waiter has the following lifecycle states:
 //
@@ -36,29 +36,36 @@ package waitq
 //
 // Waiter variables may be safely copied and are designed to be passed by value.
 type Waiter struct {
-	q        *Queue
+	q        *Waiters
 	verifyFn func() bool
 }
 
-func (w Waiter) Wait(selectFn func(ch <-chan struct{}) bool) bool {
+func (w Waiter) Wait(selectFn WaitSelectFunc) SelectResult {
 	if w.q == nil {
 		return selectFn(nil)
 	}
-	notified := false
-	w.q.inner.PopFrontFunc(p,
+	result := SelectAborted
+	w.q.inner.PopFrontFunc(wp,
 		func(struct{}) {
 			// There was an orphaned value in the channel, meaning that this
 			// waiter was notified but didn't receive it. Call Notify to pass
 			// the notification to another.
 			w.q.Notify()
 		},
-		func(ch <-chan struct{}) bool {
-			if w.verifyFn != nil && !w.verifyFn() {
-				return false
+		func(ch <-chan struct{}) SelectResult {
+			if w.verifyFn == nil || w.verifyFn() {
+				innerResult := selectFn(ch)
+				if innerResult == SelectWaitSignaled {
+					result = SelectWaitSignaled
+					return SelectInboxEmptied
+				}
 			}
-			notified = selectFn(ch)
-			return notified
+			return SelectAborted
 		},
 	)
-	return notified
+	return result
 }
+
+// WaitSelectFunc handles select operations on wait channels, returning
+// the appropriate SelectResult to indicate what happened.
+type WaitSelectFunc func(waitCh <-chan struct{}) SelectResult

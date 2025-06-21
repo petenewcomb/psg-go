@@ -40,7 +40,7 @@ func TestControllerBasics(t *testing.T) {
 			Time:           time.Now(),
 			GoroutineCount: 5,
 			Throughput:     1000,
-			SecondaryUtil:  0.5,
+			SpareUtil:      0.5,
 		}
 		c.AddSample(time.Hour, s)
 
@@ -61,19 +61,19 @@ func TestControllerBasics(t *testing.T) {
 			Time:           now,
 			GoroutineCount: 10,
 			Throughput:     2000,
-			SecondaryUtil:  0.5,
+			SpareUtil:      0.5,
 		})
 		c.AddSample(time.Hour, perfSample{
 			Time:           now.Add(time.Second),
 			GoroutineCount: 5,
 			Throughput:     1000,
-			SecondaryUtil:  0.5,
+			SpareUtil:      0.5,
 		})
 		c.AddSample(time.Hour, perfSample{
 			Time:           now.Add(2 * time.Second),
 			GoroutineCount: 15,
 			Throughput:     2500,
-			SecondaryUtil:  0.5,
+			SpareUtil:      0.5,
 		})
 
 		if len(c.samples) != 3 {
@@ -101,7 +101,7 @@ func TestControllerBasics(t *testing.T) {
 			Time:           now,
 			GoroutineCount: 5,
 			Throughput:     1000,
-			SecondaryUtil:  0.5,
+			SpareUtil:      0.5,
 		})
 
 		// Update with same goroutine count
@@ -109,7 +109,7 @@ func TestControllerBasics(t *testing.T) {
 			Time:           now.Add(time.Second),
 			GoroutineCount: 5,
 			Throughput:     1200,
-			SecondaryUtil:  0.6,
+			SpareUtil:      0.6,
 		})
 
 		if len(c.samples) != 1 {
@@ -129,11 +129,11 @@ func TestFindUtilizationValley(t *testing.T) {
 		// Add samples with different utilizations
 		now := time.Now()
 		samples := []perfSample{
-			{Time: now, GoroutineCount: 1, Throughput: 100, SecondaryUtil: 0.8},  // high
-			{Time: now, GoroutineCount: 2, Throughput: 200, SecondaryUtil: 0.7},  // high
-			{Time: now, GoroutineCount: 3, Throughput: 300, SecondaryUtil: 0.5},  // low (valley)
-			{Time: now, GoroutineCount: 4, Throughput: 380, SecondaryUtil: 0.55}, // low
-			{Time: now, GoroutineCount: 5, Throughput: 400, SecondaryUtil: 0.65}, // high
+			{Time: now, GoroutineCount: 1, Throughput: 100, SpareUtil: 0.8},  // high
+			{Time: now, GoroutineCount: 2, Throughput: 200, SpareUtil: 0.7},  // high
+			{Time: now, GoroutineCount: 3, Throughput: 300, SpareUtil: 0.5},  // low (valley)
+			{Time: now, GoroutineCount: 4, Throughput: 380, SpareUtil: 0.55}, // low
+			{Time: now, GoroutineCount: 5, Throughput: 400, SpareUtil: 0.65}, // high
 		}
 
 		for _, s := range samples {
@@ -152,9 +152,9 @@ func TestFindUtilizationValley(t *testing.T) {
 
 		// All samples have high utilization
 		samples := []perfSample{
-			{GoroutineCount: 1, Throughput: 100, SecondaryUtil: 0.8},
-			{GoroutineCount: 2, Throughput: 200, SecondaryUtil: 0.7},
-			{GoroutineCount: 3, Throughput: 300, SecondaryUtil: 0.65},
+			{GoroutineCount: 1, Throughput: 100, SpareUtil: 0.8},
+			{GoroutineCount: 2, Throughput: 200, SpareUtil: 0.7},
+			{GoroutineCount: 3, Throughput: 300, SpareUtil: 0.65},
 		}
 
 		for _, s := range samples {
@@ -176,11 +176,11 @@ func TestFindThroughputKnee(t *testing.T) {
 		// Perfect linear scaling from origin
 		now := time.Now()
 		samples := []perfSample{
-			{Time: now, GoroutineCount: 1, Throughput: 100, SecondaryUtil: 0.8},
-			{Time: now, GoroutineCount: 2, Throughput: 200, SecondaryUtil: 0.7},
-			{Time: now, GoroutineCount: 3, Throughput: 300, SecondaryUtil: 0.6},
-			{Time: now, GoroutineCount: 4, Throughput: 380, SecondaryUtil: 0.5}, // Still within tolerance
-			{Time: now, GoroutineCount: 5, Throughput: 400, SecondaryUtil: 0.4}, // Breaks minimum return
+			{Time: now, GoroutineCount: 1, Throughput: 100, SpareUtil: 0.8},
+			{Time: now, GoroutineCount: 2, Throughput: 200, SpareUtil: 0.7},
+			{Time: now, GoroutineCount: 3, Throughput: 300, SpareUtil: 0.6},
+			{Time: now, GoroutineCount: 4, Throughput: 380, SpareUtil: 0.5}, // Still within tolerance
+			{Time: now, GoroutineCount: 5, Throughput: 400, SpareUtil: 0.4}, // Breaks minimum return
 		}
 
 		for _, s := range samples {
@@ -200,9 +200,9 @@ func TestFindThroughputKnee(t *testing.T) {
 
 		// Non-linear pattern
 		samples := []perfSample{
-			{GoroutineCount: 1, Throughput: 100, SecondaryUtil: 0.8},
-			{GoroutineCount: 2, Throughput: 150, SecondaryUtil: 0.7}, // Not linear
-			{GoroutineCount: 3, Throughput: 180, SecondaryUtil: 0.6},
+			{GoroutineCount: 1, Throughput: 100, SpareUtil: 0.8},
+			{GoroutineCount: 2, Throughput: 150, SpareUtil: 0.7}, // Not linear
+			{GoroutineCount: 3, Throughput: 180, SpareUtil: 0.6},
 		}
 
 		for _, s := range samples {
@@ -234,10 +234,10 @@ func TestRecommendTarget(t *testing.T) {
 
 		// Create a valley scenario
 		samples := []perfSample{
-			{GoroutineCount: 1, Throughput: 100, SecondaryUtil: 0.8},
-			{GoroutineCount: 2, Throughput: 200, SecondaryUtil: 0.7},
-			{GoroutineCount: 3, Throughput: 300, SecondaryUtil: 0.4}, // Valley (low util)
-			{GoroutineCount: 4, Throughput: 380, SecondaryUtil: 0.5},
+			{GoroutineCount: 1, Throughput: 100, SpareUtil: 0.8},
+			{GoroutineCount: 2, Throughput: 200, SpareUtil: 0.7},
+			{GoroutineCount: 3, Throughput: 300, SpareUtil: 0.4}, // Valley (low util)
+			{GoroutineCount: 4, Throughput: 380, SpareUtil: 0.5},
 		}
 
 		for _, s := range samples {
@@ -260,10 +260,10 @@ func TestRecommendTarget(t *testing.T) {
 		// All samples linear and high utilization
 		now := time.Now()
 		samples := []perfSample{
-			{Time: now, GoroutineCount: 1, Throughput: 100, SecondaryUtil: 0.8},
-			{Time: now, GoroutineCount: 2, Throughput: 200, SecondaryUtil: 0.7},
-			{Time: now, GoroutineCount: 3, Throughput: 300, SecondaryUtil: 0.75},
-			{Time: now, GoroutineCount: 4, Throughput: 400, SecondaryUtil: 0.8},
+			{Time: now, GoroutineCount: 1, Throughput: 100, SpareUtil: 0.8},
+			{Time: now, GoroutineCount: 2, Throughput: 200, SpareUtil: 0.7},
+			{Time: now, GoroutineCount: 3, Throughput: 300, SpareUtil: 0.75},
+			{Time: now, GoroutineCount: 4, Throughput: 400, SpareUtil: 0.8},
 		}
 
 		for _, s := range samples {
@@ -292,9 +292,9 @@ func TestRecommendTarget(t *testing.T) {
 		// Would recommend > 10 without limit
 		now := time.Now()
 		samples := []perfSample{
-			{Time: now, GoroutineCount: 8, Throughput: 800, SecondaryUtil: 0.8},
-			{Time: now, GoroutineCount: 9, Throughput: 900, SecondaryUtil: 0.8},
-			{Time: now, GoroutineCount: 10, Throughput: 1000, SecondaryUtil: 0.8},
+			{Time: now, GoroutineCount: 8, Throughput: 800, SpareUtil: 0.8},
+			{Time: now, GoroutineCount: 9, Throughput: 900, SpareUtil: 0.8},
+			{Time: now, GoroutineCount: 10, Throughput: 1000, SpareUtil: 0.8},
 		}
 
 		for _, s := range samples {
@@ -315,9 +315,9 @@ func TestRecommendTarget(t *testing.T) {
 		// High util but no linear scaling from origin
 		now := time.Now()
 		samples := []perfSample{
-			{Time: now, GoroutineCount: 5, Throughput: 300, SecondaryUtil: 0.8},
-			{Time: now, GoroutineCount: 6, Throughput: 310, SecondaryUtil: 0.85},
-			{Time: now, GoroutineCount: 7, Throughput: 315, SecondaryUtil: 0.9},
+			{Time: now, GoroutineCount: 5, Throughput: 300, SpareUtil: 0.8},
+			{Time: now, GoroutineCount: 6, Throughput: 310, SpareUtil: 0.85},
+			{Time: now, GoroutineCount: 7, Throughput: 315, SpareUtil: 0.9},
 		}
 
 		for _, s := range samples {
@@ -349,7 +349,7 @@ func TestControllerProperties(t *testing.T) {
 					Time:           time.Now(),
 					GoroutineCount: gc,
 					Throughput:     throughput,
-					SecondaryUtil:  util,
+					SpareUtil:      util,
 				})
 			}
 
@@ -390,7 +390,7 @@ func TestControllerProperties(t *testing.T) {
 					Time:           time.Now(),
 					GoroutineCount: gc,
 					Throughput:     throughput,
-					SecondaryUtil:  util,
+					SpareUtil:      util,
 				})
 			}
 
@@ -428,7 +428,7 @@ func TestControllerProperties(t *testing.T) {
 				c.AddSample(time.Hour, perfSample{
 					GoroutineCount: i,
 					Throughput:     slope * float64(i),
-					SecondaryUtil:  0.5,
+					SpareUtil:      0.5,
 				})
 			}
 
@@ -439,7 +439,7 @@ func TestControllerProperties(t *testing.T) {
 				c.AddSample(time.Hour, perfSample{
 					GoroutineCount: i,
 					Throughput:     slope * float64(i) * deviation,
-					SecondaryUtil:  0.7,
+					SpareUtil:      0.7,
 				})
 			}
 

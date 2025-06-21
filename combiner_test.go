@@ -622,7 +622,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						warmupStartTime := time.Now()
-						for time.Since(warmupStartTime) < time.Second {
+						for time.Since(warmupStartTime) < 2*time.Second {
 							op()
 						}
 

@@ -9,7 +9,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/dynval"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/opts"
-	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -21,7 +21,7 @@ type TaskPool struct {
 	j              *Job
 	maxConcurrency dynval.Value[int]
 	inFlight       jobstate.InFlightCounter
-	waiterQueue    waitq.Queue
+	waiterQueue    rdvq.Waiters
 }
 
 // Creates a new [TaskPool] bound to the specified job with the given options.
@@ -97,7 +97,7 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 
 		incrementSucceeded := false
 		var err error
-		waiter := p.waiterQueue.NewWaiter(func() bool {
+		waiter := p.waiterQueue.New(func() bool {
 			// Check again after registering as a waiter, in case capacity
 			// became available between the last check and this one. Note that
 			// this overwrites the limitChangeCh at the top of the loop so that
@@ -123,21 +123,21 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 		// the in-flight counter before proceding.
 	}
 
-	j.startTask(func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context) {
+	j.startTask(func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
 		task(ctx, func() {
 			// Decrement the task pool's in-flight count BEFORE waiting on the
 			// gather channel. This makes it safe for gather functions to call
 			// `Scatter` with this same `TaskPool` instance without deadlock, as
 			// there is guaranteed to be at least one slot available.
 			p.decrementInFlight()
-		}, ctxWithBPFn)
+		}, ctxWithBPFn, taskWorkerOutboxMap)
 	})
 
 	return true, nil
 }
 
 // Returns true if the waiter was notified, false otherwise.
-type backpressureFunc func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+type backpressureFunc func(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error)
 
 func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
 	switch {

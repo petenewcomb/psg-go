@@ -12,7 +12,8 @@ type InFlightCounter struct {
 }
 
 func (c *InFlightCounter) Increment() bool {
-	return c.v.Add(1) == 1
+	newValue := c.v.Add(1)
+	return newValue == 1
 }
 
 func (c *InFlightCounter) IsUnder(limit int) bool {
@@ -23,11 +24,18 @@ func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	// Tentatively increment the counter and check against limit. If over limit,
 	// remove the tentative increment and try again if we notice that another
 	// goroutine has made room between the increment and decrement.
-	for c.v.Add(1) > int64(limit) {
-		// Back out tentative increment and re-check.
-		if c.v.Add(-1) >= int64(limit) {
-			// Still at or over limit.
-			return false
+	var newValue int64
+	for {
+		newValue = c.v.Add(1)
+		if newValue > int64(limit) {
+			// Back out tentative increment and re-check.
+			newValue = c.v.Add(-1)
+			if newValue >= int64(limit) {
+				// Still at or over limit.
+				return false
+			}
+		} else {
+			break
 		}
 		// Room might have been made, try again.
 	}

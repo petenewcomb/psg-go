@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
 type backpressureProviderKeyField bool
@@ -26,10 +26,13 @@ type backpressureProvider interface {
 	// Returns true when the block was ended by waiter notification, false
 	// otherwise. Returns an error if the waiting activity should be aborted
 	// (for instance because a context is canceled).
-	Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+	Block(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error)
 
 	// Queues work to be executed in the appropriate context (job-level or combiner-level)
 	QueueWork(workFn func(context.Context) error)
+
+	// Returns the outbox map for this backpressure provider
+	OutboxMap() *outboxMap
 }
 
 type backpressureProviderContextValueKeyType struct{}
@@ -59,7 +62,9 @@ func hasBackpressureProviderForJob(ctx context.Context, j *Job) bool {
 func withNewBackpressureProvider(ctx context.Context, j *Job) context.Context {
 	ctx, cancel := context.WithCancel(ctx)
 	context.AfterFunc(j.ctx, cancel)
-	return withBackpressureProvider(ctx, defaultBackpressureProvider{j: j})
+	return withBackpressureProvider(ctx, &defaultBackpressureProvider{
+		baseBackpressureProvider: baseBackpressureProvider{j: j},
+	})
 }
 
 func getBackpressureProvider(ctx context.Context, j *Job) backpressureProvider {
@@ -70,27 +75,38 @@ func getBackpressureProvider(ctx context.Context, j *Job) backpressureProvider {
 	return bp
 }
 
-type defaultBackpressureProvider struct {
-	j   *Job
-	key backpressureProviderKeyField
+type baseBackpressureProvider struct {
+	j         *Job
+	key       backpressureProviderKeyField
+	outboxMap outboxMap
 }
 
-func (bp defaultBackpressureProvider) ForJob(j *Job) bool {
+func (bp *baseBackpressureProvider) ForJob(j *Job) bool {
 	return bp.j == j
 }
 
-func (bp defaultBackpressureProvider) Key() backpressureProviderKey {
+func (bp *baseBackpressureProvider) Key() backpressureProviderKey {
 	return &bp.key
 }
 
-func (bp defaultBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
+func (bp *baseBackpressureProvider) OutboxMap() *outboxMap {
+	return &bp.outboxMap
+}
+
+type defaultBackpressureProvider struct {
+	baseBackpressureProvider
+}
+
+func (bp *defaultBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
 	return bp.j.tryQueueGather(), nil
 }
 
-func (bp defaultBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, limitCh <-chan struct{}) (bool, error) {
+func (bp *defaultBackpressureProvider) Block(ctx context.Context, waiter rdvq.Waiter, limitCh <-chan struct{}) (bool, error) {
 	return bp.j.gather(ctx, waiter, limitCh)
 }
 
-func (bp defaultBackpressureProvider) QueueWork(workFn func(context.Context) error) {
-	bp.j.queueWork(workFn)
+func (bp *defaultBackpressureProvider) QueueWork(workFn func(ctx context.Context) error) {
+	bp.j.queueWork(func(ctx context.Context, workID int64) error {
+		return workFn(ctx)
+	})
 }

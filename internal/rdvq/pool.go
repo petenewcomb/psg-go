@@ -12,9 +12,15 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 )
 
+// Pool provides resource pooling for channels and queue nodes used by rdvq.
+// It optimizes garbage collection by reusing channels and internal data structures
+// across multiple queue operations. A single Pool instance can be shared by
+// multiple queue instances of the same type.
+//
+// Pool is thread-safe and should be reused across the lifetime of the application.
 type Pool[T any] struct {
-	receiverPool nbcq.Pool[chan T]
-	chanPool     sync.Pool
+	nodePool nbcq.Pool[chan T]
+	chanPool sync.Pool
 }
 
 func (p *Pool[T]) getChan() chan T {

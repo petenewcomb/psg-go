@@ -43,6 +43,8 @@ Items that must be completed before merging to main branch.
 - [ ] Review potential deadlocks during cleanup, especially with combiners
 - [ ] Make sure we're always selecting on the minimum number of channels at a time 
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
+- [ ] consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
+- [ ] make sure that rdvq.Optional methods aren't inappropriately leaking through to Waiters or Required 
 
 ## Post-Merge Enhancements
 

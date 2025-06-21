@@ -17,41 +17,34 @@ import (
 	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
-	"github.com/petenewcomb/psg-go/internal/waitq"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // CombinerPool manages a pool of goroutines that execute combiners.
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
 type CombinerPool struct {
-	j           *Job
-	idleTimeout time.Duration
+	j *Job
 
 	// CombinerPoolState hosts the data and core logic for managing the pool of
 	// goroutines to maximize throughput with the minimum number of goroutines
 	// and therefore duplication of individual combiners.
 	state cpstate.CombinerPoolState
 
-	// Scattered tasks first attempt to post their results to primaryQueue. If a
-	// combiner goroutine is not immediately available, the task will
-	// concurrently try posting to both primaryQueue and secondaryChan.
+	// Work posting uses three-tier delivery via combineQueue:
+	// 1. Try immediate delivery to waiting receivers (fastest)
+	// 2. If no waiting receiver, use sender's outbox (non-blocking)
+	// 3. If outbox full, block on shared channel (backpressure)
 	//
-	// Only one goroutine at a time can elect itself "secondary". Once elected,
-	// the secondary goroutine no longer listens to primaryQueue and will
-	// therefore receive task results only if the other goroutines are too busy
-	// to immediately receive all results being posted to primaryQueue. This
-	// allows the secondary goroutine to detect if its capacity is no longer
-	// needed by staying idle until idleTimeout has passed. If this happens, the
-	// secondary goroutine resets secondaryElected to false and exits, allowing
-	// a different goroutine to elect itself secondary and continue the idle
-	// detection process.
-	primaryQueue     rdvq.Required[pendingCombine]
-	secondaryQueue   rdvq.Optional[pendingCombine]
-	secondaryChan    chan pendingCombine
-	secondaryElected atomic.Bool
+	// Primary goroutines register for immediate delivery, while the spare goroutine
+	// uses PopFrontExcessFunc to process outboxes and shared channel without
+	// registering for immediate delivery.
+	//
+	// Only one goroutine at a time can elect itself "spare" for scaling.
+	combineQueue rdvq.Required[pendingCombine]
+	spareElected atomic.Bool
 
 	waitingCombines jobstate.InFlightCounter
-	combineWaiters  waitq.Queue
+	combineWaiters  rdvq.Waiters
 }
 
 // NewCombinerPool creates a new CombinerPool bound to the specified job.
@@ -61,8 +54,7 @@ func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPo
 	// Check if the job is done
 	job.panicIfDone()
 	cp := &CombinerPool{
-		j:             job,
-		secondaryChan: make(chan pendingCombine),
+		j: job,
 	}
 
 	// Apply default configuration
@@ -79,9 +71,9 @@ func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPo
 	// Apply user options
 	cp.state.SetOptions(options...)
 
-	cp.primaryQueue.Init(combineQueuePool)
-	cp.secondaryQueue.Init(combineQueuePool)
+	cp.combineQueue.Init(combineQueuePool)
 	cp.combineWaiters.Init()
+
 	return cp
 }
 
@@ -92,6 +84,11 @@ func (cp *CombinerPool) checkInitialized() {
 	}
 }
 
+// combineOutboxKey returns a unique identifier for this CombinerPool for combine outbox mapping.
+func (cp *CombinerPool) combineOutboxKey() outboxKey[pendingCombine] {
+	return cp
+}
+
 // SetOptions applies the given configuration options to the pool.
 func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 	cp.checkInitialized()
@@ -100,19 +97,22 @@ func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 
 var combineQueuePool = &rdvq.Pool[pendingCombine]{}
 
-func (cp *CombinerPool) postCombine(ctx context.Context, combineFn boundCombine) {
+func (cp *CombinerPool) postCombine(ctx context.Context, outbox *rdvq.Outbox[pendingCombine], combineFn boundCombine) {
 	if cp.state.MaybeSpawnGoroutine() {
 		cp.spawnNewCombiner(combineFn)
 		return
 	}
-
 	pc := pendingCombine{fn: combineFn, releaseWaiters: false}
-	cp.primaryQueue.PushBackFunc(combineQueuePool, pc, func(primaryCh chan<- pendingCombine, pc pendingCombine) {
-		// Attempt to post to the secondary queue, else fall back to the slow path.
-		if !cp.secondaryQueue.TryPushBack(combineQueuePool, pc) {
-			cp.postCombineSlow(ctx, primaryCh, pc.fn)
-		}
+	tookSlowPath := false
+	cp.combineQueue.PushBackFunc(combineQueuePool, outbox, pc, func(outboxCh chan<- pendingCombine) rdvq.SelectResult {
+		// Fallback to slow path when outbox would block
+		tookSlowPath = true
+		return cp.postCombineSlow(ctx, outboxCh, pc.fn)
 	})
+
+	if !tookSlowPath && cp.state.ShouldStartFirstGoroutine() {
+		cp.spawnNewCombiner(nil)
+	}
 }
 
 func (cp *CombinerPool) releaseWaiters() {
@@ -127,7 +127,7 @@ func (cp *CombinerPool) releaseWaiters() {
 	}
 }
 
-func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pendingCombine, combineFn boundCombine) {
+func (cp *CombinerPool) postCombineSlow(ctx context.Context, outboxCh chan<- pendingCombine, combineFn boundCombine) rdvq.SelectResult {
 
 	// We don't attempt the primary channel alone here since both fast paths
 	// failed, meaning both primary and secondary goroutines are likely busy. At
@@ -147,7 +147,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pe
 		spawnWaitCh := cp.state.ShouldSpawnGoroutine()
 		if spawnWaitCh == nil {
 			cp.spawnNewCombiner(combineFn)
-			return
+			return rdvq.SelectAborted
 		}
 
 		// If we get here, the primary and secondary channels were busy and we
@@ -167,15 +167,12 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, primaryCh chan<- pe
 
 		// Block until we can post or it's time to retry
 		select {
-		case primaryCh <- pc:
+		case outboxCh <- pc:
 			waitersIncremented = false // Successfully sent, don't release in defer
-			return
-		case cp.secondaryChan <- pc:
-			waitersIncremented = false // Successfully sent, don't release in defer
-			return
+			return rdvq.SelectOutboxFilled
 		case <-spawnWaitCh:
 		case <-ctx.Done():
-			return
+			return rdvq.SelectAborted
 		}
 	}
 }
@@ -187,7 +184,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 	go func() {
 		defer j.wg.Done()
 
-		isSecondary := false
+		isSpare := false
 
 		// Create the base goroutine context
 		goroutineCtx, cancelGoroutineCtx := context.WithCancel(j.ctx)
@@ -215,7 +212,6 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 		}()
 
 		var cm combinerMap
-		type combineWork func(ctx context.Context)
 		type combineWorkItem struct {
 			id     int64
 			workFn combineWork
@@ -231,12 +227,13 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 		var executeCombineFn func(ctx context.Context, combineFn boundCombine)
 		var flushAll func(ctx context.Context)
 
-		queueWork := func(workFn combineWork) {
+		queueWork := func(workFn combineWork) int64 {
 			workCounter++
 			workQueue.PushBack(combineWorkItem{
 				id:     workCounter,
 				workFn: workFn,
 			})
+			return workCounter
 		}
 
 		flushToNextDeadline := func() time.Duration {
@@ -257,6 +254,8 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 			return 0
 		}
 
+		var backpressureCtx context.Context
+
 		queueCombine := func(pc pendingCombine) {
 			if pc.releaseWaiters {
 				cp.releaseWaiters()
@@ -269,26 +268,16 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 
 		tryCombine := func(ctx context.Context) bool {
 
-			if isSecondary {
-				gotCombine := false
-				cp.secondaryQueue.TryPopFront(ctx, combineQueuePool, func(pc pendingCombine) {
-					queueCombine(pc)
-					gotCombine = true
-				})
-				if gotCombine {
-					return true
-				}
-
-				select {
-				case pc := <-cp.secondaryChan:
+			if isSpare {
+				// Spare goroutine tries non-blocking excess work processing
+				if pc, ok := cp.combineQueue.TryPopFront(combineQueuePool); ok {
 					queueCombine(pc)
 					return true
-				default:
 				}
 				return false
 			}
 
-			// Not secondary
+			// Primary goroutine
 			ok := false
 			// Overrides queueCombine defined above to include setting ok flag
 			queueCombine := func(pc pendingCombine) {
@@ -296,26 +285,23 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				// References previously defined version above
 				queueCombine(pc)
 			}
-			cp.primaryQueue.PopFrontFunc(combineQueuePool, queueCombine,
-				func(dedicatedPrimaryCh, sharedPrimaryCh <-chan pendingCombine) <-chan pendingCombine {
+			cp.combineQueue.PopFrontFunc(combineQueuePool, queueCombine,
+				func(inboxCh <-chan pendingCombine, waitCh <-chan struct{}) rdvq.SelectResult {
 					select {
-					case pc := <-dedicatedPrimaryCh:
+					case pc := <-inboxCh:
 						queueCombine(pc)
-						return dedicatedPrimaryCh
-					case pc := <-sharedPrimaryCh:
-						queueCombine(pc)
-					case pc := <-cp.secondaryChan:
-						// Primary may steal from secondary, but not vice-versa
-						queueCombine(pc)
+						return rdvq.SelectInboxEmptied
+					case <-waitCh:
+						return rdvq.SelectWaitSignaled
 					default:
+						return rdvq.SelectAborted
 					}
-					return nil
 				},
 			)
 			return ok
 		}
 
-		combine := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+		combine := func(ctx context.Context, idleTimerCh <-chan time.Time, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error) {
 
 			// Check if any combiners need to be flushed due to deadlines and
 			// set up flush deadline timer if needed
@@ -327,23 +313,20 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				flushDeadlineTimerCh = flushDeadlineTimer.C
 			}
 
-			if isSecondary {
+			if isSpare {
+				// Spare goroutine processes excess work (outboxes + shared channel)
+				// without registering for immediate delivery
 				waiterNotified := false
 				var err error
-				cp.secondaryQueue.PopFrontFunc(combineQueuePool, queueCombine,
-					func(dedicatedCh <-chan pendingCombine) bool {
-						// Secondary goroutines only listen to secondaryChan and other events
-						waitStartTime := time.Now()
-						cp.state.SecondaryWaitStarted(waitStartTime)
-						defer cp.state.SecondaryWaitEnded(waitStartTime)
-						dedicatedChWasSource := false
-						waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
+
+				pc, ok := cp.combineQueue.PopFrontExcessFunc(combineQueuePool,
+					func(popWaitCh <-chan struct{}) rdvq.SelectResult {
+						popResult := rdvq.SelectAborted
+						waiter.Wait(func(waiterWaitCh <-chan struct{}) rdvq.SelectResult {
+							waitStartTime := time.Now()
+							cp.state.SpareWaitStarted(waitStartTime)
+							defer cp.state.SpareWaitEnded(waitStartTime)
 							select {
-							case pc := <-dedicatedCh:
-								queueCombine(pc)
-								dedicatedChWasSource = true
-							case pc := <-cp.secondaryChan:
-								queueCombine(pc)
 							case <-nextJobFlushCh:
 								queueWork(flushAll)
 							case <-flushDeadlineTimerCh:
@@ -356,19 +339,25 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 								if cp.state.ShouldExitGoroutine() {
 									err = errIdleTimeout
 								}
-							case <-waitCh:
-								return true
+							case <-popWaitCh:
+								popResult = rdvq.SelectWaitSignaled
+							case <-waiterWaitCh:
+								waiterNotified = true
+								return rdvq.SelectWaitSignaled
 							case <-changeCh:
 							case <-doneCh:
 								err = doneChErr
 							case <-ctx.Done():
 								err = ctx.Err()
 							}
-							return false
+							return rdvq.SelectAborted
 						})
-						return dedicatedChWasSource
+						return popResult
 					},
 				)
+				if ok {
+					queueCombine(pc)
+				}
 				if err == errIdleTimeout && workQueue.Len() > 0 {
 					// Don't exit if we still have work to do.
 					err = nil
@@ -376,64 +365,61 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				return waiterNotified, err
 			}
 
-			// Not secondary
+			// Primary goroutine - registers for immediate delivery
 			waiterNotified := false
 			var err error
-			cp.primaryQueue.PopFrontFunc(combineQueuePool, queueCombine,
-				func(dedicatedCh, sharedCh <-chan pendingCombine) (sourceCh <-chan pendingCombine) {
-					waiterNotified = waiter.Wait(func(waitCh <-chan struct{}) bool {
+			cp.combineQueue.PopFrontFunc(combineQueuePool, queueCombine,
+				func(inboxCh <-chan pendingCombine, popWaitCh <-chan struct{}) rdvq.SelectResult {
+					popResult := rdvq.SelectAborted
+					waiter.Wait(func(waiterWaitCh <-chan struct{}) rdvq.SelectResult {
 						select {
-						case pc := <-dedicatedCh:
+						case pc := <-inboxCh:
 							queueCombine(pc)
-							sourceCh = dedicatedCh
-						case pc := <-sharedCh:
-							queueCombine(pc)
-						case pc := <-cp.secondaryChan:
-							// Primary may steal from secondary, but not vice-versa
-							queueCombine(pc)
+							popResult = rdvq.SelectInboxEmptied
 						case <-nextJobFlushCh:
 							queueWork(flushAll)
 						case <-flushDeadlineTimerCh:
 							// At least one combiner has reached its deadline
 							flushToNextDeadline()
-						case <-waitCh:
-							return true
+						case <-popWaitCh:
+							popResult = rdvq.SelectWaitSignaled
+						case <-waiterWaitCh:
+							waiterNotified = true
+							return rdvq.SelectWaitSignaled
 						case <-changeCh:
 						case <-doneCh:
 							err = doneChErr
 						case <-ctx.Done():
 							err = ctx.Err()
 						}
-						return false
+						return rdvq.SelectAborted
 					})
-					return sourceCh
+					return popResult
 				},
 			)
 			return waiterNotified, err
 		}
 
-		var processWorkAndCombine func(ctx context.Context, topLevel bool, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+		var processWorkAndCombine func(ctx context.Context, topLevel bool, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error)
 
-		bp := combineBackpressureProvider{
-			job: j,
+		bp := &combineBackpressureProvider{
+			baseBackpressureProvider: baseBackpressureProvider{j: j},
 			tryCombineFn: func(ctx context.Context) (bool, error) {
 				return tryCombine(ctx), nil
 			},
-			combineFn: func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-				ok, err := processWorkAndCombine(ctx, false, waiter, changeCh)
-				if err == errIdleTimeout {
-					// In backpressure so not really idle: ignore
-					err = nil
-				}
-				return ok, err
+			combineFn: func(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error) {
+				return combine(ctx, nil, waiter, changeCh)
 			},
 			queueWorkFn: func(workFn func(context.Context) error) {
-				// Queue scatter functions to be executed later rather than immediately
+				// Queue scatters for deferred execution when capacity becomes available
 				pendingScatters.PushBack(workFn)
 			},
 		}
 
-		backpressureCtx := withBackpressureProvider(goroutineCtx, bp)
+		backpressureCtx = withBackpressureProvider(goroutineCtx, bp)
+
+		// Create the dedicated outbox for this combiner goroutine to emit gathers to the job
+		emitGatherOutbox := OutboxFor[boundGather](bp.OutboxMap(), j.gatherOutboxKey())
 
 		// Flush sends any pending results from the combiner if needed. It also
 		// decrements the combiner counter to ensure that the job is not kept
@@ -447,15 +433,12 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 			}
 		}
 
-		// Ensure combiner is flushed as needed when this goroutine terminates.
-		defer flushAll(backpressureCtx)
-
 		executeCombineFn = func(ctx context.Context, combineFn boundCombine) {
 			if nextJobFlushCh == nil {
 				// Make sure the job won't terminate before the combiner is flushed
 				nextJobFlushCh, unregisterAsJobFlusher = j.state.RegisterFlusher()
 			}
-			combineFn(ctx, &cm)
+			combineFn(ctx, &cm, queueWork, emitGatherOutbox)
 			cp.state.IncrementCompleted()
 		}
 
@@ -464,23 +447,77 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 
 		var idleTimer *time.Timer
 
-		processWorkAndCombine = func(ctx context.Context, topLevel bool, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
+		processPendingScatters := func(ctx context.Context, topLevel bool) {
+			if !topLevel {
+				return
+			}
+
+			for {
+				scatterFn, ok := pendingScatters.PopFront()
+				if !ok {
+					break
+				}
+				if err := scatterFn(ctx); err != nil {
+					// Analysis: All pending scatter functions originate from scatters called within
+					// combiner execution context. Even if it's a gather.Scatter() call, it uses the
+					// combiner's backpressure provider (not the job's default one).
+					//
+					// The combiner backpressure provider only returns errors from:
+					// - bp.Yield() -> tryCombine() -> always returns (bool, nil)
+					// - bp.Block() -> processWorkAndCombine() -> can return context/job cancellation errors
+					//
+					// Therefore, the only possible errors are shutdown-related:
+					// - context.Canceled/DeadlineExceeded (context cancellation)
+					// - ErrJobDone (job completion)
+					// - errIdleTimeout (combiner idle timeout)
+					//
+					// No user gather function errors occur here since the gather is only queued,
+					// not executed. Gather execution happens later in the job's work queue.
+					//
+					// These are all expected shutdown conditions, so no special handling needed.
+					switch err {
+					case context.Canceled, context.DeadlineExceeded, ErrJobDone, errIdleTimeout:
+					default:
+						panic(fmt.Sprintf("unexpected error from deferred scatter: %v", err))
+					}
+				}
+			}
+		}
+
+		processWork := func(ctx context.Context, topLevel bool) int64 {
+			// Execute pending scatters before processing work
+			processPendingScatters(ctx, topLevel)
+
 			lastIDToProcess := workCounter
+			workItemsProcessed := 0
+			lastIDProcessed := workCounter
 			for {
 				work, ok := workQueue.PopFront()
 				if !ok {
 					break
 				}
+				workItemsProcessed++
 				work.workFn(ctx)
+				lastIDProcessed = work.id
+
+				// Execute pending scatters before continuing to process work
+				processPendingScatters(ctx, topLevel)
+
 				if work.id >= lastIDToProcess {
 					break
 				}
 			}
+			return lastIDProcessed
+		}
+
+		processWorkAndCombine = func(ctx context.Context, topLevel bool, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error) {
+
+			lastIDProcessed := processWork(ctx, topLevel)
 
 			var idleTimerCh <-chan time.Time
-			if isSecondary {
+			if topLevel && isSpare {
 				// Capture the current idle timeout value to ensure consistency
-				idleTimeout := cp.idleTimeout
+				idleTimeout := cp.state.IdleTimeout()
 				if idleTimeout >= 0 {
 					// This is the goroutine that has elected itself to read only
 					// the secondary channel. This will keep this goroutine idle
@@ -488,37 +525,6 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 					// elapse (if enabled).
 					idleTimer.Reset(idleTimeout)
 					idleTimerCh = idleTimer.C
-				}
-			}
-
-			// Execute a pending scatter if this is a top-level call
-			if topLevel {
-				scatterFn, ok := pendingScatters.PopFront()
-				if ok {
-					if err := scatterFn(ctx); err != nil {
-						// Analysis: All pending scatter functions originate from scatters called within
-						// combiner execution context. Even if it's a gather.Scatter() call, it uses the
-						// combiner's backpressure provider (not the job's default one).
-						//
-						// The combiner backpressure provider only returns errors from:
-						// - bp.Yield() -> tryCombine() -> always returns (bool, nil)
-						// - bp.Block() -> processWorkAndCombine() -> can return context/job cancellation errors
-						//
-						// Therefore, the only possible errors are shutdown-related:
-						// - context.Canceled/DeadlineExceeded (context cancellation)
-						// - ErrJobDone (job completion)
-						// - errIdleTimeout (combiner idle timeout)
-						//
-						// No user gather function errors occur here since the gather is only queued,
-						// not executed. Gather execution happens later in the job's work queue.
-						//
-						// These are all expected shutdown conditions, so no special handling needed.
-						switch err {
-						case context.Canceled, context.DeadlineExceeded, ErrJobDone, errIdleTimeout:
-						default:
-							panic(fmt.Sprintf("unexpected error from deferred scatter: %v", err))
-						}
-					}
 				}
 			}
 
@@ -531,8 +537,8 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 			// gathered.
 			var ok bool
 			var err error
-			if workCounter > lastIDToProcess || (topLevel && pendingScatters.Len() > 0) {
-				// There's still work in the queue OR pending scatters, use tryCombine to avoid blocking
+			if workCounter > lastIDProcessed {
+				// There's still work in the queue, use tryCombine to avoid blocking
 				ok = tryCombine(ctx)
 			} else {
 				ok, err = combine(ctx, idleTimerCh, waiter, changeCh)
@@ -540,19 +546,23 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 			return ok, err
 		}
 
-		executeCombineFn(backpressureCtx, combineFn)
+		if combineFn != nil {
+			executeCombineFn(backpressureCtx, combineFn)
+		}
 
 		for {
-			if !isSecondary {
-				if cp.secondaryElected.CompareAndSwap(false, true) {
-					isSecondary = true
+			if !isSpare {
+				if cp.spareElected.CompareAndSwap(false, true) {
+					isSpare = true
 					idleTimer = timerp.Get()
 					defer timerp.Put(idleTimer)
-					defer cp.secondaryElected.Store(false)
+					defer cp.spareElected.Store(false)
 				}
 			}
 
-			if _, err := processWorkAndCombine(backpressureCtx, true, waitq.Waiter{}, nil); err != nil {
+			_, err := processWorkAndCombine(backpressureCtx, true, rdvq.Waiter{}, nil)
+
+			if err != nil {
 				switch err {
 				case ErrJobDone, errIdleTimeout, context.Canceled:
 				default:
@@ -564,12 +574,19 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				break
 			}
 		}
+
+		// Flush combiners as needed when this goroutine terminates.
+		flushAll(backpressureCtx)
+
+		// Process any work items that were created during the flush operation
+		processWork(backpressureCtx, true)
 	}()
 }
 
 const errIdleTimeout = cerr.Error("idle timeout reached")
 
-type boundCombine func(ctx context.Context, cm *combinerMap)
+type combineWork func(ctx context.Context)
+type boundCombine func(ctx context.Context, cm *combinerMap, queueWork func(combineWork) int64, gatherOutbox *rdvq.Outbox[boundGather])
 
 type pendingCombine struct {
 	fn             boundCombine
@@ -611,7 +628,7 @@ type combinerMapKey struct {
 	Combine any
 }
 
-func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *CombineOp[I, O]) halfBoundCombine[I] {
+func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *CombineOp[I, O], queueWork func(combineWork) int64, emitGatherOutbox *rdvq.Outbox[boundGather]) halfBoundCombine[I] {
 	j := cp.j
 	k := combinerMapKey{
 		Job:     j,
@@ -623,18 +640,20 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 		combineFn = bc.CombineFn.(halfBoundCombine[I])
 	} else {
 		emit := func(ctx context.Context, output O, outputErr error) {
+			j.state.IncrementWork()
+
 			// Bind the gatherFn to the combiner output
 			gatherFn := func(ctx context.Context) error {
+				defer func() {
+					j.state.DecrementWork()
+				}()
 				return c.gatherOp.gatherFn(ctx, output, outputErr)
 			}
 
-			// The job's in-flight work counter will be decremented by
-			// Job.executeGather, so we must increment it to keep the job alive
-			// until the gather happens.
-			j.state.IncrementWork()
-
-			// Post the bound gather to the job's gather queue.
-			j.postGather(ctx, gatherFn)
+			// Queue the gather as work for this combiner goroutine to avoid blocking
+			queueWork(func(ctx context.Context) {
+				j.postGather(ctx, emitGatherOutbox, gatherFn)
+			})
 		}
 
 		combiner := func() Combiner[I, O] {
@@ -695,10 +714,6 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 					// Just in case the panic is otherwise suppressed
 					emit(ctx, *new(O), ErrCombinePanicked)
 				}
-
-				// The job's in-flight work counter must be decremented here
-				// just as it is in Job.executeGather.
-				j.state.DecrementWork()
 			}()
 
 			combiner.Combine(ctx, input, inputErr, emit)

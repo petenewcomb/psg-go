@@ -5,6 +5,7 @@ package psg_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -30,8 +31,8 @@ func TestBySimulation(t *testing.T) {
 
 		//planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		//planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.Task.UseCombine.Probability = 0
-		//planConfig.Combine.Flush.Probability = 0
+		//planConfig.Task.UseCombine.Probability = 1
+		//planConfig.Combine.Flush.Probability = 1
 
 		//planConfig.Subjob.MaxDepth = 0
 		//planConfig.Task.Func.Subjob.Add.Probability = 0
@@ -51,6 +52,10 @@ func TestBySimulation(t *testing.T) {
 
 		plan := sim.NewPlan(t, &planConfig)
 		t.Logf("Test plan:\n%#v", plan)
+		if debug {
+			// Write to stdout along with the other debug output.
+			fmt.Printf("Test plan:\n%#v\n", plan)
+		}
 
 		// Run the actual simulation
 		simulationStart := time.Now()

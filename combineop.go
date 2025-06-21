@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/opts"
-	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -86,7 +86,9 @@ func (c *CombineOp[I, O]) Scatter(
 		// Make sure the job doesn't shut down until this scatter has been done.
 		j.state.IncrementWork()
 		bp.QueueWork(func(ctx context.Context) error {
-			defer j.state.DecrementWork()
+			defer func() {
+				j.state.DecrementWork()
+			}()
 			vettedCtx := j.vettedContext(ctx)
 			return doScatter(vettedCtx)
 		})
@@ -95,7 +97,7 @@ func (c *CombineOp[I, O]) Scatter(
 
 	ctx = j.gatherContext(vettedCtx)
 
-	if err := j.processOutstandingWork(ctx); err != nil {
+	if _, err := j.processOutstandingWork(ctx); err != nil {
 		return err
 	}
 
@@ -116,7 +118,7 @@ func (c *CombineOp[I, O]) TryScatter(
 	vetScatter(vettedCtx, target, taskFn)
 
 	if !vettedCtx.inGather {
-		if err := j.processOutstandingWork(ctx); err != nil {
+		if _, err := j.processOutstandingWork(ctx); err != nil {
 			return false, err
 		}
 	}
@@ -142,7 +144,7 @@ func (c *CombineOp[I, O]) scatter(
 	}
 
 	for !c.pool.waitingCombines.IsZero() {
-		waiter := c.pool.combineWaiters.NewWaiter(func() bool {
+		waiter := c.pool.combineWaiters.New(func() bool {
 			// Check again _after_ registering as a waiter, so we don't
 			// potentially miss a notification.
 			return !c.pool.waitingCombines.IsZero()
@@ -165,9 +167,14 @@ func (c *CombineOp[I, O]) scatter(
 		bpf = bp.Block
 	}
 
-	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, input I, inputErr error) {
-		c.pool.postCombine(ctx, func(ctx context.Context, cm *combinerMap) {
-			combineFn := getCombineFunc(ctx, cm, c.pool, c)
+	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, taskWorkerOutboxMap *outboxMap, input I, inputErr error) {
+		combineOutbox := OutboxFor[pendingCombine](taskWorkerOutboxMap, c.pool.combineOutboxKey())
+		c.pool.postCombine(ctx, combineOutbox, func(ctx context.Context, cm *combinerMap, queueWork func(combineWork) int64, emitGatherOutbox *rdvq.Outbox[boundGather]) {
+			defer func() {
+				j.state.DecrementWork()
+			}()
+
+			combineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
 			combineFn(ctx, input, inputErr)
 		})
 	})
@@ -176,35 +183,27 @@ func (c *CombineOp[I, O]) scatter(
 // combineBackpressureProvider is used to integrate the combiner pool with the job's
 // backpressure system, allowing tasks to be gathered while waiting for resources
 type combineBackpressureProvider struct {
-	job          *Job
+	baseBackpressureProvider
 	tryCombineFn func(ctx context.Context) (bool, error)
-	combineFn    func(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error)
+	combineFn    func(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error)
 	queueWorkFn  func(workFn func(context.Context) error)
-	key          backpressureProviderKeyField
 }
 
-func (bp combineBackpressureProvider) ForJob(j *Job) bool {
-	return bp.job == j
-}
-
-func (bp combineBackpressureProvider) Key() backpressureProviderKey {
-	return &bp.key
-}
-
-func (bp combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
+func (bp *combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
 	return bp.tryCombineFn(vetted.ctx)
 }
 
-func (bp combineBackpressureProvider) Block(ctx context.Context, waiter waitq.Waiter, changeCh <-chan struct{}) (bool, error) {
-	return bp.combineFn(ctx, waiter, changeCh)
+func (bp *combineBackpressureProvider) Block(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error) {
+	waiterNotified, err := bp.combineFn(ctx, waiter, changeCh)
+	return waiterNotified, err
 }
 
-func (bp combineBackpressureProvider) QueueWork(workFn func(context.Context) error) {
+func (bp *combineBackpressureProvider) QueueWork(workFn func(context.Context) error) {
 	bp.queueWorkFn(workFn)
 }
 
 func isCombinerBackpressureProvider(bp backpressureProvider) bool {
-	_, ok := bp.(combineBackpressureProvider)
+	_, ok := bp.(*combineBackpressureProvider)
 	return ok
 }
 

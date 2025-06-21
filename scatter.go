@@ -6,7 +6,7 @@ package psg
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/waitq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
@@ -21,7 +21,7 @@ type TaskPoolOrJob interface {
 	withBackpressureProvider(ctx context.Context) context.Context
 }
 
-type boundTask func(ctx context.Context, completedFn func(), ctxWithBP func(backpressureProvider) context.Context)
+type boundTask func(ctx context.Context, completedFn func(), ctxWithBP func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap)
 
 func vetScatter[T any](
 	vetted vettedContext,
@@ -56,7 +56,7 @@ func scatter[T any](
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 	applyBackpressure backpressureFunc,
-	postResultFn func(context.Context, T, error),
+	postResultFn func(context.Context, *outboxMap, T, error),
 ) (launched bool, err error) {
 	j := target.job()
 
@@ -73,7 +73,7 @@ func scatter[T any](
 			return false, nil
 		}
 
-		_, err = applyBackpressure(vettedCtx.ctx, waitq.Waiter{}, busyChangeCh)
+		_, err = applyBackpressure(vettedCtx.ctx, rdvq.Waiter{}, busyChangeCh)
 		if err != nil {
 			return false, err
 		}
@@ -93,8 +93,7 @@ func scatter[T any](
 
 	// Bind the task and gather functions together into a top-level function for
 	// the new goroutine and hand it to the target to launch.
-	return target.launch(vettedCtx.ctx, applyBackpressure, func(ctx context.Context, taskCompletedFn func(), ctxWithBPFn func(backpressureProvider) context.Context) {
-
+	launched, err = target.launch(vettedCtx.ctx, applyBackpressure, func(ctx context.Context, taskCompletedFn func(), ctxWithBPFn func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.
 		var value T
@@ -104,7 +103,7 @@ func scatter[T any](
 				taskCompletedFn()
 			}
 			ctx = ctxWithBPFn(bp)
-			postResultFn(ctx, value, err)
+			postResultFn(ctx, taskWorkerOutboxMap, value, err)
 		}()
 
 		// Actually execute the task function. Since this is the top-level
@@ -118,6 +117,7 @@ func scatter[T any](
 		// panics.
 		value, err = taskFn(ctx)
 	})
+	return launched, err
 }
 
 // This function is designed to be called before scattering a new task to

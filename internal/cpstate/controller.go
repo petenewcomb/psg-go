@@ -31,7 +31,7 @@ type perfSample struct {
 	Time           time.Time
 	GoroutineCount int
 	Throughput     float64
-	SecondaryUtil  float64
+	SpareUtil      float64
 }
 
 // Format implements fmt.Formatter
@@ -53,7 +53,7 @@ func (c *controller) Format(fs fmt.State, verb rune) {
 		case i == knee:
 			label = "(k)"
 		}
-		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SecondaryUtil*100)
+		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SpareUtil*100)
 		sep = ", "
 	}
 	_, _ = fmt.Fprint(fs, "]")
@@ -207,7 +207,7 @@ func (c *controller) calculateBestTarget() int {
 // if all samples are high
 func (c *controller) findUtilizationValley() int {
 	for i, s := range c.samples {
-		if s.SecondaryUtil < c.config.HighUtilThreshold {
+		if s.SpareUtil < c.config.HighUtilThreshold {
 			return i
 		}
 	}

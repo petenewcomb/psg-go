@@ -6,7 +6,7 @@ PSG's combiner pools face a fundamental resource allocation challenge: determini
 
 ### The Core Dilemma
 
-Too few goroutines create a capacity bottleneck. Tasks queue up waiting for available combiners, secondary channels become heavily utilized, and overall throughput suffers. The system is clearly under-provisioned, but how much should we scale up?
+Too few goroutines create a capacity bottleneck. Tasks queue up waiting for available combiners, spare channels become heavily utilized, and overall throughput suffers. The system is clearly under-provisioned, but how much should we scale up?
 
 Too many goroutines create a different problem entirely. Excessive goroutines compete for shared resources - memory bandwidth, CPU cache lines, locks, and coordination overhead. Paradoxically, this contention can drive individual goroutine utilization higher while simultaneously reducing overall throughput. The system appears busy but is actually thrashing.
 
@@ -20,17 +20,17 @@ The optimal point lies somewhere between these extremes, but traditional capacit
 
 **Fixed scaling factors** (always double when scaling up) are too rigid. The optimal goroutine count varies dramatically based on workload characteristics, available CPU cores, memory bandwidth, and task complexity. A one-size-fits-all approach cannot adapt to this variability.
 
-### The Secondary Utilization Signal
+### The Spare Utilization Signal
 
-PSG's architecture provides a unique observability window through secondary channel utilization. In PSG's two-channel design, only one goroutine can elect itself as "secondary," exclusively monitoring the secondary channel for overflow work when primary channels are busy.
+PSG's architecture provides a unique observability window through spare channel utilization. In PSG's two-channel design, only one goroutine can elect itself as "spare," exclusively monitoring the spare channel for overflow work when primary channels are busy.
 
-Secondary utilization exhibits a characteristic U-shaped curve as goroutine count increases:
+Spare utilization exhibits a characteristic U-shaped curve as goroutine count increases:
 
-- **Under-provisioned** (few goroutines): Secondary utilization approaches 80-100% because insufficient overall capacity forces the secondary goroutine to handle disproportionate work
-- **Well-provisioned** (optimal goroutines): Secondary utilization moderates to 30-60% as the secondary handles overflow without being overwhelmed
-- **Over-provisioned** (excessive goroutines): Secondary utilization initially drops to 20-40% due to work spreading across many goroutines, then rises again to 60-90% as contention effects dominate
+- **Under-provisioned** (few goroutines): Spare utilization approaches 80-100% because insufficient overall capacity forces the spare goroutine to handle disproportionate work
+- **Well-provisioned** (optimal goroutines): Spare utilization moderates to 30-60% as the spare handles overflow without being overwhelmed
+- **Over-provisioned** (excessive goroutines): Spare utilization initially drops to 20-40% due to work spreading across many goroutines, then rises again to 60-90% as contention effects dominate
 
-This U-shape creates ambiguity - high secondary utilization could indicate either end of the spectrum. The algorithm must combine utilization with throughput measurements to distinguish between these cases.
+This U-shape creates ambiguity - high spare utilization could indicate either end of the spectrum. The algorithm must combine utilization with throughput measurements to distinguish between these cases.
 
 ### Performance Knee Detection
 
@@ -48,13 +48,13 @@ The algorithm maintains a collection of performance samples, each containing:
 - **Timestamp**: When the measurement was taken
 - **Goroutine count**: The number of active combiner goroutines
 - **Throughput**: Operations completed per unit time
-- **Secondary utilization**: Fraction of time the secondary goroutine was busy
+- **Spare utilization**: Fraction of time the spare goroutine was busy
 
 Samples are kept sorted by goroutine count and aged out based on a configurable retention period to adapt to workload changes.
 
 ### Valley Detection
 
-The algorithm searches for the "utilization valley" - the lowest secondary utilization point that indicates efficient resource allocation. Valley detection simply finds the sample with minimum secondary utilization, with basic outlier handling to avoid being misled by measurement noise.
+The algorithm searches for the "utilization valley" - the lowest spare utilization point that indicates efficient resource allocation. Valley detection simply finds the sample with minimum spare utilization, with basic outlier handling to avoid being misled by measurement noise.
 
 The valley represents the sweet spot where the system has sufficient capacity without excessive competition between goroutines.
 

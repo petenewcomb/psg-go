@@ -133,9 +133,9 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	var orphanValues []int
 	q.PopFrontFunc(p, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(ch <-chan int) bool {
-		// Always return false (timeout immediately)
-		return false
+	}, func(ch <-chan int) rdvq.SelectResult {
+		// Always return aborted (timeout immediately)
+		return rdvq.SelectAborted
 	})
 
 	// Should not have received any orphan values since no sender
@@ -151,10 +151,10 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	orphanValues = nil
 	q.PopFrontFunc(p, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(ch <-chan int) bool {
+	}, func(ch <-chan int) rdvq.SelectResult {
 		time.Sleep(10 * time.Millisecond) // Let the sender send first
-		// Return false to simulate timeout/abandonment
-		return false
+		// Return aborted to simulate timeout/abandonment
+		return rdvq.SelectAborted
 	})
 
 	// Should have received the orphaned value
@@ -187,6 +187,8 @@ func TestOptional_ConcurrentSendersAndReceivers(t *testing.T) {
 			})
 			require.NoError(t, err)
 		}(i)
+
+		time.Sleep(20 * time.Millisecond) // Make sure receiver is ready
 
 		// Sender - wait a bit then send
 		go func(id int) {

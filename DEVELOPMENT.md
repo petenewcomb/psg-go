@@ -4,7 +4,8 @@ This document provides guidance for anyone (human or AI) working on the PSG-Go c
 
 ## Reference Materials
 - See `README.md` for project overview, `docs` folder for design documentation, `benchmarks` for previous investigations
-- Check `TODO.md` for branch-specific work requirements and pre-merge checklists  
+- Check `TODO.md` for branch-specific work requirements and pre-merge checklists
+- Review `WORKING_NOTES.md` for current development context and insights on active branches
 - Review GitHub issues for project-wide planning and cross-branch work streams
 
 ## Concurrency Safety

@@ -236,6 +236,15 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 			return workCounter
 		}
 
+		queueFlush := func(flushFn combineWork) int64 {
+			// Flush operations are legitimate work that must complete before job can finish
+			j.state.IncrementWork()
+			return queueWork(func(ctx context.Context) {
+				defer j.state.DecrementWork()
+				flushFn(ctx)
+			})
+		}
+
 		flushToNextDeadline := func() time.Duration {
 			for {
 				nextBCToFlush := cm.NextToFlush()
@@ -249,7 +258,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				}
 				// Remove from heap immediately to prevent infinite loop
 				cm.deadlines.Remove(nextBCToFlush)
-				queueWork(nextBCToFlush.FlushFn)
+				queueFlush(nextBCToFlush.FlushFn)
 			}
 			return 0
 		}
@@ -328,7 +337,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 							defer cp.state.SpareWaitEnded(waitStartTime)
 							select {
 							case <-nextJobFlushCh:
-								queueWork(flushAll)
+								queueFlush(flushAll)
 							case <-flushDeadlineTimerCh:
 								// At least one combiner has reached its flush deadline
 								flushToNextDeadline()
@@ -377,7 +386,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 							queueCombine(pc)
 							popResult = rdvq.SelectInboxEmptied
 						case <-nextJobFlushCh:
-							queueWork(flushAll)
+							queueFlush(flushAll)
 						case <-flushDeadlineTimerCh:
 							// At least one combiner has reached its deadline
 							flushToNextDeadline()

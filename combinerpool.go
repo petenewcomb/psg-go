@@ -130,8 +130,8 @@ func (cp *CombinerPool) releaseWaiters() {
 func (cp *CombinerPool) postCombineSlow(ctx context.Context, outboxCh chan<- pendingCombine, combineFn boundCombine) rdvq.SelectResult {
 
 	// We don't attempt the primary channel alone here since both fast paths
-	// failed, meaning both primary and secondary goroutines are likely busy. At
-	// this point spillage to secondary is warranted, so we use
+	// failed, meaning both primary and spare goroutines are likely busy. At
+	// this point spillage to spare is warranted, so we use
 	// first-come-first-served among whatever becomes available.
 
 	waitersIncremented := false
@@ -150,7 +150,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, outboxCh chan<- pen
 			return rdvq.SelectAborted
 		}
 
-		// If we get here, the primary and secondary channels were busy and we
+		// If we get here, the primary and spare channels were busy and we
 		// hit the limit of how many combiner tasks we can launch or need to
 		// wait before we can spawn another. Increment the waiting task count to
 		// signal Scatter to apply backpressure.
@@ -520,7 +520,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				idleTimeout := cp.state.IdleTimeout()
 				if idleTimeout >= 0 {
 					// This is the goroutine that has elected itself to read only
-					// the secondary channel. This will keep this goroutine idle
+					// the spare channel. This will keep this goroutine idle
 					// unless it's really needed, thus allowing the idle timeout to
 					// elapse (if enabled).
 					idleTimer.Reset(idleTimeout)

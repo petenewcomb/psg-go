@@ -16,5 +16,7 @@ jobs:
   ci:
     uses: petenewcomb/ci-go/.github/workflows/ci.yml@main
     with:
-      testJobTimeoutMinutes: 60
-      goTestTimeout: '25m'
+      # PSG has very heavy benchmarks - give full tests 2 hours
+      fullTestTimeoutMinutes: 120
+      full1CpuTestTimeoutMinutes: 120
+      fullRaceTestTimeoutMinutes: 120

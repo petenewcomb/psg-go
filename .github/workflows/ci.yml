@@ -14,7 +14,7 @@ on:
 
 jobs:
   ci:
-    uses: petenewcomb/ci-go/.github/workflows/ci.yml@v0.0.8
+    uses: petenewcomb/ci-go/.github/workflows/ci.yml@main
     with:
-      testJobTimeoutMinutes: 30
+      testJobTimeoutMinutes: 60
       goTestTimeout: '25m'

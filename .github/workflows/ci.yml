@@ -14,7 +14,7 @@ on:
 
 jobs:
   ci:
-    uses: petenewcomb/ci-go/.github/workflows/ci.yml@main
+    uses: petenewcomb/ci-go/.github/workflows/ci.yml@v0.0.9
     with:
       # PSG has very heavy benchmarks - give full tests 2 hours
       fullTestTimeoutMinutes: 120

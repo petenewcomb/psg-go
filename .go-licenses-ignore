@@ -1,0 +1,17 @@
+# Disallowed license types
+!forbidden
+!restricted
+!unknown
+
+# Global ignores for all modules
+# (none)
+
+# Module-specific ignores
+**/cmd/*:.
+
+otpsg:.
+
+internal/cmd/chartgen:
+	golang.org/x/image/vector          # BSD-3-Clause
+	github.com/golang/freetype/raster  # BSD-ish FreeType License
+	github.com/ajstarks/svgo           # CC-BY-4.0

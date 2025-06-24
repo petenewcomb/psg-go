@@ -2,6 +2,10 @@
 
 set -e
 
+echo "$0: Entering directory \``pwd`'"
+goimports -w .
+gofmt -s -w .
+
 find . -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
     set -e
     cd "${file%/*}"
@@ -9,13 +13,14 @@ find . -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
     set -x
     go mod tidy
     go vet ./...
-    goimports -w .
-    gofmt -s -w .
-    golangci-lint run
     go test -short ./...
     go generate ./...
+    go-licenses check --include_tests $(go-licenses-ignore .) ./...
 ); echo; done
 
 echo "$0: Entering directory \``pwd`'"
+
 set -x
+golangci-lint config verify
+golangci-lint run
 ! git status --porcelain -uno | grep '^[^ ][^ ]'

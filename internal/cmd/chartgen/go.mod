@@ -1,4 +1,4 @@
-module main
+module github.com/petenewcomb/psg-go/internal/cmd/chartgen
 
 go 1.24
 

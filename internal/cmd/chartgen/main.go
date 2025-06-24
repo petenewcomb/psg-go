@@ -93,7 +93,7 @@ func plotScatter(c *chart) error {
 		return err
 	}
 
-	//p.Add(plotter.NewGlyphBoxes())
+	// p.Add(plotter.NewGlyphBoxes())
 
 	return savePlot(c, p, 10.0/6.0)
 }
@@ -145,7 +145,7 @@ func plotBars(c *chart) error {
 
 	p.Y.Max *= c.YAxisGrowFactor
 
-	//p.Add(plotter.NewGlyphBoxes())
+	// p.Add(plotter.NewGlyphBoxes())
 
 	return savePlot(c, p, 16.0/6.0)
 }
@@ -169,7 +169,7 @@ func savePlot(c *chart, p *plot.Plot, aspect float64) error {
 	p.Legend.Draw(ldc)
 
 	r = p.Legend.Rectangle(ldc)
-	//r.Max.X += p.Legend.Padding / 2
+	// r.Max.X += p.Legend.Padding / 2
 	r.Max.Y += p.Legend.Padding / 2
 	r.Min.Y -= p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding/2
 	ldc.StrokeLines(draw.LineStyle{
@@ -185,7 +185,7 @@ func savePlot(c *chart, p *plot.Plot, aspect float64) error {
 	p.Draw(dc)
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll("charts", 0755); err != nil {
+	if err := os.MkdirAll("charts", 0750); err != nil {
 		return err
 	}
 
@@ -518,9 +518,9 @@ func main() {
 		}
 
 		for _, workloadDurationKey := range workloadDurationKeys {
-			//workloadDuration := float64(workloadDurations[workloadDurationKey])
+			// workloadDuration := float64(workloadDurations[workloadDurationKey])
 			for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
-				//flushPeriod := float64(flushPeriods[flushPeriodKey])
+				// flushPeriod := float64(flushPeriods[flushPeriodKey])
 
 				workloadDurationString := workloadDurationKey.Get(workloadDurationP.Fields()[0])
 				flushPeriodString := flushPeriodKey.Get(flushPeriodP.Fields()[0])
@@ -544,7 +544,7 @@ func main() {
 					var methodDisplayName string
 					switch methodName {
 					case "gatherOnly":
-						//methodDisplayName = "Gather Only"
+						// methodDisplayName = "Gather Only"
 						continue
 					case "combine":
 						if concurrencyLimit == -1 {

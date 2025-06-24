@@ -18,11 +18,11 @@ import (
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCombinerScatterNilTaskPanic(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
@@ -42,7 +42,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 		combineOp := psg.NewCombineOp(
 			gatherOp,
 			combinerPool,
-			func() psgfn.Combiner[int, int] {
+			func() psg.Combiner[int, int] {
 				return psgfn.Combiner[int, int]{
 					CombineFn: func(ctx context.Context, value int, err error, emit psgfn.Emit[int]) {
 						chk.NoError(err)
@@ -65,24 +65,22 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 }
 
 func TestCombinerScatterNilGatherPanic(t *testing.T) {
-	chk := require.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 
-	chk.PanicsWithValue("gather function must be non-nil", func() {
+	assert.PanicsWithValue(t, "gather function must be non-nil", func() {
 		psg.NewGatherOp[int](nil)
 	})
 }
 
 func TestCombinerTryScatterNilTaskPanic(t *testing.T) {
-	chk := require.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 	taskPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
-	chk.PanicsWithValue("task function must be non-nil", func() {
+	assert.PanicsWithValue(t, "task function must be non-nil", func() {
 		gatherOp := psg.NewGatherOp(
 			func(ctx context.Context, result int, err error) error {
 				return nil
@@ -97,7 +95,7 @@ func TestCombinerTryScatterNilTaskPanic(t *testing.T) {
 }
 
 func TestCombinerScatterFromTask(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	taskPool := psg.NewTaskPool(job)
@@ -137,7 +135,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 }
 
 func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 
 	// Create parent job with task pool
@@ -155,7 +153,23 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherOp.Scatter(
+	combinerPool := psg.NewCombinerPool(parentJob)
+	combineOp := psg.NewCombineOp(
+		gatherOp,
+		combinerPool,
+		func() psg.Combiner[bool, bool] {
+			return psgfn.Combiner[bool, bool]{
+				CombineFn: func(ctx context.Context, value bool, err error, emit psgfn.Emit[bool]) {
+					chk.NoError(err)
+					emit(ctx, value, nil)
+				},
+				FlushFn: func(ctx context.Context, emit psgfn.Emit[bool]) {
+					// No-op in this test
+				},
+			}
+		},
+	)
+	err := combineOp.Scatter(
 		ctx,
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
@@ -197,7 +211,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 }
 
 func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 
 	// Create parent job with task pool
@@ -212,7 +226,23 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherOp.Scatter(
+	combinerPool := psg.NewCombinerPool(parentJob)
+	combineOp := psg.NewCombineOp(
+		gatherOp,
+		combinerPool,
+		func() psg.Combiner[bool, bool] {
+			return psgfn.Combiner[bool, bool]{
+				CombineFn: func(ctx context.Context, value bool, err error, emit psgfn.Emit[bool]) {
+					chk.NoError(err)
+					emit(ctx, value, nil)
+				},
+				FlushFn: func(ctx context.Context, emit psgfn.Emit[bool]) {
+					// No-op in this test
+				},
+			}
+		},
+	)
+	err := combineOp.Scatter(
 		ctx,
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
@@ -251,7 +281,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 		0,  // gather-only
 		1, 2, 3, 4,
 	}
-	availableCores := runtime.NumCPU()
+	availableCores := runtime.GOMAXPROCS(-1)
 	for {
 		prevLimit := combinerLimits[len(combinerLimits)-1]
 		if prevLimit >= availableCores {
@@ -486,7 +516,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						} else {
 							gatherOp := psg.NewGatherOp(gatherFn)
 							combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(max(0, combinerLimit), combinerLimit))
-							combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psgfn.Combiner[taskResult, combinedResult] {
+							combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[taskResult, combinedResult] {
 								maxDepth := 0
 								count := 0
 								var taskLatenciesNs *tdigest.TDigest
@@ -651,8 +681,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						tasksGathered := float64(totalTasksGathered - tasksGatheredOrigin)
 
 						// Now call CloseAndGatherAll to make sure nothing was lost.
-						require.NoError(b, job.CloseAndGatherAll(ctx))
-						require.Equal(b, totalTasksLaunched.Load(), int64(totalTasksGathered))
+						assert.NoError(b, job.CloseAndGatherAll(ctx))
+						assert.Equal(b, totalTasksLaunched.Load(), int64(totalTasksGathered))
 
 						b.ReportAllocs()
 

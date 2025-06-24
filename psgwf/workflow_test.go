@@ -11,7 +11,7 @@ import (
 	psg "github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestWorkflowAfterFunc verifies that AfterFuncs are called after workflow completion
@@ -55,12 +55,12 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "test", nil
 	})
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Close job and gather all results
 	// During gathering, the final Unref will trigger AfterFuncs
 	err = job.CloseAndGatherAll(context.Background())
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Verify all AfterFuncs were called
 	for i := 0; i < 5; i++ {
@@ -120,7 +120,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		err := gatherOp.Scatter(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "new task", nil
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	})
 
 	// Run a simple task to use the workflow
@@ -131,13 +131,13 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "original task", nil
 	})
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Close job and gather all results
 	// During gathering, the final Unref will trigger AfterFuncs
 	// The AfterFunc will scatter new tasks that will also be gathered
 	err = job.CloseAndGatherAll(context.Background())
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Verify both AfterFunc and new task ran
 	mu.Lock()

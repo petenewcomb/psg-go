@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"go.uber.org/zap"
 )
@@ -96,9 +97,9 @@ func LoggedGather[T any](
 func LoggedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[I, O] {
-	return func() psgfn.Combiner[I, O] {
+	combinerFactory psg.CombinerFactory[I, O],
+) psg.CombinerFactory[I, O] {
+	return func() psg.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 
 		return psgfn.Combiner[I, O]{

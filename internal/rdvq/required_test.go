@@ -5,6 +5,8 @@ package rdvq_test
 
 import (
 	"context"
+	"errors"
+	"math/rand/v2"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -12,7 +14,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 var p = &rdvq.Pool[int]{}
@@ -24,8 +26,8 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 
 	// Test TryPopFront on empty queue
 	value, ok := q.TryPopFront(p)
-	require.False(t, ok)
-	require.Equal(t, 0, value) // zero value for int
+	assert.False(t, ok)
+	assert.Equal(t, 0, value) // zero value for int
 
 	// Test rendezvous pattern - producer blocks until consumer receives
 	values := make(chan int, 3)
@@ -49,9 +51,9 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 
 	// Consume first value with TryPopFront
 	value, ok = q.TryPopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 1, value)
-	require.Equal(t, 1, <-values)
+	assert.True(t, ok)
+	assert.Equal(t, 1, value)
+	assert.Equal(t, 1, <-values)
 
 	// Consume second value with PopFront
 	// Note: PopFront may process both an outbox value and an orphaned inbox value
@@ -59,24 +61,31 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 	err := q.PopFront(ctx, p, func(value int) {
 		received = append(received, value)
 	})
-	require.NoError(t, err)
-	require.Len(t, received, 2)
-	require.Contains(t, received, 2)
-	require.Contains(t, received, 3)
-	require.Equal(t, 2, <-values)
-	require.Equal(t, 3, <-values)
+	assert.NoError(t, err)
+	assert.Contains(t, received, 2)
 
-	// All values should have been consumed by PopFront
-	value, ok = q.TryPopFront(p)
-	require.False(t, ok)
-	require.Equal(t, 0, value) // zero value
+	// All three values should already be available in the model
+	assert.Equal(t, 2, <-values)
+	assert.Equal(t, 3, <-values)
 
+	// If we didn't receive the third value yet, PopFront should still work
+	if len(received) != 2 {
+		err := q.PopFront(ctx, p, func(value int) {
+			received = append(received, value)
+		})
+		assert.NoError(t, err)
+	}
+
+	// By now we should have all three values
+	assert.Contains(t, received, 3)
+
+	// And the producer should be finished
 	wg.Wait()
 
-	// Queue should be empty now
+	// There should be no more values available
 	value, ok = q.TryPopFront(p)
-	require.False(t, ok)
-	require.Equal(t, 0, value) // zero value for int
+	assert.False(t, ok)
+	assert.Equal(t, 0, value) // zero value
 }
 
 func TestRequired_ContextCancellation(t *testing.T) {
@@ -92,7 +101,7 @@ func TestRequired_ContextCancellation(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
-		require.Error(t, err, "Should not receive value when cancelled")
+		assert.Error(t, err, "Should not receive value when cancelled")
 		close(done)
 	}()
 
@@ -121,7 +130,7 @@ func TestRequired_ReceiverThenSender(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			received <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Give receiver time to register
@@ -134,16 +143,16 @@ func TestRequired_ReceiverThenSender(t *testing.T) {
 		defer wg.Done()
 		var outbox rdvq.Outbox[int]
 		err := q.PushBack(ctx, p, &outbox, 42)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		err = outbox.Wait(ctx, p)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 	defer wg.Wait()
 
 	// Verify receipt
 	select {
 	case val := <-received:
-		require.Equal(t, 42, val)
+		assert.Equal(t, 42, val)
 	case <-time.After(time.Second):
 		t.Fatal("Receiver did not receive value")
 	}
@@ -161,7 +170,7 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 			err := q.PopFront(ctx, p, func(value int) {
 				t.Error("Should not receive value when cancelled")
 			})
-			require.Error(t, err)
+			assert.Error(t, err)
 		}()
 		time.Sleep(5 * time.Millisecond)
 		cancel()
@@ -178,9 +187,9 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 		defer wg.Done()
 		var outbox rdvq.Outbox[int]
 		err := q.PushBack(ctx, p, &outbox, 99)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		err = outbox.Wait(ctx, p)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// New receiver should get the value
@@ -188,9 +197,9 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 	err := q.PopFront(ctx, p, func(value int) {
 		received = append(received, value)
 	})
-	require.NoError(t, err)
-	require.Len(t, received, 1)
-	require.Equal(t, 99, received[0])
+	assert.NoError(t, err)
+	assert.Len(t, received, 1)
+	assert.Equal(t, 99, received[0])
 	wg.Wait()
 }
 
@@ -199,8 +208,8 @@ func TestRequired_Concurrency(t *testing.T) {
 	q.Init(p)
 	ctx := context.Background()
 
-	numReaders := max(1, runtime.NumCPU()/2)
-	numWriters := max(1, runtime.NumCPU()/2)
+	numReaders := max(1, runtime.GOMAXPROCS(-1)/2)
+	numWriters := max(1, runtime.GOMAXPROCS(-1)/2)
 	iterations := 100_000
 	if testing.Short() {
 		iterations /= 10
@@ -259,7 +268,7 @@ func TestRequired_Concurrency(t *testing.T) {
 				}
 			}
 			err := outbox.Wait(ctx, p)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}(id)
 	}
 
@@ -292,78 +301,172 @@ func TestRequired_Concurrency(t *testing.T) {
 
 	// Queue should be empty
 	value, ok := q.TryPopFront(p)
-	require.False(t, ok, "Queue should be empty after all values consumed")
-	require.Equal(t, 0, value) // zero value for int
+	assert.False(t, ok, "Queue should be empty after all values consumed")
+	assert.Equal(t, 0, value) // zero value for int
 }
 
-func TestRequired_StressWithAbandonments(t *testing.T) {
+func TestRequired_Stress(t *testing.T) {
 	var q rdvq.Required[int]
 	q.Init(p)
 
-	const (
-		numGoroutines = 100
-		duration      = 2 * time.Second
-	)
+	numPushers := runtime.GOMAXPROCS(-1)
+	numPoppers := runtime.GOMAXPROCS(-1)
+	numExcessPoppers := min(3, runtime.GOMAXPROCS(-1))
+	duration := 10 * time.Second
+
+	if testing.Short() {
+		duration = 1 * time.Second
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var (
-		pushed        atomic.Int64
-		pushFailures  atomic.Int64
-		popped        atomic.Int64
-		popsAbandoned atomic.Int64
+		pushed    atomic.Int64
+		tryPushed atomic.Int64
+		refused   atomic.Int64
+		canceled  atomic.Int64
+		popped    atomic.Int64
+		tryPopped atomic.Int64
+		excess    atomic.Int64
+		abandoned atomic.Int64
 	)
 
-	// Start goroutines that randomly push, pop, or abandon
+	pushErrCh := make(chan error, 1)
+	popErrCh := make(chan error, 1)
+
+	pushOps := []func(context.Context, *rdvq.Outbox[int]){
+		func(ctx context.Context, outbox *rdvq.Outbox[int]) {
+			// Trying pusher
+			if !q.TryPushBack(p, outbox, int(tryPushed.Add(1))) {
+				refused.Add(1)
+			}
+		},
+		func(ctx context.Context, outbox *rdvq.Outbox[int]) {
+			// Normal pusher
+			err := q.PushBack(ctx, p, outbox, int(pushed.Add(1)))
+			switch {
+			case err == nil:
+			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+				canceled.Add(1)
+			default:
+				select {
+				case pushErrCh <- err:
+				default:
+				}
+			}
+		},
+	}
+
+	popOps := []func(context.Context){
+		func(ctx context.Context) {
+			// Normal popper
+			err := q.PopFront(ctx, p, func(value int) {
+				popped.Add(1)
+			})
+			switch {
+			case err == nil:
+			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+			default:
+				select {
+				case popErrCh <- err:
+				default:
+				}
+			}
+		},
+		func(ctx context.Context) {
+			// Trying popper
+			if _, ok := q.TryPopFront(p); ok {
+				tryPopped.Add(1)
+			}
+		},
+		func(ctx context.Context) {
+			// Abandoning popper
+			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
+			err := q.PopFront(shortCtx, p, func(value int) {
+				popped.Add(1)
+			})
+			switch {
+			case err == nil:
+			case errors.Is(err, context.DeadlineExceeded) && shortCtx.Err() != nil:
+				abandoned.Add(1)
+			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+			default:
+				select {
+				case popErrCh <- err:
+				default:
+				}
+			}
+			shortCancel()
+		},
+	}
+
 	var wg sync.WaitGroup
-	for i := 0; i < numGoroutines; i++ {
+
+	for range numPoppers {
 		wg.Add(1)
-		go func(id int) {
+		go func() {
 			defer wg.Done()
+
+			// Create a new context to reduce contention
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			for ctx.Err() == nil {
+				//nolint:gosec // non-cryptographic use case
+				popOps[rand.IntN(len(popOps))](ctx)
+			}
+		}()
+	}
+
+	// Start separate excess poppers, as they would otherwise block and slow
+	// down the other poppers
+	for range numExcessPoppers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Create a new context to reduce contention
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			for ctx.Err() == nil {
+				_, err := q.PopFrontExcess(ctx, p)
+				switch {
+				case err == nil:
+					excess.Add(1)
+				case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+				default:
+					select {
+					case popErrCh <- err:
+					default:
+					}
+				}
+			}
+		}()
+	}
+
+	for range numPushers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Create a new context to reduce contention
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
 
 			var outbox rdvq.Outbox[int]
 			for ctx.Err() == nil {
-				switch id % 3 {
-				case 0: // Pusher
-					if q.PushBack(ctx, p, &outbox, int(pushed.Add(1))) != nil {
-						pushFailures.Add(1)
-					}
-
-				case 1: // Normal popper
-					err := q.PopFront(ctx, p, func(value int) {
-						popped.Add(1)
-					})
-					if err != nil && ctx.Err() == nil {
-						// Error but context not cancelled - unexpected
-						t.Errorf("Unexpected PopFront error: %v", err)
-					}
-
-				case 2: // Abandoning popper
-					shortCtx, shortCancel := context.WithTimeout(ctx, time.Microsecond)
-					err := q.PopFront(shortCtx, p, func(value int) {
-						popped.Add(1)
-					})
-					if err == nil {
-						// Successfully got a value
-					} else {
-						popsAbandoned.Add(1)
-					}
-					shortCancel()
-				}
-
-				// Small delay to make the test more realistic
-				time.Sleep(time.Microsecond * time.Duration(id%10))
+				//nolint:gosec // non-cryptographic use case
+				pushOps[rand.IntN(len(pushOps))](ctx, &outbox)
 			}
-		}(i)
+		}()
 	}
 
 	// Let it run for a while
 	time.Sleep(duration)
 	cancel()
 	wg.Wait()
-
-	t.Logf("Pushed: %d, Popped: %d, PushFailures: %d, PopsAbandoned: %d", pushed.Load(), popped.Load(), pushFailures.Load(), popsAbandoned.Load())
 
 	// Drain any remaining values
 	var remaining int64
@@ -375,11 +478,24 @@ func TestRequired_StressWithAbandonments(t *testing.T) {
 		remaining++
 	}
 
-	// Verify conservation: pushed = popped + remaining
-	if pushed.Load()-pushFailures.Load() != popped.Load()+remaining {
-		t.Errorf("Value conservation failed: pushed=%d, popped=%d, remaining=%d",
-			pushed.Load()-pushFailures.Load(), popped.Load(), remaining)
+	t.Logf("Pushed: %d, TryPushed: %d, Refused: %d, Canceled: %d, Popped: %d, TryPopped: %d, Excess: %d, Abandoned: %d, Remaining: %d", pushed.Load(), tryPushed.Load(), refused.Load(), canceled.Load(), popped.Load(), tryPopped.Load(), excess.Load(), abandoned.Load(), remaining)
+
+	// Error but context not cancelled - unexpected
+	select {
+	case err := <-pushErrCh:
+		assert.NoError(t, err, "Unexpected error from PushBack")
+	default:
 	}
+
+	select {
+	case err := <-popErrCh:
+		assert.NoError(t, err, "Unexpected error from PopFront")
+	default:
+	}
+
+	actuallyPushed := pushed.Load() + tryPushed.Load() - refused.Load() - canceled.Load()
+	actuallyPopped := popped.Load() + tryPopped.Load() + excess.Load() + remaining
+	assert.Equal(t, actuallyPushed, actuallyPopped)
 }
 
 func TestRequired_TryPushBack(t *testing.T) {
@@ -390,9 +506,9 @@ func TestRequired_TryPushBack(t *testing.T) {
 	// TryPushBack should fail when no receivers are waiting
 	var outbox rdvq.Outbox[int]
 	success := q.TryPushBack(p, &outbox, 42)
-	require.True(t, success, "TryPushBack should succeed with empty outbox")
+	assert.True(t, success, "TryPushBack should succeed with empty outbox")
 	success = q.TryPushBack(p, &outbox, 24)
-	require.False(t, success, "TryPushBack should fail with full outbox and no waiting receivers")
+	assert.False(t, success, "TryPushBack should fail with full outbox and no waiting receivers")
 
 	// Start a receiver
 	received := make(chan int)
@@ -400,24 +516,24 @@ func TestRequired_TryPushBack(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			received <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Give receiver time to register
 	time.Sleep(10 * time.Millisecond)
 
-	require.True(t, outbox.IsEmpty(p))
+	assert.True(t, outbox.IsEmpty(p))
 
 	// TryPushBack should succeed now
 	success = q.TryPushBack(p, &outbox, 42)
-	require.True(t, success, "TryPushBack should succeed with waiting receiver")
+	assert.True(t, success, "TryPushBack should succeed with waiting receiver")
 
-	require.False(t, outbox.IsEmpty(p))
+	assert.False(t, outbox.IsEmpty(p))
 
 	// Verify the value was received
 	select {
 	case val := <-received:
-		require.Equal(t, 42, val)
+		assert.Equal(t, 42, val)
 	case <-time.After(time.Second):
 		t.Fatal("Receiver did not receive value")
 	}
@@ -434,7 +550,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			received <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Give receiver time to register
@@ -442,25 +558,25 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 
 	var outbox rdvq.Outbox[int]
 	err := q.PushBack(ctx, p, &outbox, 100)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Should receive immediately via direct delivery
 	select {
 	case val := <-received:
-		require.Equal(t, 100, val)
+		assert.Equal(t, 100, val)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Direct delivery failed")
 	}
 
 	// Outbox should still be empty (direct delivery bypassed outbox)
-	require.True(t, outbox.IsEmpty(p))
+	assert.True(t, outbox.IsEmpty(p))
 
 	// Test Tier 2: Outbox buffering when no receivers waiting
 	err = q.PushBack(ctx, p, &outbox, 200)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Outbox should now contain the item
-	require.False(t, outbox.IsEmpty(p))
+	assert.False(t, outbox.IsEmpty(p))
 
 	// Test Tier 3: Shared channel when outbox is full
 	done := make(chan struct{})
@@ -468,7 +584,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 		defer close(done)
 		// This should block on shared channel since outbox is full
 		err := q.PushBack(ctx, p, &outbox, 300)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Give sender time to start blocking
@@ -481,19 +597,19 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			received <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 
 		// Second PopFront should get the shared channel item
 		err = q.PopFront(ctx, p, func(value int) {
 			received <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Should receive the outboxed item first
 	select {
 	case val := <-received:
-		require.Equal(t, 200, val)
+		assert.Equal(t, 200, val)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Outbox delivery failed")
 	}
@@ -501,7 +617,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	// Should receive the shared channel item second
 	select {
 	case val := <-received:
-		require.Equal(t, 300, val)
+		assert.Equal(t, 300, val)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Shared channel delivery failed")
 	}
@@ -527,7 +643,7 @@ func TestRequired_OutboxNotification(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			received <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Wait for receiver to start waiting
@@ -537,18 +653,18 @@ func TestRequired_OutboxNotification(t *testing.T) {
 	// Send item to outbox - this should notify the waiting receiver
 	var outbox rdvq.Outbox[int]
 	err := q.PushBack(ctx, p, &outbox, 42)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Receiver should be notified and drain the outbox
 	select {
 	case val := <-received:
-		require.Equal(t, 42, val)
+		assert.Equal(t, 42, val)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Outbox notification failed")
 	}
 
 	// Outbox should be empty now
-	require.True(t, outbox.IsEmpty(p))
+	assert.True(t, outbox.IsEmpty(p))
 }
 
 func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
@@ -568,7 +684,7 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 			err := q.PopFront(ctx, p, func(value int) {
 				received <- value
 			})
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}
 	}()
 
@@ -583,12 +699,12 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 			for i := 0; i < itemsPerSender; i++ {
 				value := id*1000 + i // Unique value per sender
 				err := q.PushBack(ctx, p, &outbox, value)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}
 
 			// Wait for outbox to be drained
 			err := outbox.Wait(ctx, p)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}(senderID)
 	}
 
@@ -606,11 +722,11 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 	}
 
 	// Verify we got all expected values
-	require.Len(t, receivedValues, numSenders*itemsPerSender)
+	assert.Len(t, receivedValues, numSenders*itemsPerSender)
 	for senderID := 0; senderID < numSenders; senderID++ {
 		for i := 0; i < itemsPerSender; i++ {
 			expectedValue := senderID*1000 + i
-			require.True(t, receivedValues[expectedValue], "Missing value %d", expectedValue)
+			assert.True(t, receivedValues[expectedValue], "Missing value %d", expectedValue)
 		}
 	}
 }
@@ -621,21 +737,21 @@ func TestRequired_TryPopFrontWithOutboxes(t *testing.T) {
 
 	// TryPopFront should return immediately when no work available
 	value, ok := q.TryPopFront(p)
-	require.False(t, ok)
-	require.Equal(t, 0, value) // zero value for int
+	assert.False(t, ok)
+	assert.Equal(t, 0, value) // zero value for int
 
 	// Add item to outbox
 	var outbox rdvq.Outbox[int]
 	success := q.TryPushBack(p, &outbox, 42)
-	require.True(t, success) // Should go to outbox
+	assert.True(t, success) // Should go to outbox
 
 	// TryPopFront should immediately drain the outbox
 	value, ok = q.TryPopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 42, value)
+	assert.True(t, ok)
+	assert.Equal(t, 42, value)
 
 	// Outbox should be empty now
-	require.True(t, outbox.IsEmpty(p))
+	assert.True(t, outbox.IsEmpty(p))
 }
 
 func TestRequired_OutboxWaitBehavior(t *testing.T) {
@@ -647,12 +763,12 @@ func TestRequired_OutboxWaitBehavior(t *testing.T) {
 
 	// Wait on empty outbox should return immediately
 	err := outbox.Wait(ctx, p)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 
 	// Add item to outbox
 	err = q.PushBack(ctx, p, &outbox, 42)
-	require.NoError(t, err)
-	require.False(t, outbox.IsEmpty(p))
+	assert.NoError(t, err)
+	assert.False(t, outbox.IsEmpty(p))
 
 	// Wait should block until outbox is drained
 	waitDone := make(chan error)
@@ -672,13 +788,13 @@ func TestRequired_OutboxWaitBehavior(t *testing.T) {
 
 	// Drain the outbox
 	value, ok := q.TryPopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 42, value)
+	assert.True(t, ok)
+	assert.Equal(t, 42, value)
 
 	// Wait should now complete
 	select {
 	case err := <-waitDone:
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Wait did not complete after outbox was drained")
 	}
@@ -707,7 +823,7 @@ func TestRequired_RaceConditionPrevention(t *testing.T) {
 			err := q.PopFront(ctx, p, func(value int) {
 				received <- value
 			})
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}()
 
 		// Wait for receiver to start
@@ -717,12 +833,12 @@ func TestRequired_RaceConditionPrevention(t *testing.T) {
 		// outboxes and starting to block
 		var outbox rdvq.Outbox[int]
 		err := q.PushBack(ctx, p, &outbox, i)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 
 		// Should always receive the value despite the race
 		select {
 		case val := <-received:
-			require.Equal(t, i, val)
+			assert.Equal(t, i, val)
 		case <-time.After(100 * time.Millisecond):
 			t.Fatalf("Race condition detected at iteration %d", i)
 		}

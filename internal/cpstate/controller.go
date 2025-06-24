@@ -46,14 +46,20 @@ func (c *controller) Format(fs fmt.State, verb rune) {
 	for i, s := range c.samples {
 		label := ""
 		switch {
-		case i == valley && i == knee:
+		case i == valley && valley == knee:
 			label = "(v,k)"
 		case i == valley:
 			label = "(v)"
 		case i == knee:
 			label = "(k)"
 		}
-		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%", sep, s.GoroutineCount, label, s.Throughput*float64(time.Second), s.SpareUtil*100)
+		_, _ = fmt.Fprintf(fs, "%s%d%s: %.2f@%.0f%%",
+			sep,
+			s.GoroutineCount,
+			label,
+			s.Throughput*float64(time.Second),
+			s.SpareUtil*100, //nolint:mnd // by definition
+		)
 		sep = ", "
 	}
 	_, _ = fmt.Fprint(fs, "]")
@@ -84,6 +90,7 @@ func (c *controller) AddSample(retentionPeriod time.Duration, s perfSample) {
 		}
 	} else {
 		refreshAroundInflectionPoint := func(inflectionPointIndex int) {
+			//nolint:mnd // by definition
 			for i := max(0, inflectionPointIndex-2); i <= min(inflectionPointIndex+2, len(c.samples)-1); i++ {
 				c.samples[i].Time = s.Time
 			}
@@ -108,7 +115,7 @@ func (c *controller) AddSample(retentionPeriod time.Duration, s perfSample) {
 	// Scan to expire old samples while also inserting new sample
 	c.oldestSampleTime = s.Time
 	j := 0
-	append := func(i int, s perfSample) {
+	appendSample := func(i int, s perfSample) {
 		if j != i {
 			if j < len(c.samples) {
 				c.samples[j] = s
@@ -126,18 +133,18 @@ func (c *controller) AddSample(retentionPeriod time.Duration, s perfSample) {
 			// Insert new sample or replace existing one with same goroutine count
 			if es.GoroutineCount == s.GoroutineCount {
 				// Replace existing sample with same goroutine count
-				append(i, s)
+				appendSample(i, s)
 			} else {
 				// Insert new sample before existing one
-				append(-1, s)
+				appendSample(-1, s)
 			}
 		} else if !es.Time.Before(oldestValidTime) {
 			// Keep existing sample that hasn't expired
-			append(i, es)
+			appendSample(i, es)
 		}
 	}
 	if newSampleIndex == len(c.samples) {
-		append(-1, s)
+		appendSample(-1, s)
 	}
 	c.samples = c.samples[:j]
 }
@@ -181,7 +188,7 @@ func (c *controller) calculateBestTarget() int {
 		}
 
 	case kneeIndex == len(c.samples):
-		if len(c.samples) < 2 {
+		if len(c.samples) < 2 { //nolint:mnd // by definition
 			// Can't determine throughput growth with less than two samples:
 			// explore a bit higher
 			return c.scaleUpConservatively()
@@ -259,7 +266,7 @@ func (c *controller) scaleUpWithinGapAt(baseIndex int) int {
 	if gapSize == 1 {
 		return baseGC
 	}
-	return baseGC + min(1, int(math.Round(float64(gapSize)*0.5)))
+	return baseGC + min(1, int(math.Round(float64(gapSize)*0.5))) //nolint:mnd // binary search
 }
 
 func (c *controller) throughputStillImprovingAt(baseIndex int) bool {
@@ -271,7 +278,7 @@ func (c *controller) throughputStillImprovingAt(baseIndex int) bool {
 // goroutine count less than 1.
 func (c *controller) scaleDown() int {
 	baseGC := c.samples[0].GoroutineCount
-	return max(1, min(baseGC-1, int(math.Round(float64(baseGC)*0.5))))
+	return max(1, min(baseGC-1, int(math.Round(float64(baseGC)*0.5)))) //nolint:mnd // binary search
 }
 
 /*

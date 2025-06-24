@@ -9,7 +9,7 @@ type Value[T any] struct {
 	state atomic.Pointer[dvState[T]]
 }
 
-func (dv *Value[T]) Load() (T, <-chan struct{}) {
+func (dv *Value[T]) Load() (value T, changeCh <-chan struct{}) {
 	state := dv.state.Load()
 	if state == nil {
 		state = newDvState(*new(T))

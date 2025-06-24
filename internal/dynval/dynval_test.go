@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/dynval"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestValue_ZeroValue(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	var dv dynval.Value[int]
 
 	// Load from zero value should return zero and not panic
@@ -25,7 +25,7 @@ func TestValue_ZeroValue(t *testing.T) {
 }
 
 func TestValue_Store(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	var dv dynval.Value[int]
 
 	// Store sets the value
@@ -40,7 +40,7 @@ func TestValue_Store(t *testing.T) {
 }
 
 func TestValue_LoadNotification(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	var dv dynval.Value[int]
 
 	// Get the initial value and change channel
@@ -81,7 +81,7 @@ func TestValue_LoadNotification(t *testing.T) {
 }
 
 func TestValue_Concurrent(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	var dv dynval.Value[int]
 
 	const numGoroutines = 10
@@ -154,7 +154,7 @@ func TestValue_Concurrent(t *testing.T) {
 }
 
 func TestValue_RapidChanges(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	var dv dynval.Value[int]
 
 	// Get the initial change channel
@@ -180,7 +180,7 @@ func TestValue_RapidChanges(t *testing.T) {
 
 func TestValueConcurrency(t *testing.T) {
 	var dv dynval.Value[int]
-	chk := require.New(t)
+	chk := assert.New(t)
 
 	const numReaders = 100
 	const numWriters = 100
@@ -409,7 +409,7 @@ func TestValueConcurrency(t *testing.T) {
 }
 
 func TestValue_AliasedChannels(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	var dv dynval.Value[int]
 
 	// Get the value and change channel twice
@@ -449,13 +449,13 @@ func TestValue_AliasedChannels(t *testing.T) {
 }
 
 func TestValue_DifferentTypes(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 
 	// Test with string
 	var dvString dynval.Value[string]
 
 	val, ch := dvString.Load()
-	chk.Equal("", val)
+	chk.Empty(val)
 
 	dvString.Store("world")
 	select {
@@ -478,7 +478,7 @@ func TestValue_DifferentTypes(t *testing.T) {
 
 	valStruct, _ := dvStruct.Load()
 	chk.Equal(0, valStruct.Field1)
-	chk.Equal("", valStruct.Field2)
+	chk.Empty(valStruct.Field2)
 
 	dvStruct.Store(testStruct{Field1: 100, Field2: "world"})
 

@@ -10,12 +10,12 @@ import (
 	"testing"
 
 	"github.com/petenewcomb/psg-go/internal/sim"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 	"pgregory.net/rapid"
 )
 
 func TestPlanFormatting(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 
 	testdata := "testdata/rapid/TestPlanFormatting"
 	_, err := os.Stat("testdata/rapid/TestPlanFormatting")
@@ -4103,6 +4103,6 @@ Plan#0 step 4/4 (+0s): ends at 29.100037ms`
 		}
 		ranOnce = true
 		plan := sim.NewPlan(t, &sim.DefaultConfig)
-		require.Equal(t, expected, fmt.Sprintf("%#v", plan), "use -test.v -rapid.v -rapid.log to see full error")
+		assert.Equal(t, expected, fmt.Sprintf("%#v", plan), "use -test.v -rapid.v -rapid.log to see full error")
 	})
 }

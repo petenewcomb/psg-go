@@ -39,7 +39,7 @@ func ExampleCombine() {
 		}
 	}
 
-	newCombiner := func() psgfn.Combiner[string, map[string]int] {
+	newCombiner := func() psg.Combiner[string, map[string]int] {
 		// Aggregation state variable shared between combine and flush
 		var counts map[string]int
 

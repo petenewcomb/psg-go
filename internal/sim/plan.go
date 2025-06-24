@@ -102,7 +102,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 
 		selfTime := funcConfig.SelfTime.Draw(t, name+".SelfTime")
 
-		stepCount := 2*len(scatters) + 1
+		stepCount := 2*len(scatters) + 1 //nolint:mnd // by definition
 		if subjobPlan != nil {
 			stepCount += 2
 		}
@@ -177,7 +177,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		combineName := fmt.Sprintf("Combine#%d", id)
 		var flush ResultHandler
 		if planConfig.Combine.Flush.Draw(t, combineName+".Flush") {
-			flushScatterCount := (&BiasedIntConfig{Med: len(paths) / 2, Max: len(paths)}).Draw(t, combineName+".FlushScatterCount")
+			flushScatterCount := (&BiasedIntConfig{Med: len(paths) / 2, Max: len(paths)}).Draw(t, combineName+".FlushScatterCount") //nolint:mnd // even split
 			flush = newGather(id, paths[:flushScatterCount])
 			paths = paths[flushScatterCount:]
 		}
@@ -296,7 +296,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 				RootTask:        task,
 			})
 		}
-		paths = append(paths, remainingCandidates...)
+		paths = append(paths, remainingCandidates...) //nolint:makezero // working buffer
 	}
 
 	plan.Steps = rapid.Permutation(plan.Steps).Draw(t, planName+".StepsPermutation")

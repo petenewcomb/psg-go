@@ -18,7 +18,7 @@ import (
 // "Hello world" example that uses psg to run a couple of tasks and gather their
 // results.
 //
-//nolint:errcheck
+//nolint:errcheck,gosec // concise example code for readme
 func Example_hello() {
 	ctx := context.Background()
 	job := psg.NewJob(ctx)

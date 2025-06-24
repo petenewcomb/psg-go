@@ -5,6 +5,7 @@ package psg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -99,7 +100,7 @@ var combineQueuePool = &rdvq.Pool[pendingCombine]{}
 
 func (cp *CombinerPool) postCombine(ctx context.Context, outbox *rdvq.Outbox[pendingCombine], combineFn boundCombine) {
 	if cp.state.MaybeSpawnGoroutine() {
-		cp.spawnNewCombiner(combineFn)
+		cp.spawnNewCombiner(ctx, combineFn)
 		return
 	}
 	pc := pendingCombine{fn: combineFn, releaseWaiters: false}
@@ -111,7 +112,7 @@ func (cp *CombinerPool) postCombine(ctx context.Context, outbox *rdvq.Outbox[pen
 	})
 
 	if !tookSlowPath && cp.state.ShouldStartFirstGoroutine() {
-		cp.spawnNewCombiner(nil)
+		cp.spawnNewCombiner(ctx, nil)
 	}
 }
 
@@ -146,7 +147,7 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, outboxCh chan<- pen
 	for {
 		spawnWaitCh := cp.state.ShouldSpawnGoroutine()
 		if spawnWaitCh == nil {
-			cp.spawnNewCombiner(combineFn)
+			cp.spawnNewCombiner(ctx, combineFn)
 			return rdvq.SelectAborted
 		}
 
@@ -177,11 +178,11 @@ func (cp *CombinerPool) postCombineSlow(ctx context.Context, outboxCh chan<- pen
 	}
 }
 
-func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
+func (cp *CombinerPool) spawnNewCombiner(_ context.Context, combineFn boundCombine) {
 	j := cp.j
 	nextJobFlushCh, unregisterAsJobFlusher := j.state.RegisterFlusher()
 	j.wg.Add(1)
-	go func() {
+	go func() { //nolint:contextcheck // must use job context
 		defer j.wg.Done()
 
 		isSpare := false
@@ -367,7 +368,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				if ok {
 					queueCombine(pc)
 				}
-				if err == errIdleTimeout && workQueue.Len() > 0 {
+				if errors.Is(err, errIdleTimeout) && workQueue.Len() > 0 {
 					// Don't exit if we still have work to do.
 					err = nil
 				}
@@ -484,9 +485,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 					// not executed. Gather execution happens later in the job's work queue.
 					//
 					// These are all expected shutdown conditions, so no special handling needed.
-					switch err {
-					case context.Canceled, context.DeadlineExceeded, ErrJobDone, errIdleTimeout:
-					default:
+					if !errIn(err, context.Canceled, context.DeadlineExceeded, ErrJobDone, errIdleTimeout) {
 						panic(fmt.Sprintf("unexpected error from deferred scatter: %v", err))
 					}
 				}
@@ -564,7 +563,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 				if cp.spareElected.CompareAndSwap(false, true) {
 					isSpare = true
 					idleTimer = timerp.Get()
-					defer timerp.Put(idleTimer)
+					defer timerp.Put(idleTimer) //nolint:gocritic
 					defer cp.spareElected.Store(false)
 				}
 			}
@@ -572,9 +571,7 @@ func (cp *CombinerPool) spawnNewCombiner(combineFn boundCombine) {
 			_, err := processWorkAndCombine(backpressureCtx, true, rdvq.Waiter{}, nil)
 
 			if err != nil {
-				switch err {
-				case ErrJobDone, errIdleTimeout, context.Canceled:
-				default:
+				if !errIn(err, ErrJobDone, errIdleTimeout, context.Canceled) {
 					panic(fmt.Sprintf("combiner goroutine exiting with unexpected error: %v", err))
 				}
 				if workQueue.Len() != 0 {
@@ -672,13 +669,13 @@ func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *Combiner
 					emit(ctx, *new(O), ErrCombinerFactoryPanicked)
 				}
 			}()
-			psgfnCombiner := c.newCombiner()
+			combiner := c.newCombiner()
 			panicked = false
-			if psgfnCombiner.CombineFn == nil && psgfnCombiner.FlushFn == nil {
+			if combiner == nil {
 				emit(ctx, *new(O), ErrCombinerFactoryReturnedNil)
 				return &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
 			}
-			return psgfnCombiner
+			return combiner
 		}()
 
 		// Initialize the map if needed

@@ -29,7 +29,7 @@ type Monitor struct {
 	done           chan struct{}
 }
 
-func (m *Monitor) BusySignal() (bool, <-chan struct{}) {
+func (m *Monitor) BusySignal() (busy bool, changeCh <-chan struct{}) {
 	return m.busy.Load()
 }
 

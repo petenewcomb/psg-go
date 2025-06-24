@@ -3,6 +3,7 @@
 
 package sim
 
+//nolint:mnd // default configuration
 var DefaultConfig = Config{
 	Path: PathConfig{
 		Count:  BiasedIntConfig{Min: 1, Med: 15, Max: 30},

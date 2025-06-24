@@ -5,7 +5,7 @@ package psg_test
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // non-cryptographic use case
 	"fmt"
 	"log"
 	"os"
@@ -47,9 +47,10 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Run digesting tasks in a Pool limited to the number of cores available to
 	// the program, since it should be CPU-bound.
-	digesterPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(runtime.NumCPU()))
+	digesterPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(runtime.GOMAXPROCS(-1)))
 	newDigestingTaskFn := func(data []byte) psgfn.Task[[md5.Size]byte] {
 		return func(ctx context.Context) ([md5.Size]byte, error) {
+			//nolint:gosec // non-cryptographic use case
 			return md5.Sum(data), nil
 		}
 	}
@@ -70,6 +71,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// the digesters.
 	newReadingTaskFn := func(path string) psgfn.Task[[]byte] {
 		return func(ctx context.Context) ([]byte, error) {
+			//nolint:gosec // path from known source
 			return os.ReadFile(path)
 		}
 	}

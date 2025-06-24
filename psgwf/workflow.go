@@ -27,7 +27,7 @@ type AfterFunc func(ctx context.Context, wf *Workflow)
 // propagated from tasks to gathers or combines, and then to additional tasks
 // scattered from those gathers or combines.
 type Workflow struct {
-	ctx        context.Context
+	ctx        context.Context //nolint:containedctx // for the workflow, separate from normal call-tree context
 	mu         sync.Mutex
 	refCount   int
 	cancel     context.CancelCauseFunc

@@ -9,6 +9,9 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
+// CombinerFactory is a function that creates a new Combiner instance.
+type CombinerFactory[I, O any] = func() Combiner[I, O]
+
 // Combiner is an interface that defines operations for combining and flushing inputs.
 // It is used to aggregate inputs over time before emitting outputs.
 type Combiner[I, O any] interface {

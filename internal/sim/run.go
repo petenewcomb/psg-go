@@ -5,6 +5,7 @@ package sim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -15,19 +16,18 @@ import (
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
-func Run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error {
+func Run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
 	return run(ctx, t, plan, debug)
 }
 
-func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error {
+func run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
 
 	c := &controller{
-		Ctx:                          ctx,
 		Plan:                         plan,
 		Job:                          job,
 		TaskPools:                    make([]*psg.TaskPool, len(plan.TaskPools)),
@@ -48,7 +48,6 @@ func run(ctx context.Context, t require.TestingT, plan *Plan, debug bool) error 
 }
 
 type controller struct {
-	Ctx                          context.Context
 	Plan                         *Plan
 	Job                          *psg.Job
 	TaskPoolsLock                sync.Mutex
@@ -71,7 +70,7 @@ type controller struct {
 	Debug                        bool
 }
 
-func (c *controller) Run(ctx context.Context, t require.TestingT) error {
+func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	c.StartTime = time.Now()
 	c.debugf(ctx, "starting %v", c.Plan)
 
@@ -84,7 +83,7 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 		}
 	}
 
-	chk := require.New(t)
+	chk := assert.New(t)
 	// Loop to handle expected errors from gathers
 	for {
 		c.debugf(ctx, "closing and gathering")
@@ -93,7 +92,8 @@ func (c *controller) Run(ctx context.Context, t require.TestingT) error {
 		if err == nil {
 			break
 		}
-		if ge, ok := err.(ExpectedGatherError); ok {
+		var ge ExpectedGatherError
+		if errors.As(err, &ge) {
 			chk.True(ge.g.Func.ReturnError)
 		} else {
 			chk.NoError(err)
@@ -129,7 +129,7 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 	return pool
 }
 
-func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *Task) {
+func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *Task) {
 	c.debugf(ctx, "Scattering %v", task)
 	defer c.debugf(ctx, "Scattered %v", task)
 	switch rh := task.ResultHandler.(type) {
@@ -149,12 +149,13 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 		// Scatter as it applies backpressure
 		for {
 			err := gatherOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
-				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
+				c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break
 			}
-			chk := require.New(t)
-			if ge, ok := err.(ExpectedGatherError); ok {
+			chk := assert.New(t)
+			var ge ExpectedGatherError
+			if errors.As(err, &ge) {
 				chk.True(ge.g.Func.ReturnError)
 			} else {
 				chk.NoError(err)
@@ -195,13 +196,14 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 		for {
 			c.debugf(ctx, "Calling combine.Scatter for %v", task)
 			err := combineOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
-				c.newTaskFunc(task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
+				c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			c.debugf(ctx, "Called combine.Scatter for %v: %v", task, err)
 			if err == nil {
 				break
 			}
-			chk := require.New(t)
-			if ge, ok := err.(ExpectedGatherError); ok {
+			chk := assert.New(t)
+			var ge ExpectedGatherError
+			if errors.As(err, &ge) {
 				chk.True(ge.g.Func.ReturnError)
 			} else {
 				chk.NoError(err)
@@ -212,44 +214,7 @@ func (c *controller) scatterTask(ctx context.Context, t require.TestingT, task *
 	}
 }
 
-type localT struct {
-	calls []func(require.TestingT)
-}
-
-func (lt *localT) Errorf(format string, args ...any) {
-	lt.calls = append(lt.calls, func(t require.TestingT) {
-		t.Errorf(format, args...)
-	})
-}
-
-func (lt *localT) FailNow() {
-	lt.calls = append(lt.calls, func(t require.TestingT) {
-		t.FailNow()
-	})
-	panic(localTPanicType{})
-}
-
-func (lt *localT) DrainTo(t require.TestingT) {
-	for _, call := range lt.calls {
-		call(t)
-	}
-}
-
-type localTPanicType struct{}
-
-func recoverLocalTPanic(f func()) {
-	if r := recover(); r != nil {
-		if _, ok := r.(localTPanicType); ok {
-			if f != nil {
-				f()
-			}
-		} else {
-			panic(r)
-		}
-	}
-}
-
-func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psgfn.Task[*taskResult] {
+func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *atomic.Int64) psgfn.Task[*taskResult] {
 	scatterTime := time.Now()
 	return func(ctx context.Context) (res *taskResult, err error) {
 		c.MinScatterDelay.UpdateMin(int64(time.Since(scatterTime)))
@@ -258,13 +223,11 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psgfn.Ta
 			Task:               task,
 			ConcurrencyAtStart: concurrency.Add(1),
 		}
-		defer recoverLocalTPanic(nil)
 
-		t := &res.T
-		chk := require.New(t)
+		chk := assert.New(t)
 
 		c.debugf(ctx, "starting %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAtStart)
-		chk.Greater(res.ConcurrencyAtStart, int64(0))
+		chk.Positive(res.ConcurrencyAtStart)
 		defer func() {
 			res.ConcurrencyAfter = concurrency.Add(-1)
 			c.debugf(ctx, "ended %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAfter)
@@ -298,12 +261,11 @@ func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psgfn.Ta
 	}
 }
 
-func (c *controller) newGatherFunc(t require.TestingT) psgfn.Gather[*taskResult] {
+func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] {
 	return func(ctx context.Context, res *taskResult, err error) (retErr error) {
 		c.MinGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
 
-		res.T.DrainTo(t)
-		chk := require.New(t)
+		chk := assert.New(t)
 
 		c.updateTaskStats(t, res, err)
 
@@ -325,8 +287,8 @@ func (c *controller) newGatherFunc(t require.TestingT) psgfn.Gather[*taskResult]
 	}
 }
 
-func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) psgfn.CombinerFactory[*taskResult, *combineResult] {
-	return func() psgfn.Combiner[*taskResult, *combineResult] {
+func (c *controller) newCombinerFactory(t assert.TestingT, combineIndex int) psg.CombinerFactory[*taskResult, *combineResult] {
+	return func() psg.Combiner[*taskResult, *combineResult] {
 		cRes := &combineResult{
 			Index: combineIndex,
 		}
@@ -342,10 +304,7 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 			CombineFn: func(ctx context.Context, tRes *taskResult, err error, emit psgfn.Emit[*combineResult]) {
 				c.MinCombineDelay.UpdateMin(int64(time.Since(tRes.EndTime)))
 
-				defer recoverLocalTPanic(func() { flush(ctx, nil, nil, emit) })
-				t := &cRes.T
-				tRes.T.DrainTo(t)
-				chk := require.New(t)
+				chk := assert.New(t)
 
 				c.updateTaskStats(t, tRes, err)
 
@@ -366,20 +325,17 @@ func (c *controller) newCombinerFactory(pt require.TestingT, combineIndex int) p
 				}
 			},
 			FlushFn: func(ctx context.Context, emit psgfn.Emit[*combineResult]) {
-				//if cRes.TaskCount > 0 {
 				flush(ctx, nil, nil, emit)
-				//}
 			},
 		}
 	}
 }
 
-func (c *controller) newCombinerGatherFunc(t require.TestingT) psgfn.Gather[*combineResult] {
+func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*combineResult] {
 	return func(ctx context.Context, res *combineResult, err error) error {
 		c.MinCombineGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
 
-		res.T.DrainTo(t)
-		chk := require.New(t)
+		chk := assert.New(t)
 
 		combine := res.Combine
 		if combine == nil {
@@ -389,7 +345,8 @@ func (c *controller) newCombinerGatherFunc(t require.TestingT) psgfn.Gather[*com
 			// FlushHandler and/or combine error case
 			if combine.Func.ReturnError {
 				chk.Error(err)
-				if ce, ok := err.(ExpectedCombineError); ok {
+				var ce ExpectedCombineError
+				if errors.As(err, &ce) {
 					chk.Equal(combine.Func, ce.c.Func)
 				} else {
 					chk.NoError(err)
@@ -420,8 +377,8 @@ func (c *controller) newCombinerGatherFunc(t require.TestingT) psgfn.Gather[*com
 	}
 }
 
-func (c *controller) updateTaskStats(t require.TestingT, res *taskResult, err error) {
-	chk := require.New(t)
+func (c *controller) updateTaskStats(t assert.TestingT, res *taskResult, err error) {
+	chk := assert.New(t)
 	task := res.Task
 	if task.Func.ReturnError {
 		chk.Error(err)
@@ -430,7 +387,7 @@ func (c *controller) updateTaskStats(t require.TestingT, res *taskResult, err er
 	}
 
 	taskPool := task.PoolIndex
-	chk.Greater(res.ConcurrencyAtStart, int64(0))
+	chk.Positive(res.ConcurrencyAtStart)
 	chk.LessOrEqual(res.ConcurrencyAtStart, int64(c.Plan.TaskPools[taskPool].ConcurrencyLimit))
 	chk.GreaterOrEqual(res.ConcurrencyAfter, int64(0))
 	chk.Less(res.ConcurrencyAfter, int64(c.Plan.TaskPools[taskPool].ConcurrencyLimit))
@@ -440,8 +397,8 @@ func (c *controller) updateTaskStats(t require.TestingT, res *taskResult, err er
 	chk.GreaterOrEqual(elapsedTime, task.PathDuration())
 }
 
-func (c *controller) executeGatherOrCombineFunc(t require.TestingT, ctx context.Context, rh ResultHandler, fn *Func) error {
-	chk := require.New(t)
+func (c *controller) executeGatherOrCombineFunc(t assert.TestingT, ctx context.Context, rh ResultHandler, fn *Func) error {
+	chk := assert.New(t)
 	timer := timerp.Get()
 	defer timerp.Put(timer)
 	for _, step := range fn.Steps {
@@ -477,7 +434,6 @@ func (c *controller) debugf(ctx context.Context, format string, args ...interfac
 
 // taskResult represents the result of executing a simulated task.
 type taskResult struct {
-	T                  localT
 	Task               *Task
 	ConcurrencyAtStart int64
 	ConcurrencyAfter   int64
@@ -486,7 +442,6 @@ type taskResult struct {
 
 // combineResult represents a result emitted by a simulated combiner.
 type combineResult struct {
-	T         localT
 	Index     int
 	Combine   *Combine
 	TaskCount int

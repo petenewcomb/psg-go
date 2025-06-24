@@ -14,53 +14,55 @@ linters:
     - unused
     
     # Security-focused
-    # - gosec
+    - gosec
     - bodyclose
     - errchkjson
     - noctx
     - rowserrcheck
     
     # Performance/efficiency
-    # - gocritic
-    # - prealloc
+    - gocritic
+    - prealloc
     - unconvert
-    # - makezero
+    - makezero
     
     # Code quality/maintainability
-    # - misspell
+    - asciicheck
+    - bidichk
+    - containedctx
+    - contextcheck
+    - misspell
     - goconst
     # - cyclop
-    # - dupl
+    - dupl
+    - mnd
     
     # Error handling
-    # - errorlint
+    - errorlint
     - nilerr
     
     # Testing
-    # - testifylint
+    - testifylint
     - thelper
+
   settings:
-    cyclop:
-      max-complexity: 15
-    dupl:
-      threshold: 100
-    goconst:
-      min-len: 3
-      min-occurrences: 3
+    #cyclop:
+    #  max-complexity: 15
     gocritic:
       enabled-tags:
         - diagnostic
         - style
         - performance
         - experimental
-      disabled-checks:
-        - whyNoLint # allow missing lint explanations
-    gosec:
-      excludes:
-        - G204 # subprocess with variable - common in build tools
+        - opinionated
     prealloc:
       simple: true
       range-loops: true
+    testifylint:
+      disable:
+        # Don't force use of require when checking error values, since we often
+        # can't use require due to concurrency not obvious to the linter.
+        - require-error
   exclusions:
     rules:
       # Allow complex test functions
@@ -68,16 +70,6 @@ linters:
         linters:
           - cyclop
           - funlen
-
-      # Allow magic numbers in tests
-      - path: _test\.go
-        linters:
-          - mnd
-
-      # Allow long lines in generated code
-      - path: \.pb\.go
-        linters:
-          - lll
 
 run:
   timeout: 5m

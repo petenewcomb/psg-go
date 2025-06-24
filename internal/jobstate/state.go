@@ -141,20 +141,21 @@ func (js *JobState) noMoreWork() {
 	// If totalReferences is zero, there is nothing left to do.
 	if js.totalReferences.IsZero() {
 		js.noMoreReferences()
-	} else {
-		// Handle flush channel for flushing state
-		if currentStage == stageFlushing {
-			// Call the flushListener callback if set (before closing the channel)
-			if fn, ok := js.flushListener.Load().(func()); ok && fn != nil {
-				fn()
-			}
+		return
+	}
 
-			// Create new channel and swap with old one
-			newCh := make(chan struct{})
-			oldCh := js.nextFlushChan.Swap(newCh).(chan struct{})
-			// Close old channel after replacing it
-			close(oldCh)
+	// Handle flush channel for flushing state
+	if currentStage == stageFlushing {
+		// Call the flushListener callback if set (before closing the channel)
+		if fn, ok := js.flushListener.Load().(func()); ok && fn != nil {
+			fn()
 		}
+
+		// Create new channel and swap with old one
+		newCh := make(chan struct{})
+		oldCh := js.nextFlushChan.Swap(newCh).(chan struct{})
+		// Close old channel after replacing it
+		close(oldCh)
 	}
 }
 

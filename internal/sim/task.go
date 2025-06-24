@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+//nolint:mnd // default configuration
 var defaultTaskConfig = TaskConfig{
 	Func: FuncConfig{
 		SelfTime: BiasedDurationConfig{Min: 0, Med: 10 * time.Microsecond, Max: 10 * time.Millisecond},

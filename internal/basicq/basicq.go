@@ -67,10 +67,10 @@ func (q *Queue[T]) grow() int {
 	var newItems []T
 	if oldCapacity == 0 {
 		// Use default initial slice capacity
-		newItems = append(q.items, *new(T))
+		newItems = append(newItems, *new(T))
 		newItems = newItems[:cap(newItems)]
 	} else {
-		newItems = make([]T, oldCapacity*2)
+		newItems = make([]T, oldCapacity*2) //nolint:mnd // standard growth factor
 		// Copy elements in order, starting from front
 		size := q.Len()
 		for i := 0; i < size; i++ {

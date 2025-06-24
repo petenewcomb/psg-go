@@ -83,7 +83,7 @@ func (q *Optional[T]) PopFrontFunc(p *Pool[T], processOrphanFn ProcessValueFunc[
 	}
 }
 
-func (q *Optional[T]) TryPopFront(ctx context.Context, p *Pool[T], processFn ProcessValueFunc[T]) {
+func (q *Optional[T]) TryPopFront(p *Pool[T], processFn ProcessValueFunc[T]) {
 	q.PopFrontFunc(p, processFn, func(ch <-chan T) SelectResult {
 		select {
 		case value := <-ch:

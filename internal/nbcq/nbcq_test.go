@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 	"pgregory.net/rapid"
 )
 
@@ -24,7 +24,7 @@ func TestQueueBasicFunctionality(t *testing.T) {
 
 	// Test empty queue
 	_, ok := q.PopFront(p)
-	require.False(t, ok)
+	assert.False(t, ok)
 
 	// Test adding and removing elements
 	q.PushBack(p, 1)
@@ -32,19 +32,19 @@ func TestQueueBasicFunctionality(t *testing.T) {
 	q.PushBack(p, 3)
 
 	val, ok := q.PopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 1, val)
+	assert.True(t, ok)
+	assert.Equal(t, 1, val)
 
 	val, ok = q.PopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 2, val)
+	assert.True(t, ok)
+	assert.Equal(t, 2, val)
 
 	val, ok = q.PopFront(p)
-	require.True(t, ok)
-	require.Equal(t, 3, val)
+	assert.True(t, ok)
+	assert.Equal(t, 3, val)
 
 	_, ok = q.PopFront(p)
-	require.False(t, ok)
+	assert.False(t, ok)
 }
 
 // TestQueueWithRapid uses rapid state machine testing to verify queue
@@ -86,8 +86,8 @@ func TestQueueWithRapid(t *testing.T) {
 				val, ok := q.PopFront(p)
 
 				// Verify the operation succeeded
-				require.True(t, ok, "PopFront failed on non-empty queue")
-				require.Equal(t, expected, val, "PopFront returned wrong value")
+				assert.True(t, ok, "PopFront failed on non-empty queue")
+				assert.Equal(t, expected, val, "PopFront returned wrong value")
 			},
 
 			// Check invariants between actions
@@ -95,7 +95,7 @@ func TestQueueWithRapid(t *testing.T) {
 				// If model is empty, verify queue behaves as empty
 				if len(model) == 0 {
 					_, ok := q.PopFront(p)
-					require.False(t, ok, "PopFront should fail on empty queue")
+					assert.False(t, ok, "PopFront should fail on empty queue")
 				}
 			},
 		})
@@ -105,10 +105,10 @@ func TestQueueWithRapid(t *testing.T) {
 func TestQueueConcurrency(t *testing.T) {
 	var q nbcq.Queue[int]
 	q.Init(p)
-	chk := require.New(t)
+	chk := assert.New(t)
 
-	var numReaders = max(1, runtime.NumCPU()/2)
-	var numWriters = max(1, runtime.NumCPU()/2)
+	var numReaders = max(1, runtime.GOMAXPROCS(-1)/2)
+	var numWriters = max(1, runtime.GOMAXPROCS(-1)/2)
 	var iterations = 5_000_000
 	if testing.Short() {
 		iterations /= 10
@@ -280,7 +280,7 @@ func TestQueueConcurrency(t *testing.T) {
 	chk.Greater(readerWriterTimeOverlap, time.Duration(0), "Readers and writers didn't operate concurrently")
 
 	readerWriterValueOverlap := minReaderMaxValue - maxReaderMinValue
-	chk.Greater(readerWriterValueOverlap, 0, "Readers did not receive fully overlapping value sets")
+	chk.Positive(readerWriterValueOverlap, "Readers did not receive fully overlapping value sets")
 
 	t.Logf("Time overlap: all readers and all writers ran concurrently for %v", readerWriterTimeOverlap)
 

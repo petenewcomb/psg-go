@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"go.opentelemetry.io/otel"
 )
@@ -84,9 +85,9 @@ func MetricsGather[T any](
 func MetricsCombiner[I, O any](
 	combineMetricName string,
 	flushMetricName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[I, O] {
-	return func() psgfn.Combiner[I, O] {
+	combinerFactory psg.CombinerFactory[I, O],
+) psg.CombinerFactory[I, O] {
+	return func() psg.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 

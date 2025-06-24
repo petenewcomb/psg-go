@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestOutbox_ZeroValue(t *testing.T) {
@@ -17,14 +17,14 @@ func TestOutbox_ZeroValue(t *testing.T) {
 	var pool rdvq.Pool[int]
 
 	// Zero value should be empty
-	require.True(t, outbox.IsEmpty(&pool))
+	assert.True(t, outbox.IsEmpty(&pool))
 
 	// Wait on empty outbox should return immediately
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
 	err := outbox.Wait(ctx, &pool)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 }
 
 func TestOutbox_StateTransitions(t *testing.T) {
@@ -35,22 +35,22 @@ func TestOutbox_StateTransitions(t *testing.T) {
 	var outbox rdvq.Outbox[int]
 
 	// Initially empty
-	require.True(t, outbox.IsEmpty(&pool))
+	assert.True(t, outbox.IsEmpty(&pool))
 
 	// Add item via TryPushBack when no receivers are waiting
 	success := q.TryPushBack(&pool, &outbox, 42)
-	require.True(t, success) // Should go to outbox
+	assert.True(t, success) // Should go to outbox
 
 	// Should now be full
-	require.False(t, outbox.IsEmpty(&pool))
+	assert.False(t, outbox.IsEmpty(&pool))
 
 	// Drain the outbox via TryPopFront
 	value, ok := q.TryPopFront(&pool)
-	require.True(t, ok)
-	require.Equal(t, 42, value)
+	assert.True(t, ok)
+	assert.Equal(t, 42, value)
 
 	// Should be empty again
-	require.True(t, outbox.IsEmpty(&pool))
+	assert.True(t, outbox.IsEmpty(&pool))
 }
 
 func TestOutbox_WaitFunc(t *testing.T) {
@@ -66,12 +66,12 @@ func TestOutbox_WaitFunc(t *testing.T) {
 		called = true
 		return rdvq.SelectAborted
 	})
-	require.False(t, called)
+	assert.False(t, called)
 
 	// Add item to outbox via TryPushBack
 	success := q.TryPushBack(&pool, &outbox, 42)
-	require.True(t, success)
-	require.False(t, outbox.IsEmpty(&pool))
+	assert.True(t, success)
+	assert.False(t, outbox.IsEmpty(&pool))
 
 	// WaitFunc should call selectFn with the channel
 	selectCalled := false
@@ -89,17 +89,17 @@ func TestOutbox_WaitFunc(t *testing.T) {
 		}
 	})
 
-	require.True(t, selectCalled)
-	require.NotNil(t, providedCh)
+	assert.True(t, selectCalled)
+	assert.NotNil(t, providedCh)
 
 	// Outbox should still be full since selectFn returned false
-	require.False(t, outbox.IsEmpty(&pool))
+	assert.False(t, outbox.IsEmpty(&pool))
 
 	// Now drain the outbox and test WaitFunc again
 	value, ok := q.TryPopFront(&pool)
-	require.True(t, ok)
-	require.Equal(t, 42, value)
-	require.True(t, outbox.IsEmpty(&pool))
+	assert.True(t, ok)
+	assert.Equal(t, 42, value)
+	assert.True(t, outbox.IsEmpty(&pool))
 }
 
 func TestOutbox_WaitWithContext(t *testing.T) {
@@ -111,27 +111,27 @@ func TestOutbox_WaitWithContext(t *testing.T) {
 
 	// Add item to outbox so Wait will block
 	success := q.TryPushBack(&pool, &outbox, 42)
-	require.True(t, success)
-	require.False(t, outbox.IsEmpty(&pool))
+	assert.True(t, success)
+	assert.False(t, outbox.IsEmpty(&pool))
 
 	// Wait with cancelled context should return error
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
 	err := outbox.Wait(ctx, &pool)
-	require.Error(t, err)
-	require.Equal(t, context.Canceled, err)
+	assert.Error(t, err)
+	assert.Equal(t, context.Canceled, err)
 
 	// Outbox should still contain the item
-	require.False(t, outbox.IsEmpty(&pool))
+	assert.False(t, outbox.IsEmpty(&pool))
 
 	// Wait with timeout should return error
 	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
 	err = outbox.Wait(ctx, &pool)
-	require.Error(t, err)
-	require.Equal(t, context.DeadlineExceeded, err)
+	assert.Error(t, err)
+	assert.Equal(t, context.DeadlineExceeded, err)
 }
 
 func TestOutbox_ConcurrentAccess(t *testing.T) {
@@ -154,7 +154,7 @@ func TestOutbox_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		select {
 		case empty := <-done:
-			require.True(t, empty)
+			assert.True(t, empty)
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("Concurrent IsEmpty test timed out")
 		}
@@ -172,14 +172,14 @@ func TestOutbox_ChannelRecycling(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		// Add item via TryPushBack
 		success := q.TryPushBack(&pool, &outbox, i)
-		require.True(t, success)
-		require.False(t, outbox.IsEmpty(&pool))
+		assert.True(t, success)
+		assert.False(t, outbox.IsEmpty(&pool))
 
 		// Remove item via TryPopFront
 		value, ok := q.TryPopFront(&pool)
-		require.True(t, ok)
-		require.Equal(t, i, value)
-		require.True(t, outbox.IsEmpty(&pool))
+		assert.True(t, ok)
+		assert.Equal(t, i, value)
+		assert.True(t, outbox.IsEmpty(&pool))
 	}
 
 	// Verify that channels are being recycled by checking that we don't

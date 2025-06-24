@@ -20,7 +20,7 @@ func (tt *TimeTracker) Started(startTime time.Time) {
 	tt.StartTimeSum += startTime.Sub(Epoch)
 }
 
-func (tt *TimeTracker) Ended(startTime time.Time, timeOrigin time.Time) {
+func (tt *TimeTracker) Ended(startTime, timeOrigin time.Time) {
 	tt.StartedCount--
 	tt.StartTimeSum -= startTime.Sub(Epoch)
 	if startTime.Before(timeOrigin) {

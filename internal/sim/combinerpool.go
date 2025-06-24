@@ -7,6 +7,7 @@ import (
 	"fmt"
 )
 
+//nolint:mnd // default configuration
 var defaultCombinerPoolConfig = CombinerPoolConfig{
 	Count:            BiasedIntConfig{Min: 1, Med: 3, Max: 10},
 	ConcurrencyLimit: BiasedIntConfig{Min: 1, Med: 3, Max: 10},

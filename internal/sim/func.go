@@ -24,7 +24,7 @@ type Func struct {
 	ReturnError bool
 }
 
-func (f *Func) Dump(fs fmt.State, indent string, name string) {
+func (f *Func) Dump(fs fmt.State, indent, name string) {
 	var t time.Duration
 	for i, s := range f.Steps {
 		_, _ = fmt.Fprintf(fs, "%s step %d/%d (+%v): ", name, i+1, len(f.Steps)+1, t)

@@ -45,6 +45,8 @@ func (q *Queue[T]) Init(p *Pool[T]) {
 }
 
 // enqueue(Q: pointer to queue_t, value: data type)
+//
+//nolint:gocritic // ignore commented-out (pseudo-)code
 func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 	// E1: node = new_node()      // Allocate a new node from the free list
 	// E2: node->value = value	  // Copy enqueued value into node
@@ -88,6 +90,8 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 }
 
 // dequeue(Q: pointer to queue_t, pvalue: pointer to data type): boolean
+//
+//nolint:gocritic // ignore commented-out (pseudo-)code
 func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 	// D1: loop // Keep trying until Dequeue is done
 	for {
@@ -189,6 +193,6 @@ func (p *atomicPointer[T]) Store(v pointer[T]) {
 	(*atomic.Value)(p).Store(v)
 }
 
-func (p *atomicPointer[T]) CompareAndSwap(old, new pointer[T]) bool {
-	return (*atomic.Value)(p).CompareAndSwap(old, new)
+func (p *atomicPointer[T]) CompareAndSwap(oldP, newP pointer[T]) bool {
+	return (*atomic.Value)(p).CompareAndSwap(oldP, newP)
 }

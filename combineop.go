@@ -19,7 +19,7 @@ import (
 type CombineOp[I, O any] struct {
 	gatherOp    *GatherOp[O]
 	pool        *CombinerPool
-	newCombiner psgfn.CombinerFactory[I, O]
+	newCombiner CombinerFactory[I, O]
 	minHoldTime time.Duration // Minimum time since last combine before auto-flushing
 	maxHoldTime time.Duration // Maximum time since first combine before auto-flushing
 }
@@ -29,7 +29,7 @@ type CombineOp[I, O any] struct {
 func NewCombineOp[I, O any](
 	gatherOp *GatherOp[O],
 	pool *CombinerPool,
-	combinerFactory psgfn.CombinerFactory[I, O],
+	combinerFactory CombinerFactory[I, O],
 	options ...psgopt.CombineOpOption,
 ) *CombineOp[I, O] {
 	if gatherOp == nil {
@@ -79,7 +79,7 @@ func (c *CombineOp[I, O]) Scatter(
 		return err
 	}
 
-	bp := getBackpressureProvider(vettedCtx.ctx, j)
+	bp := getBackpressureProvider(vettedCtx.ctx, j) //nolint:contextcheck // vetted version of inherited ctx
 
 	// Queue work if we're in a gather context or if we have a combiner backpressure provider
 	if vettedCtx.inGather || isCombinerBackpressureProvider(bp) {
@@ -97,6 +97,7 @@ func (c *CombineOp[I, O]) Scatter(
 
 	ctx = j.gatherContext(vettedCtx)
 
+	//nolint:contextcheck // gather-tagged version of inherited ctx
 	if _, err := j.processOutstandingWork(ctx); err != nil {
 		return err
 	}

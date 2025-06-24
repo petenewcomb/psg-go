@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestWaiters_BasicNotification(t *testing.T) {
@@ -46,7 +46,7 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	// Should receive notification
 	select {
 	case result := <-notified:
-		require.True(t, result)
+		assert.True(t, result)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Notification not received")
 	}
@@ -66,8 +66,8 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 	})
 
 	// Verification returned false, so select function should not be called
-	require.False(t, selectCalled)
-	require.Equal(t, rdvq.SelectAborted, result)
+	assert.False(t, selectCalled)
+	assert.Equal(t, rdvq.SelectAborted, result)
 }
 
 func TestWaiters_VerificationPreventsRace(t *testing.T) {
@@ -109,7 +109,7 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 	// Waiter should receive notification and return SelectWaitSignaled
 	select {
 	case result := <-waitResult:
-		require.True(t, result) // Should return SelectWaitSignaled since waiter was notified
+		assert.True(t, result) // Should return SelectWaitSignaled since waiter was notified
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Waiter did not respond to notification")
 	}
@@ -133,8 +133,8 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 	})
 
 	// Verification should have prevented waiting
-	require.False(t, selectCalled)               // Select function should not be called
-	require.Equal(t, rdvq.SelectAborted, result) // Should return SelectAborted (not notified)
+	assert.False(t, selectCalled)               // Select function should not be called
+	assert.Equal(t, rdvq.SelectAborted, result) // Should return SelectAborted (not notified)
 }
 
 func TestWaiters_MultipleWaiters(t *testing.T) {
@@ -178,8 +178,8 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 	for i := 0; i < numWaiters; i++ {
 		select {
 		case waiterID := <-notifications:
-			require.NotEqual(t, -1, waiterID, "Waiter timed out")
-			require.False(t, received[waiterID], "Waiter %d notified multiple times", waiterID)
+			assert.NotEqual(t, -1, waiterID, "Waiter timed out")
+			assert.False(t, received[waiterID], "Waiter %d notified multiple times", waiterID)
 			received[waiterID] = true
 		case <-time.After(500 * time.Millisecond):
 			t.Fatalf("Did not receive notification %d", i)
@@ -187,7 +187,7 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 	}
 
 	// All waiters should have been notified
-	require.Len(t, received, numWaiters)
+	assert.Len(t, received, numWaiters)
 }
 
 func TestWaiters_NotifyAll(t *testing.T) {
@@ -226,7 +226,7 @@ func TestWaiters_NotifyAll(t *testing.T) {
 	for i := 0; i < numWaiters; i++ {
 		select {
 		case notified := <-notifications:
-			require.True(t, notified, "Waiter %d was not notified", i)
+			assert.True(t, notified, "Waiter %d was not notified", i)
 		case <-time.After(200 * time.Millisecond):
 			t.Fatalf("Waiter %d did not receive notification", i)
 		}
@@ -281,7 +281,7 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	// Should receive notification (either orphaned one or new one)
 	select {
 	case result := <-notified:
-		require.True(t, result)
+		assert.True(t, result)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("New waiter did not receive notification")
 	}

@@ -64,10 +64,10 @@ func TracedGather[T any](
 func TracedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psg.CombinerFactory[I, O],
+) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
 	// Create a combiner factory that adds tracing
-	tracedFactory := func() psgfn.Combiner[I, O] {
+	tracedFactory := func() psg.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 
 		return psgfn.Combiner[I, O]{

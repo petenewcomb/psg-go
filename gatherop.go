@@ -71,7 +71,7 @@ func (g *GatherOp[T]) Scatter(
 	if vettedCtx.inGather {
 		// Make sure the job doesn't shut down until this scatter has been done.
 		j.state.IncrementWork()
-		bp := getBackpressureProvider(vettedCtx.ctx, j)
+		bp := getBackpressureProvider(vettedCtx.ctx, j) //nolint:contextcheck // vetted version of inherited ctx
 		bp.QueueWork(func(ctx context.Context) error {
 			defer func() {
 				j.state.DecrementWork()
@@ -84,6 +84,7 @@ func (g *GatherOp[T]) Scatter(
 
 	ctx = j.gatherContext(vettedCtx)
 
+	//nolint:contextcheck // gather-tagged version of inherited ctx
 	if _, err := j.processOutstandingWork(ctx); err != nil {
 		return err
 	}

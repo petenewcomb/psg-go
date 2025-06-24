@@ -54,11 +54,11 @@ func Example_clientTimeout() {
 	}
 
 	// Simulate handling requests
-	handleRequest := func(requestID string, clientCtx context.Context) {
+	handleRequest := func(ctx context.Context, requestID string, clientCtx context.Context) {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		err := gatherOp.Scatter(context.Background(), pool, wf, newRequestTaskFn(requestID))
+		err := gatherOp.Scatter(ctx, pool, wf, newRequestTaskFn(requestID))
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
@@ -66,31 +66,33 @@ func Example_clientTimeout() {
 
 	fmt.Println("starting job")
 
+	ctx := context.Background()
+
 	// Request 1: client disconnects early
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	clientCtx1, cancel1 := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel1()
-	handleRequest("req1", ctx1)
+	handleRequest(ctx, "req1", clientCtx1)
 
 	time.Sleep(10 * time.Millisecond)
 
 	// Request 2: will complete successfully, even though request 1 was cancelled
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	clientCtx2, cancel2 := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel2()
-	handleRequest("req2", ctx2)
+	handleRequest(ctx, "req2", clientCtx2)
 
 	time.Sleep(20 * time.Millisecond)
 
 	// Request 3: will be canceled because the job is canceled
-	ctx3, cancel3 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	clientCtx3, cancel3 := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel3()
-	handleRequest("req3", ctx3)
+	handleRequest(ctx, "req3", clientCtx3)
 
 	time.Sleep(20 * time.Millisecond)
 
 	fmt.Printf("gathering results\n")
 
 	// Process results
-	err := job.CloseAndGatherAll(context.Background())
+	err := job.CloseAndGatherAll(ctx)
 	if err != nil {
 		// For test output stability, don't report the error until req3 has had
 		// a chance to report its cancellation.

@@ -6,6 +6,7 @@ package psgwf
 import (
 	"context"
 
+	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
@@ -29,8 +30,8 @@ type CombinerFactory[I, O any] = func() Combiner[I, O]
 
 func wrapCombinerFactory[I, O any](
 	combinerFactory CombinerFactory[I, O],
-) psgfn.CombinerFactory[result[I], result[O]] {
-	return func() psgfn.Combiner[result[I], result[O]] {
+) psg.CombinerFactory[result[I], result[O]] {
+	return func() psg.Combiner[result[I], result[O]] {
 		innerCombiner := combinerFactory()
 		return psgfn.Combiner[result[I], result[O]]{
 			CombineFn: func(ctx context.Context, input result[I], inputErr error, emit psgfn.Emit[result[O]]) {

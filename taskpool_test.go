@@ -7,14 +7,12 @@ import (
 	"testing"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestTaskPoolNilJobPanic(t *testing.T) {
-	chk := require.New(t)
-
 	// Try to create a pool with a nil job
-	chk.PanicsWithValue("job must be non-nil", func() {
+	assert.PanicsWithValue(t, "job must be non-nil", func() {
 		_ = psg.NewTaskPool(nil)
 	})
 }

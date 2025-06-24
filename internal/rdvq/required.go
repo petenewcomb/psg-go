@@ -60,15 +60,16 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 			outbox.ch <- value
 			q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
 			q.outboxWaiters.Notify()
-		} else {
-			// Outbox is full, wait for it to become available
-			if selectFn(outbox.ch) == SelectOutboxFilled {
-				// Value was successfully sent to outbox
-				q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
-				q.outboxWaiters.Notify()
-			}
-			// If selectFn returned SelectAborted, value was not sent (cancelled/interrupted)
+			return
 		}
+
+		// Outbox is full, wait for it to become available
+		if selectFn(outbox.ch) == SelectOutboxFilled {
+			// Value was successfully sent to outbox
+			q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
+			q.outboxWaiters.Notify()
+		}
+		// If selectFn returned anything else, value was not sent (cancelled/aborted)
 	}
 }
 
@@ -213,7 +214,7 @@ func (q *Required[T]) PopFrontExcessFunc(p *Pool[T], selectFn WaitSelectFunc) (T
 // Returns the received value and an error. The error is non-nil only if the context
 // is cancelled before a value can be received. This method only processes excess work
 // that couldn't be immediately delivered to waiting consumers.
-func (q *Required[T]) PopFrontExcess(ctx context.Context, p *Pool[T], processFn ProcessValueFunc[T]) (T, error) {
+func (q *Required[T]) PopFrontExcess(ctx context.Context, p *Pool[T]) (T, error) {
 	var err error
 	value, _ := q.PopFrontExcessFunc(p, func(waitCh <-chan struct{}) SelectResult {
 		select {

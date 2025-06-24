@@ -120,10 +120,10 @@ func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFun
 		}
 
 		// Even if the waiter was notified, we need to reattempt incrementing
-		// the in-flight counter before proceding.
+		// the in-flight counter before proceeding.
 	}
 
-	j.startTask(func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
+	j.startTask(ctx, func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
 		task(ctx, func() {
 			// Decrement the task pool's in-flight count BEFORE waiting on the
 			// gather channel. This makes it safe for gather functions to call

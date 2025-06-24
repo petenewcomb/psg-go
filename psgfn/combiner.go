@@ -10,9 +10,6 @@ import (
 // Emit is a function used by combiners to emit aggregated results.
 type Emit[O any] func(context.Context, O, error)
 
-// CombinerFactory is a function that creates a new Combiner instance.
-type CombinerFactory[I, O any] = func() Combiner[I, O]
-
 // Combiner is a struct that implements the psg.Combiner interface
 // using function fields. This allows for simple creation of combiners using
 // closures that share state.

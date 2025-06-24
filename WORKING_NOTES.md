@@ -10,6 +10,7 @@ This document contains working notes and context for development on the `combine
 - **Naming consistency**: ✅ Completed (secondary → spare, committed in a6e25d7)
 - **Work reference tracking**: ✅ Fixed flush work imbalance with queueFlush() (committed in 5e1017d)
 - **Scale-to-zero**: ✅ Root cause identified - benchmark MinConcurrency setting prevents goroutine exit
+- **Code quality**: ✅ Comprehensive linting improvements applied
 - **Gather liveness**: 🚧 High tasks/op issue identified, solution planned
 - **Next**: 🚧 Implement gather liveness optimization to fix responsiveness
 
@@ -25,6 +26,16 @@ This document contains working notes and context for development on the `combine
 - Tracks flush operations as legitimate work that must complete before job finish
 - Balances work references: increment when queued, decrement when complete
 - Fixes work reference imbalances that contributed to goroutine hang issues
+
+### Code Quality Improvements ✅ Completed
+**Enhancement**: Comprehensive linting and code quality improvements
+- **Enhanced linters**: Added gosec, gocritic, prealloc, makezero, misspell, dupl, mnd, errorlint, testifylint
+- **Type improvements**: Created `CombinerFactory[I,O]` type alias, eliminating dependency on psgfn package
+- **Test safety**: Switched from `require` to `assert` to prevent inappropriate `testing.T` method calls from goroutines
+- **Error handling**: Added `errIn()` utility for cleaner multi-error checking
+- **Context handling**: Added appropriate `//nolint:contextcheck` for vetted contexts
+- **Performance optimizations**: Use `runtime.GOMAXPROCS(-1)` instead of `runtime.NumCPU()`
+- **TODO**: Enable cyclop linter and refactor high-complexity functions
 
 ### Scale-to-Zero Investigation ✅ Diagnostic Available
 **Issue**: Spare goroutines spinning indefinitely instead of exiting when idle

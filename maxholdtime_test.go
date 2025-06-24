@@ -12,11 +12,11 @@ import (
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMaxHoldTimeBasic(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -35,14 +35,12 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(1, 1)) // Force exactly 1 goroutine
 
-	combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psgfn.Combiner[int, int] {
+	combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[int, int] {
 		return psgfn.Combiner[int, int]{
 			CombineFn: func(ctx context.Context, value int, err error, emit psgfn.Emit[int]) {
-				t.Logf("Combine called with value %d", value)
 				// Don't emit immediately - let maxHoldTime trigger flush
 			},
 			FlushFn: func(ctx context.Context, emit psgfn.Emit[int]) {
-				t.Logf("Flush called")
 				flushCount.Add(1)
 				emit(ctx, 42, nil)
 			},

@@ -5,12 +5,16 @@ package rdvq_test
 
 import (
 	"context"
+	"errors"
+	"math/rand/v2"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestOptional_BasicFunctionality(t *testing.T) {
@@ -20,14 +24,14 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 
 	// TryPopFront should not receive anything when queue is empty
 	var received []int
-	q.TryPopFront(ctx, p, func(value int) {
+	q.TryPopFront(p, func(value int) {
 		received = append(received, value)
 	})
-	require.Empty(t, received)
+	assert.Empty(t, received)
 
 	// TryPushBack should fail when no receivers are waiting
 	success := q.TryPushBack(p, 42)
-	require.False(t, success, "TryPushBack should fail with no waiting receivers")
+	assert.False(t, success, "TryPushBack should fail with no waiting receivers")
 
 	// Start a receiver
 	receivedCh := make(chan int)
@@ -35,7 +39,7 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			receivedCh <- value
 		})
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
 
 	// Give receiver time to register
@@ -43,12 +47,12 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 
 	// TryPushBack should succeed now
 	success = q.TryPushBack(p, 42)
-	require.True(t, success, "TryPushBack should succeed with waiting receiver")
+	assert.True(t, success, "TryPushBack should succeed with waiting receiver")
 
 	// Verify the value was received
 	select {
 	case val := <-receivedCh:
-		require.Equal(t, 42, val)
+		assert.Equal(t, 42, val)
 	case <-time.After(time.Second):
 		t.Fatal("Receiver did not receive value")
 	}
@@ -71,7 +75,7 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 			err := q.PopFront(ctx, p, func(value int) {
 				received <- value
 			})
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}()
 	}
 
@@ -81,7 +85,7 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 	// Send values - each should succeed
 	for i := 1; i <= numReceivers; i++ {
 		success := q.TryPushBack(p, i)
-		require.True(t, success, "TryPushBack should succeed for value %d", i)
+		assert.True(t, success, "TryPushBack should succeed for value %d", i)
 	}
 
 	// Wait for all receivers to finish
@@ -89,13 +93,13 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 
 	// Verify all values were received
 	close(received)
-	var receivedValues []int
+	receivedValues := make([]int, 0, len(received))
 	for val := range received {
 		receivedValues = append(receivedValues, val)
 	}
-	require.Len(t, receivedValues, numReceivers)
+	assert.Len(t, receivedValues, numReceivers)
 	// Values might be received in any order due to goroutine scheduling
-	require.ElementsMatch(t, []int{1, 2, 3, 4, 5}, receivedValues)
+	assert.ElementsMatch(t, []int{1, 2, 3, 4, 5}, receivedValues)
 }
 
 func TestOptional_AbandonedReceiver(t *testing.T) {
@@ -108,7 +112,7 @@ func TestOptional_AbandonedReceiver(t *testing.T) {
 		err := q.PopFront(ctx, p, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
-		require.Error(t, err)
+		assert.Error(t, err)
 	}()
 
 	// Give receiver time to register
@@ -122,7 +126,7 @@ func TestOptional_AbandonedReceiver(t *testing.T) {
 
 	// TryPushBack should now fail since the receiver abandoned
 	success := q.TryPushBack(p, 42)
-	require.False(t, success, "TryPushBack should fail with abandoned receiver")
+	assert.False(t, success, "TryPushBack should fail with abandoned receiver")
 }
 
 func TestOptional_PopFrontFunc(t *testing.T) {
@@ -139,7 +143,7 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	})
 
 	// Should not have received any orphan values since no sender
-	require.Empty(t, orphanValues)
+	assert.Empty(t, orphanValues)
 
 	// Now test with a sender that sends to the dedicated channel
 	go func() {
@@ -158,77 +162,149 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	})
 
 	// Should have received the orphaned value
-	require.Len(t, orphanValues, 1)
-	require.Equal(t, 99, orphanValues[0])
+	assert.Len(t, orphanValues, 1)
+	assert.Equal(t, 99, orphanValues[0])
 }
 
-func TestOptional_ConcurrentSendersAndReceivers(t *testing.T) {
+func TestOptional_Stress(t *testing.T) {
 	var q rdvq.Optional[int]
 	q.Init(p)
-	ctx := context.Background()
 
-	const (
-		numPairs = 20
-		duration = 100 * time.Millisecond
+	numPushers := runtime.GOMAXPROCS(-1)
+	numPoppers := runtime.GOMAXPROCS(-1)
+	duration := 10 * time.Second
+
+	if testing.Short() {
+		duration = 1 * time.Second
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		tryPushed atomic.Int64
+		refused   atomic.Int64
+		canceled  atomic.Int64
+		popped    atomic.Int64
+		tryPopped atomic.Int64
+		abandoned atomic.Int64
 	)
 
-	received := make(chan int, numPairs*10) // Buffer for received values
+	pushErrCh := make(chan error, 1)
+	popErrCh := make(chan error, 1)
+
+	popOps := []func(context.Context){
+		func(ctx context.Context) {
+			// Normal popper
+			err := q.PopFront(ctx, p, func(value int) {
+				popped.Add(1)
+			})
+			switch {
+			case err == nil:
+			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+			default:
+				select {
+				case popErrCh <- err:
+				default:
+				}
+			}
+		},
+		func(ctx context.Context) {
+			// Trying popper
+			q.TryPopFront(p, func(value int) {
+				tryPopped.Add(1)
+			})
+		},
+		func(ctx context.Context) {
+			// Abandoning popper
+			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
+			err := q.PopFront(shortCtx, p, func(value int) {
+				popped.Add(1)
+			})
+			switch {
+			case err == nil:
+			case errors.Is(err, context.DeadlineExceeded) && shortCtx.Err() != nil:
+				abandoned.Add(1)
+			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+			default:
+				select {
+				case popErrCh <- err:
+				default:
+				}
+			}
+			shortCancel()
+		},
+	}
+
 	var wg sync.WaitGroup
 
-	// Start receiver-sender pairs
-	for i := 0; i < numPairs; i++ {
-		wg.Add(2)
-
-		// Receiver
-		go func(id int) {
+	for range numPoppers {
+		wg.Add(1)
+		go func() {
 			defer wg.Done()
-			err := q.PopFront(ctx, p, func(value int) {
-				received <- value
-			})
-			require.NoError(t, err)
-		}(i)
 
-		time.Sleep(20 * time.Millisecond) // Make sure receiver is ready
+			// Create a new context to reduce contention
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
 
-		// Sender - wait a bit then send
-		go func(id int) {
-			defer wg.Done()
-			time.Sleep(time.Duration(id) * time.Millisecond) // Stagger sends
-			success := q.TryPushBack(p, 1000+id)
-			require.True(t, success, "Send should succeed when receiver is waiting")
-		}(i)
+			for ctx.Err() == nil {
+				//nolint:gosec // non-cryptographic use case
+				popOps[rand.IntN(len(popOps))](ctx)
+			}
+		}()
 	}
 
-	// Wait for all pairs to complete
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+	for range numPushers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Create a new context to reduce contention
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			for ctx.Err() == nil {
+				if !q.TryPushBack(p, int(tryPushed.Add(1))) {
+					refused.Add(1)
+				}
+			}
+		}()
+	}
+
+	// Let it run for a while
+	time.Sleep(duration)
+	cancel()
+	wg.Wait()
+
+	// Drain any remaining values
+	var remaining int64
+	for {
+		ok := false
+		q.TryPopFront(p, func(int) {
+			ok = true
+			remaining++
+		})
+		if !ok {
+			break
+		}
+	}
+
+	t.Logf("TryPushed: %d, Refused: %d, Canceled: %d, Popped: %d, TryPopped: %d, Abandoned: %d, Remaining: %d", tryPushed.Load(), refused.Load(), canceled.Load(), popped.Load(), tryPopped.Load(), abandoned.Load(), remaining)
+
+	// Error but context not cancelled - unexpected
+	select {
+	case err := <-pushErrCh:
+		assert.NoError(t, err, "Unexpected error from PushBack")
+	default:
+	}
 
 	select {
-	case <-done:
-		// Good, all completed
-	case <-time.After(5 * time.Second):
-		t.Fatal("Test did not complete in time")
+	case err := <-popErrCh:
+		assert.NoError(t, err, "Unexpected error from PopFront")
+	default:
 	}
 
-	// Count received values
-	close(received)
-	var receivedValues []int
-	for val := range received {
-		receivedValues = append(receivedValues, val)
-	}
-
-	// Should have received exactly numPairs values
-	require.Len(t, receivedValues, numPairs)
-
-	// All values should be unique and in the expected range
-	valueSet := make(map[int]bool)
-	for _, val := range receivedValues {
-		require.False(t, valueSet[val], "Duplicate value received: %d", val)
-		require.GreaterOrEqual(t, val, 1000)
-		require.Less(t, val, 1000+numPairs)
-		valueSet[val] = true
-	}
+	actuallyPushed := tryPushed.Load() - refused.Load() - canceled.Load()
+	actuallyPopped := popped.Load() + tryPopped.Load() + remaining
+	assert.Equal(t, actuallyPushed, actuallyPopped)
 }

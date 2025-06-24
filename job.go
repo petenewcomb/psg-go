@@ -5,6 +5,7 @@ package psg
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,7 @@ import (
 // A Job must be created with [NewJob], see that function for caveats and
 // important details.
 type Job struct {
-	ctx         context.Context
+	ctx         context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
 	cancelFn    context.CancelFunc
 	gatherQueue rdvq.Required[boundGather]
 	wg          sync.WaitGroup
@@ -71,8 +72,8 @@ func (j *Job) gatherOutboxKey() outboxKey[boundGather] {
 }
 
 type vettedContext struct {
-	ctx          context.Context
-	hasTaskValue bool // Pre-computed includesJob(ctx, j, taskContextValueKey)
+	ctx          context.Context //nolint:containedctx // ctx about which we have cached metadata
+	hasTaskValue bool            // Pre-computed includesJob(ctx, j, taskContextValueKey)
 	inGather     bool
 }
 
@@ -89,13 +90,8 @@ func (j *Job) vettedContext(ctx context.Context) vettedContext {
 
 	// Only try to add backpressure provider if context doesn't have task value
 	// (to avoid the panic in hasBackpressureProviderForJob)
-	var resultCtx context.Context
-	if hasTask {
-		// Task contexts cannot have backpressure providers added
-		resultCtx = ctx
-	} else if hasBackpressureProviderForJob(ctx, j) {
-		resultCtx = ctx
-	} else {
+	resultCtx := ctx
+	if !hasTask && !hasBackpressureProviderForJob(ctx, j) {
 		resultCtx = withNewBackpressureProvider(ctx, j)
 	}
 
@@ -120,6 +116,8 @@ func (j *Job) cacheVettedContext(ctx context.Context, vettedCtx vettedContext) v
 	stop := context.AfterFunc(ctx, func() {
 		j.vettedCtxCache.Delete(ctx)
 	})
+
+	//nolint:contextcheck // cancel cache cleanup if job is canceled
 	_ = context.AfterFunc(j.ctx, func() {
 		_ = stop()
 	})
@@ -307,7 +305,7 @@ func (j *Job) CancelAndWait() {
 // [Gather] and wait until it returns.
 func (j *Job) Gather(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
-	_, err := j.processWorkAndGather(vetted)
+	_, err := j.processWorkAndGather(vetted) //nolint:contextcheck // passing vetted version
 	return err
 }
 
@@ -503,7 +501,7 @@ func (j *Job) gather(ctx context.Context, waiter rdvq.Waiter, limitCh <-chan str
 // See Gather for additional details.
 func (j *Job) TryGather(ctx context.Context) (bool, error) {
 	vetted := j.vettedContext(ctx)
-	return j.processWorkAndTryGather(vetted)
+	return j.processWorkAndTryGather(vetted) //nolint:contextcheck // passing vetted version
 }
 
 func (j *Job) processWorkAndTryGather(vettedCtx vettedContext) (bool, error) {
@@ -552,7 +550,7 @@ func (j *Job) tryQueueGather() bool {
 func (j *Job) GatherAll(ctx context.Context) error {
 	vetted := j.vettedContext(ctx)
 	err := j.gatherAll(vetted, j.processWorkAndGather)
-	if err == ErrJobDone {
+	if errors.Is(err, ErrJobDone) {
 		return nil
 	}
 	return err
@@ -590,18 +588,19 @@ func (j *Job) gatherAll(vettedCtx vettedContext, gatherSomeFn func(vettedContext
 	}
 }
 
-func (j *Job) startTask(taskFn pendingTask) {
+func (j *Job) startTask(ctx context.Context, taskFn pendingTask) {
 	// Try to hand off to an idle worker
 	if j.taskQueue.TryPushBack(taskQueuePool, taskFn) {
 		return // Successfully handed off to idle worker
 	}
 
 	// No idle workers available, spawn a new one
-	j.spawnTaskWorker(taskFn)
+	j.spawnTaskWorker(ctx, taskFn)
 }
 
-func (j *Job) spawnTaskWorker(taskFn pendingTask) {
+func (j *Job) spawnTaskWorker(_ context.Context, taskFn pendingTask) {
 	j.wg.Add(1)
+	//nolint:contextcheck // task worker goroutine will use job context
 	go func() {
 		defer j.wg.Done()
 
@@ -642,7 +641,7 @@ func (j *Job) spawnTaskWorker(taskFn pendingTask) {
 						taskFn = orphanedTaskFn
 					} else {
 						// Hand this one off to a different or new goroutine
-						j.startTask(orphanedTaskFn)
+						j.startTask(ctx, orphanedTaskFn)
 					}
 				},
 				func(inboxCh <-chan pendingTask) rdvq.SelectResult {
@@ -667,7 +666,7 @@ var taskContextValueKey any = taskContextValueKeyType{}
 // Implements the TaskPoolOrJob interface.
 func (j *Job) launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTask) (launched bool, err error) {
 	// Launch the task immediately without any pool tracking
-	j.startTask(func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
+	j.startTask(ctx, func(ctx context.Context, ctxWithBP func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
 		taskFn(ctx, nil, ctxWithBP, taskWorkerOutboxMap) // No completion callback needed for unlimited tasks
 	})
 	return true, nil

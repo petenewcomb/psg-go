@@ -61,16 +61,7 @@ func (c BiasedBoolConfig) Draw(t *rapid.T, name string) bool {
 		// Generate a value in the range [0.5, 0.5) instead of [0, 1) to take
 		// advantage of rapid's bias toward generating numbers near zero as well
 		// as at the provided bounds.
-		val := 0.5 + rapid.Float64Range(-0.5, 0.5).Draw(t, name+"(internal)")
-		/*
-			Filter(func(val float64) bool {
-				t.Logf("BiasedBoolConfig2: %s: %v", name, val)
-				// Exclude 0.5 to make the upper bound non-inclusive. This
-				// ensures that val is always less than 1.0, and therefore if p
-				// == 1.0 the returned boolean value will always be true.
-				return val < 0.5
-			}).Draw(t, name+"(internal)")
-		*/
+		val := 0.5 + rapid.Float64Range(-0.5, 0.5).Draw(t, name+"(internal)") //nolint:mnd // by definition
 		t.Logf("BiasedBoolConfig3: %s: %v", name, val)
 
 		// Handle edge cases after drawing from rapid

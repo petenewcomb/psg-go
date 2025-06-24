@@ -66,9 +66,9 @@ func PropagateGather[T any](
 // PropagateCombiner wraps a combiner factory to create combiners that propagate trace context.
 // Both the Combine and Flush methods will properly handle trace context propagation.
 func PropagateCombiner[I, O any](
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
-	return func() psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psg.CombinerFactory[I, O],
+) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	return func() psg.Combiner[PropagatedResult[I], PropagatedResult[O]] {
 		innerCombiner := combinerFactory()
 
 		return psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]]{

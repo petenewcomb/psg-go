@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+//nolint:mnd // default configuration
 var defaultCombineConfig = CombineConfig{
 	Count: BiasedIntConfig{Min: 1, Med: 5, Max: 20},
 	Func: FuncConfig{

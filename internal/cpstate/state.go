@@ -109,7 +109,7 @@ func (cps *CombinerPoolState) SpareWaitEnded(startTime time.Time) {
 
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
 	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) {
+	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) { //nolint:mnd  // nyquist rate
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -202,7 +202,7 @@ func (cps *CombinerPoolState) report(msg string) {
 		cps.targetGoroutineCount,
 		cps.throughput.Get()*float64(time.Second),
 		cps.throughput.Get()*float64(time.Second)/float64(cps.liveGoroutineCount),
-		cps.spareUtil.Get()*100,
+		cps.spareUtil.Get()*100, //nolint:mnd // by definition
 		&cps.controller,
 	)
 }

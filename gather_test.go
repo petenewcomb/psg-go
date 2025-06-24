@@ -8,11 +8,11 @@ import (
 	"testing"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestGatherScatterNilTaskPanic(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
@@ -33,14 +33,14 @@ func TestGatherScatterNilTaskPanic(t *testing.T) {
 }
 
 func TestGatherScatterNilGatherPanic(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	chk.PanicsWithValue("gather function must be non-nil", func() {
 		psg.NewGatherOp[int](nil)
 	})
 }
 
 func TestGatherTryScatterNilTaskPanic(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
@@ -61,7 +61,7 @@ func TestGatherTryScatterNilTaskPanic(t *testing.T) {
 }
 
 func TestGatherScatterGatherScatterFromTask(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
 	defer job.CancelAndWait()
@@ -102,7 +102,7 @@ func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 }
 
 func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 
 	// Create parent job with pool
@@ -162,7 +162,7 @@ func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 }
 
 func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 
 	// Create parent job with pool
@@ -209,7 +209,7 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 }
 
 func TestGatherScatterTaskCannotGather(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 
 	// Create parent job with pool
@@ -240,7 +240,7 @@ func TestGatherScatterTaskCannotGather(t *testing.T) {
 }
 
 func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
-	chk := require.New(t)
+	chk := assert.New(t)
 	ctx := context.Background()
 
 	// Create parent job with pool

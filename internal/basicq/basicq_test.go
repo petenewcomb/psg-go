@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/petenewcomb/psg-go/internal/basicq"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 	"pgregory.net/rapid"
 )
 
@@ -16,30 +16,30 @@ func TestQueueBasicFunctionality(t *testing.T) {
 	q := basicq.Queue[int]{}
 
 	// Test empty queue
-	require.Equal(t, 0, q.Len())
+	assert.Equal(t, 0, q.Len())
 	_, ok := q.PopFront()
-	require.False(t, ok)
+	assert.False(t, ok)
 
 	// Test adding and removing elements
 	q.PushBack(1)
 	q.PushBack(2)
 	q.PushBack(3)
 
-	require.Equal(t, 3, q.Len())
+	assert.Equal(t, 3, q.Len())
 
 	val, ok := q.PopFront()
-	require.True(t, ok)
-	require.Equal(t, 1, val)
+	assert.True(t, ok)
+	assert.Equal(t, 1, val)
 
 	val, ok = q.PopFront()
-	require.True(t, ok)
-	require.Equal(t, 2, val)
+	assert.True(t, ok)
+	assert.Equal(t, 2, val)
 
 	val, ok = q.PopFront()
-	require.True(t, ok)
-	require.Equal(t, 3, val)
+	assert.True(t, ok)
+	assert.Equal(t, 3, val)
 
-	require.Equal(t, 0, q.Len())
+	assert.Equal(t, 0, q.Len())
 }
 
 // TestQueueWithRapid uses rapid state machine testing to verify queue correctness
@@ -64,7 +64,7 @@ func TestQueueWithRapid(t *testing.T) {
 				model = append(model, val)
 
 				// Verify length matches after operation
-				require.Equal(t, len(model), q.Len(), "Length mismatch after PushBack")
+				assert.Equal(t, len(model), q.Len(), "Length mismatch after PushBack")
 			},
 
 			// PopFront operation
@@ -82,22 +82,22 @@ func TestQueueWithRapid(t *testing.T) {
 				val, ok := q.PopFront()
 
 				// Verify the operation succeeded
-				require.True(t, ok, "PopFront failed on non-empty queue")
-				require.Equal(t, expected, val, "PopFront returned wrong value")
+				assert.True(t, ok, "PopFront failed on non-empty queue")
+				assert.Equal(t, expected, val, "PopFront returned wrong value")
 
 				// Verify length matches after operation
-				require.Equal(t, len(model), q.Len(), "Length mismatch after PopFront")
+				assert.Equal(t, len(model), q.Len(), "Length mismatch after PopFront")
 			},
 
 			// Check invariants between actions
 			"": func(t *rapid.T) {
 				// Verify length matches the model
-				require.Equal(t, len(model), q.Len(), "Length mismatch in invariant check")
+				assert.Equal(t, len(model), q.Len(), "Length mismatch in invariant check")
 
 				// If model is empty, verify queue behaves as empty
 				if len(model) == 0 {
 					_, ok := q.PopFront()
-					require.False(t, ok, "PopFront should fail on empty queue")
+					assert.False(t, ok, "PopFront should fail on empty queue")
 				}
 			},
 		})

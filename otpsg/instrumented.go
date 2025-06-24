@@ -49,8 +49,8 @@ func InstrumentedGather[T any](
 func InstrumentedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psg.CombinerFactory[I, O],
+) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedCombiner := LoggedCombiner(combineOpName, flushOpName, combinerFactory)

@@ -39,20 +39,13 @@ func (w *Watchers) Notify(renotifyFn RenotifyFunc) {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Watchers=%p", w)
 
-	for {
-		notifyFn, ok := w.q.PopFront(watchersPool)
-		if !ok {
-			break
-		}
-		productive := true
+	if notifyFn, ok := w.q.PopFront(watchersPool); ok {
 		notifyFn(func() {
-			productive = false
+			w.Notify(renotifyFn)
 		})
-		if productive {
-			return
-		}
+	} else {
+		renotifyFn()
 	}
-	renotifyFn()
 }
 
 //nolint:contextcheck // background context used only for tracing

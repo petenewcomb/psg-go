@@ -6,6 +6,8 @@ package rdvq
 import (
 	"context"
 
+	"github.com/petenewcomb/psg-go/internal/trace"
+
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 )
 
@@ -30,10 +32,14 @@ type Required[T any] struct {
 //
 // The pool parameter provides channel allocation and recycling to minimize
 // garbage collection overhead during high-throughput operations.
+//
+//nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) Init(p *Pool[T]) {
+	traceRegion := "rdvq.Required.Init"
 	q.Optional.Init(p)
 	q.fullOutboxes.Init(&p.nodePool)
 	q.outboxWaiters.Init()
+	trace.Logf(context.Background(), traceRegion, "Required=%p, fullOutboxes=%p, outboxWaiters=%p", q, &q.fullOutboxes, &q.outboxWaiters)
 }
 
 // PushSelectFunc is called when PushBackFunc needs to send a value when the outbox is full.
@@ -52,25 +58,40 @@ type PushSelectFunc[T any] func(outboxCh chan<- T) SelectResult
 //
 // The outbox parameter must be unique per sender. Sharing outboxes between
 // senders will break the drop-and-go semantics and may cause data races.
+//
+//nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selectFn PushSelectFunc[T]) {
-	if !q.Optional.TryPushBack(p, value) {
-		if outbox.ch == nil {
-			// Outbox is empty, use it for "drop-and-go" semantics
-			outbox.ch = p.getChan()
-			outbox.ch <- value
-			q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
-			q.outboxWaiters.Notify()
-			return
-		}
+	traceRegion := "rdvq.Required.PushBackFunc"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Required=%p", q)
 
-		// Outbox is full, wait for it to become available
-		if selectFn(outbox.ch) == SelectOutboxFilled {
-			// Value was successfully sent to outbox
-			q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
-			q.outboxWaiters.Notify()
-		}
-		// If selectFn returned anything else, value was not sent (cancelled/aborted)
+	// First try to deliver to a waiting inbox
+	if q.Optional.TryPushBack(p, value) {
+		trace.Logf(context.Background(), "rdvq.PushBackFunc", "Optional.TryPushBack succeeded for outbox=%p", outbox)
+		return
 	}
+
+	if outbox.ch == nil {
+		// Outbox is empty, use it for "drop-and-go" semantics
+		outbox.ch = p.getChan()
+		outbox.ch <- value
+		trace.Logf(context.Background(), traceRegion, "outbox=%p was empty, delivered value into outboxCh=%p", outbox, outbox.ch)
+		q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
+		q.outboxWaiters.Notify(func() {})
+		return
+	}
+
+	// Outbox is full, wait for it to become available
+	trace.Logf(context.Background(), traceRegion, "outbox=%p is full (outboxCh=%p), calling selectFn", outbox, outbox.ch)
+	if selectFn(outbox.ch) != SelectOutboxFilled {
+		// Value was not sent via outbox, so there's no further action to take
+		trace.Logf(context.Background(), traceRegion, "selectFn returned without filling outbox=%p (outboxCh=%p)", outbox, outbox.ch)
+		return
+	}
+
+	// Value was successfully sent to outbox, so queue it and notify waiters
+	q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
+	q.outboxWaiters.Notify(func() {})
 }
 
 // PushBack sends a value using the two-tier delivery system with context support.
@@ -83,12 +104,17 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 // Important: After calling PushBack, callers should typically call outbox.Wait()
 // to ensure their outboxed item has been processed before the sender exits.
 func (q *Required[T]) PushBack(ctx context.Context, p *Pool[T], outbox *Outbox[T], value T) error {
+	traceRegion := "rdvq.Required.PushBack"
+
 	var err error
 	q.PushBackFunc(p, outbox, value, func(outboxCh chan<- T) SelectResult {
+		trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
 		case outboxCh <- value:
+			trace.Logf(ctx, traceRegion, "delivered value to outboxCh=%p", outboxCh)
 			return SelectOutboxFilled
 		case <-ctx.Done():
+			trace.Logf(ctx, traceRegion, "received context done signal")
 			err = ctx.Err()
 			return SelectAborted
 		}
@@ -99,20 +125,34 @@ func (q *Required[T]) PushBack(ctx context.Context, p *Pool[T], outbox *Outbox[T
 // TryPushBack attempts to send a value without blocking.
 // Returns true if the value was sent to a waiting receiver, false otherwise.
 // This is analogous to a non-blocking channel send.
+//
+//nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) TryPushBack(p *Pool[T], outbox *Outbox[T], value T) bool {
+	traceRegion := "rdvq.Required.TryPushBack"
+
 	sent := true
 	q.PushBackFunc(p, outbox, value, func(outboxCh chan<- T) SelectResult {
 		// Don't block waiting for outbox to become available
+		trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
+		select {
+		case outboxCh <- value:
+			trace.Logf(context.Background(), traceRegion, "delivered value to outboxCh=%p", outboxCh)
+			return SelectOutboxFilled
+		default:
+			trace.Logf(context.Background(), traceRegion, "outboxCh=%p full, aborting", outboxCh)
+		}
 		sent = false
 		return SelectAborted
 	})
+
+	trace.Logf(context.Background(), traceRegion, "returning %v", sent)
 	return sent
 }
 
-// RequiredPopSelectFunc handles the select operation for PopFrontFunc when no outboxes
-// are available. It should select on the inbox channel and wait channel, returning
-// the appropriate result to indicate what happened.
-type RequiredPopSelectFunc[T any] func(inboxCh <-chan T, waitCh <-chan struct{}) SelectResult
+// RequiredPopSelectFunc handles the select operation for PopFrontFunc when no
+// outboxes are available. It should select on the inbox channel and outbox
+// filled channel, returning the appropriate result to indicate what happened.
+type RequiredPopSelectFunc[T any] func(inboxCh <-chan T, outboxFilledCh <-chan RenotifyFunc) (SelectResult, RenotifyFunc)
 
 func (q *Required[T]) tryOutboxes(p *Pool[T], processFn ProcessValueFunc[T]) bool {
 	if value, ok := q.TryPopFront(p); ok {
@@ -122,60 +162,84 @@ func (q *Required[T]) tryOutboxes(p *Pool[T], processFn ProcessValueFunc[T]) boo
 	return false
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) PopFrontFunc(p *Pool[T], processFn ProcessValueFunc[T], selectFn RequiredPopSelectFunc[T]) {
+	traceRegion := "rdvq.Required.PopFrontFunc"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Required=%p", q)
+
 	for {
 		if q.tryOutboxes(p, processFn) {
 			return
 		}
+		var ok bool
 		var result SelectResult
-		q.Optional.PopFrontFunc(p, processFn,
+		q.Optional.PopFrontFunc(p,
+			func(value T) {
+				ok = true
+				processFn(value)
+			},
 			func(inboxCh <-chan T) SelectResult {
 				waiter := q.outboxWaiters.New(func() bool {
-					checkResult := !q.tryOutboxes(p, processFn)
-					return checkResult
+					ok = q.tryOutboxes(p, processFn)
+					return !ok
 				})
-				waiter.Wait(func(waitCh <-chan struct{}) SelectResult {
-					result = selectFn(inboxCh, waitCh)
-					return result
+				waiter.WaitFunc(func(outboxFilledCh <-chan RenotifyFunc) RenotifyFunc {
+					var renotifyFn RenotifyFunc
+					result, renotifyFn = selectFn(inboxCh, outboxFilledCh)
+					return renotifyFn
 				})
 				return result
 			},
 		)
-		if result != SelectWaitSignaled {
-			break
+		if ok || result != SelectOutboxFilled {
+			return
 		}
 	}
 }
 
 func (q *Required[T]) PopFront(ctx context.Context, p *Pool[T], processFn ProcessValueFunc[T]) error {
+	traceRegion := "rdvq.Required.PopFront"
+
 	var err error
-	q.PopFrontFunc(p, processFn, func(inboxCh <-chan T, waitCh <-chan struct{}) SelectResult {
+	q.PopFrontFunc(p, processFn, func(inboxCh <-chan T, outboxFilledCh <-chan RenotifyFunc) (SelectResult, RenotifyFunc) {
+		trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxFilledCh=%p", inboxCh, outboxFilledCh)
 		select {
 		case value := <-inboxCh:
+			trace.Logf(ctx, traceRegion, "received value from inboxCh=%p", inboxCh)
 			processFn(value)
-			return SelectInboxEmptied
-		case <-waitCh:
-			return SelectWaitSignaled
+			return SelectInboxEmptied, nil
+		case renotifyFn := <-outboxFilledCh:
+			trace.Logf(ctx, traceRegion, "received signal from outboxFilledCh=%p", outboxFilledCh)
+			return SelectOutboxFilled, renotifyFn
 		case <-ctx.Done():
+			trace.Logf(ctx, traceRegion, "received context done signal")
 			err = ctx.Err()
-			return SelectAborted
+			return SelectAborted, nil
 		}
 	})
 	return err
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) TryPopFront(p *Pool[T]) (T, bool) {
+	traceRegion := "rdvq.Required.TryPopFront"
+
 	for {
 		outboxCh, ok := q.fullOutboxes.PopFront(&p.nodePool)
 		if !ok {
+			trace.Logf(context.Background(), traceRegion, "no full outboxes to try, returning false")
 			return *new(T), false // No more outboxes
 		}
 
+		trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
 		case value := <-outboxCh:
+			trace.Logf(context.Background(), traceRegion, "received value from outboxCh=%p, returning true", outboxCh)
 			return value, true
 		default:
 			// Outbox was empty (drained), return channel to pool and try next
+			trace.Logf(context.Background(), traceRegion, "outboxCh=%p was empty, trying next", outboxCh)
 			p.putChan(outboxCh)
 		}
 	}
@@ -190,18 +254,31 @@ func (q *Required[T]) TryPopFront(p *Pool[T]) (T, bool) {
 // should only process excess work to avoid competing with primary consumers.
 //
 // Returns an error only if the context is cancelled.
+//
+//nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) PopFrontExcessFunc(p *Pool[T], selectFn WaitSelectFunc) (T, bool) {
+	traceRegion := "rdvq.Required.PopFrontExcessFunc"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Required=%p", q)
+
+	var renotifyFn RenotifyFunc
 	for {
 		value, ok := q.TryPopFront(p)
 		if ok {
 			return value, true
 		}
+		if renotifyFn != nil {
+			// We could not productively use the notification, so pass it on. Do so
+			// before starting wait to avoid an infinite renotification loop.
+			renotifyFn()
+		}
+
 		waiter := q.outboxWaiters.New(func() bool {
 			value, ok = q.TryPopFront(p)
 			return !ok
 		})
-		waitResult := waiter.Wait(selectFn)
-		if waitResult != SelectWaitSignaled || ok {
+		renotifyFn = waiter.WaitFunc(selectFn)
+		if ok || renotifyFn == nil {
 			return value, ok
 		}
 	}
@@ -215,14 +292,19 @@ func (q *Required[T]) PopFrontExcessFunc(p *Pool[T], selectFn WaitSelectFunc) (T
 // is cancelled before a value can be received. This method only processes excess work
 // that couldn't be immediately delivered to waiting consumers.
 func (q *Required[T]) PopFrontExcess(ctx context.Context, p *Pool[T]) (T, error) {
+	traceRegion := "rdvq.Required.PopFrontExcessFunc"
+
 	var err error
-	value, _ := q.PopFrontExcessFunc(p, func(waitCh <-chan struct{}) SelectResult {
+	value, _ := q.PopFrontExcessFunc(p, func(outboxFilledCh <-chan RenotifyFunc) RenotifyFunc {
+		trace.Logf(ctx, traceRegion, "entering select: outboxFilledCh=%p", outboxFilledCh)
 		select {
-		case <-waitCh:
-			return SelectWaitSignaled
+		case renotifyFn := <-outboxFilledCh:
+			trace.Logf(ctx, traceRegion, "received signal from outboxFilledCh=%p", outboxFilledCh)
+			return renotifyFn
 		case <-ctx.Done():
+			trace.Logf(ctx, traceRegion, "received context done signal")
 			err = ctx.Err()
-			return SelectAborted
+			return nil
 		}
 	})
 	return value, err

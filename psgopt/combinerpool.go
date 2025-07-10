@@ -19,7 +19,7 @@ const DefaultCombinerPoolHistoryRetentionPeriod = 1 * time.Second
 
 // DefaultCombinerPoolIdleTimeout is the default goroutine idle timeout for [github.com/petenewcomb/psg-go.CombinerPool]
 // unless overridden with [WithIdleTimeout]. Empirically determined; subject to change.
-const DefaultCombinerPoolIdleTimeout = 100 * time.Microsecond
+const DefaultCombinerPoolIdleTimeout = -1 // 100 * time.Microsecond
 
 // DefaultCombinerPoolHighUtilizationThreshold is the default utilization threshold for [github.com/petenewcomb/psg-go.CombinerPool]
 // unless overridden with [WithHighUtilizationThreshold]. Empirically determined; subject to change.

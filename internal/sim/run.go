@@ -8,9 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/internal/timerp"
@@ -20,12 +24,44 @@ import (
 )
 
 func Run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
+	traceRegion := "sim.Run"
+	if debug {
+		// See [MaxEventTrailerDataSize] defined to be 1<<10
+		// [MaxEventTrailerDataSize]: https://cs.opensource.google/go/go/+/master:src/internal/trace/tracev2/events.go;drc=6c3b5a2798c83d583cb37dba9f39c47300d19f1f;l=588
+		header := "Test plan:\n\n"
+		continuationHeader := "Test plan (continued):\n\n"
+		maxChunkSize := 1<<10 - max(len(header), len(continuationHeader)) - 1
+		planText := fmt.Sprintf("%#v", plan)
+		for len(planText) > maxChunkSize {
+			chunk := planText[:maxChunkSize]
+			lastNewlineIndex := strings.LastIndexByte(chunk, '\n')
+			if lastNewlineIndex != -1 {
+				chunk = planText[:lastNewlineIndex]
+				planText = planText[len(chunk)+1:]
+			} else {
+				l := len(chunk)
+				for l > 0 && !utf8.RuneStart(chunk[l-1]) {
+					l--
+				}
+				chunk = chunk[:l]
+				planText = planText[l:]
+			}
+			trace.Log(ctx, traceRegion, header+chunk+"\n")
+			header = continuationHeader
+		}
+		trace.Log(ctx, traceRegion, header+planText+"\n")
+	}
 	return run(ctx, t, plan, debug)
 }
 
 func run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
+	defer trace.StartRegion(ctx, "sim.run").End()
+
 	job := psg.NewJob(ctx)
-	defer job.CancelAndWait()
+	defer func() {
+		defer trace.StartRegion(ctx, "sim.run.cleanup").End()
+		job.CancelAndWait()
+	}()
 
 	c := &controller{
 		Plan:                         plan,
@@ -71,8 +107,10 @@ type controller struct {
 }
 
 func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
+	traceRegion := "sim.controller.Run"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, "plan", "%v", c.Plan)
 	c.StartTime = time.Now()
-	c.debugf(ctx, "starting %v", c.Plan)
 
 	for _, step := range c.Plan.Steps {
 		switch step := step.(type) {
@@ -85,20 +123,21 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 
 	chk := assert.New(t)
 	// Loop to handle expected errors from gathers
-	for {
-		c.debugf(ctx, "closing and gathering")
-		err := c.Job.CloseAndGatherAll(ctx)
-		c.debugf(ctx, "closing and gathering returned %v", err)
-		if err == nil {
-			break
+	trace.WithRegion(ctx, "sim.CloseAndGatherAll(loop)", func() {
+		for {
+			err := c.Job.CloseAndGatherAll(ctx)
+			trace.Logf(ctx, "sim.CloseAndGatherAll", "err=%v", err)
+			if err == nil {
+				break
+			}
+			var ge ExpectedGatherError
+			if errors.As(err, &ge) {
+				chk.True(ge.g.Func.ReturnError)
+			} else {
+				chk.NoError(err)
+			}
 		}
-		var ge ExpectedGatherError
-		if errors.As(err, &ge) {
-			chk.True(ge.g.Func.ReturnError)
-		} else {
-			chk.NoError(err)
-		}
-	}
+	})
 
 	gatheredCount := c.GatheredCount.Load()
 	chk.GreaterOrEqual(gatheredCount, int64(c.Plan.MinGatherCount))
@@ -109,7 +148,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		maxConcurrencyByTaskPool[i] = c.MaxConcurrencyByTaskPool[i].Load()
 	}
 
-	c.debugf(ctx, "ended %v with min delays scatter=%v gather=%v combine=%v combineGather=%v", c.Plan,
+	trace.Logf(ctx, "sim.controller.Run(summary)", "min delays: scatter=%v gather=%v combine=%v combineGather=%v",
 		time.Duration(c.MinScatterDelay.Load()),
 		time.Duration(c.MinGatherDelay.Load()),
 		time.Duration(c.MinCombineDelay.Load()),
@@ -130,11 +169,11 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 }
 
 func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *Task) {
-	c.debugf(ctx, "Scattering %v", task)
-	defer c.debugf(ctx, "Scattered %v", task)
+	defer trace.StartRegion(ctx, "sim.scatterTask").End()
+	trace.Logf(ctx, "task", "%v", task)
+
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
-		c.debugf(ctx, "Scattering %v to Gather", task)
 		gatherOp := func() *psg.GatherOp[*taskResult] {
 			c.GathersLock.Lock()
 			defer c.GathersLock.Unlock()
@@ -145,11 +184,17 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 			}
 			return gatherOp
 		}()
+		taskPool := c.getTaskPool(task.PoolIndex)
+		baseTaskFn := c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex])
+		taskFn := func(ctx context.Context) (*taskResult, error) {
+			defer trace.StartRegion(ctx, "sim.scatterTask.Task").End()
+			trace.Logf(ctx, "task", "%v", task)
+			return baseTaskFn(ctx)
+		}
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
-			err := gatherOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
-				c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
+			err := gatherOp.Scatter(ctx, taskPool, taskFn)
 			if err == nil {
 				break
 			}
@@ -263,6 +308,9 @@ func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *ato
 
 func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] {
 	return func(ctx context.Context, res *taskResult, err error) (retErr error) {
+		defer trace.StartRegion(ctx, "sim.gatherFunc").End()
+		trace.Logf(ctx, "gather", "%v", res.Task.ResultHandler.(*Gather))
+
 		c.MinGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
 
 		chk := assert.New(t)
@@ -273,7 +321,7 @@ func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] 
 		gather := task.ResultHandler.(*Gather)
 
 		gatheredCount := c.GatheredCount.Add(1)
-		c.debugf(ctx, "gathering %v, gathered count now %d", task, gatheredCount)
+		trace.Logf(ctx, "sim.GatheredCount", "%d", gatheredCount)
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
 
 		if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
@@ -383,6 +431,9 @@ func (c *controller) updateTaskStats(t assert.TestingT, res *taskResult, err err
 	if task.Func.ReturnError {
 		chk.Error(err)
 	} else {
+		if err != nil {
+			panic("unexpected error: " + err.Error())
+		}
 		chk.NoError(err)
 	}
 
@@ -428,7 +479,7 @@ func (c *controller) executeGatherOrCombineFunc(t assert.TestingT, ctx context.C
 
 func (c *controller) debugf(ctx context.Context, format string, args ...interface{}) {
 	if c.Debug {
-		fmt.Printf("%v ctx(%p) "+format+"\n", append([]any{time.Now(), ctx}, args...)...)
+		trace.Logf(ctx, "sim.debugf", format, args...)
 	}
 }
 

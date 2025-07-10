@@ -242,7 +242,7 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		pathName := fmt.Sprintf("%s.Path[%d]", planName, i)
 		leafTask, _ := nextGroupTask(nil)
 		paths[i] = &Path{
-			RemainingLength: planConfig.Path.Length.Draw(t, pathName+".Length"),
+			RemainingLength: planConfig.Path.Length.Draw(t, pathName+".Length") - 1,
 			RootTask:        leafTask,
 		}
 	}
@@ -263,8 +263,15 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 
 		// Find the set of paths that share the longest remaining length
 		last := len(paths) - 1
-		first := last - 1
 		remainingLength := paths[last].RemainingLength
+		if remainingLength == 0 {
+			for _, path := range paths {
+				plan.Steps = append(plan.Steps, Scatter{Task: path.RootTask})
+			}
+			break
+		}
+
+		first := last - 1
 		for first >= 0 && paths[first].RemainingLength == remainingLength {
 			first--
 		}
@@ -282,20 +289,12 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		// of tasks from the end of the list of paths.
 		task, remainingCandidates := nextGroupTask(permutedCandidates)
 
-		remainingLength--
-		if remainingLength == 0 {
-			// This set of paths is complete, add the new task to the plan's
-			// root-level steps
-			paths = paths[:len(paths)-len(permutedCandidates)]
-			plan.Steps = append(plan.Steps, Scatter{Task: task})
-		} else {
-			// Collapse the group down to one element and update it to hold the
-			// new task
-			paths = append(paths[:len(paths)-len(permutedCandidates)], &Path{
-				RemainingLength: remainingLength,
-				RootTask:        task,
-			})
-		}
+		// Collapse the group down to one element and update it to hold the
+		// new task
+		paths = append(paths[:len(paths)-len(permutedCandidates)], &Path{
+			RemainingLength: remainingLength - 1,
+			RootTask:        task,
+		})
 		paths = append(paths, remainingCandidates...) //nolint:makezero // working buffer
 	}
 

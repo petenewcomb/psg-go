@@ -23,13 +23,12 @@ const (
 	// meaning a value was received from a sender's dedicated channel.
 	SelectInboxEmptied
 
-	// SelectOutboxFilled indicates an outbox channel was successfully written to,
-	// meaning a value was successfully sent to a sender's outbox buffer.
+	// SelectOutboxFilled indicates an outbox channel was successfully written
+	// to, meaning a value was successfully sent to a sender's outbox buffer. It
+	// is used by PushSelectFunc to signal that the select function filled an
+	// empty outbox and by RequiredPopSelectFunc to signal that a full outbox
+	// has been added to the outboxWaiters queue.
 	SelectOutboxFilled
-
-	// SelectWaitSignaled indicates a wait channel was signaled,
-	// meaning new work became available and the operation should retry.
-	SelectWaitSignaled
 )
 
 func (sr SelectResult) String() string {
@@ -40,8 +39,6 @@ func (sr SelectResult) String() string {
 		return "SelectInboxEmptied"
 	case SelectOutboxFilled:
 		return "SelectOutboxFilled"
-	case SelectWaitSignaled:
-		return "SelectWaitSignaled"
 	default:
 		return fmt.Sprintf("SelectResult(%d)", sr)
 	}

@@ -73,6 +73,9 @@ This document provides guidance for anyone (human or AI) working on the PSG-Go c
 - Use `require` package for test assertions, usually by instantiating a `chk` variable with `require.New` 
 
 ## Documentation Style
+- Documentation is focused on teaching concepts and details that readers need to understand to use, modify, or extend the code easily and effectively.
+- Documentation is not for highlighting accomplishments and must not make unsubstantiated claims.
+- Benchmark results and other empirical evidence should be used to support or refute that a design or implementation solves a stated problem.
 - Design documents should be mostly prose but still include key diagrams, small code blocks, and structured lists where they help with clarity or pedagogy.
 - Make sure that any tunable parameters are referred to as such and avoid implying that any concrete values provided as examples are dictated by the design.
 - Always include discussion of rejected alternatives.

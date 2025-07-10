@@ -3,6 +3,12 @@
 
 package rdvq
 
+import (
+	"context"
+
+	"github.com/petenewcomb/psg-go/internal/trace"
+)
+
 // A Waiter has the following lifecycle states:
 //
 // 1. The zero value of waiter is a waiter that will never be signaled.
@@ -36,36 +42,64 @@ package rdvq
 //
 // Waiter variables may be safely copied and are designed to be passed by value.
 type Waiter struct {
-	q        *Waiters
-	verifyFn func() bool
+	w         *Waiters
+	confirmFn func() bool
 }
 
-func (w Waiter) Wait(selectFn WaitSelectFunc) SelectResult {
-	if w.q == nil {
+// WaitSelectFunc handles select operations on wait channels, returning the the
+// received RenotifyFunc or nil if the select exited without receiving one.
+type WaitSelectFunc func(waitCh <-chan RenotifyFunc) RenotifyFunc
+
+type NotifyFunc = func(RenotifyFunc)
+
+//nolint:contextcheck // background context used only for tracing
+func (w Waiter) WaitFuncWithOrphanHandler(orphanFn NotifyFunc, selectFn WaitSelectFunc) RenotifyFunc {
+	traceRegion := "rdvq.Waiter.WaitFuncWithOrphanHandler"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w.w)
+
+	if w.w == nil {
 		return selectFn(nil)
 	}
-	result := SelectAborted
-	w.q.inner.PopFrontFunc(wp,
-		func(struct{}) {
-			// There was an orphaned value in the channel, meaning that this
-			// waiter was notified but didn't receive it. Call Notify to pass
-			// the notification to another.
-			w.q.Notify()
-		},
-		func(ch <-chan struct{}) SelectResult {
-			if w.verifyFn == nil || w.verifyFn() {
-				innerResult := selectFn(ch)
-				if innerResult == SelectWaitSignaled {
-					result = SelectWaitSignaled
+	var renotifyFn RenotifyFunc
+	w.w.q.PopFrontFunc(wp,
+		orphanFn,
+		func(ch <-chan RenotifyFunc) SelectResult {
+			if w.confirmFn == nil || w.confirmFn() {
+				renotifyFn = selectFn(ch)
+				if renotifyFn != nil {
 					return SelectInboxEmptied
 				}
 			}
 			return SelectAborted
 		},
 	)
-	return result
+	return renotifyFn
 }
 
-// WaitSelectFunc handles select operations on wait channels, returning
-// the appropriate SelectResult to indicate what happened.
-type WaitSelectFunc func(waitCh <-chan struct{}) SelectResult
+func (w Waiter) WaitFunc(selectFn WaitSelectFunc) RenotifyFunc {
+	return w.WaitFuncWithOrphanHandler(w.w.Notify, selectFn)
+}
+
+func (w Waiter) WaitWithOrphanHandler(ctx context.Context, orphanFn NotifyFunc) (RenotifyFunc, error) {
+	traceRegion := "rdvq.Waiter.WaitWithOrphanHandler"
+
+	var err error
+	renotifyFn := w.WaitFuncWithOrphanHandler(orphanFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+		trace.Logf(ctx, traceRegion, "entering select: waitCh=%p", waitCh)
+		select {
+		case renotifyFn := <-waitCh:
+			trace.Logf(ctx, traceRegion, "received renotifyFn from waitCh=%p", waitCh)
+			return renotifyFn
+		case <-ctx.Done():
+			trace.Logf(ctx, traceRegion, "received context done signal")
+			err = ctx.Err()
+		}
+		return nil
+	})
+	return renotifyFn, err
+}
+
+func (w Waiter) Wait(ctx context.Context) (RenotifyFunc, error) {
+	return w.WaitWithOrphanHandler(ctx, w.w.Notify)
+}

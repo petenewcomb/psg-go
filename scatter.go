@@ -5,8 +5,11 @@ package psg
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/psg-go/internal/trace"
+
+	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
@@ -15,19 +18,17 @@ import (
 type TaskPoolOrJob interface {
 	// job returns the Job associated with this target
 	job() *Job
-	// launch executes a task, potentially waiting if concurrency limits are reached
-	launch(ctx context.Context, backpressureFn backpressureFunc, taskFn boundTask) (launched bool, err error)
-	// withBackpressureProvider returns a context with the appropriate backpressure provider
-	withBackpressureProvider(ctx context.Context) context.Context
+	// newScatterWork creates a work item that will execute the task function in the target context
+	newScatterWork(taskFn boundTaskFunc) workq.WorkFunc
 }
 
-type boundTask func(ctx context.Context, completedFn func(), ctxWithBP func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap)
+type boundTaskFunc func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap)
 
 func vetScatter[T any](
-	vetted vettedContext,
+	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
-) {
+) (context.Context, *ctxMeta) {
 	if taskFn == nil {
 		panic("task function must be non-nil")
 	}
@@ -39,70 +40,53 @@ func vetScatter[T any](
 		panic("task pool not bound to a job")
 	}
 
-	if vetted.hasTaskValue {
-		// Don't launch if the provided context is a task context within the
-		// current job, since that may lead to deadlock.
-		panic("Scatter called from within Task; move call to Gather instead")
-	}
+	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
+		switch ctxType {
+		case topLevelContext, gatherContext, combineContext:
+		// These are valid for scattering
+		default:
+			panic(fmt.Sprintf("Scatter called from %v context but allowed only by top-level, gather, or combine context", ctxType))
+		}
+	})
 
 	// Panic if the job is already done. This prevents tasks from being launched
 	// after job completion, which would create orphaned tasks that will never
 	// be gathered and could leak resources or cause unexpected behavior.
 	j.panicIfDone()
+
+	return ctx, meta
 }
 
-func scatter[T any](
-	vettedCtx vettedContext,
+func newScatterWork[T any](
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
-	applyBackpressure backpressureFunc,
 	postResultFn func(context.Context, *outboxMap, T, error),
-) (launched bool, err error) {
+) workq.WorkFunc {
+	traceRegion := "newScatterWork"
+
 	j := target.job()
 
-	bp := getBackpressureProvider(vettedCtx.ctx, j)
-
-	// If the job is too busy, we should wait to scatter the task.
-	for {
-		busy, busyChangeCh := j.gcMonitor.BusySignal()
-		if !busy {
-			break
-		}
-
-		if applyBackpressure == nil {
-			return false, nil
-		}
-
-		_, err = applyBackpressure(vettedCtx.ctx, rdvq.Waiter{}, busyChangeCh)
-		if err != nil {
-			return false, err
-		}
-	}
-
-	// Register the task with the job to make sure that any calls to gather will
-	// block until the task is completed.
+	// Register the task with the job to keep the job running until the task is
+	// completed and its results have been combined or gathered. Decremented in
+	// tryScatterNow if the task is abandoned.
 	j.state.IncrementWork()
 
-	// Bookkeeping: make sure that the job-scope count incremented above gets
-	// decremented unless the launch actually happens
-	defer func() {
-		if !launched {
-			j.state.DecrementWork()
-		}
-	}()
+	// Bind the task and gather functions together into a generic task function
+	boundTaskFn := func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap) {
+		traceRegion := traceRegion + ".boundTaskFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
 
-	// Bind the task and gather functions together into a top-level function for
-	// the new goroutine and hand it to the target to launch.
-	launched, err = target.launch(vettedCtx.ctx, applyBackpressure, func(ctx context.Context, taskCompletedFn func(), ctxWithBPFn func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
 		// Make sure that a panic in a task function doesn't compromise the rest
 		// of the job.
 		var value T
 		var err error = ErrTaskPanicked
 		defer func() {
-			if taskCompletedFn != nil {
-				taskCompletedFn()
+			if completedFn != nil {
+				completedFn()
 			}
-			ctx = ctxWithBPFn(bp)
+			if err != nil {
+				trace.Logf(ctx, traceRegion, "posting task err=%v", err)
+			}
 			postResultFn(ctx, taskWorkerOutboxMap, value, err)
 		}()
 
@@ -115,22 +99,87 @@ func scatter[T any](
 		// posting a gather to the job's channel or otherwise attempt to
 		// maintain the integrity of the task pool or overall job in case of task
 		// panics.
-		value, err = taskFn(ctx)
-	})
-	return launched, err
+		trace.WithRegion(ctx, traceRegion+".taskFn", func() {
+			value, err = taskFn(ctx)
+		})
+	}
+
+	// Pass to the target to wrap up as a work function
+	return target.newScatterWork(boundTaskFn)
 }
 
-// This function is designed to be called before scattering a new task to
-// preemptively gather or gather results from completed tasks. This smooths
-// execution and adds backpressure that enables operation with unlimited task pools.
-// Gathering up to 2 here balances between catching up and pausing for too long
-// during a scatter.
-func yieldBeforeScatter(vetted vettedContext, bp backpressureProvider) error {
-	for range 2 {
-		ok, err := bp.Yield(vetted)
-		if !ok || err != nil {
-			return err
+func tryScatterNow(
+	ctx context.Context,
+	meta *ctxMeta,
+	target TaskPoolOrJob,
+	scatterWorkFn workq.WorkFunc,
+) (bool, error) {
+	return scatterNowOrQueue(ctx, meta, target, scatterWorkFn, nil)
+}
+
+func scatterNow(
+	ctx context.Context,
+	meta *ctxMeta,
+	target TaskPoolOrJob,
+	scatterWorkFn workq.WorkFunc,
+) error {
+	_, err := scatterNowOrQueue(ctx, meta, target, scatterWorkFn, meta.QueueWork)
+	return err
+}
+
+func scatterNowOrQueue(
+	ctx context.Context,
+	meta *ctxMeta,
+	target TaskPoolOrJob,
+	scatterWorkFn workq.WorkFunc,
+	queueFn workq.QueueWorkFunc,
+) (bool, error) {
+	traceRegion := "scatterNowOrQueue"
+
+	j := target.job()
+
+	// Bookkeeping: make sure that the job-scope count incremented in
+	// newScatterWork above gets decremented if the task is abandoned because it
+	// could not be started immediately
+	started := false
+	defer func() {
+		if !started {
+			j.state.DecrementWork()
+		}
+	}()
+
+	var readyFn workq.NotifyFunc
+	if meta.IsTopLevel() {
+		err := j.yield(ctx, meta)
+		if err != nil {
+			return false, err
+		}
+		readyFn = func(renotifyFn workq.RenotifyFunc) {
+			trace.WithRegion(ctx, traceRegion+".readyFn", func() {
+				renotifyFn()
+			})
 		}
 	}
-	return nil
+
+	err := scatterWorkFn(ctx, workq.Execution{
+		Blocking: func() {},
+		Starting: func() {
+			started = true
+			trace.Logf(ctx, traceRegion+".Starting", "started=true")
+		},
+		ReadyFn: readyFn,
+	})
+
+	if queueFn != nil && !started && err == nil {
+		started = true
+		queueFn(scatterWorkFn)
+		trace.Logf(ctx, traceRegion, "scatter queued")
+	}
+
+	if err == nil {
+		trace.Logf(ctx, traceRegion, "returning started=%v", started)
+	} else {
+		trace.Logf(ctx, traceRegion, "returning started=%v, err=%v", started, err)
+	}
+	return started, err
 }

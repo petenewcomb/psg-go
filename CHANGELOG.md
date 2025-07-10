@@ -14,11 +14,12 @@ format.
 - Test coverage for various expected panic conditions
 - Job.CancelAndWait to ensure that task goroutines have fully shut down
 - Job.Close and Job.CloseAndGatherAll
-- Combine, et. al. for scaleable aggregation of task results before passing to gather operations
+- Combine, et. al. for scalable aggregation of task results before passing to gather operations
 - psgwf package providing workflow context propagation and lifecycle management utilities
 - otpsg module providing OpenTelemetry integration and observability patterns
 - Comprehensive options pattern implementation via psgopt package
 - SetOptions methods for atomic configuration updates across all components
+- `PSGTRACEINTERNALS` environment variable to enable and configure `runtime/trace` instrumentation of PSG internals 
 
 ### Changed
 

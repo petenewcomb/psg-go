@@ -5,11 +5,15 @@ package psg
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"sync/atomic"
 
-	"github.com/petenewcomb/psg-go/internal/dynval"
+	"github.com/petenewcomb/psg-go/internal/trace"
+
 	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/opts"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
@@ -19,9 +23,9 @@ import (
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
 	j              *Job
-	maxConcurrency dynval.Value[int]
+	maxConcurrency atomic.Int32
 	inFlight       jobstate.InFlightCounter
-	waiterQueue    rdvq.Waiters
+	waiters        workq.Waiters
 }
 
 // Creates a new [TaskPool] bound to the specified job with the given options.
@@ -29,7 +33,11 @@ type TaskPool struct {
 // Use psgopt.WithMaxConcurrency() to set a specific limit.
 //
 // Panics if the job is nil or in the done state.
+//
+//nolint:contextcheck // background context used only for tracing
 func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
+	traceRegion := "NewTaskPool"
+
 	if job == nil {
 		panic("job must be non-nil")
 	}
@@ -40,13 +48,15 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	p := &TaskPool{
 		j: job,
 	}
-	p.waiterQueue.Init()
+	p.waiters.Init()
 
 	// Set default unlimited concurrency
 	p.maxConcurrency.Store(-1)
 
 	// Apply user options
 	p.SetOptions(options...)
+
+	trace.Logf(context.Background(), traceRegion, "TaskPool=%p, job=%p, inFlight=%p, waiters=%p", p, job, &p.inFlight, &p.waiters)
 
 	return p
 }
@@ -60,18 +70,27 @@ func (p *TaskPool) job() *Job {
 	return p.j
 }
 
-// withBackpressureProvider returns a context with the backpressure provider for this TaskPool
-func (p *TaskPool) withBackpressureProvider(ctx context.Context) context.Context {
-	return p.j.withBackpressureProvider(ctx)
-}
-
 // taskPoolConfigWrapper wraps a TaskPool to implement the taskPoolConfig interface for options
 type taskPoolConfigWrapper struct {
 	pool *TaskPool
 }
 
 func (w taskPoolConfigWrapper) SetMaxConcurrency(limit int) {
-	w.pool.maxConcurrency.Store(limit)
+	if limit < -1 {
+		panic(fmt.Sprintf("max concurrency limit %d is less than minimum allowed value of -1", limit))
+	}
+	if limit > math.MaxInt32 {
+		panic(fmt.Sprintf("max concurrency limit %d exceeds maximum allowed value of %d", limit, math.MaxInt32))
+	}
+	oldLimit := w.pool.maxConcurrency.Swap(int32(limit))
+	switch {
+	case limit == -1:
+		w.pool.waiters.NotifyAll()
+	case oldLimit != -1:
+		for range max(0, limit-int(oldLimit)) {
+			w.pool.waiters.Notify(func() {})
+		}
+	}
 }
 
 // SetOptions applies the given configuration options to the pool.
@@ -81,80 +100,89 @@ func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 	opts.ApplyToTaskPool(taskPoolConfigWrapper{pool: p}, options...)
 }
 
-func (p *TaskPool) launch(ctx context.Context, applyBackpressure backpressureFunc, task boundTask) (bool, error) {
+//nolint:contextcheck // background context used only for tracing
+func (p *TaskPool) newScatterWork(taskFn boundTaskFunc) workq.WorkFunc {
+	traceRegion := "TaskPool.newScatterWork"
+
 	j := p.j
 
-	// Try to add to the pool
-	for {
-		limit, limitChangeCh := p.maxConcurrency.Load()
-		if p.incrementInFlightIfUnder(limit) {
-			break
-		}
+	trace.Logf(context.Background(), traceRegion, "TaskPool=%p", p)
 
-		if applyBackpressure == nil {
-			return false, nil
-		}
-
-		incrementSucceeded := false
-		var err error
-		waiter := p.waiterQueue.New(func() bool {
-			// Check again after registering as a waiter, in case capacity
-			// became available between the last check and this one. Note that
-			// this overwrites the limitChangeCh at the top of the loop so that
-			// the latest one is passed to applyBackpressure below.
-			limit, limitChangeCh = p.maxConcurrency.Load()
-			if p.incrementInFlightIfUnder(limit) {
-				incrementSucceeded = true
-				return false // waiter was not notified
-			}
-			return true
-		})
-
-		_, err = applyBackpressure(ctx, waiter, limitChangeCh)
-		if err != nil {
-			return false, err
-		}
-
-		if incrementSucceeded {
-			break
-		}
-
-		// Even if the waiter was notified, we need to reattempt incrementing
-		// the in-flight counter before proceeding.
-	}
-
-	j.startTask(ctx, func(ctx context.Context, ctxWithBPFn func(backpressureProvider) context.Context, taskWorkerOutboxMap *outboxMap) {
-		task(ctx, func() {
-			// Decrement the task pool's in-flight count BEFORE waiting on the
-			// gather channel. This makes it safe for gather functions to call
-			// `Scatter` with this same `TaskPool` instance without deadlock, as
-			// there is guaranteed to be at least one slot available.
-			p.decrementInFlight()
-		}, ctxWithBPFn, taskWorkerOutboxMap)
+	baseWorkFn := j.newScatterWorkWithCompletedFn(taskFn, func() {
+		// Decrement the task pool's in-flight count BEFORE waiting on the
+		// gather channel. This makes it safe for gather functions to call
+		// `Scatter` with this same `TaskPool` instance without deadlock, as
+		// there is guaranteed to be at least one slot available.
+		p.decrementInFlight()
 	})
 
-	return true, nil
+	needDecrement := false
+	decrementingWorkFn := func(ctx context.Context, ex workq.Execution) error {
+		traceRegion := traceRegion + ".decrementingWorkFn"
+		defer trace.StartRegion(context.Background(), traceRegion).End()
+
+		originalStarting := ex.Starting
+		ex.Starting = func() {
+			originalStarting()
+			needDecrement = false
+			trace.Logf(ctx, traceRegion+".Starting", "needDecrement=false")
+		}
+		defer func() {
+			if needDecrement {
+				p.decrementInFlight()
+			}
+		}()
+		return baseWorkFn(ctx, ex)
+	}
+
+	inFlightIncremented := false
+	return p.waiters.Wrap(decrementingWorkFn,
+		func(ctx context.Context) workq.WaitBehavior {
+			ctx, meta := j.ctxMeta(ctx)
+			return meta.WaitBehavior(func() bool {
+				traceRegion := traceRegion + ".shouldWaitFn"
+				// Make sure we increment only once, though shouldWaitFn may
+				// be called multiple times. This is ok because once we have
+				// incremented, we have reserved our slot.
+				if !inFlightIncremented {
+					inFlightIncremented = p.incrementInFlight()
+					needDecrement = inFlightIncremented
+				} else {
+					trace.Logf(ctx, traceRegion, "inFlight counter already incremented")
+				}
+				return !inFlightIncremented
+			})
+		},
+	)
 }
 
-// Returns true if the waiter was notified, false otherwise.
-type backpressureFunc func(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error)
+//nolint:contextcheck // background context used only for tracing
+func (p *TaskPool) incrementInFlight() bool {
+	traceRegion := "TaskPool.incrementInFlight"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-func (p *TaskPool) incrementInFlightIfUnder(limit int) bool {
+	limit := p.maxConcurrency.Load()
 	switch {
 	case limit < 0:
 		p.inFlight.Increment()
 		return true
 	case limit == 0:
+		trace.Logf(context.Background(), traceRegion, "limit is zero; returning false")
 		return false
 	default:
-		return p.inFlight.IncrementIfUnder(limit)
+		return p.inFlight.IncrementIfUnder(int(limit))
 	}
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (p *TaskPool) decrementInFlight() {
-	limit, _ := p.maxConcurrency.Load()
-	if p.inFlight.DecrementAndCheckIfUnder(limit) {
-		// Signal any waiting tasks
-		p.waiterQueue.Notify()
+	traceRegion := "TaskPool.decrementInFlight"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "TaskPool=%p", p)
+
+	limit := p.maxConcurrency.Load()
+	if p.inFlight.DecrementAndCheckIfUnder(int(limit)) {
+		// Signal any waiting task
+		p.waiters.Notify(func() {})
 	}
 }

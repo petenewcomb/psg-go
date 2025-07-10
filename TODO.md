@@ -2,72 +2,64 @@
 
 ## Combiner Branch Pre-Merge Tasks
 
-Items that must be completed before merging to main branch.
-
-### 2. Testing
-- [ ] Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
-- [ ] Test automatic flushing behavior based on timeout settings
-- [ ] Test TaskPool.SetOptions and CombinerPool.SetOptions functionality, especially dynamic pool resizing
-- [ ] Ensure no goroutine leaks in any scenario
-- [ ] Add comprehensive tests for the new heap implementation
-- [ ] Test job-binding of CombinerPool, including invalid cases
-- [ ] Test panic recovery in combiners (simulate panics in Combine and Flush)
-- [ ] Test edge cases with cross-job context propagation
-- [ ] Test behavior when combiner factory panics
-- [ ] Test cleanup behavior with mixed TaskPool and CombinerPool operations
-- [ ] Add tests verifying proper shutdown sequence and resource cleanup
-- [ ] Test and document behavior when tasks passed to combiners return errors
-- [ ] test running gather scatters from combiners and vice versa in combiner benchmark
-- [ ] Thoroughly test multithreaded gathers
+Items to complete before merging to main branch.
 
 ### 3. Documentation updates
 - [ ] Complete review and update of doc comments for all new/modified public APIs
 - [ ] Update README with information about the new combining architecture
 - [ ] Add a Combiner example to the README Features section
 - [ ] Create a playground example for the new combining architecture
-- [ ] Clearly show the reentrancy effect of scattering or gathering within combiners and gather functions, esp. given that combiners may also be flushed
-- [ ] Add documentation that compares waitq with condition variables
-
-### 4. Performance optimization
-- [ ] Test automatic scaling of combiner task count based on workload
-- [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
-- [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
 ### 5. API finalization
 - [ ] Review and document thread-safety guarantees for remaining public APIs
 
 ### 6. Implementation improvements
-- [ ] Simplify and clarify context propagation and checking (review includesJob and newTaskContext, shift to leveraging vettedContext)
-- [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use inGather/combinerBackpressureProvider to allow new scatters only to finish workflows already started)
-- [ ] Review race conditions during job shutdown and combiner flushing
-- [ ] Review potential deadlocks during cleanup, especially with combiners
-- [ ] Make sure we're always selecting on the minimum number of channels at a time 
+- [ ] Add an emitWaiters backpressure system similar to the combineWaiters one (or merge them together) so that scatters are also held off when flushes are stacked up waiting for gathers 
+- [ ] Finish cleaning up tracing instrumentation to be concise, consistent, and follow the traceRegion pattern 
+- [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 - [ ] consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
 - [ ] make sure that rdvq.Optional methods aren't inappropriately leaking through to Waiters or Required 
+- [ ] consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path
 
 ## Post-Merge Enhancements
 
 Items that can be deferred to GitHub issues after the combiner branch is merged.
 
 ### Performance Optimizations
-- [ ] Actually hook up gcok to do something useful, and find a way for there to be only one instance of the monitor.
+- [ ] Find a way for there to be only one instance of the GC monitor that can serve multiple jobs.
+- [ ] Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
+- [ ] Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
 
 ### API Enhancements
 - [ ] Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
-- [ ] Consider making it possible to "shut down" task and combiner pools without shutting down the overall job?
+- [ ] Add keyed combine and reduce functionality
+- [ ] Consider making it possible to positively close and release task and combiner pools without shutting down the overall job?
 - [ ] Add generic hooks in core PSG for key lifecycle events
 - [ ] Add metrics hooks for pool resource utilization (in-flight tasks, queue depth)
 - [ ] Add hooks for job-level monitoring and statistics
 - [ ] Create standard interfaces for instrumentation providers
-- [ ] debug mode that runs everything in a single goroutine in a way that makes logic easy to debug
+- [ ] debug mode that runs everything in a way that makes logic easy to debug, ideally in a single goroutine
+- [ ] consider publishing generally-useful internal packages as standalone projects
+- [ ] consider adding environment variable-based configuration of PSG default tuning parameters 
 
 ### Additional Tests and Examples
 - [ ] Make sure that combiner pools scale down to zero
+- [ ] Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
+- [ ] Test automatic flushing behavior based on timeout settings
+- [ ] Test TaskPool.SetOptions and CombinerPool.SetOptions functionality, especially dynamic pool resizing
+- [ ] Ensure no goroutine leaks in any scenario
+- [ ] Add comprehensive tests for the heap implementation
+- [ ] Test job-binding of CombinerPool, including invalid cases
+- [ ] Test panic recovery in combiners (simulate panics in Combine and Flush)
+- [ ] Test edge cases with cross-job context propagation
+- [ ] Test behavior when combiner factory panics
+- [ ] Add tests verifying proper shutdown sequence and resource cleanup
+- [ ] Thoroughly test multithreaded gathers
+- [ ] Verify cross-job Gather safety similar to Combine cross-job safety (may not be relevant since Gather doesn't bind to jobs like CombinerPool does)
+- [ ] Add integration tests with actual TaskPool to verify cross-system notification flow (may be covered by existing simulation/benchmark tests)
 
 ### Design Documentation
-- [ ] Add an overall design doc that covers the user-facing design of psg.  this would have a more theoretical bent as opposed to the practical focus of what's in doc.go.  This doc would focus on overall theory not specific implementation.
-- [ ] Add a design doc for the implementation of backpressure mechanisms, detailing the interplay of recursion and reentrancy.
-
-### Items Needing Further Investigation
-- [ ] Verify cross-job Gather safety similar to Combine cross-job safety (may not be relevant since Gather doesn't bind to jobs like CombinerPool does)
+- [ ] Update and refine design docs to make them more readable and less AI-fueled dumps of bullet points
+- [ ] Add documentation that compares rdvq.Waiters, workq.Watchers, and workq.Waiters with condition variables
+- [ ] Better establish the theoretical basis of notification conservation and find a way to measure and verify it

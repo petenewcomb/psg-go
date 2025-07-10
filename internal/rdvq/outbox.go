@@ -3,7 +3,11 @@
 
 package rdvq
 
-import "context"
+import (
+	"context"
+
+	"github.com/petenewcomb/psg-go/internal/trace"
+)
 
 // Outbox provides per-sender buffering for overflow items in Required queues.
 // Each sender should maintain their own Outbox instance to achieve "drop-and-go"
@@ -28,19 +32,29 @@ type Outbox[T any] struct {
 //
 // Note: This method has side effects when the outbox is empty but contains
 // a zero value. It will drain and recycle the channel in this case.
+//
+//nolint:contextcheck // background context used only for tracing
 func (ob *Outbox[T]) IsEmpty(p *Pool[T]) bool {
-	ch := ob.ch
-	if ch == nil {
+	traceRegion := "rdvq.Outbox.IsEmpty"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	outboxCh := ob.ch
+	trace.Logf(context.Background(), traceRegion, "Outbox=%p, outboxCh=%p", ob, outboxCh)
+	if outboxCh == nil {
 		return true
 	}
+
+	trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
 	select {
-	case ch <- *new(T):
+	case outboxCh <- *new(T):
+		trace.Logf(context.Background(), traceRegion, "delivered zero value to outboxCh=%p, returning true", outboxCh)
 		// Successfully sent a zero value, so the channel is empty
 		ob.ch = nil
-		<-ch // remove the zero value
-		p.putChan(ch)
+		<-outboxCh // remove the zero value
+		p.putChan(outboxCh)
 		return true
 	default:
+		trace.Logf(context.Background(), traceRegion, "outboxCh=%p is not empty, returning false", outboxCh)
 		// Can't send a zero value, so the channel is not empty
 		return false
 	}
@@ -51,16 +65,22 @@ func (ob *Outbox[T]) IsEmpty(p *Pool[T]) bool {
 // The value written will be discarded.
 type OutboxWaitSelectFunc[T any] func(ch chan<- T) SelectResult
 
+//nolint:contextcheck // background context used only for tracing
 func (ob *Outbox[T]) WaitFunc(p *Pool[T], selectFn OutboxWaitSelectFunc[T]) {
-	ch := ob.ch
-	if ch != nil && selectFn(ch) == SelectOutboxFilled {
+	traceRegion := "rdvq.Outbox.WaitFunc"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	outboxCh := ob.ch
+	trace.Logf(context.Background(), traceRegion, "Outbox=%p, outboxCh=%p", ob, outboxCh)
+
+	if outboxCh != nil && selectFn(outboxCh) == SelectOutboxFilled {
 		// If the select function returns SelectOutboxFilled, it means that the channel was
 		// successfully written to, confirming that the box was empty. But now
 		// it's full, so we need to drain the value before putting the channel
 		// back into the pool.
 		ob.ch = nil
-		<-ch
-		p.putChan(ch)
+		<-outboxCh
+		p.putChan(outboxCh)
 	}
 }
 
@@ -78,12 +98,17 @@ func (ob *Outbox[T]) WaitFunc(p *Pool[T], selectFn OutboxWaitSelectFunc[T]) {
 //	err = outbox.Wait(ctx, pool) // Ensure item is processed
 //	return err
 func (ob *Outbox[T]) Wait(ctx context.Context, p *Pool[T]) error {
+	traceRegion := "rdvq.Outbox.Wait"
+
 	var err error
-	ob.WaitFunc(p, func(ch chan<- T) SelectResult {
+	ob.WaitFunc(p, func(outboxCh chan<- T) SelectResult {
+		trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
-		case ch <- *new(T):
+		case outboxCh <- *new(T):
+			trace.Logf(ctx, traceRegion, "delivered zero value to outboxCh=%p", outboxCh)
 			return SelectOutboxFilled
 		case <-ctx.Done():
+			trace.Logf(ctx, traceRegion, "received context done signal")
 			err = ctx.Err()
 			return SelectAborted
 		}
@@ -97,17 +122,30 @@ func (ob *Outbox[T]) Wait(ctx context.Context, p *Pool[T]) error {
 //
 // After calling Drain, the outbox should not be reused. This method is
 // typically used for cleanup during context cancellation or job completion.
+//
+//nolint:contextcheck // background context used only for tracing
 func (ob *Outbox[T]) Drain(p *Pool[T]) (T, bool) {
-	if ch := ob.ch; ch != nil {
+	traceRegion := "rdvq.Outbox.Drain"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	outboxCh := ob.ch
+	trace.Logf(context.Background(), traceRegion, "Outbox=%p, outboxCh=%p", ob, outboxCh)
+
+	if outboxCh != nil {
 		ob.ch = nil
+		trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
-		case value := <-ch:
-			// Had an item, drained it. Don't pool - tryOutboxes will handle it
+		case value := <-outboxCh:
+			// Had an item, drained it. Don't pool because it is still queued in
+			// fullOutboxes; tryOutboxes will handle it.
+			trace.Logf(context.Background(), traceRegion, "received value from outboxCh=%p, returning true", outboxCh)
 			return value, true
 		default:
 			// Was empty, safe to pool immediately
-			p.putChan(ch)
+			p.putChan(outboxCh)
 		}
 	}
+
+	trace.Logf(context.Background(), traceRegion, "outbox was empty, returning false")
 	return *new(T), false
 }

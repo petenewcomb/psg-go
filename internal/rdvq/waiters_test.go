@@ -17,7 +17,7 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	waiters.Init()
 
 	// No waiters - notification should be dropped
-	waiters.Notify()
+	waiters.Notify(func() {})
 
 	notified := make(chan bool, 1)
 	waiterStarted := make(chan struct{})
@@ -28,12 +28,15 @@ func TestWaiters_BasicNotification(t *testing.T) {
 
 		close(waiterStarted) // Signal that waiter is created
 
-		result := waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-			// Block waiting for notification - no default case
-			<-ch
-			return rdvq.SelectWaitSignaled // Waiter was notified
-		})
-		notified <- (result == rdvq.SelectWaitSignaled)
+		renotifyFn := waiter.WaitFuncWithOrphanHandler(
+			func(rdvq.RenotifyFunc) { panic("orphan notify") },
+			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				// Block waiting for notification - no default case
+				renotifyFn := <-ch
+				return renotifyFn // Waiter was notified
+			},
+		)
+		notified <- (renotifyFn != nil)
 	}()
 
 	// Wait for waiter to be created and start waiting
@@ -41,7 +44,7 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Send notification
-	waiters.Notify()
+	waiters.Notify(func() {})
 
 	// Should receive notification
 	select {
@@ -60,21 +63,24 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 	waiter := waiters.New(func() bool { return false })
 
 	selectCalled := false
-	result := waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-		selectCalled = true
-		return rdvq.SelectAborted
-	})
+	renotifyFn := waiter.WaitFuncWithOrphanHandler(
+		func(rdvq.RenotifyFunc) { panic("orphan notify") },
+		func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			selectCalled = true
+			return nil
+		},
+	)
 
 	// Verification returned false, so select function should not be called
 	assert.False(t, selectCalled)
-	assert.Equal(t, rdvq.SelectAborted, result)
+	assert.Nil(t, renotifyFn)
 }
 
 func TestWaiters_VerificationPreventsRace(t *testing.T) {
 	var waiters rdvq.Waiters
 	waiters.Init()
 
-	workAvailable := false
+	workReady := false
 	var mu sync.Mutex
 
 	// Start the waiter in a goroutine
@@ -86,25 +92,28 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 		waiter := waiters.New(func() bool {
 			mu.Lock()
 			defer mu.Unlock()
-			return !workAvailable // Continue waiting only if no work available
+			return !workReady // Continue waiting only if no work ready
 		})
 
 		close(waiterStarted)
 
-		result := waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-			// When verification succeeds, this should be called and block
-			<-ch
-			return rdvq.SelectWaitSignaled
-		})
-		waitResult <- (result == rdvq.SelectWaitSignaled)
+		renotifyFn := waiter.WaitFuncWithOrphanHandler(
+			func(rdvq.RenotifyFunc) { panic("orphan notify") },
+			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				// When verification succeeds, this should be called and block
+				renotifyFn := <-ch
+				return renotifyFn
+			},
+		)
+		waitResult <- (renotifyFn != nil)
 	}()
 
 	// Wait for waiter to start
 	<-waiterStarted
 	time.Sleep(10 * time.Millisecond)
 
-	// Send notification while no work is available - should trigger select function
-	waiters.Notify()
+	// Send notification while no work is ready - should trigger select function
+	waiters.Notify(func() {})
 
 	// Waiter should receive notification and return SelectWaitSignaled
 	select {
@@ -119,22 +128,25 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 	var waiters rdvq.Waiters
 	waiters.Init()
 
-	workAvailable := true // Work is immediately available
+	workReady := true // Work is immediately ready
 
 	// Create waiter that checks for work
 	waiter := waiters.New(func() bool {
-		return !workAvailable // Should return false (don't wait)
+		return !workReady // Should return false (don't wait)
 	})
 
 	selectCalled := false
-	result := waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-		selectCalled = true
-		return rdvq.SelectAborted
-	})
+	renotifyFn := waiter.WaitFuncWithOrphanHandler(
+		func(rdvq.RenotifyFunc) { panic("orphan notify") },
+		func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			selectCalled = true
+			return nil
+		},
+	)
 
 	// Verification should have prevented waiting
-	assert.False(t, selectCalled)               // Select function should not be called
-	assert.Equal(t, rdvq.SelectAborted, result) // Should return SelectAborted (not notified)
+	assert.False(t, selectCalled) // Select function should not be called
+	assert.Nil(t, renotifyFn)     // Should return nil (not notified)
 }
 
 func TestWaiters_MultipleWaiters(t *testing.T) {
@@ -150,16 +162,19 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 		waiter := waiters.New(func() bool { return true })
 
 		go func(id int) {
-			result := waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-				select {
-				case <-ch:
-					notifications <- id
-					return rdvq.SelectWaitSignaled
-				case <-time.After(200 * time.Millisecond):
-					return rdvq.SelectAborted
-				}
-			})
-			if result != rdvq.SelectWaitSignaled {
+			renotifyFn := waiter.WaitFuncWithOrphanHandler(
+				func(rdvq.RenotifyFunc) { panic("orphan notify") },
+				func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+					select {
+					case renotifyFn := <-ch:
+						notifications <- id
+						return renotifyFn
+					case <-time.After(200 * time.Millisecond):
+						return nil
+					}
+				},
+			)
+			if renotifyFn == nil {
 				notifications <- -1 // Indicate timeout/abort
 			}
 		}(waiterID)
@@ -170,7 +185,7 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 
 	// Send notifications one by one
 	for i := 0; i < numWaiters; i++ {
-		waiters.Notify()
+		waiters.Notify(func() {})
 	}
 
 	// Collect notifications
@@ -202,17 +217,20 @@ func TestWaiters_NotifyAll(t *testing.T) {
 		waiter := waiters.New(func() bool { return true })
 
 		go func() {
-			result := waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-				select {
-				case <-ch:
-					notifications <- true
-					return rdvq.SelectWaitSignaled
-				case <-time.After(200 * time.Millisecond):
-					notifications <- false
-					return rdvq.SelectAborted
-				}
-			})
-			notifications <- (result == rdvq.SelectWaitSignaled)
+			renotifyFn := waiter.WaitFuncWithOrphanHandler(
+				func(rdvq.RenotifyFunc) { panic("orphan notify") },
+				func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+					select {
+					case renotifyFn := <-ch:
+						notifications <- true
+						return renotifyFn
+					case <-time.After(200 * time.Millisecond):
+						notifications <- false
+						return nil
+					}
+				},
+			)
+			notifications <- (renotifyFn != nil)
 		}()
 	}
 
@@ -242,41 +260,47 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 
 	// Start waiting but abandon immediately
 	go func() {
-		waiter.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-			// Abandon immediately
-			return rdvq.SelectAborted
-		})
+		_ = waiter.WaitFuncWithOrphanHandler(
+			func(rdvq.RenotifyFunc) { panic("orphan notify") },
+			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				// Abandon immediately
+				return nil
+			},
+		)
 	}()
 
 	// Give waiter time to register and abandon
 	time.Sleep(10 * time.Millisecond)
 
 	// Send notification - should be orphaned
-	waiters.Notify()
+	waiters.Notify(func() {})
 
 	// Create new waiter - should handle the orphaned notification gracefully
 	waiter2 := waiters.New(func() bool { return true })
 
 	notified := make(chan bool, 1)
 	go func() {
-		result := waiter2.Wait(func(ch <-chan struct{}) rdvq.SelectResult {
-			select {
-			case <-ch:
-				notified <- true
-				return rdvq.SelectWaitSignaled
-			case <-time.After(50 * time.Millisecond):
-				notified <- false
-				return rdvq.SelectAborted
-			}
-		})
-		notified <- (result == rdvq.SelectWaitSignaled)
+		renotifyFn := waiter2.WaitFuncWithOrphanHandler(
+			func(rdvq.RenotifyFunc) { panic("orphan notify") },
+			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				select {
+				case renotifyFn := <-ch:
+					notified <- true
+					return renotifyFn
+				case <-time.After(50 * time.Millisecond):
+					notified <- false
+					return nil
+				}
+			},
+		)
+		notified <- (renotifyFn != nil)
 	}()
 
 	// Give new waiter time to process orphaned notification
 	time.Sleep(20 * time.Millisecond)
 
 	// Send another notification for the new waiter
-	waiters.Notify()
+	waiters.Notify(func() {})
 
 	// Should receive notification (either orphaned one or new one)
 	select {

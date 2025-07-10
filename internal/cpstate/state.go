@@ -4,10 +4,13 @@
 package cpstate
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/ema"
 	"github.com/petenewcomb/psg-go/internal/opts"
@@ -108,16 +111,11 @@ func (cps *CombinerPoolState) SpareWaitEnded(startTime time.Time) {
 }
 
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
-	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) { //nolint:mnd  // nyquist rate
+	if cps.spawnedGoroutineCount.Load() == 0 {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
-	return false
-}
-
-func (cps *CombinerPoolState) ShouldStartFirstGoroutine() bool {
-	// Always do full check if spawned count is zero
-	if cps.spawnedGoroutineCount.Load() == 0 {
+	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
+	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) { //nolint:mnd  // nyquist rate
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -190,13 +188,13 @@ func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
 	return false
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (cps *CombinerPoolState) report(msg string) {
 	if !cpDebug {
 		return
 	}
-	fmt.Printf("%v %-8s\tgoroutines: %d->%d->%d\tthroughput: %.1f/s (%.1f/s each)\tutil: %.1f%%\t%v\n",
-		time.Now(),
-		msg+":",
+	trace.Logf(context.Background(), "cpstate.debug", "%s: goroutines: %d->%d->%d throughput: %.1f/s (%.1f/s each) util: %.1f%% controller: %v",
+		msg,
 		cps.spawnedGoroutineCount.Load(),
 		cps.liveGoroutineCount,
 		cps.targetGoroutineCount,
@@ -273,7 +271,7 @@ func (cps *CombinerPoolState) updateStats() bool {
 	spareWait := cps.spareWait.CumulativeDuration - cps.spareWaitOrigin
 	cps.spareWaitOrigin = cps.spareWait.CumulativeDuration
 	if spareWait > elapsedTime {
-		panic(fmt.Sprintf("%v spareWait %d greater than elapsed time %d!", time.Now(), spareWait, elapsedTime))
+		panic(fmt.Sprintf("spareWait %d greater than elapsed time %d!", spareWait, elapsedTime))
 	}
 	// Calculate spare utilization: fraction of time spare goroutine was working
 	spareUtilization := 1.0 - float64(spareWait)/float64(elapsedTime)
@@ -304,9 +302,16 @@ func (cps *CombinerPoolState) updateStats() bool {
 // us to reuse waitChan indefinitely. Only one goroutine need call
 // ShouldSpawnGoroutine, since all goroutines will benefit from any new
 // goroutine spawned.
+//
+//nolint:contextcheck // background context used only for tracing
 func (cps *CombinerPoolState) notifyWaiter() {
+	traceRegion := "CombinerPoolState.notifyWaiter"
+	waitCh := cps.waitChan
+	trace.Logf(context.Background(), traceRegion, "entering select: CombinerPoolState=%p, waitChan=%p", cps, waitCh)
 	select {
-	case cps.waitChan <- struct{}{}:
+	case waitCh <- struct{}{}:
+		trace.Logf(context.Background(), traceRegion, "delivered signal to waitChan=%p", waitCh)
 	default:
+		trace.Logf(context.Background(), traceRegion, "no waiters waiting on waitChan=%p", waitCh)
 	}
 }

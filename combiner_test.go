@@ -98,6 +98,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.NewJob(ctx)
+	defer job.CancelAndWait()
 	taskPool := psg.NewTaskPool(job)
 
 	gatherOp := psg.NewGatherOp(
@@ -106,11 +107,27 @@ func TestCombinerScatterFromTask(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherOp.Scatter(
+	combinerPool := psg.NewCombinerPool(job)
+	combineOp := psg.NewCombineOp(
+		gatherOp,
+		combinerPool,
+		func() psg.Combiner[int, int] {
+			return psgfn.Combiner[int, int]{
+				CombineFn: func(ctx context.Context, value int, err error, emit psgfn.Emit[int]) {
+					chk.NoError(err)
+					emit(ctx, value, nil)
+				},
+				FlushFn: func(ctx context.Context, emit psgfn.Emit[int]) {
+					// No-op in this test
+				},
+			}
+		},
+	)
+	err := combineOp.Scatter(
 		ctx,
 		taskPool,
 		func(ctx context.Context) (int, error) {
-			chk.PanicsWithValue("Scatter called from within Task; move call to Gather instead", func() {
+			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
 				innerGatherOp := psg.NewGatherOp(
 					func(ctx context.Context, result int, err error) error {
 						chk.NoError(err)
@@ -254,7 +271,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 					return nil
 				},
 			)
-			chk.PanicsWithValue("Scatter called from within Task; move call to Gather instead", func() {
+			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
 				_ = innerGatherOp.Scatter(
 					ctx,
 					parentTaskPool,
@@ -652,7 +669,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						warmupStartTime := time.Now()
-						for time.Since(warmupStartTime) < 2*time.Second {
+						for time.Since(warmupStartTime) < 1*time.Second {
 							op()
 						}
 

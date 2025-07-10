@@ -432,6 +432,83 @@ func (job *Job) Wait() {
 - Backpressure provider states
 - Resource utilization statistics
 
+## Notification Conservation and Cross-System Backpressure
+
+### Core Theory
+
+#### Notification Conservation Principle
+
+**Fundamental Invariant**: Notifications should never disappear. They must keep flowing until either:
+1. Someone can act on them (execute deferred work), or 
+2. There's genuinely nothing left to wake up
+
+This ensures that resource availability signals always reach work that can utilize those resources.
+
+#### Cross-System Notification Cascading
+
+PSG's architecture involves multiple notification systems:
+- **Resource pools** (TaskPool, CombinerPool) that signal capacity availability
+- **Work queues** (Accepted queues) that coordinate worker activity
+- **Backpressure providers** that bridge between resource constraints and work execution
+
+When a notification flows from one system to another, the receiving system becomes responsible for either:
+1. **Consuming the notification** by executing relevant deferred work, or
+2. **Propagating the notification** back upstream if it cannot consume it
+
+#### Notification Consumption Semantics
+
+A notification is considered "properly consumed" when it leads to **deferred work execution**. This is because:
+
+1. **Deferred work represents previously blocked work** waiting for resources
+2. **Every deferred work item must have a `readyFn`** to guarantee eventual execution
+3. **Fresh work execution doesn't consume notifications** because fresh work wasn't waiting for the specific resource that became available
+
+#### Eventual Consistency Through Cross-Resource Borrowing
+
+The system allows "cross-resource borrowing" where:
+- TaskPool A's notification might trigger execution of TaskPool B work
+- This is safe because TaskPool B work must have its own `readyFn` that will eventually trigger and give TaskPool A work another opportunity
+- The system converges through multiple notification rounds rather than requiring perfect resource matching
+
+#### Implementation: Upstream Notifier Queues
+
+Each `Accepted` work queue maintains an `upstream` notification queue:
+
+```go
+type Accepted struct {
+    fresh    nbcq.Queue[WorkFunc]
+    deferred nbcq.Queue[WorkFunc] 
+    waiters  rdvq.Waiters
+    upstream nbcq.Queue[WorkReadyFunc]  // Pooled renotify functions
+}
+```
+
+**Worker Execution Logic**:
+1. Worker wakes up via notification
+2. Attempts to execute deferred work
+3. If no deferred work executes AND worker was woken by upstream notification:
+   - Push upstream notifier to `upstream` queue for other workers to process
+4. If deferred work executes: notification properly consumed
+
+**Cross-System Flow**:
+1. **Resource becomes available** → ResourcePool.waiters.Notify()
+2. **Watchers respond** → readyFn adds upstream notifier to work queue and wakes worker  
+3. **Worker processes work** → if no deferred work executes, queues upstream notifier
+4. **Any available worker** can pick up and execute upstream notifiers
+5. **Upstream notifiers** continue the cascade back to the original resource pool
+
+#### Benefits
+
+**Notification Conservation**: No notifications get lost in cross-system handoffs
+
+**Lower Latency**: Idle workers can process notification debt from busy workers
+
+**Eventual Consistency**: System converges to optimal resource utilization through multiple rounds
+
+**Scalability**: Pooled renotify queues prevent notification bottlenecks
+
+**Composability**: Any number of systems can be chained while preserving notification flow
+
 ## Conclusion
 
 PSG's backpressure and reentrancy management systems provide the foundation for reliable concurrent programming by:
@@ -440,7 +517,8 @@ PSG's backpressure and reentrancy management systems provide the foundation for 
 2. **Enabling Safe Reentrancy**: Work queueing allows nested operations without deadlocks  
 3. **Maintaining Liveness**: Structured processing cycles ensure forward progress
 4. **Providing Performance**: Lock-free algorithms and adaptive tuning deliver high throughput
+5. **Conserving Notifications**: Cross-system notification cascading ensures resource availability signals always reach work that can utilize them
 
 These implementation details enable the high-level programming model described in [programming-model.md](programming-model.md) while maintaining the safety and performance characteristics that make PSG suitable for production use.
 
-The combination of principled architectural constraints (like task scattering prohibition) with sophisticated implementation techniques (like multi-tier queuing) demonstrates that high-performance concurrent systems can be both safe and performant when built on solid theoretical foundations.
+The combination of principled architectural constraints (like task scattering prohibition) with sophisticated implementation techniques (like multi-tier queuing and notification conservation) demonstrates that high-performance concurrent systems can be both safe and performant when built on solid theoretical foundations.

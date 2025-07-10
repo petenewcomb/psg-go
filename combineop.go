@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/trace"
+
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -26,12 +29,16 @@ type CombineOp[I, O any] struct {
 
 // NewCombineOp creates a new CombineOp operation that uses the specified gather function,
 // combiner pool, and combiner factory.
+//
+//nolint:contextcheck // background context used only for tracing
 func NewCombineOp[I, O any](
 	gatherOp *GatherOp[O],
 	pool *CombinerPool,
 	combinerFactory CombinerFactory[I, O],
 	options ...psgopt.CombineOpOption,
 ) *CombineOp[I, O] {
+	traceRegion := "NewCombineOp"
+
 	if gatherOp == nil {
 		panic("gather must be non-nil")
 	}
@@ -52,6 +59,8 @@ func NewCombineOp[I, O any](
 	// Apply user options
 	c.SetOptions(options...)
 
+	trace.Logf(context.Background(), traceRegion, "CombineOp=%p, pool=%p", c, pool)
+
 	return c
 }
 
@@ -67,42 +76,13 @@ func (c *CombineOp[I, O]) Scatter(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) error {
-	j := target.job()
-	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFn)
+	traceRegion := "CombineOp.Scatter"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
 
-	doScatter := func(vettedCtx vettedContext) error {
-		launched, err := c.scatter(vettedCtx, j, target, true, taskFn)
-		if !launched && err == nil {
-			panic("task function was not launched, but no error was returned")
-		}
-		return err
-	}
-
-	bp := getBackpressureProvider(vettedCtx.ctx, j) //nolint:contextcheck // vetted version of inherited ctx
-
-	// Queue work if we're in a gather context or if we have a combiner backpressure provider
-	if vettedCtx.inGather || isCombinerBackpressureProvider(bp) {
-		// Make sure the job doesn't shut down until this scatter has been done.
-		j.state.IncrementWork()
-		bp.QueueWork(func(ctx context.Context) error {
-			defer func() {
-				j.state.DecrementWork()
-			}()
-			vettedCtx := j.vettedContext(ctx)
-			return doScatter(vettedCtx)
-		})
-		return nil
-	}
-
-	ctx = j.gatherContext(vettedCtx)
-
-	//nolint:contextcheck // gather-tagged version of inherited ctx
-	if _, err := j.processOutstandingWork(ctx); err != nil {
-		return err
-	}
-
-	return doScatter(vettedCtx)
+	ctx, meta := vetScatter(ctx, target, taskFn)
+	workFn := c.newScatterWork(target, taskFn)
+	return scatterNow(ctx, meta, target.job(), workFn)
 }
 
 // TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
@@ -114,98 +94,77 @@ func (c *CombineOp[I, O]) TryScatter(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) (bool, error) {
-	j := target.job()
-	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFn)
+	traceRegion := "CombineOp.TryScatter"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
 
-	if !vettedCtx.inGather {
-		if _, err := j.processOutstandingWork(ctx); err != nil {
-			return false, err
-		}
-	}
-
-	return c.scatter(vettedCtx, j, target, false, taskFn)
+	ctx, meta := vetScatter(ctx, target, taskFn)
+	workFn := c.newScatterWork(target, taskFn)
+	return tryScatterNow(ctx, meta, target, workFn)
 }
 
-func (c *CombineOp[I, O]) scatter(
-	vettedCtx vettedContext,
-	j *Job,
+func (c *CombineOp[I, O]) newScatterWork(
 	target TaskPoolOrJob,
-	block bool,
 	taskFn psgfn.Task[I],
-) (bool, error) {
+) workq.WorkFunc {
+	traceRegion := "CombineOp.newScatterWork"
+
+	j := target.job()
 	if j != c.pool.j {
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	bp := getBackpressureProvider(vettedCtx.ctx, j)
+	workID := workIDCounter.Add(1)
+	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
 
-	if err := yieldBeforeScatter(vettedCtx, bp); err != nil {
-		return false, err
+	postResultFn := func(ctx context.Context, taskWorkerOutboxMap *outboxMap, input I, inputErr error) {
+		traceRegion := traceRegion + ".postResultFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(ctx, traceRegion, "workID=%d", workID)
+
+		// Post the combine using the task worker's outbox for the pool's combine queue
+		combineOutbox := OutboxFor[workq.WorkFunc](taskWorkerOutboxMap, c.pool.combineOutboxKey())
+
+		boundCombineFn := func(ctx context.Context, cm *combinerMap, queueWork workq.QueueWorkFunc, emitGatherOutbox *rdvq.Outbox[workq.WorkFunc]) {
+			traceRegion := traceRegion + ".boundCombineFn"
+			defer trace.StartRegion(ctx, traceRegion).End()
+			trace.Logf(ctx, traceRegion, "workID=%d", workID)
+
+			// Balances the increment in newScatterWork
+			defer j.state.DecrementWork()
+
+			halfBoundCombineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
+			halfBoundCombineFn(ctx, input, inputErr)
+		}
+
+		c.pool.postCombine(ctx, combineOutbox, boundCombineFn)
 	}
 
-	for !c.pool.waitingCombines.IsZero() {
-		waiter := c.pool.combineWaiters.New(func() bool {
-			// Check again _after_ registering as a waiter, so we don't
-			// potentially miss a notification.
-			return !c.pool.waitingCombines.IsZero()
-		})
+	baseWorkFn := newScatterWork(target, taskFn, postResultFn)
 
-		// bp.Block will return true only if we got a notification from the
-		// waiterQueue, so we can pass that along to break out of the loop
-		// and proceed without rechecking waitingCombines.
-		waiterNotified, err := bp.Block(vettedCtx.ctx, waiter, nil)
+	wrappedFn := c.pool.waitingScatters.Wrap(baseWorkFn,
+		func(ctx context.Context) workq.WaitBehavior {
+			_, meta := j.ctxMeta(ctx)
+			return meta.WaitBehavior(func() bool {
+				shouldWait := !c.pool.waitingCombines.IsZero()
+				if shouldWait {
+					trace.Logf(ctx, traceRegion+".waitingScatters", "applying backpressure due to non-zero waitingCombines")
+				}
+				return shouldWait
+			})
+		},
+	)
+
+	return func(ctx context.Context, ex workq.Execution) error {
+		traceRegion := traceRegion + ".workFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(ctx, traceRegion, "workID=%d", workID)
+		err := wrappedFn(ctx, ex)
 		if err != nil {
-			return false, err
+			trace.Logf(ctx, traceRegion, "returning err=%v", err)
 		}
-		if waiterNotified {
-			break
-		}
+		return err
 	}
-
-	var bpf backpressureFunc
-	if block {
-		bpf = bp.Block
-	}
-
-	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, taskWorkerOutboxMap *outboxMap, input I, inputErr error) {
-		combineOutbox := OutboxFor[pendingCombine](taskWorkerOutboxMap, c.pool.combineOutboxKey())
-		c.pool.postCombine(ctx, combineOutbox, func(ctx context.Context, cm *combinerMap, queueWork func(combineWork) int64, emitGatherOutbox *rdvq.Outbox[boundGather]) {
-			defer func() {
-				j.state.DecrementWork()
-			}()
-
-			combineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
-			combineFn(ctx, input, inputErr)
-		})
-	})
-}
-
-// combineBackpressureProvider is used to integrate the combiner pool with the job's
-// backpressure system, allowing tasks to be gathered while waiting for resources
-type combineBackpressureProvider struct {
-	baseBackpressureProvider
-	tryCombineFn func(ctx context.Context) (bool, error)
-	combineFn    func(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error)
-	queueWorkFn  func(workFn func(context.Context) error)
-}
-
-func (bp *combineBackpressureProvider) Yield(vetted vettedContext) (bool, error) {
-	return bp.tryCombineFn(vetted.ctx)
-}
-
-func (bp *combineBackpressureProvider) Block(ctx context.Context, waiter rdvq.Waiter, changeCh <-chan struct{}) (bool, error) {
-	waiterNotified, err := bp.combineFn(ctx, waiter, changeCh)
-	return waiterNotified, err
-}
-
-func (bp *combineBackpressureProvider) QueueWork(workFn func(context.Context) error) {
-	bp.queueWorkFn(workFn)
-}
-
-func isCombinerBackpressureProvider(bp backpressureProvider) bool {
-	_, ok := bp.(*combineBackpressureProvider)
-	return ok
 }
 
 // combineOpConfigWrapper wraps a CombineOp to implement the combineOpConfig interface for options

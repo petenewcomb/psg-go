@@ -55,29 +55,23 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 	assert.Equal(t, 1, value)
 	assert.Equal(t, 1, <-values)
 
-	// Consume second value with PopFront
-	// Note: PopFront may process both an outbox value and an orphaned inbox value
+	// Consume remaining values with PopFront
+	// Note: PopFront may process multiple values due to timing
 	var received []int
-	err := q.PopFront(ctx, p, func(value int) {
-		received = append(received, value)
-	})
-	assert.NoError(t, err)
-	assert.Contains(t, received, 2)
-
-	// All three values should already be available in the model
-	assert.Equal(t, 2, <-values)
-	assert.Equal(t, 3, <-values)
-
-	// If we didn't receive the third value yet, PopFront should still work
-	if len(received) != 2 {
+	for len(received) < 2 {
 		err := q.PopFront(ctx, p, func(value int) {
 			received = append(received, value)
 		})
 		assert.NoError(t, err)
 	}
 
-	// By now we should have all three values
+	// We should have received both values 2 and 3
+	assert.Contains(t, received, 2)
 	assert.Contains(t, received, 3)
+
+	// All three values should already be available in the model
+	assert.Equal(t, 2, <-values)
+	assert.Equal(t, 3, <-values)
 
 	// And the producer should be finished
 	wg.Wait()

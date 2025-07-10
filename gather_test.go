@@ -77,7 +77,7 @@ func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 		ctx,
 		pool,
 		func(ctx context.Context) (int, error) {
-			chk.PanicsWithValue("Scatter called from within Task; move call to Gather instead", func() {
+			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
 				innerGatherOp := psg.NewGatherOp(
 					func(ctx context.Context, result int, err error) error {
 						chk.NoError(err)
@@ -189,7 +189,7 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 					return nil
 				},
 			)
-			chk.PanicsWithValue("Scatter called from within Task; move call to Gather instead", func() {
+			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
 				_ = innerGather.Scatter(
 					ctx,
 					parentPool,
@@ -228,7 +228,7 @@ func TestGatherScatterTaskCannotGather(t *testing.T) {
 		ctx,
 		pool,
 		func(ctx context.Context) (bool, error) {
-			chk.PanicsWithValue("Gather called from within Task of the same or a parent Job", func() {
+			chk.PanicsWithValue("Gather called from task context but allowed only by top-level or gather context", func() {
 				_, _ = job.TryGather(ctx)
 			})
 			return true, nil
@@ -276,7 +276,7 @@ func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 				ctx,
 				subPool,
 				func(ctx context.Context) (bool, error) {
-					chk.PanicsWithValue("Gather called from within Task of the same or a parent Job", func() {
+					chk.PanicsWithValue("Context belongs to a child job", func() {
 						_, _ = parentJob.TryGather(ctx)
 					})
 					return true, nil

@@ -6,6 +6,9 @@ package psg
 import (
 	"context"
 
+	"github.com/petenewcomb/psg-go/internal/trace"
+
+	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
@@ -19,9 +22,15 @@ func NewGatherOp[T any](
 	if gatherFn == nil {
 		panic("gather function must be non-nil")
 	}
-	return &GatherOp[T]{
-		gatherFn: gatherFn,
+	g := &GatherOp[T]{}
+	g.gatherFn = func(ctx context.Context, value T, err error) error {
+		traceRegion := "GatherOp.gatherFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		err = gatherFn(ctx, value, err)
+		trace.Logf(ctx, traceRegion, "GatherOp=%p returned err=%v", g, err)
+		return err
 	}
+	return g
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
@@ -56,40 +65,9 @@ func (g *GatherOp[T]) Scatter(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) error {
-	j := target.job()
-	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFn)
-
-	doScatter := func(vettedCtx vettedContext) error {
-		launched, err := g.scatter(vettedCtx, j, target, true, taskFn)
-		if !launched && err == nil {
-			panic("task function was not launched, but no error was returned")
-		}
-		return err
-	}
-
-	if vettedCtx.inGather {
-		// Make sure the job doesn't shut down until this scatter has been done.
-		j.state.IncrementWork()
-		bp := getBackpressureProvider(vettedCtx.ctx, j) //nolint:contextcheck // vetted version of inherited ctx
-		bp.QueueWork(func(ctx context.Context) error {
-			defer func() {
-				j.state.DecrementWork()
-			}()
-			vettedCtx := j.vettedContext(ctx)
-			return doScatter(vettedCtx)
-		})
-		return nil
-	}
-
-	ctx = j.gatherContext(vettedCtx)
-
-	//nolint:contextcheck // gather-tagged version of inherited ctx
-	if _, err := j.processOutstandingWork(ctx); err != nil {
-		return err
-	}
-
-	return doScatter(vettedCtx)
+	ctx, meta := vetScatter(ctx, target, taskFn)
+	workFn := g.newScatterWork(target, taskFn)
+	return scatterNow(ctx, meta, target.job(), workFn)
 }
 
 // TryScatter attempts to initiate asynchronous execution of the provided task
@@ -108,49 +86,51 @@ func (g *GatherOp[T]) TryScatter(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) (bool, error) {
-	j := target.job()
-	vettedCtx := j.vettedContext(ctx)
-	vetScatter(vettedCtx, target, taskFn)
-
-	if !vettedCtx.inGather {
-		if _, err := j.processOutstandingWork(ctx); err != nil {
-			return false, err
-		}
-	}
-
-	return g.scatter(vettedCtx, j, target, false, taskFn)
+	ctx, meta := vetScatter(ctx, target, taskFn)
+	workFn := g.newScatterWork(target, taskFn)
+	return tryScatterNow(ctx, meta, target, workFn)
 }
 
-func (g *GatherOp[T]) scatter(
-	vettedCtx vettedContext,
-	j *Job,
+func (g *GatherOp[T]) newScatterWork(
 	target TaskPoolOrJob,
-	block bool,
 	taskFn psgfn.Task[T],
-) (bool, error) {
-	bp := getBackpressureProvider(vettedCtx.ctx, j)
+) workq.WorkFunc {
+	j := target.job()
 
-	if err := yieldBeforeScatter(vettedCtx, bp); err != nil {
-		return false, err
-	}
+	workID := workIDCounter.Add(1)
+	trace.Logf(context.Background(), "gather.newScatterWork", "start, workID=%d", workID)
 
-	var bpf backpressureFunc
-	if block {
-		bpf = bp.Block
-	}
+	postResultFn := func(ctx context.Context, taskWorkerOutboxMap *outboxMap, value T, err error) {
+		defer trace.StartRegion(ctx, "gather.postResultFn").End()
 
-	return scatter(vettedCtx, target, taskFn, bpf, func(ctx context.Context, taskWorkerOutboxMap *outboxMap, value T, err error) {
-		// Build the gather function, binding the supplied gatherFn to the
-		// result.
-		gatherFn := func(ctx context.Context) error {
+		// Post the gather using the task worker's outbox for the job's gather queue
+		gatherOutbox := OutboxFor[workq.WorkFunc](taskWorkerOutboxMap, j.gatherOutboxKey())
+		trace.Logf(ctx, "gather.postResultFn", "start, outbox=%p, workID=%d", gatherOutbox, workID)
+
+		// Bind the supplied gatherFn to the result.
+		boundGatherFn := func(ctx context.Context) error {
+			defer trace.StartRegion(ctx, "gather.boundGatherFn").End()
+			trace.Logf(ctx, "gather.boundGatherFn", "start, workID=%d", workID)
+
 			defer func() {
+				// Balances the increment in newScatterWork
 				j.state.DecrementWork()
+				trace.Logf(ctx, "gather.boundGatherFn", "decremented work, workID=%d", workID)
 			}()
 			return g.gatherFn(ctx, value, err)
 		}
 
-		// Post the gather using the task worker's outbox to the job's gather queue
-		gatherOutbox := OutboxFor[boundGather](taskWorkerOutboxMap, j.gatherOutboxKey())
-		j.postGather(ctx, gatherOutbox, gatherFn)
-	})
+		j.postGather(ctx, gatherOutbox, boundGatherFn)
+		trace.Logf(ctx, "gather.postResultFn", "posted boundGatherFn to outbox=%p, workID=%d", gatherOutbox, workID)
+	}
+
+	scatterWorkFn := newScatterWork(target, taskFn, postResultFn)
+
+	return func(ctx context.Context, ex workq.Execution) error {
+		defer trace.StartRegion(ctx, "gatherop.scatterWorkFn").End()
+		trace.Logf(ctx, "gatherop.scatterWorkFn", "calling scatterWorkFn, workID=%d", workID)
+		err := scatterWorkFn(ctx, ex)
+		trace.Logf(ctx, "gatherop.scatterWorkFn", "called scatterWorkFn, workID=%d, err=%v", workID, err)
+		return err
+	}
 }

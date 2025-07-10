@@ -19,7 +19,7 @@ type JobOption interface {
 type JobConfigChanges struct {
 	TaskWorkerIdleTimeout *time.Duration
 	FlushListener         *func()
-	GCConfig              gcok.GCConfigChanges
+	GCConfig              gcok.ConfigChanges
 }
 
 type jobConfig interface {

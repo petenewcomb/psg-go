@@ -23,9 +23,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func Run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
+func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	traceRegion := "sim.Run"
-	if debug {
+	if trace.IsEnabled() {
 		// See [MaxEventTrailerDataSize] defined to be 1<<10
 		// [MaxEventTrailerDataSize]: https://cs.opensource.google/go/go/+/master:src/internal/trace/tracev2/events.go;drc=6c3b5a2798c83d583cb37dba9f39c47300d19f1f;l=588
 		header := "Test plan:\n\n"
@@ -51,10 +51,10 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
 		}
 		trace.Log(ctx, traceRegion, header+planText+"\n")
 	}
-	return run(ctx, t, plan, debug)
+	return run(ctx, t, plan)
 }
 
-func run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
+func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	defer trace.StartRegion(ctx, "sim.run").End()
 
 	job := psg.NewJob(ctx)
@@ -74,7 +74,6 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, debug bool) error {
 		CombinerPools:                make([]*psg.CombinerPool, len(plan.CombinerPools)),
 		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
 		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
-		Debug:                        debug,
 	}
 	c.MinScatterDelay.Store(math.MaxInt64)
 	c.MinGatherDelay.Store(math.MaxInt64)
@@ -103,7 +102,6 @@ type controller struct {
 	MinGatherDelay               atomicMinMaxInt64
 	MinCombineDelay              atomicMinMaxInt64
 	MinCombineGatherDelay        atomicMinMaxInt64
-	Debug                        bool
 }
 
 func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
@@ -292,7 +290,7 @@ func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *ato
 				}
 			case Subjob:
 				c.debugf(ctx, "%v subjob %v", task, step.Plan)
-				err := run(ctx, t, step.Plan, c.Debug)
+				err := run(ctx, t, step.Plan)
 				chk.NoError(err)
 			default:
 				panic(fmt.Sprintf("unknown step type %T", step))
@@ -464,7 +462,7 @@ func (c *controller) executeGatherOrCombineFunc(t assert.TestingT, ctx context.C
 			}
 		case Subjob:
 			c.debugf(ctx, "%v subjob %v", rh, step.Plan)
-			err := run(ctx, t, step.Plan, c.Debug)
+			err := run(ctx, t, step.Plan)
 			chk.NoError(err)
 		case Scatter:
 			c.debugf(ctx, "%v scatter %v", rh, step.Task)
@@ -478,9 +476,7 @@ func (c *controller) executeGatherOrCombineFunc(t assert.TestingT, ctx context.C
 }
 
 func (c *controller) debugf(ctx context.Context, format string, args ...interface{}) {
-	if c.Debug {
-		trace.Logf(ctx, "sim.debugf", format, args...)
-	}
+	trace.Logf(ctx, "sim.debugf", format, args...)
 }
 
 // taskResult represents the result of executing a simulated task.

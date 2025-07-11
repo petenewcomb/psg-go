@@ -28,34 +28,33 @@ func TestBySimulation(t *testing.T) {
 			planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 2, Max: 3}
 		}
 
-		// This flag and the below commented configuration lines are provided to
-		// help reduce test complexity and diagnose uncovered issues.
-		debug := true
+		// The below commented configuration lines are provided to help reduce
+		// test complexity and diagnose uncovered issues.
 
 		//nolint:gocritic // ignore commented-out code
-		//planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.Task.UseCombine.Probability = 0
-		//planConfig.Combine.Flush.Probability = 0
+		// planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.Task.UseCombine.Probability = 0
+		// planConfig.Combine.Flush.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
-		//planConfig.Subjob.MaxDepth = 1
+		// planConfig.Subjob.MaxDepth = 0
 		// planConfig.Task.Func.Subjob.Add.Probability = 0
 		// planConfig.Combine.Func.Subjob.Add.Probability = 0
 		// planConfig.Gather.Func.Subjob.Add.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
-		//planConfig.Combine.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.Gather.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.TaskPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.TaskPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.CombinerPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		//planConfig.CombinerPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.Combine.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.Gather.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.TaskPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.TaskPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.CombinerPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.CombinerPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 
 		//nolint:gocritic // ignore commented-out code
-		//planConfig.Task.Func.SelfTime = sim.BiasedDurationConfig{}
-		//planConfig.Combine.Func.SelfTime = sim.BiasedDurationConfig{}
-		//planConfig.Gather.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Task.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Combine.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Gather.Func.SelfTime = sim.BiasedDurationConfig{}
 
 		plan := sim.NewPlan(t, &planConfig)
 		t.Logf("Test plan:\n%#v", plan)
@@ -63,7 +62,7 @@ func TestBySimulation(t *testing.T) {
 		// Run the actual simulation
 		simulationStart := time.Now()
 		ctx := context.Background()
-		err := sim.Run(ctx, t, plan, debug)
+		err := sim.Run(ctx, t, plan)
 		assert.NoError(t, err)
 		t.Logf("simulation time: %v", time.Since(simulationStart))
 	})

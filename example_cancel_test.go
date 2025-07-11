@@ -41,7 +41,7 @@ func ExampleJob_Cancel() {
 		pool,
 		func(context.Context) (string, error) {
 			// Simulate a long-running task
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			return "first task result", nil
 		},
 	)
@@ -56,7 +56,7 @@ func ExampleJob_Cancel() {
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
-			// Simulate a long-running task
+			// Simulate a longer-running task
 			time.Sleep(100 * time.Millisecond)
 			return "second task result", nil
 		},

@@ -115,7 +115,8 @@ func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	if time.Since(lastUpdate) > min(time.Duration(cps.tau), time.Duration(cps.retentionPeriod.Load())/2) { //nolint:mnd  // nyquist rate
+	nyquistRate := time.Duration(cps.retentionPeriod.Load()) / 2 //nolint:mnd // by definition
+	if time.Since(lastUpdate) > min(time.Duration(cps.tau), nyquistRate) {
 		return cps.ShouldSpawnGoroutine() == nil
 	}
 	return false
@@ -193,7 +194,8 @@ func (cps *CombinerPoolState) report(msg string) {
 	if !cpDebug {
 		return
 	}
-	trace.Logf(context.Background(), "cpstate.debug", "%s: goroutines: %d->%d->%d throughput: %.1f/s (%.1f/s each) util: %.1f%% controller: %v",
+	trace.Logf(context.Background(),
+		"cpstate.debug", "%s: goroutines: %d->%d->%d throughput: %.1f/s (%.1f/s each) util: %.1f%% controller: %v",
 		msg,
 		cps.spawnedGoroutineCount.Load(),
 		cps.liveGoroutineCount,

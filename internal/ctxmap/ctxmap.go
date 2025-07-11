@@ -27,7 +27,10 @@ type Map[K any, T comparable] struct {
 // Returns a Result containing the value and a context that has the value available.
 // If the value was computed, it's cached and cleanup is automatically registered.
 // Uses LoadOrStore pattern to handle race conditions.
-func (m *Map[K, T]) WithValue(ctx context.Context, computeFn func(T, bool) (context.Context, T)) (stampedCtx context.Context, value T) {
+func (m *Map[K, T]) WithValue(
+	ctx context.Context,
+	computeFn func(T, bool) (context.Context, T),
+) (stampedCtx context.Context, value T) {
 	// Check cache first to avoid expensive computation
 	if cached, ok := m.cache.Load(ctx); ok {
 		entry := cached.(*entry[T])

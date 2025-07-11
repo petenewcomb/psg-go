@@ -79,7 +79,8 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 	combineConfig := &planConfig.Combine
 	plan.CombinerPoolIndexes = make([]int, combineConfig.Count.Draw(t, planName+".CombineCount"))
 	for i := range plan.CombinerPoolIndexes {
-		plan.CombinerPoolIndexes[i] = rapid.IntRange(0, len(plan.CombinerPools)-1).Draw(t, fmt.Sprintf("CombineIndex#%d.PoolIndex", i))
+		plan.CombinerPoolIndexes[i] = rapid.IntRange(0, len(plan.CombinerPools)-1).
+			Draw(t, fmt.Sprintf("CombineIndex#%d.PoolIndex", i))
 	}
 
 	plan.PathCount = planConfig.Path.Count.Draw(t, planName+".PathCount")
@@ -95,7 +96,10 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		if planConfig.Subjob.MaxDepth > 0 && funcConfig.Subjob.Add.Draw(t, name+".Subjob.Add") {
 			subjobConfig := *planConfig
 			subjobConfig.Subjob.MaxDepth--
-			subjobConfig.Path.Length.Med = max(subjobConfig.Path.Length.Min, subjobConfig.Path.Length.Med/planConfig.Subjob.MaxDepth)
+			subjobConfig.Path.Length.Med = max(
+				subjobConfig.Path.Length.Min,
+				subjobConfig.Path.Length.Med/planConfig.Subjob.MaxDepth,
+			)
 			subjobPlan = newPlan(t, &subjobConfig, nextIDs)
 			plan.SubjobTaskCount += subjobPlan.TaskCount + subjobPlan.SubjobTaskCount
 		}
@@ -177,7 +181,10 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		combineName := fmt.Sprintf("Combine#%d", id)
 		var flush ResultHandler
 		if planConfig.Combine.Flush.Draw(t, combineName+".Flush") {
-			flushScatterCount := (&BiasedIntConfig{Med: len(paths) / 2, Max: len(paths)}).Draw(t, combineName+".FlushScatterCount") //nolint:mnd // even split
+			flushScatterCount := (&BiasedIntConfig{
+				Med: len(paths) / 2, //nolint:mnd // even split
+				Max: len(paths),
+			}).Draw(t, combineName+".FlushScatterCount")
 			flush = newGather(id, paths[:flushScatterCount])
 			paths = paths[flushScatterCount:]
 		}
@@ -281,7 +288,8 @@ func newPlan(t *rapid.T, planConfig *Config, nextIDs *idCounters) *Plan {
 		t.Logf("permuting candidates starting at index %d of %d: %d", first, len(paths), nextPermutationNumber)
 		permutationGenerator := rapid.Permutation(paths[first:])
 		t.Logf("got permutationGenerator: %d", nextPermutationNumber)
-		permutedCandidates := permutationGenerator.Draw(t, fmt.Sprintf("%s.PathsPermutation[%d]", planName, nextPermutationNumber))
+		permutedCandidates := permutationGenerator.Draw(t,
+			fmt.Sprintf("%s.PathsPermutation[%d]", planName, nextPermutationNumber))
 		t.Logf("permuted candidates: %d", nextPermutationNumber)
 		nextPermutationNumber++
 
@@ -358,7 +366,8 @@ func (p *Plan) Format(f fmt.State, verb rune) {
 
 func (p *Plan) Dump(fs fmt.State, indent string) {
 	name := fmt.Sprint(p)
-	_, _ = fmt.Fprintf(fs, "%s: pathCount=%d taskCount=%d maxPathDuration=%v minGatherCount=%d maxGatherCount=%d", name, p.PathCount, p.TaskCount, p.MaxPathDuration, p.MinGatherCount, p.MaxGatherCount)
+	_, _ = fmt.Fprintf(fs, "%s: pathCount=%d taskCount=%d maxPathDuration=%v minGatherCount=%d maxGatherCount=%d",
+		name, p.PathCount, p.TaskCount, p.MaxPathDuration, p.MinGatherCount, p.MaxGatherCount)
 	var t time.Duration
 	for i, tp := range p.TaskPools {
 		_, _ = fmt.Fprintf(fs, "\n%s   TaskPools[%d]: %#v", indent, i, &tp)
@@ -374,5 +383,6 @@ func (p *Plan) Dump(fs fmt.State, indent string) {
 		s.Dump(fs, indent)
 		t += s.Duration()
 	}
-	_, _ = fmt.Fprintf(fs, "\n%s%s step %d/%d (+%v): ends at %v", indent, name, len(p.Steps)+1, len(p.Steps)+1, t, p.MaxPathDuration)
+	_, _ = fmt.Fprintf(fs, "\n%s%s step %d/%d (+%v): ends at %v",
+		indent, name, len(p.Steps)+1, len(p.Steps)+1, t, p.MaxPathDuration)
 }

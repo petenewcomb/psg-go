@@ -43,7 +43,12 @@ func (c *CombineOp[I, O]) Scatter(ctx context.Context, pool *psg.TaskPool, wf *W
 	return err
 }
 
-func (c *CombineOp[I, O]) TryScatter(ctx context.Context, pool *psg.TaskPool, wf *Workflow, taskFn Task[I]) (bool, error) {
+func (c *CombineOp[I, O]) TryScatter(
+	ctx context.Context,
+	pool *psg.TaskPool,
+	wf *Workflow,
+	taskFn Task[I],
+) (bool, error) {
 	return scatterTask(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I]]) (bool, error) {
 			return c.inner().TryScatter(ctx, pool, taskFn)

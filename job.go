@@ -113,7 +113,9 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	// Apply user options
 	j.SetOptions(options...)
 
-	trace.Logf(ctx, "psg.NewJob", "job=%p, state=%p, gatherQueue=%p, workQueue=%p, taskQueue=%p, gcMonitor=%p, gcWaiters=%p", j, &j.state, &j.gatherQueue, &j.workQueue, &j.taskQueue, &j.gcMonitor, &j.gcWaiters)
+	trace.Logf(ctx,
+		"psg.NewJob", "job=%p, state=%p, gatherQueue=%p, workQueue=%p, taskQueue=%p, gcMonitor=%p, gcWaiters=%p",
+		j, &j.state, &j.gatherQueue, &j.workQueue, &j.taskQueue, &j.gcMonitor, &j.gcWaiters)
 
 	return j
 }
@@ -205,7 +207,11 @@ func (j *Job) tryGather(ctx context.Context, _ *ctxMeta) (bool, error) {
 
 func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
 	return true, j.workQueue.ExecuteOne(ctx,
-		func(ctx context.Context, workReadyCh <-chan workq.RenotifyFunc, queueFn workq.QueueWorkFunc) (workq.RenotifyFunc, error) {
+		func(
+			ctx context.Context,
+			workReadyCh <-chan workq.RenotifyFunc,
+			queueFn workq.QueueWorkFunc,
+		) (workq.RenotifyFunc, error) {
 			workReadyRenotifyFn, _, err := j.addWork(ctx, meta, workReadyCh, queueFn, nil)
 			return workReadyRenotifyFn, err
 		},
@@ -263,7 +269,11 @@ func (j *Job) block(ctx context.Context, blockWaitCh <-chan workq.RenotifyFunc) 
 	trace.Logf(ctx, "job.block", "meta=%v", meta)
 	var blockWaitRenotifyFn workq.RenotifyFunc
 	err := j.workQueue.ExecuteOne(ctx,
-		func(ctx context.Context, workReadyCh <-chan workq.RenotifyFunc, queueFn workq.QueueWorkFunc) (workq.RenotifyFunc, error) {
+		func(
+			ctx context.Context,
+			workReadyCh <-chan workq.RenotifyFunc,
+			queueFn workq.QueueWorkFunc,
+		) (workq.RenotifyFunc, error) {
 			var workReadyRenotifyFn workq.RenotifyFunc
 			var err error
 			workReadyRenotifyFn, blockWaitRenotifyFn, err = j.addWork(ctx, meta, workReadyCh, queueFn, blockWaitCh)
@@ -290,7 +300,10 @@ func (j *Job) addWork(
 			err = j.tryAddWork(ctx, queueFn)
 		} else {
 			j.gatherQueue.PopFrontFunc(queueFn,
-				func(inboxCh <-chan workq.WorkFunc, outboxFilledCh <-chan rdvq.RenotifyFunc) (rdvq.SelectResult, rdvq.RenotifyFunc) {
+				func(
+					inboxCh <-chan workq.WorkFunc,
+					outboxFilledCh <-chan rdvq.RenotifyFunc,
+				) (rdvq.SelectResult, rdvq.RenotifyFunc) {
 					trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, blockWaitCh=%p",
 						inboxCh, outboxFilledCh, workReadyCh, blockWaitCh)
 					select {
@@ -340,7 +353,12 @@ func (j *Job) postGather(ctx context.Context, outbox *rdvq.Outbox[workq.WorkFunc
 }
 
 // postGather sends a gather operation to the gather queue.
-func (j *Job) postGatherSlow(ctx context.Context, outboxCh chan<- workq.WorkFunc, gatherFn boundGatherFunc, workID int64) rdvq.SelectResult {
+func (j *Job) postGatherSlow(
+	ctx context.Context,
+	outboxCh chan<- workq.WorkFunc,
+	gatherFn boundGatherFunc,
+	workID int64,
+) rdvq.SelectResult {
 	traceRegion := "Job.postGatherSlow"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "outboxCh=%d", outboxCh)

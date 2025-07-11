@@ -289,7 +289,8 @@ func TestOptional_Stress(t *testing.T) {
 		}
 	}
 
-	t.Logf("TryPushed: %d, Refused: %d, Canceled: %d, Popped: %d, TryPopped: %d, Abandoned: %d, Remaining: %d", tryPushed.Load(), refused.Load(), canceled.Load(), popped.Load(), tryPopped.Load(), abandoned.Load(), remaining)
+	t.Logf("TryPushed: %d, Refused: %d, Canceled: %d, Popped: %d, TryPopped: %d, Abandoned: %d, Remaining: %d",
+		tryPushed.Load(), refused.Load(), canceled.Load(), popped.Load(), tryPopped.Load(), abandoned.Load(), remaining)
 
 	// Error but context not cancelled - unexpected
 	select {

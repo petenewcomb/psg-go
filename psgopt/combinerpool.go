@@ -9,32 +9,43 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 )
 
-// DefaultCombinerPoolMeasurementTimeConstant is the default throughput measurement period for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithMeasurementTimeConstant]. Empirically determined; subject to change.
+// DefaultCombinerPoolMeasurementTimeConstant is the default throughput
+// measurement period for [github.com/petenewcomb/psg-go.CombinerPool] unless
+// overridden with [WithMeasurementTimeConstant]. Empirically determined;
+// subject to change.
 const DefaultCombinerPoolMeasurementTimeConstant = 50 * time.Millisecond
 
-// DefaultCombinerPoolHistoryRetentionPeriod is the default sample retention period for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithHistoryRetentionPeriod]. Empirically determined; subject to change.
+// DefaultCombinerPoolHistoryRetentionPeriod is the default sample retention
+// period for [github.com/petenewcomb/psg-go.CombinerPool] unless overridden
+// with [WithHistoryRetentionPeriod]. Empirically determined; subject to change.
 const DefaultCombinerPoolHistoryRetentionPeriod = 1 * time.Second
 
-// DefaultCombinerPoolIdleTimeout is the default goroutine idle timeout for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithIdleTimeout]. Empirically determined; subject to change.
+// DefaultCombinerPoolIdleTimeout is the default goroutine idle timeout for
+// [github.com/petenewcomb/psg-go.CombinerPool] unless overridden with
+// [WithIdleTimeout]. Empirically determined; subject to change.
 const DefaultCombinerPoolIdleTimeout = -1 // 100 * time.Microsecond
 
-// DefaultCombinerPoolHighUtilizationThreshold is the default utilization threshold for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithHighUtilizationThreshold]. Empirically determined; subject to change.
+// DefaultCombinerPoolHighUtilizationThreshold is the default utilization
+// threshold for [github.com/petenewcomb/psg-go.CombinerPool] unless overridden
+// with [WithHighUtilizationThreshold]. Empirically determined; subject to
+// change.
 const DefaultCombinerPoolHighUtilizationThreshold = 0.6 // Last goroutine must be more than 60% utilized
 
-// DefaultCombinerPoolMinThroughputROI is the default throughput ROI threshold for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithMinThroughputROI]. Empirically determined; subject to change.
+// DefaultCombinerPoolMinThroughputROI is the default throughput ROI threshold
+// for [github.com/petenewcomb/psg-go.CombinerPool] unless overridden with
+// [WithMinThroughputROI]. Empirically determined; subject to change.
 const DefaultCombinerPoolMinThroughputROI = 0.01 // Each new goroutine must add at least 1% more throughput
 
-// DefaultCombinerPoolAggressiveGrowthFactor is the default aggressive growth factor for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithAggressiveGrowthFactor] or [WithGrowthFactors]. Empirically determined; subject to change.
+// DefaultCombinerPoolAggressiveGrowthFactor is the default aggressive growth
+// factor for [github.com/petenewcomb/psg-go.CombinerPool] unless overridden
+// with [WithAggressiveGrowthFactor] or [WithGrowthFactors]. Empirically
+// determined; subject to change.
 const DefaultCombinerPoolAggressiveGrowthFactor = 1.5 // Add 50% more goroutines
 
-// DefaultCombinerPoolConservativeGrowthFactor is the default conservative growth factor for [github.com/petenewcomb/psg-go.CombinerPool]
-// unless overridden with [WithConservativeGrowthFactor] or [WithGrowthFactors]. Empirically determined; subject to change.
+// DefaultCombinerPoolConservativeGrowthFactor is the default conservative
+// growth factor for [github.com/petenewcomb/psg-go.CombinerPool] unless
+// overridden with [WithConservativeGrowthFactor] or [WithGrowthFactors].
+// Empirically determined; subject to change.
 const DefaultCombinerPoolConservativeGrowthFactor = 1.1 // Add 10% more goroutines
 
 // CombinerPoolOption is a configuration option that can be applied to CombinerPool.
@@ -53,8 +64,9 @@ const DefaultCombinerPoolConservativeGrowthFactor = 1.1 // Add 10% more goroutin
 //   - [WithConservativeGrowthFactor] - Sets conservative growth factor only
 type CombinerPoolOption = opts.CombinerPoolOption
 
-// WithConcurrencyBounds sets the minimum and maximum concurrency bounds for [github.com/petenewcomb/psg-go.CombinerPool].
-// Use -1 for maxConcurrency to indicate unlimited. The default minimum is 0 and maximum is unlimited.
+// WithConcurrencyBounds sets the minimum and maximum concurrency bounds for
+// [github.com/petenewcomb/psg-go.CombinerPool]. Use -1 for maxConcurrency to
+// indicate unlimited. The default minimum is 0 and maximum is unlimited.
 //
 // For setting only one bound, see [WithMinConcurrency] and [WithMaxConcurrency].
 func WithConcurrencyBounds(minConcurrency, maxConcurrency int) ConcurrencyBoundsOption {
@@ -77,8 +89,9 @@ type MinConcurrencyOption interface {
 	CombinerPoolOption
 }
 
-// WithIdleTimeout sets how long excess combiner goroutines in [github.com/petenewcomb/psg-go.CombinerPool] can remain idle
-// before being terminated. Use -1 to disable idle timeout.
+// WithIdleTimeout sets how long excess combiner goroutines in
+// [github.com/petenewcomb/psg-go.CombinerPool] can remain idle before being
+// terminated. Use -1 to disable idle timeout.
 //
 // The default value is [DefaultCombinerPoolIdleTimeout].
 func WithIdleTimeout(timeout time.Duration) IdleTimeoutOption {
@@ -89,8 +102,9 @@ type IdleTimeoutOption interface {
 	CombinerPoolOption
 }
 
-// WithMeasurementTimeConstant sets the period over which [github.com/petenewcomb/psg-go.CombinerPool] combiner throughput
-// is measured for scaling decisions.
+// WithMeasurementTimeConstant sets the period over which
+// [github.com/petenewcomb/psg-go.CombinerPool] combiner throughput is measured
+// for scaling decisions.
 //
 // The default value is [DefaultCombinerPoolMeasurementTimeConstant].
 func WithMeasurementTimeConstant(d time.Duration) MeasurementTimeConstantOption {
@@ -113,7 +127,8 @@ type HighUtilizationThresholdOption interface {
 	CombinerPoolOption
 }
 
-// WithHistoryRetentionPeriod sets how long [github.com/petenewcomb/psg-go.CombinerPool] performance samples are retained
+// WithHistoryRetentionPeriod sets how long
+// [github.com/petenewcomb/psg-go.CombinerPool] performance samples are retained
 // for scaling analysis.
 //
 // The default value is [DefaultCombinerPoolHistoryRetentionPeriod].
@@ -125,7 +140,8 @@ type HistoryRetentionPeriodOption interface {
 	CombinerPoolOption
 }
 
-// WithMinThroughputROI sets the threshold ratio for detecting the [github.com/petenewcomb/psg-go.CombinerPool] throughput knee.
+// WithMinThroughputROI sets the threshold ratio for detecting the
+// [github.com/petenewcomb/psg-go.CombinerPool] throughput knee.
 //
 // The default value is [DefaultCombinerPoolMinThroughputROI].
 func WithMinThroughputROI(ratio float64) MinThroughputROIOption {
@@ -136,10 +152,13 @@ type MinThroughputROIOption interface {
 	CombinerPoolOption
 }
 
-// WithGrowthFactors sets the multipliers used when scaling up [github.com/petenewcomb/psg-go.CombinerPool] combiner goroutines.
+// WithGrowthFactors sets the multipliers used when scaling up
+// [github.com/petenewcomb/psg-go.CombinerPool] combiner goroutines.
 //
-// For setting individual factors, see [WithAggressiveGrowthFactor] and [WithConservativeGrowthFactor].
-// The default values are [DefaultCombinerPoolAggressiveGrowthFactor] and [DefaultCombinerPoolConservativeGrowthFactor].
+// For setting individual factors, see [WithAggressiveGrowthFactor] and
+// [WithConservativeGrowthFactor]. The default values are
+// [DefaultCombinerPoolAggressiveGrowthFactor] and
+// [DefaultCombinerPoolConservativeGrowthFactor].
 func WithGrowthFactors(aggressive, conservative float64) GrowthFactorsOption {
 	return opts.GrowthFactors{Aggressive: aggressive, Conservative: conservative}
 }
@@ -148,10 +167,12 @@ type GrowthFactorsOption interface {
 	CombinerPoolOption
 }
 
-// WithAggressiveGrowthFactor sets only the aggressive growth factor for [github.com/petenewcomb/psg-go.CombinerPool].
+// WithAggressiveGrowthFactor sets only the aggressive growth factor for
+// [github.com/petenewcomb/psg-go.CombinerPool].
 //
-// To set both factors at once, use [WithGrowthFactors]. To set only the conservative factor, use [WithConservativeGrowthFactor].
-// The default value is [DefaultCombinerPoolAggressiveGrowthFactor].
+// To set both factors at once, use [WithGrowthFactors]. To set only the
+// conservative factor, use [WithConservativeGrowthFactor]. The default value is
+// [DefaultCombinerPoolAggressiveGrowthFactor].
 func WithAggressiveGrowthFactor(factor float64) AggressiveGrowthFactorOption {
 	return opts.AggressiveGrowthFactor(factor)
 }
@@ -160,10 +181,12 @@ type AggressiveGrowthFactorOption interface {
 	CombinerPoolOption
 }
 
-// WithConservativeGrowthFactor sets only the conservative growth factor for [github.com/petenewcomb/psg-go.CombinerPool].
+// WithConservativeGrowthFactor sets only the conservative growth factor for
+// [github.com/petenewcomb/psg-go.CombinerPool].
 //
-// To set both factors at once, use [WithGrowthFactors]. To set only the aggressive factor, use [WithAggressiveGrowthFactor].
-// The default value is [DefaultCombinerPoolConservativeGrowthFactor].
+// To set both factors at once, use [WithGrowthFactors]. To set only the
+// aggressive factor, use [WithAggressiveGrowthFactor]. The default value is
+// [DefaultCombinerPoolConservativeGrowthFactor].
 func WithConservativeGrowthFactor(factor float64) ConservativeGrowthFactorOption {
 	return opts.ConservativeGrowthFactor(factor)
 }

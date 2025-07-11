@@ -56,7 +56,9 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	// Apply user options
 	p.SetOptions(options...)
 
-	trace.Logf(context.Background(), traceRegion, "TaskPool=%p, job=%p, inFlight=%p, waiters=%p", p, job, &p.inFlight, &p.waiters)
+	trace.Logf(context.Background(), traceRegion,
+		"TaskPool=%p, job=%p, inFlight=%p, waiters=%p",
+		p, job, &p.inFlight, &p.waiters)
 
 	return p
 }

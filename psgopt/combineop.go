@@ -33,9 +33,9 @@ type HoldTimesOption interface {
 	CombineOpOption
 }
 
-// WithMinHoldTime sets the minimum time a [github.com/petenewcomb/psg-go.CombineOp] combiner will hold inputs after the last
-// combine operation before flushing. This is useful for batching inputs that arrive
-// close together in time.
+// WithMinHoldTime sets the minimum time a [github.com/petenewcomb/psg-go.CombineOp]
+// combiner will hold inputs after the last combine operation before flushing.
+// This is useful for batching inputs that arrive close together in time.
 //
 // A value of -1 means no idle-based flushing will occur.
 // A value of 0 means flush immediately after each combine.
@@ -57,9 +57,9 @@ type MinHoldTimeOption interface {
 	CombineOpOption
 }
 
-// WithMaxHoldTime sets the maximum time a [github.com/petenewcomb/psg-go.CombineOp] combiner will hold any inputs before
-// flushing, measured from when the first unflushed input was received. This creates
-// an upper bound on result latency.
+// WithMaxHoldTime sets the maximum time a [github.com/petenewcomb/psg-go.CombineOp]
+// combiner will hold any inputs before flushing, measured from when the first
+// unflushed input was received. This creates an upper bound on result latency.
 //
 // A value of -1 means no absolute deadline for flushing.
 // A value of 0 means flush immediately (equivalent to no combining).

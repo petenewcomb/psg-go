@@ -232,7 +232,9 @@ func (c *controller) queueFresh(workFn WorkFunc) {
 	traceRegion := "workq.Accepted.queueFresh"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	acceptedWorkID := acceptedWorkCounter.Add(1)
-	trace.Logf(context.Background(), traceRegion, "Accepted(%p) queuing fresh work with acceptedWorkID=%d", c.q, acceptedWorkID)
+	trace.Logf(context.Background(), traceRegion,
+		"Accepted(%p) queuing fresh work with acceptedWorkID=%d",
+		c.q, acceptedWorkID)
 	c.q.fresh.PushBack(workPool, func(ctx context.Context, ex Execution) error {
 		trace.Logf(ctx, traceRegion+".workFn", "executing acceptedWorkID=%d", acceptedWorkID)
 		return workFn(ctx, ex)

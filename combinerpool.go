@@ -74,7 +74,10 @@ func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPo
 		psgopt.WithMeasurementTimeConstant(psgopt.DefaultCombinerPoolMeasurementTimeConstant),
 		psgopt.WithHistoryRetentionPeriod(psgopt.DefaultCombinerPoolHistoryRetentionPeriod),
 		psgopt.WithMinThroughputROI(psgopt.DefaultCombinerPoolMinThroughputROI),
-		psgopt.WithGrowthFactors(psgopt.DefaultCombinerPoolAggressiveGrowthFactor, psgopt.DefaultCombinerPoolConservativeGrowthFactor),
+		psgopt.WithGrowthFactors(
+			psgopt.DefaultCombinerPoolAggressiveGrowthFactor,
+			psgopt.DefaultCombinerPoolConservativeGrowthFactor,
+		),
 		psgopt.WithIdleTimeout(psgopt.DefaultCombinerPoolIdleTimeout),
 	)
 
@@ -85,7 +88,8 @@ func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPo
 	cp.governor.Init()
 	cp.workQueue.Init()
 
-	trace.Logf(context.Background(), traceRegion, "CombinerPool=%p, job=%p, state=%p, combineQueue=%p, governor=%p, workQueue=%p",
+	trace.Logf(context.Background(), traceRegion,
+		"CombinerPool=%p, job=%p, state=%p, combineQueue=%p, governor=%p, workQueue=%p",
 		cp, job, &cp.state, &cp.combineQueue, &cp.governor, &cp.workQueue)
 
 	return cp
@@ -109,7 +113,11 @@ func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 	cp.state.SetOptions(options...)
 }
 
-func (cp *CombinerPool) postCombine(ctx context.Context, outbox *rdvq.Outbox[workq.WorkFunc], combineFn boundCombineFunc) {
+func (cp *CombinerPool) postCombine(
+	ctx context.Context,
+	outbox *rdvq.Outbox[workq.WorkFunc],
+	combineFn boundCombineFunc,
+) {
 	traceRegion := "CombinerPool.postCombine"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -127,7 +135,11 @@ func (cp *CombinerPool) postCombine(ctx context.Context, outbox *rdvq.Outbox[wor
 	})
 }
 
-func (cp *CombinerPool) newCombineWork(combineFn boundCombineFunc, workID int64, waitersIncremented bool) workq.WorkFunc {
+func (cp *CombinerPool) newCombineWork(
+	combineFn boundCombineFunc,
+	workID int64,
+	waitersIncremented bool,
+) workq.WorkFunc {
 	return func(ctx context.Context, ex workq.Execution) error {
 		traceRegion := "CombinerPool.newCombineWork.workFn"
 		defer trace.StartRegion(ctx, traceRegion).End()
@@ -147,7 +159,12 @@ func (cp *CombinerPool) newCombineWork(combineFn boundCombineFunc, workID int64,
 	}
 }
 
-func (cp *CombinerPool) postCombineSlow(ctx context.Context, outboxCh chan<- workq.WorkFunc, combineFn boundCombineFunc, workID int64) rdvq.SelectResult {
+func (cp *CombinerPool) postCombineSlow(
+	ctx context.Context,
+	outboxCh chan<- workq.WorkFunc,
+	combineFn boundCombineFunc,
+	workID int64,
+) rdvq.SelectResult {
 	traceRegion := "CombinerPool.postCombineSlow"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "outboxCh=%d", outboxCh)
@@ -256,7 +273,8 @@ func (cp *CombinerPool) spawnNewCombiner(ctx context.Context) {
 		// Create the dedicated outbox for this combiner goroutine to emit gathers to the job
 		worker.emitGatherOutbox = OutboxFor[workq.WorkFunc](&worker.outboxMap, j.gatherOutboxKey())
 
-		trace.Logf(ctx, traceRegion, "cpWorker=%p, combinerMap=%p, emitGatherOutbox=%p", worker, &worker.combinerMap, worker.emitGatherOutbox)
+		trace.Logf(ctx, traceRegion, "cpWorker=%p, combinerMap=%p, emitGatherOutbox=%p",
+			worker, &worker.combinerMap, worker.emitGatherOutbox)
 
 		cp.state.GoroutineStarted()
 		defer cp.state.GoroutineExited()
@@ -314,7 +332,12 @@ func (cp *CombinerPool) spawnNewCombiner(ctx context.Context) {
 	}()
 }
 
-type boundCombineFunc func(ctx context.Context, cm *combinerMap, queueWork workq.QueueWorkFunc, gatherOutbox *rdvq.Outbox[workq.WorkFunc])
+type boundCombineFunc func(
+	ctx context.Context,
+	cm *combinerMap,
+	queueWork workq.QueueWorkFunc,
+	gatherOutbox *rdvq.Outbox[workq.WorkFunc],
+)
 
 type halfBoundCombineFunc[I any] = func(ctx context.Context, input I, inputErr error)
 
@@ -351,7 +374,14 @@ type combinerMapKey struct {
 	Combine any
 }
 
-func getCombineFunc[I, O any](ctx context.Context, cm *combinerMap, cp *CombinerPool, c *CombineOp[I, O], queueWork workq.QueueWorkFunc, emitGatherOutbox *rdvq.Outbox[workq.WorkFunc]) halfBoundCombineFunc[I] {
+func getCombineFunc[I, O any](
+	ctx context.Context,
+	cm *combinerMap,
+	cp *CombinerPool,
+	c *CombineOp[I, O],
+	queueWork workq.QueueWorkFunc,
+	emitGatherOutbox *rdvq.Outbox[workq.WorkFunc],
+) halfBoundCombineFunc[I] {
 	j := cp.j
 	k := combinerMapKey{
 		Job:     j,

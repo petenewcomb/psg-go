@@ -77,23 +77,26 @@ func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 		ctx,
 		pool,
 		func(ctx context.Context) (int, error) {
-			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
-				innerGatherOp := psg.NewGatherOp(
-					func(ctx context.Context, result int, err error) error {
-						chk.NoError(err)
-						chk.Fail("should not get here")
-						return nil
-					},
-				)
-				chk.NoError(innerGatherOp.Scatter(
-					ctx,
-					pool,
-					func(ctx context.Context) (int, error) {
-						chk.Fail("should not get here")
-						return 0, nil
-					},
-				))
-			})
+			chk.PanicsWithValue(
+				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				func() {
+					innerGatherOp := psg.NewGatherOp(
+						func(ctx context.Context, result int, err error) error {
+							chk.NoError(err)
+							chk.Fail("should not get here")
+							return nil
+						},
+					)
+					chk.NoError(innerGatherOp.Scatter(
+						ctx,
+						pool,
+						func(ctx context.Context) (int, error) {
+							chk.Fail("should not get here")
+							return 0, nil
+						},
+					))
+				},
+			)
 			return 0, nil
 		},
 	)
@@ -189,16 +192,19 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 					return nil
 				},
 			)
-			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
-				_ = innerGather.Scatter(
-					ctx,
-					parentPool,
-					func(ctx context.Context) (bool, error) {
-						chk.Fail("Should not get here - parent pool task should not run")
-						return false, nil
-					},
-				)
-			})
+			chk.PanicsWithValue(
+				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				func() {
+					_ = innerGather.Scatter(
+						ctx,
+						parentPool,
+						func(ctx context.Context) (bool, error) {
+							chk.Fail("Should not get here - parent pool task should not run")
+							return false, nil
+						},
+					)
+				},
+			)
 
 			return true, nil
 		},

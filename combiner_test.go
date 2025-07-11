@@ -127,23 +127,26 @@ func TestCombinerScatterFromTask(t *testing.T) {
 		ctx,
 		taskPool,
 		func(ctx context.Context) (int, error) {
-			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
-				innerGatherOp := psg.NewGatherOp(
-					func(ctx context.Context, result int, err error) error {
-						chk.NoError(err)
-						chk.Fail("should not get here")
-						return nil
-					},
-				)
-				chk.NoError(innerGatherOp.Scatter(
-					ctx,
-					taskPool,
-					func(ctx context.Context) (int, error) {
-						chk.Fail("should not get here")
-						return 0, nil
-					},
-				))
-			})
+			chk.PanicsWithValue(
+				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				func() {
+					innerGatherOp := psg.NewGatherOp(
+						func(ctx context.Context, result int, err error) error {
+							chk.NoError(err)
+							chk.Fail("should not get here")
+							return nil
+						},
+					)
+					chk.NoError(innerGatherOp.Scatter(
+						ctx,
+						taskPool,
+						func(ctx context.Context) (int, error) {
+							chk.Fail("should not get here")
+							return 0, nil
+						},
+					))
+				},
+			)
 			return 0, nil
 		},
 	)
@@ -271,16 +274,19 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 					return nil
 				},
 			)
-			chk.PanicsWithValue("Scatter called from task context but allowed only by top-level, gather, or combine context", func() {
-				_ = innerGatherOp.Scatter(
-					ctx,
-					parentTaskPool,
-					func(ctx context.Context) (bool, error) {
-						chk.Fail("Should not get here - parent task pool task should not run")
-						return false, nil
-					},
-				)
-			})
+			chk.PanicsWithValue(
+				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				func() {
+					_ = innerGatherOp.Scatter(
+						ctx,
+						parentTaskPool,
+						func(ctx context.Context) (bool, error) {
+							chk.Fail("Should not get here - parent task pool task should not run")
+							return false, nil
+						},
+					)
+				},
+			)
 
 			return true, nil
 		},
@@ -731,9 +737,21 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						b.ReportMetric(gatherDurationsNs.Quantile(0.99), "p99-gather-duration-ns")
 						b.ReportMetric(gatherDurationsNs.Quantile(0.50), "p50-gather-duration-ns")
 
-						combineDurationInflation := float64(combineDurationSum)/float64(combineDurationCount)/float64(workloadDuration) - 1
-						gatherDurationInflation := float64(gatherDurationSum)/float64(gatherDurationCount)/float64(workloadDuration) - 1
-						overallDurationInflation := float64(combineDurationSum+gatherDurationSum)/float64(combineDurationCount+gatherDurationCount)/float64(workloadDuration) - 1
+						combineDurationInflation := -1 +
+							float64(combineDurationSum)/
+								float64(combineDurationCount)/
+								float64(workloadDuration)
+
+						gatherDurationInflation := -1 +
+							float64(gatherDurationSum)/
+								float64(gatherDurationCount)/
+								float64(workloadDuration)
+
+						overallDurationInflation := -1 +
+							float64(combineDurationSum+gatherDurationSum)/
+								float64(combineDurationCount+gatherDurationCount)/
+								float64(workloadDuration)
+
 						if combinerLimit != 0 {
 							b.ReportMetric(combineDurationInflation, "combine-duration-inflation")
 						}

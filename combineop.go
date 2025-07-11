@@ -125,7 +125,12 @@ func (c *CombineOp[I, O]) newScatterWork(
 		// Post the combine using the task worker's outbox for the pool's combine queue
 		combineOutbox := OutboxFor[workq.WorkFunc](taskWorkerOutboxMap, c.pool.combineOutboxKey())
 
-		boundCombineFn := func(ctx context.Context, cm *combinerMap, queueWork workq.QueueWorkFunc, emitGatherOutbox *rdvq.Outbox[workq.WorkFunc]) {
+		boundCombineFn := func(
+			ctx context.Context,
+			cm *combinerMap,
+			queueWork workq.QueueWorkFunc,
+			emitGatherOutbox *rdvq.Outbox[workq.WorkFunc],
+		) {
 			traceRegion := traceRegion + ".boundCombineFn"
 			defer trace.StartRegion(ctx, traceRegion).End()
 			trace.Logf(ctx, traceRegion, "workID=%d", workID)
@@ -168,7 +173,8 @@ func (w combineOpConfigWrapper[I, O]) Update(changes opts.CombineOpConfigChanges
 			panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", *changes.MinHoldTime))
 		}
 		if w.combineOp.maxHoldTime >= 0 && *changes.MinHoldTime > w.combineOp.maxHoldTime {
-			panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)", *changes.MinHoldTime, w.combineOp.maxHoldTime))
+			panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)",
+				*changes.MinHoldTime, w.combineOp.maxHoldTime))
 		}
 	}
 	if changes.MaxHoldTime != nil {
@@ -176,7 +182,8 @@ func (w combineOpConfigWrapper[I, O]) Update(changes opts.CombineOpConfigChanges
 			panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", *changes.MaxHoldTime))
 		}
 		if w.combineOp.minHoldTime >= 0 && *changes.MaxHoldTime < w.combineOp.minHoldTime {
-			panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)", *changes.MaxHoldTime, w.combineOp.minHoldTime))
+			panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)",
+				*changes.MaxHoldTime, w.combineOp.minHoldTime))
 		}
 	}
 

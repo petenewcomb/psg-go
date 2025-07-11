@@ -26,6 +26,7 @@ import (
 func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	traceRegion := "sim.Run"
 	if trace.IsEnabled() {
+		//nolint:lll // long url
 		// See [MaxEventTrailerDataSize] defined to be 1<<10
 		// [MaxEventTrailerDataSize]: https://cs.opensource.google/go/go/+/master:src/internal/trace/tracev2/events.go;drc=6c3b5a2798c83d583cb37dba9f39c47300d19f1f;l=588
 		header := "Test plan:\n\n"
@@ -220,7 +221,8 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 				combinerPool := c.CombinerPools[combinerPoolIndex]
 				if combinerPool == nil {
 					// Create a combiner pool with the concurrency limit
-					combinerPool = psg.NewCombinerPool(c.Job, psgopt.WithConcurrencyBounds(0, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit))
+					combinerPool = psg.NewCombinerPool(c.Job,
+						psgopt.WithConcurrencyBounds(0, c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit))
 					c.CombinerPools[combinerPoolIndex] = combinerPool
 				}
 
@@ -333,7 +335,10 @@ func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] 
 	}
 }
 
-func (c *controller) newCombinerFactory(t assert.TestingT, combineIndex int) psg.CombinerFactory[*taskResult, *combineResult] {
+func (c *controller) newCombinerFactory(
+	t assert.TestingT,
+	combineIndex int,
+) psg.CombinerFactory[*taskResult, *combineResult] {
 	return func() psg.Combiner[*taskResult, *combineResult] {
 		cRes := &combineResult{
 			Index: combineIndex,
@@ -416,7 +421,8 @@ func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*comb
 		}
 
 		gatheredCount := c.GatheredCount.Add(int64(res.TaskCount))
-		c.debugf(ctx, "gathering %d combined tasks from CombineIndex#%d, gathered count now %d", res.TaskCount, res.Index, gatheredCount)
+		c.debugf(ctx, "gathering %d combined tasks from CombineIndex#%d, gathered count now %d",
+			res.TaskCount, res.Index, gatheredCount)
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
 		return err
@@ -446,7 +452,12 @@ func (c *controller) updateTaskStats(t assert.TestingT, res *taskResult, err err
 	chk.GreaterOrEqual(elapsedTime, task.PathDuration())
 }
 
-func (c *controller) executeGatherOrCombineFunc(t assert.TestingT, ctx context.Context, rh ResultHandler, fn *Func) error {
+func (c *controller) executeGatherOrCombineFunc(
+	t assert.TestingT,
+	ctx context.Context,
+	rh ResultHandler,
+	fn *Func,
+) error {
 	chk := assert.New(t)
 	timer := timerp.Get()
 	defer timerp.Put(timer)

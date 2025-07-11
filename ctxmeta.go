@@ -161,7 +161,10 @@ func (j *Job) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	return ctx, meta
 }
 
-func (j *Job) ensureCtxMeta(ctx context.Context, updateFn func(context.Context, *ctxMeta) context.Context) (context.Context, *ctxMeta) {
+func (j *Job) ensureCtxMeta(
+	ctx context.Context,
+	updateFn func(context.Context, *ctxMeta) context.Context,
+) (context.Context, *ctxMeta) {
 	traceRegion := "Job.ensureCtxMeta"
 
 	ctx, meta := j.ctxMetaMap.WithValue(ctx,

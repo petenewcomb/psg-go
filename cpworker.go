@@ -71,7 +71,11 @@ func (cw *cpWorker) TryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc)
 	return nil
 }
 
-func (cw *cpWorker) AddWork(ctx context.Context, workReadyCh <-chan workq.RenotifyFunc, queueFn workq.QueueWorkFunc) (workq.RenotifyFunc, error) {
+func (cw *cpWorker) AddWork(
+	ctx context.Context,
+	workReadyCh <-chan workq.RenotifyFunc,
+	queueFn workq.QueueWorkFunc,
+) (workq.RenotifyFunc, error) {
 	cw.workReadyCh = workReadyCh
 	cw.queueFn = queueFn
 	defer func() {
@@ -141,7 +145,11 @@ func (cw *cpWorker) AddWork(ctx context.Context, workReadyCh <-chan workq.Renoti
 	return cw.workReadyRenotifyFn, cw.err
 }
 
-func (cw *cpWorker) primaryPopSelect(ctx context.Context, inboxCh <-chan workq.WorkFunc, outboxFilledCh <-chan rdvq.RenotifyFunc) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
+func (cw *cpWorker) primaryPopSelect(
+	ctx context.Context,
+	inboxCh <-chan workq.WorkFunc,
+	outboxFilledCh <-chan rdvq.RenotifyFunc,
+) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
 	cw.inboxCh = inboxCh
 	defer func() {
 		cw.inboxCh = nil
@@ -197,9 +205,13 @@ func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duratio
 	return queuedFlush, 0
 }
 
-func (cw *cpWorker) primaryInnerPopSelect(ctx context.Context, outboxFilledCh <-chan rdvq.RenotifyFunc) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
+func (cw *cpWorker) primaryInnerPopSelect(
+	ctx context.Context,
+	outboxFilledCh <-chan rdvq.RenotifyFunc,
+) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
 	traceRegion := "cpWorker.primaryInnerPopSelect"
-	trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
+	trace.Logf(ctx, traceRegion,
+		"entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
 		cw.inboxCh, outboxFilledCh, cw.workReadyCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 	select {
 	case workFn := <-cw.inboxCh:
@@ -230,10 +242,15 @@ func (cw *cpWorker) primaryInnerPopSelect(ctx context.Context, outboxFilledCh <-
 	return rdvq.SelectAborted, nil
 }
 
-func (cw *cpWorker) spareInnerPopSelect(ctx context.Context, outboxFilledCh <-chan rdvq.RenotifyFunc) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
+func (cw *cpWorker) spareInnerPopSelect(
+	ctx context.Context,
+	outboxFilledCh <-chan rdvq.RenotifyFunc,
+) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
 	traceRegion := "cpWorker.spareInnerPopSelect"
 
-	trace.Logf(ctx, traceRegion, "entering select: idleTimerCh=%p, inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
+	trace.Logf(ctx, traceRegion,
+		//nolint:lll // doesn't make sense break up
+		"entering select: idleTimerCh=%p, inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
 		cw.idleTimerCh, cw.inboxCh, outboxFilledCh, cw.workReadyCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 
 	// Track idle time

@@ -66,7 +66,9 @@ func (js *JobState) Init() {
 	js.nextFlushChan.Store(make(chan struct{}))
 	js.doneChan = make(chan struct{})
 
-	trace.Logf(context.Background(), traceRegion, "JobState=%p, inFlightWork=%p, totalReferences=%p", js, &js.inFlightWork, &js.totalReferences)
+	trace.Logf(context.Background(), traceRegion,
+		"JobState=%p, inFlightWork=%p, totalReferences=%p",
+		js, &js.inFlightWork, &js.totalReferences)
 }
 
 // IncrementWork increments both the work counter and total references counter

@@ -39,7 +39,9 @@ func (q *Required[T]) Init(p *Pool[T]) {
 	q.Optional.Init(p)
 	q.fullOutboxes.Init(&p.nodePool)
 	q.outboxWaiters.Init()
-	trace.Logf(context.Background(), traceRegion, "Required=%p, fullOutboxes=%p, outboxWaiters=%p", q, &q.fullOutboxes, &q.outboxWaiters)
+	trace.Logf(context.Background(), traceRegion,
+		"Required=%p, fullOutboxes=%p, outboxWaiters=%p",
+		q, &q.fullOutboxes, &q.outboxWaiters)
 }
 
 // PushSelectFunc is called when PushBackFunc needs to send a value when the outbox is full.
@@ -75,17 +77,23 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 		// Outbox is empty, use it for "drop-and-go" semantics
 		outbox.ch = p.getChan()
 		outbox.ch <- value
-		trace.Logf(context.Background(), traceRegion, "outbox=%p was empty, delivered value into outboxCh=%p", outbox, outbox.ch)
+		trace.Logf(context.Background(), traceRegion,
+			"outbox=%p was empty, delivered value into outboxCh=%p",
+			outbox, outbox.ch)
 		q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
 		q.outboxWaiters.Notify(func() {})
 		return
 	}
 
 	// Outbox is full, wait for it to become available
-	trace.Logf(context.Background(), traceRegion, "outbox=%p is full (outboxCh=%p), calling selectFn", outbox, outbox.ch)
+	trace.Logf(context.Background(), traceRegion,
+		"outbox=%p is full (outboxCh=%p), calling selectFn",
+		outbox, outbox.ch)
 	if selectFn(outbox.ch) != SelectOutboxFilled {
 		// Value was not sent via outbox, so there's no further action to take
-		trace.Logf(context.Background(), traceRegion, "selectFn returned without filling outbox=%p (outboxCh=%p)", outbox, outbox.ch)
+		trace.Logf(context.Background(), traceRegion,
+			"selectFn returned without filling outbox=%p (outboxCh=%p)",
+			outbox, outbox.ch)
 		return
 	}
 
@@ -152,7 +160,10 @@ func (q *Required[T]) TryPushBack(p *Pool[T], outbox *Outbox[T], value T) bool {
 // RequiredPopSelectFunc handles the select operation for PopFrontFunc when no
 // outboxes are available. It should select on the inbox channel and outbox
 // filled channel, returning the appropriate result to indicate what happened.
-type RequiredPopSelectFunc[T any] = func(inboxCh <-chan T, outboxFilledCh <-chan RenotifyFunc) (SelectResult, RenotifyFunc)
+type RequiredPopSelectFunc[T any] = func(
+	inboxCh <-chan T,
+	outboxFilledCh <-chan RenotifyFunc,
+) (SelectResult, RenotifyFunc)
 
 func (q *Required[T]) tryOutboxes(p *Pool[T], processFn ProcessValueFunc[T]) bool {
 	if value, ok := q.TryPopFront(p); ok {

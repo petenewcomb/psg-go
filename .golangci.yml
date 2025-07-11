@@ -36,6 +36,7 @@ linters:
     # - cyclop
     - dupl
     - mnd
+    - lll
     
     # Error handling
     - errorlint

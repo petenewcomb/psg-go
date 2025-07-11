@@ -40,6 +40,7 @@ func TestPlanFormatting(t *testing.T) {
 	defer chk.NoError(nofailfile.Set(oldNofailfileValue))
 	chk.NoError(nofailfile.Set("true"))
 
+	//nolint:lll // must be verbatim
 	expected := `Plan#0: pathCount=9 taskCount=16 maxPathDuration=35.186905ms minGatherCount=10 maxGatherCount=34
    TaskPools[0]: TaskPool#0: limit=5
    TaskPools[1]: TaskPool#1: limit=1

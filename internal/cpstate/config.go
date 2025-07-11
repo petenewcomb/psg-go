@@ -53,7 +53,8 @@ func (c *Config) Update(changes opts.CombinerPoolConfigChanges) {
 func (c *Config) validate() {
 	// Validate concurrency limits
 	if c.MaxConcurrency >= 0 && c.MinConcurrency > c.MaxConcurrency {
-		panic(fmt.Sprintf("minimum concurrency (%d) cannot exceed maximum concurrency (%d)", c.MinConcurrency, c.MaxConcurrency))
+		panic(fmt.Sprintf("minimum concurrency (%d) cannot exceed maximum concurrency (%d)",
+			c.MinConcurrency, c.MaxConcurrency))
 	}
 	if c.MinConcurrency < 0 {
 		panic(fmt.Sprintf("minimum concurrency (%d) must be >= 0", c.MinConcurrency))

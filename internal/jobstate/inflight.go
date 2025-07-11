@@ -34,7 +34,9 @@ func (c *InFlightCounter) IsUnder(limit int) bool {
 	value := c.v.Load()
 	ok := value < int64(limit)
 
-	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, value=%d, limit=%d; returning %v", c, value, limit, ok)
+	trace.Logf(context.Background(), traceRegion,
+		"InFlightCounter=%p, value=%d, limit=%d; returning %v",
+		c, value, limit, ok)
 	return ok
 }
 
@@ -62,7 +64,9 @@ func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 		}
 		if newValue >= int64(limit) {
 			// Still at or over limit.
-			trace.Logf(context.Background(), traceRegion, "newValue=%d >= limit=%d; still at or over limit, returning false", newValue, limit)
+			trace.Logf(context.Background(), traceRegion,
+				"newValue=%d >= limit=%d; still at or over limit, returning false",
+				newValue, limit)
 			return false
 		}
 		// Room might have been made, try again.
@@ -98,7 +102,9 @@ func (c *InFlightCounter) DecrementAndCheckIfUnder(limit int) bool {
 	newValue := c.v.Add(-1)
 	// Check if new value is under limit
 	ok := limit < 0 || newValue < int64(limit)
-	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d, limit=%d; returning %v", c, newValue, limit, ok)
+	trace.Logf(context.Background(), traceRegion,
+		"InFlightCounter=%p, newValue=%d, limit=%d; returning %v",
+		c, newValue, limit, ok)
 
 	if newValue < 0 {
 		panic("unbalanced decrement detected")

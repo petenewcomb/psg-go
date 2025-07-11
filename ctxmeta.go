@@ -54,28 +54,25 @@ func (cm *ctxMeta) IsTopLevel() bool {
 	return cm.ctxType == topLevelContext
 }
 
-func (cm *ctxMeta) WaitBehavior(shouldWaitFn func() bool) workq.WaitBehavior {
-	return ctxMetaWaitBehavior{
-		cm:           cm,
-		shouldWaitFn: shouldWaitFn,
+func (cm *ctxMeta) ShouldBlock() workq.BlockFunc {
+	if cm.IsTopLevel() {
+		return cm.job.block
 	}
+	return nil
 }
 
-type ctxMetaWaitBehavior struct {
-	cm           *ctxMeta
-	shouldWaitFn func() bool
+func (j *Job) withOutboxFor(ctx context.Context, key outboxKey[workq.WorkFunc], fn func(*workq.Outbox)) {
+	_, meta := j.ctxMeta(ctx)
+	meta.WithOutbox(key, fn)
 }
 
-func (wb ctxMetaWaitBehavior) ShouldWait() bool {
-	return wb.shouldWaitFn()
+func (j *Job) withGatherOutbox(ctx context.Context, fn func(*workq.Outbox)) {
+	j.withOutboxFor(ctx, j.gatherOutboxKey(), fn)
 }
 
-func (wb ctxMetaWaitBehavior) ShouldBlock() bool {
-	return wb.cm.IsTopLevel()
-}
-
-func (wb ctxMetaWaitBehavior) Block(ctx context.Context, waitCh <-chan workq.RenotifyFunc) (workq.RenotifyFunc, error) {
-	return wb.cm.job.block(ctx, waitCh)
+func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
+	_, meta := j.ctxMeta(ctx)
+	return meta.ShouldBlock()
 }
 
 type executionEnvironment interface {

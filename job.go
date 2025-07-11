@@ -6,6 +6,7 @@ package psg
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,11 @@ type Job struct {
 
 	gatherQueue workq.Offers
 
+	// If there are tasks or combiners waiting to post work to gatherQueue, the
+	// governor will block new top-level scatters, thereby applying backpressure
+	// to regulate the system.
+	governor workq.Governor
+
 	workQueue workq.Accepted
 
 	taskQueue             rdvq.Optional[pendingTask]
@@ -64,7 +70,7 @@ func (j *Job) gatherOutboxKey() outboxKey[workq.WorkFunc] {
 	return j
 }
 
-type boundGatherFunc = func(ctx context.Context) error
+type boundGatherFunc func(ctx context.Context) error
 
 // NewJob creates an independent scatter-gather execution environment with the
 // specified context. The context passed to NewJob is used as the root of the
@@ -84,6 +90,7 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	}
 	j.state.Init()
 	j.gatherQueue.Init()
+	j.governor.Init()
 	j.workQueue.Init()
 	j.taskQueue.Init(taskQueuePool)
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
@@ -210,11 +217,41 @@ func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
 func (j *Job) yield(ctx context.Context, meta *ctxMeta) error {
+	/*
+		gathered := 0
+		for {
+			ok, err := j.tryGather(ctx, meta)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				break
+			}
+			gathered++
+		}
+
+		if gathered == 0 {
+	*/
+	// Give previously scattered tasks a chance to run. Without this call, the
+	// normal use case of scattering many tasks in a tight loop tends not to
+	// give those tasks a chance to run until they've all been started. This
+	// call to runtime.GoSched not only not only smooths task startup, it allows
+	// backpressure to operate more effectively, spacing out tasks to avoid
+	// boom-and-bust cycles of activity more reminiscent of batch processing.
+	runtime.Gosched()
+
 	for {
-		if ok, err := j.tryGather(ctx, meta); !ok || err != nil {
+		ok, err := j.tryGather(ctx, meta)
+		if err != nil {
 			return err
 		}
+		if !ok {
+			break
+		}
 	}
+	//}
+
+	return nil
 }
 
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
@@ -288,23 +325,61 @@ func (j *Job) addWork(
 
 // postGather sends a gather operation to the gather queue.
 func (j *Job) postGather(ctx context.Context, outbox *rdvq.Outbox[workq.WorkFunc], gatherFn boundGatherFunc) {
+	traceRegion := "Job.postGather"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	workID := workIDCounter.Add(1)
+	trace.Logf(ctx, traceRegion, "Job=%p, outbox=%p, workID=%d", j, outbox, workID)
+
+	workFn := j.newGatherWork(gatherFn, workID, false)
+
 	// Error can only be due to context cancellation, so safe to ignore here.
-	workFn := j.newGatherWork(gatherFn)
-	_ = j.gatherQueue.PushBack(ctx, outbox, workFn)
+	j.gatherQueue.PushBackFunc(outbox, workFn, func(outboxCh chan<- workq.WorkFunc) rdvq.SelectResult {
+		return j.postGatherSlow(ctx, outboxCh, gatherFn, workID)
+	})
+}
+
+// postGather sends a gather operation to the gather queue.
+func (j *Job) postGatherSlow(ctx context.Context, outboxCh chan<- workq.WorkFunc, gatherFn boundGatherFunc, workID int64) rdvq.SelectResult {
+	traceRegion := "Job.postGatherSlow"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "outboxCh=%d", outboxCh)
+
+	j.governor.IncrementDownstreamWaiters()
+	workFn := j.newGatherWork(gatherFn, workID, true)
+	defer func() {
+		// If we incremented waiters but didn't successfully send to a channel,
+		// we must decrement the waiters ourselves
+		if workFn != nil {
+			j.governor.DecrementDownstreamWaiters()
+		}
+	}()
+
+	trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
+	select {
+	case outboxCh <- workFn:
+		workFn = nil // Successfully sent, don't decrement waiters in defer
+		trace.Logf(ctx, traceRegion, "received workFn from outboxCh=%d", outboxCh)
+		return rdvq.SelectOutboxFilled
+	case <-ctx.Done():
+		trace.Logf(ctx, traceRegion, "received context done signal")
+		return rdvq.SelectAborted
+	}
 }
 
 var workIDCounter atomic.Int64
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) newGatherWork(gatherFn boundGatherFunc) workq.WorkFunc {
-
-	workID := workIDCounter.Add(1)
-	trace.Logf(context.Background(), "job.newGatherWork", "workID=%d", workID)
-
+func (j *Job) newGatherWork(gatherFn boundGatherFunc, workID int64, waitersIncremented bool) workq.WorkFunc {
 	return func(ctx context.Context, ex workq.Execution) error {
 		defer trace.StartRegion(ctx, "job.gatherWork").End()
 		trace.Logf(ctx, "job.gatherWork", "starting, workID=%d", workID)
+
 		ex.Starting()
+		if waitersIncremented {
+			j.governor.DecrementDownstreamWaiters()
+		}
+
 		trace.Logf(ctx, "job.gatherWork", "started, workID=%d", workID)
 		ctx, meta := j.ctxMeta(ctx)
 		var err error
@@ -313,6 +388,39 @@ func (j *Job) newGatherWork(gatherFn boundGatherFunc) workq.WorkFunc {
 		})
 		trace.Logf(ctx, "job.gatherWork", "ended, workID=%d, err=%v", workID, err)
 		return err
+	}
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (j *Job) newCombineGatherWork(gatherFn boundGatherFunc) workq.WorkFunc {
+	traceRegion := "Job.newCombineGatherWork"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	workID := workIDCounter.Add(1)
+	trace.Logf(context.Background(), traceRegion, "Job=%p, workID=%d", j, workID)
+
+	baseWorkFn := j.newGatherWork(gatherFn, workID, false)
+
+	waitersIncremented := false
+	return func(ctx context.Context, ex workq.Execution) error {
+		started := false
+		defer func() {
+			if !started && !waitersIncremented {
+				waitersIncremented = true
+				j.governor.IncrementDownstreamWaiters()
+			}
+		}()
+
+		originalStarting := ex.Starting
+		ex.Starting = func() {
+			started = true
+			originalStarting()
+			if waitersIncremented {
+				j.governor.DecrementDownstreamWaiters()
+			}
+		}
+
+		return baseWorkFn(ctx, ex)
 	}
 }
 
@@ -492,12 +600,9 @@ func (j *Job) newScatterWorkWithCompletedFn(taskFn boundTaskFunc, completedFn fu
 		return nil
 	}
 
-	return j.gcWaiters.Wrap(baseWorkFn,
-		func(ctx context.Context) workq.WaitBehavior {
-			_, meta := j.ctxMeta(ctx)
-			return meta.WaitBehavior(j.gcMonitor.Busy)
-		},
-	)
+	governedFn := j.governor.WrapUpstream(baseWorkFn, j.shouldBlock)
+
+	return j.gcWaiters.Wrap(governedFn, j.gcMonitor.Busy, j.shouldBlock)
 }
 
 // panicIfDone panics if the job is in the done state

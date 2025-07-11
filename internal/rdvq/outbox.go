@@ -63,7 +63,7 @@ func (ob *Outbox[T]) IsEmpty(p *Pool[T]) bool {
 // OutboxWaitSelectFunc should attempt to write a (zero value) T to the channel.
 // It must return SelectOutboxFilled if it successfully wrote, SelectAborted otherwise.
 // The value written will be discarded.
-type OutboxWaitSelectFunc[T any] func(ch chan<- T) SelectResult
+type OutboxWaitSelectFunc[T any] = func(ch chan<- T) SelectResult
 
 //nolint:contextcheck // background context used only for tracing
 func (ob *Outbox[T]) WaitFunc(p *Pool[T], selectFn OutboxWaitSelectFunc[T]) {

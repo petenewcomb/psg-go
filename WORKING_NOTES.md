@@ -11,7 +11,7 @@ This document contains working notes and context for development on the `combine
 - **Work reference tracking**: ✅ Fixed flush work imbalance with queueFlush() (committed in 5e1017d)
 - **Scale-to-zero**: ✅ Root cause identified - benchmark MinConcurrency setting prevents goroutine exit
 - **Code quality**: ✅ Comprehensive linting improvements applied
-- **Gather liveness**: 🚧 High tasks/op issue identified, solution planned
+- **Gather liveness**: ✅ **High tasks/op issue resolved with Gosched in yield operations**
 - **Workq integration**: ✅ **Combiner pool integration complete with context binding**
 - **Context binding**: ✅ **ctxmap package enables worker-context association pattern**
 - **Notification conservation**: ✅ **Implemented and integrated**

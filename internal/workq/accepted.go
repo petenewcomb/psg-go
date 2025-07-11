@@ -42,12 +42,12 @@ func (q *Accepted) Init() {
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be
 // called for each work item accepted. Returns whether the waitCh was signaled
 // or not.
-type AddWorkFunc = func(ctx context.Context, waitCh <-chan RenotifyFunc, queueFn QueueWorkFunc) (RenotifyFunc, error)
+type AddWorkFunc func(ctx context.Context, waitCh <-chan RenotifyFunc, queueFn QueueWorkFunc) (RenotifyFunc, error)
 
 type RenotifyFunc = rdvq.RenotifyFunc
 
 // QueueWorkFunc is called by AddWorkFunc to add new work items to processing.
-type QueueWorkFunc = func(WorkFunc)
+type QueueWorkFunc func(WorkFunc)
 
 // Signals the end of work
 const ErrEndOfWork = cerr.Error("end of work")
@@ -139,7 +139,7 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 
 // TryAddWorkFunc provides new work for non-blocking execution attempts.
 // It should call queueFn for each available work item.
-type TryAddWorkFunc = func(context.Context, QueueWorkFunc) error
+type TryAddWorkFunc func(context.Context, QueueWorkFunc) error
 
 // TryExecuteOne attempts to process exactly one work item using priority-based processing.
 // It tries newly accepted work first (exhausting the queue), then deferred work

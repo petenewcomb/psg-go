@@ -50,7 +50,7 @@ type Waiter struct {
 // received RenotifyFunc or nil if the select exited without receiving one.
 type WaitSelectFunc func(waitCh <-chan RenotifyFunc) RenotifyFunc
 
-type NotifyFunc = func(RenotifyFunc)
+type NotifyFunc func(RenotifyFunc)
 
 //nolint:contextcheck // background context used only for tracing
 func (w Waiter) WaitFuncWithOrphanHandler(orphanFn NotifyFunc, selectFn WaitSelectFunc) RenotifyFunc {

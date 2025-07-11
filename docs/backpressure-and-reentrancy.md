@@ -432,6 +432,40 @@ func (job *Job) Wait() {
 - Backpressure provider states
 - Resource utilization statistics
 
+## Governor: Coordinating Backpressure Across System Boundaries
+
+### The Story Behind Cross-System Coordination
+
+PSG's architecture creates an interesting challenge that doesn't exist in traditional queuing systems. When a scatter operation flows from a TaskPool into a CombinerPool, you're crossing a boundary between two different resource management systems. Each system has its own notification infrastructure, its own capacity constraints, and its own workers waiting for work.
+
+The fundamental problem emerges when the downstream system (CombinerPool) becomes congested. In a traditional system, you might expect the upstream system to simply queue requests until the downstream system is ready. But PSG doesn't work that way—it's built around notification conservation and immediate resource utilization rather than queuing patterns.
+
+When a CombinerPool becomes busy, new combine work hits what the code calls the "slow path" in `postCombineSlow()`. At this point, the work can't be immediately processed, but it also can't just disappear into a queue. The system needs to communicate back to the upstream scatter operations that they should pause and wait for downstream capacity to become available.
+
+This is where the Governor comes in. It serves as a coordination mechanism that allows the downstream system to signal "I'm congested" in a way that the upstream system can understand and respond to appropriately.
+
+### How the Governor Fits Into PSG's Architecture
+
+The Governor doesn't replace any existing coordination—it extends PSG's existing `Waiters` infrastructure to work across system boundaries. When you look at the code in `governor.go`, you can see it's remarkably simple: just an atomic counter tracking how many downstream workers are waiting, combined with the existing `Waiters` system for upstream coordination.
+
+The elegance is in how it integrates with the existing flow. When a scatter operation reaches `combineOp.go`, it gets wrapped by the Governor through `WrapUpstream()`. This wrapper uses the existing `Waiters.Wrap()` pattern that PSG already uses throughout the system, so no upstream code needs to change.
+
+The downstream integration happens in the combiner pool's slow path. When work can't be immediately processed, the pool calls `IncrementDownstreamWaiters()` to signal congestion. When work eventually completes, it calls `DecrementDownstreamWaiters()`. When that counter hits zero, the Governor triggers `NotifyAll()` on its upstream waiters, waking any scatter operations that were paused waiting for downstream capacity.
+
+### The Context Connection
+
+What makes this particularly elegant is how it connects to PSG's context system. The Governor respects the context hierarchy through the `ShouldBlock()` method in `ctxmeta.go`. Top-level contexts participate in backpressure because they can safely wait, but task contexts return `nil` for their block function because they might be holding resources needed to resolve the very congestion they'd be waiting for.
+
+This context awareness prevents the deadlock scenarios that could arise if every context type participated in backpressure. It's another example of how PSG's architectural constraints (like prohibiting task-to-task scattering) create the safety properties that allow sophisticated coordination mechanisms like the Governor to work reliably.
+
+### Why This Matters for Notification Conservation
+
+The Governor ensures that when resources become available in one system, that availability information flows correctly to the system that needs it. Without the Governor, you could have a situation where a CombinerPool becomes available again, but the TaskPool scatter operations that were waiting for that capacity never get notified to retry.
+
+This bidirectional notification flow—downstream signaling congestion upstream, and upstream signaling capacity availability downstream—is what makes PSG's cross-system coordination work without losing the notification conservation properties that make the whole system reliable.
+
+The Governor is essentially a translator between the resource accounting of different subsystems, ensuring that PSG's fundamental principle—that resource availability notifications never get lost—holds true even when work flows across multiple system boundaries.
+
 ## Notification Conservation and Cross-System Backpressure
 
 ### Core Theory

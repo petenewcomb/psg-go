@@ -46,7 +46,7 @@ func (q *Required[T]) Init(p *Pool[T]) {
 // It should wait for the outbox to become available, typically using a select statement
 // to handle context cancellation and other events. Must return SelectOutboxFilled if the value was sent,
 // SelectAborted if not.
-type PushSelectFunc[T any] func(outboxCh chan<- T) SelectResult
+type PushSelectFunc[T any] = func(outboxCh chan<- T) SelectResult
 
 // PushBackFunc attempts to send a value using the two-tier delivery system:
 //  1. Try immediate delivery to a waiting receiver (via Optional.TryPushBack)
@@ -152,7 +152,7 @@ func (q *Required[T]) TryPushBack(p *Pool[T], outbox *Outbox[T], value T) bool {
 // RequiredPopSelectFunc handles the select operation for PopFrontFunc when no
 // outboxes are available. It should select on the inbox channel and outbox
 // filled channel, returning the appropriate result to indicate what happened.
-type RequiredPopSelectFunc[T any] func(inboxCh <-chan T, outboxFilledCh <-chan RenotifyFunc) (SelectResult, RenotifyFunc)
+type RequiredPopSelectFunc[T any] = func(inboxCh <-chan T, outboxFilledCh <-chan RenotifyFunc) (SelectResult, RenotifyFunc)
 
 func (q *Required[T]) tryOutboxes(p *Pool[T], processFn ProcessValueFunc[T]) bool {
 	if value, ok := q.TryPopFront(p); ok {

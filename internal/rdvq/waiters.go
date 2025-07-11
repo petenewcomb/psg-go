@@ -9,7 +9,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
-type RenotifyFunc = func()
+type RenotifyFunc func()
 
 // Waiters provides a blocking wait and notification system for coordinating
 // between senders and receivers. It's used internally by Required to prevent

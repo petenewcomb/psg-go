@@ -100,44 +100,45 @@ func (q *Offers) PopFrontExcess(ctx context.Context) (WorkFunc, error) {
 type WithOutboxFunc func(context.Context, func(*Outbox))
 
 // NewPostOfferWork creates a new work function that will push the given work function
-// into this Offers queue,
+// into this Offers queue.
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Offers) NewPostOfferWork(workFn WorkFunc, withOutboxFn WithOutboxFunc) WorkFunc {
-	trace.Logf(context.Background(), "workq.NewPostOfferWork", "called")
+	traceRegion := "workq.Offers.NewPostOfferWork"
+	trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
 	pendingWorkFn := func(ctx context.Context, ex Execution) error {
-		trace.Logf(ctx, "workq.NewPostOfferWork", "in pendingWorkFn")
-		starting := ex.Starting
+		traceRegion := traceRegion + ".pendingWorkFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
+		originalStarting := ex.Starting
 		ex.Starting = func() {
-			trace.Logf(ctx, "workq.NewPostOfferWork", "notifying waiters")
+			trace.Logf(ctx, traceRegion, "notifying waiters")
 			q.waiters.Notify(func() {})
-			starting()
+			originalStarting()
 		}
-		trace.Logf(ctx, "workq.NewPostOfferWork", "calling workFn")
 		return workFn(ctx, ex)
 	}
 	return func(ctx context.Context, ex Execution) error {
-		defer trace.StartRegion(ctx, "workq.NewPostOfferWork").End()
-		trace.Logf(ctx, "workq.NewPostOfferWork", "work called")
+		traceRegion := traceRegion + ".workFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
 		var pushed bool
 		withOutboxFn(ctx, func(outbox *Outbox) {
-			trace.Logf(ctx, "workq.NewPostOfferWork", "trying to push with outbox=%p", outbox)
 			pushed = q.TryPushBack(outbox, pendingWorkFn)
 			if !pushed && ex.ReadyFn != nil {
-				trace.Logf(ctx, "workq.NewPostOfferWork", "queue full, adding to waiters and retrying with outbox=%p", outbox)
 				q.waiters.Add(func(renotifyFn RenotifyFunc) {
 					ex.ReadyFn(func() {
 						q.waiters.Notify(renotifyFn)
 					})
 				})
-				// Re-check after adding to waiters to avoid race condition
-				trace.Logf(ctx, "workq.NewPostOfferWork", "retrying push with outbox=%p", outbox)
+				// Retry push after registering for notification in case
+				// something happened in between
 				pushed = q.TryPushBack(outbox, pendingWorkFn)
-				trace.Logf(ctx, "workq.NewPostOfferWork", "retry result=%v", pushed)
 			}
 		})
 		if pushed {
-			trace.Logf(ctx, "workq.NewPostOfferWork", "pushed to queue, calling Starting")
+			// Since we can't know if we're going to be able to push until we
+			// successfully do so, we have to call Starting after the fact.
 			ex.Starting()
 		}
 		return nil

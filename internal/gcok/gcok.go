@@ -6,10 +6,11 @@ package gcok
 import (
 	"context"
 	"runtime/metrics"
-	"runtime/trace"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
 // ConfigChanges holds configuration changes for a GC Monitor.

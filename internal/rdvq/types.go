@@ -6,7 +6,7 @@ package rdvq
 import "fmt"
 
 // ProcessValueFunc is called to process a value retrieved from a queue.
-type ProcessValueFunc[T any] func(value T)
+type ProcessValueFunc[T any] = func(value T)
 
 // SelectResult indicates the outcome of a select operation in rdvq.
 // This enumeration provides type-safe, explicit results for all select

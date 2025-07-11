@@ -57,6 +57,9 @@ func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 		// Back out tentative increment and re-check.
 		trace.Logf(context.Background(), traceRegion, "newValue=%d > limit=%d; backing out increment", newValue, limit)
 		newValue = c.v.Add(-1)
+		if newValue < 0 {
+			panic("unbalanced decrement detected")
+		}
 		if newValue >= int64(limit) {
 			// Still at or over limit.
 			trace.Logf(context.Background(), traceRegion, "newValue=%d >= limit=%d; still at or over limit, returning false", newValue, limit)
@@ -79,7 +82,7 @@ func (c *InFlightCounter) Decrement() bool {
 	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d; returning %v", c, newValue, ok)
 
 	if newValue < 0 {
-		panic("there were no tasks in flight")
+		panic("unbalanced decrement detected")
 	}
 	return ok
 }
@@ -98,7 +101,7 @@ func (c *InFlightCounter) DecrementAndCheckIfUnder(limit int) bool {
 	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d, limit=%d; returning %v", c, newValue, limit, ok)
 
 	if newValue < 0 {
-		panic("there were no tasks in flight")
+		panic("unbalanced decrement detected")
 	}
 	return ok
 }

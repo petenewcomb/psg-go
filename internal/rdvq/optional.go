@@ -62,7 +62,7 @@ func (q *Optional[T]) TryPushBack(p *Pool[T], value T) bool {
 
 // OptionalPopSelectFunc handles the select operation for PopFrontFunc.
 // It should select on the inbox channel, returning the appropriate result.
-type OptionalPopSelectFunc[T any] func(inboxCh <-chan T) SelectResult
+type OptionalPopSelectFunc[T any] = func(inboxCh <-chan T) SelectResult
 
 //nolint:contextcheck // background context used only for tracing
 func (q *Optional[T]) PopFrontFunc(p *Pool[T], processOrphanFn ProcessValueFunc[T], selectFn OptionalPopSelectFunc[T]) {

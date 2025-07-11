@@ -8,7 +8,7 @@ import (
 )
 
 // Emit is a function used by combiners to emit aggregated results.
-type Emit[O any] func(context.Context, O, error)
+type Emit[O any] = func(context.Context, O, error)
 
 // Combiner is a struct that implements the psg.Combiner interface
 // using function fields. This allows for simple creation of combiners using

@@ -14,13 +14,15 @@ Items to complete before merging to main branch.
 - [ ] Review and document thread-safety guarantees for remaining public APIs
 
 ### 6. Implementation improvements
-- [ ] Add an emitWaiters backpressure system similar to the combineWaiters one (or merge them together) so that scatters are also held off when flushes are stacked up waiting for gathers 
 - [ ] Finish cleaning up tracing instrumentation to be concise, consistent, and follow the traceRegion pattern 
 - [ ] Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - [ ] Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 - [ ] consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
 - [ ] make sure that rdvq.Optional methods aren't inappropriately leaking through to Waiters or Required 
 - [ ] consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path
+- [ ] reproduce and fix hang detected in bench_20250710T205142Z_hang.txt
+- [ ] profile (memory, cpu, blocking) again after all the recent refactoring, see if there are any more obvious targets or low-hanging fruit
+- [ ] review again for readability
 
 ## Post-Merge Enhancements
 

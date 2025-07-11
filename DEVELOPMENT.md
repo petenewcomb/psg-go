@@ -79,6 +79,11 @@ This document provides guidance for anyone (human or AI) working on the PSG-Go c
 - Design documents should be mostly prose but still include key diagrams, small code blocks, and structured lists where they help with clarity or pedagogy.
 - Make sure that any tunable parameters are referred to as such and avoid implying that any concrete values provided as examples are dictated by the design.
 - Always include discussion of rejected alternatives.
+- Tell the story, don't list features: Design docs should narrate why a component exists, what problem it solves, and how it fits into the broader architecture. Avoid feature lists or API documentation—focus on the conceptual story.
+- Ground documentation in actual code and constraints: Base explanations on what actually exists in the codebase and the real constraints that shaped the design. Don't invent hypothetical alternatives unless they were genuinely considered. Refer to specific files, functions, and code patterns when explaining how something works.
+- Respect architectural uniqueness: PSG doesn't follow standard patterns (like traditional queuing systems). Design docs should explain how PSG's unique approach (notification conservation, structured concurrency constraints, etc.) shapes the solutions. Don't force conventional explanations onto unconventional architectures.
+- Connect to broader principles: Show how individual components serve PSG's fundamental goals (deadlock prevention, notification conservation, performance). Explain how architectural constraints enable the solutions rather than limit them.
+- Focus on integration patterns: Emphasize how components integrate with existing PSG infrastructure rather than standing alone. Show how new solutions leverage existing patterns (like Waiters, context hierarchy, atomic coordination) rather than inventing new coordination mechanisms.
 
 ## Testing Guidelines
 1. Test edge cases involving concurrency limits

@@ -142,24 +142,13 @@ func (c *CombineOp[I, O]) newScatterWork(
 
 	baseWorkFn := newScatterWork(target, taskFn, postResultFn)
 
-	wrappedFn := c.pool.waitingScatters.Wrap(baseWorkFn,
-		func(ctx context.Context) workq.WaitBehavior {
-			_, meta := j.ctxMeta(ctx)
-			return meta.WaitBehavior(func() bool {
-				shouldWait := !c.pool.waitingCombines.IsZero()
-				if shouldWait {
-					trace.Logf(ctx, traceRegion+".waitingScatters", "applying backpressure due to non-zero waitingCombines")
-				}
-				return shouldWait
-			})
-		},
-	)
+	governedFn := c.pool.governor.WrapUpstream(baseWorkFn, j.shouldBlock)
 
 	return func(ctx context.Context, ex workq.Execution) error {
 		traceRegion := traceRegion + ".workFn"
 		defer trace.StartRegion(ctx, traceRegion).End()
 		trace.Logf(ctx, traceRegion, "workID=%d", workID)
-		err := wrappedFn(ctx, ex)
+		err := governedFn(ctx, ex)
 		if err != nil {
 			trace.Logf(ctx, traceRegion, "returning err=%v", err)
 		}

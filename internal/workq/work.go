@@ -19,7 +19,7 @@ import (
 // execute anyway if the condition allows. This avoids a race in which the
 // condition becomes true between the initial check and the registration of the
 // ReadyFn.
-type WorkFunc = func(ctx context.Context, ex Execution) error
+type WorkFunc func(ctx context.Context, ex Execution) error
 
 // Execution provides the interface for a work function to interact with
 // the work queue system.

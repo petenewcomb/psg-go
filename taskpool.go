@@ -116,44 +116,42 @@ func (p *TaskPool) newScatterWork(taskFn boundTaskFunc) workq.WorkFunc {
 		p.decrementInFlight()
 	})
 
-	needDecrement := false
+	inFlightIncremented := false
 	decrementingWorkFn := func(ctx context.Context, ex workq.Execution) error {
 		traceRegion := traceRegion + ".decrementingWorkFn"
 		defer trace.StartRegion(context.Background(), traceRegion).End()
 
 		originalStarting := ex.Starting
+		started := false
 		ex.Starting = func() {
+			started = true
 			originalStarting()
-			needDecrement = false
-			trace.Logf(ctx, traceRegion+".Starting", "needDecrement=false")
+			trace.Logf(ctx, traceRegion, "started=true")
 		}
 		defer func() {
-			if needDecrement {
+			// If we didn't start, we must release our slot
+			if !started && inFlightIncremented {
 				p.decrementInFlight()
+				inFlightIncremented = false
 			}
 		}()
 		return baseWorkFn(ctx, ex)
 	}
 
-	inFlightIncremented := false
-	return p.waiters.Wrap(decrementingWorkFn,
-		func(ctx context.Context) workq.WaitBehavior {
-			ctx, meta := j.ctxMeta(ctx)
-			return meta.WaitBehavior(func() bool {
-				traceRegion := traceRegion + ".shouldWaitFn"
-				// Make sure we increment only once, though shouldWaitFn may
-				// be called multiple times. This is ok because once we have
-				// incremented, we have reserved our slot.
-				if !inFlightIncremented {
-					inFlightIncremented = p.incrementInFlight()
-					needDecrement = inFlightIncremented
-				} else {
-					trace.Logf(ctx, traceRegion, "inFlight counter already incremented")
-				}
-				return !inFlightIncremented
-			})
-		},
-	)
+	shouldWaitFn := func() bool {
+		traceRegion := traceRegion + ".shouldWaitFn"
+		// Make sure we increment only once for this invocation of the scatter
+		// work function, though shouldWaitFn may be called multiple times. This
+		// is ok because once we have incremented, we have reserved our slot.
+		if !inFlightIncremented {
+			inFlightIncremented = p.incrementInFlight()
+		} else {
+			trace.Logf(context.Background(), traceRegion, "inFlight counter already incremented")
+		}
+		return !inFlightIncremented
+	}
+
+	return p.waiters.Wrap(decrementingWorkFn, shouldWaitFn, j.shouldBlock)
 }
 
 //nolint:contextcheck // background context used only for tracing

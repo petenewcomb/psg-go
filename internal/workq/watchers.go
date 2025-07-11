@@ -71,8 +71,9 @@ func (w *Watchers) Notify(renotifyFn RenotifyFunc) {
 		switch state.Add(-1) {
 		case -1:
 			// renotifyShimFn had not yet decremented the state, so we will
-			// leave further notification propagation to it to ensure if
-			// needed.
+			// leave further notification propagation to it to ensure if needed
+			// and otherwise consider the notification productively delivered.
+			return
 		default:
 			// renotifyShimFn had been called at least once before we
 			// decremented, meaning that notification propagation is necessary

@@ -6,7 +6,6 @@ package psg
 import (
 	"context"
 	"errors"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,11 +43,6 @@ type Job struct {
 
 	gatherQueue workq.Offers
 
-	// If there are tasks or combiners waiting to post work to gatherQueue, the
-	// governor will block new top-level scatters, thereby applying backpressure
-	// to regulate the system.
-	governor workq.Governor
-
 	workQueue workq.Accepted
 
 	taskQueue             rdvq.Optional[pendingTask]
@@ -83,6 +77,9 @@ type boundGatherFunc func(ctx context.Context) error
 // [Job.CancelAndWait] to ensure that an early exit from the calling function
 // does not leave any outstanding goroutines.
 func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
+	traceRegion := "NewJob"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
 	ctx, cancelFn := context.WithCancel(ctx)
 	j := &Job{
 		ctx:      ctx,
@@ -90,7 +87,6 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	}
 	j.state.Init()
 	j.gatherQueue.Init()
-	j.governor.Init()
 	j.workQueue.Init()
 	j.taskQueue.Init(taskQueuePool)
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
@@ -113,8 +109,8 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	// Apply user options
 	j.SetOptions(options...)
 
-	trace.Logf(ctx,
-		"psg.NewJob", "job=%p, state=%p, gatherQueue=%p, workQueue=%p, taskQueue=%p, gcMonitor=%p, gcWaiters=%p",
+	trace.Logf(ctx, traceRegion,
+		"Job=%p, state=%p, gatherQueue=%p, workQueue=%p, taskQueue=%p, gcMonitor=%p, gcWaiters=%p",
 		j, &j.state, &j.gatherQueue, &j.workQueue, &j.taskQueue, &j.gcMonitor, &j.gcWaiters)
 
 	return j
@@ -141,8 +137,9 @@ var taskQueuePool = &rdvq.Pool[pendingTask]{}
 //
 //nolint:contextcheck // background context used only for tracing
 func (j *Job) Cancel() {
-	defer trace.StartRegion(context.Background(), "job.Cancel").End()
-	trace.Logf(context.Background(), "job.Cancel", "canceling job context")
+	traceRegion := "Job.Cancel"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Job=%p", j)
 	j.cancelFn()
 	j.gcMonitor.Cancel()
 }
@@ -187,12 +184,11 @@ func (j *Job) Gather(ctx context.Context) error {
 }
 
 func (j *Job) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
-	defer trace.StartRegion(ctx, "job.tryAddWork").End()
+	traceRegion := "Job.tryAddWork"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "Job=%p", j)
 	if workFn, ok := j.gatherQueue.TryPopFront(); ok {
-		trace.Logf(ctx, "job.tryAddWork", "found work in gather queue, queueing it")
 		queueFn(workFn)
-	} else {
-		trace.Logf(ctx, "job.tryAddWork", "no work found in gather queue")
 	}
 	return nil
 }
@@ -222,30 +218,11 @@ func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
 // preemptively gather or gather results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
-func (j *Job) yield(ctx context.Context, meta *ctxMeta) error {
-	/*
-		gathered := 0
-		for {
-			ok, err := j.tryGather(ctx, meta)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				break
-			}
-			gathered++
-		}
+func (j *Job) yield(ctx context.Context) error {
+	traceRegion := "Job.yield"
+	defer trace.StartRegion(ctx, traceRegion).End()
 
-		if gathered == 0 {
-	*/
-	// Give previously scattered tasks a chance to run. Without this call, the
-	// normal use case of scattering many tasks in a tight loop tends not to
-	// give those tasks a chance to run until they've all been started. This
-	// call to runtime.GoSched not only not only smooths task startup, it allows
-	// backpressure to operate more effectively, spacing out tasks to avoid
-	// boom-and-bust cycles of activity more reminiscent of batch processing.
-	runtime.Gosched()
-
+	ctx, meta := j.vetGather(ctx)
 	for {
 		ok, err := j.tryGather(ctx, meta)
 		if err != nil {
@@ -255,18 +232,16 @@ func (j *Job) yield(ctx context.Context, meta *ctxMeta) error {
 			break
 		}
 	}
-	//}
-
 	return nil
 }
 
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
 
 func (j *Job) block(ctx context.Context, blockWaitCh <-chan workq.RenotifyFunc) (workq.RenotifyFunc, error) {
-	defer trace.StartRegion(ctx, "job.block").End()
-	trace.Logf(ctx, "job.block", "starting, blockWaitCh=%p", blockWaitCh)
+	traceRegion := "Job.block"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "Job=%p", j)
 	ctx, meta := j.vetGather(ctx)
-	trace.Logf(ctx, "job.block", "meta=%v", meta)
 	var blockWaitRenotifyFn workq.RenotifyFunc
 	err := j.workQueue.ExecuteOne(ctx,
 		func(
@@ -283,7 +258,6 @@ func (j *Job) block(ctx context.Context, blockWaitCh <-chan workq.RenotifyFunc) 
 	if errors.Is(err, errBlockWaitSignaled) {
 		err = nil
 	}
-	trace.Logf(ctx, "job.block", "ExecuteOne returned blockWaitRenotifyFn=%v, err=%v", blockWaitRenotifyFn, err)
 	return blockWaitRenotifyFn, err
 }
 
@@ -308,24 +282,24 @@ func (j *Job) addWork(
 						inboxCh, outboxFilledCh, workReadyCh, blockWaitCh)
 					select {
 					case workFn := <-inboxCh:
-						trace.Logf(ctx, "job.addWork", "received workFn from inboxCh=%p", inboxCh)
+						trace.Logf(ctx, traceRegion, "received workFn from inboxCh=%p", inboxCh)
 						queueFn(workFn)
 						return rdvq.SelectInboxEmptied, nil
 					case renotifyFn := <-outboxFilledCh:
-						trace.Logf(ctx, "job.addWork", "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
+						trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
 						return rdvq.SelectOutboxFilled, renotifyFn
 					case renotifyFn := <-workReadyCh:
-						trace.Logf(ctx, "job.addWork", "received renotifyFn from workReadyCh=%p", workReadyCh)
+						trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", workReadyCh)
 						workReadyRenotifyFn = renotifyFn
 					case renotifyFn := <-blockWaitCh:
-						trace.Logf(ctx, "job.addWork", "received renotifyFn from blockWaitCh=%p", blockWaitCh)
+						trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
 						blockWaitRenotifyFn = renotifyFn
 						err = errBlockWaitSignaled
 					case <-j.state.Done():
-						trace.Logf(ctx, "job.addWork", "woke from job done signal")
+						trace.Logf(ctx, traceRegion, "received job done signal")
 						err = ErrJobDone
 					case <-ctx.Done():
-						trace.Logf(ctx, "job.addWork", "woke from context done signal")
+						trace.Logf(ctx, traceRegion, "received context done signal")
 						err = ctx.Err()
 					}
 					return rdvq.SelectAborted, nil
@@ -341,14 +315,14 @@ func (j *Job) postGather(ctx context.Context, outbox *rdvq.Outbox[workq.WorkFunc
 	traceRegion := "Job.postGather"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	workID := workIDCounter.Add(1)
+	workID := workq.NewWorkID()
 	trace.Logf(ctx, traceRegion, "Job=%p, outbox=%p, workID=%d", j, outbox, workID)
 
-	workFn := j.newGatherWork(gatherFn, workID, false)
+	workFn := j.newGatherWork(workID, gatherFn)
 
 	// Error can only be due to context cancellation, so safe to ignore here.
 	j.gatherQueue.PushBackFunc(outbox, workFn, func(outboxCh chan<- workq.WorkFunc) rdvq.SelectResult {
-		return j.postGatherSlow(ctx, outboxCh, gatherFn, workID)
+		return j.postGatherSlow(ctx, outboxCh, workID, workFn)
 	})
 }
 
@@ -356,28 +330,16 @@ func (j *Job) postGather(ctx context.Context, outbox *rdvq.Outbox[workq.WorkFunc
 func (j *Job) postGatherSlow(
 	ctx context.Context,
 	outboxCh chan<- workq.WorkFunc,
-	gatherFn boundGatherFunc,
-	workID int64,
+	workID workq.WorkID,
+	workFn workq.WorkFunc,
 ) rdvq.SelectResult {
 	traceRegion := "Job.postGatherSlow"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "outboxCh=%d", outboxCh)
-
-	j.governor.IncrementDownstreamWaiters()
-	workFn := j.newGatherWork(gatherFn, workID, true)
-	defer func() {
-		// If we incremented waiters but didn't successfully send to a channel,
-		// we must decrement the waiters ourselves
-		if workFn != nil {
-			j.governor.DecrementDownstreamWaiters()
-		}
-	}()
 
 	trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
 	select {
 	case outboxCh <- workFn:
-		workFn = nil // Successfully sent, don't decrement waiters in defer
-		trace.Logf(ctx, traceRegion, "received workFn from outboxCh=%d", outboxCh)
+		trace.Logf(ctx, traceRegion, "delivered workFn into outboxCh=%p", outboxCh)
 		return rdvq.SelectOutboxFilled
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
@@ -385,61 +347,66 @@ func (j *Job) postGatherSlow(
 	}
 }
 
-var workIDCounter atomic.Int64
-
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) newGatherWork(gatherFn boundGatherFunc, workID int64, waitersIncremented bool) workq.WorkFunc {
-	return func(ctx context.Context, ex workq.Execution) error {
-		defer trace.StartRegion(ctx, "job.gatherWork").End()
-		trace.Logf(ctx, "job.gatherWork", "starting, workID=%d", workID)
+func (j *Job) newWork(workID workq.WorkID, workFn workq.WorkFunc) workq.WorkFunc {
+	traceRegion := "job.newWork"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
 
-		ex.Starting()
-		if waitersIncremented {
-			j.governor.DecrementDownstreamWaiters()
+	// Register the work with the job to keep the job running until the work is
+	// completed.
+	j.state.IncrementWork()
+
+	return func(ctx context.Context, ex workq.Execution) error {
+		traceRegion := traceRegion + ".workFn"
+		defer trace.StartRegion(context.Background(), traceRegion).End()
+		trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
+
+		started := false
+		originalStarting := ex.Starting
+		if originalStarting != nil {
+			ex.Starting = func() {
+				started = true
+				originalStarting()
+			}
 		}
 
-		trace.Logf(ctx, "job.gatherWork", "started, workID=%d", workID)
+		defer func() {
+			if originalStarting == nil || started {
+				trace.Logf(ctx, traceRegion, "workID=%d", workID)
+				j.state.DecrementWork()
+			}
+		}()
+
+		return workFn(ctx, ex)
+	}
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (j *Job) newGatherWork(workID workq.WorkID, gatherFn boundGatherFunc) workq.WorkFunc {
+	traceRegion := "Job.newGatherWork"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
+
+	gatherWorkFn := func(ctx context.Context, ex workq.Execution) error {
+		traceRegion := traceRegion + ".workFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(ctx, traceRegion, "workID=%d", workID)
+
+		if ex.Starting == nil {
+			return nil
+		}
+		ex.Starting()
+
 		ctx, meta := j.ctxMeta(ctx)
 		var err error
 		meta.WithQueueFunc(ex.Queue, func() {
 			err = gatherFn(ctx)
 		})
-		trace.Logf(ctx, "job.gatherWork", "ended, workID=%d, err=%v", workID, err)
 		return err
 	}
-}
 
-//nolint:contextcheck // background context used only for tracing
-func (j *Job) newCombineGatherWork(gatherFn boundGatherFunc) workq.WorkFunc {
-	traceRegion := "Job.newCombineGatherWork"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	workID := workIDCounter.Add(1)
-	trace.Logf(context.Background(), traceRegion, "Job=%p, workID=%d", j, workID)
-
-	baseWorkFn := j.newGatherWork(gatherFn, workID, false)
-
-	waitersIncremented := false
-	return func(ctx context.Context, ex workq.Execution) error {
-		started := false
-		defer func() {
-			if !started && !waitersIncremented {
-				waitersIncremented = true
-				j.governor.IncrementDownstreamWaiters()
-			}
-		}()
-
-		originalStarting := ex.Starting
-		ex.Starting = func() {
-			started = true
-			originalStarting()
-			if waitersIncremented {
-				j.governor.DecrementDownstreamWaiters()
-			}
-		}
-
-		return baseWorkFn(ctx, ex)
-	}
+	return j.newWork(workID, gatherWorkFn)
 }
 
 // TryGather processes outstanding task results and then attempts to process
@@ -598,29 +565,33 @@ func (j *Job) spawnTaskWorker(_ context.Context, taskFn pendingTask) {
 	}()
 }
 
-// launch executes a task immediately without any concurrency constraints.
-// Implements the TaskPoolOrJob interface.
-func (j *Job) newScatterWork(taskFn boundTaskFunc) workq.WorkFunc {
+// Job.newScatterWork creates a task that will execute immediately without any
+// concurrency constraints. Implements the TaskPoolOrJob interface.
+func (j *Job) newScatterWork(workID workq.WorkID, taskFn boundTaskFunc) workq.WorkFunc {
 	// No completion callback needed for unlimited tasks
-	return j.newScatterWorkWithCompletedFn(taskFn, nil)
+	return j.newScatterWorkWithCompletedFn(workID, taskFn, nil)
 }
 
-// launch executes a task immediately without any concurrency constraints.
-// Implements the TaskPoolOrJob interface.
-func (j *Job) newScatterWorkWithCompletedFn(taskFn boundTaskFunc, completedFn func()) workq.WorkFunc {
+func (j *Job) newScatterWorkWithCompletedFn(
+	workID workq.WorkID,
+	taskFn boundTaskFunc,
+	completedFn func(),
+) workq.WorkFunc {
 
 	baseWorkFn := func(ctx context.Context, ex workq.Execution) error {
-		// Launch the task immediately without any pool tracking
+		if ex.Starting == nil {
+			return nil
+		}
 		ex.Starting()
+		j.state.IncrementWork()
 		j.startTask(ctx, func(ctx context.Context, taskWorkerOutboxMap *outboxMap) {
+			defer j.state.DecrementWork()
 			taskFn(ctx, completedFn, taskWorkerOutboxMap)
 		})
 		return nil
 	}
 
-	governedFn := j.governor.WrapUpstream(baseWorkFn, j.shouldBlock)
-
-	return j.gcWaiters.Wrap(governedFn, j.gcMonitor.Busy, j.shouldBlock)
+	return j.gcWaiters.Wrap(baseWorkFn, j.gcMonitor.Busy, j.shouldBlock)
 }
 
 // panicIfDone panics if the job is in the done state

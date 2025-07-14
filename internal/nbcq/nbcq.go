@@ -11,8 +11,11 @@
 package nbcq
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
+
+	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
 // structure pointer_t {ptr: pointer to node_t, count: unsigned integer}
@@ -48,6 +51,8 @@ func (q *Queue[T]) Init(p *Pool[T]) {
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
 func (q *Queue[T]) PushBack(p *Pool[T], value T) {
+	traceRegion := "nbcq.PushBack"
+
 	// E1: node = new_node()      // Allocate a new node from the free list
 	// E2: node->value = value	  // Copy enqueued value into node
 	// E3: node->next.ptr = NULL  // Set next pointer of node to NULL
@@ -69,6 +74,8 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 				// E9: if CAS(&tail.ptr->next, next, <node, next.count+1>)
 				if tail.ptr.next.CompareAndSwap(next, pointer[T]{ptr: node, count: next.count + 1}) {
 					// E10: break	  // Enqueue is done.  Exit loop
+
+					trace.Logf(context.Background(), traceRegion, "Queue=%p item=%d enqueued", q, tail.count)
 
 					// Instead of breaking the loop, the post-loop step is
 					// moved here to avoid expanding the scope of the tail
@@ -93,6 +100,8 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
 func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
+	traceRegion := "nbcq.PopFront"
+
 	// D1: loop // Keep trying until Dequeue is done
 	for {
 		// D2: head = Q->Head         // Read Head
@@ -123,6 +132,8 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 				// D13: if CAS(&Q->Head, head, <next.ptr, head.count+1>)
 				if q.head.CompareAndSwap(head, pointer[T]{ptr: next.ptr, count: head.count + 1}) {
 					// D14: break           // Dequeue is done.  Exit loop
+
+					trace.Logf(context.Background(), traceRegion, "Queue=%p item=%d dequeued", q, head.count)
 
 					// Instead of breaking the loop, the post-loop steps are
 					// moved here to avoid expanding the scope of the value

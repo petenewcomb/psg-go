@@ -5,7 +5,7 @@ This document provides guidance for anyone (human or AI) working on the PSG-Go c
 ## Reference Materials
 - See `README.md` for project overview, `docs` folder for design documentation, `benchmarks` for previous investigations
 - Check `TODO.md` for branch-specific work requirements and pre-merge checklists
-- Review `WORKING_NOTES.md` for current development context and insights on active branches
+- Review `WORKING_NOTES.md` for current development context and implementation insights needed for remaining work
 - Review GitHub issues for project-wide planning and cross-branch work streams
 
 ## Concurrency Safety
@@ -84,6 +84,58 @@ This document provides guidance for anyone (human or AI) working on the PSG-Go c
 - Respect architectural uniqueness: PSG doesn't follow standard patterns (like traditional queuing systems). Design docs should explain how PSG's unique approach (notification conservation, structured concurrency constraints, etc.) shapes the solutions. Don't force conventional explanations onto unconventional architectures.
 - Connect to broader principles: Show how individual components serve PSG's fundamental goals (deadlock prevention, notification conservation, performance). Explain how architectural constraints enable the solutions rather than limit them.
 - Focus on integration patterns: Emphasize how components integrate with existing PSG infrastructure rather than standing alone. Show how new solutions leverage existing patterns (like Waiters, context hierarchy, atomic coordination) rather than inventing new coordination mechanisms.
+
+## Tracing Guidelines
+
+PSG-Go uses comprehensive tracing instrumentation controlled by the `PSGTRACEINTERNALS` environment variable. Follow these principles when adding or maintaining tracing code:
+
+### Essential Tracing Patterns to Include
+- **Select branch logging**: Always log which branch of a select statement was taken, as this cannot be easily inferred and is crucial for debugging concurrent behavior
+- **Channel pointer correlation**: Log when channels are actually used (not just when they participate in a select) - the pointer values help correlate channel usage across goroutines  
+- **Async workflow correlation**: Use `workID` logging to correlate related work across scatter/gather lifecycles and async boundaries
+- **Cross-system coordination**: Log handoffs between different subsystems (task pools, combiner pools, etc.)
+- **Component relationship tracking**: In New/Init functions, log pointers to the created object and its key internal components to establish debugging relationships
+- **Object method tracking**: From tracked methods, log the pointer to the object being operated on to maintain object correlation throughout its lifecycle
+
+### Tracing Patterns to Avoid
+- **Method entry/exit redundancy**: Avoid "calling X" / "called X" logs when the called method handles its own tracing appropriately
+- **State change echoing**: Avoid logs that merely echo state changes already logged by the underlying operations
+- **StartTask usage**: Avoid `trace.StartTask` due to context-creation overhead - use `workID` correlation instead for tracking async work
+- **Context propagation for tracing**: Avoid propagating contexts solely for tracing purposes
+
+### Standard Tracing Structure
+Use this consistent pattern throughout the codebase:
+```go
+func NewComponent() *Component {
+    traceRegion := "NewComponent"
+    defer trace.StartRegion(ctx, traceRegion).End()
+    c := &Component{...}
+    trace.Logf(ctx, traceRegion, "Component=%p, internalQueue=%p, state=%p", 
+        c, &c.internalQueue, &c.state)
+    return c
+}
+
+func (c *Component) MyMethod() {
+    traceRegion := "Component.MyMethod"
+    defer trace.StartRegion(ctx, traceRegion).End()
+    trace.Logf(ctx, traceRegion, "Component=%p", c)
+    
+    // For nested functions/closures:
+    innerFn := func() {
+        traceRegion := traceRegion + ".innerFn" 
+        defer trace.StartRegion(ctx, traceRegion).End()
+        // ...
+    }
+}
+```
+
+### Context Usage in Tracing
+- Use `context.Background()` for tracing when a context is not available - tracing should not require context propagation
+- Prefer passed contexts when available, but don't propagate contexts solely for tracing purposes
+
+### When to Use StartRegion
+- Use `StartRegion` for significant logical boundaries and entry points
+- Avoid `StartRegion` for simple helper functions called in predictable patterns where the calling context already provides sufficient tracing coverage
 
 ## Testing Guidelines
 1. Test edge cases involving concurrency limits

@@ -3,4 +3,6 @@
 set -e
 set -o pipefail
 
-awk '/ ends at /{print $1}' "$@" | sort -t'#' -k2,2n
+SIMDIR="${BASH_SOURCE[0]%/*}"
+
+"$SIMDIR/extract-sim-plan.sh" "$@" | awk '/ ends at /{print $1}' | sort -t'#' -k2,2n

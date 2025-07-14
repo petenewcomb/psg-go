@@ -36,9 +36,11 @@ type Required[T any] struct {
 //nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) Init(p *Pool[T]) {
 	traceRegion := "rdvq.Required.Init"
+
 	q.Optional.Init(p)
 	q.fullOutboxes.Init(&p.nodePool)
 	q.outboxWaiters.Init()
+
 	trace.Logf(context.Background(), traceRegion,
 		"Required=%p, fullOutboxes=%p, outboxWaiters=%p",
 		q, &q.fullOutboxes, &q.outboxWaiters)
@@ -69,7 +71,6 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 
 	// First try to deliver to a waiting inbox
 	if q.Optional.TryPushBack(p, value) {
-		trace.Logf(context.Background(), "rdvq.PushBackFunc", "Optional.TryPushBack succeeded for outbox=%p", outbox)
 		return
 	}
 
@@ -119,7 +120,7 @@ func (q *Required[T]) PushBack(ctx context.Context, p *Pool[T], outbox *Outbox[T
 		trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
 		case outboxCh <- value:
-			trace.Logf(ctx, traceRegion, "delivered value to outboxCh=%p", outboxCh)
+			trace.Logf(ctx, traceRegion, "delivered value into outboxCh=%p", outboxCh)
 			return SelectOutboxFilled
 		case <-ctx.Done():
 			trace.Logf(ctx, traceRegion, "received context done signal")
@@ -144,7 +145,7 @@ func (q *Required[T]) TryPushBack(p *Pool[T], outbox *Outbox[T], value T) bool {
 		trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
 		case outboxCh <- value:
-			trace.Logf(context.Background(), traceRegion, "delivered value to outboxCh=%p", outboxCh)
+			trace.Logf(context.Background(), traceRegion, "delivered value into outboxCh=%p", outboxCh)
 			return SelectOutboxFilled
 		default:
 			trace.Logf(context.Background(), traceRegion, "outboxCh=%p full, aborting", outboxCh)

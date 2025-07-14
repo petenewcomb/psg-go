@@ -43,11 +43,10 @@ func (q *Pending) PushBack(ctx context.Context, outbox *Outbox, workFn WorkFunc)
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Pending) TryPushBack(outbox *Outbox, workFn WorkFunc) bool {
-	defer trace.StartRegion(context.Background(), "workq.TryPushBack").End()
-	trace.Logf(context.Background(), "workq.TryPushBack", "attempting push with outbox=%p workFn=%p", outbox, workFn)
-	result := q.Required.TryPushBack(pendingPool, outbox, workFn)
-	trace.Logf(context.Background(), "workq.TryPushBack", "outbox=%p result=%v", outbox, result)
-	return result
+	traceRegion := "Pending.TryPushBack"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Pending=%p, outbox=%p", q, outbox)
+	return q.Required.TryPushBack(pendingPool, outbox, workFn)
 }
 
 // See [rdvq.RequiredPopSelectFunc]
@@ -67,10 +66,10 @@ func (q *Pending) PopFront(ctx context.Context, queueFn QueueWorkFunc) error {
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Pending) TryPopFront() (WorkFunc, bool) {
-	defer trace.StartRegion(context.Background(), "workq.TryPopFront").End()
-	workFn, ok := q.Required.TryPopFront(pendingPool)
-	trace.Logf(context.Background(), "workq.TryPopFront", "ok=%v", ok)
-	return workFn, ok
+	traceRegion := "Pending.TryPopFront"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Pending=%p", q)
+	return q.Required.TryPopFront(pendingPool)
 }
 
 // See [rdvq.PushSelectFunc]

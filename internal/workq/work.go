@@ -5,27 +5,37 @@ package workq
 
 import (
 	"context"
+	"sync/atomic"
 )
 
 // WorkFunc represents a work item that will execute immediately or provide
-// notification for later retry. The work function must call ex.Starting()
-// before starting execution to confirm it will execute, and must not call
-// ex.Starting() if it cannot execute. If not executing immediately and
-// ex.ReadyFn is not nil, it must return quickly and later call ex.ReadyFn
-// when execution should be retried (e.g., when resources become available).
+// notification for later retry. If ex.Starting is nil, the work function is
+// being abandoned and must release any acquired resources and exit without
+// executing its work. Otherwise, the work function must call ex.Starting before
+// starting execution to confirm it will execute, and must not call ex.Starting
+// if it cannot execute. If not executing immediately and ex.Subscribe is not
+// nil, it must call ex.Subscribe to register for notification when execution
+// should be retried (e.g., when resources become available).
 //
-// IMPORTANT: After registering (queuing) a ReadyFn to be called later, the work
-// function must re-check the condition that caused it to not execute and
-// execute anyway if the condition allows. This avoids a race in which the
-// condition becomes true between the initial check and the registration of the
-// ReadyFn.
+// IMPORTANT: After calling ex.Subscribe the work function must re-check the
+// condition that caused it to not execute and execute anyway if the condition
+// allows. This avoids a race in which the condition becomes true between the
+// initial check and the registration of the ReadyFn.
 type WorkFunc func(ctx context.Context, ex Execution) error
 
 // Execution provides the interface for a work function to interact with
 // the work queue system.
 type Execution struct {
-	Blocking func()        // Call before blocking to release resources
-	Starting func()        // Call before starting execution to confirm execution
-	ReadyFn  NotifyFunc    // Call when ready to retry (can be nil for non-blocking)
-	Queue    QueueWorkFunc // Queue additional work items
+	Blocking  func()             // Call before blocking to release resources
+	Starting  func()             // Call before starting execution to confirm execution
+	Subscribe func(*Coordinator) // Call to subscribe to ready notifications
+	Queue     QueueWorkFunc      // Queue additional work items
+}
+
+var workIDCounter atomic.Int64
+
+type WorkID int64
+
+func NewWorkID() WorkID {
+	return WorkID(workIDCounter.Add(1))
 }

@@ -28,13 +28,23 @@ type Accepted struct {
 	fresh    nbcq.Queue[WorkFunc]
 	deferred nbcq.Queue[WorkFunc]
 	waiters  rdvq.Waiters
+	monitor  Monitor
 }
 
 // Init initializes the work queue using the global pool.
+//
+//nolint:contextcheck // background context used only for tracing
 func (q *Accepted) Init() {
+	traceRegion := "workq.Accepted.Init"
+
 	q.fresh.Init(workPool)
 	q.deferred.Init(workPool)
 	q.waiters.Init()
+	q.monitor.Notify = q.waiters.Notify
+
+	trace.Logf(context.Background(), traceRegion,
+		"Accepted=%p, fresh=%p, deferred=%p, waiters=%p, monitor=%p",
+		q, &q.fresh, &q.deferred, &q.waiters, &q.monitor)
 }
 
 // AddWorkFunc provides new work to the queue processor. It is called with a
@@ -64,11 +74,12 @@ const ErrEndOfWork = cerr.Error("end of work")
 // value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
 // been called but was nil.
 func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error {
-	defer trace.StartRegion(ctx, "workq.Accepted.ExecuteOne").End()
-	trace.Logf(ctx, "workq.Accepted.ExecuteOne", "q=%p", q)
+	traceRegion := "workq.Accepted.ExecuteOne"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "Accepted=%p", q)
 
-	// Used to propagate wokeByNotify flag from a wait at the end of the loop to
-	// the controller created at the beginning
+	// Used to propagate a renotifyFn collected from the wait at the end of the
+	// loop to the controller created at the beginning
 	var renotifyFn RenotifyFunc
 	defer func() {
 		if renotifyFn != nil {
@@ -91,22 +102,18 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 				c.Close()
 			}()
 
-			trace.Log(ctx, "workq.Accepted.ExecuteOne", "controller created, trying accepted work")
 			var err error
-			if workExecuted, err := c.TryAccepted(ctx, nil); workExecuted || err != nil {
-				trace.Logf(ctx, "workq.Accepted.ExecuteOne", "TryAccepted returned workExecuted=%v err=%v", workExecuted, err)
+			if workExecuted, err := c.TryAccepted(ctx, false); workExecuted || err != nil {
 				return workExecuted, err
 			}
-			trace.Log(ctx, "workq.Accepted.ExecuteOne", "TryAccepted found no work, trying new work")
 
-			if endOfWorkErr != nil {
+			if !c.workWasDeferred && endOfWorkErr != nil {
 				return false, endOfWorkErr
 			}
 
 			// Avoid full blocking protocol if we can
 			workAdded, err := c.TryAddNew(ctx)
 			if err != nil {
-				trace.Logf(ctx, "workq.Accepted.ExecuteOne", "TryAddNew returned workAdded=%v err=%v", workAdded, err)
 				if errors.Is(err, ErrEndOfWork) {
 					endOfWorkErr = err
 					return false, nil
@@ -114,14 +121,11 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 				return false, err
 			}
 			if workAdded {
-				trace.Logf(ctx, "workq.Accepted.ExecuteOne", "TryAddNew succeeded")
 				return false, nil
 			}
 
 			// Block and wait for work to become available
-			trace.Logf(ctx, "workq.Accepted.ExecuteOne", "calling WaitForNew")
 			workExecuted, err := c.WaitForNew(ctx)
-			trace.Logf(ctx, "workq.Accepted.ExecuteOne", "WaitForNew returned err=%v", err)
 			if workExecuted {
 				return true, err
 			}
@@ -160,12 +164,16 @@ func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) 
 	defer c.Close()
 
 	// Try accepted work first
-	if workExecuted, err := c.TryAccepted(ctx, nil); workExecuted || err != nil {
+	if workExecuted, err := c.TryAccepted(ctx, false); workExecuted || err != nil {
 		return workExecuted, err
 	}
 
 	if addWorkFn == nil {
-		return false, ErrEndOfWork
+		if c.workWasDeferred {
+			return false, nil
+		} else {
+			return false, ErrEndOfWork
+		}
 	}
 
 	// Requeue immediately because there's no need to hold buffered items to
@@ -186,18 +194,20 @@ func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) 
 		return false, addErr
 	}
 
-	workExecuted, err := c.TryAccepted(ctx, nil)
-	if err == nil {
+	c.workWasDeferred = false
+	workExecuted, err := c.TryAccepted(ctx, false)
+	if !c.workWasDeferred && err == nil {
 		err = addErr
 	}
 	return workExecuted, err
 }
 
 type controller struct {
-	q          *Accepted
-	buffer     *[]bufferedWork
-	addWorkFn  AddWorkFunc
-	renotifyFn RenotifyFunc
+	q               *Accepted
+	buffer          *[]bufferedWork
+	addWorkFn       AddWorkFunc
+	renotifyFn      RenotifyFunc
+	workWasDeferred bool
 }
 
 func (c *controller) Close() {
@@ -206,20 +216,25 @@ func (c *controller) Close() {
 
 // TryAccepted attempts to execute work from both accepted queues.
 // First exhausts newly accepted work, then tries deferred work.
-func (c *controller) TryAccepted(ctx context.Context, readyFn NotifyFunc) (bool, error) {
-	if workExecuted, err := c.tryAccepted(ctx, &c.q.fresh, readyFn); workExecuted || err != nil {
+func (c *controller) TryAccepted(ctx context.Context, allowSubscription bool) (bool, error) {
+	traceRegion := "workq.controller.TryAccepted"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	if workExecuted, err := c.tryAccepted(ctx, &c.q.fresh, allowSubscription); workExecuted || err != nil {
+		trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", workExecuted, err)
 		return workExecuted, err
 	}
-	return c.tryAccepted(ctx, &c.q.deferred, readyFn)
+	workExecuted, err := c.tryAccepted(ctx, &c.q.deferred, allowSubscription)
+	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", workExecuted, err)
+	return workExecuted, err
 }
 
-func (c *controller) tryAccepted(ctx context.Context, q *nbcq.Queue[WorkFunc], readyFn NotifyFunc) (bool, error) {
+func (c *controller) tryAccepted(ctx context.Context, q *nbcq.Queue[WorkFunc], allowSubscription bool) (bool, error) {
 	for {
 		i := c.collectAccepted(q)
 		if i < 0 {
 			return false, nil
 		}
-		if workExecuted, err := c.execute(ctx, i, readyFn); workExecuted || err != nil {
+		if workExecuted, err := c.execute(ctx, i, allowSubscription); workExecuted || err != nil {
 			return workExecuted, err
 		}
 	}
@@ -230,19 +245,31 @@ var acceptedWorkCounter atomic.Int64
 //nolint:contextcheck // background context used only for tracing
 func (c *controller) queueFresh(workFn WorkFunc) {
 	traceRegion := "workq.Accepted.queueFresh"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	acceptedWorkID := acceptedWorkCounter.Add(1)
-	trace.Logf(context.Background(), traceRegion,
-		"Accepted(%p) queuing fresh work with acceptedWorkID=%d",
-		c.q, acceptedWorkID)
-	c.q.fresh.PushBack(workPool, func(ctx context.Context, ex Execution) error {
-		trace.Logf(ctx, traceRegion+".workFn", "executing acceptedWorkID=%d", acceptedWorkID)
-		return workFn(ctx, ex)
-	})
+	if trace.IsEnabled() {
+		defer trace.StartRegion(context.Background(), traceRegion).End()
+		acceptedWorkID := acceptedWorkCounter.Add(1)
+		trace.Logf(context.Background(), traceRegion,
+			"Accepted(%p) queuing fresh work with acceptedWorkID=%d",
+			c.q, acceptedWorkID)
+		originalWorkFn := workFn
+		workFn = func(ctx context.Context, ex Execution) error {
+			traceRegion := traceRegion + ".workFn"
+			trace.Logf(ctx, traceRegion, "executing acceptedWorkID=%d", acceptedWorkID)
+			err := originalWorkFn(ctx, ex)
+			if err != nil {
+				trace.Logf(ctx, traceRegion, "returning err=%v", err)
+			}
+			return err
+		}
+	}
+	c.q.fresh.PushBack(workPool, workFn)
 }
 
 func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
+	traceRegion := "workq.controller.TryAddNew"
+	defer trace.StartRegion(ctx, traceRegion).End()
 	if c.addWorkFn == nil {
+		trace.Logf(ctx, traceRegion, "returning workAdded=false err=ErrEndOfWork")
 		return false, ErrEndOfWork
 	}
 	workAdded := false
@@ -252,11 +279,15 @@ func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
 	}
 
 	_, err := c.addWorkFn(ctx, nil, queueFn)
+	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", workAdded, err)
 	return workAdded, err
 }
 
 func (c *controller) WaitForNew(ctx context.Context) (bool, error) {
+	traceRegion := "workq.controller.WaitForNew"
+	defer trace.StartRegion(ctx, traceRegion).End()
 	if c.addWorkFn == nil {
+		trace.Logf(ctx, traceRegion, "returning workExecuted=false err=ErrEndOfWork")
 		return false, ErrEndOfWork
 	}
 	workExecuted := false
@@ -270,6 +301,7 @@ func (c *controller) WaitForNew(ctx context.Context) (bool, error) {
 		c.renotifyFn, err = c.addWorkFn(ctx, waitCh, c.queueFresh)
 		return c.renotifyFn
 	})
+	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", workExecuted, err)
 	return workExecuted, err
 }
 
@@ -284,7 +316,7 @@ func (c *controller) collectAccepted(q *nbcq.Queue[WorkFunc]) int {
 	return i
 }
 
-func (c *controller) execute(ctx context.Context, i int, readyFn NotifyFunc) (bool, error) {
+func (c *controller) execute(ctx context.Context, i int, allowSubscription bool) (bool, error) {
 	traceRegion := "workq.Accepted.execute"
 	workExecuted := false
 	bw := (*c.buffer)[i]
@@ -298,20 +330,29 @@ func (c *controller) execute(ctx context.Context, i int, readyFn NotifyFunc) (bo
 		c.commitStart(i)
 		commitStart = func() {}
 	}
-	err := bw.workFn(ctx, Execution{
-		Blocking: func() {
-			commitStart()
-		},
+
+	ex := Execution{
+		Blocking: commitStart,
 		Starting: func() {
 			commitStart()
 			workExecuted = true
 		},
-		ReadyFn: readyFn,
-		Queue:   c.queueFresh,
-	})
+		Queue: c.queueFresh,
+	}
+
+	if allowSubscription {
+		ex.Subscribe = c.q.monitor.Subscribe
+	}
+
+	err := bw.workFn(ctx, ex)
 	if errors.Is(err, ErrEndOfWork) {
 		panic("ErrEndOfWork received from work function")
 	}
+
+	if !workExecuted {
+		c.workWasDeferred = true
+	}
+
 	return workExecuted, err
 }
 
@@ -338,18 +379,13 @@ func (c *controller) commitStart(i int) {
 // accepted queues for any new work, then retries deferred work items with
 // the notification function to register for later wake-up.
 func (c *controller) retryExecutionBeforeWait(ctx context.Context) (bool, error) {
-	readyFn := func(renotifyFn RenotifyFunc) {
-		trace.Logf(ctx, "workq.retryExecutionBeforeWait", "readyFn called, notifying waiters")
-		c.q.waiters.Notify(renotifyFn)
-	}
-
 	// Walk through the deferred work items to retry (i.e., verify that the wait
 	// is still needed) and pass the notification function to them.
 	if c.buffer != nil {
 		// Iterate through the buffer and retry each work item while giving each
-		// a chance to register the readyFn
+		// a chance to register for notifications
 		for i := range *c.buffer {
-			workExecuted, err := c.execute(ctx, i, readyFn)
+			workExecuted, err := c.execute(ctx, i, true)
 			if workExecuted || err != nil {
 				return workExecuted, err
 			}
@@ -358,7 +394,7 @@ func (c *controller) retryExecutionBeforeWait(ctx context.Context) (bool, error)
 
 	// Check to make sure nothing else accumulated before we registered as a
 	// waiter.
-	if workExecuted, err := c.TryAccepted(ctx, readyFn); workExecuted || err != nil {
+	if workExecuted, err := c.TryAccepted(ctx, true); workExecuted || err != nil {
 		return workExecuted, err
 	}
 
@@ -372,17 +408,15 @@ func (c *controller) retryExecutionBeforeWait(ctx context.Context) (bool, error)
 //
 //nolint:contextcheck // background context used only for tracing
 func (c *controller) requeueBuffer() {
-	defer trace.StartRegion(context.Background(), "workq.requeueBuffer").End()
-	trace.Logf(context.Background(), "workq.requeueBuffer", "buffer=%p", c.buffer)
+	traceRegion := "workq.controller.requeueBuffer"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
 	if c.buffer != nil {
-		trace.Logf(context.Background(), "workq.requeueBuffer", "buffer contents=%v", *c.buffer)
 		for i := range *c.buffer {
 			workFn := (*c.buffer)[i].workFn
 			if workFn != nil {
 				(*c.buffer)[i].workFn = nil
-				trace.Logf(context.Background(), "workq.requeueBuffer", "pushing %p at index %d to deferred queue", workFn, i)
+				trace.Logf(context.Background(), traceRegion, "pushing workFn at index %d to deferred queue", i)
 				c.q.deferred.PushBack(workPool, workFn)
-				trace.Logf(context.Background(), "workq.requeueBuffer", "pushed %p", workFn)
 			}
 		}
 		*c.buffer = (*c.buffer)[:0]
@@ -398,21 +432,20 @@ func (c *controller) requeueBuffer() {
 		renotifyFn()
 	}
 
-	trace.Logf(context.Background(), "workq.requeueBuffer", "done")
 }
 
 //nolint:contextcheck // background context used only for tracing
 func (c *controller) addToBuffer(workFn WorkFunc, wasDeferred bool) {
-	defer trace.StartRegion(context.Background(), "workq.addToBuffer").End()
-	trace.Logf(context.Background(), "workq.addToBuffer", "buffer=%p workFn=%p", c.buffer, workFn)
+	traceRegion := "workq.controller.addToBuffer"
 	if c.buffer == nil {
 		c.buffer = bufferPool.Get().(*[]bufferedWork)
 	}
+	index := len(*c.buffer)
 	*c.buffer = append(*c.buffer, bufferedWork{
 		workFn:      workFn,
 		wasDeferred: wasDeferred,
 	})
-	trace.Logf(context.Background(), "workq.addToBuffer", "buffer contents: %v", *c.buffer)
+	trace.Logf(context.Background(), traceRegion, "added workFn at index %d, wasDeferred=%v", index, wasDeferred)
 }
 
 func (c *controller) bufferLen() int {

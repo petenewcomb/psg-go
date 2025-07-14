@@ -65,6 +65,10 @@ func (g *GatherOp[T]) Scatter(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) error {
+	traceRegion := "GatherOp.Scatter"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
+
 	ctx, meta := vetScatter(ctx, target, taskFn)
 	workFn := g.newScatterWork(target, taskFn)
 	return scatterNow(ctx, meta, target.job(), workFn)
@@ -86,6 +90,10 @@ func (g *GatherOp[T]) TryScatter(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) (bool, error) {
+	traceRegion := "GatherOp.TryScatter"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
+
 	ctx, meta := vetScatter(ctx, target, taskFn)
 	workFn := g.newScatterWork(target, taskFn)
 	return tryScatterNow(ctx, meta, target, workFn)
@@ -95,42 +103,34 @@ func (g *GatherOp[T]) newScatterWork(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) workq.WorkFunc {
+	traceRegion := "GatherOp.newScatterWork"
+
+	workID := workq.NewWorkID()
+	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
+
 	j := target.job()
 
-	workID := workIDCounter.Add(1)
-	trace.Logf(context.Background(), "gather.newScatterWork", "start, workID=%d", workID)
-
 	postResultFn := func(ctx context.Context, taskWorkerOutboxMap *outboxMap, value T, err error) {
-		defer trace.StartRegion(ctx, "gather.postResultFn").End()
+		traceRegion := traceRegion + ".postResultFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
 
 		// Post the gather using the task worker's outbox for the job's gather queue
 		gatherOutbox := OutboxFor[workq.WorkFunc](taskWorkerOutboxMap, j.gatherOutboxKey())
-		trace.Logf(ctx, "gather.postResultFn", "start, outbox=%p, workID=%d", gatherOutbox, workID)
+		trace.Logf(ctx, traceRegion, "outbox=%p, workID=%d", gatherOutbox, workID)
 
 		// Bind the supplied gatherFn to the result.
 		boundGatherFn := func(ctx context.Context) error {
-			defer trace.StartRegion(ctx, "gather.boundGatherFn").End()
-			trace.Logf(ctx, "gather.boundGatherFn", "start, workID=%d", workID)
+			traceRegion := traceRegion + ".boundGatherFn"
+			defer trace.StartRegion(ctx, traceRegion).End()
+			trace.Logf(ctx, traceRegion, "workID=%d", workID)
 
-			defer func() {
-				// Balances the increment in newScatterWork
-				j.state.DecrementWork()
-				trace.Logf(ctx, "gather.boundGatherFn", "decremented work, workID=%d", workID)
-			}()
 			return g.gatherFn(ctx, value, err)
 		}
 
 		j.postGather(ctx, gatherOutbox, boundGatherFn)
-		trace.Logf(ctx, "gather.postResultFn", "posted boundGatherFn to outbox=%p, workID=%d", gatherOutbox, workID)
 	}
 
-	scatterWorkFn := newScatterWork(target, taskFn, postResultFn)
+	scatterWorkFn := newScatterWork(target, workID, taskFn, postResultFn)
 
-	return func(ctx context.Context, ex workq.Execution) error {
-		defer trace.StartRegion(ctx, "gatherop.scatterWorkFn").End()
-		trace.Logf(ctx, "gatherop.scatterWorkFn", "calling scatterWorkFn, workID=%d", workID)
-		err := scatterWorkFn(ctx, ex)
-		trace.Logf(ctx, "gatherop.scatterWorkFn", "called scatterWorkFn, workID=%d, err=%v", workID, err)
-		return err
-	}
+	return j.newWork(workID, scatterWorkFn)
 }

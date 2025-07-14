@@ -47,7 +47,7 @@ func (ob *Outbox[T]) IsEmpty(p *Pool[T]) bool {
 	trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
 	select {
 	case outboxCh <- *new(T):
-		trace.Logf(context.Background(), traceRegion, "delivered zero value to outboxCh=%p, returning true", outboxCh)
+		trace.Logf(context.Background(), traceRegion, "delivered zero value into outboxCh=%p, returning true", outboxCh)
 		// Successfully sent a zero value, so the channel is empty
 		ob.ch = nil
 		<-outboxCh // remove the zero value
@@ -105,7 +105,7 @@ func (ob *Outbox[T]) Wait(ctx context.Context, p *Pool[T]) error {
 		trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
 		case outboxCh <- *new(T):
-			trace.Logf(ctx, traceRegion, "delivered zero value to outboxCh=%p", outboxCh)
+			trace.Logf(ctx, traceRegion, "delivered zero value into outboxCh=%p", outboxCh)
 			return SelectOutboxFilled
 		case <-ctx.Done():
 			trace.Logf(ctx, traceRegion, "received context done signal")

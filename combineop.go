@@ -114,7 +114,7 @@ func (c *CombineOp[I, O]) newScatterWork(
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	workID := workIDCounter.Add(1)
+	workID := workq.NewWorkID()
 	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
 
 	postResultFn := func(ctx context.Context, taskWorkerOutboxMap *outboxMap, input I, inputErr error) {
@@ -135,9 +135,6 @@ func (c *CombineOp[I, O]) newScatterWork(
 			defer trace.StartRegion(ctx, traceRegion).End()
 			trace.Logf(ctx, traceRegion, "workID=%d", workID)
 
-			// Balances the increment in newScatterWork
-			defer j.state.DecrementWork()
-
 			halfBoundCombineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
 			halfBoundCombineFn(ctx, input, inputErr)
 		}
@@ -145,20 +142,11 @@ func (c *CombineOp[I, O]) newScatterWork(
 		c.pool.postCombine(ctx, combineOutbox, boundCombineFn)
 	}
 
-	baseWorkFn := newScatterWork(target, taskFn, postResultFn)
+	baseWorkFn := newScatterWork(target, workID, taskFn, postResultFn)
 
 	governedFn := c.pool.governor.WrapUpstream(baseWorkFn, j.shouldBlock)
 
-	return func(ctx context.Context, ex workq.Execution) error {
-		traceRegion := traceRegion + ".workFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		trace.Logf(ctx, traceRegion, "workID=%d", workID)
-		err := governedFn(ctx, ex)
-		if err != nil {
-			trace.Logf(ctx, traceRegion, "returning err=%v", err)
-		}
-		return err
-	}
+	return j.newWork(workID, governedFn)
 }
 
 // combineOpConfigWrapper wraps a CombineOp to implement the combineOpConfig interface for options

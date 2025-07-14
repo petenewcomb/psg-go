@@ -3,5 +3,5 @@
 set -e
 set -o pipefail
 
-awk '/plan: Plan#/{print $NF};/sim.debugf.* done/{print $(NF-1)};/sim.debugf: ended/{print $(NF-6)}' "$@" | \
-  sort -t'#' -k2,2n
+sed -rn 's;^.* ([A-Za-z]+#[0-9]+) step ([0-9]+)/\2: done$;\1;p' "$@" | \
+    sort -t'#' -k2,2n

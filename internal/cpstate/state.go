@@ -194,8 +194,8 @@ func (cps *CombinerPoolState) report(msg string) {
 	if !cpDebug {
 		return
 	}
-	trace.Logf(context.Background(),
-		"cpstate.debug", "%s: goroutines: %d->%d->%d throughput: %.1f/s (%.1f/s each) util: %.1f%% controller: %v",
+	fmt.Printf(
+		"%s: goroutines: %d->%d->%d throughput: %.1f/s (%.1f/s each) util: %.1f%% controller: %v\n",
 		msg,
 		cps.spawnedGoroutineCount.Load(),
 		cps.liveGoroutineCount,

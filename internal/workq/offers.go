@@ -12,6 +12,11 @@ import (
 // pending is a private type alias for Pending to prevent direct access to base methods
 type pending = Pending
 
+// Offers adds to [Pending] the ability to create work items that offer other
+// work items to a [Pending] queue. This allows the offers themselves to be
+// managed in a non-blocking fashion by an [Accepted] work queue and thus
+// facilitates asynchronous posting of work items from one work queue to
+// another.
 type Offers struct {
 	pending
 	waiters Waiters
@@ -31,14 +36,12 @@ func (q *Offers) Init() {
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Offers) TryPopFront() (WorkFunc, bool) {
-	defer trace.StartRegion(context.Background(), "workq.TryPopFront").End()
+	traceRegion := "Offers.TryPopFront"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
 	workFn, ok := q.pending.TryPopFront()
 	if ok {
-		// Notify waiters that there's now space available in the queue
-		trace.Logf(context.Background(), "workq.TryPopFront", "notifying waiters after successful pop of workFn=%p", workFn)
 		q.waiters.Notify(func() {})
-	} else {
-		trace.Logf(context.Background(), "workq.TryPopFront", "no work found")
 	}
 	return workFn, ok
 }
@@ -71,11 +74,11 @@ func (q *Offers) PopFront(ctx context.Context, queueFn QueueWorkFunc) error {
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Offers) PopFrontExcessFunc(selectFn WaitSelectFunc) (WorkFunc, bool) {
-	defer trace.StartRegion(context.Background(), "workq.PopFrontExcessFunc").End()
+	traceRegion := "Offers.PopFrontExcessFunc"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
 	workFn, ok := q.pending.PopFrontExcessFunc(selectFn)
 	if ok {
-		// Notify waiters that there's now space available in the queue
-		trace.Logf(context.Background(), "workq.PopFrontExcessFunc", "notifying waiters after successful pop")
 		q.waiters.Notify(func() {})
 	}
 	return workFn, ok
@@ -83,11 +86,11 @@ func (q *Offers) PopFrontExcessFunc(selectFn WaitSelectFunc) (WorkFunc, bool) {
 
 // PopFrontExcess wraps Pending.PopFrontExcess and notifies waiters when work is successfully consumed
 func (q *Offers) PopFrontExcess(ctx context.Context) (WorkFunc, error) {
-	defer trace.StartRegion(ctx, "workq.PopFrontExcess").End()
+	traceRegion := "Offers.PopFrontExcess"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "Offers=%p", q)
 	workFn, err := q.pending.PopFrontExcess(ctx)
 	if err == nil {
-		// Notify waiters that there's now space available in the queue
-		trace.Logf(ctx, "workq.PopFrontExcess", "notifying waiters after successful pop")
 		q.waiters.Notify(func() {})
 	}
 	return workFn, err
@@ -106,34 +109,25 @@ type WithOutboxFunc func(context.Context, func(*Outbox))
 func (q *Offers) NewPostOfferWork(workFn WorkFunc, withOutboxFn WithOutboxFunc) WorkFunc {
 	traceRegion := "workq.Offers.NewPostOfferWork"
 	trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
-	pendingWorkFn := func(ctx context.Context, ex Execution) error {
-		traceRegion := traceRegion + ".pendingWorkFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
-		originalStarting := ex.Starting
-		ex.Starting = func() {
-			trace.Logf(ctx, traceRegion, "notifying waiters")
-			q.waiters.Notify(func() {})
-			originalStarting()
-		}
-		return workFn(ctx, ex)
-	}
 	return func(ctx context.Context, ex Execution) error {
 		traceRegion := traceRegion + ".workFn"
 		defer trace.StartRegion(ctx, traceRegion).End()
 		trace.Logf(context.Background(), traceRegion, "Offers=%p", q)
+
+		if ex.Starting == nil {
+			// If the posting is abandoned, so too must be the work to be
+			// posted.
+			return workFn(ctx, Execution{})
+		}
+
 		var pushed bool
 		withOutboxFn(ctx, func(outbox *Outbox) {
-			pushed = q.TryPushBack(outbox, pendingWorkFn)
-			if !pushed && ex.ReadyFn != nil {
-				q.waiters.Add(func(renotifyFn RenotifyFunc) {
-					ex.ReadyFn(func() {
-						q.waiters.Notify(renotifyFn)
-					})
-				})
+			pushed = q.TryPushBack(outbox, workFn)
+			if !pushed && ex.Subscribe != nil {
+				ex.Subscribe(&q.waiters.Coordinator)
 				// Retry push after registering for notification in case
 				// something happened in between
-				pushed = q.TryPushBack(outbox, pendingWorkFn)
+				pushed = q.TryPushBack(outbox, workFn)
 			}
 		})
 		if pushed {

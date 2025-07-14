@@ -103,14 +103,14 @@ func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (p *TaskPool) newScatterWork(taskFn boundTaskFunc) workq.WorkFunc {
+func (p *TaskPool) newScatterWork(workID workq.WorkID, taskFn boundTaskFunc) workq.WorkFunc {
 	traceRegion := "TaskPool.newScatterWork"
 
 	j := p.j
 
-	trace.Logf(context.Background(), traceRegion, "TaskPool=%p", p)
+	trace.Logf(context.Background(), traceRegion, "TaskPool=%p, workID=%d", p, workID)
 
-	baseWorkFn := j.newScatterWorkWithCompletedFn(taskFn, func() {
+	baseWorkFn := j.newScatterWorkWithCompletedFn(workID, taskFn, func() {
 		// Decrement the task pool's in-flight count BEFORE waiting on the
 		// gather channel. This makes it safe for gather functions to call
 		// `Scatter` with this same `TaskPool` instance without deadlock, as
@@ -123,13 +123,16 @@ func (p *TaskPool) newScatterWork(taskFn boundTaskFunc) workq.WorkFunc {
 		traceRegion := traceRegion + ".decrementingWorkFn"
 		defer trace.StartRegion(context.Background(), traceRegion).End()
 
-		originalStarting := ex.Starting
 		started := false
-		ex.Starting = func() {
-			started = true
-			originalStarting()
-			trace.Logf(ctx, traceRegion, "started=true")
+		originalStarting := ex.Starting
+		if originalStarting != nil {
+			ex.Starting = func() {
+				started = true
+				originalStarting()
+				trace.Logf(ctx, traceRegion, "started=true")
+			}
 		}
+
 		defer func() {
 			// If we didn't start, we must release our slot
 			if !started && inFlightIncremented {
@@ -137,6 +140,7 @@ func (p *TaskPool) newScatterWork(taskFn boundTaskFunc) workq.WorkFunc {
 				inFlightIncremented = false
 			}
 		}()
+
 		return baseWorkFn(ctx, ex)
 	}
 

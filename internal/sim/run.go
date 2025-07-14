@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,11 +55,14 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 }
 
 func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
-	defer trace.StartRegion(ctx, "sim.run").End()
+	traceRegion := "sim.run"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", plan)
 
 	job := psg.NewJob(ctx)
 	defer func() {
-		defer trace.StartRegion(ctx, "sim.run.cleanup").End()
+		traceRegion := "sim.run.cleanup"
+		defer trace.StartRegion(ctx, traceRegion).End()
 		job.CancelAndWait()
 	}()
 
@@ -76,10 +78,6 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
 		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
 	}
-	c.MinScatterDelay.Store(math.MaxInt64)
-	c.MinGatherDelay.Store(math.MaxInt64)
-	c.MinCombineDelay.Store(math.MaxInt64)
-	c.MinCombineGatherDelay.Store(math.MaxInt64)
 	return c.Run(ctx, t)
 }
 
@@ -99,21 +97,16 @@ type controller struct {
 	MaxConcurrencyByCombinerPool []atomicMinMaxInt64
 	GatheredCount                atomic.Int64
 	StartTime                    time.Time
-	MinScatterDelay              atomicMinMaxInt64
-	MinGatherDelay               atomicMinMaxInt64
-	MinCombineDelay              atomicMinMaxInt64
-	MinCombineGatherDelay        atomicMinMaxInt64
 }
 
 func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	traceRegion := "sim.controller.Run"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, "plan", "%v", c.Plan)
 	c.StartTime = time.Now()
 
-	for _, step := range c.Plan.Steps {
+	for i, step := range c.Plan.Steps {
 		switch step := step.(type) {
 		case Scatter:
+			trace.Logf(ctx, traceRegion, "%v step %d/%d: scatter %v", c.Plan, i+1, len(c.Plan.Steps)+1, step.Task)
 			c.scatterTask(ctx, t, step.Task)
 		default:
 			panic(fmt.Sprintf("unknown step type %T", step))
@@ -122,21 +115,18 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 
 	chk := assert.New(t)
 	// Loop to handle expected errors from gathers
-	trace.WithRegion(ctx, "sim.CloseAndGatherAll(loop)", func() {
-		for {
-			err := c.Job.CloseAndGatherAll(ctx)
-			trace.Logf(ctx, "sim.CloseAndGatherAll", "err=%v", err)
-			if err == nil {
-				break
-			}
-			var ge ExpectedGatherError
-			if errors.As(err, &ge) {
-				chk.True(ge.g.Func.ReturnError)
-			} else {
-				chk.NoError(err)
-			}
+	for {
+		err := c.Job.CloseAndGatherAll(ctx)
+		if err == nil {
+			break
 		}
-	})
+		var ge ExpectedGatherError
+		if errors.As(err, &ge) {
+			chk.True(ge.g.Func.ReturnError)
+		} else {
+			chk.NoError(err)
+		}
+	}
 
 	gatheredCount := c.GatheredCount.Load()
 	chk.GreaterOrEqual(gatheredCount, int64(c.Plan.MinGatherCount))
@@ -147,12 +137,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		maxConcurrencyByTaskPool[i] = c.MaxConcurrencyByTaskPool[i].Load()
 	}
 
-	trace.Logf(ctx, "sim.controller.Run(summary)", "min delays: scatter=%v gather=%v combine=%v combineGather=%v",
-		time.Duration(c.MinScatterDelay.Load()),
-		time.Duration(c.MinGatherDelay.Load()),
-		time.Duration(c.MinCombineDelay.Load()),
-		time.Duration(c.MinCombineGatherDelay.Load()),
-	)
+	trace.Logf(ctx, traceRegion, "%v step %d/%d: done", c.Plan, len(c.Plan.Steps)+1, len(c.Plan.Steps)+1)
 	return nil
 }
 
@@ -168,9 +153,6 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 }
 
 func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *Task) {
-	defer trace.StartRegion(ctx, "sim.scatterTask").End()
-	trace.Logf(ctx, "task", "%v", task)
-
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
 		gatherOp := func() *psg.GatherOp[*taskResult] {
@@ -184,12 +166,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 			return gatherOp
 		}()
 		taskPool := c.getTaskPool(task.PoolIndex)
-		baseTaskFn := c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex])
-		taskFn := func(ctx context.Context) (*taskResult, error) {
-			defer trace.StartRegion(ctx, "sim.scatterTask.Task").End()
-			trace.Logf(ctx, "task", "%v", task)
-			return baseTaskFn(ctx)
-		}
+		taskFn := c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex])
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
@@ -206,10 +183,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 			}
 		}
 	case *Combine:
-		c.debugf(ctx, "Scattering %v to Combine", task)
 		combineOp := func() *psg.CombineOp[*taskResult, *combineResult] {
-			c.debugf(ctx, "Getting combine for %v", task)
-			defer c.debugf(ctx, "Got combine for %v", task)
 			c.CombinesLock.Lock()
 			defer c.CombinesLock.Unlock()
 			combineOp := c.Combines[rh.Index]
@@ -239,10 +213,8 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
-			c.debugf(ctx, "Calling combine.Scatter for %v", task)
 			err := combineOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
-			c.debugf(ctx, "Called combine.Scatter for %v: %v", task, err)
 			if err == nil {
 				break
 			}
@@ -260,9 +232,10 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 }
 
 func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *atomic.Int64) psgfn.Task[*taskResult] {
-	scatterTime := time.Now()
 	return func(ctx context.Context) (res *taskResult, err error) {
-		c.MinScatterDelay.UpdateMin(int64(time.Since(scatterTime)))
+		traceRegion := "sim.taskFunc"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(ctx, traceRegion, "%v", task)
 
 		res = &taskResult{
 			Task:               task,
@@ -271,19 +244,17 @@ func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *ato
 
 		chk := assert.New(t)
 
-		c.debugf(ctx, "starting %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAtStart)
 		chk.Positive(res.ConcurrencyAtStart)
 		defer func() {
 			res.ConcurrencyAfter = concurrency.Add(-1)
-			c.debugf(ctx, "ended %v on pool %d, concurrency now %d", task, task.PoolIndex, res.ConcurrencyAfter)
 			res.EndTime = time.Now()
 		}()
 		timer := timerp.Get()
 		defer timerp.Put(timer)
-		for _, step := range task.Func.Steps {
+		for i, step := range task.Func.Steps {
 			switch step := step.(type) {
 			case SelfTime:
-				c.debugf(ctx, "%v self time %v", task, step.Duration())
+				trace.Logf(ctx, traceRegion, "%v step %d/%d: %v self time", task, i+1, len(task.Func.Steps)+1, step.Duration())
 				timerp.Reset(timer, step.Duration())
 				select {
 				case <-timer.C:
@@ -291,13 +262,16 @@ func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *ato
 					return res, ctx.Err()
 				}
 			case Subjob:
-				c.debugf(ctx, "%v subjob %v", task, step.Plan)
+				trace.Logf(ctx, traceRegion, "%v step %d/%d: subjob %v", task, i+1, len(task.Func.Steps)+1, step.Plan)
 				err := run(ctx, t, step.Plan)
 				chk.NoError(err)
 			default:
 				panic(fmt.Sprintf("unknown step type %T", step))
 			}
 		}
+
+		trace.Logf(ctx, traceRegion, "%v step %d/%d: done", task, len(task.Func.Steps)+1, len(task.Func.Steps)+1)
+
 		if task.Func.ReturnError {
 			return res, fmt.Errorf("%v error", task)
 		} else {
@@ -308,17 +282,16 @@ func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *ato
 
 func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] {
 	return func(ctx context.Context, res *taskResult, err error) (retErr error) {
-		defer trace.StartRegion(ctx, "sim.gatherFunc").End()
-		trace.Logf(ctx, "gather", "%v", res.Task.ResultHandler.(*Gather))
+		traceRegion := "sim.gatherFunc"
+		defer trace.StartRegion(ctx, traceRegion).End()
 
-		c.MinGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
+		task := res.Task
+		gather := task.ResultHandler.(*Gather)
+		trace.Logf(ctx, traceRegion, "%v", gather)
 
 		chk := assert.New(t)
 
 		c.updateTaskStats(t, res, err)
-
-		task := res.Task
-		gather := task.ResultHandler.(*Gather)
 
 		gatheredCount := c.GatheredCount.Add(1)
 		trace.Logf(ctx, "sim.GatheredCount", "%d", gatheredCount)
@@ -353,8 +326,6 @@ func (c *controller) newCombinerFactory(
 		}
 		return psgfn.Combiner[*taskResult, *combineResult]{
 			CombineFn: func(ctx context.Context, tRes *taskResult, err error, emit psgfn.Emit[*combineResult]) {
-				c.MinCombineDelay.UpdateMin(int64(time.Since(tRes.EndTime)))
-
 				chk := assert.New(t)
 
 				c.updateTaskStats(t, tRes, err)
@@ -384,8 +355,6 @@ func (c *controller) newCombinerFactory(
 
 func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*combineResult] {
 	return func(ctx context.Context, res *combineResult, err error) error {
-		c.MinCombineGatherDelay.UpdateMin(int64(time.Since(res.EndTime)))
-
 		chk := assert.New(t)
 
 		combine := res.Combine
@@ -421,8 +390,6 @@ func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*comb
 		}
 
 		gatheredCount := c.GatheredCount.Add(int64(res.TaskCount))
-		c.debugf(ctx, "gathering %d combined tasks from CombineIndex#%d, gathered count now %d",
-			res.TaskCount, res.Index, gatheredCount)
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
 		return err
@@ -458,13 +425,14 @@ func (c *controller) executeGatherOrCombineFunc(
 	rh ResultHandler,
 	fn *Func,
 ) error {
+	traceRegion := "sim.executeGatherOrCombineFunc"
 	chk := assert.New(t)
 	timer := timerp.Get()
 	defer timerp.Put(timer)
-	for _, step := range fn.Steps {
+	for i, step := range fn.Steps {
 		switch step := step.(type) {
 		case SelfTime:
-			c.debugf(ctx, "%v self time %v", rh, step.Duration())
+			trace.Logf(ctx, traceRegion, "%v step %d/%d: %v self time", rh, i+1, len(fn.Steps)+1, step.Duration())
 			timerp.Reset(timer, step.Duration())
 			select {
 			case <-timer.C:
@@ -472,22 +440,18 @@ func (c *controller) executeGatherOrCombineFunc(
 				return ctx.Err()
 			}
 		case Subjob:
-			c.debugf(ctx, "%v subjob %v", rh, step.Plan)
+			trace.Logf(ctx, traceRegion, "%v step %d/%d: subjob %v", rh, i+1, len(fn.Steps)+1, step.Plan)
 			err := run(ctx, t, step.Plan)
 			chk.NoError(err)
 		case Scatter:
-			c.debugf(ctx, "%v scatter %v", rh, step.Task)
+			trace.Logf(ctx, traceRegion, "%v step %d/%d: scatter %v", rh, i+1, len(fn.Steps)+1, step.Task)
 			c.scatterTask(ctx, t, step.Task)
 		default:
 			panic(fmt.Sprintf("unknown step type %T", step))
 		}
 	}
-	c.debugf(ctx, "%v done", rh)
+	trace.Logf(ctx, traceRegion, "%v step %d/%d: done", rh, len(fn.Steps)+1, len(fn.Steps)+1)
 	return nil
-}
-
-func (c *controller) debugf(ctx context.Context, format string, args ...interface{}) {
-	trace.Logf(ctx, "sim.debugf", format, args...)
 }
 
 // taskResult represents the result of executing a simulated task.

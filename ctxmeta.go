@@ -61,15 +61,6 @@ func (cm *ctxMeta) ShouldBlock() workq.BlockFunc {
 	return nil
 }
 
-func (j *Job) withOutboxFor(ctx context.Context, key outboxKey[workq.WorkFunc], fn func(*workq.Outbox)) {
-	_, meta := j.ctxMeta(ctx)
-	meta.WithOutbox(key, fn)
-}
-
-func (j *Job) withGatherOutbox(ctx context.Context, fn func(*workq.Outbox)) {
-	j.withOutboxFor(ctx, j.gatherOutboxKey(), fn)
-}
-
 func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
 	_, meta := j.ctxMeta(ctx)
 	return meta.ShouldBlock()

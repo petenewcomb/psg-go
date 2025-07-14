@@ -7,11 +7,12 @@ if [ -z "$trace_zstd" -o ! -f "$trace_zstd" ]; then
 fi
 
 set -e
-set -o pipefail
+
+SIMDIR="${BASH_SOURCE[0]%/*}"
 
 extract() {
     zstd -dc "$trace_zstd" | \
-        go run -C ~/src/psg-go/internal/cmd/fmttrace ./...
+        go run -C "$SIMDIR/../cmd/fmttrace" ./...
 }
 
 first_line="$(

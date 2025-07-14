@@ -119,36 +119,38 @@ func (cp *CombinerPool) postCombine(
 	combineFn boundCombineFunc,
 ) {
 	traceRegion := "CombinerPool.postCombine"
-	defer trace.StartRegion(ctx, traceRegion).End()
 
-	workID := workIDCounter.Add(1)
+	defer trace.StartRegion(ctx, traceRegion).End()
+	workID := workq.NewWorkID()
 	trace.Logf(ctx, traceRegion, "CombinerPool=%p, outbox=%p, workID=%d", cp, outbox, workID)
 
 	if cp.state.MaybeSpawnGoroutine() {
 		cp.spawnNewCombiner(ctx)
 	}
 
-	workFn := cp.newCombineWork(combineFn, workID, false)
+	workFn := cp.newCombineWork(workID, combineFn)
+
 	cp.combineQueue.PushBackFunc(outbox, workFn, func(outboxCh chan<- workq.WorkFunc) rdvq.SelectResult {
 		// Fallback to slow path when outbox would block
-		return cp.postCombineSlow(ctx, outboxCh, combineFn, workID)
+		return cp.postCombineSlow(ctx, outboxCh, workID, workFn)
 	})
 }
 
 func (cp *CombinerPool) newCombineWork(
+	workID workq.WorkID,
 	combineFn boundCombineFunc,
-	workID int64,
-	waitersIncremented bool,
 ) workq.WorkFunc {
-	return func(ctx context.Context, ex workq.Execution) error {
-		traceRegion := "CombinerPool.newCombineWork.workFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		trace.Logf(ctx, traceRegion, "CombinerPool=%p, workID=%d", cp, workID)
+	traceRegion := "CombinerPool.newCombineWork"
 
-		ex.Starting()
-		if waitersIncremented {
-			cp.governor.DecrementDownstreamWaiters()
+	combineWorkFn := func(ctx context.Context, ex workq.Execution) error {
+		traceRegion := traceRegion + ".workFn"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		trace.Logf(ctx, traceRegion, "workID=%d", workID)
+
+		if ex.Starting == nil {
+			return nil
 		}
+		ex.Starting()
 
 		workerCtx, meta := cp.j.ctxMeta(ctx)
 		cw := meta.executionEnvironment.(*cpWorker)
@@ -157,31 +159,25 @@ func (cp *CombinerPool) newCombineWork(
 		})
 		return nil
 	}
+
+	return cp.j.newWork(workID, combineWorkFn)
 }
 
 func (cp *CombinerPool) postCombineSlow(
 	ctx context.Context,
 	outboxCh chan<- workq.WorkFunc,
-	combineFn boundCombineFunc,
-	workID int64,
+	workID workq.WorkID,
+	workFn workq.WorkFunc,
 ) rdvq.SelectResult {
 	traceRegion := "CombinerPool.postCombineSlow"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "outboxCh=%d", outboxCh)
+
+	workFn = cp.governor.WrapDownstream(workFn, false)
 
 	// We don't attempt the primary channel alone here since both fast paths
 	// failed, meaning both primary and spare goroutines are likely busy. At
 	// this point spillage to spare is warranted, so we use
 	// first-come-first-served among whatever becomes available.
-
-	var workFn workq.WorkFunc
-	defer func() {
-		// If we incremented waiters but didn't successfully send to a channel,
-		// we must decrement the waiters ourselves
-		if workFn != nil {
-			cp.governor.DecrementDownstreamWaiters()
-		}
-	}()
 
 	for {
 		spawnWaitCh := cp.state.ShouldSpawnGoroutine()
@@ -189,21 +185,11 @@ func (cp *CombinerPool) postCombineSlow(
 			cp.spawnNewCombiner(ctx)
 		}
 
-		// If we get here, the primary and spare channels were busy and we
-		// hit the limit of how many combiner tasks we can launch or need to
-		// wait before we can spawn another. Increment the waiting task count to
-		// signal Scatter to apply backpressure.
-		if workFn == nil {
-			cp.governor.IncrementDownstreamWaiters()
-			workFn = cp.newCombineWork(combineFn, workID, true)
-		}
-
 		// Block until we can post or it's time to retry
 		trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p, spawnWaitCh=%p", outboxCh, spawnWaitCh)
 		select {
 		case outboxCh <- workFn:
-			workFn = nil // Successfully sent, don't decrement waiters in defer
-			trace.Logf(ctx, traceRegion, "received workFn from outboxCh=%d", outboxCh)
+			trace.Logf(ctx, traceRegion, "delivered workFn into outboxCh=%d", outboxCh)
 			return rdvq.SelectOutboxFilled
 		case <-spawnWaitCh:
 			trace.Logf(ctx, traceRegion, "received signal from spawnWaitCh=%d", spawnWaitCh)
@@ -291,42 +277,20 @@ func (cp *CombinerPool) spawnNewCombiner(ctx context.Context) {
 			}
 
 			err := cp.workQueue.ExecuteOne(ctx, worker.AddWork)
-			if err != nil {
-				if errors.Is(err, workq.ErrEndOfWork) {
-					trace.Logf(ctx, traceRegion, "at end of work")
-					break
-				}
-				if errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded) {
-					trace.Logf(ctx, traceRegion, "exiting early with err=%v", err)
-					return
-				}
-				if err != nil {
-					panic(fmt.Sprintf("combiner goroutine received unexpected error: %v", err))
-				}
-			}
-		}
-
-		traceRegion += ".shutdown"
-		defer trace.StartRegion(ctx, traceRegion).End()
-
-		// Flush combiners as needed when this goroutine terminates.
-		worker.flushAll(ctx)
-
-		for {
-			// Process any work items that were created during the flush operation
-			err := cp.workQueue.ExecuteOne(ctx, nil)
-			if err != nil {
-				if errors.Is(err, workq.ErrEndOfWork) {
+			switch {
+			case err == nil:
+			case errors.Is(err, workq.ErrEndOfWork):
+				trace.Logf(ctx, traceRegion, "at end of work, flushing combiners")
+				if !worker.flushAll(ctx) {
+					// There was nothing left to flush
 					trace.Logf(ctx, traceRegion, "exiting at end of work")
-					break
-				}
-				if errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded) {
-					trace.Logf(ctx, traceRegion, "exiting with err=%v", err)
 					return
 				}
-				if err != nil {
-					panic(fmt.Sprintf("combiner goroutine received unexpected error at shutdown: %v", err))
-				}
+			case errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded):
+				trace.Logf(ctx, traceRegion, "exiting with err=%v", err)
+				return
+			default:
+				panic(fmt.Sprintf("combiner goroutine received unexpected error: %v", err))
 			}
 		}
 	}()
@@ -396,21 +360,23 @@ func getCombineFunc[I, O any](
 			traceRegion := "CombinerPool.emit"
 			defer trace.StartRegion(ctx, traceRegion).End()
 
-			if outputErr != nil {
-				trace.Logf(ctx, traceRegion, "emitting err=%v", outputErr)
-			}
+			postWorkID := workq.NewWorkID()
+			gatherWorkID := workq.NewWorkID()
 
-			j.state.IncrementWork()
+			if outputErr == nil {
+				trace.Logf(ctx, traceRegion, "emitting gather workID=%d via post workID=%d", gatherWorkID, postWorkID)
+			} else {
+				trace.Logf(ctx, traceRegion,
+					"emitting gather workID=%d with err=%v via post workID=%d",
+					gatherWorkID, outputErr, postWorkID)
+			}
 
 			// Bind the gatherFn to the combiner output
 			gatherFn := func(ctx context.Context) error {
-				defer j.state.DecrementWork()
 				return c.gatherOp.gatherFn(ctx, output, outputErr)
 			}
 
-			gatherWorkFn := j.newCombineGatherWork(gatherFn)
-			postWorkFn := j.gatherQueue.NewPostOfferWork(gatherWorkFn, j.withGatherOutbox)
-			queueWork(postWorkFn)
+			j.postGather(ctx, emitGatherOutbox, gatherFn)
 		}
 
 		combiner := func() Combiner[I, O] {

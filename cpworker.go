@@ -197,9 +197,7 @@ func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duratio
 		}
 		// Remove from heap immediately to prevent infinite loop
 		cw.combinerMap.deadlines.Remove(nextBCToFlush)
-		trace.Logf(ctx, "cpworker.flushToNextDeadline", "calling FlushFn")
 		nextBCToFlush.FlushFn(ctx)
-		trace.Logf(ctx, "cpworker.flushToNextDeadline", "called FlushFn")
 		queuedFlush = true
 	}
 	return queuedFlush, 0
@@ -215,6 +213,7 @@ func (cw *cpWorker) primaryInnerPopSelect(
 		cw.inboxCh, outboxFilledCh, cw.workReadyCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 	select {
 	case workFn := <-cw.inboxCh:
+		trace.Logf(ctx, traceRegion, "received workFn from inboxCh=%p", cw.inboxCh)
 		cw.followupFn = func(context.Context) {
 			cw.queueFn(workFn)
 		}
@@ -222,21 +221,23 @@ func (cw *cpWorker) primaryInnerPopSelect(
 
 	// Here down should be identical to spareWaiterSelect below
 	case renotifyFn := <-outboxFilledCh:
-		trace.Logf(ctx, "cpworker.primaryInnerPopSelect", "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
 		return rdvq.SelectOutboxFilled, renotifyFn
 	case renotifyFn := <-cw.workReadyCh:
-		trace.Logf(ctx, "cpworker.primaryInnerPopSelect", "received renotifyFn from workReadyCh=%p", cw.workReadyCh)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", cw.workReadyCh)
 		cw.workReadyRenotifyFn = renotifyFn
 	case <-cw.flushDeadlineTimerCh:
+		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.nextJobFlushCh:
-		trace.Logf(ctx, "cpworker.primaryInnerPopSelect", "setting followup call to flushAll")
+		trace.Logf(ctx, traceRegion, "received job flush signal")
 		cw.followupFn = func(ctx context.Context) {
-			trace.Logf(ctx, "cpworker.primaryInnerPopSelect", "following up with flushAll")
 			cw.flushAll(ctx)
 		}
 	case <-ctx.Done():
+		trace.Logf(ctx, traceRegion, "received context done signal")
 		cw.err = ctx.Err()
 	case <-cw.doneCh:
+		trace.Logf(ctx, traceRegion, "received combiner goroutine done signal")
 		cw.err = cw.doneErr()
 	}
 	return rdvq.SelectAborted, nil
@@ -260,6 +261,7 @@ func (cw *cpWorker) spareInnerPopSelect(
 
 	select {
 	case <-cw.idleTimerCh:
+		trace.Logf(ctx, traceRegion, "received idle timer signal")
 		cw.followupFn = func(context.Context) {
 			if cw.cp.state.ShouldExitGoroutine() {
 				cw.err = workq.ErrEndOfWork
@@ -268,48 +270,45 @@ func (cw *cpWorker) spareInnerPopSelect(
 
 	// Here down should be identical to primaryWaiterSelect above
 	case renotifyFn := <-outboxFilledCh:
-		trace.Logf(ctx, "cpworker.spareInnerPopSelect", "woke from outboxFilledCh=%p", outboxFilledCh)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
 		return rdvq.SelectOutboxFilled, renotifyFn
 	case renotifyFn := <-cw.workReadyCh:
-		trace.Logf(ctx, "cpworker.spareInnerPopSelect", "woke from workReadyCh=%p", cw.workReadyCh)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", cw.workReadyCh)
 		cw.workReadyRenotifyFn = renotifyFn
 	case <-cw.flushDeadlineTimerCh:
+		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.nextJobFlushCh:
-		trace.Logf(ctx, "cpworker.spareInnerPopSelect", "setting followup call to flushAll")
+		trace.Logf(ctx, traceRegion, "received job flush signal")
 		cw.followupFn = func(ctx context.Context) {
-			trace.Logf(ctx, "cpworker.spareInnerPopSelect", "following up with flushAll")
 			cw.flushAll(ctx)
 		}
 	case <-ctx.Done():
+		trace.Logf(ctx, traceRegion, "received context done signal")
 		cw.err = ctx.Err()
 	case <-cw.doneCh:
+		trace.Logf(ctx, traceRegion, "received combiner goroutine done signal")
 		cw.err = cw.doneErr()
 	}
 	return rdvq.SelectAborted, nil
 }
 
-func (cw *cpWorker) flushAll(ctx context.Context) {
-	defer trace.StartRegion(ctx, "cpworker.flushAll").End()
-	trace.Logf(ctx, "cpworker.flushAll", "starting")
-	if cw.nextJobFlushCh != nil {
-		// Call the combiner's Flush method
-		trace.Logf(ctx, "cpworker.flushAll", "calling cm.FlushAll")
-		cw.combinerMap.FlushAll(ctx)
-		trace.Logf(ctx, "cpworker.flushAll", "called cm.FlushAll")
-		cw.nextJobFlushCh = nil
-		cw.unregisterAsJobFlusher()
-		trace.Logf(ctx, "cpworker.flushAll", "unregistered as job flusher")
+func (cw *cpWorker) flushAll(ctx context.Context) bool {
+	if cw.nextJobFlushCh == nil {
+		return false
 	}
-	trace.Logf(ctx, "cpworker.flushAll", "ended")
+	cw.combinerMap.FlushAll(ctx)
+	cw.nextJobFlushCh = nil
+	cw.unregisterAsJobFlusher()
+	return true
 }
 
 func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFunc) {
-	defer trace.StartRegion(ctx, "cpworker.executeCombine").End()
+	traceRegion := "cpWorker.executeCombine"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "cpWorker=%p", cw)
 	if cw.nextJobFlushCh == nil {
-		trace.Logf(ctx, "cpworker.executeCombine", "registering as job flusher")
 		// Make sure the job won't terminate before the combiner is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.j.state.RegisterFlusher()
-		trace.Logf(ctx, "cpworker.executeCombine", "registered as job flusher")
 	}
 	combineFn(ctx, &cw.combinerMap, cw.queueFn, cw.emitGatherOutbox)
 	cw.cp.state.IncrementCompleted()

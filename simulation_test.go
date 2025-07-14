@@ -17,7 +17,8 @@ import (
 
 func TestBySimulation(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		defer trace.StartRegion(context.Background(), "TestBySimulation").End()
+		traceRegion := "TestBySimulation"
+		defer trace.StartRegion(context.Background(), traceRegion).End()
 
 		// Build a simulation plan
 		planConfig := sim.DefaultConfig

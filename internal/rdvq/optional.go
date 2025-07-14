@@ -25,7 +25,11 @@ type Optional[T any] struct {
 
 // Init initializes the queue. Must be called before first use.
 func (q *Optional[T]) Init(p *Pool[T]) {
+	traceRegion := "rdvq.Optional.Init"
+
 	q.emptyInboxes.Init(&p.nodePool)
+
+	trace.Logf(context.Background(), traceRegion, "Optional=%p, emptyInboxes=%p", q, &q.emptyInboxes)
 }
 
 //nolint:contextcheck // background context used only for tracing

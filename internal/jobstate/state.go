@@ -75,37 +75,29 @@ func (js *JobState) Init() {
 //
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) IncrementWork() {
-	defer trace.StartRegion(context.Background(), "JobState.IncrementWork").End()
-	trace.Logf(context.Background(), "js", "%p", js)
-	trace.WithRegion(context.Background(), "totalReferences", func() {
-		js.totalReferences.Increment()
-	})
-	trace.WithRegion(context.Background(), "inFlightWork", func() {
-		js.inFlightWork.Increment()
-	})
+	traceRegion := "JobState.IncrementWork"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
+	js.totalReferences.Increment()
+	js.inFlightWork.Increment()
 }
 
 // DecrementWork decrements the work counter and attempts stage transitions if needed
 //
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) DecrementWork() {
-	defer trace.StartRegion(context.Background(), "JobState.DecrementWork").End()
-	trace.Logf(context.Background(), "js", "%p", js)
+	traceRegion := "JobState.DecrementWork"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
-	var noMoreWork bool
-	trace.WithRegion(context.Background(), "inFlightWork", func() {
-		noMoreWork = js.inFlightWork.Decrement()
-	})
+	noMoreWork := js.inFlightWork.Decrement()
 
 	// Decrement the total references count and check if it hit zero. If noMoreWork is true,
 	// js.noMoreWork will handle the transition logic. But if noMoreWork is false
 	// and the total references counter hit zero, we need to call js.noMoreReferences directly to
 	// handle the race condition where flushers complete between the decrement and
 	// the IsZero() check in noMoreWork().
-	var noMoreReferences bool
-	trace.WithRegion(context.Background(), "totalReferences", func() {
-		noMoreReferences = js.totalReferences.Decrement()
-	})
+	noMoreReferences := js.totalReferences.Decrement()
 
 	if noMoreWork {
 		// Last work just completed.
@@ -118,19 +110,15 @@ func (js *JobState) DecrementWork() {
 
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister func()) {
-	defer trace.StartRegion(context.Background(), "JobState.RegisterFlusher").End()
-	trace.Logf(context.Background(), "js", "%p", js)
+	traceRegion := "JobState.RegisterFlusher"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
-	trace.WithRegion(context.Background(), "totalReferences", func() {
-		js.totalReferences.Increment()
-	})
+	js.totalReferences.Increment()
+
 	return js.nextFlushChan.Load().(chan struct{}), func() {
 		// Check if all references are done for Flushing → Done transition
-		var noMoreReferences bool
-		trace.WithRegion(context.Background(), "totalReferences", func() {
-			noMoreReferences = js.totalReferences.Decrement()
-		})
-		if noMoreReferences {
+		if js.totalReferences.Decrement() {
 			// Last reference just completed (work or combiner)
 			js.noMoreReferences()
 		}
@@ -141,20 +129,17 @@ func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister fun
 //
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) Close() {
-	defer trace.StartRegion(context.Background(), "JobState.Close").End()
-	trace.Logf(context.Background(), "js", "%p", js)
+	traceRegion := "JobState.Close"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
 	var swapped bool
-	trace.WithRegion(context.Background(), "currentStage.CompareAndSwap(open, closed)", func() {
+	trace.WithRegion(context.Background(), traceRegion+".CompareAndSwap(open, closed)", func() {
 		swapped = js.currentStage.CompareAndSwap(int32(stageOpen), int32(stageClosed))
 	})
 	if swapped {
 		// Successfully changed from Open to Closed
-		var noMoreWork bool
-		trace.WithRegion(context.Background(), "inFlightWork", func() {
-			noMoreWork = js.inFlightWork.IsZero()
-		})
-		if noMoreWork {
+		if js.inFlightWork.IsZero() {
 			js.noMoreWork()
 		}
 	}
@@ -184,15 +169,16 @@ func (js *JobState) PanicIfDone() {
 //
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) noMoreWork() {
-	defer trace.StartRegion(context.Background(), "JobState.noMoreWork").End()
-	trace.Logf(context.Background(), "js", "%p", js)
+	traceRegion := "JobState.noMoreWork"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
 	currentStage := lifecycleStage(js.currentStage.Load())
 
 	// Try to transition from Closed to Flushing if needed
 	if currentStage == stageClosed {
 		var swapped bool
-		trace.WithRegion(context.Background(), "currentStage.CompareAndSwap(closed, flushing)", func() {
+		trace.WithRegion(context.Background(), traceRegion+".CompareAndSwap(closed, flushing)", func() {
 			swapped = js.currentStage.CompareAndSwap(int32(stageClosed), int32(stageFlushing))
 		})
 		if swapped {
@@ -210,7 +196,7 @@ func (js *JobState) noMoreWork() {
 	if currentStage == stageFlushing {
 		// Call the flushListener callback if set (before closing the channel)
 		if fn, ok := js.flushListener.Load().(func()); ok && fn != nil {
-			trace.WithRegion(context.Background(), "flushListener", fn)
+			trace.WithRegion(context.Background(), traceRegion+".flushListener", fn)
 		}
 
 		// Create new channel and swap with old one
@@ -225,16 +211,17 @@ func (js *JobState) noMoreWork() {
 //
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) noMoreReferences() {
-	defer trace.StartRegion(context.Background(), "JobState.noMoreReferences").End()
-	trace.Logf(context.Background(), "js", "%p", js)
+	traceRegion := "JobState.noMoreReferences"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
 	var swapped bool
-	trace.WithRegion(context.Background(), "currentStage.CompareAndSwap(flushing, done)", func() {
+	trace.WithRegion(context.Background(), traceRegion+".CompareAndSwap(flushing, done)", func() {
 		swapped = js.currentStage.CompareAndSwap(int32(stageFlushing), int32(stageDone))
 	})
 	if swapped {
 		// Successfully changed from Flushing to Done
-		trace.WithRegion(context.Background(), "close(js.doneChan)", func() {
+		trace.WithRegion(context.Background(), traceRegion+".close(js.doneChan)", func() {
 			close(js.doneChan)
 		})
 	}

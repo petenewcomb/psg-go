@@ -15,33 +15,37 @@ import (
 
 type NotifyFunc = rdvq.NotifyFunc
 
-type Watchers struct {
+type Coordinator struct {
 	q nbcq.Queue[NotifyFunc]
 }
 
-func (w *Watchers) Init() {
-	w.q.Init(watchersPool)
+func (c *Coordinator) Init() {
+	traceRegion := "workq.Coordinator.Init"
+
+	c.q.Init(notifyPool)
+
+	trace.Logf(context.Background(), traceRegion, "Coordinator=%p, q=%p", c, &c.q)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *Watchers) Add(notifyFn NotifyFunc) {
-	traceRegion := "workq.Watchers.Add"
+func (c *Coordinator) add(notifyFn NotifyFunc) {
+	traceRegion := "workq.Coordinator.add"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Watchers=%p", w)
+	trace.Logf(context.Background(), traceRegion, "Coordinator=%p", c)
 
 	if notifyFn != nil {
-		w.q.PushBack(watchersPool, notifyFn)
+		c.q.PushBack(notifyPool, notifyFn)
 	}
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *Watchers) Notify(renotifyFn RenotifyFunc) {
-	traceRegion := "workq.Watchers.Notify"
+func (c *Coordinator) Notify(renotifyFn RenotifyFunc) {
+	traceRegion := "workq.Coordinator.Notify"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Watchers=%p", w)
+	trace.Logf(context.Background(), traceRegion, "Coordinator=%p", c)
 
 	for {
-		notifyFn, ok := w.q.PopFront(watchersPool)
+		notifyFn, ok := c.q.PopFront(notifyPool)
 		if !ok {
 			renotifyFn()
 			return
@@ -57,7 +61,7 @@ func (w *Watchers) Notify(renotifyFn RenotifyFunc) {
 				// function must have already decremented and exited the loop,
 				// so we must recursively (though asynchronously) call Notify
 				// again to continue propagation.
-				w.Notify(renotifyFn)
+				c.Notify(renotifyFn)
 			default:
 				// Either the state has not yet been decremented by the outer
 				// function and we can therefore let the outer loop continue
@@ -83,13 +87,13 @@ func (w *Watchers) Notify(renotifyFn RenotifyFunc) {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *Watchers) NotifyAll() {
-	traceRegion := "workq.Watchers.NotifyAll"
+func (c *Coordinator) NotifyAll() {
+	traceRegion := "workq.Coordinator.NotifyAll"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Watchers=%p", w)
+	trace.Logf(context.Background(), traceRegion, "Coordinator=%p", c)
 
 	for {
-		notifyFn, ok := w.q.PopFront(watchersPool)
+		notifyFn, ok := c.q.PopFront(notifyPool)
 		if !ok {
 			break
 		}
@@ -97,4 +101,4 @@ func (w *Watchers) NotifyAll() {
 	}
 }
 
-var watchersPool = &nbcq.Pool[NotifyFunc]{}
+var notifyPool = &nbcq.Pool[NotifyFunc]{}

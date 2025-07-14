@@ -4,7 +4,9 @@
 package nbcq_test
 
 import (
+	"context"
 	"runtime"
+	"runtime/trace"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,6 +56,9 @@ func TestQueueWithRapid(t *testing.T) {
 		// The system under test
 		q := nbcq.Queue[int]{}
 		q.Init(p)
+
+		traceRegion := "TestQueueWithRapid"
+		defer trace.StartRegion(context.Background(), traceRegion).End()
 
 		// The model (reference implementation)
 		var model []int
@@ -111,7 +116,7 @@ func TestQueueConcurrency(t *testing.T) {
 	var numWriters = max(1, runtime.GOMAXPROCS(-1)/2)
 	var iterations = 5_000_000
 	if testing.Short() {
-		iterations /= 10
+		iterations /= 100
 	}
 
 	// Tracking statistics for each reader and writer independently

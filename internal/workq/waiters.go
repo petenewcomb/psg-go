@@ -12,17 +12,19 @@ import (
 )
 
 type Waiters struct {
-	Watchers
+	Coordinator
 	rdvq.Waiters
 }
 
 //nolint:contextcheck // background context used only for tracing
 func (w *Waiters) Init() {
 	traceRegion := "workq.Waiters.Init"
-	w.Watchers.Init()
+	w.Coordinator.Init()
 	w.Waiters.Init()
 
-	trace.Logf(context.Background(), traceRegion, "Waiters=%p, Watchers=%p, rdvq.Waiters=%p", w, &w.Watchers, &w.Waiters)
+	trace.Logf(context.Background(), traceRegion,
+		"Waiters=%p, Coordinator=%p, rdvq.Waiters=%p",
+		w, &w.Coordinator, &w.Waiters)
 }
 
 type BlockFunc func(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyFunc, error)
@@ -43,8 +45,8 @@ func (w *Waiters) Wrap(workFn WorkFunc, shouldWait func() bool, shouldBlock func
 				renotifyFn()
 			}
 
-			readyFn := ex.ReadyFn
-			if readyFn == nil {
+			subscribeFn := ex.Subscribe
+			if subscribeFn == nil {
 				// Non-blocking execution requested, so we "wait" by exiting
 				// without calling the wrapped work function.
 				return nil
@@ -52,23 +54,17 @@ func (w *Waiters) Wrap(workFn WorkFunc, shouldWait func() bool, shouldBlock func
 
 			blockFn = shouldBlock(ctx)
 			if blockFn == nil {
-				// Arrange for the readyFn to be called when this Waiters
-				// instance is notified.
-				w.Add(func(renotifyFn RenotifyFunc) {
-					readyFn(func() {
-						w.Notify(renotifyFn)
-					})
-				})
+				ex.Subscribe(&w.Coordinator)
 
-				// Recheck condition in case it changed before the readyFn was
-				// registered and could receive the notification.
+				// Recheck condition in case it changed before the subscription
+				// was registered and could receive the notification.
 				if !shouldWait() {
 					break
 				}
 
 				// Return now without executing the wrapped work function and
-				// expect to be called again later (e.g., after ex.ReadyFn has
-				// been called)
+				// expect to be called again later (e.g., after notification via
+				// the subscription)
 				return nil
 			}
 
@@ -107,7 +103,7 @@ func (w *Waiters) Notify(renotifyFn RenotifyFunc) {
 
 	// By default, notify watchers before waiters, since watchers typically
 	// represent in-process work and waiters represent new work.
-	w.Watchers.Notify(func() {
+	w.Coordinator.Notify(func() {
 		w.Waiters.Notify(renotifyFn)
 	})
 }
@@ -118,6 +114,6 @@ func (w *Waiters) NotifyAll() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
-	w.Watchers.NotifyAll()
+	w.Coordinator.NotifyAll()
 	w.Waiters.NotifyAll()
 }

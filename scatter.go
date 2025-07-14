@@ -5,7 +5,9 @@ package psg
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -19,7 +21,7 @@ type TaskPoolOrJob interface {
 	// job returns the Job associated with this target
 	job() *Job
 	// newScatterWork creates a work item that will execute the task function in the target context
-	newScatterWork(taskFn boundTaskFunc) workq.WorkFunc
+	newScatterWork(workID workq.WorkID, taskFn boundTaskFunc) workq.WorkFunc
 }
 
 type boundTaskFunc func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap)
@@ -61,17 +63,11 @@ func vetScatter[T any](
 
 func newScatterWork[T any](
 	target TaskPoolOrJob,
+	workID workq.WorkID,
 	taskFn psgfn.Task[T],
 	postResultFn func(context.Context, *outboxMap, T, error),
 ) workq.WorkFunc {
 	traceRegion := "newScatterWork"
-
-	j := target.job()
-
-	// Register the task with the job to keep the job running until the task is
-	// completed and its results have been combined or gathered. Decremented in
-	// tryScatterNow if the task is abandoned.
-	j.state.IncrementWork()
 
 	// Bind the task and gather functions together into a generic task function
 	boundTaskFn := func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap) {
@@ -107,7 +103,7 @@ func newScatterWork[T any](
 	}
 
 	// Pass to the target to wrap up as a work function
-	return target.newScatterWork(boundTaskFn)
+	return target.newScatterWork(workID, boundTaskFn)
 }
 
 func tryScatterNow(
@@ -135,53 +131,56 @@ func scatterNowOrQueue(
 	target TaskPoolOrJob,
 	scatterWorkFn workq.WorkFunc,
 	queueFn workq.QueueWorkFunc,
-) (bool, error) {
+) (startedOrQueued bool, err error) {
 	traceRegion := "scatterNowOrQueue"
+
+	// Give previously scattered tasks a chance to run. Without this call, the
+	// normal use case of scattering many tasks in a tight loop tends not to
+	// give those tasks a chance to run until they've all been started. This
+	// call to runtime.GoSched not only not only smooths task startup, it allows
+	// backpressure to operate more effectively, spacing out tasks to avoid
+	// boom-and-bust cycles of activity more reminiscent of batch processing.
+	runtime.Gosched()
 
 	j := target.job()
 
-	// Bookkeeping: make sure that the job-scope count incremented in
-	// newScatterWork above gets decremented if the task is abandoned because it
-	// could not be started immediately
-	started := false
+	ex := workq.Execution{
+		Blocking: func() {},
+		Starting: func() {
+			startedOrQueued = true
+			trace.Logf(ctx, traceRegion+".Starting", "started=true")
+		},
+	}
+
 	defer func() {
-		if !started {
-			j.state.DecrementWork()
+		if !startedOrQueued {
+			// Notify scatterWorkFn that it has been abandoned
+			err = errors.Join(err, scatterWorkFn(ctx, workq.Execution{}))
+		}
+		if err == nil {
+			trace.Logf(ctx, traceRegion, "returning startedOrQueued=%v", startedOrQueued)
+		} else {
+			trace.Logf(ctx, traceRegion, "returning startedOrQueued=%v, err=%v", startedOrQueued, err)
 		}
 	}()
 
-	var readyFn workq.NotifyFunc
 	if meta.IsTopLevel() {
-		err := j.yield(ctx, meta)
+		err := j.yield(ctx)
 		if err != nil {
 			return false, err
 		}
-		readyFn = func(renotifyFn workq.RenotifyFunc) {
-			trace.WithRegion(ctx, traceRegion+".readyFn", func() {
-				renotifyFn()
-			})
+		ex.Subscribe = func(c *workq.Coordinator) {
+			panic("should be blocking, not subscribing for notification")
 		}
 	}
 
-	err := scatterWorkFn(ctx, workq.Execution{
-		Blocking: func() {},
-		Starting: func() {
-			started = true
-			trace.Logf(ctx, traceRegion+".Starting", "started=true")
-		},
-		ReadyFn: readyFn,
-	})
+	err = scatterWorkFn(ctx, ex)
 
-	if queueFn != nil && !started && err == nil {
-		started = true
+	if err == nil && !startedOrQueued && queueFn != nil {
+		startedOrQueued = true
 		queueFn(scatterWorkFn)
 		trace.Logf(ctx, traceRegion, "scatter queued")
 	}
 
-	if err == nil {
-		trace.Logf(ctx, traceRegion, "returning started=%v", started)
-	} else {
-		trace.Logf(ctx, traceRegion, "returning started=%v, err=%v", started, err)
-	}
-	return started, err
+	return
 }

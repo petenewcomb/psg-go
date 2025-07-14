@@ -41,7 +41,7 @@ type Job struct {
 	gcMonitor gcok.Monitor
 	gcWaiters workq.Waiters
 
-	gatherQueue workq.Offers
+	gatherQueue workq.Pending
 
 	workQueue workq.Accepted
 

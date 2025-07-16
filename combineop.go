@@ -6,12 +6,12 @@ package psg
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/opts"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
@@ -38,6 +38,7 @@ func NewCombineOp[I, O any](
 	options ...psgopt.CombineOpOption,
 ) *CombineOp[I, O] {
 	traceRegion := "NewCombineOp"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	if gatherOp == nil {
 		panic("gather must be non-nil")
@@ -56,10 +57,10 @@ func NewCombineOp[I, O any](
 		maxHoldTime: -1, // Sentinel value: no absolute deadline
 	}
 
+	trace.Logf(context.Background(), traceRegion, "CombineOp=%p, pool=%p", c, pool)
+
 	// Apply user options
 	c.SetOptions(options...)
-
-	trace.Logf(context.Background(), traceRegion, "CombineOp=%p, pool=%p", c, pool)
 
 	return c
 }
@@ -81,8 +82,8 @@ func (c *CombineOp[I, O]) Scatter(
 	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	workFn := c.newScatterWork(target, taskFn)
-	return scatterNow(ctx, meta, target.job(), workFn)
+	work := c.newScatterWork(target, taskFn)
+	return scatterNow(ctx, meta, target, work)
 }
 
 // TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
@@ -99,54 +100,74 @@ func (c *CombineOp[I, O]) TryScatter(
 	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	workFn := c.newScatterWork(target, taskFn)
-	return tryScatterNow(ctx, meta, target, workFn)
+	work := c.newScatterWork(target, taskFn)
+	return tryScatterNow(ctx, meta, target, work)
 }
 
 func (c *CombineOp[I, O]) newScatterWork(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
-) workq.WorkFunc {
+) *combineScatterWork {
 	traceRegion := "CombineOp.newScatterWork"
 
-	j := target.job()
-	if j != c.pool.j {
+	j := target.getJob()
+	if j != c.pool.job {
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	workID := workq.NewWorkID()
-	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
+	w := combineScatterWorkPool.Get().(*combineScatterWork)
+	w.Init(c.pool, target, bindTaskFunc(j, taskFn, c.postResult))
 
-	postResultFn := func(ctx context.Context, taskWorkerOutboxMap *outboxMap, input I, inputErr error) {
-		traceRegion := traceRegion + ".postResultFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		trace.Logf(ctx, traceRegion, "workID=%d", workID)
+	trace.Logf(context.Background(), traceRegion, "CombineOp=%p created %v", c, w)
+	return w
+}
 
-		// Post the combine using the task worker's outbox for the pool's combine queue
-		combineOutbox := OutboxFor[workq.WorkFunc](taskWorkerOutboxMap, c.pool.combineOutboxKey())
+type combineScatterWork struct {
+	jobWork
+	pool   *CombinerPool
+	target TaskPoolOrJob
+	taskPoolScatterWork
+	taskFn boundTaskFunc
+}
 
-		boundCombineFn := func(
-			ctx context.Context,
-			cm *combinerMap,
-			queueWork workq.QueueWorkFunc,
-			emitGatherOutbox *rdvq.Outbox[workq.WorkFunc],
-		) {
-			traceRegion := traceRegion + ".boundCombineFn"
-			defer trace.StartRegion(ctx, traceRegion).End()
-			trace.Logf(ctx, traceRegion, "workID=%d", workID)
+func (w *combineScatterWork) Init(pool *CombinerPool, target TaskPoolOrJob, taskFn boundTaskFunc) {
+	w.jobWork.Init(pool.job)
+	w.pool = pool
+	w.target = target
+	w.taskFn = taskFn
+}
 
-			halfBoundCombineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
-			halfBoundCombineFn(ctx, input, inputErr)
-		}
+func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "combineScatterWork.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", w)
 
-		c.pool.postCombine(ctx, combineOutbox, boundCombineFn)
+	bb := &jobBlockBehavior{
+		job: w.pool.job,
 	}
 
-	baseWorkFn := newScatterWork(target, workID, taskFn, postResultFn)
+	return w.pool.governor.Execute(ctx, ex, bb,
+		func(ctx context.Context, ex workq.Execution) error {
+			return w.target.scatter(ctx, ex, &w.taskPoolScatterWork, w.taskFn)
+		},
+	)
+}
 
-	governedFn := c.pool.governor.WrapUpstream(baseWorkFn, j.shouldBlock)
+func (w *combineScatterWork) Close() {
+	traceRegion := "combineScatterWork.Close"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	return j.newWork(workID, governedFn)
+	w.jobWork.Close(w.pool.job)
+
+	*w = combineScatterWork{} // Clear the work item for garbage collection and reuse
+	combineScatterWorkPool.Put(w)
+}
+
+var combineScatterWorkPool = sync.Pool{
+	New: func() any {
+		return &combineScatterWork{}
+	},
 }
 
 // combineOpConfigWrapper wraps a CombineOp to implement the combineOpConfig interface for options
@@ -189,4 +210,32 @@ func (w combineOpConfigWrapper[I, O]) Update(changes opts.CombineOpConfigChanges
 // values take effect within a running job is undefined.
 func (c *CombineOp[I, O]) SetOptions(options ...psgopt.CombineOpOption) {
 	opts.ApplyToCombineOp(combineOpConfigWrapper[I, O]{combineOp: c}, options...)
+}
+
+func (c *CombineOp[I, O]) postResult(
+	ctx context.Context,
+	j *Job,
+	taskWorkerOutboxMap *outboxMap,
+	input I,
+	inputErr error,
+) {
+	traceRegion := "CombineOp.postResult"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	// Post the combine using the task worker's outbox for the pool's combine queue
+	combineOutbox := OutboxFor[workq.Work](taskWorkerOutboxMap, c.pool.combineOutboxKey())
+	trace.Logf(ctx, traceRegion, "CombineOp=%p, outbox=%p", c, combineOutbox)
+
+	// Bind the halfBoundCombineFn to the result.
+	boundCombineFn := func(
+		ctx context.Context,
+		cm *combinerMap,
+		queueWork workq.QueueWorkFunc,
+		emitGatherOutbox *workq.Outbox,
+	) {
+		halfBoundCombineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
+		halfBoundCombineFn(ctx, input, inputErr)
+	}
+
+	c.pool.postCombine(ctx, combineOutbox, boundCombineFn)
 }

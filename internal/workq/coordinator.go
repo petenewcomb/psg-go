@@ -21,10 +21,10 @@ type Coordinator struct {
 
 func (c *Coordinator) Init() {
 	traceRegion := "workq.Coordinator.Init"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Coordinator=%p, nbcq.Queue=%p", c, &c.q)
 
 	c.q.Init(notifyPool)
-
-	trace.Logf(context.Background(), traceRegion, "Coordinator=%p, q=%p", c, &c.q)
 }
 
 //nolint:contextcheck // background context used only for tracing

@@ -11,11 +11,11 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
-// Specialization of [rdvq.Required] for [WorkFunc]. Same interface as Required
+// Specialization of [rdvq.Required] for [Work]. Same interface as Required
 // but without the pool arguments, since Pending automatically uses a common
 // global [rdvq.Pool] specialized for work functions.
 type Pending struct {
-	rdvq.Required[WorkFunc]
+	rdvq.Required[Work]
 }
 
 // See [rdvq.Required.Init]
@@ -24,33 +24,33 @@ func (q *Pending) Init() {
 }
 
 // See [rdvq.Outbox]
-type Outbox = rdvq.Outbox[WorkFunc]
+type Outbox = rdvq.Outbox[Work]
 
 // See [rdvq.PushSelectFunc]
-type PushSelectFunc = rdvq.PushSelectFunc[WorkFunc]
+type PushSelectFunc = rdvq.PushSelectFunc[Work]
 
 // See [rdvq.Required.PushBackFunc]
-func (q *Pending) PushBackFunc(outbox *Outbox, workFn WorkFunc, selectFn PushSelectFunc) {
-	q.Required.PushBackFunc(pendingPool, outbox, workFn, selectFn)
+func (q *Pending) PushBackFunc(outbox *Outbox, work Work, selectFn PushSelectFunc) {
+	q.Required.PushBackFunc(pendingPool, outbox, work, selectFn)
 }
 
 // See [rdvq.Required.PushBack]
-func (q *Pending) PushBack(ctx context.Context, outbox *Outbox, workFn WorkFunc) error {
-	return q.Required.PushBack(ctx, pendingPool, outbox, workFn)
+func (q *Pending) PushBack(ctx context.Context, outbox *Outbox, work Work) error {
+	return q.Required.PushBack(ctx, pendingPool, outbox, work)
 }
 
 // See [rdvq.Required.TryPushBack]
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Pending) TryPushBack(outbox *Outbox, workFn WorkFunc) bool {
+func (q *Pending) TryPushBack(outbox *Outbox, work Work) bool {
 	traceRegion := "Pending.TryPushBack"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Pending=%p, outbox=%p", q, outbox)
-	return q.Required.TryPushBack(pendingPool, outbox, workFn)
+	return q.Required.TryPushBack(pendingPool, outbox, work)
 }
 
 // See [rdvq.RequiredPopSelectFunc]
-type PopSelectFunc = rdvq.RequiredPopSelectFunc[WorkFunc]
+type PopSelectFunc = rdvq.RequiredPopSelectFunc[Work]
 
 // See [rdvq.Required.PopFrontFunc]
 func (q *Pending) PopFrontFunc(queueFn QueueWorkFunc, selectFn PopSelectFunc) {
@@ -65,7 +65,7 @@ func (q *Pending) PopFront(ctx context.Context, queueFn QueueWorkFunc) error {
 // See [rdvq.Required.TryPopFront]
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Pending) TryPopFront() (WorkFunc, bool) {
+func (q *Pending) TryPopFront() (Work, bool) {
 	traceRegion := "Pending.TryPopFront"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Pending=%p", q)
@@ -76,13 +76,13 @@ func (q *Pending) TryPopFront() (WorkFunc, bool) {
 type WaitSelectFunc = rdvq.WaitSelectFunc
 
 // See [rdvq.Required.PopFrontExcessFunc]
-func (q *Pending) PopFrontExcessFunc(selectFn WaitSelectFunc) (WorkFunc, bool) {
+func (q *Pending) PopFrontExcessFunc(selectFn WaitSelectFunc) (Work, bool) {
 	return q.Required.PopFrontExcessFunc(pendingPool, selectFn)
 }
 
 // See [rdvq.Required.PopFrontExcess]
-func (q *Pending) PopFrontExcess(ctx context.Context) (WorkFunc, error) {
+func (q *Pending) PopFrontExcess(ctx context.Context) (Work, error) {
 	return q.Required.PopFrontExcess(ctx, pendingPool)
 }
 
-var pendingPool = &rdvq.Pool[WorkFunc]{}
+var pendingPool = &rdvq.Pool[Work]{}

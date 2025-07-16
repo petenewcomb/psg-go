@@ -513,22 +513,22 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							return nil
 						}
 
-						gatherFnAdapter := func(ctx context.Context, task taskResult, err error) error {
+						gatherFnAdapter := func(ctx context.Context, taskRes taskResult, err error) error {
 							now := time.Now()
 							taskLatencyNsCentroid := tdigest.Centroid{
-								Mean:   float64(now.Sub(task.Time).Nanoseconds()),
+								Mean:   float64(now.Sub(taskRes.Time).Nanoseconds()),
 								Weight: 1.0,
 							}
-							combined := combinedResult{
+							combinedRes := combinedResult{
 								Time:                now,
-								Depth:               task.Depth,
+								Depth:               taskRes.Depth,
 								Count:               1,
 								TaskLatenciesNs:     newCentroidList(taskLatencyNsCentroid),
 								LatenciesNs:         newCentroidList(taskLatencyNsCentroid),
 								DurationsNs:         newCentroidList(),
 								WorkflowLatenciesNs: newCentroidList(taskLatencyNsCentroid),
 							}
-							return gatherFn(ctx, combined, err)
+							return gatherFn(ctx, combinedRes, err)
 						}
 
 						idealCombinesPerGather := int(math.Round(float64(flushPeriod) / float64(workloadDuration)))
@@ -772,6 +772,224 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						b.ReportMetric(rectifiedThroughput, "rectified-tasks/sec")
 						b.ReportMetric(idealThroughput, "ideal-tasks/sec")
 						b.ReportMetric(idealThroughputRatio, "ideal-throughput-ratio")
+					})
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkForProfiling(b *testing.B) {
+	combinerLimits := []int{
+		-1, // combine, unlimited
+		0,  // gather-only
+		1, 2, 3, 4,
+	}
+	availableCores := runtime.GOMAXPROCS(-1)
+	for {
+		prevLimit := combinerLimits[len(combinerLimits)-1]
+		if prevLimit >= availableCores {
+			break
+		}
+		combinerLimits = append(combinerLimits, prevLimit*2)
+	}
+	combinerLimits = append(combinerLimits, availableCores, availableCores*2)
+	slices.Sort(combinerLimits)
+	combinerLimits = slices.Compact(combinerLimits)
+
+	// Run with different worker configurations
+	for _, workload := range []string{"processing", "waiting"} {
+		for _, workloadDuration := range []time.Duration{
+			10 * time.Microsecond,
+			100 * time.Microsecond,
+			1 * time.Millisecond,
+		} {
+			for fpi, flushPeriod := range []time.Duration{
+				workloadDuration,
+				10 * workloadDuration,
+				100 * workloadDuration,
+			} {
+				for _, combinerLimit := range combinerLimits {
+					// Only need to run gather-only once to cover all flush periods
+					if combinerLimit == 0 && fpi > 0 {
+						continue
+					}
+
+					var method string
+					switch combinerLimit {
+					case 0:
+						method = "gatherOnly"
+					default:
+						method = "combine"
+					}
+					name := fmt.Sprintf(
+						"workload=%s/duration=%v/flushPeriod=%v/method=%s/combinerLimit=%d",
+						workload,
+						workloadDuration,
+						flushPeriod,
+						method,
+						combinerLimit,
+					)
+
+					b.Run(name, func(b *testing.B) {
+						ctx, cancel := context.WithCancel(context.Background())
+						defer cancel()
+
+						job := psg.NewJob(ctx)
+						defer func() {
+							job.CancelAndWait()
+						}()
+
+						type taskResult struct {
+							Depth int
+						}
+
+						type combinedResult struct {
+							Depth int
+							Count int
+						}
+
+						totalTasksGathered := 0
+
+						var newTaskFn func(depth int) psgfn.Task[taskResult]
+						var scatter func(ctx context.Context, target psg.TaskPoolOrJob, task psgfn.Task[taskResult]) error
+
+						gatherFn := func(ctx context.Context, combineRes combinedResult, err error) error {
+							if err != nil {
+								return err
+							}
+
+							totalTasksGathered += combineRes.Count
+
+							// Don't include scatter time in work duration inflation
+							for range max(0, 3-combineRes.Depth) {
+								if err := scatter(ctx, job, newTaskFn(combineRes.Depth+1)); err != nil {
+									return err
+								}
+							}
+							return nil
+						}
+
+						gatherFnAdapter := func(ctx context.Context, taskRes taskResult, err error) error {
+							combined := combinedResult{
+								Depth: taskRes.Depth,
+								Count: 1,
+							}
+							return gatherFn(ctx, combined, err)
+						}
+
+						idealCombinesPerGather := int(math.Round(float64(flushPeriod) / float64(workloadDuration)))
+
+						// Setup processing - either gather-only or with combiner
+						if combinerLimit == 0 {
+							scatter = psg.NewGatherOp(gatherFnAdapter).Scatter
+						} else {
+							gatherOp := psg.NewGatherOp(gatherFn)
+							combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(max(0, combinerLimit), combinerLimit))
+							combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psg.Combiner[taskResult, combinedResult] {
+								maxDepth := 0
+								count := 0
+
+								flush := func(ctx context.Context, emit psgfn.Emit[combinedResult]) {
+									if count > 0 {
+										res := combinedResult{
+											Depth: maxDepth,
+											Count: count,
+										}
+										emit(ctx, res, nil)
+									}
+
+									maxDepth = 0
+									count = 0
+								}
+
+								return psgfn.Combiner[taskResult, combinedResult]{
+									CombineFn: func(ctx context.Context, taskRes taskResult, err error, emit psgfn.Emit[combinedResult]) {
+										if err != nil {
+											emit(ctx, combinedResult{}, err)
+										}
+
+										maxDepth = max(maxDepth, taskRes.Depth)
+										count++
+
+										// Don't include scatter time in work duration inflation
+										for range max(0, min(1-count, 3-taskRes.Depth)) {
+											if err := scatter(ctx, job, newTaskFn(taskRes.Depth+1)); err != nil {
+												emit(ctx, combinedResult{}, err)
+												return
+											}
+										}
+
+										if count >= idealCombinesPerGather {
+											flush(ctx, emit)
+										}
+									},
+									FlushFn: flush,
+								}
+							})
+							combineOp.SetOptions(psgopt.WithMaxHoldTime(flushPeriod))
+
+							scatter = func(ctx context.Context, target psg.TaskPoolOrJob, task psgfn.Task[taskResult]) error {
+								if err := combineOp.Scatter(ctx, target, task); err != nil {
+									return err
+								}
+								return nil
+							}
+						}
+
+						var totalTasksLaunched atomic.Int64
+						newTaskFn = func(depth int) psgfn.Task[taskResult] {
+							totalTasksLaunched.Add(1)
+							return func(context.Context) (taskResult, error) {
+								return taskResult{Depth: depth}, nil
+							}
+						}
+
+						opTasksGatheredOrigin := totalTasksGathered
+						op := func() int {
+							for {
+								if err := scatter(ctx, job, newTaskFn(0)); err != nil {
+									b.Fatalf("Error: %v", err)
+								}
+
+								if totalTasksGathered != opTasksGatheredOrigin {
+									tasksGathered := totalTasksGathered - opTasksGatheredOrigin
+									opTasksGatheredOrigin = totalTasksGathered
+									return tasksGathered
+								}
+							}
+						}
+
+						warmupStartTime := time.Now()
+						for time.Since(warmupStartTime) < 1*time.Second {
+							op()
+						}
+
+						tasksGatheredOrigin := totalTasksGathered
+						for b.Loop() {
+							op()
+						}
+
+						// We purposefully do not run job.CloseAndGatherAll
+						// before capturing results to avoid inflating
+						// overallSum with data gathered outside the
+						// benchmarking loop.
+
+						tasksGathered := float64(totalTasksGathered - tasksGatheredOrigin)
+
+						// Now call CloseAndGatherAll to make sure nothing was lost.
+						assert.NoError(b, job.CloseAndGatherAll(ctx))
+						assert.Equal(b, totalTasksLaunched.Load(), int64(totalTasksGathered))
+
+						b.ReportAllocs()
+
+						// Throughput - the primary metric for this benchmark
+						throughput := tasksGathered / b.Elapsed().Seconds()
+						b.ReportMetric(throughput, "tasks/sec")
+
+						// Tasks per operation - needed to normalize allocs/op and B/op
+						tasksPerOp := tasksGathered / float64(b.N)
+						b.ReportMetric(tasksPerOp, "tasks/op")
 					})
 				}
 			}

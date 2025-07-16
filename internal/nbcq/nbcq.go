@@ -26,7 +26,7 @@ type pointer[T any] struct {
 
 // structure node_t {value: data type, next: pointer_t}
 type node[T any] struct {
-	value atomic.Value
+	value atomic.Pointer[T]
 	next  atomicPointer[T]
 }
 
@@ -40,7 +40,7 @@ type Queue[T any] struct {
 func (q *Queue[T]) Init(p *Pool[T]) {
 	// node = new_node()      // Allocate a free node
 	// node->next.ptr = NULL  // Make it the only node in the linked list
-	node := p.get()
+	node := p.getNode()
 
 	// Q->Head.ptr = Q->Tail.ptr = node	 // Both Head and Tail point to it
 	q.head.Store(pointer[T]{ptr: node})
@@ -56,8 +56,8 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 	// E1: node = new_node()      // Allocate a new node from the free list
 	// E2: node->value = value	  // Copy enqueued value into node
 	// E3: node->next.ptr = NULL  // Set next pointer of node to NULL
-	node := p.get()
-	node.value.Store(value)
+	node := p.getNode()
+	node.value.Store(p.getValuePointer(value))
 
 	// E4: loop  // Keep trying until Enqueue is done
 	for {
@@ -127,7 +127,7 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 				// Read value before CAS
 				// Otherwise, another dequeue might free the next node
 				// D12: *pvalue = next.ptr->value
-				value := next.ptr.value.Load().(T)
+				valuePointer := next.ptr.value.Load()
 				// Try to swing Head to the next node
 				// D13: if CAS(&Q->Head, head, <next.ptr, head.count+1>)
 				if q.head.CompareAndSwap(head, pointer[T]{ptr: next.ptr, count: head.count + 1}) {
@@ -141,15 +141,18 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 
 					// D19: free(head.ptr)  // It is safe now to free the old node
 
-					// Overwrite with zero value to allow any held resources to
-					// be garbage collected before storing this node in the
-					// pool. This uses an atomic.Value to avoid the write
-					// getting flagged by the race detector. The reference
+					// Clear the node's value and recycle the value pointer
+					// object itself to allow any held resources to be garbage
+					// collected before storing this node in the pool. A value
+					// pointer object and atomic.Pointer is used to avoid the
+					// write getting flagged by the race detector. The reference
 					// algorithm doesn't require use of an atomic operation here
 					// because while step D12 above might read an incorrect
 					// value, it wouldn't end up using it because the CAS would
 					// fail.
-					head.ptr.value.Store(*new(T))
+					head.ptr.value.Store(nil)
+					value := *valuePointer
+					p.putValuePointer(valuePointer)
 
 					// Clear the next pointer so the node is ready for re-use,
 					// but maintain the associated count so that it will still
@@ -161,7 +164,7 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 					head.ptr.next.Store(pointer[T]{count: next.count})
 
 					// Stash the node away for reuse.
-					p.put(head.ptr)
+					p.putNode(head.ptr)
 
 					// D20: return TRUE     // Queue was not empty, dequeue succeeded
 					return value, true
@@ -172,11 +175,12 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 }
 
 type Pool[T any] struct {
-	inner sync.Pool
+	nodes         sync.Pool
+	valuePointers sync.Pool
 }
 
-func (p *Pool[T]) get() *node[T] {
-	n, _ := p.inner.Get().(*node[T])
+func (p *Pool[T]) getNode() *node[T] {
+	n, _ := p.nodes.Get().(*node[T])
 	if n == nil {
 		n = &node[T]{}
 		// Since the zero value of atomic.Value is different than the zero value
@@ -187,8 +191,23 @@ func (p *Pool[T]) get() *node[T] {
 	return n
 }
 
-func (p *Pool[T]) put(n *node[T]) {
-	p.inner.Put(n)
+func (p *Pool[T]) putNode(n *node[T]) {
+	p.nodes.Put(n)
+}
+
+func (p *Pool[T]) getValuePointer(v T) *T {
+	vp, _ := p.valuePointers.Get().(*T)
+	if vp == nil {
+		vp = &v
+	} else {
+		*vp = v
+	}
+	return vp
+}
+
+func (p *Pool[T]) putValuePointer(vp *T) {
+	*vp = *new(T) // Clear the value to allow garbage collection
+	p.valuePointers.Put(vp)
 }
 
 // This implementation depends on Go's implementation of atomic operations for

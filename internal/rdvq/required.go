@@ -36,14 +36,14 @@ type Required[T any] struct {
 //nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) Init(p *Pool[T]) {
 	traceRegion := "rdvq.Required.Init"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion,
+		"Required=%p, fullOutboxes=%p, outboxWaiters=%p",
+		q, &q.fullOutboxes, &q.outboxWaiters)
 
 	q.Optional.Init(p)
 	q.fullOutboxes.Init(&p.nodePool)
 	q.outboxWaiters.Init()
-
-	trace.Logf(context.Background(), traceRegion,
-		"Required=%p, fullOutboxes=%p, outboxWaiters=%p",
-		q, &q.fullOutboxes, &q.outboxWaiters)
 }
 
 // PushSelectFunc is called when PushBackFunc needs to send a value when the outbox is full.

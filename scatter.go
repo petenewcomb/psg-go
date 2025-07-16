@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime"
 
@@ -18,10 +17,10 @@ import (
 // TaskPoolOrJob represents either a TaskPool or a Job.
 // When scattering directly to a Job, tasks are not subject to any concurrency limit.
 type TaskPoolOrJob interface {
-	// job returns the Job associated with this target
-	job() *Job
-	// newScatterWork creates a work item that will execute the task function in the target context
-	newScatterWork(workID workq.WorkID, taskFn boundTaskFunc) workq.WorkFunc
+	// getJob returns the Job associated with this target
+	getJob() *Job
+	// Execute executes the task function in the target context
+	scatter(context.Context, workq.Execution, *taskPoolScatterWork, boundTaskFunc) error
 }
 
 type boundTaskFunc func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap)
@@ -35,12 +34,7 @@ func vetScatter[T any](
 		panic("task function must be non-nil")
 	}
 
-	// If target is nil, job() will panic directly.
-	// If job() returns nil, it's a zero-value TaskPool.
-	j := target.job()
-	if j == nil {
-		panic("task pool not bound to a job")
-	}
+	j := target.getJob()
 
 	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
@@ -61,17 +55,15 @@ func vetScatter[T any](
 	return ctx, meta
 }
 
-func newScatterWork[T any](
-	target TaskPoolOrJob,
-	workID workq.WorkID,
+// Binds type-specific task and gather functions together into a generic task
+// function
+func bindTaskFunc[T any](
+	job *Job,
 	taskFn psgfn.Task[T],
-	postResultFn func(context.Context, *outboxMap, T, error),
-) workq.WorkFunc {
-	traceRegion := "newScatterWork"
-
-	// Bind the task and gather functions together into a generic task function
-	boundTaskFn := func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap) {
-		traceRegion := traceRegion + ".boundTaskFn"
+	postResultFn func(context.Context, *Job, *outboxMap, T, error),
+) boundTaskFunc {
+	return func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap) {
+		traceRegion := "bindTaskFunc.boundTaskFn"
 		defer trace.StartRegion(ctx, traceRegion).End()
 
 		// Make sure that a panic in a task function doesn't compromise the rest
@@ -85,7 +77,7 @@ func newScatterWork[T any](
 			if err != nil {
 				trace.Logf(ctx, traceRegion, "posting task err=%v", err)
 			}
-			postResultFn(ctx, taskWorkerOutboxMap, value, err)
+			postResultFn(ctx, job, taskWorkerOutboxMap, value, err)
 		}()
 
 		// Actually execute the task function. Since this is the top-level
@@ -101,27 +93,24 @@ func newScatterWork[T any](
 			value, err = taskFn(ctx)
 		})
 	}
-
-	// Pass to the target to wrap up as a work function
-	return target.newScatterWork(workID, boundTaskFn)
 }
 
 func tryScatterNow(
 	ctx context.Context,
 	meta *ctxMeta,
 	target TaskPoolOrJob,
-	scatterWorkFn workq.WorkFunc,
+	scatterWork workq.Work,
 ) (bool, error) {
-	return scatterNowOrQueue(ctx, meta, target, scatterWorkFn, nil)
+	return scatterNowOrQueue(ctx, meta, target, scatterWork, nil)
 }
 
 func scatterNow(
 	ctx context.Context,
 	meta *ctxMeta,
 	target TaskPoolOrJob,
-	scatterWorkFn workq.WorkFunc,
+	scatterWork workq.Work,
 ) error {
-	_, err := scatterNowOrQueue(ctx, meta, target, scatterWorkFn, meta.QueueWork)
+	_, err := scatterNowOrQueue(ctx, meta, target, scatterWork, meta.MayQueue())
 	return err
 }
 
@@ -129,7 +118,7 @@ func scatterNowOrQueue(
 	ctx context.Context,
 	meta *ctxMeta,
 	target TaskPoolOrJob,
-	scatterWorkFn workq.WorkFunc,
+	scatterWork workq.Work,
 	queueFn workq.QueueWorkFunc,
 ) (startedOrQueued bool, err error) {
 	traceRegion := "scatterNowOrQueue"
@@ -142,21 +131,14 @@ func scatterNowOrQueue(
 	// boom-and-bust cycles of activity more reminiscent of batch processing.
 	runtime.Gosched()
 
-	j := target.job()
-
-	ex := workq.Execution{
-		Blocking: func() {},
-		Starting: func() {
-			startedOrQueued = true
-			trace.Logf(ctx, traceRegion+".Starting", "started=true")
-		},
-	}
-
+	started := false
+	queued := false
 	defer func() {
-		if !startedOrQueued {
-			// Notify scatterWorkFn that it has been abandoned
-			err = errors.Join(err, scatterWorkFn(ctx, workq.Execution{}))
+		if started || !queued {
+			scatterWork.Close()
 		}
+
+		startedOrQueued = started || queued
 		if err == nil {
 			trace.Logf(ctx, traceRegion, "returning startedOrQueued=%v", startedOrQueued)
 		} else {
@@ -164,22 +146,29 @@ func scatterNowOrQueue(
 		}
 	}()
 
+	ex := workq.Execution{
+		Blocking: func() {},
+		Starting: func() {
+			started = true
+		},
+	}
+
 	if meta.IsTopLevel() {
+		j := target.getJob()
 		err := j.yield(ctx)
 		if err != nil {
 			return false, err
 		}
-		ex.Subscribe = func(c *workq.Coordinator) {
-			panic("should be blocking, not subscribing for notification")
+		ex.Subscribe = func(*workq.Coordinator) {
+			panic("unexpected call to scatterNowOrQueue.ex.Subscribe")
 		}
 	}
 
-	err = scatterWorkFn(ctx, ex)
+	err = scatterWork.Execute(ctx, ex)
 
-	if err == nil && !startedOrQueued && queueFn != nil {
-		startedOrQueued = true
-		queueFn(scatterWorkFn)
-		trace.Logf(ctx, traceRegion, "scatter queued")
+	if err == nil && !started && queueFn != nil {
+		queued = true
+		queueFn(scatterWork)
 	}
 
 	return

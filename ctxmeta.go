@@ -61,15 +61,19 @@ func (cm *ctxMeta) ShouldBlock() workq.BlockFunc {
 	return nil
 }
 
-func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
-	_, meta := j.ctxMeta(ctx)
+type jobBlockBehavior struct {
+	job *Job
+}
+
+func (bb *jobBlockBehavior) ShouldBlock(ctx context.Context) workq.BlockFunc {
+	_, meta := bb.job.ctxMeta(ctx)
 	return meta.ShouldBlock()
 }
 
 type executionEnvironment interface {
-	WithOutbox(key outboxKey[workq.WorkFunc], fn func(*workq.Outbox))
+	WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox))
 	WithQueueFunc(queueFn workq.QueueWorkFunc, fn func())
-	QueueWork(workFn workq.WorkFunc)
+	MayQueue() workq.QueueWorkFunc
 }
 
 type topLevelExEnv struct {
@@ -79,14 +83,14 @@ type topLevelExEnv struct {
 	queueFnSet atomic.Bool // Can be read without holding mu
 }
 
-func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.WorkFunc], fn func(*workq.Outbox)) {
+func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox)) {
 	traceRegion := "topLevelExEnv.WithOutbox"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p", ee)
 
 	ee.mu.Lock()
 	defer ee.mu.Unlock()
-	outbox := OutboxFor[workq.WorkFunc](&ee.outboxMap, key)
+	outbox := OutboxFor[workq.Work](&ee.outboxMap, key)
 	trace.Logf(context.Background(), traceRegion, "outbox=%p", outbox)
 	fn(outbox)
 }
@@ -114,13 +118,9 @@ func (ee *topLevelExEnv) WithQueueFunc(queueFn workq.QueueWorkFunc, fn func()) {
 	trace.WithRegion(context.Background(), traceRegion+".queueFnSet", fn)
 }
 
-func (ee *topLevelExEnv) QueueWork(workFn workq.WorkFunc) {
-	traceRegion := "topLevelExEnv.QueueWork"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p", ee)
-
+func (ee *topLevelExEnv) MayQueue() workq.QueueWorkFunc {
 	// Lock must already be held by WithQueueFunc
-	ee.queueFn(workFn)
+	return ee.queueFn
 }
 
 type ctxMetaValueKey struct{}

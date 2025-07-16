@@ -61,14 +61,13 @@ type JobState struct {
 //nolint:contextcheck // background context used only for tracing
 func (js *JobState) Init() {
 	traceRegion := "JobState.Init"
+	trace.Logf(context.Background(), traceRegion,
+		"JobState=%p, inFlightWork=%p, totalReferences=%p",
+		js, &js.inFlightWork, &js.totalReferences)
 
 	js.currentStage.Store(int32(stageOpen))
 	js.nextFlushChan.Store(make(chan struct{}))
 	js.doneChan = make(chan struct{})
-
-	trace.Logf(context.Background(), traceRegion,
-		"JobState=%p, inFlightWork=%p, totalReferences=%p",
-		js, &js.inFlightWork, &js.totalReferences)
 }
 
 // IncrementWork increments both the work counter and total references counter

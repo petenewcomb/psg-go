@@ -25,6 +25,8 @@ type Waiters struct {
 }
 
 func (w *Waiters) Init() {
+	traceRegion := "rdvq.Waiters.Init"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
 	w.q.Init(wp)
 }
 

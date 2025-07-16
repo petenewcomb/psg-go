@@ -308,6 +308,7 @@ func (cps *CombinerPoolState) updateStats() bool {
 //nolint:contextcheck // background context used only for tracing
 func (cps *CombinerPoolState) notifyWaiter() {
 	traceRegion := "CombinerPoolState.notifyWaiter"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
 	waitCh := cps.waitChan
 	trace.Logf(context.Background(), traceRegion, "entering select: CombinerPoolState=%p, waitChan=%p", cps, waitCh)
 	select {

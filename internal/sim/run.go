@@ -7,11 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -24,33 +22,12 @@ import (
 
 func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	traceRegion := "sim.Run"
-	if trace.IsEnabled() {
-		//nolint:lll // long url
-		// See [MaxEventTrailerDataSize] defined to be 1<<10
-		// [MaxEventTrailerDataSize]: https://cs.opensource.google/go/go/+/master:src/internal/trace/tracev2/events.go;drc=6c3b5a2798c83d583cb37dba9f39c47300d19f1f;l=588
-		header := "Test plan:\n\n"
-		continuationHeader := "Test plan (continued):\n\n"
-		maxChunkSize := 1<<10 - max(len(header), len(continuationHeader)) - 1
-		planText := fmt.Sprintf("%#v", plan)
-		for len(planText) > maxChunkSize {
-			chunk := planText[:maxChunkSize]
-			lastNewlineIndex := strings.LastIndexByte(chunk, '\n')
-			if lastNewlineIndex != -1 {
-				chunk = planText[:lastNewlineIndex]
-				planText = planText[len(chunk)+1:]
-			} else {
-				l := len(chunk)
-				for l > 0 && !utf8.RuneStart(chunk[l-1]) {
-					l--
-				}
-				chunk = chunk[:l]
-				planText = planText[l:]
-			}
-			trace.Log(ctx, traceRegion, header+chunk+"\n")
-			header = continuationHeader
-		}
-		trace.Log(ctx, traceRegion, header+planText+"\n")
-	}
+	trace.LongLogf(ctx, traceRegion,
+		"Test plan:\n\n",
+		"Test plan (continued):\n\n",
+		"\n",
+		"%#v", plan,
+	)
 	return run(ctx, t, plan)
 }
 

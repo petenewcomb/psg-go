@@ -19,7 +19,7 @@ type cpWorker struct {
 
 	combinerMap      combinerMap
 	outboxMap        outboxMap
-	emitGatherOutbox *rdvq.Outbox[workq.WorkFunc]
+	emitGatherOutbox *workq.Outbox
 	idleTimer        *time.Timer
 	doneCh           <-chan struct{}
 	doneErr          func() error
@@ -27,7 +27,7 @@ type cpWorker struct {
 	idleTimerCh            <-chan time.Time
 	workReadyCh            <-chan workq.RenotifyFunc
 	queueFn                workq.QueueWorkFunc
-	inboxCh                <-chan workq.WorkFunc
+	inboxCh                <-chan workq.Work
 	flushDeadlineTimerCh   <-chan time.Time
 	nextJobFlushCh         <-chan struct{}
 	unregisterAsJobFlusher func()
@@ -40,8 +40,8 @@ func (cw *cpWorker) IsSpare() bool {
 	return cw.idleTimer != nil
 }
 
-func (cw *cpWorker) QueueWork(workFn workq.WorkFunc) {
-	cw.queueFn(workFn)
+func (cw *cpWorker) MayQueue() workq.QueueWorkFunc {
+	return cw.queueFn
 }
 
 func (cw *cpWorker) WithQueueFunc(queueFn workq.QueueWorkFunc, fn func()) {
@@ -55,8 +55,8 @@ func (cw *cpWorker) WithQueueFunc(queueFn workq.QueueWorkFunc, fn func()) {
 	fn()
 }
 
-func (cw *cpWorker) WithOutbox(key outboxKey[workq.WorkFunc], fn func(outbox *workq.Outbox)) {
-	outbox := OutboxFor[workq.WorkFunc](&cw.outboxMap, key)
+func (cw *cpWorker) WithOutbox(key outboxKey[workq.Work], fn func(outbox *workq.Outbox)) {
+	outbox := OutboxFor[workq.Work](&cw.outboxMap, key)
 	fn(outbox)
 }
 
@@ -64,8 +64,8 @@ func (cw *cpWorker) TryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc)
 	if queuedFlush, _ := cw.flushToNextDeadline(ctx); queuedFlush {
 		return nil
 	}
-	if workFn, ok := cw.cp.combineQueue.TryPopFront(); ok {
-		queueFn(workFn)
+	if work, ok := cw.cp.combineQueue.TryPopFront(); ok {
+		queueFn(work)
 		return nil
 	}
 	return nil
@@ -89,8 +89,8 @@ func (cw *cpWorker) AddWork(
 
 	if workReadyCh == nil {
 		// Non-blocking mode
-		if workFn, ok := cw.cp.combineQueue.TryPopFront(); ok {
-			cw.queueFn(workFn)
+		if work, ok := cw.cp.combineQueue.TryPopFront(); ok {
+			cw.queueFn(work)
 		}
 		return nil, nil
 	}
@@ -104,7 +104,7 @@ func (cw *cpWorker) AddWork(
 	if !cw.IsSpare() {
 		// Primary goroutine, no need for idle detection
 		cw.cp.combineQueue.PopFrontFunc(cw.queueFn,
-			func(inboxCh <-chan workq.WorkFunc, outboxFilledCh <-chan rdvq.RenotifyFunc) (rdvq.SelectResult, rdvq.RenotifyFunc) {
+			func(inboxCh <-chan workq.Work, outboxFilledCh <-chan rdvq.RenotifyFunc) (rdvq.SelectResult, rdvq.RenotifyFunc) {
 				return cw.primaryPopSelect(ctx, inboxCh, outboxFilledCh)
 			},
 		)
@@ -126,13 +126,13 @@ func (cw *cpWorker) AddWork(
 
 		// Spare goroutine processes excess work (outboxes + shared channel)
 		// without registering for immediate delivery
-		workFn, ok := cw.cp.combineQueue.PopFrontExcessFunc(
+		work, ok := cw.cp.combineQueue.PopFrontExcessFunc(
 			func(outboxFilledCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				return cw.sparePopSelect(ctx, outboxFilledCh)
 			},
 		)
 		if ok {
-			cw.queueFn(workFn)
+			cw.queueFn(work)
 		}
 	}
 
@@ -147,7 +147,7 @@ func (cw *cpWorker) AddWork(
 
 func (cw *cpWorker) primaryPopSelect(
 	ctx context.Context,
-	inboxCh <-chan workq.WorkFunc,
+	inboxCh <-chan workq.Work,
 	outboxFilledCh <-chan rdvq.RenotifyFunc,
 ) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
 	cw.inboxCh = inboxCh
@@ -212,10 +212,10 @@ func (cw *cpWorker) primaryInnerPopSelect(
 		"entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
 		cw.inboxCh, outboxFilledCh, cw.workReadyCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 	select {
-	case workFn := <-cw.inboxCh:
-		trace.Logf(ctx, traceRegion, "received workFn from inboxCh=%p", cw.inboxCh)
+	case work := <-cw.inboxCh:
+		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", cw.inboxCh)
 		cw.followupFn = func(context.Context) {
-			cw.queueFn(workFn)
+			cw.queueFn(work)
 		}
 		return rdvq.SelectInboxEmptied, nil
 
@@ -308,7 +308,7 @@ func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFu
 	trace.Logf(ctx, traceRegion, "cpWorker=%p", cw)
 	if cw.nextJobFlushCh == nil {
 		// Make sure the job won't terminate before the combiner is flushed
-		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.j.state.RegisterFlusher()
+		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
 	combineFn(ctx, &cw.combinerMap, cw.queueFn, cw.emitGatherOutbox)
 	cw.cp.state.IncrementCompleted()

@@ -5,6 +5,7 @@ package psg
 
 import (
 	"context"
+	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -70,8 +71,8 @@ func (g *GatherOp[T]) Scatter(
 	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	workFn := g.newScatterWork(target, taskFn)
-	return scatterNow(ctx, meta, target.job(), workFn)
+	work := g.newScatterWork(target, taskFn)
+	return scatterNow(ctx, meta, target, work)
 }
 
 // TryScatter attempts to initiate asynchronous execution of the provided task
@@ -99,38 +100,69 @@ func (g *GatherOp[T]) TryScatter(
 	return tryScatterNow(ctx, meta, target, workFn)
 }
 
+func (g *GatherOp[T]) postResult(ctx context.Context, j *Job, taskWorkerOutboxMap *outboxMap, value T, err error) {
+	traceRegion := "GatherOp.postResult"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	// Post the gather using the task worker's outbox for the job's gather queue
+	gatherOutbox := OutboxFor[workq.Work](taskWorkerOutboxMap, j.gatherOutboxKey())
+	trace.Logf(ctx, traceRegion, "GatherOp=%p outbox=%p", g, gatherOutbox)
+
+	// Bind the gatherFn to the result.
+	boundGatherFn := func(ctx context.Context) error {
+		return g.gatherFn(ctx, value, err)
+	}
+
+	j.postGather(ctx, gatherOutbox, boundGatherFn)
+}
+
 func (g *GatherOp[T]) newScatterWork(
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
-) workq.WorkFunc {
+) *gatherScatterWork {
 	traceRegion := "GatherOp.newScatterWork"
 
-	workID := workq.NewWorkID()
-	trace.Logf(context.Background(), traceRegion, "workID=%d", workID)
+	w := gatherScatterWorkPool.Get().(*gatherScatterWork)
+	w.Init(target, bindTaskFunc(target.getJob(), taskFn, g.postResult))
 
-	j := target.job()
+	trace.Logf(context.Background(), traceRegion, "GatherOp=%p created %v", g, w)
+	return w
+}
 
-	postResultFn := func(ctx context.Context, taskWorkerOutboxMap *outboxMap, value T, err error) {
-		traceRegion := traceRegion + ".postResultFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
+type gatherScatterWork struct {
+	jobWork
+	target TaskPoolOrJob
+	taskPoolScatterWork
+	taskFn boundTaskFunc
+}
 
-		// Post the gather using the task worker's outbox for the job's gather queue
-		gatherOutbox := OutboxFor[workq.WorkFunc](taskWorkerOutboxMap, j.gatherOutboxKey())
-		trace.Logf(ctx, traceRegion, "outbox=%p, workID=%d", gatherOutbox, workID)
+func (w *gatherScatterWork) Init(target TaskPoolOrJob, taskFn boundTaskFunc) {
+	w.jobWork.Init(target.getJob())
+	w.target = target
+	w.taskFn = taskFn
+}
 
-		// Bind the supplied gatherFn to the result.
-		boundGatherFn := func(ctx context.Context) error {
-			traceRegion := traceRegion + ".boundGatherFn"
-			defer trace.StartRegion(ctx, traceRegion).End()
-			trace.Logf(ctx, traceRegion, "workID=%d", workID)
+func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "gatherScatterWork.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", w)
 
-			return g.gatherFn(ctx, value, err)
-		}
+	return w.target.scatter(ctx, ex, &w.taskPoolScatterWork, w.taskFn)
+}
 
-		j.postGather(ctx, gatherOutbox, boundGatherFn)
-	}
+func (w *gatherScatterWork) Close() {
+	traceRegion := "gatherScatterWork.Close"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	scatterWorkFn := newScatterWork(target, workID, taskFn, postResultFn)
+	w.jobWork.Close(w.target.getJob())
 
-	return j.newWork(workID, scatterWorkFn)
+	*w = gatherScatterWork{} // Clear the work item for garbage collection and reuse
+	gatherScatterWorkPool.Put(w)
+}
+
+var gatherScatterWorkPool = sync.Pool{
+	New: func() any {
+		return &gatherScatterWork{}
+	},
 }

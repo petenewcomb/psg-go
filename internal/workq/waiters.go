@@ -19,80 +19,79 @@ type Waiters struct {
 //nolint:contextcheck // background context used only for tracing
 func (w *Waiters) Init() {
 	traceRegion := "workq.Waiters.Init"
-	w.Coordinator.Init()
-	w.Waiters.Init()
-
 	trace.Logf(context.Background(), traceRegion,
 		"Waiters=%p, Coordinator=%p, rdvq.Waiters=%p",
 		w, &w.Coordinator, &w.Waiters)
+
+	w.Coordinator.Init()
+	w.Waiters.Init()
 }
 
 type BlockFunc func(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyFunc, error)
 
-func (w *Waiters) Wrap(workFn WorkFunc, shouldWait func() bool, shouldBlock func(context.Context) BlockFunc) WorkFunc {
-	return func(ctx context.Context, ex Execution) error {
-		traceRegion := "workq.Waiters.wrappedFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		trace.Logf(ctx, traceRegion, "Waiters=%p", w)
+type WaitBehavior interface {
+	BlockBehavior
+	ShouldWait() bool
+}
 
-		var renotifyFn RenotifyFunc
-		var blockFn BlockFunc
-		blockingCalled := false
-		for shouldWait() {
+func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavior, workFn WorkFunc) error {
+	traceRegion := "workq.Waiters.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
 
-			if renotifyFn != nil {
-				// Can't productively use notification receieved, so pass it along
-				renotifyFn()
-			}
+	var renotifyFn RenotifyFunc
+	var blockFn BlockFunc
+	blockingCalled := false
+	for behavior.ShouldWait() {
 
-			subscribeFn := ex.Subscribe
-			if subscribeFn == nil {
-				// Non-blocking execution requested, so we "wait" by exiting
-				// without calling the wrapped work function.
-				return nil
-			}
-
-			blockFn = shouldBlock(ctx)
-			if blockFn == nil {
-				ex.Subscribe(&w.Coordinator)
-
-				// Recheck condition in case it changed before the subscription
-				// was registered and could receive the notification.
-				if !shouldWait() {
-					break
-				}
-
-				// Return now without executing the wrapped work function and
-				// expect to be called again later (e.g., after notification via
-				// the subscription)
-				return nil
-			}
-
-			// Blocking path
-			waiter := w.New(func() bool {
-				if !shouldWait() {
-					return false
-				}
-				if !blockingCalled {
-					blockingCalled = true
-					ex.Blocking()
-				}
-				return true
-			})
-			var err error
-			renotifyFn = waiter.WaitFuncWithOrphanHandler(w.Notify, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
-				var renotifyFn RenotifyFunc
-				renotifyFn, err = blockFn(ctx, waitCh)
-				return renotifyFn
-			})
-			if err != nil {
-				trace.Logf(ctx, traceRegion, "returning error from blockFn: %v", err)
-				return err
-			}
+		if renotifyFn != nil {
+			// Can't productively use notification receieved, so pass it along
+			renotifyFn()
 		}
 
-		return workFn(ctx, ex)
+		if !ex.ShouldBlockOrSubscribe() {
+			return nil
+		}
+
+		blockFn = behavior.ShouldBlock(ctx)
+		if blockFn == nil {
+			ex.Subscribe(&w.Coordinator)
+
+			// Recheck condition in case it changed before the subscription
+			// was registered and could receive the notification.
+			if !behavior.ShouldWait() {
+				break
+			}
+
+			// Return now without executing the wrapped work function and
+			// expect to be called again later (e.g., after notification via
+			// the subscription)
+			return nil
+		}
+
+		// Blocking path
+		waiter := w.New(func() bool {
+			if !behavior.ShouldWait() {
+				return false
+			}
+			if !blockingCalled {
+				blockingCalled = true
+				ex.Blocking()
+			}
+			return true
+		})
+		var err error
+		renotifyFn = waiter.WaitFuncWithOrphanHandler(w.Notify, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+			var renotifyFn RenotifyFunc
+			renotifyFn, err = blockFn(ctx, waitCh)
+			return renotifyFn
+		})
+		if err != nil {
+			trace.Logf(ctx, traceRegion, "returning error from blockFn: %v", err)
+			return err
+		}
 	}
+
+	return workFn(ctx, ex)
 }
 
 //nolint:contextcheck // background context used only for tracing

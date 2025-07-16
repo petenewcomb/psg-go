@@ -14,9 +14,12 @@ package trace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"runtime/trace"
+	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 var (
@@ -94,13 +97,57 @@ func Log(ctx context.Context, category, message string) {
 
 // Logf adds a formatted log event to the trace if tracing is enabled.
 // The category is automatically prefixed with the global prefix.
-func Logf(ctx context.Context, category, format string, args ...interface{}) {
+func Logf(ctx context.Context, category, format string, args ...any) {
 	p := prefix.Load()
 	if p == nil {
 		return
 	}
 	prefixedCategory := *p + category
 	trace.Logf(ctx, prefixedCategory, format, args...)
+}
+
+// LongLogf adds one or more log events to the trace if tracing is enabled,
+// breaking the message up as needed to avoid truncation due to per-event size
+// limit. The category is automatically prefixed with the global prefix.
+// See [MaxEventTrailerDataSize], defined to be 1<<10
+// [MaxEventTrailerDataSize]: https://cs.opensource.google/go/go/+/master:src/internal/trace/tracev2/events.go;drc=6c3b5a2798c83d583cb37dba9f39c47300d19f1f;l=588
+//
+//nolint:lll // long url
+func LongLogf(ctx context.Context, category, header, continuationHeader, trailer, format string, args ...any) {
+	if !trace.IsEnabled() {
+		return
+	}
+
+	const maxChunkSize = 1 << 10
+
+	message := fmt.Sprintf(format, args...)
+	for {
+		targetChunkSize := maxChunkSize - len(header) - len(trailer)
+		if len(message) <= targetChunkSize {
+			break
+		}
+		chunk := message[:targetChunkSize]
+
+		// Prefer breaking on line boundaries, otherwise break between runes.
+		lastNewlineIndex := strings.LastIndexByte(chunk, '\n')
+		if lastNewlineIndex != -1 {
+			chunk = message[:lastNewlineIndex]
+			message = message[len(chunk)+1:]
+		} else {
+			l := len(chunk)
+			for l > 0 && !utf8.RuneStart(chunk[l-1]) {
+				l--
+			}
+			chunk = chunk[:l]
+			message = message[l:]
+		}
+		Log(ctx, category, header+chunk+trailer)
+
+		// Use the continuation header for subsequent chunks.
+		header = continuationHeader
+	}
+
+	Log(ctx, category, header+message+trailer)
 }
 
 type Task struct {

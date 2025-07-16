@@ -22,11 +22,23 @@ esac
 
 SIMDIR="${BASH_SOURCE[0]%/*}"
 
+brokenpipeok() {
+    (
+        set +e
+        "$@"
+        code=$?
+        if [ $code -eq 141 ]; then
+            code=0
+        fi
+        exit $code
+    )
+}
+
 if [ ! -e trace.txt.zst ]; then
     "$SIMDIR/extract-sim-trace.sh" "$trace_zstd" | zstd >trace.txt.zst
 fi
 if [ ! -e plan.txt ]; then
-    zstd -dc trace.txt.zst | "$SIMDIR/extract-sim-plan.sh" >plan.txt
+    brokenpipeok zstd -dc trace.txt.zst | "$SIMDIR/extract-sim-plan.sh" >plan.txt
 fi
 if [ ! -e started.txt ]; then
     zstd -dc trace.txt.zst | "$SIMDIR/extract-sim-started.sh" >started.txt

@@ -22,7 +22,7 @@ import (
 //
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
-	j              *Job
+	job            *Job
 	maxConcurrency atomic.Int32
 	inFlight       jobstate.InFlightCounter
 	waiters        workq.Waiters
@@ -37,6 +37,15 @@ type TaskPool struct {
 //nolint:contextcheck // background context used only for tracing
 func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	traceRegion := "NewTaskPool"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	p := &TaskPool{
+		job: job,
+	}
+
+	trace.Logf(context.Background(), traceRegion,
+		"TaskPool=%p, job=%p, inFlight=%p, waiters=%p",
+		p, job, &p.inFlight, &p.waiters)
 
 	if job == nil {
 		panic("job must be non-nil")
@@ -45,9 +54,6 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	// Check if the job is done
 	job.panicIfDone()
 
-	p := &TaskPool{
-		j: job,
-	}
 	p.waiters.Init()
 
 	// Set default unlimited concurrency
@@ -56,20 +62,14 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	// Apply user options
 	p.SetOptions(options...)
 
-	trace.Logf(context.Background(), traceRegion,
-		"TaskPool=%p, job=%p, inFlight=%p, waiters=%p",
-		p, job, &p.inFlight, &p.waiters)
-
 	return p
 }
 
-// job returns the Job associated with this TaskPool.
-// Panics if the TaskPool was not created properly via NewTaskPool.
-func (p *TaskPool) job() *Job {
-	if p.j == nil {
+func (p *TaskPool) getJob() *Job {
+	if p.job == nil {
 		panic("task pool not bound to a job")
 	}
-	return p.j
+	return p.job
 }
 
 // taskPoolConfigWrapper wraps a TaskPool to implement the taskPoolConfig interface for options
@@ -102,62 +102,71 @@ func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 	opts.ApplyToTaskPool(taskPoolConfigWrapper{pool: p}, options...)
 }
 
-//nolint:contextcheck // background context used only for tracing
-func (p *TaskPool) newScatterWork(workID workq.WorkID, taskFn boundTaskFunc) workq.WorkFunc {
-	traceRegion := "TaskPool.newScatterWork"
+func (p *TaskPool) scatter(
+	ctx context.Context,
+	ex workq.Execution,
+	tpSW *taskPoolScatterWork,
+	taskFn boundTaskFunc,
+) error {
+	traceRegion := "TaskPool.scatter"
+	defer trace.StartRegion(ctx, traceRegion).End()
 
-	j := p.j
-
-	trace.Logf(context.Background(), traceRegion, "TaskPool=%p, workID=%d", p, workID)
-
-	baseWorkFn := j.newScatterWorkWithCompletedFn(workID, taskFn, func() {
-		// Decrement the task pool's in-flight count BEFORE waiting on the
-		// gather channel. This makes it safe for gather functions to call
-		// `Scatter` with this same `TaskPool` instance without deadlock, as
-		// there is guaranteed to be at least one slot available.
-		p.decrementInFlight()
-	})
-
-	inFlightIncremented := false
-	decrementingWorkFn := func(ctx context.Context, ex workq.Execution) error {
-		traceRegion := traceRegion + ".decrementingWorkFn"
-		defer trace.StartRegion(context.Background(), traceRegion).End()
-
-		started := false
-		originalStarting := ex.Starting
-		if originalStarting != nil {
-			ex.Starting = func() {
-				started = true
-				originalStarting()
-				trace.Logf(ctx, traceRegion, "started=true")
-			}
-		}
-
-		defer func() {
-			// If we didn't start, we must release our slot
-			if !started && inFlightIncremented {
-				p.decrementInFlight()
-				inFlightIncremented = false
-			}
-		}()
-
-		return baseWorkFn(ctx, ex)
+	wb := &taskPoolWaitBehavior{
+		jobBlockBehavior: jobBlockBehavior{
+			job: p.job,
+		},
+		pool: p,
+		work: tpSW,
 	}
 
-	shouldWaitFn := func() bool {
-		traceRegion := traceRegion + ".shouldWaitFn"
-		// Make sure we increment only once for this invocation of the scatter
-		// work function, though shouldWaitFn may be called multiple times. This
-		// is ok because once we have incremented, we have reserved our slot.
-		if !inFlightIncremented {
-			inFlightIncremented = p.incrementInFlight()
-		} else {
-			trace.Logf(context.Background(), traceRegion, "inFlight counter already incremented")
+	started := false
+	defer func() {
+		// If we didn't start, we must release our slot
+		if !started && tpSW.inFlightIncremented {
+			p.decrementInFlight()
+			tpSW.inFlightIncremented = false
 		}
-		return !inFlightIncremented
+	}()
+
+	originalStarting := ex.Starting
+	ex.Starting = func() {
+		started = true
+		originalStarting()
 	}
 
-	return p.waiters.Wrap(decrementingWorkFn, shouldWaitFn, j.shouldBlock)
+	return p.waiters.Execute(ctx, ex, wb,
+		func(ctx context.Context, ex workq.Execution) error {
+			return p.job.scatterWithCompletedFn(ctx, ex, taskFn, p.decrementInFlight)
+		},
+	)
+}
+
+type taskPoolScatterWork struct {
+	inFlightIncremented bool
+}
+
+type taskPoolWaitBehavior struct {
+	jobBlockBehavior
+	pool *TaskPool
+	work *taskPoolScatterWork
+}
+
+func (wb *taskPoolWaitBehavior) Waiters() *workq.Waiters {
+	return &wb.pool.waiters
+}
+
+func (wb *taskPoolWaitBehavior) ShouldWait() bool {
+	traceRegion := "taskPoolWaitBehavior.ShouldWait"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	// Make sure we increment only once for this invocation of the scatter work
+	// function, though ShouldWait may be called multiple times. This is ok
+	// because once we have incremented, we have reserved a slot for this work
+	// item.
+	if !wb.work.inFlightIncremented {
+		wb.work.inFlightIncremented = wb.pool.incrementInFlight()
+	}
+	return !wb.work.inFlightIncremented
 }
 
 //nolint:contextcheck // background context used only for tracing

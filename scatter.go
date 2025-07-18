@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -131,14 +132,17 @@ func scatterNowOrQueue(
 	// boom-and-bust cycles of activity more reminiscent of batch processing.
 	runtime.Gosched()
 
-	started := false
+	executor := getExecutor()
+	defer putExecutor(executor)
+	ex := executor.BaseEx()
+
 	queued := false
 	defer func() {
-		if started || !queued {
+		if ex.Started() || !queued {
 			scatterWork.Close()
 		}
 
-		startedOrQueued = started || queued
+		startedOrQueued = ex.Started() || queued
 		if err == nil {
 			trace.Logf(ctx, traceRegion, "returning startedOrQueued=%v", startedOrQueued)
 		} else {
@@ -146,19 +150,16 @@ func scatterNowOrQueue(
 		}
 	}()
 
-	ex := workq.Execution{
-		Blocking: func() {},
-		Starting: func() {
-			started = true
-		},
-	}
-
 	if meta.IsTopLevel() {
 		j := target.getJob()
 		err := j.yield(ctx)
 		if err != nil {
 			return false, err
 		}
+
+		// Signal the work that it should block making Subscribe non-nil,
+		// knowing at this point that it will block rather than subscribe
+		// because we're at the top level.
 		ex.Subscribe = func(*workq.Coordinator) {
 			panic("unexpected call to scatterNowOrQueue.ex.Subscribe")
 		}
@@ -166,10 +167,25 @@ func scatterNowOrQueue(
 
 	err = scatterWork.Execute(ctx, ex)
 
-	if err == nil && !started && queueFn != nil {
+	if err == nil && !ex.Started() && queueFn != nil {
 		queued = true
 		queueFn(scatterWork)
 	}
 
 	return
+}
+
+var executorPool = sync.Pool{
+	New: func() any {
+		return &workq.Executor{}
+	},
+}
+
+func getExecutor() *workq.Executor {
+	return executorPool.Get().(*workq.Executor)
+}
+
+func putExecutor(e *workq.Executor) {
+	e.Reset()
+	executorPool.Put(e)
 }

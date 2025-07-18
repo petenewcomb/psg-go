@@ -25,6 +25,15 @@ type CombineOp[I, O any] struct {
 	newCombiner CombinerFactory[I, O]
 	minHoldTime time.Duration // Minimum time since last combine before auto-flushing
 	maxHoldTime time.Duration // Maximum time since first combine before auto-flushing
+
+	// avoid closure reallocation
+	postResultFn func(
+		ctx context.Context,
+		j *Job,
+		taskWorkerOutboxMap *outboxMap,
+		input I,
+		inputErr error,
+	)
 }
 
 // NewCombineOp creates a new CombineOp operation that uses the specified gather function,
@@ -56,6 +65,8 @@ func NewCombineOp[I, O any](
 		minHoldTime: -1, // Sentinel value: no idle-based flushing
 		maxHoldTime: -1, // Sentinel value: no absolute deadline
 	}
+
+	c.postResultFn = c.postResult
 
 	trace.Logf(context.Background(), traceRegion, "CombineOp=%p, pool=%p", c, pool)
 
@@ -116,7 +127,7 @@ func (c *CombineOp[I, O]) newScatterWork(
 	}
 
 	w := combineScatterWorkPool.Get().(*combineScatterWork)
-	w.Init(c.pool, target, bindTaskFunc(j, taskFn, c.postResult))
+	w.Init(c.pool, target, bindTaskFunc(j, taskFn, c.postResultFn))
 
 	trace.Logf(context.Background(), traceRegion, "CombineOp=%p created %v", c, w)
 	return w
@@ -142,9 +153,7 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	bb := &jobBlockBehavior{
-		job: w.pool.job,
-	}
+	bb := w.pool.job.protoBB
 
 	return w.pool.governor.Execute(ctx, ex, bb,
 		func(ctx context.Context, ex workq.Execution) error {

@@ -38,333 +38,346 @@
 <path d="M0,0L1009,0L1009,432L0,432Z" style="fill:#-8000000000000000-8000000000000000-8000000000000000;fill-opacity:0" />
 <text x="403.11" y="-422.61" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Aggregation Workload Speedup (Waiting)</text>
-<text x="408.82" y="-3.9023" transform="scale(1, -1)"
+<text x="411.32" y="-3.9023" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Aggregation Workload Duration @ Flush Period</text>
-<text x="150.37" y="-16.541" transform="scale(1, -1)"
+<text x="155.37" y="-16.541" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">10µs @ 1ms</text>
-<text x="495.31" y="-16.541" transform="scale(1, -1)"
+<text x="497.81" y="-16.541" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">100µs @ 10ms</text>
 <text x="846.74" y="-16.541" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">1ms @ 100ms</text>
-<path d="M175.63,24.363L175.63,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M525.57,24.363L525.57,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M180.63,24.363L180.63,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M528.07,24.363L528.07,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
 <path d="M875.51,24.363L875.51,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M175.63,32.363L875.51,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M180.63,32.363L875.51,32.363" style="fill:none;stroke:#808080;stroke-width:0.5" />
 <g transform="rotate(90)">
 <text x="176.3" y="9.3867" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Throughput vs. Direct</text>
 </g>
-<text x="20.885" y="-37.924" transform="scale(1, -1)"
+<text x="25.885" y="-37.924" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">0</text>
-<text x="20.885" y="-206.08" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">8</text>
-<text x="15.885" y="-374.24" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">16</text>
-<path d="M28.385,40.209L36.385,40.209" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M28.385,208.36L36.385,208.36" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M28.385,376.52L36.385,376.52" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M32.385,124.29L36.385,124.29" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M32.385,292.44L36.385,292.44" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M36.385,40.209L36.385,418.71" style="fill:none;stroke:#808080;stroke-width:0.5" />
-<path d="M42.135,40.209L42.135,40.739L66.135,40.739L66.135,40.209Z" style="fill:#A6CEE3" />
-<path d="M54.135,40.715L54.135,40.777" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M48.135,40.715L60.135,40.715" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M48.135,40.777L60.135,40.777" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="44.685" y="-68.492" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.025</text>
-<text x="46.167" y="-60.092" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+7%</text>
-<text x="47.138" y="-51.692" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-5%</text>
-<path d="M392.07,40.209L392.07,42.732L416.07,42.732L416.07,40.209Z" style="fill:#A6CEE3" />
-<path d="M404.07,42.582L404.07,43.093" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M398.07,42.582L410.07,42.582" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M398.07,43.093L410.07,43.093" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="394.62" y="-70.808" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.120</text>
-<text x="394.01" y="-62.408" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+14%</text>
-<text x="397.08" y="-54.008" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-6%</text>
-<path d="M742.01,40.209L742.01,57.883L766.01,57.883L766.01,40.209Z" style="fill:#A6CEE3" />
-<path d="M754.01,57.529L754.01,58.307" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M748.01,57.529L760.01,57.529" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M748.01,58.307L760.01,58.307" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="744.56" y="-86.021" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.841</text>
-<text x="749.08" y="-77.621" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="748.42" y="-69.221" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">2%</text>
-<path d="M69.135,40.209L69.135,41.284L93.135,41.284L93.135,40.209Z" style="fill:#1F78B4" />
-<path d="M81.135,41.178L81.135,41.396" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M75.135,41.178L87.135,41.178" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M75.135,41.396L87.135,41.396" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="71.685" y="-69.111" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.051</text>
-<text x="76.201" y="-60.711" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="73.436" y="-52.311" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">10%</text>
-<path d="M419.07,40.209L419.07,42.943L443.07,42.943L443.07,40.209Z" style="fill:#1F78B4" />
-<path d="M431.07,42.744L431.07,43.229" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M425.07,42.744L437.07,42.744" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M425.07,43.229L437.07,43.229" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="421.62" y="-70.944" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.130</text>
-<text x="421.01" y="-62.544" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+10%</text>
-<text x="424.08" y="-54.144" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-7%</text>
-<path d="M769.01,40.209L769.01,57.882L793.01,57.882L793.01,40.209Z" style="fill:#1F78B4" />
-<path d="M781.01,57.55L781.01,58.036" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M775.01,57.55L787.01,57.55" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M775.01,58.036L787.01,58.036" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="771.56" y="-85.75" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.841</text>
-<text x="773.05" y="-77.35" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1%</text>
-<text x="774.02" y="-68.95" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-2%</text>
-<path d="M96.135,40.209L96.135,41.992L120.13,41.992L120.13,40.209Z" style="fill:#B2DF8A" />
-<path d="M108.13,41.864L108.13,42.128" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M102.13,41.864L114.13,41.864" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M102.13,42.128L114.13,42.128" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="98.685" y="-69.843" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.085</text>
-<text x="100.17" y="-61.443" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+8%</text>
-<text x="101.14" y="-53.043" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-7%</text>
-<path d="M446.07,40.209L446.07,46.282L470.07,46.282L470.07,40.209Z" style="fill:#B2DF8A" />
-<path d="M458.07,45.495L458.07,46.902" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M452.07,45.495L464.07,45.495" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M452.07,46.902L464.07,46.902" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="448.62" y="-74.616" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.289</text>
-<text x="448.01" y="-66.216" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+10%</text>
-<text x="448.98" y="-57.816" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-13%</text>
-<path d="M796.01,40.209L796.01,74.807L820.01,74.807L820.01,40.209Z" style="fill:#B2DF8A" />
-<path d="M808.01,74.324L808.01,75.122" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M802.01,74.324L814.01,74.324" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M802.01,75.122L814.01,75.122" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="798.56" y="-102.84" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1.646</text>
-<text x="803.08" y="-94.437" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="802.42" y="-86.037" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1%</text>
-<path d="M123.13,40.209L123.13,43.257L147.13,43.257L147.13,40.209Z" style="fill:#33A02C" />
-<path d="M135.13,42.733L135.13,43.454" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M129.13,42.733L141.13,42.733" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M129.13,43.454L141.13,43.454" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="125.68" y="-71.169" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.145</text>
-<text x="127.17" y="-62.769" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+6%</text>
-<text x="126.04" y="-54.369" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-17%</text>
-<path d="M473.07,40.209L473.07,48.33L497.07,48.33L497.07,40.209Z" style="fill:#33A02C" />
-<path d="M485.07,47.322L485.07,49.64" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M479.07,47.322L491.07,47.322" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M479.07,49.64L491.07,49.64" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="475.62" y="-77.355" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.386</text>
-<text x="475.01" y="-68.955" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+16%</text>
-<text x="475.98" y="-60.555" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-12%</text>
-<path d="M823.01,40.209L823.01,91.475L847.01,91.475L847.01,40.209Z" style="fill:#33A02C" />
-<path d="M835.01,90.382L835.01,91.728" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M829.01,90.382L841.01,90.382" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M829.01,91.728L841.01,91.728" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="825.56" y="-119.44" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">2.439</text>
-<text x="827.05" y="-111.04" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+0%</text>
-<text x="828.02" y="-102.64" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-2%</text>
-<path d="M150.13,40.209L150.13,44.598L174.13,44.598L174.13,40.209Z" style="fill:#FB9A99" />
-<path d="M162.13,44.319L162.13,44.804" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M156.13,44.319L168.13,44.319" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M156.13,44.804L168.13,44.804" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="152.68" y="-72.518" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.209</text>
-<text x="154.17" y="-64.118" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+5%</text>
-<text x="155.14" y="-55.718" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-6%</text>
-<path d="M500.07,40.209L500.07,51.058L524.07,51.058L524.07,40.209Z" style="fill:#FB9A99" />
-<path d="M512.07,50.218L512.07,51.736" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M506.07,50.218L518.07,50.218" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M506.07,51.736L518.07,51.736" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="502.62" y="-79.451" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.516</text>
-<text x="504.11" y="-71.051" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+6%</text>
-<text x="505.08" y="-62.651" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-8%</text>
-<path d="M850.01,40.209L850.01,106.75L874.01,106.75L874.01,40.209Z" style="fill:#FB9A99" />
-<path d="M862.01,105.73L862.01,107.49" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M856.01,105.73L868.01,105.73" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M856.01,107.49L868.01,107.49" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="852.56" y="-135.21" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">3.166</text>
-<text x="854.05" y="-126.81" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1%</text>
-<text x="855.02" y="-118.41" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-2%</text>
-<path d="M177.13,40.209L177.13,46.977L201.13,46.977L201.13,40.209Z" style="fill:#E31A1C" />
-<path d="M189.13,46.947L189.13,47.183" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M183.13,46.947L195.13,46.947" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M183.13,47.183L195.13,47.183" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="179.68" y="-74.897" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.322</text>
-<text x="181.17" y="-66.497" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+3%</text>
-<text x="182.14" y="-58.097" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-0%</text>
-<path d="M527.07,40.209L527.07,57.656L551.07,57.656L551.07,40.209Z" style="fill:#E31A1C" />
-<path d="M539.07,56.718L539.07,58.704" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M533.07,56.718L545.07,56.718" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M533.07,58.704L545.07,58.704" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="529.62" y="-86.419" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.830</text>
-<text x="531.11" y="-78.019" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+6%</text>
-<text x="532.08" y="-69.619" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-5%</text>
-<path d="M877.01,40.209L877.01,163.77L901.01,163.77L901.01,40.209Z" style="fill:#E31A1C" />
-<path d="M889.01,161.76L889.01,166.68" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M883.01,161.76L895.01,161.76" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M883.01,166.68L895.01,166.68" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="879.56" y="-194.4" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">5.878</text>
-<text x="884.08" y="-186" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="883.42" y="-177.6" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">2%</text>
-<path d="M204.13,40.209L204.13,45.577L228.13,45.577L228.13,40.209Z" style="fill:#FDBF6F" />
-<path d="M216.13,45.357L216.13,45.796" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M210.13,45.357L222.13,45.357" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M210.13,45.796L222.13,45.796" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="206.68" y="-73.51" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.255</text>
-<text x="211.2" y="-65.11" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="210.54" y="-56.71" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">4%</text>
-<path d="M554.07,40.209L554.07,64.863L578.07,64.863L578.07,40.209Z" style="fill:#FDBF6F" />
-<path d="M566.07,64.419L566.07,65.348" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M560.07,64.419L572.07,64.419" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M560.07,65.348L572.07,65.348" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="556.62" y="-93.063" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1.173</text>
-<text x="561.14" y="-84.663" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="560.48" y="-76.263" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">2%</text>
-<path d="M904.01,40.209L904.01,208.91L928.01,208.91L928.01,40.209Z" style="fill:#FDBF6F" />
-<path d="M916.01,203.66L916.01,211.39" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M910.01,203.66L922.01,203.66" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M910.01,211.39L922.01,211.39" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="906.56" y="-239.11" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">8.026</text>
-<text x="908.05" y="-230.71" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1%</text>
-<text x="909.02" y="-222.31" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-3%</text>
-<path d="M231.13,40.209L231.13,44.662L255.13,44.662L255.13,40.209Z" style="fill:#FF7F00" />
-<path d="M243.13,44.613L243.13,44.711" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M237.13,44.613L249.13,44.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M237.13,44.711L249.13,44.711" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="233.68" y="-72.425" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.212</text>
-<text x="238.2" y="-64.025" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="237.54" y="-55.625" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1%</text>
-<path d="M581.07,40.209L581.07,75.835L605.07,75.835L605.07,40.209Z" style="fill:#FF7F00" />
-<path d="M593.07,73.764L593.07,77.119" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M587.07,73.764L599.07,73.764" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M587.07,77.119L599.07,77.119" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="583.62" y="-104.83" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1.695</text>
-<text x="585.11" y="-96.434" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+4%</text>
-<text x="586.08" y="-88.034" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-6%</text>
-<path d="M931.01,40.209L931.01,256.19L955.01,256.19L955.01,40.209Z" style="fill:#FF7F00" />
-<path d="M943.01,250.68L943.01,259.95" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M937.01,250.68L949.01,250.68" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M937.01,259.95L949.01,259.95" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="933.56" y="-287.66" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">10.28</text>
-<text x="935.05" y="-279.26" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+2%</text>
-<text x="936.02" y="-270.86" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-3%</text>
-<path d="M258.13,40.209L258.13,43.493L282.13,43.493L282.13,40.209Z" style="fill:#CAB2D6" />
-<path d="M270.13,43.461L270.13,43.588" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M264.13,43.461L276.13,43.461" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M264.13,43.588L276.13,43.588" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="260.68" y="-71.303" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.156</text>
-<text x="262.17" y="-62.903" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+3%</text>
-<text x="263.14" y="-54.503" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-1%</text>
-<path d="M608.07,40.209L608.07,105.44L632.07,105.44L632.07,40.209Z" style="fill:#CAB2D6" />
-<path d="M620.07,99.44L620.07,107.18" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M614.07,99.44L626.07,99.44" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M614.07,107.18L626.07,107.18" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="610.62" y="-134.9" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">3.103</text>
-<text x="612.11" y="-126.5" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+3%</text>
-<text x="613.08" y="-118.1" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-9%</text>
-<path d="M958.01,40.209L958.01,317.06L982.01,317.06L982.01,40.209Z" style="fill:#CAB2D6" />
-<path d="M970.01,311.49L970.01,319.37" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M964.01,311.49L976.01,311.49" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M964.01,319.37L976.01,319.37" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="960.56" y="-347.08" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">13.17</text>
-<text x="962.05" y="-338.68" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1%</text>
-<text x="963.02" y="-330.28" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-2%</text>
-<path d="M285.13,40.209L285.13,43.275L309.13,43.275L309.13,40.209Z" style="fill:#6A3D9A" />
-<path d="M297.13,43.038L297.13,43.493" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M291.13,43.038L303.13,43.038" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M291.13,43.493L303.13,43.493" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="287.68" y="-71.208" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.146</text>
-<text x="289.17" y="-62.808" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+7%</text>
-<text x="290.14" y="-54.408" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-8%</text>
-<path d="M635.07,40.209L635.07,62.294L659.07,62.294L659.07,40.209Z" style="fill:#6A3D9A" />
-<path d="M647.07,58.168L647.07,66.385" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M641.07,58.168L653.07,58.168" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M641.07,66.385L653.07,66.385" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="637.62" y="-94.099" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1.051</text>
-<text x="642.14" y="-85.699" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+/-</text>
-<text x="639.38" y="-77.299" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">19%</text>
-<path d="M985.01,40.209L985.01,308.48L1009,308.48L1009,40.209Z" style="fill:#6A3D9A" />
-<path d="M997.01,291.71L997.01,355.63" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M991.01,291.71L1003,291.71" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M991.01,355.63L1003,355.63" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<text x="987.56" y="-383.34" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">12.76</text>
-<text x="986.95" y="-374.94" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+18%</text>
-<text x="990.02" y="-366.54" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-6%</text>
+<text x="15.885" y="-158.53" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">100</text>
+<text x="15.885" y="-279.13" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">200</text>
+<text x="15.885" y="-399.73" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:10px;fill:#808080">300</text>
+<path d="M33.385,40.209L41.385,40.209" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M33.385,160.81L41.385,160.81" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M33.385,281.41L41.385,281.41" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M33.385,402.02L41.385,402.02" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,64.329L41.385,64.329" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,88.45L41.385,88.45" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,112.57L41.385,112.57" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,136.69L41.385,136.69" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,184.93L41.385,184.93" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,209.05L41.385,209.05" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,233.17L41.385,233.17" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,257.29L41.385,257.29" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,305.53L41.385,305.53" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,329.65L41.385,329.65" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,353.77L41.385,353.77" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M37.385,377.9L41.385,377.9" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M41.385,40.209L41.385,418.71" style="fill:none;stroke:#808080;stroke-width:0.5" />
+<path d="M47.135,40.209L47.135,41.579L71.135,41.579L71.135,40.209Z" style="fill:#A6CEE3" />
+<path d="M59.135,40.271L59.135,43.315" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M53.135,40.271L65.135,40.271" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M53.135,43.315L65.135,43.315" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="49.685" y="-71.03" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">1.136</text>
+<text x="49.416" y="-62.63" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.3x</text>
+<text x="50.038" y="-54.23" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-95%</text>
+<path d="M394.57,40.209L394.57,55.73L418.57,55.73L418.57,40.209Z" style="fill:#A6CEE3" />
+<path d="M406.57,40.34L406.57,71.773" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M400.57,40.34L412.57,40.34" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M400.57,71.773L412.57,71.773" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="397.12" y="-99.488" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">12.87</text>
+<text x="400.01" y="-91.088" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1x</text>
+<text x="397.48" y="-82.688" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-99%</text>
+<path d="M742.01,40.209L742.01,185.99L766.01,185.99L766.01,40.209Z" style="fill:#A6CEE3" />
+<path d="M754.01,41.219L754.01,355.63" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M748.01,41.219L760.01,41.219" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M748.01,355.63L760.01,355.63" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="744.56" y="-383.34" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">120.9</text>
+<text x="744.3" y="-374.94" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.2x</text>
+<text x="744.92" y="-366.54" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-99%</text>
+<path d="M74.135,40.209L74.135,40.631L98.135,40.631L98.135,40.209Z" style="fill:#1F78B4" />
+<path d="M86.135,40.256L86.135,41.337" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M80.135,40.256L92.135,40.256" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M80.135,41.337L92.135,41.337" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="76.685" y="-69.052" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.350</text>
+<text x="76.416" y="-60.652" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.7x</text>
+<text x="77.037" y="-52.252" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-89%</text>
+<path d="M421.57,40.209L421.57,45.414L445.57,45.414L445.57,40.209Z" style="fill:#1F78B4" />
+<path d="M433.57,40.325L433.57,51.834" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M427.57,40.325L439.57,40.325" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M427.57,51.834L439.57,51.834" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="424.12" y="-79.548" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">4.316</text>
+<text x="423.86" y="-71.148" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.2x</text>
+<text x="424.48" y="-62.748" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-98%</text>
+<path d="M769.01,40.209L769.01,68.193L793.01,68.193L793.01,40.209Z" style="fill:#1F78B4" />
+<path d="M781.01,41.188L781.01,147.8" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M775.01,41.188L787.01,41.188" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M775.01,147.8L787.01,147.8" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="771.56" y="-175.51" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">23.20</text>
+<text x="771.3" y="-167.11" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+2.8x</text>
+<text x="771.92" y="-158.71" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-97%</text>
+<path d="M101.13,40.209L101.13,40.887L125.13,40.887L125.13,40.209Z" style="fill:#B2DF8A" />
+<path d="M113.13,40.29L113.13,41.539" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M107.13,40.29L119.13,40.29" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M107.13,41.539L119.13,41.539" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="103.68" y="-69.254" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.562</text>
+<text x="103.07" y="-60.854" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+96%</text>
+<text x="104.04" y="-52.454" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-88%</text>
+<path d="M448.57,40.209L448.57,46.438L472.57,46.438L472.57,40.209Z" style="fill:#B2DF8A" />
+<path d="M460.57,40.373L460.57,53.585" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M454.57,40.373L466.57,40.373" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M454.57,53.585L466.57,53.585" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="451.12" y="-81.299" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">5.165</text>
+<text x="450.86" y="-72.899" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="451.48" y="-64.499" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-97%</text>
+<path d="M796.01,40.209L796.01,115.94L820.01,115.94L820.01,40.209Z" style="fill:#B2DF8A" />
+<path d="M808.01,41.691L808.01,193.51" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M802.01,41.691L814.01,41.691" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M802.01,193.51L814.01,193.51" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="798.56" y="-221.22" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">62.80</text>
+<text x="801.45" y="-212.82" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1x</text>
+<text x="798.92" y="-204.42" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-98%</text>
+<path d="M128.13,40.209L128.13,40.968L152.13,40.968L152.13,40.209Z" style="fill:#33A02C" />
+<path d="M140.13,40.35L140.13,41.67" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M134.13,40.35L146.13,40.35" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M134.13,41.67L146.13,41.67" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="130.68" y="-69.384" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.629</text>
+<text x="130.07" y="-60.984" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+92%</text>
+<text x="131.04" y="-52.584" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-81%</text>
+<path d="M475.57,40.209L475.57,47.659L499.57,47.659L499.57,40.209Z" style="fill:#33A02C" />
+<path d="M487.57,40.444L487.57,55.068" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M481.57,40.444L493.57,40.444" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M481.57,55.068L493.57,55.068" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="478.12" y="-82.782" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">6.177</text>
+<text x="477.51" y="-74.382" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+99%</text>
+<text x="478.48" y="-65.982" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-97%</text>
+<path d="M823.01,40.209L823.01,118.14L847.01,118.14L847.01,40.209Z" style="fill:#33A02C" />
+<path d="M835.01,42.193L835.01,204.86" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M829.01,42.193L841.01,42.193" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M829.01,204.86L841.01,204.86" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="825.56" y="-232.57" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">64.62</text>
+<text x="825.3" y="-224.17" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="825.92" y="-215.77" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-97%</text>
+<path d="M155.13,40.209L155.13,40.993L179.13,40.993L179.13,40.209Z" style="fill:#FB9A99" />
+<path d="M167.13,40.401L167.13,41.62" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M161.13,40.401L173.13,40.401" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M161.13,41.62L173.13,41.62" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="157.68" y="-69.335" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.650</text>
+<text x="157.07" y="-60.935" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+80%</text>
+<text x="158.04" y="-52.535" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-76%</text>
+<path d="M502.57,40.209L502.57,46.83L526.57,46.83L526.57,40.209Z" style="fill:#FB9A99" />
+<path d="M514.57,40.524L514.57,54.507" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M508.57,40.524L520.57,40.524" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M508.57,54.507L520.57,54.507" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="505.12" y="-82.222" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">5.490</text>
+<text x="504.86" y="-73.822" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.2x</text>
+<text x="505.48" y="-65.422" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-95%</text>
+<path d="M850.01,40.209L850.01,107.09L874.01,107.09L874.01,40.209Z" style="fill:#FB9A99" />
+<path d="M862.01,42.719L862.01,202.8" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M856.01,42.719L868.01,42.719" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M856.01,202.8L868.01,202.8" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="852.56" y="-230.51" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">55.46</text>
+<text x="852.3" y="-222.11" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.4x</text>
+<text x="852.92" y="-213.71" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-96%</text>
+<path d="M182.13,40.209L182.13,41.027L206.13,41.027L206.13,40.209Z" style="fill:#E31A1C" />
+<path d="M194.13,40.614L194.13,41.648" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M188.13,40.614L200.13,40.614" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M188.13,41.648L200.13,41.648" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="184.68" y="-69.362" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.678</text>
+<text x="184.07" y="-60.962" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+76%</text>
+<text x="185.04" y="-52.562" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-51%</text>
+<path d="M529.57,40.209L529.57,45.887L553.57,45.887L553.57,40.209Z" style="fill:#E31A1C" />
+<path d="M541.57,40.804L541.57,55.661" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M535.57,40.804L547.57,40.804" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M535.57,55.661L547.57,55.661" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="532.12" y="-83.376" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">4.708</text>
+<text x="531.86" y="-74.976" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.7x</text>
+<text x="532.48" y="-66.576" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-90%</text>
+<path d="M877.01,40.209L877.01,124.87L901.01,124.87L901.01,40.209Z" style="fill:#E31A1C" />
+<path d="M889.01,44.761L889.01,214.46" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M883.01,44.761L895.01,44.761" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M883.01,214.46L895.01,214.46" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="879.56" y="-242.17" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">70.20</text>
+<text x="879.3" y="-233.77" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="879.92" y="-225.37" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-95%</text>
+<path d="M209.13,40.209L209.13,41.064L233.13,41.064L233.13,40.209Z" style="fill:#FDBF6F" />
+<path d="M221.13,40.498L221.13,41.66" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M215.13,40.498L227.13,40.498" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M215.13,41.66L227.13,41.66" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="211.68" y="-69.374" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.709</text>
+<text x="211.07" y="-60.974" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+70%</text>
+<text x="212.04" y="-52.574" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-66%</text>
+<path d="M556.57,40.209L556.57,48.093L580.57,48.093L580.57,40.209Z" style="fill:#FDBF6F" />
+<path d="M568.57,41.112L568.57,55.475" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M562.57,41.112L574.57,41.112" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M562.57,55.475L574.57,55.475" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="559.12" y="-83.189" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">6.537</text>
+<text x="558.51" y="-74.789" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+94%</text>
+<text x="559.48" y="-66.389" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-89%</text>
+<path d="M904.01,40.209L904.01,130.2L928.01,130.2L928.01,40.209Z" style="fill:#FDBF6F" />
+<path d="M916.01,46.869L916.01,215" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M910.01,46.869L922.01,46.869" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M910.01,215L922.01,215" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="906.56" y="-242.71" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">74.62</text>
+<text x="905.95" y="-234.31" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+94%</text>
+<text x="906.92" y="-225.91" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-93%</text>
+<path d="M236.13,40.209L236.13,40.991L260.13,40.991L260.13,40.209Z" style="fill:#FF7F00" />
+<path d="M248.13,40.443L248.13,41.654" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M242.13,40.443L254.13,40.443" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M242.13,41.654L254.13,41.654" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="238.68" y="-69.368" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.648</text>
+<text x="238.07" y="-60.968" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+85%</text>
+<text x="239.04" y="-52.568" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-70%</text>
+<path d="M583.57,40.209L583.57,47.853L607.57,47.853L607.57,40.209Z" style="fill:#FF7F00" />
+<path d="M595.57,41.053L595.57,55.659" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M589.57,41.053L601.57,41.053" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M589.57,55.659L601.57,55.659" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="586.12" y="-83.374" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">6.338</text>
+<text x="589.01" y="-74.974" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1x</text>
+<text x="586.48" y="-66.574" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-89%</text>
+<path d="M931.01,40.209L931.01,133.17L955.01,133.17L955.01,40.209Z" style="fill:#FF7F00" />
+<path d="M943.01,48.681L943.01,218.42" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M937.01,48.681L949.01,48.681" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M937.01,218.42L949.01,218.42" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="933.56" y="-246.14" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">77.08</text>
+<text x="932.95" y="-237.74" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+92%</text>
+<text x="933.92" y="-229.34" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-91%</text>
+<path d="M263.13,40.209L263.13,40.924L287.13,40.924L287.13,40.209Z" style="fill:#CAB2D6" />
+<path d="M275.13,40.401L275.13,41.554" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M269.13,40.401L281.13,40.401" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M269.13,41.554L281.13,41.554" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="265.68" y="-69.269" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.592</text>
+<text x="265.07" y="-60.869" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+88%</text>
+<text x="266.04" y="-52.469" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-73%</text>
+<path d="M610.57,40.209L610.57,48.286L634.57,48.286L634.57,40.209Z" style="fill:#CAB2D6" />
+<path d="M622.57,41.25L622.57,55.406" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M616.57,41.25L628.57,41.25" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M616.57,55.406L628.57,55.406" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="613.12" y="-83.12" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">6.697</text>
+<text x="612.51" y="-74.72" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+88%</text>
+<text x="613.48" y="-66.32" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-87%</text>
+<path d="M958.01,40.209L958.01,123.86L982.01,123.86L982.01,40.209Z" style="fill:#CAB2D6" />
+<path d="M970.01,52.292L970.01,214.59" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M964.01,52.292L976.01,52.292" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M964.01,214.59L976.01,214.59" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="960.56" y="-242.3" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">69.36</text>
+<text x="960.3" y="-233.9" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="960.92" y="-225.5" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-86%</text>
+<path d="M290.13,40.209L290.13,40.739L314.13,40.739L314.13,40.209Z" style="fill:#6A3D9A" />
+<path d="M302.13,40.347L302.13,41.343" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M296.13,40.347L308.13,40.347" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M296.13,41.343L308.13,41.343" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="292.68" y="-69.058" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">0.440</text>
+<text x="292.42" y="-60.658" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="293.04" y="-52.258" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-74%</text>
+<path d="M637.57,40.209L637.57,45.704L661.57,45.704L661.57,40.209Z" style="fill:#6A3D9A" />
+<path d="M649.57,40.866L649.57,51.631" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M643.57,40.866L655.57,40.866" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M643.57,51.631L655.57,51.631" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="640.12" y="-79.345" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">4.556</text>
+<text x="639.86" y="-70.945" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="640.48" y="-62.545" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-88%</text>
+<path d="M985.01,40.209L985.01,96.247L1009,96.247L1009,40.209Z" style="fill:#6A3D9A" />
+<path d="M997.01,53.423L997.01,155.73" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M991.01,53.423L1003,53.423" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M991.01,155.73L1003,155.73" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<text x="987.56" y="-183.45" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">46.47</text>
+<text x="987.3" y="-175.05" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">+1.1x</text>
+<text x="987.92" y="-166.65" transform="scale(1, -1)"
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:8.4px;fill:#808080">-76%</text>
 </g>
 </svg>

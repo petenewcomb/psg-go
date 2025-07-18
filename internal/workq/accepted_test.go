@@ -11,6 +11,26 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+type workFuncItem struct {
+	WorkItem
+	workFn WorkFunc
+}
+
+func newWorkItem(workFn WorkFunc) *workFuncItem {
+	wi := &workFuncItem{}
+	wi.Init(workFn)
+	return wi
+}
+
+func (wi *workFuncItem) Init(workFn WorkFunc) {
+	wi.WorkItem.Init()
+	wi.workFn = workFn
+}
+
+func (wi *workFuncItem) Execute(ctx context.Context, ex Execution) error {
+	return wi.workFn(ctx, ex)
+}
+
 func TestAccepted_ExecuteOne_NoWork(t *testing.T) {
 	q := Accepted{}
 	q.Init()
@@ -52,7 +72,7 @@ func TestAccepted_ExecuteOne_NewWork_Success(t *testing.T) {
 	q.Init()
 
 	executed := false
-	work := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	work := newWorkItem(func(ctx context.Context, ex Execution) error {
 		ex.Starting()
 		executed = true
 		return nil
@@ -79,7 +99,7 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 
 	tryCount := 0
 	executed := false
-	work := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	work := newWorkItem(func(ctx context.Context, ex Execution) error {
 		tryCount++
 		if tryCount == 1 {
 			// First try (non-blocking) - defer
@@ -111,19 +131,19 @@ func TestAccepted_ExecuteOne_MultipleNewWork_OneSucceeds(t *testing.T) {
 	q.Init()
 
 	work1Executed := false
-	work1 := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	work1 := newWorkItem(func(ctx context.Context, ex Execution) error {
 		return nil // Always not ready
 	})
 
 	work2Executed := false
-	work2 := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	work2 := newWorkItem(func(ctx context.Context, ex Execution) error {
 		ex.Starting()
 		work2Executed = true
 		return nil // Always succeeds
 	})
 
 	work3Executed := false
-	work3 := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	work3 := newWorkItem(func(ctx context.Context, ex Execution) error {
 		work3Executed = true
 		return nil // Should not be executed due to early success
 	})
@@ -157,7 +177,7 @@ func TestAccepted_ExecuteOne_DeferredWork_Priority(t *testing.T) {
 
 	// First, add work that will become deferred
 	deferredExecuted := false
-	deferredWork := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	deferredWork := newWorkItem(func(ctx context.Context, ex Execution) error {
 		// No call to ex.Starting(), will be deferred
 		return nil
 	})
@@ -174,7 +194,7 @@ func TestAccepted_ExecuteOne_DeferredWork_Priority(t *testing.T) {
 
 	// Now add new work - it should have priority over deferred work
 	newWorkExecuted := false
-	newWork := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	newWork := newWorkItem(func(ctx context.Context, ex Execution) error {
 		ex.Starting()
 		newWorkExecuted = true
 		return nil
@@ -203,7 +223,7 @@ func TestAccepted_ExecuteOne_NoNewWork_ProcessesDeferred(t *testing.T) {
 
 	// First, add work that is not ready and will become deferred
 	deferredTryCount := 0
-	deferredWork := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	deferredWork := newWorkItem(func(ctx context.Context, ex Execution) error {
 		deferredTryCount++
 		if deferredTryCount == 1 {
 			// First try does not call ex.Starting(), becomes deferred
@@ -245,7 +265,7 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 
 	tryCount := 0
 	notifyReceived := false
-	work := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	work := newWorkItem(func(ctx context.Context, ex Execution) error {
 		tryCount++
 		if tryCount == 1 {
 			// First try does not call ex.Starting(), becomes deferred
@@ -285,12 +305,12 @@ func TestAccepted_ExecuteOne_ExQueueFunction(t *testing.T) {
 	var executionOrder []string
 
 	// Work item that queues additional work
-	parentWork := NewWorkItem(func(ctx context.Context, ex Execution) error {
+	parentWork := newWorkItem(func(ctx context.Context, ex Execution) error {
 		ex.Starting()
 		executionOrder = append(executionOrder, "parent")
 
 		// Queue a child work item
-		childWork := NewWorkItem(func(ctx context.Context, ex Execution) error {
+		childWork := newWorkItem(func(ctx context.Context, ex Execution) error {
 			ex.Starting()
 			executionOrder = append(executionOrder, "child")
 			return nil

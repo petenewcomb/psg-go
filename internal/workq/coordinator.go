@@ -47,7 +47,9 @@ func (c *Coordinator) Notify(renotifyFn RenotifyFunc) {
 	for {
 		notifyFn, ok := c.q.PopFront(notifyPool)
 		if !ok {
-			renotifyFn()
+			if renotifyFn != nil {
+				renotifyFn()
+			}
 			return
 		}
 
@@ -97,7 +99,7 @@ func (c *Coordinator) NotifyAll() {
 		if !ok {
 			break
 		}
-		notifyFn(func() {})
+		notifyFn(nil)
 	}
 }
 

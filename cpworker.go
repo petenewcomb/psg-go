@@ -33,7 +33,10 @@ type cpWorker struct {
 	unregisterAsJobFlusher func()
 	workReadyRenotifyFn    workq.RenotifyFunc
 	followupFn             func(context.Context)
+	newWork                workq.Work
 	err                    error
+
+	idleFollowupFn func(context.Context) // avoid closure reallocation
 }
 
 func (cw *cpWorker) IsSpare() bool {
@@ -44,15 +47,18 @@ func (cw *cpWorker) MayQueue() workq.QueueWorkFunc {
 	return cw.queueFn
 }
 
-func (cw *cpWorker) WithQueueFunc(queueFn workq.QueueWorkFunc, fn func()) {
+func (cw *cpWorker) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) {
 	if cw.queueFn != nil {
 		panic("cpWorker WithQueueFunc called while queueFn is not nil")
 	}
-	defer func() {
-		cw.queueFn = nil
-	}()
 	cw.queueFn = queueFn
-	fn()
+}
+
+func (cw *cpWorker) UnlockAndResetQueueFunc() {
+	if cw.queueFn == nil {
+		panic("cpWorker WithQueueFunc called while queueFn is nil")
+	}
+	cw.queueFn = nil
 }
 
 func (cw *cpWorker) WithOutbox(key outboxKey[workq.Work], fn func(outbox *workq.Outbox)) {
@@ -97,9 +103,13 @@ func (cw *cpWorker) AddWork(
 
 	cw.workReadyRenotifyFn = nil
 	cw.err = nil
+	cw.newWork = nil
+	cw.followupFn = nil
 	defer func() {
 		cw.workReadyRenotifyFn = nil
 		cw.err = nil
+		cw.newWork = nil
+		cw.followupFn = nil
 	}()
 	if !cw.IsSpare() {
 		// Primary goroutine, no need for idle detection
@@ -136,9 +146,13 @@ func (cw *cpWorker) AddWork(
 		}
 	}
 
+	work := cw.newWork
+	if work != nil {
+		cw.queueFn(work)
+	}
+
 	followupFn := cw.followupFn
 	if followupFn != nil {
-		cw.followupFn = nil
 		followupFn(ctx)
 	}
 
@@ -214,9 +228,7 @@ func (cw *cpWorker) primaryInnerPopSelect(
 	select {
 	case work := <-cw.inboxCh:
 		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", cw.inboxCh)
-		cw.followupFn = func(context.Context) {
-			cw.queueFn(work)
-		}
+		cw.newWork = work
 		return rdvq.SelectInboxEmptied, nil
 
 	// Here down should be identical to spareWaiterSelect below
@@ -262,11 +274,10 @@ func (cw *cpWorker) spareInnerPopSelect(
 	select {
 	case <-cw.idleTimerCh:
 		trace.Logf(ctx, traceRegion, "received idle timer signal")
-		cw.followupFn = func(context.Context) {
-			if cw.cp.state.ShouldExitGoroutine() {
-				cw.err = workq.ErrEndOfWork
-			}
+		if cw.idleFollowupFn == nil {
+			cw.idleFollowupFn = cw.idleFollowup
 		}
+		cw.followupFn = cw.idleFollowupFn
 
 	// Here down should be identical to primaryWaiterSelect above
 	case renotifyFn := <-outboxFilledCh:
@@ -290,6 +301,12 @@ func (cw *cpWorker) spareInnerPopSelect(
 		cw.err = cw.doneErr()
 	}
 	return rdvq.SelectAborted, nil
+}
+
+func (cw *cpWorker) idleFollowup(context.Context) {
+	if cw.cp.state.ShouldExitGoroutine() {
+		cw.err = workq.ErrEndOfWork
+	}
 }
 
 func (cw *cpWorker) flushAll(ctx context.Context) bool {

@@ -90,7 +90,7 @@ func (w taskPoolConfigWrapper) SetMaxConcurrency(limit int) {
 		w.pool.waiters.NotifyAll()
 	case oldLimit != -1:
 		for range max(0, limit-int(oldLimit)) {
-			w.pool.waiters.Notify(func() {})
+			w.pool.waiters.Notify(nil)
 		}
 	}
 }
@@ -111,28 +111,20 @@ func (p *TaskPool) scatter(
 	traceRegion := "TaskPool.scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	wb := &taskPoolWaitBehavior{
-		jobBlockBehavior: jobBlockBehavior{
-			job: p.job,
+	wb := workq.WaitBehavior{
+		BlockBehavior: p.job.protoBB,
+		ShouldWait: func() bool {
+			return p.scatterShouldWait(tpSW)
 		},
-		pool: p,
-		work: tpSW,
 	}
 
-	started := false
 	defer func() {
 		// If we didn't start, we must release our slot
-		if !started && tpSW.inFlightIncremented {
+		if !ex.Started() && tpSW.inFlightIncremented {
 			p.decrementInFlight()
 			tpSW.inFlightIncremented = false
 		}
 	}()
-
-	originalStarting := ex.Starting
-	ex.Starting = func() {
-		started = true
-		originalStarting()
-	}
 
 	return p.waiters.Execute(ctx, ex, wb,
 		func(ctx context.Context, ex workq.Execution) error {
@@ -145,28 +137,21 @@ type taskPoolScatterWork struct {
 	inFlightIncremented bool
 }
 
-type taskPoolWaitBehavior struct {
-	jobBlockBehavior
-	pool *TaskPool
-	work *taskPoolScatterWork
-}
-
-func (wb *taskPoolWaitBehavior) Waiters() *workq.Waiters {
-	return &wb.pool.waiters
-}
-
-func (wb *taskPoolWaitBehavior) ShouldWait() bool {
-	traceRegion := "taskPoolWaitBehavior.ShouldWait"
+//nolint:contextcheck // background context used only for tracing
+func (p *TaskPool) scatterShouldWait(w *taskPoolScatterWork) bool {
+	traceRegion := "TaskPool.scatterShouldWait"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	// Make sure we increment only once for this invocation of the scatter work
 	// function, though ShouldWait may be called multiple times. This is ok
 	// because once we have incremented, we have reserved a slot for this work
 	// item.
-	if !wb.work.inFlightIncremented {
-		wb.work.inFlightIncremented = wb.pool.incrementInFlight()
+	if w.inFlightIncremented {
+		return false
 	}
-	return !wb.work.inFlightIncremented
+
+	w.inFlightIncremented = p.incrementInFlight()
+	return !w.inFlightIncremented
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -196,6 +181,6 @@ func (p *TaskPool) decrementInFlight() {
 	limit := p.maxConcurrency.Load()
 	if p.inFlight.DecrementAndCheckIfUnder(int(limit)) {
 		// Signal any waiting task
-		p.waiters.Notify(func() {})
+		p.waiters.Notify(nil)
 	}
 }

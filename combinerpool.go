@@ -169,9 +169,9 @@ func (w *combineWork) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	workerCtx, meta := w.pool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)
-	cw.WithQueueFunc(ex.Queue, func() {
-		cw.executeCombine(workerCtx, w.combineFn)
-	})
+	cw.LockAndSetQueueFunc(ex.Queue)
+	defer cw.UnlockAndResetQueueFunc()
+	cw.executeCombine(workerCtx, w.combineFn)
 	return nil
 }
 
@@ -302,6 +302,8 @@ func (cp *CombinerPool) goroutine() {
 	cp.state.GoroutineStarted()
 	defer cp.state.GoroutineExited()
 
+	addWorkFn := worker.AddWork
+
 	for {
 		if worker.idleTimer == nil {
 			if cp.spareElected.CompareAndSwap(false, true) {
@@ -313,7 +315,7 @@ func (cp *CombinerPool) goroutine() {
 			}
 		}
 
-		err := cp.workQueue.ExecuteOne(ctx, worker.AddWork)
+		err := cp.workQueue.ExecuteOne(ctx, addWorkFn)
 		switch {
 		case err == nil:
 		case errors.Is(err, workq.ErrEndOfWork):

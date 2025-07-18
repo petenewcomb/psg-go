@@ -54,33 +54,18 @@ func (cm *ctxMeta) IsTopLevel() bool {
 	return cm.ctxType == topLevelContext
 }
 
-func (cm *ctxMeta) ShouldBlock() workq.BlockFunc {
-	if cm.IsTopLevel() {
-		return cm.job.block
-	}
-	return nil
-}
-
-type jobBlockBehavior struct {
-	job *Job
-}
-
-func (bb *jobBlockBehavior) ShouldBlock(ctx context.Context) workq.BlockFunc {
-	_, meta := bb.job.ctxMeta(ctx)
-	return meta.ShouldBlock()
-}
-
 type executionEnvironment interface {
 	WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox))
-	WithQueueFunc(queueFn workq.QueueWorkFunc, fn func())
+	LockAndSetQueueFunc(queueFn workq.QueueWorkFunc)
+	UnlockAndResetQueueFunc()
 	MayQueue() workq.QueueWorkFunc
 }
 
 type topLevelExEnv struct {
-	mu         sync.Mutex
-	outboxMap  outboxMap
-	queueFn    workq.QueueWorkFunc
-	queueFnSet atomic.Bool // Can be read without holding mu
+	mu           sync.Mutex
+	outboxMap    outboxMap
+	queueFn      workq.QueueWorkFunc
+	queueFnDepth atomic.Int32
 }
 
 func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox)) {
@@ -95,27 +80,41 @@ func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Ou
 	fn(outbox)
 }
 
-func (ee *topLevelExEnv) WithQueueFunc(queueFn workq.QueueWorkFunc, fn func()) {
-	traceRegion := "topLevelExEnv.WithQueueFunc"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p", ee)
+func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) {
+	traceRegion := "topLevelExEnv.LockAndSetQueueFunc"
 
-	if ee.queueFnSet.Load() {
+	queueFnDepth := ee.queueFnDepth.Add(1)
+	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%d", ee, queueFnDepth)
+
+	if queueFnDepth > 1 {
 		// Reentrant. Would be nice to assert that the queueFn is the same, but
 		// function pointers are not comparable in Go.
-		trace.WithRegion(context.Background(), traceRegion+".queueFnWasAlreadySet", fn)
 		return
 	}
 
 	ee.mu.Lock()
 	ee.queueFn = queueFn
-	ee.queueFnSet.Store(true)
-	defer func() {
-		ee.queueFnSet.Store(false)
-		ee.queueFn = nil
-		ee.mu.Unlock()
-	}()
-	trace.WithRegion(context.Background(), traceRegion+".queueFnSet", fn)
+}
+
+func (ee *topLevelExEnv) UnlockAndResetQueueFunc() {
+	traceRegion := "topLevelExEnv.UnlockAndResetQueueFunc"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	queueFnDepth := ee.queueFnDepth.Add(-1)
+	if queueFnDepth < 0 {
+		panic("unbalanced calls to LockAndSet/UnlockAndResetQueueFunc")
+	}
+
+	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%v", ee, queueFnDepth)
+
+	if queueFnDepth > 0 {
+		// Reentrant. Would be nice to assert that the queueFn is the same, but
+		// function pointers are not comparable in Go.
+		return
+	}
+
+	ee.queueFn = nil
+	ee.mu.Unlock()
 }
 
 func (ee *topLevelExEnv) MayQueue() workq.QueueWorkFunc {

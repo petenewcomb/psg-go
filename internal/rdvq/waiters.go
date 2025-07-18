@@ -30,17 +30,9 @@ func (w *Waiters) Init() {
 	w.q.Init(wp)
 }
 
-// New creates a waiter that will use the given verification function to prevent
-// race conditions. The confirmFn should return true if the waiter should continue
-// waiting, false if work has become available and waiting is no longer needed.
-//
-// The verification function is called after the waiter registers but before it
-// starts blocking, ensuring that no notifications are missed due to race conditions.
-func (w *Waiters) New(confirmFn func() bool) Waiter {
-	return Waiter{
-		w:         w,
-		confirmFn: confirmFn,
-	}
+func noopRenotify() {
+	// noopRenotify is a no-op function used as a default renotify function to
+	// avoid nil checks in Notify.
 }
 
 // Notify signals one waiting receiver to re-check for work. This should be
@@ -56,6 +48,10 @@ func (w *Waiters) Notify(renotifyFn RenotifyFunc) {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
+	if renotifyFn == nil {
+		renotifyFn = noopRenotify
+	}
+
 	if !w.q.TryPushBack(wp, renotifyFn) {
 		renotifyFn()
 	}
@@ -67,7 +63,7 @@ func (w *Waiters) NotifyAll() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
-	for w.q.TryPushBack(wp, func() {}) {
+	for w.q.TryPushBack(wp, noopRenotify) {
 		// Keep notifying until we can't anymore
 	}
 }

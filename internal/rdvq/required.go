@@ -82,7 +82,7 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 			"outbox=%p was empty, delivered value into outboxCh=%p",
 			outbox, outbox.ch)
 		q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
-		q.outboxWaiters.Notify(func() {})
+		q.outboxWaiters.Notify(nil)
 		return
 	}
 
@@ -100,7 +100,7 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 
 	// Value was successfully sent to outbox, so queue it and notify waiters
 	q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
-	q.outboxWaiters.Notify(func() {})
+	q.outboxWaiters.Notify(nil)
 }
 
 // PushBack sends a value using the two-tier delivery system with context support.
@@ -180,30 +180,32 @@ func (q *Required[T]) PopFrontFunc(p *Pool[T], processFn ProcessValueFunc[T], se
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Required=%p", q)
 
+	var ok bool
+	processOrphanFn := func(value T) {
+		ok = true
+		processFn(value)
+	}
+	confirmFn := func() bool {
+		ok = q.tryOutboxes(p, processFn)
+		return !ok
+	}
+
+	var result SelectResult
+	waitingSelectFn := func(inboxCh <-chan T) SelectResult {
+		q.outboxWaiters.WaitFunc(confirmFn, func(outboxFilledCh <-chan RenotifyFunc) RenotifyFunc {
+			var renotifyFn RenotifyFunc
+			result, renotifyFn = selectFn(inboxCh, outboxFilledCh)
+			return renotifyFn
+		})
+		return result
+	}
+
 	for {
 		if q.tryOutboxes(p, processFn) {
 			return
 		}
-		var ok bool
-		var result SelectResult
-		q.Optional.PopFrontFunc(p,
-			func(value T) {
-				ok = true
-				processFn(value)
-			},
-			func(inboxCh <-chan T) SelectResult {
-				waiter := q.outboxWaiters.New(func() bool {
-					ok = q.tryOutboxes(p, processFn)
-					return !ok
-				})
-				waiter.WaitFunc(func(outboxFilledCh <-chan RenotifyFunc) RenotifyFunc {
-					var renotifyFn RenotifyFunc
-					result, renotifyFn = selectFn(inboxCh, outboxFilledCh)
-					return renotifyFn
-				})
-				return result
-			},
-		)
+
+		q.Optional.PopFrontFunc(p, processOrphanFn, waitingSelectFn)
 		if ok || result != SelectOutboxFilled {
 			return
 		}
@@ -285,11 +287,11 @@ func (q *Required[T]) PopFrontExcessFunc(p *Pool[T], selectFn WaitSelectFunc) (T
 			renotifyFn()
 		}
 
-		waiter := q.outboxWaiters.New(func() bool {
+		confirmFn := func() bool {
 			value, ok = q.TryPopFront(p)
 			return !ok
-		})
-		renotifyFn = waiter.WaitFunc(selectFn)
+		}
+		renotifyFn = q.outboxWaiters.WaitFunc(confirmFn, selectFn)
 		if ok || renotifyFn == nil {
 			return value, ok
 		}

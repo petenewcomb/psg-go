@@ -13,6 +13,8 @@ import (
 type Governor struct {
 	upstream   Waiters
 	downstream atomic.Int32
+
+	upstreamShouldWaitFn func() bool // avoid reallocating closure
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -22,37 +24,33 @@ func (g *Governor) Init() {
 	trace.Logf(context.Background(), traceRegion, "Governor=%p, upstream=%p", g, &g.upstream)
 
 	g.upstream.Init()
+	g.upstreamShouldWaitFn = g.upstreamShouldWait
 }
 
-type BlockBehavior interface {
-	ShouldBlock(context.Context) BlockFunc
+type BlockBehavior struct {
+	ShouldBlock func(context.Context) BlockFunc
 }
 
 func (g *Governor) Execute(ctx context.Context, ex Execution, behavior BlockBehavior, workFn WorkFunc) error {
 	traceRegion := "workq.Governor.Execution"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	wb := &upstreamWaitBehavior{
+	wb := WaitBehavior{
 		BlockBehavior: behavior,
-		governor:      g,
+		ShouldWait:    g.upstreamShouldWaitFn,
 	}
 	return g.upstream.Execute(ctx, ex, wb, workFn)
 }
 
-type upstreamWaitBehavior struct {
-	BlockBehavior
-	governor *Governor
-}
-
 //nolint:contextcheck // background context used only for tracing
-func (wb *upstreamWaitBehavior) ShouldWait() bool {
-	traceRegion := "workq.upstreamWaitBehavior.ShouldWait"
+func (g *Governor) upstreamShouldWait() bool {
+	traceRegion := "workq.Governor.upstreamShouldWait"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	downstream := wb.governor.downstream.Load()
+	downstream := g.downstream.Load()
 	if downstream > 0 {
 		trace.Logf(context.Background(), traceRegion,
 			"Governor=%p has %d downstream waiters, applying backpressure",
-			wb.governor, downstream)
+			g, downstream)
 		return true
 	}
 	return false
@@ -80,16 +78,14 @@ func (dw *DownstreamWork) Execute(ctx context.Context, ex Execution, governor *G
 	// If the work function does not call ex.Starting but could have, then
 	// execution is deferred and we should increment the downstream waiter count
 	// if we haven't already.
-	started := false
 	defer func() {
-		if !started && ex.ShouldBlockOrSubscribe() {
+		if !ex.Started() && ex.ShouldBlockOrSubscribe() {
 			dw.Waiting(governor)
 		}
 	}()
 
 	originalStarting := ex.Starting
 	ex.Starting = func() {
-		started = true
 		dw.release()
 		originalStarting()
 	}

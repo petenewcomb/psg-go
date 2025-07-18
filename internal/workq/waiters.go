@@ -29,9 +29,9 @@ func (w *Waiters) Init() {
 
 type BlockFunc func(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyFunc, error)
 
-type WaitBehavior interface {
+type WaitBehavior struct {
 	BlockBehavior
-	ShouldWait() bool
+	ShouldWait func() bool
 }
 
 func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavior, workFn WorkFunc) error {
@@ -69,7 +69,7 @@ func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavi
 		}
 
 		// Blocking path
-		waiter := w.New(func() bool {
+		confirmFn := func() bool {
 			if !behavior.ShouldWait() {
 				return false
 			}
@@ -78,9 +78,9 @@ func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavi
 				ex.Blocking()
 			}
 			return true
-		})
+		}
 		var err error
-		renotifyFn = waiter.WaitFuncWithOrphanHandler(w.Notify, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+		renotifyFn = w.WaitFuncWithOrphanHandler(confirmFn, w.Notify, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
 			var renotifyFn RenotifyFunc
 			renotifyFn, err = blockFn(ctx, waitCh)
 			return renotifyFn

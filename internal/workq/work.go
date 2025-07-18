@@ -7,8 +7,6 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
-
-	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
 // TODO: update
@@ -31,23 +29,6 @@ type Work interface {
 	ID() WorkID
 	Execute(context.Context, Execution) error
 	Close()
-}
-
-// Execution provides the interface for a work function to interact with
-// the work queue system.
-type Execution struct {
-	Blocking  func()             // Call before blocking to release resources
-	Subscribe func(*Coordinator) // Call to subscribe to ready notifications
-	Starting  func()             // Call before starting execution to confirm execution
-	Queue     QueueWorkFunc      // Queue additional work items
-}
-
-func (ex Execution) ShouldBlockOrSubscribe() bool {
-	return ex.Subscribe != nil
-}
-
-func (ex Execution) MayQueue() bool {
-	return ex.Queue != nil
 }
 
 var workIDCounter atomic.Int64
@@ -75,27 +56,4 @@ func (wi *WorkItem) Close() {
 
 func (wi *WorkItem) String() string {
 	return fmt.Sprintf("WorkItem#%d", wi.id)
-}
-
-type WorkFuncItem struct {
-	WorkItem
-	workFn WorkFunc
-}
-
-func NewWorkItem(workFn WorkFunc) *WorkFuncItem {
-	wi := &WorkFuncItem{}
-	wi.Init(workFn)
-	return wi
-}
-
-func (wi *WorkFuncItem) Init(workFn WorkFunc) {
-	wi.WorkItem.Init()
-	wi.workFn = workFn
-}
-
-func (wi *WorkFuncItem) Execute(ctx context.Context, ex Execution) error {
-	traceRegion := "workq.WorkFuncItem.Execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", wi)
-	return wi.workFn(ctx, ex)
 }

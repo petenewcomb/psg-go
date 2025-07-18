@@ -17,18 +17,16 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	waiters.Init()
 
 	// No waiters - notification should be dropped
-	waiters.Notify(func() {})
+	waiters.Notify(nil)
 
 	notified := make(chan bool, 1)
 	waiterStarted := make(chan struct{})
 
 	go func() {
-		// Create waiter that always continues waiting
-		waiter := waiters.New(func() bool { return true })
-
 		close(waiterStarted) // Signal that waiter is created
 
-		renotifyFn := waiter.WaitFuncWithOrphanHandler(
+		renotifyFn := waiters.WaitFuncWithOrphanHandler(
+			func() bool { return true },
 			func(rdvq.RenotifyFunc) { panic("orphan notify") },
 			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				// Block waiting for notification - no default case
@@ -44,7 +42,7 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Send notification
-	waiters.Notify(func() {})
+	waiters.Notify(nil)
 
 	// Should receive notification
 	select {
@@ -59,11 +57,9 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 	var waiters rdvq.Waiters
 	waiters.Init()
 
-	// Create waiter with verification that returns false (don't wait)
-	waiter := waiters.New(func() bool { return false })
-
 	selectCalled := false
-	renotifyFn := waiter.WaitFuncWithOrphanHandler(
+	renotifyFn := waiters.WaitFuncWithOrphanHandler(
+		func() bool { return false },
 		func(rdvq.RenotifyFunc) { panic("orphan notify") },
 		func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			selectCalled = true
@@ -88,16 +84,14 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 	waiterStarted := make(chan struct{})
 
 	go func() {
-		// Create waiter that checks for work
-		waiter := waiters.New(func() bool {
-			mu.Lock()
-			defer mu.Unlock()
-			return !workReady // Continue waiting only if no work ready
-		})
-
 		close(waiterStarted)
 
-		renotifyFn := waiter.WaitFuncWithOrphanHandler(
+		renotifyFn := waiters.WaitFuncWithOrphanHandler(
+			func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return !workReady // Continue waiting only if no work ready
+			},
 			func(rdvq.RenotifyFunc) { panic("orphan notify") },
 			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				// When verification succeeds, this should be called and block
@@ -130,13 +124,11 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 
 	workReady := true // Work is immediately ready
 
-	// Create waiter that checks for work
-	waiter := waiters.New(func() bool {
-		return !workReady // Should return false (don't wait)
-	})
-
 	selectCalled := false
-	renotifyFn := waiter.WaitFuncWithOrphanHandler(
+	renotifyFn := waiters.WaitFuncWithOrphanHandler(
+		func() bool {
+			return !workReady // Should return false (don't wait)
+		},
 		func(rdvq.RenotifyFunc) { panic("orphan notify") },
 		func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			selectCalled = true
@@ -159,10 +151,10 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 	// Start multiple waiters
 	for i := 0; i < numWaiters; i++ {
 		waiterID := i
-		waiter := waiters.New(func() bool { return true })
 
 		go func(id int) {
-			renotifyFn := waiter.WaitFuncWithOrphanHandler(
+			renotifyFn := waiters.WaitFuncWithOrphanHandler(
+				func() bool { return true },
 				func(rdvq.RenotifyFunc) { panic("orphan notify") },
 				func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 					select {
@@ -214,10 +206,9 @@ func TestWaiters_NotifyAll(t *testing.T) {
 
 	// Start multiple waiters
 	for i := 0; i < numWaiters; i++ {
-		waiter := waiters.New(func() bool { return true })
-
 		go func() {
-			renotifyFn := waiter.WaitFuncWithOrphanHandler(
+			renotifyFn := waiters.WaitFuncWithOrphanHandler(
+				func() bool { return true },
 				func(rdvq.RenotifyFunc) { panic("orphan notify") },
 				func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 					select {
@@ -255,12 +246,10 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	var waiters rdvq.Waiters
 	waiters.Init()
 
-	// Create waiter but don't actually wait
-	waiter := waiters.New(func() bool { return true })
-
 	// Start waiting but abandon immediately
 	go func() {
-		_ = waiter.WaitFuncWithOrphanHandler(
+		_ = waiters.WaitFuncWithOrphanHandler(
+			func() bool { return true },
 			func(rdvq.RenotifyFunc) { panic("orphan notify") },
 			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				// Abandon immediately
@@ -275,12 +264,10 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	// Send notification - should be orphaned
 	waiters.Notify(func() {})
 
-	// Create new waiter - should handle the orphaned notification gracefully
-	waiter2 := waiters.New(func() bool { return true })
-
 	notified := make(chan bool, 1)
 	go func() {
-		renotifyFn := waiter2.WaitFuncWithOrphanHandler(
+		renotifyFn := waiters.WaitFuncWithOrphanHandler(
+			func() bool { return true },
 			func(rdvq.RenotifyFunc) { panic("orphan notify") },
 			func(ch <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				select {

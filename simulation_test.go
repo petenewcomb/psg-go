@@ -33,7 +33,7 @@ func TestBySimulation(t *testing.T) {
 		// test complexity and diagnose uncovered issues.
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.Path.Count = sim.BiasedIntConfig{Min: 4, Med: 4, Max: 4}
+		// planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.Task.UseCombine.Probability = 0
 		// planConfig.Combine.Flush.Probability = 0

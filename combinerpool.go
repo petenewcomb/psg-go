@@ -264,6 +264,13 @@ func (cp *CombinerPool) goroutine() {
 
 	// Create the base goroutine context
 	ctx, cancel := context.WithCancel(j.ctx)
+	ctx, _ = j.ensureCtxMeta(ctx,
+		func(ctx context.Context, meta *ctxMeta) context.Context {
+			meta.ctxType = combineContext
+			meta.executionEnvironment = worker
+			return ctx
+		},
+	)
 
 	defer func() {
 		trace.Logf(context.Background(), traceRegion, "canceling context")
@@ -284,14 +291,6 @@ func (cp *CombinerPool) goroutine() {
 		}
 		close(doneCh)
 	}()
-
-	ctx, _ = j.ensureCtxMeta(ctx,
-		func(ctx context.Context, meta *ctxMeta) context.Context {
-			meta.ctxType = combineContext
-			meta.executionEnvironment = worker
-			return ctx
-		},
-	)
 
 	// Create the dedicated outbox for this combiner goroutine to emit gathers to the job
 	worker.emitGatherOutbox = OutboxFor[workq.Work](&worker.outboxMap, j.gatherOutboxKey())

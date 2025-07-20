@@ -9,19 +9,14 @@
 // https://www.cs.rochester.edu/research/synchronization/pseudocode/queues.html
 // on May 16, 2025.
 //
-// This implementation depends on Go's [atomic.Value] which provides atomic
-// operations for arbitrary values. It would be good to use hardware-based
-// 128-bit atomic operations instead, but they are not yet supported by Go (see
-// https://github.com/golang/go/issues/61236). Other than the fact that
-// atomic.Value is itself non-trival and includes a loop that has potential for
-// live-locking, the major downside to its use is the unavoidable heap
-// allocations of the (pointer, counter) structures used by the algorithm to
-// solve the "ABA" problem. Pooling and reuse of these structures would break
-// the invariants of atomic.Value and cause races within this code because both
-// expect the contents of the structure to be immutable as long as a reference
-// is held -- something that only the garbage collector can guarantee. Alternate
-// solutions to the ABA problem (e.g., hazard pointers) are more complex and
-// less compatible with Go.
+// This implementation depends on [github.com/petenewcomb/atomic128-go] which
+// provides atomic operations for pairs of 64-bit values using hardware
+// acceleration if supported, [atomic.Value] if not. Hardware acceleration can
+// be disabled by setting the environment variable PSGNATIVEA128 to a value
+// recognized by [strconv.ParseBool] as false, and it can be required by setting
+// it to a value recognized as true. If the environment variable is not set or
+// set to the empty string, hardware acceleration will be used if supported by
+// both atomic128-go and the platform on which PSG is running.
 package nbcq
 
 import (
@@ -41,13 +36,13 @@ type pointer[T any] struct {
 // structure node_t {value: data type, next: pointer_t}
 type node[T any] struct {
 	value atomic.Pointer[T]
-	next  atomic.Value
+	next  atomicPointer[T]
 }
 
 // structure queue_t {Head: pointer_t, Tail: pointer_t}
 type Queue[T any] struct {
-	head atomic.Value
-	tail atomic.Value
+	head atomicPointer[T]
+	tail atomicPointer[T]
 }
 
 // initialize(Q: pointer to queue_t)
@@ -76,19 +71,17 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 	// E4: loop  // Keep trying until Enqueue is done
 	for {
 		// E5: tail = Q->Tail         // Read Tail.ptr and Tail.count together
-		tailAny := q.tail.Load()
-		tail := tailAny.(pointer[T])
+		tail := q.tail.Load()
 		// E6: next = tail.ptr->next  // Read next ptr and count fields together
-		nextAny := tail.ptr.next.Load()
-		next := nextAny.(pointer[T])
+		next := tail.ptr.next.Load()
 		// E7: if tail == Q->Tail     // Are tail and next consistent?
-		if tailAny == q.tail.Load().(pointer[T]) {
+		if tail == q.tail.Load() {
 			// Was Tail pointing to the last node?
 			// E8: if next.ptr == NULL
 			if next.ptr == nil {
 				// Try to link node at the end of the linked list
 				// E9: if CAS(&tail.ptr->next, next, <node, next.count+1>)
-				if tail.ptr.next.CompareAndSwap(nextAny, pointer[T]{ptr: node, count: next.count + 1}) {
+				if tail.ptr.next.CompareAndSwap(next, pointer[T]{ptr: node, count: next.count + 1}) {
 					// E10: break	  // Enqueue is done.  Exit loop
 
 					if trace.IsEnabled() {
@@ -101,14 +94,14 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 
 					// Enqueue is done.  Try to swing Tail to the inserted node
 					// E17: CAS(&Q->Tail, tail, <node, tail.count+1>)
-					q.tail.CompareAndSwap(tailAny, pointer[T]{ptr: node, count: tail.count + 1})
+					q.tail.CompareAndSwap(tail, pointer[T]{ptr: node, count: tail.count + 1})
 					return
 				} // E11: endif
 			} else {
 				// E12: else          // Tail was not pointing to the last node
 				// Try to swing Tail to the next node
 				// E13: CAS(&Q->Tail, tail, <next.ptr, tail.count+1>)
-				q.tail.CompareAndSwap(tailAny, pointer[T]{ptr: next.ptr, count: tail.count + 1})
+				q.tail.CompareAndSwap(tail, pointer[T]{ptr: next.ptr, count: tail.count + 1})
 			} // E14: endif
 		} // E15: endif
 	} // E16: endloop
@@ -123,15 +116,13 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 	// D1: loop // Keep trying until Dequeue is done
 	for {
 		// D2: head = Q->Head         // Read Head
-		headAny := q.head.Load()
-		head := headAny.(pointer[T])
+		head := q.head.Load()
 		// D3: tail = Q->Tail         // Read Tail
-		tailAny := q.tail.Load()
-		tail := tailAny.(pointer[T])
+		tail := q.tail.Load()
 		// D4: next = head.ptr->next  // Read Head.ptr->next
-		next := head.ptr.next.Load().(pointer[T])
+		next := head.ptr.next.Load()
 		// D5: if head == Q->Head     // Are head, tail, and next consistent?
-		if headAny == q.head.Load().(pointer[T]) {
+		if head == q.head.Load() {
 			// D6: if head.ptr == tail.ptr  // Is queue empty or Tail falling behind?
 			if head.ptr == tail.ptr {
 				// D7: if next.ptr == NULL  // Is queue empty?
@@ -141,7 +132,7 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 				} // D9: endif
 				// Tail is falling behind.  Try to advance it
 				// D10: CAS(&Q->Tail, tail, <next.ptr, tail.count+1>)
-				q.tail.CompareAndSwap(tailAny, pointer[T]{ptr: next.ptr, count: tail.count + 1})
+				q.tail.CompareAndSwap(tail, pointer[T]{ptr: next.ptr, count: tail.count + 1})
 			} else {
 				// D11: else                // No need to deal with Tail
 				// Read value before CAS
@@ -150,7 +141,7 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 				valuePointer := next.ptr.value.Load()
 				// Try to swing Head to the next node
 				// D13: if CAS(&Q->Head, head, <next.ptr, head.count+1>)
-				if q.head.CompareAndSwap(headAny, pointer[T]{ptr: next.ptr, count: head.count + 1}) {
+				if q.head.CompareAndSwap(head, pointer[T]{ptr: next.ptr, count: head.count + 1}) {
 					// D14: break           // Dequeue is done.  Exit loop
 
 					if trace.IsEnabled() {

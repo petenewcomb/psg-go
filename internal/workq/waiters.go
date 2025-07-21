@@ -11,6 +11,8 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
+type Waiter = rdvq.Waiter
+
 type Waiters struct {
 	Coordinator
 	rdvq.Waiters
@@ -27,7 +29,7 @@ func (w *Waiters) Init() {
 	w.Waiters.Init()
 }
 
-type BlockFunc func(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyFunc, error)
+type BlockFunc func(ctx context.Context, waiters *Waiters, confirmWaitFn func() bool) (RenotifyFunc, error)
 
 type WaitBehavior struct {
 	BlockBehavior
@@ -80,11 +82,7 @@ func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavi
 			return true
 		}
 		var err error
-		renotifyFn = w.WaitFuncWithOrphanHandler(confirmFn, w.Notify, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
-			var renotifyFn RenotifyFunc
-			renotifyFn, err = blockFn(ctx, waitCh)
-			return renotifyFn
-		})
+		renotifyFn, err = blockFn(ctx, w, confirmFn)
 		if err != nil {
 			trace.Logf(ctx, traceRegion, "returning error from blockFn: %v", err)
 			return err

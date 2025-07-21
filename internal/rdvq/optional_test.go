@@ -22,13 +22,6 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 	q.Init(p)
 	ctx := context.Background()
 
-	// TryPopFront should not receive anything when queue is empty
-	var received []int
-	q.TryPopFront(p, func(value int) {
-		received = append(received, value)
-	})
-	assert.Empty(t, received)
-
 	// TryPushBack should fail when no receivers are waiting
 	success := q.TryPushBack(p, 42)
 	assert.False(t, success, "TryPushBack should fail with no waiting receivers")
@@ -36,7 +29,8 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 	// Start a receiver
 	receivedCh := make(chan int)
 	go func() {
-		err := q.PopFront(ctx, p, func(value int) {
+		var inbox rdvq.Inbox[int]
+		err := q.PopFront(ctx, p, &inbox, func(value int) {
 			receivedCh <- value
 		})
 		assert.NoError(t, err)
@@ -72,7 +66,8 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := q.PopFront(ctx, p, func(value int) {
+			var inbox rdvq.Inbox[int]
+			err := q.PopFront(ctx, p, &inbox, func(value int) {
 				received <- value
 			})
 			assert.NoError(t, err)
@@ -109,7 +104,8 @@ func TestOptional_AbandonedReceiver(t *testing.T) {
 	// Start a receiver that will be cancelled
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		err := q.PopFront(ctx, p, func(value int) {
+		var inbox rdvq.Inbox[int]
+		err := q.PopFront(ctx, p, &inbox, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
 		assert.Error(t, err)
@@ -134,8 +130,9 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	q.Init(p)
 
 	// Test custom select function that always times out
+	var inbox rdvq.Inbox[int]
 	var orphanValues []int
-	q.PopFrontFunc(p, func(value int) {
+	q.PopFrontFunc(p, &inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
 	}, func(ch <-chan int) rdvq.SelectResult {
 		// Always return aborted (timeout immediately)
@@ -153,7 +150,7 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 
 	// Use PopFrontFunc with a select that should timeout
 	orphanValues = nil
-	q.PopFrontFunc(p, func(value int) {
+	q.PopFrontFunc(p, &inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
 	}, func(ch <-chan int) rdvq.SelectResult {
 		time.Sleep(10 * time.Millisecond) // Let the sender send first
@@ -172,7 +169,7 @@ func TestOptional_Stress(t *testing.T) {
 
 	numPushers := runtime.GOMAXPROCS(-1)
 	numPoppers := runtime.GOMAXPROCS(-1)
-	duration := 10 * time.Second
+	duration := 30 * time.Second
 
 	if testing.Short() {
 		duration = 1 * time.Second
@@ -184,19 +181,17 @@ func TestOptional_Stress(t *testing.T) {
 	var (
 		tryPushed atomic.Int64
 		refused   atomic.Int64
-		canceled  atomic.Int64
 		popped    atomic.Int64
-		tryPopped atomic.Int64
 		abandoned atomic.Int64
 	)
 
 	pushErrCh := make(chan error, 1)
 	popErrCh := make(chan error, 1)
 
-	popOps := []func(context.Context){
-		func(ctx context.Context) {
+	popOps := []func(context.Context, *rdvq.Inbox[int]){
+		func(ctx context.Context, inbox *rdvq.Inbox[int]) {
 			// Normal popper
-			err := q.PopFront(ctx, p, func(value int) {
+			err := q.PopFront(ctx, p, inbox, func(value int) {
 				popped.Add(1)
 			})
 			switch {
@@ -209,16 +204,10 @@ func TestOptional_Stress(t *testing.T) {
 				}
 			}
 		},
-		func(ctx context.Context) {
-			// Trying popper
-			q.TryPopFront(p, func(value int) {
-				tryPopped.Add(1)
-			})
-		},
-		func(ctx context.Context) {
+		func(ctx context.Context, inbox *rdvq.Inbox[int]) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
-			err := q.PopFront(shortCtx, p, func(value int) {
+			err := q.PopFront(shortCtx, p, inbox, func(value int) {
 				popped.Add(1)
 			})
 			switch {
@@ -247,9 +236,10 @@ func TestOptional_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
+			var inbox rdvq.Inbox[int]
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
-				popOps[rand.IntN(len(popOps))](ctx)
+				popOps[rand.IntN(len(popOps))](ctx, &inbox)
 			}
 		}()
 	}
@@ -276,21 +266,8 @@ func TestOptional_Stress(t *testing.T) {
 	cancel()
 	wg.Wait()
 
-	// Drain any remaining values
-	var remaining int64
-	for {
-		ok := false
-		q.TryPopFront(p, func(int) {
-			ok = true
-			remaining++
-		})
-		if !ok {
-			break
-		}
-	}
-
-	t.Logf("TryPushed: %d, Refused: %d, Canceled: %d, Popped: %d, TryPopped: %d, Abandoned: %d, Remaining: %d",
-		tryPushed.Load(), refused.Load(), canceled.Load(), popped.Load(), tryPopped.Load(), abandoned.Load(), remaining)
+	t.Logf("TryPushed: %d, Refused: %d, Popped: %d, Abandoned: %d",
+		tryPushed.Load(), refused.Load(), popped.Load(), abandoned.Load())
 
 	// Error but context not cancelled - unexpected
 	select {
@@ -305,7 +282,7 @@ func TestOptional_Stress(t *testing.T) {
 	default:
 	}
 
-	actuallyPushed := tryPushed.Load() - refused.Load() - canceled.Load()
-	actuallyPopped := popped.Load() + tryPopped.Load() + remaining
+	actuallyPushed := tryPushed.Load() - refused.Load()
+	actuallyPopped := popped.Load()
 	assert.Equal(t, actuallyPushed, actuallyPopped)
 }

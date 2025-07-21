@@ -11,6 +11,10 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 )
 
+type Inbox[T any] struct {
+	ch chan T // nil when empty, contains 1 buffered item when full
+}
+
 // Optional implements the base layer of rdvq's two-tier architecture,
 // providing direct sender-receiver rendezvous without overflow handling.
 // It serves as the foundation for Required[T] and can be used standalone
@@ -38,6 +42,7 @@ func (q *Optional[T]) TryPushBack(p *Pool[T], value T) bool {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Optional=%p", q)
 
+	// Loop through available inboxes
 	for {
 		inboxCh, ok := q.emptyInboxes.PopFront(&p.nodePool)
 		if !ok {
@@ -46,20 +51,32 @@ func (q *Optional[T]) TryPushBack(p *Pool[T], value T) bool {
 			return false
 		}
 
-		// Try to send to this receiver
-		trace.Logf(context.Background(), traceRegion, "entering select: inboxCh=%p", inboxCh)
-		select {
-		case inboxCh <- value:
-			trace.Logf(context.Background(), traceRegion, "delivered value to inboxCh=%p, returning true", inboxCh)
-			// Successfully delivered
-			return true
-		default:
-			trace.Logf(context.Background(), traceRegion, "inboxCh=%p was full, trying next", inboxCh)
-			// inboxCh is full which means that the receiver abandoned it.
-			// Drain and put back in the pool, then loop and try getting
-			// another.
-			<-inboxCh
-			p.putChan(inboxCh)
+		// Loop to (re)attempt sending to the inbox channel
+		for {
+			trace.Logf(context.Background(), traceRegion, "entering select: inboxCh=%p", inboxCh)
+			select {
+			case inboxCh <- value:
+				trace.Logf(context.Background(), traceRegion, "delivered value to inboxCh=%p, returning true", inboxCh)
+				// Successfully delivered
+				return true
+			default:
+			}
+
+			// inboxCh is full which means that the receiver abandoned it. Drain
+			// to notify the inbox that the channel is no longer in queue, then
+			// loop and try another.
+			select {
+			case <-inboxCh:
+				trace.Logf(context.Background(), traceRegion, "inboxCh=%p was full, trying next", inboxCh)
+				inboxCh = nil
+			default:
+				// Channel was emptied since last attempt to send, so must about to be reused in PopFront
+				trace.Logf(context.Background(), traceRegion, "inboxCh=%p was full but became empty, retrying delivery", inboxCh)
+			}
+
+			if inboxCh == nil {
+				break
+			}
 		}
 	}
 }
@@ -69,15 +86,41 @@ func (q *Optional[T]) TryPushBack(p *Pool[T], value T) bool {
 type OptionalPopSelectFunc[T any] = func(inboxCh <-chan T) SelectResult
 
 //nolint:contextcheck // background context used only for tracing
-func (q *Optional[T]) PopFrontFunc(p *Pool[T], processOrphanFn ProcessValueFunc[T], selectFn OptionalPopSelectFunc[T]) {
+func (q *Optional[T]) PopFrontFunc(
+	p *Pool[T],
+	inbox *Inbox[T],
+	processOrphanFn ProcessValueFunc[T],
+	selectFn OptionalPopSelectFunc[T],
+) {
 	traceRegion := "rdvq.Optional.PopFrontFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	// Register ourselves as a waiting receiver.
-	inboxCh := p.getChan()
-	q.emptyInboxes.PushBack(&p.nodePool, inboxCh)
-
-	trace.Logf(context.Background(), traceRegion, "Optional=%p, inboxCh=%p", q, inboxCh)
+	inboxCh := inbox.ch
+	if inboxCh == nil {
+		// Register ourselves as a waiting receiver.
+		inboxCh = p.getChan()
+		inbox.ch = inboxCh
+		trace.Logf(context.Background(), traceRegion, "Optional=%p inbox=%p allocated inboxCh=%p", q, inbox, inboxCh)
+		q.emptyInboxes.PushBack(&p.nodePool, inboxCh)
+	} else {
+		// Reuse the existing inbox channel, which must still be in the queue
+		// and marked as abandoned.  Drain it and reuse.
+		select {
+		case <-inboxCh:
+			// This confirms that the channel has not yet been seen by
+			// TryPushBack, so we can reuse it without requeuing.
+			trace.Logf(context.Background(), traceRegion,
+				"Optional=%p inbox=%p reusing still-queued inboxCh=%p",
+				q, inbox, inboxCh)
+		default:
+			// Channel was drained by TryPushBack, so we can reuse it but need
+			// to requeue.
+			trace.Logf(context.Background(), traceRegion,
+				"Optional=%p inbox=%p reusing and requeuing inboxCh=%p",
+				q, inbox, inboxCh)
+			q.emptyInboxes.PushBack(&p.nodePool, inboxCh)
+		}
+	}
 
 	// Call the custom selecting function
 	result := selectFn(inboxCh)
@@ -85,7 +128,8 @@ func (q *Optional[T]) PopFrontFunc(p *Pool[T], processOrphanFn ProcessValueFunc[
 		// PushBack must have pulled it out of the queue and the select just
 		// emptied it, so it's safe to return to the pool.
 		p.putChan(inboxCh)
-		return // Done!
+		inbox.ch = nil
+		return
 	}
 
 	// Clean up the dedicated channel, which may still be in the queue or
@@ -103,30 +147,14 @@ func (q *Optional[T]) PopFrontFunc(p *Pool[T], processOrphanFn ProcessValueFunc[
 		// PushBack must have pulled it out of the queue and we just
 		// emptied it, so it's safe to return to the pool.
 		p.putChan(inboxCh)
+		inbox.ch = nil
 	}
 }
 
-//nolint:contextcheck // background context used only for tracing
-func (q *Optional[T]) TryPopFront(p *Pool[T], processFn ProcessValueFunc[T]) {
-	traceRegion := "rdvq.Optional.TryPopFront"
-	q.PopFrontFunc(p, processFn, func(inboxCh <-chan T) SelectResult {
-		trace.Logf(context.Background(), traceRegion, "entering select: inboxCh=%p", inboxCh)
-		select {
-		case value := <-inboxCh:
-			trace.Logf(context.Background(), traceRegion, "value received from inboxCh=%p", inboxCh)
-			processFn(value)
-			return SelectInboxEmptied
-		default:
-			trace.Logf(context.Background(), traceRegion, "no value available from inboxCh=%p", inboxCh)
-		}
-		return SelectAborted
-	})
-}
-
-func (q *Optional[T]) PopFront(ctx context.Context, p *Pool[T], processFn ProcessValueFunc[T]) error {
+func (q *Optional[T]) PopFront(ctx context.Context, p *Pool[T], inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
 	traceRegion := "rdvq.Optional.PopFront"
 	var err error
-	q.PopFrontFunc(p, processFn, func(inboxCh <-chan T) SelectResult {
+	q.PopFrontFunc(p, inbox, processFn, func(inboxCh <-chan T) SelectResult {
 		trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p", inboxCh)
 		select {
 		case value := <-inboxCh:

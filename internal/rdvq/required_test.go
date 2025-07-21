@@ -17,8 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var p = &rdvq.Pool[int]{}
-
 func TestRequired_BasicFunctionality(t *testing.T) {
 	var q rdvq.Required[int]
 	q.Init(p)
@@ -57,9 +55,10 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 
 	// Consume remaining values with PopFront
 	// Note: PopFront may process multiple values due to timing
+	var receiver rdvq.Receiver[int]
 	var received []int
 	for len(received) < 2 {
-		err := q.PopFront(ctx, p, func(value int) {
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			received = append(received, value)
 		})
 		assert.NoError(t, err)
@@ -92,7 +91,8 @@ func TestRequired_ContextCancellation(t *testing.T) {
 	// Start a receiver that will block
 	done := make(chan struct{})
 	go func() {
-		err := q.PopFront(ctx, p, func(value int) {
+		var receiver rdvq.Receiver[int]
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
 		assert.Error(t, err, "Should not receive value when cancelled")
@@ -121,7 +121,8 @@ func TestRequired_ReceiverThenSender(t *testing.T) {
 	// Start receiver first
 	received := make(chan int)
 	go func() {
-		err := q.PopFront(ctx, p, func(value int) {
+		var receiver rdvq.Receiver[int]
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			received <- value
 		})
 		assert.NoError(t, err)
@@ -160,8 +161,9 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
+			var receiver rdvq.Receiver[int]
 			// This will block and then abandon
-			err := q.PopFront(ctx, p, func(value int) {
+			err := q.PopFront(ctx, p, &receiver, func(value int) {
 				t.Error("Should not receive value when cancelled")
 			})
 			assert.Error(t, err)
@@ -187,8 +189,9 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 	}()
 
 	// New receiver should get the value
+	var receiver rdvq.Receiver[int]
 	var received []int
-	err := q.PopFront(ctx, p, func(value int) {
+	err := q.PopFront(ctx, p, &receiver, func(value int) {
 		received = append(received, value)
 	})
 	assert.NoError(t, err)
@@ -232,8 +235,9 @@ func TestRequired_Concurrency(t *testing.T) {
 			defer readerWg.Done()
 			<-startCh
 
+			var receiver rdvq.Receiver[int]
 			for {
-				err := q.PopFront(readerCtx, p, func(val int) {
+				err := q.PopFront(readerCtx, p, &receiver, func(val int) {
 					receivedValueMap[val].Add(1)
 					totalPopped.Add(1)
 				})
@@ -316,14 +320,14 @@ func TestRequired_Stress(t *testing.T) {
 	defer cancel()
 
 	var (
-		pushed    atomic.Int64
-		tryPushed atomic.Int64
-		refused   atomic.Int64
-		canceled  atomic.Int64
-		popped    atomic.Int64
-		tryPopped atomic.Int64
-		excess    atomic.Int64
-		abandoned atomic.Int64
+		pushed       atomic.Int64
+		tryPushed    atomic.Int64
+		pushRefused  atomic.Int64
+		pushCanceled atomic.Int64
+		popped       atomic.Int64
+		tryPopped    atomic.Int64
+		excess       atomic.Int64
+		abandoned    atomic.Int64
 	)
 
 	pushErrCh := make(chan error, 1)
@@ -333,7 +337,7 @@ func TestRequired_Stress(t *testing.T) {
 		func(ctx context.Context, outbox *rdvq.Outbox[int]) {
 			// Trying pusher
 			if !q.TryPushBack(p, outbox, int(tryPushed.Add(1))) {
-				refused.Add(1)
+				pushRefused.Add(1)
 			}
 		},
 		func(ctx context.Context, outbox *rdvq.Outbox[int]) {
@@ -342,7 +346,7 @@ func TestRequired_Stress(t *testing.T) {
 			switch {
 			case err == nil:
 			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
-				canceled.Add(1)
+				pushCanceled.Add(1)
 			default:
 				select {
 				case pushErrCh <- err:
@@ -352,10 +356,10 @@ func TestRequired_Stress(t *testing.T) {
 		},
 	}
 
-	popOps := []func(context.Context){
-		func(ctx context.Context) {
+	popOps := []func(context.Context, *rdvq.Receiver[int]){
+		func(ctx context.Context, receiver *rdvq.Receiver[int]) {
 			// Normal popper
-			err := q.PopFront(ctx, p, func(value int) {
+			err := q.PopFront(ctx, p, receiver, func(value int) {
 				popped.Add(1)
 			})
 			switch {
@@ -368,16 +372,16 @@ func TestRequired_Stress(t *testing.T) {
 				}
 			}
 		},
-		func(ctx context.Context) {
+		func(ctx context.Context, receiver *rdvq.Receiver[int]) {
 			// Trying popper
 			if _, ok := q.TryPopFront(p); ok {
 				tryPopped.Add(1)
 			}
 		},
-		func(ctx context.Context) {
+		func(ctx context.Context, receiver *rdvq.Receiver[int]) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
-			err := q.PopFront(shortCtx, p, func(value int) {
+			err := q.PopFront(shortCtx, p, receiver, func(value int) {
 				popped.Add(1)
 			})
 			switch {
@@ -406,9 +410,10 @@ func TestRequired_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
+			var receiver rdvq.Receiver[int]
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
-				popOps[rand.IntN(len(popOps))](ctx)
+				popOps[rand.IntN(len(popOps))](ctx, &receiver)
 			}
 		}()
 	}
@@ -424,8 +429,9 @@ func TestRequired_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
+			var waiter rdvq.Waiter
 			for ctx.Err() == nil {
-				_, err := q.PopFrontExcess(ctx, p)
+				_, err := q.PopFrontExcess(ctx, p, &waiter)
 				switch {
 				case err == nil:
 					excess.Add(1)
@@ -473,8 +479,8 @@ func TestRequired_Stress(t *testing.T) {
 	}
 
 	//nolint:lll // doesn't make sense to break up more
-	t.Logf("Pushed: %d, TryPushed: %d, Refused: %d, Canceled: %d, Popped: %d, TryPopped: %d, Excess: %d, Abandoned: %d, Remaining: %d",
-		pushed.Load(), tryPushed.Load(), refused.Load(), canceled.Load(), popped.Load(), tryPopped.Load(), excess.Load(), abandoned.Load(), remaining)
+	t.Logf("Pushed: %d, TryPushed: %d, PushRefused: %d, PushCanceled: %d, Popped: %d, TryPopped: %d, Excess: %d, Abandoned: %d, Remaining: %d",
+		pushed.Load(), tryPushed.Load(), pushRefused.Load(), pushCanceled.Load(), popped.Load(), tryPopped.Load(), excess.Load(), abandoned.Load(), remaining)
 
 	// Error but context not cancelled - unexpected
 	select {
@@ -489,7 +495,7 @@ func TestRequired_Stress(t *testing.T) {
 	default:
 	}
 
-	actuallyPushed := pushed.Load() + tryPushed.Load() - refused.Load() - canceled.Load()
+	actuallyPushed := pushed.Load() + tryPushed.Load() - pushRefused.Load() - pushCanceled.Load()
 	actuallyPopped := popped.Load() + tryPopped.Load() + excess.Load() + remaining
 	assert.Equal(t, actuallyPushed, actuallyPopped)
 }
@@ -509,7 +515,8 @@ func TestRequired_TryPushBack(t *testing.T) {
 	// Start a receiver
 	received := make(chan int)
 	go func() {
-		err := q.PopFront(ctx, p, func(value int) {
+		var receiver rdvq.Receiver[int]
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			received <- value
 		})
 		assert.NoError(t, err)
@@ -543,7 +550,8 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	// Test Tier 1: Direct delivery to waiting receiver
 	received := make(chan int, 1)
 	go func() {
-		err := q.PopFront(ctx, p, func(value int) {
+		var receiver rdvq.Receiver[int]
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			received <- value
 		})
 		assert.NoError(t, err)
@@ -589,14 +597,16 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	// Start receiver to unblock the sender - need two PopFront calls:
 	// one for the outboxed item (200) and one for the shared channel item (300)
 	go func() {
+		var receiver rdvq.Receiver[int]
+
 		// First PopFront should get the outboxed item
-		err := q.PopFront(ctx, p, func(value int) {
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			received <- value
 		})
 		assert.NoError(t, err)
 
 		// Second PopFront should get the shared channel item
-		err = q.PopFront(ctx, p, func(value int) {
+		err = q.PopFront(ctx, p, &receiver, func(value int) {
 			received <- value
 		})
 		assert.NoError(t, err)
@@ -636,7 +646,8 @@ func TestRequired_OutboxNotification(t *testing.T) {
 	receiverStarted := make(chan struct{})
 	go func() {
 		close(receiverStarted)
-		err := q.PopFront(ctx, p, func(value int) {
+		var receiver rdvq.Receiver[int]
+		err := q.PopFront(ctx, p, &receiver, func(value int) {
 			received <- value
 		})
 		assert.NoError(t, err)
@@ -676,8 +687,9 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 
 	// Start receiver
 	go func() {
+		var receiver rdvq.Receiver[int]
 		for i := 0; i < numSenders*itemsPerSender; i++ {
-			err := q.PopFront(ctx, p, func(value int) {
+			err := q.PopFront(ctx, p, &receiver, func(value int) {
 				received <- value
 			})
 			assert.NoError(t, err)
@@ -816,7 +828,8 @@ func TestRequired_RaceConditionPrevention(t *testing.T) {
 		// Start receiver
 		go func() {
 			close(receiverStarted)
-			err := q.PopFront(ctx, p, func(value int) {
+			var receiver rdvq.Receiver[int]
+			err := q.PopFront(ctx, p, &receiver, func(value int) {
 				received <- value
 			})
 			assert.NoError(t, err)

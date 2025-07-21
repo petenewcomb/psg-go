@@ -301,7 +301,11 @@ func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
 	return nil
 }
 
-func (j *Job) block(ctx context.Context, blockWaitCh <-chan workq.RenotifyFunc) (workq.RenotifyFunc, error) {
+func (j *Job) block(
+	ctx context.Context,
+	blockWaiters *workq.Waiters,
+	confirmBlockWaitFn func() bool,
+) (workq.RenotifyFunc, error) {
 	traceRegion := "Job.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Job=%p", j)
@@ -310,13 +314,14 @@ func (j *Job) block(ctx context.Context, blockWaitCh <-chan workq.RenotifyFunc) 
 	err := j.workQueue.ExecuteOne(ctx,
 		func(
 			ctx context.Context,
-			workReadyCh <-chan workq.RenotifyFunc,
 			queueFn workq.QueueWorkFunc,
+			workWaiters *rdvq.Waiters,
+			confirmWorkWaitFn func() bool,
 		) (workq.RenotifyFunc, error) {
 			var workReadyRenotifyFn workq.RenotifyFunc
 			var err error
 			workReadyRenotifyFn, blockWaitRenotifyFn, err = j.addWorkWhileMaybeBlocking(
-				ctx, meta, workReadyCh, queueFn, blockWaitCh)
+				ctx, meta, queueFn, workWaiters, confirmWorkWaitFn, blockWaiters, confirmBlockWaitFn)
 			return workReadyRenotifyFn, err
 		},
 	)
@@ -328,63 +333,130 @@ func (j *Job) block(ctx context.Context, blockWaitCh <-chan workq.RenotifyFunc) 
 
 func (j *Job) addWork(
 	ctx context.Context,
-	workReadyCh <-chan workq.RenotifyFunc,
 	queueFn workq.QueueWorkFunc,
+	waiters *rdvq.Waiters,
+	confirmWaitFn func() bool,
 ) (workq.RenotifyFunc, error) {
+	traceRegion := "Job.addWork"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "Job=%p", j)
 	ctx, meta := j.ctxMeta(ctx)
-	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, workReadyCh, queueFn, nil)
+	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters, confirmWaitFn, nil, nil)
 	return workReadyRenotifyFn, err
 }
 
 func (j *Job) addWorkWhileMaybeBlocking(
 	ctx context.Context,
 	meta *ctxMeta,
-	workReadyCh <-chan workq.RenotifyFunc,
 	queueFn workq.QueueWorkFunc,
-	blockWaitCh <-chan workq.RenotifyFunc,
+	workWaiters *rdvq.Waiters,
+	confirmWorkWaitFn func() bool,
+	blockWaiters *workq.Waiters,
+	confirmBlockWaitFn func() bool,
 ) (workReadyRenotifyFn, blockWaitRenotifyFn workq.RenotifyFunc, err error) {
-	traceRegion := "Job.addWorkWhileMaybeBlocking"
-
-	meta.LockAndSetQueueFunc(queueFn)
+	workReceiver, workWaiter, blockWaiter := meta.LockAndSetQueueFunc(queueFn)
 	defer meta.UnlockAndResetQueueFunc()
 
-	if workReadyCh == nil {
+	if workWaiters == nil {
 		err = j.tryAddWork(ctx, queueFn)
 	} else {
-		j.gatherQueue.PopFrontFunc(queueFn,
+		j.gatherQueue.PopFrontFunc(
+			workReceiver,
+			queueFn,
 			func(
 				inboxCh <-chan workq.Work,
 				outboxFilledCh <-chan rdvq.RenotifyFunc,
 			) (rdvq.SelectResult, rdvq.RenotifyFunc) {
-				trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, blockWaitCh=%p",
-					inboxCh, outboxFilledCh, workReadyCh, blockWaitCh)
-				select {
-				case work := <-inboxCh:
-					trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
-					queueFn(work)
-					return rdvq.SelectInboxEmptied, nil
-				case renotifyFn := <-outboxFilledCh:
-					trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
-					return rdvq.SelectOutboxFilled, renotifyFn
-				case renotifyFn := <-workReadyCh:
-					trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", workReadyCh)
-					workReadyRenotifyFn = renotifyFn
-				case renotifyFn := <-blockWaitCh:
-					trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
-					blockWaitRenotifyFn = renotifyFn
-					err = errBlockWaitSignaled
-				case <-j.state.Done():
-					trace.Logf(ctx, traceRegion, "received job done signal")
-					err = ErrJobDone
-				case <-ctx.Done():
-					trace.Logf(ctx, traceRegion, "received context done signal")
-					err = ctx.Err()
-				}
-				return rdvq.SelectAborted, nil
+				var result rdvq.SelectResult
+				var outboxFilledRenotifyFn rdvq.RenotifyFunc
+				workReadyRenotifyFn = workWaiters.WaitFunc(
+					workWaiter,
+					confirmWorkWaitFn,
+					func(workReadyCh <-chan workq.RenotifyFunc) workq.RenotifyFunc {
+						if blockWaiters == nil {
+							result, err = j.gatherSelect(
+								ctx,
+								queueFn,
+								inboxCh,
+								outboxFilledCh,
+								&outboxFilledRenotifyFn,
+								workReadyCh,
+								&workReadyRenotifyFn,
+								nil,
+								nil,
+							)
+						} else {
+							blockWaitRenotifyFn = blockWaiters.WaitFunc(
+								blockWaiter,
+								func() bool {
+									shouldWait := confirmBlockWaitFn()
+									if !shouldWait {
+										err = errBlockWaitSignaled
+									}
+									return shouldWait
+								},
+								func(blockWaitCh <-chan workq.RenotifyFunc) workq.RenotifyFunc {
+									result, err = j.gatherSelect(
+										ctx,
+										queueFn,
+										inboxCh,
+										outboxFilledCh,
+										&outboxFilledRenotifyFn,
+										workReadyCh,
+										&workReadyRenotifyFn,
+										blockWaitCh,
+										&blockWaitRenotifyFn,
+									)
+									return blockWaitRenotifyFn
+								},
+							)
+						}
+						return workReadyRenotifyFn
+					},
+				)
+				return result, outboxFilledRenotifyFn
 			},
 		)
 	}
 	return
+}
+
+func (j *Job) gatherSelect(
+	ctx context.Context,
+	queueFn workq.QueueWorkFunc,
+	inboxCh <-chan workq.Work,
+	outboxFilledCh <-chan rdvq.RenotifyFunc,
+	outboxFilledRenotifyFn *rdvq.RenotifyFunc,
+	workReadyCh <-chan workq.RenotifyFunc,
+	workReadyRenotifyFn *workq.RenotifyFunc,
+	blockWaitCh <-chan workq.RenotifyFunc,
+	blockWaitRenotifyFn *workq.RenotifyFunc,
+) (rdvq.SelectResult, error) {
+	traceRegion := "Job.gatherSelect"
+	trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, blockWaitCh=%p",
+		inboxCh, outboxFilledCh, workReadyCh, blockWaitCh)
+	var err error
+	select {
+	case work := <-inboxCh:
+		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
+		queueFn(work)
+		return rdvq.SelectInboxEmptied, nil
+	case *outboxFilledRenotifyFn = <-outboxFilledCh:
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
+		return rdvq.SelectOutboxFilled, nil
+	case *workReadyRenotifyFn = <-workReadyCh:
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", workReadyCh)
+	case *blockWaitRenotifyFn = <-blockWaitCh:
+		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
+		err = errBlockWaitSignaled
+	case <-j.state.Done():
+		trace.Logf(ctx, traceRegion, "received job done signal")
+		err = ErrJobDone
+	case <-ctx.Done():
+		trace.Logf(ctx, traceRegion, "received context done signal")
+		err = ctx.Err()
+	}
+	return rdvq.SelectAborted, err
 }
 
 // postGather sends a gather operation to the gather queue.
@@ -602,6 +674,8 @@ func (j *Job) spawnTaskWorker(_ context.Context, task *taskWork) {
 			},
 		)
 
+		var inbox rdvq.Inbox[*taskWork]
+
 		// Create the outbox map for this task worker goroutine
 		var taskWorkerOutboxMap outboxMap
 
@@ -620,6 +694,7 @@ func (j *Job) spawnTaskWorker(_ context.Context, task *taskWork) {
 			timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
 
 			j.taskQueue.PopFrontFunc(taskQueuePool,
+				&inbox,
 				func(orphanedTask *taskWork) {
 					if task == nil {
 						task = orphanedTask

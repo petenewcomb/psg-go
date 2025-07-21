@@ -26,12 +26,14 @@ Items to complete before merging to main branch.
 - consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path
 - profile (memory, cpu, blocking) again after all the recent refactoring, see if there are any more obvious targets or low-hanging fruit
 - review again for readability
-- reduce potential build-up of stale notify functions (add monitor-style bounding of waiters for rdvq waiters, etc.)
 - make sure all exported functions emit trace regions
 - reorganize code within large files like job.go
-- re-review tracing guidlines in DEVELOPMENT.md
-- review combiner pool controller settings for processing/10µs/1ms, processing/1ms/1ms, waiting/100µs/100µs,  waiting/100µs/1ms,  waiting/10µs/10µs, waiting/1ms/100ms.  consider and measure the effects of more efficient combining (higher combine counts)
+- re-review tracing guidelines in DEVELOPMENT.md
+- check the scatter plots and review combiner pool controller settings
 - review and understand processing and waiting aggregation throughput and speedup graphs - interesting how flat they are, but seems potentially right
+- fix LockAndSetQueueFunc ugliness
+- change taskQueue from Optional to Required and use outboxes to reduce task goroutine proliferation
+- fix addWork ugliness
 
 ## Post-Merge Enhancements
 

@@ -112,7 +112,12 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 	})
 
 	// AddWorkFunc that provides one work item
-	addWorkFn := func(ctx context.Context, waitCh <-chan RenotifyFunc, queueFn QueueWorkFunc) (RenotifyFunc, error) {
+	addWorkFn := func(
+		ctx context.Context,
+		queueFn QueueWorkFunc,
+		waiters *rdvq.Waiters,
+		confirmWaitFn func() bool,
+	) (RenotifyFunc, error) {
 		queueFn(work)
 		return nil, nil
 	}
@@ -281,10 +286,18 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 		return nil
 	})
 
-	addWorkFn := func(ctx context.Context, waitCh <-chan RenotifyFunc, queueFn QueueWorkFunc) (rdvq.RenotifyFunc, error) {
+	addWorkFn := func(
+		ctx context.Context,
+		queueFn QueueWorkFunc,
+		waiters *rdvq.Waiters,
+		confirmWaitFn func() bool,
+	) (RenotifyFunc, error) {
 		if tryCount == 0 {
 			queueFn(work)
 			return func() {}, nil
+		}
+		if confirmWaitFn != nil {
+			confirmWaitFn()
 		}
 		return nil, nil // No new work on subsequent calls
 	}

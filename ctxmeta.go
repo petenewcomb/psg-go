@@ -56,7 +56,7 @@ func (cm *ctxMeta) IsTopLevel() bool {
 
 type executionEnvironment interface {
 	WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox))
-	LockAndSetQueueFunc(queueFn workq.QueueWorkFunc)
+	LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) (*workq.Receiver, *workq.Waiter, *workq.Waiter)
 	UnlockAndResetQueueFunc()
 	MayQueue() workq.QueueWorkFunc
 }
@@ -66,6 +66,9 @@ type topLevelExEnv struct {
 	outboxMap    outboxMap
 	queueFn      workq.QueueWorkFunc
 	queueFnDepth atomic.Int32
+	workReceiver workq.Receiver
+	workWaiter   workq.Waiter
+	blockWaiter  workq.Waiter
 }
 
 func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox)) {
@@ -80,20 +83,21 @@ func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Ou
 	fn(outbox)
 }
 
-func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) {
+func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) (
+	workReceiver *workq.Receiver, workWaiter *workq.Waiter, blockWaiter *workq.Waiter,
+) {
 	traceRegion := "topLevelExEnv.LockAndSetQueueFunc"
 
 	queueFnDepth := ee.queueFnDepth.Add(1)
 	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%d", ee, queueFnDepth)
 
-	if queueFnDepth > 1 {
-		// Reentrant. Would be nice to assert that the queueFn is the same, but
-		// function pointers are not comparable in Go.
-		return
+	// Handle reentrancy. Would be nice to assert that the queueFn is the same
+	// each time, but function pointers are not comparable in Go.
+	if queueFnDepth == 1 {
+		ee.mu.Lock()
+		ee.queueFn = queueFn
 	}
-
-	ee.mu.Lock()
-	ee.queueFn = queueFn
+	return &ee.workReceiver, &ee.workWaiter, &ee.blockWaiter
 }
 
 func (ee *topLevelExEnv) UnlockAndResetQueueFunc() {

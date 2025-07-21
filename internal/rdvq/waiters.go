@@ -11,15 +11,32 @@ import (
 
 type RenotifyFunc func()
 
+// WaitSelectFunc handles select operations on wait channels, returning the the
+// received RenotifyFunc or nil if the select exited without receiving one.
+type WaitSelectFunc func(waitCh <-chan RenotifyFunc) RenotifyFunc
+
+type NotifyFunc func(RenotifyFunc)
+
+type Waiter struct {
+	inbox Inbox[RenotifyFunc]
+}
+
+func (w *Waiter) waiter() *Waiter {
+	return w
+}
+
 // Waiters provides a blocking wait and notification system for coordinating
 // between senders and receivers. It's used internally by Required to prevent
 // race conditions when checking outboxes and blocking on channels, but can be
 // used anywhere a multi-party blocking wait mechanism is needed.
 //
-// The design reuses Optional to provide lock-free notification delivery. When
-// senders add items to outboxes, they call Notify() to wake up one waiting
-// receiver. Receivers register with verification functions that re-check for
-// work after registration but before blocking.
+// The design reuses Optional to provide lock-free notification delivery. For
+// example, when senders add items to outboxes via Required, it calls Notify()
+// on its filledOutboxes Waiters instance to wake up one waiting receiver by
+// passing a signal to that receiver's inbox. When notification receivers
+// register with Waiters to provide an inbox, they also provide confirmation
+// functions that allow the waiter to re-check to confirm the wait after
+// registration but before blocking.
 type Waiters struct {
 	q Optional[RenotifyFunc] // Reuses Optional for lock-free notification delivery
 }
@@ -30,9 +47,67 @@ func (w *Waiters) Init() {
 	w.q.Init(wp)
 }
 
-func noopRenotify() {
-	// noopRenotify is a no-op function used as a default renotify function to
-	// avoid nil checks in Notify.
+//nolint:contextcheck // background context used only for tracing
+func (w *Waiters) WaitFuncWithOrphanHandler(
+	waiter *Waiter,
+	confirmFn func() bool,
+	orphanFn NotifyFunc,
+	selectFn WaitSelectFunc,
+) RenotifyFunc {
+	traceRegion := "rdvq.Waiter.WaitFuncWithOrphanHandler"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
+
+	if w == nil {
+		return selectFn(nil)
+	}
+	var renotifyFn RenotifyFunc
+	w.q.PopFrontFunc(wp,
+		&waiter.inbox,
+		orphanFn,
+		func(ch <-chan RenotifyFunc) SelectResult {
+			if confirmFn() {
+				renotifyFn = selectFn(ch)
+				if renotifyFn != nil {
+					return SelectInboxEmptied
+				}
+			}
+			return SelectAborted
+		},
+	)
+	return renotifyFn
+}
+
+func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
+	return w.WaitFuncWithOrphanHandler(waiter, confirmFn, w.Notify, selectFn)
+}
+
+func (w *Waiters) WaitWithOrphanHandler(
+	ctx context.Context,
+	waiter *Waiter,
+	confirmFn func() bool,
+	orphanFn NotifyFunc,
+) (RenotifyFunc, error) {
+	traceRegion := "rdvq.Waiter.WaitWithOrphanHandler"
+
+	var err error
+	renotifyFn := w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+		trace.Logf(ctx, traceRegion, "entering select: waitCh=%p", waitCh)
+		select {
+		case renotifyFn := <-waitCh:
+			trace.Logf(ctx, traceRegion, "received renotifyFn from waitCh=%p", waitCh)
+			return renotifyFn
+		case <-ctx.Done():
+			trace.Logf(ctx, traceRegion, "received context done signal")
+			err = ctx.Err()
+		}
+		return nil
+	})
+	return renotifyFn, err
+}
+
+func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) (RenotifyFunc, error) {
+	return w.WaitWithOrphanHandler(ctx, waiter, confirmFn, w.Notify)
 }
 
 // Notify signals one waiting receiver to re-check for work. This should be
@@ -66,6 +141,11 @@ func (w *Waiters) NotifyAll() {
 	for w.q.TryPushBack(wp, noopRenotify) {
 		// Keep notifying until we can't anymore
 	}
+}
+
+func noopRenotify() {
+	// noopRenotify is a no-op function used as a default renotify function to
+	// avoid nil checks in Notify.
 }
 
 var wp = &Pool[RenotifyFunc]{}

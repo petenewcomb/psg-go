@@ -51,7 +51,12 @@ func (q *Accepted) Init() {
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be
 // called for each work item accepted. Returns whether the waitCh was signaled
 // or not.
-type AddWorkFunc func(ctx context.Context, waitCh <-chan RenotifyFunc, queueFn QueueWorkFunc) (RenotifyFunc, error)
+type AddWorkFunc func(
+	ctx context.Context,
+	queueFn QueueWorkFunc,
+	waiters *rdvq.Waiters,
+	confirmWaitFn func() bool,
+) (RenotifyFunc, error)
 
 type RenotifyFunc = rdvq.RenotifyFunc
 
@@ -225,6 +230,7 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 func (c *controller) TryAccepted(ctx context.Context, blockOrSubscribe bool) error {
 	traceRegion := "workq.controller.TryAccepted"
 	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "blockOrSubscribe=%v", blockOrSubscribe)
 	if err := c.tryAccepted(ctx, &c.q.fresh, blockOrSubscribe); c.ex.Started() || err != nil {
 		trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
 		return err
@@ -270,7 +276,7 @@ func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
 	if c.tryAddWorkFn != nil {
 		err = c.tryAddWorkFn(ctx, queueFn)
 	} else {
-		_, err = c.addWorkFn(ctx, nil, queueFn)
+		_, err = c.addWorkFn(ctx, queueFn, nil, nil)
 	}
 	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", c.workWasAdded, err)
 	return c.workWasAdded, err
@@ -291,15 +297,12 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 		c.shouldStillWaitErr = nil
 	}()
 
-	c.q.waiters.WaitFunc(c.shouldStillWait, c.waitSelect)
+	var err error
+	c.renotifyFn, err = c.addWorkFn(ctx, c.ex.Queue, &c.q.waiters, c.shouldStillWait)
+	err = errors.Join(c.shouldStillWaitErr, err)
 
-	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), c.shouldStillWaitErr)
-	return c.shouldStillWaitErr
-}
-
-func (c *controller) waitSelect(waitCh <-chan RenotifyFunc) RenotifyFunc {
-	c.renotifyFn, c.shouldStillWaitErr = c.addWorkFn(c.shouldStillWaitCtx, waitCh, c.ex.Queue)
-	return c.renotifyFn
+	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
+	return err
 }
 
 //nolint:contextcheck // background context used only for tracing

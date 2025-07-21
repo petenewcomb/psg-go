@@ -23,6 +23,9 @@ func (q *Pending) Init() {
 	q.Required.Init(pendingPool)
 }
 
+// See [rdvq.Receiver]
+type Receiver = rdvq.Receiver[Work]
+
 // See [rdvq.Outbox]
 type Outbox = rdvq.Outbox[Work]
 
@@ -53,13 +56,13 @@ func (q *Pending) TryPushBack(outbox *Outbox, work Work) bool {
 type PopSelectFunc = rdvq.RequiredPopSelectFunc[Work]
 
 // See [rdvq.Required.PopFrontFunc]
-func (q *Pending) PopFrontFunc(queueFn QueueWorkFunc, selectFn PopSelectFunc) {
-	q.Required.PopFrontFunc(pendingPool, queueFn, selectFn)
+func (q *Pending) PopFrontFunc(receiver *Receiver, queueFn QueueWorkFunc, selectFn PopSelectFunc) {
+	q.Required.PopFrontFunc(pendingPool, receiver, queueFn, selectFn)
 }
 
 // See [rdvq.Required.PopFront]
-func (q *Pending) PopFront(ctx context.Context, queueFn QueueWorkFunc) error {
-	return q.Required.PopFront(ctx, pendingPool, queueFn)
+func (q *Pending) PopFront(ctx context.Context, receiver *Receiver, queueFn QueueWorkFunc) error {
+	return q.Required.PopFront(ctx, pendingPool, receiver, queueFn)
 }
 
 // See [rdvq.Required.TryPopFront]
@@ -72,17 +75,19 @@ func (q *Pending) TryPopFront() (Work, bool) {
 	return q.Required.TryPopFront(pendingPool)
 }
 
+type WaiterOrReceiver = rdvq.WaiterOrReceiver
+
 // See [rdvq.PushSelectFunc]
 type WaitSelectFunc = rdvq.WaitSelectFunc
 
 // See [rdvq.Required.PopFrontExcessFunc]
-func (q *Pending) PopFrontExcessFunc(selectFn WaitSelectFunc) (Work, bool) {
-	return q.Required.PopFrontExcessFunc(pendingPool, selectFn)
+func (q *Pending) PopFrontExcessFunc(outboxWaiter WaiterOrReceiver, selectFn WaitSelectFunc) (Work, bool) {
+	return q.Required.PopFrontExcessFunc(pendingPool, outboxWaiter, selectFn)
 }
 
 // See [rdvq.Required.PopFrontExcess]
-func (q *Pending) PopFrontExcess(ctx context.Context) (Work, error) {
-	return q.Required.PopFrontExcess(ctx, pendingPool)
+func (q *Pending) PopFrontExcess(ctx context.Context, outboxWaiter WaiterOrReceiver) (Work, error) {
+	return q.Required.PopFrontExcess(ctx, pendingPool, outboxWaiter)
 }
 
 var pendingPool = &rdvq.Pool[Work]{}

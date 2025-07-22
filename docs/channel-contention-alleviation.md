@@ -150,6 +150,38 @@ Higher combiner limits showed bigger gains, demonstrating that RDVQ's rendezvous
 
 The gather queue optimization initially failed because per-call channel allocation dominated the performance benefits. Adding proper channel pooling with sync.Pool was critical to success. This demonstrates that implementation details can make or break optimization attempts.
 
+### Eliminating Unnecessary Channel Operations
+
+Beyond optimizing necessary channel operations, significant gains can come from eliminating unnecessary ones entirely.
+
+**Example: Redundant Select Clauses**
+
+During RDVQ investigation, the baseline implementation had unnecessary select clauses that added channel contention:
+
+```go
+// Before - unnecessary channel operations:
+select {
+case gather := <-j.gatherChan:
+    // process gather...
+case <-j.state.Done():    // Adds contention for no benefit in non-blocking operation
+    return false, nil
+case <-ctx.Done():        // Adds contention for no benefit in non-blocking operation  
+    return false, ctx.Err()
+default:
+    return false, nil
+}
+
+// After - eliminate unnecessary channels:
+select {
+case gather := <-j.gatherChan:
+    // process gather...
+default:
+    return false, nil
+}
+```
+
+**Impact**: Removing unnecessary clauses reduced overhead by ~3.6%, demonstrating that channel contention reduction includes both optimizing necessary operations and eliminating unnecessary ones.
+
 ### Measurement Methodology Is Critical
 
 Early benchmark results were misleading due to:
@@ -163,11 +195,157 @@ Proper measurement required fixed CPU frequency, elimination of profiling overhe
 
 An attempt to create a more generic "Unbuffered Blocking Concurrent Queue" (UBCQ) abstraction showed an 18% performance regression. The abstraction introduced overhead through additional indirection, memory allocations, and loss of optimization opportunities. This demonstrates that while generic abstractions improve maintainability, they may sacrifice too much performance for critical paths.
 
-### The nextValues Buffer Problem
+### The nextValues Buffer Problem: Architectural Incompatibility
 
-An optimization attempt adding a secondary buffer to RDVQ for batching introduced unfixable correctness problems. The fundamental issue was a race condition: values could become stuck in the buffer while consumers waited indefinitely on channels, since Go's select statements can only atomically wait on channels, not arbitrary data structures.
+As part of the RDVQ layered architecture refactoring, an attempt was made to add a secondary buffer (nextValues) to improve batching capabilities and support a new return-value API. This component was **abandoned** due to multiple unfixable correctness issues that revealed fundamental architectural incompatibilities with Go's concurrency model.
 
-The lesson: when designing concurrent systems, ensure all state checks can be performed atomically. Avoid splitting logical state across multiple data structures, and work with Go's channel semantics rather than against them.
+#### The Attempted Optimization
+
+The nextValues buffer was introduced as part of the broader RDVQ layered architecture refactoring. It aimed to:
+- Improve RDVQ performance by adding a buffer layer between receivers and channels
+- Support improved batching capabilities within the layered design
+- Enable a new return-value API: `PopFront(ctx, pool) (value, error)` vs the original callback-based `PopFront(ctx, pool, processFn)`
+- Reduce channel operations and improve coordination efficiency
+
+The buffer was meant to work with the layered architecture (`Strict` → `Tolerant` → `Patient`) to provide better performance characteristics.
+
+#### Why It Failed: Four Critical Issues
+
+**1. Race Condition with Go's select**
+Go's `select` statement cannot atomically check both channels and data structures, creating an unfixable race:
+
+```go
+// This pattern is inherently racy in Go:
+select {
+case value := <-bufferChannel:
+    // Got value from buffer
+case value := <-directChannel:  
+    // Got value directly  
+case <-ctx.Done():
+    // Timeout - but buffer might have value now!
+}
+```
+
+A receiver could check the buffer (empty), another goroutine could add to the buffer, and the original receiver would block on channels while the value sat in the buffer indefinitely.
+
+**2. Unfixable Abandonment Bug**
+The most critical issue occurred in cleanup logic when receivers timed out:
+
+```go
+// Buggy cleanup pattern:
+drainedValue := <-receiverCh
+if result.OK {
+    q.nextValues.PushBack(&p.valuePool, drainedValue)
+} else {
+    result.Value = drainedValue  // BUG: Trying to change the past
+    result.OK = true            // BUG: BlockFunc already decided "I got nothing"
+}
+```
+
+**Root Cause**: Once a `BlockFunc` times out and returns `BlockResult{OK: false}`, it has already captured state (like `ctx.Err()`) and informed the caller "I didn't get a value." This decision cannot be retroactively changed.
+
+**3. Infinite Loop Problem**  
+Values could cycle indefinitely between buffer and channels without ever being consumed, especially under high abandonment rates.
+
+**4. Performance Regression**
+Instead of optimization, the buffer added coordination overhead that resulted in measurable performance slowdowns.
+
+#### Key Architectural Lessons
+
+**Go's select is atomic only for channels**: Don't attempt to mix channels with other data structures in selection logic. Go's runtime cannot atomically coordinate between channels and arbitrary data structures.
+
+**State capture timing is critical**: Once a blocking operation returns with "no result," that decision cannot be retroactively changed. The timing of state capture and result communication must be carefully coordinated.
+
+**Avoid complex multi-purpose optimizations**: The nextValues buffer tried to solve multiple problems (batching, performance, buffering) and created more issues than it solved. Simple, focused designs are more robust.
+
+**Work with Go's semantics, not against them**: The Go runtime provides specific guarantees about channel operations. Designs that require atomicity beyond these guarantees are fundamentally unsound.
+
+#### Application to Future Work
+
+- Stick to channel-only patterns for Go's `select` statements
+- Be extremely careful about state consistency when introducing buffering layers  
+- Always test abandonment/timeout scenarios thoroughly in concurrent data structures
+- Consider whether optimization complexity is justified by actual, measured performance gains
+- Validate assumptions early through focused benchmarks rather than full implementation
+
+### RDVQ Layered Architecture: Architectural Trade-offs
+
+An exploration of refactoring RDVQ's monolithic implementation into a layered architecture (`Strict` → `Tolerant` → `Patient`) revealed important lessons about architectural trade-offs and performance debugging.
+
+#### The Refactoring Approach
+
+The layered architecture aimed to improve code organization by separating concerns:
+- **Strict layer**: Core rendezvous logic
+- **Tolerant layer**: Caching and overflow handling  
+- **Patient layer**: Timeout and abandonment handling
+
+#### Critical Bug Discovery: Cascading Abandonment
+
+The layered implementation introduced a subtle but severe performance bug in the `Tolerant` layer:
+
+```go
+// Buggy pattern - created unnecessary abandonment cycles:
+func (q *Tolerant[T]) PopFrontFunc(p *Pool[T], selectFn TolerantPopSelectFunc[T]) (T, bool) {
+    q.Strict.PopFrontFunc(&p.StrictPool,
+        func(ch <-chan T) bool {
+            if value, ok = q.nextValues.PopFront(&p.valuePool); ok {
+                return false  // This triggered unnecessary cleanup!
+            }
+            // ... rest of select logic
+        },
+    )
+}
+```
+
+**Root Cause**: When cached values existed, the code would still create a channel through `Strict.PopFrontFunc()`, then immediately abandon it when finding a cached value. This created a cycle: abandoned channels → cached values → more abandonment cycles.
+
+#### The Fix: Check Cache First
+
+```go
+// Fixed pattern - avoid channel operations when cache available:
+func (q *Tolerant[T]) PopFrontFunc(p *Pool[T], selectFn TolerantPopSelectFunc[T]) (T, bool) {
+    value, ok := q.nextValues.PopFront(&p.valuePool)
+    if ok {
+        return value, ok  // Return immediately without channel operations
+    }
+    // Only call Strict layer if no cached values
+    q.Strict.PopFrontFunc(&p.StrictPool, ...)
+}
+```
+
+#### Performance Analysis Results
+
+**Bug Impact**:
+- 57% reduction in nbcq overhead (58MB → 25MB)
+- 15% throughput improvement after fix
+- Eliminated cascading abandonment cycles
+
+**Remaining Trade-offs**:
+- 23% throughput reduction vs original monolithic implementation
+- Increased per-operation coordination overhead from layering
+- More complex call chains affecting inlining opportunities
+
+#### Key Architectural Lessons
+
+**Layered architectures add coordination overhead**: Each layer introduces some performance cost through call chain depth, reduced inlining opportunities, and additional coordination logic.
+
+**Benchmark methodology consistency is critical**: Different implementations may process different amounts of total work, making direct per-operation comparisons misleading. Always validate that benchmarks are measuring equivalent work.
+
+**Architectural benefits may justify performance costs**: The 23% performance reduction might be acceptable for improved code organization, testability, and maintainability - this is a business/engineering trade-off decision.
+
+**Subtle bugs can have dramatic performance impacts**: The cascading abandonment bug shows how small logical errors in coordination code can create severe performance pathologies.
+
+#### Performance vs Architecture Decision Framework
+
+When evaluating architectural changes that impact performance:
+
+1. **Measure the true performance impact** with consistent methodology
+2. **Identify specific bottlenecks** through profiling to understand costs
+3. **Consider architectural benefits** (maintainability, testability, clarity)
+4. **Evaluate business context** - is the performance cost acceptable?
+5. **Look for optimization opportunities** within the new architecture
+
+The RDVQ layered architecture investigation demonstrates that architectural improvements don't always come for free, but the costs can be quantified and weighed against benefits.
 
 ## Design Principles
 

@@ -49,12 +49,6 @@ func main() {
 	firstHeader := true
 
 	flushHeader := func(event trace.Event) {
-		if firstEvent {
-			startTimeNs = event.Time()
-			prevTimeNs = startTimeNs
-			firstEvent = false
-		}
-
 		timeSinceStart := time.Duration(event.Time()-startTimeNs) * time.Nanosecond
 		timeSincePrevEvent := time.Duration(event.Time()-prevTimeNs) * time.Nanosecond
 		if timeSincePrevEvent < 0 {
@@ -122,6 +116,12 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "Error reading event: %v\n", err)
 			os.Exit(1)
+		}
+
+		if firstEvent {
+			startTimeNs = event.Time()
+			prevTimeNs = startTimeNs
+			firstEvent = false
 		}
 
 		switch event.Kind() {

@@ -69,8 +69,6 @@ func setupPlot(c *chart) *plot.Plot {
 	p.Y.Tick.Label.Color = color.Gray{128}
 	p.Legend.TextStyle.Color = color.Gray{128}
 
-	p.X.Scale = plot.LogScale{}
-
 	p.BackgroundColor = color.Transparent
 
 	return p
@@ -93,6 +91,9 @@ func plotScatter(c *chart) error {
 		return err
 	}
 
+	p.X.Min = 1.0 / float64(time.Millisecond)
+	p.Y.Min = 0
+
 	// p.Add(plotter.NewGlyphBoxes())
 
 	return savePlot(c, p, 10.0/6.0)
@@ -100,6 +101,8 @@ func plotScatter(c *chart) error {
 
 func plotBars(c *chart) error {
 	p := setupPlot(c)
+
+	p.X.Scale = plot.LogScale{}
 
 	xTicks := make([]plot.Tick, len(c.XTickLabels))
 	for i := range c.XTickLabels {
@@ -143,6 +146,7 @@ func plotBars(c *chart) error {
 		p.Legend.Add(label, bc)
 	}
 
+	p.Y.Min = 0
 	p.Y.Max *= c.YAxisGrowFactor
 
 	// p.Add(plotter.NewGlyphBoxes())

@@ -31,6 +31,7 @@ This document provides guidance for anyone (human or AI) working on the PSG-Go c
 
 ### Benchmarking
 - When running benchmarks, always set bash timeout greater than the expected duration to account for overhead (including warmup)
+- See `BENCHMARKING.md` for comprehensive guidance on running benchmarks and analyzing results
 
 ### Git & Source Control
 - Avoid adding unrelated untracked files to a commit.  Prefer `git add -u` over `git add .`, or better yet just stage files by naming them explicitly.

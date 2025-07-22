@@ -20,7 +20,7 @@ tailpid=$!
 trap "kill $tailpid" EXIT
 
 if [ $# -eq 0 ]; then
-    set -- -bench=. -count=6 -timeout=10h
+    set -- -bench='^BenchmarkCombinerThroughput$' -count=6 -timeout=10h
 fi
 
 echo "Running benchmarks ${TAG:+($TAG)}..."

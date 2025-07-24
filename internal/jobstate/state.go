@@ -5,7 +5,6 @@ package jobstate
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -14,34 +13,20 @@ import (
 // lifecycleStage represents the possible stages in a job's lifecycle
 type lifecycleStage int32
 
+//go:generate stringer -type=lifecycleStage -linecomment
 const (
 	// stageOpen indicates that the job is accepting new tasks
-	stageOpen lifecycleStage = iota
+	stageOpen lifecycleStage = iota // Open
 	// stageClosed indicates that the job is closed for new tasks but
 	// existing tasks continue to run
-	stageClosed
+	stageClosed // Closed
 	// stageFlushing indicates that all tasks have completed and the job
 	// is waiting for combiners to finish
-	stageFlushing
+	stageFlushing // Flushing
 	// stageDone indicates that the job is completely done, all tasks and
 	// combiners have completed
-	stageDone
+	stageDone // Done
 )
-
-func (s lifecycleStage) String() string {
-	switch s {
-	case stageOpen:
-		return "Open"
-	case stageClosed:
-		return "Closed"
-	case stageFlushing:
-		return "Flushing"
-	case stageDone:
-		return "Done"
-	default:
-		return fmt.Sprintf("Unknown(%d)", int(s))
-	}
-}
 
 // JobState encapsulates the state management for a scatter-gather job
 type JobState struct {

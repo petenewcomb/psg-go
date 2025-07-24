@@ -17,27 +17,13 @@ import (
 
 type contextType int
 
+//go:generate stringer -type=contextType -linecomment
 const (
-	topLevelContext contextType = iota
-	taskContext
-	gatherContext
-	combineContext
+	topLevelContext contextType = iota // top-level
+	taskContext                        // task
+	gatherContext                      // gather
+	combineContext                     // combine
 )
-
-func (ct contextType) String() string {
-	switch ct {
-	case topLevelContext:
-		return "top-level"
-	case taskContext:
-		return "task"
-	case gatherContext:
-		return "gather"
-	case combineContext:
-		return "combine"
-	default:
-		return fmt.Sprintf("unknown(%d)", ct)
-	}
-}
 
 type ctxMeta struct {
 	job        *Job

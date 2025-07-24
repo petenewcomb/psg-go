@@ -101,4 +101,8 @@
 //     sub-job within the task rather than calling Scatter directly.
 package psg
 
-//go:generate go run -C internal/cmd/chartgen ./... ../../../bench.txt
+//go:generate go build -C internal/cmd/benchnorm -o ../../bin/benchnorm
+//go:generate go build -C internal/cmd/benchcmp -o ../../bin/benchcmp
+//go:generate go build -C internal/cmd/chartgen -o ../../bin/chartgen
+//go:generate go build -C internal/cmd/fmttrace -o ../../bin/fmttrace
+//go:generate internal/bin/chartgen -o docs/charts bench.txt

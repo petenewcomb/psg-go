@@ -30,5 +30,19 @@ echo "Benchmarks completed. Results saved to: $BENCH_FILE"
 # Normalize the results
 NORMALIZED_FILE="${BENCH_FILE%.*}_norm.txt"
 echo "Normalizing results..."
-go run -C internal/cmd/benchnorm ./... < "$BENCH_FILE" > "$NORMALIZED_FILE"
+internal/bin/benchnorm < "$BENCH_FILE" > "$NORMALIZED_FILE"
 echo "Normalized results saved to: $NORMALIZED_FILE"
+
+# Generate benchcmp report if baseline exists
+if [ -f "bench_norm.txt" ]; then
+    REPORT_FILE="${BENCH_FILE%.*}_report.txt"
+    echo "Generating comparison report..."
+    internal/bin/benchcmp -baseline bench_norm.txt -current "$NORMALIZED_FILE" > "$REPORT_FILE"
+    echo "Comparison report saved to: $REPORT_FILE"
+    echo ""
+    echo "=== Quick Summary ==="
+    head -20 "$REPORT_FILE"
+else
+    echo "No baseline found (bench_norm.txt). To enable comparison reports:"
+    echo "  cp $NORMALIZED_FILE bench_norm.txt"
+fi

@@ -16,15 +16,28 @@ import (
 )
 
 func main() {
+	var output = flag.String("o", "", "Output file (default: stdout)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [input.txt]...\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-o output.txt] [input.txt]...\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Normalizes benchmark results to per-task metrics.\n")
 		fmt.Fprintf(os.Stderr, "If no input files are specified, reads from stdin.\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	writer := benchfmt.NewWriter(os.Stdout)
+	var outFile *os.File
+	if *output == "" {
+		outFile = os.Stdout
+	} else {
+		var err error
+		outFile, err = os.Create(*output)
+		if err != nil {
+			log.Fatalf("Failed to create output file: %v", err)
+		}
+		defer outFile.Close()
+	}
+
+	writer := benchfmt.NewWriter(outFile)
 
 	if flag.NArg() == 0 {
 		if err := processFile("<stdin>", os.Stdin, writer); err != nil {

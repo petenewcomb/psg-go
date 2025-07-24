@@ -4,11 +4,13 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"image/color"
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -74,7 +76,7 @@ func setupPlot(c *chart) *plot.Plot {
 	return p
 }
 
-func plotScatter(c *chart) error {
+func plotScatter(c *chart, outputDir string) error {
 	p := setupPlot(c)
 
 	palette, err := brewer.GetPalette(brewer.TypeQualitative, "Paired", len(c.SeriesLabels))
@@ -96,10 +98,10 @@ func plotScatter(c *chart) error {
 
 	// p.Add(plotter.NewGlyphBoxes())
 
-	return savePlot(c, p, 10.0/6.0)
+	return savePlot(c, p, 10.0/6.0, outputDir)
 }
 
-func plotBars(c *chart) error {
+func plotBars(c *chart, outputDir string) error {
 	p := setupPlot(c)
 
 	p.X.Scale = plot.LogScale{}
@@ -151,10 +153,10 @@ func plotBars(c *chart) error {
 
 	// p.Add(plotter.NewGlyphBoxes())
 
-	return savePlot(c, p, 16.0/6.0)
+	return savePlot(c, p, 16.0/6.0, outputDir)
 }
 
-func savePlot(c *chart, p *plot.Plot, aspect float64) error {
+func savePlot(c *chart, p *plot.Plot, aspect float64, outputDir string) error {
 	height := 6 * vg.Inch
 	width := vg.Length(aspect * float64(height))
 	svg := vgsvg.New(width, height)
@@ -189,11 +191,11 @@ func savePlot(c *chart, p *plot.Plot, aspect float64) error {
 	p.Draw(dc)
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll("charts", 0750); err != nil {
+	if err := os.MkdirAll(outputDir, 0750); err != nil {
 		return err
 	}
 
-	w, err := os.Create("charts/" + c.FileBasename + ".svg")
+	w, err := os.Create(filepath.Join(outputDir, c.FileBasename+".svg"))
 	if err != nil {
 		return err
 	}
@@ -221,6 +223,15 @@ type Data struct {
 }
 
 func main() {
+	var outputDir = flag.String("o", "charts", "Output directory for SVG files")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-o outputdir] [input.txt]...\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Generates SVG charts from benchmark results.\n")
+		fmt.Fprintf(os.Stderr, "If no input files are specified, reads from stdin.\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
 	var pp benchproc.ProjectionParser
 	methodP, err := pp.Parse("/method,/combinerLimit", nil)
 	if err != nil {
@@ -298,7 +309,7 @@ func main() {
 	gatherOnlyMatcher := regexp.MustCompile(`/method=gatherOnly/`)
 	var gatherOnlyResults []*benchfmt.Result
 	benchFiles := &benchfmt.Files{
-		Paths:       os.Args[1:],
+		Paths:       flag.Args(),
 		AllowStdin:  true,
 		AllowLabels: true,
 	}
@@ -578,7 +589,7 @@ func main() {
 
 				}
 
-				if err := plotScatter(&chart); err != nil {
+				if err := plotScatter(&chart, *outputDir); err != nil {
 					log.Fatalf("Error creating chart: %v", err)
 				}
 			}
@@ -783,25 +794,26 @@ func main() {
 				}()
 			}
 
-			if err := plotBars(&throughputChart); err != nil {
-				log.Fatalf("Error creating chart: %v", err)
-			}
+		}
 
-			if err := plotBars(&speedupChart); err != nil {
-				log.Fatalf("Error creating chart: %v", err)
-			}
+		if err := plotBars(&throughputChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
 
-			if err := plotBars(&allocationsChart); err != nil {
-				log.Fatalf("Error creating chart: %v", err)
-			}
+		if err := plotBars(&speedupChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
 
-			if err := plotBars(&allocBytesChart); err != nil {
-				log.Fatalf("Error creating chart: %v", err)
-			}
+		if err := plotBars(&allocationsChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
+
+		if err := plotBars(&allocBytesChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
 		}
 	}
 
-	fmt.Println("Charts generated successfully in the 'charts' directory.")
+	fmt.Printf("Charts generated successfully in the '%s' directory.\n", *outputDir)
 }
 
 func formatRatio(n, d float64) string {

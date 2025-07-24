@@ -1,6 +1,6 @@
 module github.com/petenewcomb/psg-go/internal/cmd/benchnorm
 
-go 1.21
+go 1.24
 
 require golang.org/x/perf v0.0.0-20240404204407-f3e401e020e4
 

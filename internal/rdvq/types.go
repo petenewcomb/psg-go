@@ -3,8 +3,6 @@
 
 package rdvq
 
-import "fmt"
-
 // ProcessValueFunc is called to process a value retrieved from a queue.
 type ProcessValueFunc[T any] = func(value T)
 
@@ -14,6 +12,7 @@ type ProcessValueFunc[T any] = func(value T)
 // returns and making operation outcomes clear.
 type SelectResult int
 
+//go:generate stringer -type=SelectResult
 const (
 	// SelectAborted indicates the operation was cancelled or interrupted,
 	// typically due to context cancellation or other external factors.
@@ -30,16 +29,3 @@ const (
 	// has been added to the outboxWaiters queue.
 	SelectOutboxFilled
 )
-
-func (sr SelectResult) String() string {
-	switch sr {
-	case SelectAborted:
-		return "SelectAborted"
-	case SelectInboxEmptied:
-		return "SelectInboxEmptied"
-	case SelectOutboxFilled:
-		return "SelectOutboxFilled"
-	default:
-		return fmt.Sprintf("SelectResult(%d)", sr)
-	}
-}

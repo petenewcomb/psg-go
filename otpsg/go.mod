@@ -17,7 +17,7 @@ require (
 	github.com/go-logr/logr v1.2.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.8 // indirect
-	github.com/petenewcomb/atomic128-go v0.0.2 // indirect
+	github.com/petenewcomb/atomic128-go v0.0.3 // indirect
 	go.opentelemetry.io/otel/metric v1.16.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

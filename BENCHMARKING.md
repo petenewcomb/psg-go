@@ -25,6 +25,8 @@ The script will:
 3. Run the benchmarks and show progress in real-time
 4. Automatically normalize the results using `internal/cmd/benchnorm`
 5. Save normalized results with `_norm.txt` suffix
+6. Generate a comparison report using `benchcmp` if a baseline exists (`bench_norm.txt`)
+7. Display a quick summary of performance changes
 
 ### Normalizing Results Manually
 
@@ -36,6 +38,57 @@ go run -C internal/cmd/benchnorm ./... < bench_raw.txt > bench_norm.txt
 ```
 
 Always use the normalized (`*_norm.txt`) files for analysis, not the raw benchmark output.
+
+### Using benchcmp for Automated Analysis
+
+The `benchcmp` tool provides automated benchmark comparison following BENCHMARKING.md guidelines:
+
+```bash
+# Compare current results against baseline
+internal/bin/benchcmp -baseline bench_norm.txt -current bench_feature_norm.txt
+
+# Or use the auto-generated report from bench.sh
+cat bench_feature_20250724T123456Z_report.txt
+```
+
+#### Establishing a Baseline
+
+To enable automatic comparison reports:
+
+```bash
+# Run baseline benchmarks
+./bench.sh baseline
+
+# Set as comparison baseline  
+cp bench_baseline_20250724T123456Z_norm.txt bench_norm.txt
+
+# Future runs will automatically compare against this baseline
+./bench.sh my-feature
+```
+
+#### Report Structure
+
+`benchcmp` generates two complementary tables:
+
+**1. Best-to-Best Performance Analysis**
+- Compares optimal static combiner limits between baseline and current
+- Shows throughput and latency changes for your code change
+- Indicates latency threshold violations
+- Grouped by flush/duration ratio (1x, 10x, 100x) for pattern analysis
+
+**2. Unlimited Configuration Analysis**  
+- Analyzes how static limits compare to unlimited configurations
+- Shows ∞→∞ (unlimited to unlimited), B→∞ (baseline best to unlimited), C→∞ (current best to unlimited)
+- Provides efficiency insights about combiner architecture
+- Helps identify when concurrency controller needs updates
+
+#### Key Features
+
+- **Automatic best limit identification**: Follows BENCHMARKING.md rules (excludes unlimited -1)
+- **Statistical significance testing**: Uses benchmath for proper p-value calculation
+- **Consistent percentage differences**: Negative latency = improvement, positive = degradation
+- **Clean visual grouping**: Ratio-based sorting reveals operational patterns
+- **Threshold validation**: Flags latencies exceeding flush period + duration deadlines
 
 ## Key Principles
 

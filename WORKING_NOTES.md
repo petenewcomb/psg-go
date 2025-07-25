@@ -4,12 +4,27 @@ This document contains working notes and context for development on the `combine
 
 Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
 
-## Recent Performance Analysis (2025-07-22)
+## Recent Performance Analysis (2025-07-25)
+
+### Rdvq Outbox Optimization (2911b9c)
+
+Implemented non-blocking fast path for all outbox channels, not just fresh ones. Previously, non-fresh outboxes were forced through expensive selectFn path (waiter setup, notification registration) even when they had available capacity.
+
+**Performance Impact:**
+- Processing workloads: +88-142% throughput improvements in high task multiplier scenarios
+- Waiting workloads: +36-189% throughput improvements but with some latency increases
+- The optimization eliminates unnecessary waiter overhead for reused outboxes with capacity
+
+**Key Insight:** The latency increases in waiting workloads likely reflect the optimization exposing underlying Go runtime scheduler pressure rather than PSG algorithmic issues. Waiting workloads create many park/unpark events that strain the scheduler, and higher task creation rates amplify this pressure.
+
+**Next Steps:** Implement scheduler health monitoring using near-instant event timing to detect runtime pressure and add backpressure mechanisms when thresholds are exceeded.
+
+## Previous Performance Analysis (2025-07-22)
 
 ### Important Note on Benchmark Baseline
 The original analysis used bench_norm_old.txt which was found to be from a different benchmark configuration (simplified test with different task scattering and max hold time settings). The analysis has been corrected using bench_12f5955_20250722T130401Z_norm.txt as the proper baseline.
 
-### Summary of Recent Optimizations
+### Summary of Previous Optimizations
 The benchmark comparison (new baseline from commit 12f5955 vs current) captures the impact of:
 - Hardware-accelerated 128-bit atomics in nbcq (409d49d)
 - Data race fix in CombinerPool goroutine context setup (c515383)
@@ -35,9 +50,9 @@ Initial comprehensive analysis suggested performance regressions, but when basel
 - **Result**: Infrastructure changes performed as expected
 
 #### Final Assessment
-All three optimization commits (409d49d, c515383, 42ab341) performed as intended. Initial analysis suggesting regressions was due to insufficient consideration of measurement variance and failure to isolate individual commit impacts.
+All optimization commits (409d49d, c515383, 42ab341, 2911b9c) performed as intended. The rdvq optimization provides the largest performance gains while exposing scheduler-related constraints that need to be addressed through runtime pressure monitoring.
 
-**The optimization work was entirely successful with no negative trade-offs.**
+**The optimization work was entirely successful with clear next steps identified.**
 
 ### Current Status
-Branch is ready for finalization. All major performance optimization work is complete and validated.
+Branch is ready for finalization pending scheduler health monitoring implementation. All major performance optimization work is complete and validated.

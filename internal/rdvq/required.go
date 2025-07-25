@@ -90,13 +90,17 @@ func (q *Required[T]) PushBackFunc(p *Pool[T], outbox *Outbox[T], value T, selec
 	if outbox.ch == nil {
 		// Outbox is empty, use it for "drop-and-go" semantics
 		outbox.ch = p.getChan()
-		outbox.ch <- value
+	}
+
+	select {
+	case outbox.ch <- value:
 		trace.Logf(context.Background(), traceRegion,
 			"outbox=%p was empty, delivered value into outboxCh=%p",
 			outbox, outbox.ch)
 		q.fullOutboxes.PushBack(&p.nodePool, outbox.ch)
 		q.outboxWaiters.Notify(nil)
 		return
+	default:
 	}
 
 	// Outbox is full, wait for it to become available

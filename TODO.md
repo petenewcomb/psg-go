@@ -34,6 +34,9 @@ Items to complete before merging to main branch.
 - fix LockAndSetQueueFunc ugliness
 - change taskQueue from Optional to Required and use outboxes to reduce task goroutine proliferation
 - fix addWork ugliness
+- implement scheduler health monitoring using near-instant event timing to detect Go runtime pressure
+- add backpressure mechanisms when scheduler pressure is detected (dynamic pool sizing, task creation throttling)
+- consider tracking combine/gather duration distributions rather than just averages to better understand tail behavior
 
 ## Post-Merge Enhancements
 

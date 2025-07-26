@@ -5,10 +5,10 @@ package psg
 
 import (
 	"context"
-	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
@@ -122,7 +122,7 @@ func (g *GatherOp[T]) newScatterWork(
 ) *gatherScatterWork {
 	traceRegion := "GatherOp.newScatterWork"
 
-	w := gatherScatterWorkPool.Get().(*gatherScatterWork)
+	w := gatherScatterWorkPool.Get()
 	w.Init(target, bindTaskFunc(target.getJob(), taskFn, g.postResult))
 
 	trace.Logf(context.Background(), traceRegion, "GatherOp=%p created %v", g, w)
@@ -161,8 +161,4 @@ func (w *gatherScatterWork) Close() {
 	gatherScatterWorkPool.Put(w)
 }
 
-var gatherScatterWorkPool = sync.Pool{
-	New: func() any {
-		return &gatherScatterWork{}
-	},
-}
+var gatherScatterWorkPool = omnipool.For[gatherScatterWork]()

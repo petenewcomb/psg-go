@@ -24,7 +24,7 @@ func (c *Coordinator) Init() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Coordinator=%p, nbcq.Queue=%p", c, &c.q)
 
-	c.q.Init(notifyPool)
+	c.q.Init()
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -34,7 +34,7 @@ func (c *Coordinator) add(notifyFn NotifyFunc) {
 	trace.Logf(context.Background(), traceRegion, "Coordinator=%p", c)
 
 	if notifyFn != nil {
-		c.q.PushBack(notifyPool, notifyFn)
+		c.q.PushBack(notifyFn)
 	}
 }
 
@@ -45,7 +45,7 @@ func (c *Coordinator) Notify(renotifyFn RenotifyFunc) {
 	trace.Logf(context.Background(), traceRegion, "Coordinator=%p", c)
 
 	for {
-		notifyFn, ok := c.q.PopFront(notifyPool)
+		notifyFn, ok := c.q.PopFront()
 		if !ok {
 			if renotifyFn != nil {
 				renotifyFn()
@@ -95,12 +95,10 @@ func (c *Coordinator) NotifyAll() {
 	trace.Logf(context.Background(), traceRegion, "Coordinator=%p", c)
 
 	for {
-		notifyFn, ok := c.q.PopFront(notifyPool)
+		notifyFn, ok := c.q.PopFront()
 		if !ok {
 			break
 		}
 		notifyFn(nil)
 	}
 }
-
-var notifyPool = &nbcq.Pool[NotifyFunc]{}

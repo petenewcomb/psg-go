@@ -47,17 +47,15 @@
 //
 // # Typical Usage
 //
-//	var pool Pool[MyType]
 //	var queue Required[MyType]
-//	queue.Init(&pool)
+//	queue.Init()
 //
 //	// Sender side
 //	var outbox Outbox[MyType]
-//	err := queue.PushBack(ctx, &pool, &outbox, value)
-//	err = outbox.Wait(ctx, &pool) // Ensure outbox is drained
+//	err := queue.PushBack(ctx, &outbox, value)
 //
 //	// Receiver side
-//	err := queue.PopFront(ctx, &pool, func(value MyType) {
+//	err := queue.PopFront(ctx, func(value MyType) {
 //		// Process value
 //	})
 //

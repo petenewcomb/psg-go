@@ -25,26 +25,28 @@ type Inbox[T any] struct {
 // direct handoff to waiting receivers, failing immediately if none are available.
 type Optional[T any] struct {
 	emptyInboxes nbcq.Queue[chan T]
+	chanPool     *chanPool[T]
 }
 
 // Init initializes the queue. Must be called before first use.
-func (q *Optional[T]) Init(p *Pool[T]) {
+func (q *Optional[T]) Init() {
 	traceRegion := "rdvq.Optional.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Optional=%p, emptyInboxes=%p", q, &q.emptyInboxes)
 
-	q.emptyInboxes.Init(&p.nodePool)
+	q.emptyInboxes.Init()
+	q.chanPool = chanPoolFor[T]()
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (q *Optional[T]) TryPushBack(p *Pool[T], value T) bool {
+func (q *Optional[T]) TryPushBack(value T) bool {
 	traceRegion := "rdvq.Optional.TryPushBack"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Optional=%p", q)
 
 	// Loop through available inboxes
 	for {
-		inboxCh, ok := q.emptyInboxes.PopFront(&p.nodePool)
+		inboxCh, ok := q.emptyInboxes.PopFront()
 		if !ok {
 			trace.Logf(context.Background(), traceRegion, "no empty inboxes to try, returning false")
 			// No waiting emptyInboxes
@@ -87,7 +89,6 @@ type OptionalPopSelectFunc[T any] = func(inboxCh <-chan T) SelectResult
 
 //nolint:contextcheck // background context used only for tracing
 func (q *Optional[T]) PopFrontFunc(
-	p *Pool[T],
 	inbox *Inbox[T],
 	processOrphanFn ProcessValueFunc[T],
 	selectFn OptionalPopSelectFunc[T],
@@ -98,10 +99,10 @@ func (q *Optional[T]) PopFrontFunc(
 	inboxCh := inbox.ch
 	if inboxCh == nil {
 		// Register ourselves as a waiting receiver.
-		inboxCh = p.getChan()
+		inboxCh = q.chanPool.Get()
 		inbox.ch = inboxCh
 		trace.Logf(context.Background(), traceRegion, "Optional=%p inbox=%p allocated inboxCh=%p", q, inbox, inboxCh)
-		q.emptyInboxes.PushBack(&p.nodePool, inboxCh)
+		q.emptyInboxes.PushBack(inboxCh)
 	} else {
 		// Reuse the existing inbox channel, which must still be in the queue
 		// and marked as abandoned.  Drain it and reuse.
@@ -118,7 +119,7 @@ func (q *Optional[T]) PopFrontFunc(
 			trace.Logf(context.Background(), traceRegion,
 				"Optional=%p inbox=%p reusing and requeuing inboxCh=%p",
 				q, inbox, inboxCh)
-			q.emptyInboxes.PushBack(&p.nodePool, inboxCh)
+			q.emptyInboxes.PushBack(inboxCh)
 		}
 	}
 
@@ -127,7 +128,8 @@ func (q *Optional[T]) PopFrontFunc(
 	if result == SelectInboxEmptied {
 		// PushBack must have pulled it out of the queue and the select just
 		// emptied it, so it's safe to return to the pool.
-		p.putChan(inboxCh)
+		trace.Logf(context.Background(), traceRegion, "pooling emptied inboxCh=%p", inboxCh)
+		q.chanPool.Put(inboxCh)
 		inbox.ch = nil
 		return
 	}
@@ -146,15 +148,16 @@ func (q *Optional[T]) PopFrontFunc(
 		processOrphanFn(orphan)
 		// PushBack must have pulled it out of the queue and we just
 		// emptied it, so it's safe to return to the pool.
-		p.putChan(inboxCh)
+		trace.Logf(context.Background(), traceRegion, "pooling inboxCh=%p after draining orphan", inboxCh)
+		q.chanPool.Put(inboxCh)
 		inbox.ch = nil
 	}
 }
 
-func (q *Optional[T]) PopFront(ctx context.Context, p *Pool[T], inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
+func (q *Optional[T]) PopFront(ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
 	traceRegion := "rdvq.Optional.PopFront"
 	var err error
-	q.PopFrontFunc(p, inbox, processFn, func(inboxCh <-chan T) SelectResult {
+	q.PopFrontFunc(inbox, processFn, func(inboxCh <-chan T) SelectResult {
 		trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p", inboxCh)
 		select {
 		case value := <-inboxCh:

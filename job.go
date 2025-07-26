@@ -16,6 +16,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/ctxmap"
 	"github.com/petenewcomb/psg-go/internal/gcok"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
@@ -62,7 +63,7 @@ type Job struct {
 func (j *Job) newTaskWork(taskFn boundTaskFunc, completedFn func()) *taskWork {
 	traceRegion := "Job.newTaskWork"
 
-	w := taskWorkPool.Get().(*taskWork)
+	w := taskWorkPool.Get()
 	w.Init(j, taskFn, completedFn)
 
 	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
@@ -99,11 +100,7 @@ func (w *taskWork) Close(job *Job) {
 	taskWorkPool.Put(w)
 }
 
-var taskWorkPool = sync.Pool{
-	New: func() any {
-		return &taskWork{}
-	},
-}
+var taskWorkPool = omnipool.For[taskWork]()
 
 func (j *Job) getJob() *Job {
 	return j
@@ -149,7 +146,7 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.state.Init()
 	j.gatherQueue.Init()
 	j.workQueue.Init()
-	j.taskQueue.Init(taskQueuePool)
+	j.taskQueue.Init()
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
 
 	// Initialize GC monitor with defaults
@@ -172,8 +169,6 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 
 	return j
 }
-
-var taskQueuePool = &rdvq.Pool[*taskWork]{}
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
 // Outstanding calls to [Scatter], [Job.Gather], [Job.TryGather],
@@ -497,7 +492,7 @@ func (j *Job) postGatherSlow(
 func (j *Job) newGatherWork(gatherFn boundGatherFunc) *gatherWork {
 	traceRegion := "Job.newGatherWork"
 
-	w := gatherWorkPool.Get().(*gatherWork)
+	w := gatherWorkPool.Get()
 	w.Init(j, gatherFn)
 
 	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
@@ -541,11 +536,7 @@ func (w *gatherWork) Close() {
 	gatherWorkPool.Put(w)
 }
 
-var gatherWorkPool = sync.Pool{
-	New: func() any {
-		return &gatherWork{}
-	},
-}
+var gatherWorkPool = omnipool.For[gatherWork]()
 
 // TryGather processes outstanding task results and then attempts to process
 // the next task result from a task previously launched via [Scatter]. Unlike
@@ -643,7 +634,7 @@ func (j *Job) startTask(ctx context.Context, task *taskWork) {
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	// Try to hand off to an idle worker
-	if j.taskQueue.TryPushBack(taskQueuePool, task) {
+	if j.taskQueue.TryPushBack(task) {
 		return // Successfully handed off to idle worker
 	}
 
@@ -693,7 +684,7 @@ func (j *Job) spawnTaskWorker(_ context.Context, task *taskWork) {
 			// Wait for next task with timeout
 			timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
 
-			j.taskQueue.PopFrontFunc(taskQueuePool,
+			j.taskQueue.PopFrontFunc(
 				&inbox,
 				func(orphanedTask *taskWork) {
 					if task == nil {

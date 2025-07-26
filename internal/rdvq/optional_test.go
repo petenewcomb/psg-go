@@ -19,18 +19,18 @@ import (
 
 func TestOptional_BasicFunctionality(t *testing.T) {
 	var q rdvq.Optional[int]
-	q.Init(p)
+	q.Init()
 	ctx := context.Background()
 
 	// TryPushBack should fail when no receivers are waiting
-	success := q.TryPushBack(p, 42)
+	success := q.TryPushBack(42)
 	assert.False(t, success, "TryPushBack should fail with no waiting receivers")
 
 	// Start a receiver
 	receivedCh := make(chan int)
 	go func() {
 		var inbox rdvq.Inbox[int]
-		err := q.PopFront(ctx, p, &inbox, func(value int) {
+		err := q.PopFront(ctx, &inbox, func(value int) {
 			receivedCh <- value
 		})
 		assert.NoError(t, err)
@@ -40,7 +40,7 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// TryPushBack should succeed now
-	success = q.TryPushBack(p, 42)
+	success = q.TryPushBack(42)
 	assert.True(t, success, "TryPushBack should succeed with waiting receiver")
 
 	// Verify the value was received
@@ -54,7 +54,7 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 
 func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 	var q rdvq.Optional[int]
-	q.Init(p)
+	q.Init()
 	ctx := context.Background()
 
 	const numReceivers = 5
@@ -67,7 +67,7 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			var inbox rdvq.Inbox[int]
-			err := q.PopFront(ctx, p, &inbox, func(value int) {
+			err := q.PopFront(ctx, &inbox, func(value int) {
 				received <- value
 			})
 			assert.NoError(t, err)
@@ -79,7 +79,7 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 
 	// Send values - each should succeed
 	for i := 1; i <= numReceivers; i++ {
-		success := q.TryPushBack(p, i)
+		success := q.TryPushBack(i)
 		assert.True(t, success, "TryPushBack should succeed for value %d", i)
 	}
 
@@ -99,13 +99,13 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 
 func TestOptional_AbandonedReceiver(t *testing.T) {
 	var q rdvq.Optional[int]
-	q.Init(p)
+	q.Init()
 
 	// Start a receiver that will be cancelled
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		var inbox rdvq.Inbox[int]
-		err := q.PopFront(ctx, p, &inbox, func(value int) {
+		err := q.PopFront(ctx, &inbox, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
 		assert.Error(t, err)
@@ -121,18 +121,18 @@ func TestOptional_AbandonedReceiver(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// TryPushBack should now fail since the receiver abandoned
-	success := q.TryPushBack(p, 42)
+	success := q.TryPushBack(42)
 	assert.False(t, success, "TryPushBack should fail with abandoned receiver")
 }
 
 func TestOptional_PopFrontFunc(t *testing.T) {
 	var q rdvq.Optional[int]
-	q.Init(p)
+	q.Init()
 
 	// Test custom select function that always times out
 	var inbox rdvq.Inbox[int]
 	var orphanValues []int
-	q.PopFrontFunc(p, &inbox, func(value int) {
+	q.PopFrontFunc(&inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
 	}, func(ch <-chan int) rdvq.SelectResult {
 		// Always return aborted (timeout immediately)
@@ -145,12 +145,12 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	// Now test with a sender that sends to the dedicated channel
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		q.TryPushBack(p, 99)
+		q.TryPushBack(99)
 	}()
 
 	// Use PopFrontFunc with a select that should timeout
 	orphanValues = nil
-	q.PopFrontFunc(p, &inbox, func(value int) {
+	q.PopFrontFunc(&inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
 	}, func(ch <-chan int) rdvq.SelectResult {
 		time.Sleep(10 * time.Millisecond) // Let the sender send first
@@ -165,7 +165,7 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 
 func TestOptional_Stress(t *testing.T) {
 	var q rdvq.Optional[int]
-	q.Init(p)
+	q.Init()
 
 	numPushers := runtime.GOMAXPROCS(-1)
 	numPoppers := runtime.GOMAXPROCS(-1)
@@ -191,7 +191,7 @@ func TestOptional_Stress(t *testing.T) {
 	popOps := []func(context.Context, *rdvq.Inbox[int]){
 		func(ctx context.Context, inbox *rdvq.Inbox[int]) {
 			// Normal popper
-			err := q.PopFront(ctx, p, inbox, func(value int) {
+			err := q.PopFront(ctx, inbox, func(value int) {
 				popped.Add(1)
 			})
 			switch {
@@ -207,7 +207,7 @@ func TestOptional_Stress(t *testing.T) {
 		func(ctx context.Context, inbox *rdvq.Inbox[int]) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
-			err := q.PopFront(shortCtx, p, inbox, func(value int) {
+			err := q.PopFront(shortCtx, inbox, func(value int) {
 				popped.Add(1)
 			})
 			switch {
@@ -254,7 +254,7 @@ func TestOptional_Stress(t *testing.T) {
 			defer cancel()
 
 			for ctx.Err() == nil {
-				if !q.TryPushBack(p, int(tryPushed.Add(1))) {
+				if !q.TryPushBack(int(tryPushed.Add(1))) {
 					refused.Add(1)
 				}
 			}

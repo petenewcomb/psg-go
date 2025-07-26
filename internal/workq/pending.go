@@ -20,7 +20,7 @@ type Pending struct {
 
 // See [rdvq.Required.Init]
 func (q *Pending) Init() {
-	q.Required.Init(pendingPool)
+	q.Required.Init()
 }
 
 // See [rdvq.Receiver]
@@ -34,12 +34,12 @@ type PushSelectFunc = rdvq.PushSelectFunc[Work]
 
 // See [rdvq.Required.PushBackFunc]
 func (q *Pending) PushBackFunc(outbox *Outbox, work Work, selectFn PushSelectFunc) {
-	q.Required.PushBackFunc(pendingPool, outbox, work, selectFn)
+	q.Required.PushBackFunc(outbox, work, selectFn)
 }
 
 // See [rdvq.Required.PushBack]
 func (q *Pending) PushBack(ctx context.Context, outbox *Outbox, work Work) error {
-	return q.Required.PushBack(ctx, pendingPool, outbox, work)
+	return q.Required.PushBack(ctx, outbox, work)
 }
 
 // See [rdvq.Required.TryPushBack]
@@ -49,7 +49,7 @@ func (q *Pending) TryPushBack(outbox *Outbox, work Work) bool {
 	traceRegion := "Pending.TryPushBack"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Pending=%p, outbox=%p", q, outbox)
-	return q.Required.TryPushBack(pendingPool, outbox, work)
+	return q.Required.TryPushBack(outbox, work)
 }
 
 // See [rdvq.RequiredPopSelectFunc]
@@ -57,12 +57,12 @@ type PopSelectFunc = rdvq.RequiredPopSelectFunc[Work]
 
 // See [rdvq.Required.PopFrontFunc]
 func (q *Pending) PopFrontFunc(receiver *Receiver, queueFn QueueWorkFunc, selectFn PopSelectFunc) {
-	q.Required.PopFrontFunc(pendingPool, receiver, queueFn, selectFn)
+	q.Required.PopFrontFunc(receiver, queueFn, selectFn)
 }
 
 // See [rdvq.Required.PopFront]
 func (q *Pending) PopFront(ctx context.Context, receiver *Receiver, queueFn QueueWorkFunc) error {
-	return q.Required.PopFront(ctx, pendingPool, receiver, queueFn)
+	return q.Required.PopFront(ctx, receiver, queueFn)
 }
 
 // See [rdvq.Required.TryPopFront]
@@ -72,7 +72,7 @@ func (q *Pending) TryPopFront() (Work, bool) {
 	traceRegion := "Pending.TryPopFront"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Pending=%p", q)
-	return q.Required.TryPopFront(pendingPool)
+	return q.Required.TryPopFront()
 }
 
 type WaiterOrReceiver = rdvq.WaiterOrReceiver
@@ -82,12 +82,10 @@ type WaitSelectFunc = rdvq.WaitSelectFunc
 
 // See [rdvq.Required.PopFrontExcessFunc]
 func (q *Pending) PopFrontExcessFunc(outboxWaiter WaiterOrReceiver, selectFn WaitSelectFunc) (Work, bool) {
-	return q.Required.PopFrontExcessFunc(pendingPool, outboxWaiter, selectFn)
+	return q.Required.PopFrontExcessFunc(outboxWaiter, selectFn)
 }
 
 // See [rdvq.Required.PopFrontExcess]
 func (q *Pending) PopFrontExcess(ctx context.Context, outboxWaiter WaiterOrReceiver) (Work, error) {
-	return q.Required.PopFrontExcess(ctx, pendingPool, outboxWaiter)
+	return q.Required.PopFrontExcess(ctx, outboxWaiter)
 }
-
-var pendingPool = &rdvq.Pool[Work]{}

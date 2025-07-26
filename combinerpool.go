@@ -15,6 +15,7 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/cpstate"
 	"github.com/petenewcomb/psg-go/internal/heap"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/workq"
@@ -141,7 +142,7 @@ func (cp *CombinerPool) postCombine(
 func (cp *CombinerPool) newCombineWork(combineFn boundCombineFunc) *combineWork {
 	traceRegion := "CombinerPool.newCombineWork"
 
-	w := combineWorkPool.Get().(*combineWork)
+	w := combineWorkPool.Get()
 	w.Init(cp, combineFn)
 
 	trace.Logf(context.Background(), traceRegion, "CombinerPool=%p created %v", cp, w)
@@ -188,11 +189,7 @@ func (w *combineWork) Close() {
 	combineWorkPool.Put(w)
 }
 
-var combineWorkPool = sync.Pool{
-	New: func() any {
-		return &combineWork{}
-	},
-}
+var combineWorkPool = omnipool.For[combineWork]()
 
 func (cp *CombinerPool) postCombineSlow(
 	ctx context.Context,

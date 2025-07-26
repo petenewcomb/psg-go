@@ -6,12 +6,12 @@ package workq
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
@@ -40,8 +40,8 @@ func (q *Accepted) Init() {
 		"Accepted=%p, fresh=%p, deferred=%p, waiters=%p, monitor=%p",
 		q, &q.fresh, &q.deferred, &q.waiters, &q.monitor)
 
-	q.fresh.Init(workPool)
-	q.deferred.Init(workPool)
+	q.fresh.Init()
+	q.deferred.Init()
 	q.waiters.Init()
 	q.monitor.Notify = q.waiters.Notify
 }
@@ -91,7 +91,7 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 		if workExecuted || err != nil {
 			return err
 		}
-		c.Reset()
+		c.ResetForRetry()
 	}
 }
 
@@ -168,25 +168,36 @@ type controller struct {
 	shouldStillWaitErr error
 }
 
-func newController(q *Accepted) *controller {
-	c := controllerPool.Get().(*controller)
-	c.q = q
-	return c
+// Init implements omnipool.Initer to set up self-referential closures
+func (c *controller) Init() {
+	// Allocate reusable self-referential closures
+	c.ex = c.executor.BaseEx()
+	c.ex.Blocking = c.blocking
+	c.ex.Starting = c.starting
+	c.ex.Subscribe = c.subscribe
+	c.ex.Queue = c.queueFresh
 }
 
-var controllerPool = sync.Pool{
-	New: func() any {
-		c := &controller{}
+// Reset implements omnipool.Resetter to clear state while preserving allocations
+func (c *controller) Reset() {
+	c.executor.Reset()
 
-		// Allocate reusable self-referential closures
-		c.ex = c.executor.BaseEx()
-		c.ex.Blocking = c.blocking
-		c.ex.Starting = c.starting
-		c.ex.Subscribe = c.subscribe
-		c.ex.Queue = c.queueFresh
+	// Reset internal state before returning to pool
+	c.ResetForRetry()
 
-		return c
-	},
+	// Clear all but reusable allocations
+	*c = controller{
+		buffer: c.buffer[:0],
+		ex:     c.ex,
+	}
+}
+
+var controllerPool = omnipool.For[controller]()
+
+func newController(q *Accepted) *controller {
+	c := controllerPool.Get()
+	c.q = q
+	return c
 }
 
 func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
@@ -253,7 +264,7 @@ func (c *controller) tryAccepted(ctx context.Context, q *nbcq.Queue[Work], block
 func (c *controller) queueFresh(work Work) {
 	traceRegion := "workq.Accepted.queueFresh"
 	trace.Logf(context.Background(), traceRegion, "Accepted(%p) adding fresh %v", c.q, work)
-	c.q.fresh.PushBack(workPool, work)
+	c.q.fresh.PushBack(work)
 	c.workWasAdded = true
 }
 
@@ -308,7 +319,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 //nolint:contextcheck // background context used only for tracing
 func (c *controller) collectAccepted(q *nbcq.Queue[Work]) bool {
 	c.currentIndex = len(c.buffer)
-	work, ok := q.PopFront(workPool)
+	work, ok := q.PopFront()
 	if !ok {
 		return false
 	}
@@ -363,7 +374,7 @@ func (c *controller) subscribe(coordinator *Coordinator) {
 	c.q.monitor.Subscribe(coordinator)
 }
 
-func (c *controller) Reset() {
+func (c *controller) ResetForRetry() {
 	c.requeueBuffer()
 	if c.ex.Started() {
 		panic("Reset called after work was executed")
@@ -452,7 +463,7 @@ func (c *controller) requeueBuffer() {
 		if work != nil {
 			bw.work = nil
 			trace.Logf(context.Background(), traceRegion, "pushing %v at index %d to deferred queue", work, i)
-			c.q.deferred.PushBack(workPool, work)
+			c.q.deferred.PushBack(work)
 		}
 	}
 	c.buffer = c.buffer[:0]
@@ -482,16 +493,6 @@ func (c *controller) Close() {
 
 	// This must be called before c.Reset. Only Close should clear the started
 	// flag, Reset will panic if it is set.
-	c.executor.Reset()
-
-	c.Reset()
-
-	// Clear all but reusable allocations
-	*c = controller{
-		buffer: c.buffer[:0],
-		ex:     c.ex,
-	}
-
 	controllerPool.Put(c)
 }
 
@@ -499,5 +500,3 @@ type bufferedWork struct {
 	work        Work
 	wasDeferred bool
 }
-
-var workPool = &nbcq.Pool[Work]{}

@@ -44,7 +44,7 @@ type Waiters struct {
 func (w *Waiters) Init() {
 	traceRegion := "rdvq.Waiters.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	w.q.Init(wp)
+	w.q.Init()
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -62,7 +62,7 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 		return selectFn(nil)
 	}
 	var renotifyFn RenotifyFunc
-	w.q.PopFrontFunc(wp,
+	w.q.PopFrontFunc(
 		&waiter.inbox,
 		orphanFn,
 		func(ch <-chan RenotifyFunc) SelectResult {
@@ -127,7 +127,7 @@ func (w *Waiters) Notify(renotifyFn RenotifyFunc) {
 		renotifyFn = noopRenotify
 	}
 
-	if !w.q.TryPushBack(wp, renotifyFn) {
+	if !w.q.TryPushBack(renotifyFn) {
 		renotifyFn()
 	}
 }
@@ -138,7 +138,7 @@ func (w *Waiters) NotifyAll() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
-	for w.q.TryPushBack(wp, noopRenotify) {
+	for w.q.TryPushBack(noopRenotify) {
 		// Keep notifying until we can't anymore
 	}
 }
@@ -147,5 +147,3 @@ func noopRenotify() {
 	// noopRenotify is a no-op function used as a default renotify function to
 	// avoid nil checks in Notify.
 }
-
-var wp = &Pool[RenotifyFunc]{}

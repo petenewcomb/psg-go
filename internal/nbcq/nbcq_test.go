@@ -5,6 +5,7 @@ package nbcq_test
 
 import (
 	"context"
+	"math/rand/v2"
 	"runtime"
 	"runtime/trace"
 	"sync"
@@ -17,35 +18,33 @@ import (
 	"pgregory.net/rapid"
 )
 
-var p = &nbcq.Pool[int]{}
-
 // Add a basic functional test to verify operations directly
 func TestQueueBasicFunctionality(t *testing.T) {
 	q := nbcq.Queue[int]{}
-	q.Init(p)
+	q.Init()
 
 	// Test empty queue
-	_, ok := q.PopFront(p)
+	_, ok := q.PopFront()
 	assert.False(t, ok)
 
 	// Test adding and removing elements
-	q.PushBack(p, 1)
-	q.PushBack(p, 2)
-	q.PushBack(p, 3)
+	q.PushBack(1)
+	q.PushBack(2)
+	q.PushBack(3)
 
-	val, ok := q.PopFront(p)
+	val, ok := q.PopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 1, val)
 
-	val, ok = q.PopFront(p)
+	val, ok = q.PopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 2, val)
 
-	val, ok = q.PopFront(p)
+	val, ok = q.PopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 3, val)
 
-	_, ok = q.PopFront(p)
+	_, ok = q.PopFront()
 	assert.False(t, ok)
 }
 
@@ -53,64 +52,103 @@ func TestQueueBasicFunctionality(t *testing.T) {
 // correctness
 func TestQueueWithRapid(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		// The system under test
-		q := nbcq.Queue[int]{}
-		q.Init(p)
-
 		traceRegion := "TestQueueWithRapid"
 		defer trace.StartRegion(context.Background(), traceRegion).End()
 
-		// The model (reference implementation)
-		var model []int
+		// The systems under test
+		queues := make([]*nbcq.Queue[int], rapid.IntRange(1, 100).Draw(t, "queues"))
+
+		// The models (reference implementation)
+		models := make([][]int, len(queues))
+
+		getQM := func() (*nbcq.Queue[int], *[]int) {
+			i := rapid.IntRange(0, len(queues)-1).Draw(t, "value")
+			q := queues[i]
+			if q == nil {
+				q = &nbcq.Queue[int]{}
+				q.Init()
+				queues[i] = q
+			}
+			return q, &models[i]
+		}
+
+		checkQM := func(q *nbcq.Queue[int], m *[]int) {
+			// If model is empty, verify queue behaves as empty
+			if len(*m) == 0 {
+				_, ok := q.PopFront()
+				assert.False(t, ok, "PopFront should fail on empty queue")
+			}
+		}
 
 		t.Repeat(map[string]func(*rapid.T){
 			// PushBack operation
 			"pushBack": func(t *rapid.T) {
+				q, m := getQM()
+
 				// Generate a random value to push
 				val := rapid.Int().Draw(t, "value")
 
 				// Update actual implementation
-				q.PushBack(p, val)
+				q.PushBack(val)
 
 				// Update model
-				model = append(model, val)
+				*m = append(*m, val)
+
+				checkQM(q, m)
 			},
 
 			// PopFront operation
 			"popFront": func(t *rapid.T) {
+				q, m := getQM()
+
 				// Skip if empty - nothing to pop
-				if len(model) == 0 {
+				if len(*m) == 0 {
 					t.Skip("Queue is empty, nothing to pop")
 				}
 
 				// Get expected value from model
-				expected := model[0]
-				model = model[1:]
+				expected := (*m)[0]
+				*m = (*m)[1:]
 
 				// Get actual value from queue
-				val, ok := q.PopFront(p)
+				val, ok := q.PopFront()
 
 				// Verify the operation succeeded
 				assert.True(t, ok, "PopFront failed on non-empty queue")
 				assert.Equal(t, expected, val, "PopFront returned wrong value")
-			},
 
-			// Check invariants between actions
-			"": func(t *rapid.T) {
-				// If model is empty, verify queue behaves as empty
-				if len(model) == 0 {
-					_, ok := q.PopFront(p)
-					assert.False(t, ok, "PopFront should fail on empty queue")
-				}
+				checkQM(q, m)
 			},
 		})
 	})
 }
 
 func TestQueueConcurrency(t *testing.T) {
-	var q nbcq.Queue[int]
-	q.Init(p)
+	activeQueues := make([]atomic.Pointer[nbcq.Queue[int]], 3)
+	for i := range activeQueues {
+		q := &nbcq.Queue[int]{}
+		q.Init()
+		activeQueues[i].Store(q)
+	}
 	chk := assert.New(t)
+
+	var oldQueueMu sync.Mutex
+	var oldQueues []*nbcq.Queue[int]
+	stashOldQueue := func(q *nbcq.Queue[int]) {
+		oldQueueMu.Lock()
+		defer oldQueueMu.Unlock()
+		oldQueues = append(oldQueues, q)
+	}
+	popOldQueue := func() *nbcq.Queue[int] {
+		oldQueueMu.Lock()
+		defer oldQueueMu.Unlock()
+		if len(oldQueues) == 0 {
+			return nil
+		}
+		q := oldQueues[len(oldQueues)-1]
+		oldQueues = oldQueues[:len(oldQueues)-1]
+		return q
+	}
 
 	var numReaders = max(1, runtime.GOMAXPROCS(-1)/2)
 	var numWriters = max(1, runtime.GOMAXPROCS(-1)/2)
@@ -179,13 +217,10 @@ func TestQueueConcurrency(t *testing.T) {
 
 			data.startTime = time.Now()
 
-			for {
-				v, ok := q.PopFront(p)
+			pop := func(q *nbcq.Queue[int]) bool {
+				v, ok := q.PopFront()
 				if !ok {
-					if writersDone.Load() {
-						break
-					}
-					continue
+					return false
 				}
 				// The writer explicitly adds one to the value that's pushed to
 				// distinguish it from the zero value.
@@ -199,6 +234,32 @@ func TestQueueConcurrency(t *testing.T) {
 				}
 				data.maxValue = max(data.maxValue, v)
 				receivedValueMap[v].Add(1)
+				return true
+			}
+
+			for {
+				i := rand.IntN(len(activeQueues))                      //nolint:gosec // not a crypto use case
+				if rand.IntN(100*(id+1)) == 0 && !writersDone.Load() { //nolint:gosec // not a crypto use case
+					newQ := &nbcq.Queue[int]{}
+					newQ.Init()
+					oldQ := activeQueues[i].Swap(newQ)
+					stashOldQueue(oldQ)
+				} else {
+					q := activeQueues[i].Load()
+					if !pop(q) && writersDone.Load() {
+						break
+					}
+				}
+			}
+
+			for i := range activeQueues {
+				q := activeQueues[i].Load()
+				for pop(q) {
+				}
+			}
+			for q := popOldQueue(); q != nil; q = popOldQueue() {
+				for pop(q) {
+				}
 			}
 		}()
 	}
@@ -220,9 +281,10 @@ func TestQueueConcurrency(t *testing.T) {
 			rangeStart := id * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
+				q := activeQueues[rand.IntN(len(activeQueues))].Load() //nolint:gosec // not a crypto use case
 				// Add one to the value that's pushed to distinguish it from the
 				// zero value.
-				q.PushBack(p, v+1)
+				q.PushBack(v + 1)
 				data.totalWrites++
 			}
 		}()
@@ -312,8 +374,15 @@ func TestQueueConcurrency(t *testing.T) {
 
 	chk.Equal(numWriters*iterations, sumTotalWrites)
 
-	_, ok := q.PopFront(p)
-	chk.False(ok)
+	for i := range activeQueues {
+		q := activeQueues[i].Load()
+		_, ok := q.PopFront()
+		chk.False(ok)
+	}
+	for _, q := range oldQueues {
+		_, ok := q.PopFront()
+		chk.False(ok)
+	}
 
 	chk.Equal(numWriters*iterations, sumTotalReads)
 

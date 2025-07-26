@@ -35,14 +35,18 @@ echo "Normalized results saved to: $NORMALIZED_FILE"
 
 # Generate benchcmp report if baseline exists
 if [ -f "bench_norm.txt" ]; then
+    STATS_FILE="${BENCH_FILE%.*}_stats.txt"
+    echo "Generating stats..."
+    benchstat -filter '.name:CombinerThroughput .unit:(p99-workflow-latency-ns OR tasks/sec)' -table '/workload,/duration,/flushPeriod' bench_norm.txt "$NORMALIZED_FILE" > "$STATS_FILE"
+    echo "Stats saved to: $STATS_FILE"
+
     REPORT_FILE="${BENCH_FILE%.*}_report.txt"
     echo "Generating comparison report..."
     internal/bin/benchcmp -baseline bench_norm.txt -current "$NORMALIZED_FILE" > "$REPORT_FILE"
     echo "Comparison report saved to: $REPORT_FILE"
     echo ""
-    echo "=== Quick Summary ==="
-    head -20 "$REPORT_FILE"
+    cat "$REPORT_FILE"
 else
-    echo "No baseline found (bench_norm.txt). To enable comparison reports:"
+    echo "No baseline found (bench_norm.txt). To enable future comparison reports:"
     echo "  cp $NORMALIZED_FILE bench_norm.txt"
 fi

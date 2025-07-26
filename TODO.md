@@ -37,6 +37,7 @@ Items to complete before merging to main branch.
 - implement scheduler health monitoring using near-instant event timing to detect Go runtime pressure
 - add backpressure mechanisms when scheduler pressure is detected (dynamic pool sizing, task creation throttling)
 - consider tracking combine/gather duration distributions rather than just averages to better understand tail behavior
+- enable cyclo and fix issues
 
 ## Post-Merge Enhancements
 
@@ -74,6 +75,7 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - Thoroughly test multithreaded gathers
 - Verify cross-job Gather safety similar to Combine cross-job safety (may not be relevant since Gather doesn't bind to jobs like CombinerPool does)
 - Add integration tests with actual TaskPool to verify cross-system notification flow (may be covered by existing simulation/benchmark tests)
+- Improve selection of "best" in benchcmp to avoid spurious discrepencies
 
 ### Design Documentation
 - Update and refine design docs to make them more readable and less AI-fueled dumps of bullet points

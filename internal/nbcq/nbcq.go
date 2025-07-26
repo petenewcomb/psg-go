@@ -21,9 +21,9 @@ package nbcq
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
@@ -39,17 +39,44 @@ type node[T any] struct {
 	next  atomicPointer[T]
 }
 
+// Init implements omnipool.Initer to properly initialize new nodes.
+func (n *node[T]) Init() {
+	// atomic.Value, used in the fallback implementation of atomic128-go, must be
+	// initialized with the correct type before it can be used for normal operations.
+	n.next.Store(pointer[T]{})
+}
+
+// Reset implements omnipool.Resetter to properly reset the node for reuse.
+func (n *node[T]) Reset() {
+	n.value.Store(nil)
+	// Don't reset next here as it must be specially handled for the lock-free
+	// algorithm. See note at D19 in PopFront where next.count is preserved to
+	// ensure other goroutines can still safely use their references to this
+	// node even while it's pooled and after re-use.
+}
+
 // structure queue_t {Head: pointer_t, Tail: pointer_t}
 type Queue[T any] struct {
-	head atomicPointer[T]
-	tail atomicPointer[T]
+	head      atomicPointer[T]
+	tail      atomicPointer[T]
+	nodePool  *omnipool.Pool[node[T]]
+	valuePool *omnipool.Pool[T]
 }
 
 // initialize(Q: pointer to queue_t)
-func (q *Queue[T]) Init(p *Pool[T]) {
+func (q *Queue[T]) Init() {
+	// Get shared pools for this type
+	q.nodePool = omnipool.For[node[T]]()
+	q.valuePool = omnipool.For[T]()
+
 	// node = new_node()      // Allocate a free node
 	// node->next.ptr = NULL  // Make it the only node in the linked list
-	node := p.getNode()
+
+	// We do not pull from the pool here to ensure that once a node has been
+	// used its next count will never be reset to zero. See note at D19 in
+	// PopFront for more detail.
+	node := &node[T]{}
+	node.Init()
 
 	// Q->Head.ptr = Q->Tail.ptr = node	 // Both Head and Tail point to it
 	q.head.Store(pointer[T]{ptr: node})
@@ -59,14 +86,14 @@ func (q *Queue[T]) Init(p *Pool[T]) {
 // enqueue(Q: pointer to queue_t, value: data type)
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
-func (q *Queue[T]) PushBack(p *Pool[T], value T) {
+func (q *Queue[T]) PushBack(value T) {
 	traceRegion := "nbcq.PushBack"
 
 	// E1: node = new_node()      // Allocate a new node from the free list
 	// E2: node->value = value	  // Copy enqueued value into node
 	// E3: node->next.ptr = NULL  // Set next pointer of node to NULL
-	node := p.getNode()
-	node.value.Store(p.getValue(value))
+	node := q.nodePool.Get()
+	node.value.Store(q.valuePool.Clone(value))
 
 	// E4: loop  // Keep trying until Enqueue is done
 	for {
@@ -110,7 +137,7 @@ func (q *Queue[T]) PushBack(p *Pool[T], value T) {
 // dequeue(Q: pointer to queue_t, pvalue: pointer to data type): boolean
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
-func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
+func (q *Queue[T]) PopFront() (T, bool) {
 	traceRegion := "nbcq.PopFront"
 
 	// D1: loop // Keep trying until Dequeue is done
@@ -139,6 +166,7 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 				// Otherwise, another dequeue might free the next node
 				// D12: *pvalue = next.ptr->value
 				valuePointer := next.ptr.value.Load()
+
 				// Try to swing Head to the next node
 				// D13: if CAS(&Q->Head, head, <next.ptr, head.count+1>)
 				if q.head.CompareAndSwap(head, pointer[T]{ptr: next.ptr, count: head.count + 1}) {
@@ -176,10 +204,10 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 
 					// Stash the value pointer away for reuse.
 					value := *valuePointer
-					p.putValue(valuePointer)
+					q.valuePool.Put(valuePointer)
 
 					// Stash the node away for reuse.
-					p.putNode(head.ptr)
+					q.nodePool.Put(head.ptr)
 
 					// D20: return TRUE     // Queue was not empty, dequeue succeeded
 					return value, true
@@ -187,41 +215,4 @@ func (q *Queue[T]) PopFront(p *Pool[T]) (T, bool) {
 			} // D16: endif
 		} // D17: endif
 	} // D18: endloop
-}
-
-type Pool[T any] struct {
-	nodes  sync.Pool
-	values sync.Pool
-}
-
-func (p *Pool[T]) getNode() *node[T] {
-	n, _ := p.nodes.Get().(*node[T])
-	if n == nil {
-		n = &node[T]{}
-		// Since the zero value of atomic.Value is different than the zero value
-		// of pointer[T], we must explicitly store a value to allow CAS
-		// operations that expect the old value to be a zero pointer[T].
-		n.next.Store(pointer[T]{})
-	}
-	return n
-}
-
-func (p *Pool[T]) putNode(n *node[T]) {
-	p.nodes.Put(n)
-}
-
-func (p *Pool[T]) getValue(v T) *T {
-	vp, _ := p.values.Get().(*T)
-	if vp == nil {
-		vp = new(T)
-	}
-	*vp = v
-	return vp
-}
-
-func (p *Pool[T]) putValue(vp *T) {
-	// Clear the value before pooling to allow garbage collection of anything it
-	// might reference
-	*vp = *new(T)
-	p.values.Put(vp)
 }

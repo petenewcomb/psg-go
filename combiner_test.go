@@ -9,13 +9,13 @@ import (
 	"math"
 	"runtime"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/influxdata/tdigest"
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
@@ -402,13 +402,9 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							MaxConcurrency      int
 						}
 
-						tdigestPool := sync.Pool{
-							New: func() any {
-								return tdigest.New()
-							},
-						}
+						tdigestPool := omnipool.For[tdigest.TDigest]()
 						newTDigest := func() *tdigest.TDigest {
-							return tdigestPool.Get().(*tdigest.TDigest)
+							return tdigestPool.Get()
 						}
 						poolTDigest := func(t **tdigest.TDigest) {
 							if *t != nil {
@@ -418,24 +414,19 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						}
 
-						centroidListPool := sync.Pool{
-							New: func() any {
-								return &tdigest.CentroidList{}
-							},
-						}
+						centroidListPool := omnipool.ForSlice(tdigest.CentroidList(nil))
 						newCentroidList := func(c ...tdigest.Centroid) *tdigest.CentroidList {
-							cl := centroidListPool.Get().(*tdigest.CentroidList)
-							*cl = append(*cl, c...)
-							return cl
+							cl := centroidListPool.Get()
+							cl = append(cl, c...)
+							return &cl
 						}
 						copyCentroidList := func(t *tdigest.TDigest) *tdigest.CentroidList {
-							cl := centroidListPool.Get().(*tdigest.CentroidList)
-							*cl = t.Centroids(*cl)
-							return cl
+							cl := centroidListPool.Get()
+							cl = t.Centroids(cl)
+							return &cl
 						}
 						poolCentroidList := func(cl *tdigest.CentroidList) {
-							*cl = (*cl)[:0]
-							centroidListPool.Put(cl)
+							centroidListPool.Put(*cl)
 						}
 
 						totalTasksGathered := 0

@@ -7,6 +7,8 @@ import (
 	"context"
 	"math/rand/v2"
 	"sync"
+
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 )
 
 // AfterFunc is a function called after a workflow completes. It receives:
@@ -34,14 +36,25 @@ type Workflow struct {
 	afterFuncs []AfterFunc
 }
 
-var wfPool = sync.Pool{
-	New: func() any {
-		return &Workflow{}
-	},
+// workflowTrait handles pooling for Workflow without exposing Reset on the public API
+type workflowTrait struct{}
+
+func (workflowTrait) Make() *Workflow {
+	return &Workflow{}
 }
 
+func (workflowTrait) Reset(wf *Workflow) {
+	// Clear references to allow garbage collection and prepare for next use
+	wf.ctx = nil
+	wf.cancel = nil
+	// Clear afterFuncs slice but preserve capacity
+	wf.afterFuncs = wf.afterFuncs[:0]
+}
+
+var wfPool = omnipool.ForCustom(workflowTrait{})
+
 func New(ctx context.Context) *Workflow {
-	wf, _ := wfPool.Get().(*Workflow)
+	wf := wfPool.Get()
 	wf.ctx = ctx
 	return wf
 }
@@ -116,12 +129,18 @@ func (wf *Workflow) unref(ctx context.Context) {
 		fn(ctx, wf)
 	}
 
-	// Clear and return to pool
-	wf.mu.Lock() // just in case
-	defer wf.mu.Unlock()
-	wf.cancel = nil
-	if len(wf.afterFuncs) > 0 {
-		panic("AfterFunc added to Workflow during calls to its original AfterFuncs")
-	}
+	// Check invariants and return to pool
+	func() {
+		wf.mu.Lock()
+		defer wf.mu.Unlock()
+		if wf.refCount > 0 {
+			panic("Workflow reference count increased during calls to its AfterFuncs")
+		}
+		if len(wf.afterFuncs) > 0 {
+			panic("AfterFunc added to Workflow during calls to its original AfterFuncs")
+		}
+	}()
+
+	// Put back in pool - the trait's Reset method will handle clearing
 	wfPool.Put(wf)
 }

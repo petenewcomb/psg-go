@@ -6,11 +6,11 @@ package psg
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
@@ -126,7 +126,7 @@ func (c *CombineOp[I, O]) newScatterWork(
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	w := combineScatterWorkPool.Get().(*combineScatterWork)
+	w := combineScatterWorkPool.Get()
 	w.Init(c.pool, target, bindTaskFunc(j, taskFn, c.postResultFn))
 
 	trace.Logf(context.Background(), traceRegion, "CombineOp=%p created %v", c, w)
@@ -173,11 +173,7 @@ func (w *combineScatterWork) Close() {
 	combineScatterWorkPool.Put(w)
 }
 
-var combineScatterWorkPool = sync.Pool{
-	New: func() any {
-		return &combineScatterWork{}
-	},
-}
+var combineScatterWorkPool = omnipool.For[combineScatterWork]()
 
 // combineOpConfigWrapper wraps a CombineOp to implement the combineOpConfig interface for options
 type combineOpConfigWrapper[I, O any] struct {

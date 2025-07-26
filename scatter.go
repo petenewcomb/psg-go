@@ -7,10 +7,10 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
@@ -132,8 +132,8 @@ func scatterNowOrQueue(
 	// boom-and-bust cycles of activity more reminiscent of batch processing.
 	runtime.Gosched()
 
-	executor := getExecutor()
-	defer putExecutor(executor)
+	executor := executorPool.Get()
+	defer executorPool.Put(executor)
 	ex := executor.BaseEx()
 
 	queued := false
@@ -175,17 +175,4 @@ func scatterNowOrQueue(
 	return
 }
 
-var executorPool = sync.Pool{
-	New: func() any {
-		return &workq.Executor{}
-	},
-}
-
-func getExecutor() *workq.Executor {
-	return executorPool.Get().(*workq.Executor)
-}
-
-func putExecutor(e *workq.Executor) {
-	e.Reset()
-	executorPool.Put(e)
-}
+var executorPool = omnipool.For[workq.Executor]()

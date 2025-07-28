@@ -85,7 +85,9 @@ cp bench_baseline_20250724T123456Z_norm.txt bench_norm.txt
 #### Key Features
 
 - **Automatic best limit identification**: Follows BENCHMARKING.md rules (excludes unlimited -1)
-- **Statistical significance testing**: Uses benchmath for proper p-value calculation
+- **Statistical significance testing**: Uses benchmath for proper p-value calculation  
+- **P50 and P99 latency analysis**: Reports both median and tail latency with vs. ideal comparisons
+- **Focused significance markers**: ! for strong bad effects only, ~ for non-significant changes
 - **Consistent percentage differences**: Negative latency = improvement, positive = degradation
 - **Clean visual grouping**: Ratio-based sorting reveals operational patterns
 - **Threshold validation**: Flags latencies exceeding flush period + duration deadlines

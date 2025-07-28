@@ -35,9 +35,10 @@ Items to complete before merging to main branch.
 - change taskQueue from Optional to Required and use outboxes to reduce task goroutine proliferation
 - fix addWork ugliness
 - implement scheduler health monitoring using near-instant event timing to detect Go runtime pressure
-- add backpressure mechanisms when scheduler pressure is detected (dynamic pool sizing, task creation throttling)
 - consider tracking combine/gather duration distributions rather than just averages to better understand tail behavior
 - enable cyclo and fix issues
+- can Inbox and Outbox just own their channels outright and not bother with channel pooling at all?
+- experiment further with different scheduler latency backpressure settings, esp. age 
 
 ## Post-Merge Enhancements
 

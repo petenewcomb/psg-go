@@ -27,13 +27,11 @@ type cpWorker struct {
 	doneErr          func() error
 
 	idleTimerCh            <-chan time.Time
-	workReadyCh            <-chan workq.RenotifyFunc
 	queueFn                []workq.QueueWorkFunc
-	inboxCh                <-chan workq.Work
+	inbox                  *rdvq.Inbox[workq.Work]
 	flushDeadlineTimerCh   <-chan time.Time
 	nextJobFlushCh         <-chan struct{}
 	unregisterAsJobFlusher func()
-	workReadyRenotifyFn    workq.RenotifyFunc
 	followupFn             func(context.Context)
 	newWork                workq.Work
 	err                    error
@@ -52,7 +50,7 @@ func (cw *cpWorker) MayQueue() workq.QueueWorkFunc {
 	return cw.queueFn[len(cw.queueFn)-1]
 }
 
-func (cw *cpWorker) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) (
+func (cw *cpWorker) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
 	workReceiver *workq.Receiver, workWaiter *workq.Waiter, blockWaiter *workq.Waiter,
 ) {
 	cw.queueFn = append(cw.queueFn, queueFn)
@@ -102,12 +100,10 @@ func (cw *cpWorker) AddWork(
 		return nil, nil
 	}
 
-	cw.workReadyRenotifyFn = nil
 	cw.err = nil
 	cw.newWork = nil
 	cw.followupFn = nil
 	defer func() {
-		cw.workReadyRenotifyFn = nil
 		cw.err = nil
 		cw.newWork = nil
 		cw.followupFn = nil
@@ -115,10 +111,10 @@ func (cw *cpWorker) AddWork(
 	if !cw.IsSpare() {
 		// Primary goroutine, no need for idle detection
 		cw.cp.combineQueue.PopFrontFunc(&cw.workReceiver, cw.queueFn[len(cw.queueFn)-1],
-			func(inboxCh <-chan workq.Work, outboxFilledCh <-chan rdvq.RenotifyFunc) (rdvq.SelectResult, rdvq.RenotifyFunc) {
-				return cw.waitForWork(ctx, inboxCh, outboxFilledCh, workWaiters, confirmWorkWaitFn,
-					func(inboxCh <-chan workq.Work, outboxFilledCh <-chan rdvq.RenotifyFunc) (rdvq.SelectResult, rdvq.RenotifyFunc) {
-						return cw.primaryPopSelect(ctx, inboxCh, outboxFilledCh)
+			func(inbox *rdvq.Inbox[workq.Work], outboxWaiter *rdvq.Waiter) {
+				cw.waitForWork(ctx, inbox, outboxWaiter, workWaiters, confirmWorkWaitFn,
+					func(inbox *rdvq.Inbox[workq.Work], outboxWaiter *rdvq.Waiter) {
+						cw.primaryPopSelect(ctx, inbox, outboxWaiter)
 					},
 				)
 			},
@@ -143,16 +139,12 @@ func (cw *cpWorker) AddWork(
 		// without registering for immediate delivery
 		work, ok := cw.cp.combineQueue.PopFrontExcessFunc(
 			&cw.workReceiver,
-			func(outboxFilledCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-				_, outboxFilledRenotifyFn := cw.waitForWork(ctx, nil, outboxFilledCh, workWaiters, confirmWorkWaitFn,
-					func(
-						_ <-chan workq.Work,
-						outboxFilledCh <-chan rdvq.RenotifyFunc,
-					) (rdvq.SelectResult, rdvq.RenotifyFunc) {
-						return rdvq.SelectAborted, cw.sparePopSelect(ctx, outboxFilledCh)
+			func(outboxWaiter *rdvq.Waiter) {
+				cw.waitForWork(ctx, nil, outboxWaiter, workWaiters, confirmWorkWaitFn,
+					func(inbox *rdvq.Inbox[workq.Work], outboxWaiter *rdvq.Waiter) {
+						cw.sparePopSelect(ctx, outboxWaiter)
 					},
 				)
-				return outboxFilledRenotifyFn
 			},
 		)
 		if ok {
@@ -170,55 +162,49 @@ func (cw *cpWorker) AddWork(
 		followupFn(ctx)
 	}
 
-	return cw.workReadyRenotifyFn, cw.err
+	return cw.workWaiter.RenotifyFn(), cw.err
 }
 
 func (cw *cpWorker) waitForWork(
 	ctx context.Context,
-	inboxCh <-chan workq.Work,
-	outboxFilledCh <-chan rdvq.RenotifyFunc,
+	inbox *rdvq.Inbox[workq.Work],
+	outboxWaiter *rdvq.Waiter,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
 	selectFn workq.PopSelectFunc,
-) (rdvq.SelectResult, rdvq.RenotifyFunc) {
-	var result rdvq.SelectResult
-	var outboxFilledRenotifyFn workq.RenotifyFunc
-	_ = workWaiters.WaitFunc(&cw.workWaiter, confirmWorkWaitFn,
-		func(workReadyCh <-chan workq.RenotifyFunc) workq.RenotifyFunc {
-			cw.workReadyCh = workReadyCh
-			defer func() {
-				cw.workReadyCh = nil
-			}()
-			result, outboxFilledRenotifyFn = selectFn(inboxCh, outboxFilledCh)
-			return cw.workReadyRenotifyFn
+) {
+	workWaiters.WaitFunc(&cw.workWaiter, confirmWorkWaitFn,
+		func(waiter *rdvq.Waiter) {
+			if waiter != &cw.workWaiter {
+				panic("waiter does not match")
+			}
+			selectFn(inbox, outboxWaiter)
 		},
 	)
-	return result, outboxFilledRenotifyFn
 }
 
 func (cw *cpWorker) primaryPopSelect(
 	ctx context.Context,
-	inboxCh <-chan workq.Work,
-	outboxFilledCh <-chan rdvq.RenotifyFunc,
-) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
-	cw.inboxCh = inboxCh
+	inbox *rdvq.Inbox[workq.Work],
+	outboxWaiter *rdvq.Waiter,
+) {
+	cw.inbox = inbox
 	defer func() {
-		cw.inboxCh = nil
+		cw.inbox = nil
 	}()
-	return cw.popSelect(ctx, outboxFilledCh, cw.primaryInnerPopSelect)
+	cw.popSelect(ctx, outboxWaiter, cw.primaryInnerPopSelect)
 }
 
-func (cw *cpWorker) sparePopSelect(ctx context.Context, outboxFilledCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-	_, renotifyFn := cw.popSelect(ctx, outboxFilledCh, cw.spareInnerPopSelect)
-	return renotifyFn
+func (cw *cpWorker) sparePopSelect(ctx context.Context, outboxWaiter *rdvq.Waiter) {
+	cw.popSelect(ctx, outboxWaiter, cw.spareInnerPopSelect)
 }
 
-func (cw *cpWorker) popSelect(ctx context.Context, outboxFilledCh <-chan rdvq.RenotifyFunc,
-	innerSelect func(ctx context.Context, outboxFilledCh <-chan rdvq.RenotifyFunc) (rdvq.SelectResult, rdvq.RenotifyFunc),
-) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
+func (cw *cpWorker) popSelect(ctx context.Context, outboxWaiter *rdvq.Waiter,
+	innerSelect func(ctx context.Context, outboxWaiter *rdvq.Waiter),
+) {
 	queuedFlush, timeUntilNextFlushDeadline := cw.flushToNextDeadline(ctx)
 	if queuedFlush {
-		return rdvq.SelectAborted, nil
+		return
 	}
 	if timeUntilNextFlushDeadline > 0 {
 		// Set up flush deadline timer
@@ -231,7 +217,7 @@ func (cw *cpWorker) popSelect(ctx context.Context, outboxFilledCh <-chan rdvq.Re
 		}()
 	}
 
-	return innerSelect(ctx, outboxFilledCh)
+	innerSelect(ctx, outboxWaiter)
 }
 
 func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duration) {
@@ -256,25 +242,31 @@ func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duratio
 
 func (cw *cpWorker) primaryInnerPopSelect(
 	ctx context.Context,
-	outboxFilledCh <-chan rdvq.RenotifyFunc,
-) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
+	outboxWaiter *rdvq.Waiter,
+) {
 	traceRegion := "cpWorker.primaryInnerPopSelect"
+	inboxCh := cw.inbox.Ch()
+	outboxWaiterCh := outboxWaiter.Ch()
+	workWaiterCh := cw.workWaiter.Ch()
 	trace.Logf(ctx, traceRegion,
-		"entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
-		cw.inboxCh, outboxFilledCh, cw.workReadyCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
+		"entering select: inbox=%p inboxCh=%p, outboxWaiter=%p, outboxWaiterCh=%p, workWaiter=%p, workWaiterCh=%p, "+
+			"flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
+		cw.inbox, inboxCh, outboxWaiter, outboxWaiterCh, &cw.workWaiter, workWaiterCh,
+		cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 	select {
-	case work := <-cw.inboxCh:
-		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", cw.inboxCh)
+	case work := <-inboxCh:
+		cw.inbox.Emptied()
+		trace.Logf(ctx, traceRegion, "received work from inbox=%p, inboxCh=%p", cw.inbox, inboxCh)
 		cw.newWork = work
-		return rdvq.SelectInboxEmptied, nil
 
 	// Here down should be identical to spareInnerPopSelect below
-	case renotifyFn := <-outboxFilledCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
-		return rdvq.SelectOutboxFilled, renotifyFn
-	case renotifyFn := <-cw.workReadyCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", cw.workReadyCh)
-		cw.workReadyRenotifyFn = renotifyFn
+	case renotifyFn := <-outboxWaiterCh:
+		outboxWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaiter=%p, outboxWaiterCh=%p",
+			outboxWaiter, outboxWaiterCh)
+	case renotifyFn := <-workWaiterCh:
+		cw.workWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaiter=%p, workWaiterCh=%p", &cw.workWaiter, workWaiterCh)
 	case <-cw.flushDeadlineTimerCh:
 		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.nextJobFlushCh:
@@ -289,19 +281,21 @@ func (cw *cpWorker) primaryInnerPopSelect(
 		trace.Logf(ctx, traceRegion, "received combiner goroutine done signal")
 		cw.err = cw.doneErr()
 	}
-	return rdvq.SelectAborted, nil
 }
 
 func (cw *cpWorker) spareInnerPopSelect(
 	ctx context.Context,
-	outboxFilledCh <-chan rdvq.RenotifyFunc,
-) (result rdvq.SelectResult, renotifyFn rdvq.RenotifyFunc) {
+	outboxWaiter *rdvq.Waiter,
+) {
 	traceRegion := "cpWorker.spareInnerPopSelect"
 
+	outboxWaiterCh := outboxWaiter.Ch()
+	workWaiterCh := cw.workWaiter.Ch()
 	trace.Logf(ctx, traceRegion,
-		//nolint:lll // doesn't make sense break up
-		"entering select: idleTimerCh=%p, inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
-		cw.idleTimerCh, cw.inboxCh, outboxFilledCh, cw.workReadyCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
+		"entering select: idleTimerCh=%p, outboxWaiter=%p, outboxWaiterCh=%p, workWaiter=%p, workWaiterCh=%p, "+
+			"flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
+		cw.idleTimerCh, outboxWaiter, outboxWaiterCh, &cw.workWaiter, workWaiterCh,
+		cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 
 	// Track idle time
 	waitStartTime := time.Now()
@@ -317,12 +311,13 @@ func (cw *cpWorker) spareInnerPopSelect(
 		cw.followupFn = cw.idleFollowupFn
 
 	// Here down should be identical to primaryInnerPopSelect above
-	case renotifyFn := <-outboxFilledCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
-		return rdvq.SelectOutboxFilled, renotifyFn
-	case renotifyFn := <-cw.workReadyCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", cw.workReadyCh)
-		cw.workReadyRenotifyFn = renotifyFn
+	case renotifyFn := <-outboxWaiterCh:
+		outboxWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaiter=%p, outboxWaiterCh=%p",
+			outboxWaiter, outboxWaiterCh)
+	case renotifyFn := <-workWaiterCh:
+		cw.workWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaiter=%p, workWaiterCh=%p", &cw.workWaiter, workWaiterCh)
 	case <-cw.flushDeadlineTimerCh:
 		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.nextJobFlushCh:
@@ -337,7 +332,6 @@ func (cw *cpWorker) spareInnerPopSelect(
 		trace.Logf(ctx, traceRegion, "received combiner goroutine done signal")
 		cw.err = cw.doneErr()
 	}
-	return rdvq.SelectAborted, nil
 }
 
 func (cw *cpWorker) idleFollowup(context.Context) {

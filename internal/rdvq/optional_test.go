@@ -134,9 +134,9 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	var orphanValues []int
 	q.PopFrontFunc(&inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(ch <-chan int) rdvq.SelectResult {
+	}, func(inbox *rdvq.Inbox[int]) {
 		// Always return aborted (timeout immediately)
-		return rdvq.SelectAborted
+		// Don't call inbox.Emptied() to simulate abort
 	})
 
 	// Should not have received any orphan values since no sender
@@ -152,10 +152,9 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	orphanValues = nil
 	q.PopFrontFunc(&inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(ch <-chan int) rdvq.SelectResult {
+	}, func(inbox *rdvq.Inbox[int]) {
 		time.Sleep(10 * time.Millisecond) // Let the sender send first
-		// Return aborted to simulate timeout/abandonment
-		return rdvq.SelectAborted
+		// Don't call inbox.Emptied() to simulate timeout/abandonment
 	})
 
 	// Should have received the orphaned value

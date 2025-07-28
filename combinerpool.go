@@ -16,7 +16,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/cpstate"
 	"github.com/petenewcomb/psg-go/internal/heap"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgopt"
@@ -132,9 +131,9 @@ func (cp *CombinerPool) postCombine(
 
 	work := cp.newCombineWork(combineFn)
 
-	cp.combineQueue.PushBackFunc(outbox, work, func(outboxCh chan<- workq.Work) rdvq.SelectResult {
+	cp.combineQueue.PushBackFunc(outbox, work, func(outbox *workq.Outbox) {
 		// Fallback to slow path when outbox would block
-		return cp.postCombineSlow(ctx, outboxCh, work)
+		cp.postCombineSlow(ctx, outbox, work)
 	})
 }
 
@@ -170,7 +169,7 @@ func (w *combineWork) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	workerCtx, meta := w.pool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)
-	cw.LockAndSetQueueFunc(ex.Queue)
+	cw.LockAndSetQueueFunc(ex.Queue, nil)
 	defer cw.UnlockAndResetQueueFunc()
 	cw.executeCombine(workerCtx, w.combineFn)
 	return nil
@@ -193,9 +192,9 @@ var combineWorkPool = omnipool.For[combineWork]()
 
 func (cp *CombinerPool) postCombineSlow(
 	ctx context.Context,
-	outboxCh chan<- workq.Work,
+	outbox *workq.Outbox,
 	work *combineWork,
-) rdvq.SelectResult {
+) {
 	traceRegion := "CombinerPool.postCombineSlow"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -213,17 +212,19 @@ func (cp *CombinerPool) postCombineSlow(
 		}
 
 		// Block until we can post or it's time to retry
-		trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p, spawnWaitCh=%p", outboxCh, spawnWaitCh)
+		outboxCh := outbox.Ch()
+		trace.Logf(ctx, traceRegion, "entering select: outbox=%p, outboxCh=%p, spawnWaitCh=%p", outbox, outboxCh, spawnWaitCh)
 		select {
 		case outboxCh <- work:
-			trace.Logf(ctx, traceRegion, "delivered work into outboxCh=%d", outboxCh)
-			return rdvq.SelectOutboxFilled
+			outbox.Filled()
+			trace.Logf(ctx, traceRegion, "delivered work into outbox=%p, outboxCh=%p", outbox, outboxCh)
+			return
 		case <-spawnWaitCh:
-			trace.Logf(ctx, traceRegion, "received signal from spawnWaitCh=%d", spawnWaitCh)
+			trace.Logf(ctx, traceRegion, "received signal from spawnWaitCh=%p", spawnWaitCh)
 			// Loop to check if we need to spawn a new goroutine
 		case <-ctx.Done():
 			trace.Logf(ctx, traceRegion, "received context done signal")
-			return rdvq.SelectAborted
+			return
 		}
 	}
 }

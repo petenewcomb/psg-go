@@ -42,19 +42,20 @@ func (cm *ctxMeta) IsTopLevel() bool {
 
 type executionEnvironment interface {
 	WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox))
-	LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) (*workq.Receiver, *workq.Waiter, *workq.Waiter)
+	LockAndSetQueueFunc(queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
+		*workq.Receiver, *workq.Waiter, *workq.Waiter)
 	UnlockAndResetQueueFunc()
 	MayQueue() workq.QueueWorkFunc
 }
 
 type topLevelExEnv struct {
-	mu           sync.Mutex
-	outboxMap    outboxMap
-	queueFn      workq.QueueWorkFunc
-	queueFnDepth atomic.Int32
-	workReceiver workq.Receiver
-	workWaiter   workq.Waiter
-	blockWaiter  workq.Waiter
+	mu             sync.Mutex
+	outboxMap      outboxMap
+	queueFn        workq.QueueWorkFunc
+	queueFnDepth   atomic.Int32
+	workReceiver   workq.Receiver
+	workWaiter     workq.Waiter
+	blockWaiterMap map[*workq.Waiters]*workq.Waiter
 }
 
 func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox)) {
@@ -69,7 +70,7 @@ func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Ou
 	fn(outbox)
 }
 
-func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) (
+func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
 	workReceiver *workq.Receiver, workWaiter *workq.Waiter, blockWaiter *workq.Waiter,
 ) {
 	traceRegion := "topLevelExEnv.LockAndSetQueueFunc"
@@ -82,8 +83,18 @@ func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc) (
 	if queueFnDepth == 1 {
 		ee.mu.Lock()
 		ee.queueFn = queueFn
+		if blockWaiters != nil {
+			blockWaiter = ee.blockWaiterMap[blockWaiters]
+			if blockWaiter == nil {
+				if ee.blockWaiterMap == nil {
+					ee.blockWaiterMap = make(map[*workq.Waiters]*workq.Waiter)
+				}
+				blockWaiter = &workq.Waiter{}
+				ee.blockWaiterMap[blockWaiters] = blockWaiter
+			}
+		}
 	}
-	return &ee.workReceiver, &ee.workWaiter, &ee.blockWaiter
+	return &ee.workReceiver, &ee.workWaiter, blockWaiter
 }
 
 func (ee *topLevelExEnv) UnlockAndResetQueueFunc() {

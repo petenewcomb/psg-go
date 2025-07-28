@@ -11,10 +11,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 )
 
-type Inbox[T any] struct {
-	ch chan T // nil when empty, contains 1 buffered item when full
-}
-
 // Optional implements the base layer of rdvq's two-tier architecture,
 // providing direct sender-receiver rendezvous without overflow handling.
 // It serves as the foundation for Required[T] and can be used standalone
@@ -24,7 +20,7 @@ type Inbox[T any] struct {
 // by giving each receiver a dedicated inbox channel. Senders attempt
 // direct handoff to waiting receivers, failing immediately if none are available.
 type Optional[T any] struct {
-	emptyInboxes nbcq.Queue[chan T]
+	emptyInboxes nbcq.Queue[*Inbox[T]]
 	chanPool     *chanPool[T]
 }
 
@@ -46,19 +42,22 @@ func (q *Optional[T]) TryPushBack(value T) bool {
 
 	// Loop through available inboxes
 	for {
-		inboxCh, ok := q.emptyInboxes.PopFront()
+		inbox, ok := q.emptyInboxes.PopFront()
 		if !ok {
 			trace.Logf(context.Background(), traceRegion, "no empty inboxes to try, returning false")
 			// No waiting emptyInboxes
 			return false
 		}
 
+		inboxCh := inbox.ch
 		// Loop to (re)attempt sending to the inbox channel
 		for {
-			trace.Logf(context.Background(), traceRegion, "entering select: inboxCh=%p", inboxCh)
+			trace.Logf(context.Background(), traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
 			select {
 			case inboxCh <- value:
-				trace.Logf(context.Background(), traceRegion, "delivered value to inboxCh=%p, returning true", inboxCh)
+				inbox.filled()
+				trace.Logf(context.Background(), traceRegion, "delivered value to inbox=%p inboxCh=%p, returning true",
+					inbox, inboxCh)
 				// Successfully delivered
 				return true
 			default:
@@ -84,8 +83,10 @@ func (q *Optional[T]) TryPushBack(value T) bool {
 }
 
 // OptionalPopSelectFunc handles the select operation for PopFrontFunc.
-// It should select on the inbox channel, returning the appropriate result.
-type OptionalPopSelectFunc[T any] = func(inboxCh <-chan T) SelectResult
+// It should select on the inbox channel. The callback MUST call inbox.Emptied()
+// if a value is received from the inbox. For best scheduler monitoring accuracy,
+// this call SHOULD be made immediately after receiving the value.
+type OptionalPopSelectFunc[T any] = func(inbox *Inbox[T])
 
 //nolint:contextcheck // background context used only for tracing
 func (q *Optional[T]) PopFrontFunc(
@@ -102,7 +103,7 @@ func (q *Optional[T]) PopFrontFunc(
 		inboxCh = q.chanPool.Get()
 		inbox.ch = inboxCh
 		trace.Logf(context.Background(), traceRegion, "Optional=%p inbox=%p allocated inboxCh=%p", q, inbox, inboxCh)
-		q.emptyInboxes.PushBack(inboxCh)
+		q.emptyInboxes.PushBack(inbox)
 	} else {
 		// Reuse the existing inbox channel, which must still be in the queue
 		// and marked as abandoned.  Drain it and reuse.
@@ -119,17 +120,18 @@ func (q *Optional[T]) PopFrontFunc(
 			trace.Logf(context.Background(), traceRegion,
 				"Optional=%p inbox=%p reusing and requeuing inboxCh=%p",
 				q, inbox, inboxCh)
-			q.emptyInboxes.PushBack(inboxCh)
+			q.emptyInboxes.PushBack(inbox)
 		}
 	}
 
 	// Call the custom selecting function
-	result := selectFn(inboxCh)
-	if result == SelectInboxEmptied {
+	inbox.emptyPending()
+	selectFn(inbox)
+	if inbox.WasEmptied() {
 		// PushBack must have pulled it out of the queue and the select just
 		// emptied it, so it's safe to return to the pool.
-		trace.Logf(context.Background(), traceRegion, "pooling emptied inboxCh=%p", inboxCh)
-		q.chanPool.Put(inboxCh)
+		trace.Logf(context.Background(), traceRegion, "pooling emptied inbox=%p inboxCh=%p", inbox, inboxCh)
+		q.chanPool.Put(inbox.ch)
 		inbox.ch = nil
 		return
 	}
@@ -144,6 +146,7 @@ func (q *Optional[T]) PopFrontFunc(
 	default:
 		// Channel is full, drain the value and process it.
 		orphan := <-inboxCh
+		inbox.Emptied()
 		trace.Logf(context.Background(), traceRegion, "received orphan from inboxCh=%p", inboxCh)
 		processOrphanFn(orphan)
 		// PushBack must have pulled it out of the queue and we just
@@ -157,17 +160,17 @@ func (q *Optional[T]) PopFrontFunc(
 func (q *Optional[T]) PopFront(ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
 	traceRegion := "rdvq.Optional.PopFront"
 	var err error
-	q.PopFrontFunc(inbox, processFn, func(inboxCh <-chan T) SelectResult {
-		trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p", inboxCh)
+	q.PopFrontFunc(inbox, processFn, func(inbox *Inbox[T]) {
+		inboxCh := inbox.Ch()
+		trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
 		select {
 		case value := <-inboxCh:
-			trace.Logf(ctx, traceRegion, "received value from inboxCh=%p", inboxCh)
+			inbox.Emptied()
+			trace.Logf(ctx, traceRegion, "received value from inbox=%p, inboxCh=%p", inbox, inboxCh)
 			processFn(value)
-			return SelectInboxEmptied
 		case <-ctx.Done():
 			trace.Logf(ctx, traceRegion, "received context done signal")
 			err = ctx.Err()
-			return SelectAborted
 		}
 	})
 	return err

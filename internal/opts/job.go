@@ -5,8 +5,6 @@ package opts
 
 import (
 	"time"
-
-	"github.com/petenewcomb/psg-go/internal/gcok"
 )
 
 // JobOption is a configuration option that can be applied to Job.
@@ -17,9 +15,10 @@ type JobOption interface {
 // JobConfigChanges holds configuration changes for a Job.
 // Fields use pointers to distinguish between "not set" (nil) and "set to zero value" (non-nil).
 type JobConfigChanges struct {
-	TaskWorkerIdleTimeout *time.Duration
-	FlushListener         *func()
-	GCConfig              gcok.ConfigChanges
+	TaskWorkerIdleTimeout     *time.Duration
+	FlushListener             *func()
+	SchedulerLatencyThreshold *time.Duration
+	SchedulerLatencyMaxAge    *time.Duration
 }
 
 type jobConfig interface {
@@ -41,29 +40,29 @@ func (o TaskWorkerIdleTimeout) applyToJob(c *JobConfigChanges) {
 	c.TaskWorkerIdleTimeout = (*time.Duration)(&o)
 }
 
-// MaxGCTimeRatioThreshold sets the GC time ratio threshold for backpressure.
-type MaxGCTimeRatioThreshold float64
+// SchedulerLatencyThreshold sets the scheduler latency threshold for backpressure.
+type SchedulerLatencyThreshold time.Duration
 
-func (o MaxGCTimeRatioThreshold) applyToJob(c *JobConfigChanges) {
-	c.GCConfig.BusyThreshold = (*float64)(&o)
+func (o SchedulerLatencyThreshold) applyToJob(c *JobConfigChanges) {
+	c.SchedulerLatencyThreshold = (*time.Duration)(&o)
 }
 
-// GCTimeUpdateInterval sets the GC time monitoring update interval.
-type GCTimeUpdateInterval time.Duration
+// SchedulerLatencyMaxAge sets the max age for scheduler latency measurements.
+type SchedulerLatencyMaxAge time.Duration
 
-func (o GCTimeUpdateInterval) applyToJob(c *JobConfigChanges) {
-	c.GCConfig.UpdateInterval = (*time.Duration)(&o)
+func (o SchedulerLatencyMaxAge) applyToJob(c *JobConfigChanges) {
+	c.SchedulerLatencyMaxAge = (*time.Duration)(&o)
 }
 
-// GCBackpressureSettings sets both the GC time ratio threshold and monitoring interval.
-type GCBackpressureSettings struct {
-	Threshold float64
-	Interval  time.Duration
+// SchedulerBackpressureSettings sets both the scheduler latency threshold and max age.
+type SchedulerBackpressureSettings struct {
+	Threshold time.Duration
+	MaxAge    time.Duration
 }
 
-func (o GCBackpressureSettings) applyToJob(c *JobConfigChanges) {
-	c.GCConfig.BusyThreshold = &o.Threshold
-	c.GCConfig.UpdateInterval = &o.Interval
+func (o SchedulerBackpressureSettings) applyToJob(c *JobConfigChanges) {
+	c.SchedulerLatencyThreshold = &o.Threshold
+	c.SchedulerLatencyMaxAge = &o.MaxAge
 }
 
 // FlushListener sets the flush listener callback.

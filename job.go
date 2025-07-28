@@ -14,7 +14,6 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/ctxmap"
-	"github.com/petenewcomb/psg-go/internal/gcok"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
@@ -33,14 +32,20 @@ import (
 // A Job must be created with [NewJob], see that function for caveats and
 // important details.
 //
+// schedulerConfig holds scheduler monitoring configuration that can be updated atomically
+type schedulerConfig struct {
+	latencyThreshold time.Duration // scheduler latency threshold
+	maxAge           time.Duration // max age of scheduler latency measurement
+}
+
 //nolint:contextcheck // background context used only for tracing
 type Job struct {
-	ctx       context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
-	cancelFn  context.CancelFunc
-	wg        sync.WaitGroup
-	state     jobstate.JobState
-	gcMonitor gcok.Monitor
-	gcWaiters workq.Waiters
+	ctx      context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
+	cancelFn context.CancelFunc
+	wg       sync.WaitGroup
+	state    jobstate.JobState
+
+	schedulerConfig atomic.Pointer[schedulerConfig] // scheduler monitoring configuration
 
 	gatherQueue workq.Pending
 
@@ -52,11 +57,10 @@ type Job struct {
 	ctxMetaMap       ctxmap.Map[ctxMetaValueKey, *ctxMeta]
 	gatherCtxMetaMap ctxmap.Map[gatherCtxMetaValueKey, *Job]
 
-	protoBB           workq.BlockBehavior // avoid closure reallocation
-	blockFn           workq.BlockFunc     // avoid closure reallocation
-	shouldWaitForGCFn func() bool         // avoid closure reallocation
-	tryAddWorkFn      workq.TryAddWorkFunc
-	addWorkFn         workq.AddWorkFunc
+	protoBB      workq.BlockBehavior // avoid closure reallocation
+	blockFn      workq.BlockFunc     // avoid closure reallocation
+	tryAddWorkFn workq.TryAddWorkFunc
+	addWorkFn    workq.AddWorkFunc
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -135,13 +139,8 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 
 	j.protoBB.ShouldBlock = j.shouldBlock
 	j.blockFn = j.block
-	j.shouldWaitForGCFn = j.gcMonitor.Busy
 	j.tryAddWorkFn = j.tryAddWork
 	j.addWorkFn = j.addWork
-
-	trace.Logf(ctx, traceRegion,
-		"Job=%p, state=%p, gatherQueue=%p, workQueue=%p, taskQueue=%p, gcMonitor=%p, gcWaiters=%p",
-		j, &j.state, &j.gatherQueue, &j.workQueue, &j.taskQueue, &j.gcMonitor, &j.gcWaiters)
 
 	j.state.Init()
 	j.gatherQueue.Init()
@@ -149,25 +148,30 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.taskQueue.Init()
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
 
-	// Initialize GC monitor with defaults
-	defaultGCThreshold := psgopt.DefaultMaxGCTimeRatioThreshold
-	defaultGCInterval := psgopt.DefaultGCTimeUpdateInterval
-	onGCBusyChange := func(busy bool) {
-		if !busy {
-			j.gcWaiters.NotifyAll()
-		}
-	}
-	j.gcMonitor.Update(gcok.ConfigChanges{
-		BusyThreshold:  &defaultGCThreshold,
-		UpdateInterval: &defaultGCInterval,
-		OnChange:       &onGCBusyChange,
+	j.schedulerConfig.Store(&schedulerConfig{
+		latencyThreshold: psgopt.DefaultSchedulerLatencyThreshold,
+		maxAge:           psgopt.DefaultSchedulerLatencyMaxAge,
 	})
-	j.gcWaiters.Init()
 
 	// Apply user options
 	j.SetOptions(options...)
 
 	return j
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (j *Job) shouldWaitForSched() bool {
+	config := j.schedulerConfig.Load()
+	if config == nil || config.latencyThreshold == 0 {
+		return false // scheduler monitoring disabled
+	}
+	latency, updateTime := rdvq.SchedulerLatency()
+	age := time.Since(updateTime)
+	shouldWait := age < config.maxAge && latency > config.latencyThreshold
+	trace.Logf(context.Background(), "Job.shouldWaitForSched",
+		"latency=%v, age=%v, maxAge=%v, threshold=%v, shouldWait=%v",
+		latency, age, config.maxAge, config.latencyThreshold, shouldWait)
+	return shouldWait
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
@@ -193,7 +197,6 @@ func (j *Job) Cancel() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Job=%p", j)
 	j.cancelFn()
-	j.gcMonitor.Cancel()
 }
 
 // CancelAndWait cancels like [Job.Cancel], but then blocks until any
@@ -206,7 +209,6 @@ func (j *Job) CancelAndWait() {
 
 	j.Cancel()
 	j.wg.Wait()
-	j.gcMonitor.Wait()
 }
 
 // Gather processes outstanding task results and then waits for the next
@@ -349,7 +351,7 @@ func (j *Job) addWorkWhileMaybeBlocking(
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
 ) (workReadyRenotifyFn, blockWaitRenotifyFn workq.RenotifyFunc, err error) {
-	workReceiver, workWaiter, blockWaiter := meta.LockAndSetQueueFunc(queueFn)
+	workReceiver, workWaiter, blockWaiter := meta.LockAndSetQueueFunc(queueFn, blockWaiters)
 	defer meta.UnlockAndResetQueueFunc()
 
 	if workWaiters == nil {
@@ -358,30 +360,22 @@ func (j *Job) addWorkWhileMaybeBlocking(
 		j.gatherQueue.PopFrontFunc(
 			workReceiver,
 			queueFn,
-			func(
-				inboxCh <-chan workq.Work,
-				outboxFilledCh <-chan rdvq.RenotifyFunc,
-			) (rdvq.SelectResult, rdvq.RenotifyFunc) {
-				var result rdvq.SelectResult
-				var outboxFilledRenotifyFn rdvq.RenotifyFunc
-				workReadyRenotifyFn = workWaiters.WaitFunc(
+			func(inbox *rdvq.Inbox[workq.Work], outboxWaiter *rdvq.Waiter) {
+				workWaiters.WaitFunc(
 					workWaiter,
 					confirmWorkWaitFn,
-					func(workReadyCh <-chan workq.RenotifyFunc) workq.RenotifyFunc {
+					func(workWaiter *rdvq.Waiter) {
 						if blockWaiters == nil {
-							result, err = j.gatherSelect(
+							err = j.gatherSelect(
 								ctx,
 								queueFn,
-								inboxCh,
-								outboxFilledCh,
-								&outboxFilledRenotifyFn,
-								workReadyCh,
-								&workReadyRenotifyFn,
-								nil,
+								inbox,
+								outboxWaiter,
+								workWaiter,
 								nil,
 							)
 						} else {
-							blockWaitRenotifyFn = blockWaiters.WaitFunc(
+							blockWaiters.WaitFunc(
 								blockWaiter,
 								func() bool {
 									shouldWait := confirmBlockWaitFn()
@@ -390,59 +384,61 @@ func (j *Job) addWorkWhileMaybeBlocking(
 									}
 									return shouldWait
 								},
-								func(blockWaitCh <-chan workq.RenotifyFunc) workq.RenotifyFunc {
-									result, err = j.gatherSelect(
+								func(blockWaiter *rdvq.Waiter) {
+									err = j.gatherSelect(
 										ctx,
 										queueFn,
-										inboxCh,
-										outboxFilledCh,
-										&outboxFilledRenotifyFn,
-										workReadyCh,
-										&workReadyRenotifyFn,
-										blockWaitCh,
-										&blockWaitRenotifyFn,
+										inbox,
+										outboxWaiter,
+										workWaiter,
+										blockWaiter,
 									)
-									return blockWaitRenotifyFn
 								},
 							)
 						}
-						return workReadyRenotifyFn
 					},
 				)
-				return result, outboxFilledRenotifyFn
 			},
 		)
 	}
-	return
+	return workWaiter.RenotifyFn(), blockWaiter.RenotifyFn(), err
 }
 
 func (j *Job) gatherSelect(
 	ctx context.Context,
 	queueFn workq.QueueWorkFunc,
-	inboxCh <-chan workq.Work,
-	outboxFilledCh <-chan rdvq.RenotifyFunc,
-	outboxFilledRenotifyFn *rdvq.RenotifyFunc,
-	workReadyCh <-chan workq.RenotifyFunc,
-	workReadyRenotifyFn *workq.RenotifyFunc,
-	blockWaitCh <-chan workq.RenotifyFunc,
-	blockWaitRenotifyFn *workq.RenotifyFunc,
-) (rdvq.SelectResult, error) {
+	inbox *rdvq.Inbox[workq.Work],
+	outboxWaiter *rdvq.Waiter,
+	workWaiter *rdvq.Waiter,
+	blockWaiter *rdvq.Waiter,
+) error {
 	traceRegion := "Job.gatherSelect"
-	trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxFilledCh=%p, workReadyCh=%p, blockWaitCh=%p",
-		inboxCh, outboxFilledCh, workReadyCh, blockWaitCh)
+
+	inboxCh := inbox.Ch()
+	outboxWaiterCh := outboxWaiter.Ch()
+	workWaiterCh := workWaiter.Ch()
+	blockWaiterCh := blockWaiter.Ch()
+
+	trace.Logf(ctx, traceRegion,
+		"entering select: inbox=%p, inboxCh=%p, outboxWaiter=%p, outboxWaiterCh=%p, workWaiter=%p, workWaiterCh=%p, "+
+			"blockWaiter=%p, blockWaiterCh=%p",
+		inbox, inboxCh, outboxWaiter, outboxWaiterCh, workWaiter, workWaiterCh, blockWaiter, blockWaiterCh)
 	var err error
 	select {
 	case work := <-inboxCh:
-		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
+		inbox.Emptied()
+		trace.Logf(ctx, traceRegion, "received work from inbox=%p, inboxCh=%p", inbox, inboxCh)
 		queueFn(work)
-		return rdvq.SelectInboxEmptied, nil
-	case *outboxFilledRenotifyFn = <-outboxFilledCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxFilledCh=%p", outboxFilledCh)
-		return rdvq.SelectOutboxFilled, nil
-	case *workReadyRenotifyFn = <-workReadyCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from workReadyCh=%p", workReadyCh)
-	case *blockWaitRenotifyFn = <-blockWaitCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
+	case renotifyFn := <-outboxWaiterCh:
+		outboxWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaiter=%p, outboxWaiterCh=%p",
+			outboxWaiter, outboxWaiterCh)
+	case renotifyFn := <-workWaiterCh:
+		workWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaiter=%p, workWaiterCh=%p", workWaiter, workWaiterCh)
+	case renotifyFn := <-blockWaiterCh:
+		blockWaiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaiter=%p, blockWaiterCh=%p", blockWaiter, blockWaiterCh)
 		err = errBlockWaitSignaled
 	case <-j.state.Done():
 		trace.Logf(ctx, traceRegion, "received job done signal")
@@ -451,7 +447,7 @@ func (j *Job) gatherSelect(
 		trace.Logf(ctx, traceRegion, "received context done signal")
 		err = ctx.Err()
 	}
-	return rdvq.SelectAborted, err
+	return err
 }
 
 // postGather sends a gather operation to the gather queue.
@@ -463,28 +459,28 @@ func (j *Job) postGather(ctx context.Context, outbox *workq.Outbox, gatherFn bou
 	work := j.newGatherWork(gatherFn)
 
 	// Error can only be due to context cancellation, so safe to ignore here.
-	j.gatherQueue.PushBackFunc(outbox, work, func(outboxCh chan<- workq.Work) rdvq.SelectResult {
-		return j.postGatherSlow(ctx, outboxCh, work)
+	j.gatherQueue.PushBackFunc(outbox, work, func(outbox *workq.Outbox) {
+		j.postGatherSlow(ctx, outbox, work)
 	})
 }
 
 // postGather sends a gather operation to the gather queue.
 func (j *Job) postGatherSlow(
 	ctx context.Context,
-	outboxCh chan<- workq.Work,
+	outbox *workq.Outbox,
 	work workq.Work,
-) rdvq.SelectResult {
+) {
 	traceRegion := "Job.postGatherSlow"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
+	outboxCh := outbox.Ch()
+	trace.Logf(ctx, traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
 	select {
 	case outboxCh <- work:
-		trace.Logf(ctx, traceRegion, "delivered workFn into outboxCh=%p", outboxCh)
-		return rdvq.SelectOutboxFilled
+		outbox.Filled()
+		trace.Logf(ctx, traceRegion, "delivered workFn into outbox=%p, outboxCh=%p", outbox, outboxCh)
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
-		return rdvq.SelectAborted
 	}
 }
 
@@ -519,7 +515,7 @@ func (w *gatherWork) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	ctx, meta := w.job.ctxMeta(ctx)
 
-	meta.LockAndSetQueueFunc(ex.Queue)
+	meta.LockAndSetQueueFunc(ex.Queue, nil)
 	defer meta.UnlockAndResetQueueFunc()
 
 	return w.gatherFn(ctx)
@@ -694,18 +690,18 @@ func (j *Job) spawnTaskWorker(_ context.Context, task *taskWork) {
 						j.startTask(ctx, orphanedTask)
 					}
 				},
-				func(inboxCh <-chan *taskWork) rdvq.SelectResult {
-					trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p", inboxCh)
+				func(inbox *rdvq.Inbox[*taskWork]) {
+					inboxCh := inbox.Ch()
+					trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
 					select {
 					case task = <-inboxCh:
-						trace.Logf(ctx, traceRegion, "received task from inboxCh=%p", inboxCh)
-						return rdvq.SelectInboxEmptied
+						inbox.Emptied()
+						trace.Logf(ctx, traceRegion, "received task from inbox=%p, inboxCh=%p", inbox, inboxCh)
 					case <-idleTimer.C:
 						trace.Logf(ctx, traceRegion, "received signal from idle timer")
 					case <-ctx.Done():
 						trace.Logf(ctx, traceRegion, "received context done signal")
 					}
-					return rdvq.SelectAborted
 				},
 			)
 		}
@@ -747,19 +743,10 @@ func (j *Job) scatterWithCompletedFn(
 	taskFn boundTaskFunc,
 	completedFn func(),
 ) error {
-	wb := workq.WaitBehavior{
-		BlockBehavior: j.protoBB,
-		ShouldWait:    j.shouldWaitForGCFn,
-	}
-
-	return j.gcWaiters.Execute(ctx, ex, wb,
-		func(ctx context.Context, ex workq.Execution) error {
-			ex.Starting()
-			work := j.newTaskWork(taskFn, completedFn)
-			j.startTask(ctx, work)
-			return nil
-		},
-	)
+	ex.Starting()
+	work := j.newTaskWork(taskFn, completedFn)
+	j.startTask(ctx, work)
+	return nil
 }
 
 // panicIfDone panics if the job is in the done state
@@ -812,8 +799,18 @@ func (w jobConfigWrapper) Update(changes opts.JobConfigChanges) {
 		w.job.state.SetFlushListener(*changes.FlushListener)
 	}
 
-	// Apply GC changes atomically using the embedded GCConfig
-	w.job.gcMonitor.Update(changes.GCConfig)
+	// Update scheduler config atomically
+	if changes.SchedulerLatencyThreshold != nil || changes.SchedulerLatencyMaxAge != nil {
+		current := w.job.schedulerConfig.Load()
+		newConfig := *current // copy current values
+		if changes.SchedulerLatencyThreshold != nil {
+			newConfig.latencyThreshold = *changes.SchedulerLatencyThreshold
+		}
+		if changes.SchedulerLatencyMaxAge != nil {
+			newConfig.maxAge = *changes.SchedulerLatencyMaxAge
+		}
+		w.job.schedulerConfig.Store(&newConfig)
+	}
 }
 
 // SetOptions applies the given configuration options to the job.

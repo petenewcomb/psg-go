@@ -54,5 +54,23 @@ All optimization commits (409d49d, c515383, 42ab341, 2911b9c) performed as inten
 
 **The optimization work was entirely successful with clear next steps identified.**
 
+## Recent Implementation (2025-07-28)
+
+**Scheduler Latency Backpressure**: Implemented scheduler monitoring infrastructure to replace GC-based backpressure. The system can detect Go runtime scheduler pressure and apply backpressure when thresholds are exceeded. Configuration available via `WithSchedulerLatencyThreshold()` and `WithSchedulerLatencyMaxAge()`.
+
+**Key Changes:**
+- **Rdvq API improvements**: Inbox/Outbox objects now encapsulate channels + metadata instead of exposing raw channels directly
+- **Proper scheduler latency measurement**: Fixed measurement to track actual Go scheduler delays (runnable→running time) rather than application operation delays
+- **Performance neutral when disabled**: Benchmarking confirms no significant performance impact when scheduler monitoring is disabled
+- **Disabled by default**: `DefaultSchedulerLatencyThreshold = 0` to avoid premature optimization
+
+**Implementation Details:**
+- `schedulerLatencySensor` tracks wait cycles: `waitStarting()` → `triggered()` (runnable) → `waitEnded()` (running)  
+- Latency calculated as time from goroutine becoming runnable to actually executing
+- Global measurements shared across jobs (can be filtered per-job if needed)
+- Trace logging integration for debugging
+
+**Decision**: Scheduler monitoring included but disabled by default. The rdvq API improvements provide immediate ergonomic benefits while keeping the backpressure feature available for future tuning if needed.
+
 ### Current Status
-Branch is ready for finalization pending scheduler health monitoring implementation. All major performance optimization work is complete and validated.
+All major architecture and performance work complete. Scheduler monitoring infrastructure ready but dormant. Branch ready for commit and merge.

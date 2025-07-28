@@ -4,6 +4,7 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"log"
@@ -18,101 +19,34 @@ import (
 	"golang.org/x/perf/benchfmt"
 	"golang.org/x/perf/benchmath"
 	"golang.org/x/perf/benchproc"
-	"golang.org/x/perf/benchunit"
 )
 
-type Config struct {
-	Workload    string
-	Duration    time.Duration
-	FlushPeriod time.Duration
-}
-
-func (c Config) String() string {
-	ratio := float64(c.FlushPeriod) / float64(c.Duration)
-	return fmt.Sprintf("%s %v (%.0fx)", c.Workload, c.Duration, ratio)
-}
-
-func (c Config) IsValidLatency(latency time.Duration) bool {
-	// Per BENCHMARKING.md: p99 latency should be less than flush period + task duration
-	threshold := c.FlushPeriod + c.Duration
-	return latency < threshold
-}
-
-type BenchData struct {
-	Config            Config
-	CombinerLimit     int
-	ThroughputValues  []float64         // raw values collected before creating sample
-	P99LatencyValues  []float64         // raw values collected before creating sample
-	ThroughputSample  *benchmath.Sample // tasks/sec
-	P99LatencySample  *benchmath.Sample // p99-workflow-latency-ns
-	ThroughputSummary benchmath.Summary
-	P99LatencySummary benchmath.Summary
-}
-
-type ComparisonResult struct {
-	Config                Config
-	BaselineBest          BenchData
-	CurrentBest           BenchData
-	ThroughputImprovement float64 // percentage change
-	LatencyImprovement    float64 // percentage change (negative means worse)
-	ThroughputSignificant bool
-	LatencySignificant    bool
-	BaselineUnlimited     *BenchData
-	CurrentUnlimited      *BenchData
-	LatencyThresholdDelta float64 // percentage over/under threshold (negative means under/good)
-
-	// Unlimited analysis with significance testing
-	UnlimitedThroughputImprovement       float64 // ∞→∞ throughput improvement percentage
-	UnlimitedThroughputSignificant       bool    // ∞→∞ throughput significance
-	UnlimitedLatencyImprovement          float64 // ∞→∞ latency improvement percentage
-	UnlimitedLatencySignificant          bool    // ∞→∞ latency significance
-	BaselineBestToUnlimitedThroughput    float64 // B→∞ throughput percentage difference
-	BaselineBestToUnlimitedThroughputSig bool    // B→∞ throughput significance
-	BaselineBestToUnlimitedLatency       float64 // B→∞ latency percentage difference
-	BaselineBestToUnlimitedLatencySig    bool    // B→∞ latency significance
-	CurrentBestToUnlimitedThroughput     float64 // C→∞ throughput percentage difference
-	CurrentBestToUnlimitedThroughputSig  bool    // C→∞ throughput significance
-	CurrentBestToUnlimitedLatency        float64 // C→∞ latency percentage difference
-	CurrentBestToUnlimitedLatencySig     bool    // C→∞ latency significance
-	ThroughputEfficiencyDelta            float64 // Δ between B→∞ and C→∞ throughput ratios
-	LatencyEfficiencyDelta               float64 // Δ between B→∞ and C→∞ latency ratios
-}
-
 func main() {
-	var baseline = flag.String("baseline", "", "Baseline benchmark file")
-	var current = flag.String("current", "", "Current benchmark file")
 	flag.Parse()
 
-	if *baseline == "" || *current == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -baseline <file> -current <file>\n", os.Args[0])
+	if len(flag.Args()) != 2 {
+		fmt.Fprintf(os.Stderr, "Usage: %s <baseline_file> <current_file>\n", os.Args[0])
 		os.Exit(1)
 	}
 
-	baselineData, err := loadBenchmarkData(*baseline)
+	baseline, err := loadBenchmarkData(flag.Args()[0])
 	if err != nil {
 		log.Fatalf("Error loading baseline: %v", err)
 	}
 
-	currentData, err := loadBenchmarkData(*current)
+	current, err := loadBenchmarkData(flag.Args()[1])
 	if err != nil {
 		log.Fatalf("Error loading current: %v", err)
 	}
 
 	fmt.Println()
-
-	// Print gatherOnly results first (combinerLimit=0)
-	printGatherOnlyResults(baselineData, currentData)
-
-	results := compareBenchmarks(baselineData, currentData)
-
+	printGatherOnlyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printSummaryResults(results)
-
+	printStaticCombinerConcurencyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	// Print unlimited analysis table
-	printUnlimitedAnalysis(results)
+	printDynamicCombinerConcurrencyComparison(baseline, current)
 	fmt.Println()
 }
 
@@ -172,34 +106,12 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 				continue
 			}
 
-			limit, err := parseCombinerLimit(combinerLimitKey.Get(combinerLimitField))
+			limit, err := strconv.Atoi(combinerLimitKey.Get(combinerLimitField))
 			if err != nil {
 				log.Printf("Skipping benchmark with invalid combiner limit: %v", err)
 				continue
 			}
 
-			// Extract metrics
-			var throughput, latency []float64
-
-			// Check rec.Values for both throughput and latency
-			for _, v := range rec.Values {
-				v.Value, v.Unit = benchunit.Tidy(v.Value, v.Unit)
-				switch v.Unit {
-				case "tasks/sec":
-					throughput = append(throughput, v.Value)
-				case "p99-workflow-latency-sec":
-					// Convert seconds to nanoseconds for consistency with BENCHMARKING.md
-					latency = append(latency, v.Value*1e9)
-				}
-			}
-
-			// Don't double-count - rec.Values already contains what we need
-
-			if len(throughput) == 0 || len(latency) == 0 {
-				continue
-			}
-
-			// Store the data - accumulate raw values first
 			configData := data[config]
 			if configData == nil {
 				configData = make(map[int]*BenchData)
@@ -215,9 +127,28 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 				configData[limit] = benchData
 			}
 
-			// Accumulate raw values - we'll create samples later with all values
-			benchData.ThroughputValues = append(benchData.ThroughputValues, throughput...)
-			benchData.P99LatencyValues = append(benchData.P99LatencyValues, latency...)
+			for _, v := range rec.Values {
+				switch v.Unit {
+				case "tasks/sec":
+					benchData.Throughput.Add(v)
+				case "p50-combine-latency-sec":
+					if limit != 0 {
+						benchData.P50Latency.Add(v)
+					}
+				case "p99-combine-latency-sec":
+					if limit != 0 {
+						benchData.P99Latency.Add(v)
+					}
+				case "p50-gather-latency-sec":
+					if limit == 0 {
+						benchData.P50Latency.Add(v)
+					}
+				case "p99-gather-latency-sec":
+					if limit == 0 {
+						benchData.P99Latency.Add(v)
+					}
+				}
+			}
 
 		case *benchfmt.SyntaxError:
 			log.Printf("Parse error: %v", rec)
@@ -228,21 +159,20 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 		return nil, err
 	}
 
-	// Create samples with all accumulated values and compute summaries
-	confidence := 0.95
+	// Compute stats now that we've accumulated all the values
 	for _, configData := range data {
 		for _, benchData := range configData {
-			// Create samples with all values at once (this will sort them properly)
-			benchData.ThroughputSample = benchmath.NewSample(benchData.ThroughputValues, &benchmath.DefaultThresholds)
-			benchData.P99LatencySample = benchmath.NewSample(benchData.P99LatencyValues, &benchmath.DefaultThresholds)
-
-			// Use AssumeNothing to get median-based summaries like benchstat
-			benchData.ThroughputSummary = benchmath.AssumeNothing.Summary(benchData.ThroughputSample, confidence)
-			benchData.P99LatencySummary = benchmath.AssumeNothing.Summary(benchData.P99LatencySample, confidence)
+			benchData.ComputeStats()
 		}
 	}
 
 	return data, nil
+}
+
+type Config struct {
+	Workload    string
+	Duration    time.Duration
+	FlushPeriod time.Duration
 }
 
 func parseConfig(workload, duration, flushPeriod string) (Config, error) {
@@ -267,160 +197,428 @@ func parseConfig(workload, duration, flushPeriod string) (Config, error) {
 	return config, nil
 }
 
-func parseCombinerLimit(combinerLimit string) (int, error) {
-	return strconv.Atoi(combinerLimit)
+func (c Config) String() string {
+	ratio := float64(c.FlushPeriod) / float64(c.Duration)
+	return fmt.Sprintf("%s %v (%.0fx)", c.Workload, c.Duration, ratio)
 }
 
-func compareBenchmarks(baseline, current map[Config]map[int]*BenchData) []ComparisonResult {
-	var results []ComparisonResult
-
-	// Get all configs that exist in both datasets
-	for config := range baseline {
-		currentConfigData, exists := current[config]
-		if !exists {
-			continue
-		}
-		baselineConfigData := baseline[config]
-
-		result := ComparisonResult{
-			Config: config,
-		}
-
-		// Find best static limits (exclude unlimited -1)
-		result.BaselineBest = findBestStaticLimit(baselineConfigData)
-		result.CurrentBest = findBestStaticLimit(currentConfigData)
-
-		// Get unlimited performance
-		if unlimited := baselineConfigData[-1]; unlimited != nil {
-			result.BaselineUnlimited = unlimited
-		}
-		if unlimited := currentConfigData[-1]; unlimited != nil {
-			result.CurrentUnlimited = unlimited
-		}
-
-		// Calculate improvements
-		baselineThroughput := result.BaselineBest.ThroughputSummary.Center
-		currentThroughput := result.CurrentBest.ThroughputSummary.Center
-		result.ThroughputImprovement = ((currentThroughput - baselineThroughput) / baselineThroughput) * 100
-
-		baselineLatency := result.BaselineBest.P99LatencySummary.Center
-		currentLatency := result.CurrentBest.P99LatencySummary.Center
-		result.LatencyImprovement = ((baselineLatency - currentLatency) / baselineLatency) * 100
-
-		// Test statistical significance using benchmath with AssumeNothing to match benchstat
-		throughputComparison := benchmath.AssumeNothing.Compare(result.BaselineBest.ThroughputSample, result.CurrentBest.ThroughputSample)
-		result.ThroughputSignificant = throughputComparison.P < 0.05
-
-		latencyComparison := benchmath.AssumeNothing.Compare(result.BaselineBest.P99LatencySample, result.CurrentBest.P99LatencySample)
-		result.LatencySignificant = latencyComparison.P < 0.05
-
-		// Calculate latency threshold delta
-		threshold := config.FlushPeriod + config.Duration
-		thresholdNs := float64(threshold.Nanoseconds())
-		result.LatencyThresholdDelta = ((currentLatency - thresholdNs) / thresholdNs) * 100
-
-		// Calculate unlimited analysis with significance testing
-		if result.BaselineUnlimited != nil && result.CurrentUnlimited != nil {
-			// Throughput values
-			baselineUnlimitedThroughput := result.BaselineUnlimited.ThroughputSummary.Center
-			currentUnlimitedThroughput := result.CurrentUnlimited.ThroughputSummary.Center
-			baselineBestThroughput := result.BaselineBest.ThroughputSummary.Center
-			currentBestThroughput := result.CurrentBest.ThroughputSummary.Center
-
-			// Latency values
-			baselineUnlimitedLatency := result.BaselineUnlimited.P99LatencySummary.Center
-			currentUnlimitedLatency := result.CurrentUnlimited.P99LatencySummary.Center
-			baselineBestLatency := result.BaselineBest.P99LatencySummary.Center
-			currentBestLatency := result.CurrentBest.P99LatencySummary.Center
-
-			// ∞→∞ Throughput: unlimited-to-unlimited improvement
-			result.UnlimitedThroughputImprovement = ((currentUnlimitedThroughput - baselineUnlimitedThroughput) / baselineUnlimitedThroughput) * 100
-			unlimitedThroughputComparison := benchmath.AssumeNothing.Compare(result.BaselineUnlimited.ThroughputSample, result.CurrentUnlimited.ThroughputSample)
-			result.UnlimitedThroughputSignificant = unlimitedThroughputComparison.P < 0.05
-
-			// ∞→∞ Latency: unlimited-to-unlimited improvement (positive = lower latency = better)
-			result.UnlimitedLatencyImprovement = ((baselineUnlimitedLatency - currentUnlimitedLatency) / baselineUnlimitedLatency) * 100
-			unlimitedLatencyComparison := benchmath.AssumeNothing.Compare(result.BaselineUnlimited.P99LatencySample, result.CurrentUnlimited.P99LatencySample)
-			result.UnlimitedLatencySignificant = unlimitedLatencyComparison.P < 0.05
-
-			// B→∞ Throughput: baseline best to baseline unlimited percentage difference
-			result.BaselineBestToUnlimitedThroughput = ((baselineBestThroughput - baselineUnlimitedThroughput) / baselineUnlimitedThroughput) * 100
-			baselineBestToUnlimitedThroughputComparison := benchmath.AssumeNothing.Compare(result.BaselineBest.ThroughputSample, result.BaselineUnlimited.ThroughputSample)
-			result.BaselineBestToUnlimitedThroughputSig = baselineBestToUnlimitedThroughputComparison.P < 0.05
-
-			// B→∞ Latency: baseline best to baseline unlimited percentage difference (positive = higher latency = worse)
-			result.BaselineBestToUnlimitedLatency = ((baselineBestLatency - baselineUnlimitedLatency) / baselineUnlimitedLatency) * 100
-			baselineBestToUnlimitedLatencyComparison := benchmath.AssumeNothing.Compare(result.BaselineBest.P99LatencySample, result.BaselineUnlimited.P99LatencySample)
-			result.BaselineBestToUnlimitedLatencySig = baselineBestToUnlimitedLatencyComparison.P < 0.05
-
-			// C→∞ Throughput: current best to current unlimited percentage difference
-			result.CurrentBestToUnlimitedThroughput = ((currentBestThroughput - currentUnlimitedThroughput) / currentUnlimitedThroughput) * 100
-			currentBestToUnlimitedThroughputComparison := benchmath.AssumeNothing.Compare(result.CurrentBest.ThroughputSample, result.CurrentUnlimited.ThroughputSample)
-			result.CurrentBestToUnlimitedThroughputSig = currentBestToUnlimitedThroughputComparison.P < 0.05
-
-			// C→∞ Latency: current best to current unlimited percentage difference (positive = higher latency = worse)
-			result.CurrentBestToUnlimitedLatency = ((currentBestLatency - currentUnlimitedLatency) / currentUnlimitedLatency) * 100
-			currentBestToUnlimitedLatencyComparison := benchmath.AssumeNothing.Compare(result.CurrentBest.P99LatencySample, result.CurrentUnlimited.P99LatencySample)
-			result.CurrentBestToUnlimitedLatencySig = currentBestToUnlimitedLatencyComparison.P < 0.05
-
-			// Efficiency deltas: change in static vs unlimited efficiency
-			result.ThroughputEfficiencyDelta = result.CurrentBestToUnlimitedThroughput - result.BaselineBestToUnlimitedThroughput
-			result.LatencyEfficiencyDelta = result.CurrentBestToUnlimitedLatency - result.BaselineBestToUnlimitedLatency
-		}
-
-		results = append(results, result)
-	}
-
-	// Sort by ratio first, then workload, then duration
-	slices.SortFunc(results, func(a, b ComparisonResult) int {
-		// Primary: Sort by flush period / duration ratio
-		ratioA := float64(a.Config.FlushPeriod) / float64(a.Config.Duration)
-		ratioB := float64(b.Config.FlushPeriod) / float64(b.Config.Duration)
-		if ratioA != ratioB {
-			if ratioA < ratioB {
-				return -1
-			}
-			return 1
-		}
-		// Secondary: Sort by workload
-		if a.Config.Workload != b.Config.Workload {
-			return strings.Compare(a.Config.Workload, b.Config.Workload)
-		}
-		// Tertiary: Sort by duration
-		return int(a.Config.Duration - b.Config.Duration)
-	})
-
-	return results
+type Measurement struct {
+	Values  []float64 // raw values collected before creating sample
+	Sample  *benchmath.Sample
+	Summary benchmath.Summary
 }
 
-func findBestStaticLimit(configData map[int]*BenchData) BenchData {
+func (m *Measurement) Add(v benchfmt.Value) {
+	m.Values = append(m.Values, v.Value)
+}
+
+const confidence = 0.95
+
+func (m *Measurement) ComputeStats() {
+	m.Sample = benchmath.NewSample(m.Values, &benchmath.DefaultThresholds)
+	m.Summary = benchmath.AssumeNothing.Summary(m.Sample, confidence)
+}
+
+type BenchData struct {
+	Config        Config
+	CombinerLimit int
+	Throughput    Measurement
+	P50Latency    Measurement
+	P99Latency    Measurement
+}
+
+func (d *BenchData) ComputeStats() {
+	d.Throughput.ComputeStats()
+	d.P50Latency.ComputeStats()
+	d.P99Latency.ComputeStats()
+}
+
+func findBestStaticLimit(configData map[int]*BenchData) *BenchData {
 	var best *BenchData
-	bestThroughput := 0.0
 
-	// Only consider positive combiner limits (per BENCHMARKING.md)
+	// Find lowest p99 latency static combiner limit
 	for limit, data := range configData {
 		if limit <= 0 {
 			continue
 		}
 
-		throughput := data.ThroughputSummary.Center
-		if throughput > bestThroughput {
-			bestThroughput = throughput
+		latency := data.P99Latency.Summary.Center
+		if best == nil || latency < best.P99Latency.Summary.Center {
 			best = data
 		}
 	}
 
-	if best == nil {
-		// Fallback - shouldn't happen with valid data
-		for _, data := range configData {
-			return *data
+	// Find all candidates that have p99 latencies indistiguishable from the best
+	candidates := []*BenchData{best}
+	for limit, data := range configData {
+		if limit <= 0 || data == best {
+			continue
+		}
+
+		comparison := compareMeasurements(best.P99Latency, data.P99Latency)
+		if comparison.P >= 0.05 {
+			candidates = append(candidates, data)
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	// Find candidates with best-in-class throughput
+	slices.SortFunc(candidates, func(a, b *BenchData) int {
+		return -cmp.Compare(a.Throughput.Summary.Center, b.Throughput.Summary.Center)
+	})
+	best = candidates[0]
+	for i := len(candidates) - 1; i > 0; i-- {
+		data := candidates[i]
+		comparison := compareMeasurements(best.Throughput, data.Throughput)
+		if comparison.P < 0.05 {
+			candidates = slices.Delete(candidates, i, i+1)
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	// Tiebreaker: find candidate with best p50 latency
+	best = nil
+	for _, data := range candidates {
+		if best == nil || data.P50Latency.Summary.Center < best.P50Latency.Summary.Center {
+			best = data
+		}
+	}
+	return best
+}
+
+type ComparisonResult struct {
+	Baseline   *BenchData
+	Current    *BenchData
+	Throughput benchmath.Comparison
+	P50Latency benchmath.Comparison
+	P99Latency benchmath.Comparison
+}
+
+func compareMeasurements(baseline, current Measurement) benchmath.Comparison {
+	return benchmath.AssumeNothing.Compare(baseline.Sample, current.Sample)
+}
+
+func printGatherOnlyComparison(baseline, current map[Config]map[int]*BenchData) {
+
+	t := table.NewWriter()
+	t.SetTitle("Gather-Only Benchmark Comparison")
+	t.SetOutputMirror(os.Stdout)
+	t.SetStyle(tableStyle)
+
+	tp1 := "Throughput"
+	tp2 := "Change"
+	lat := "Latency"
+	topheader := table.Row{"", "", "", "", "", lat, lat, lat, lat, "", ""}
+	midheader := table.Row{"", tp1, tp1}
+	subheader := table.Row{"Configuration", tp2, tp2}
+	colConfigs := []table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+		{Number: 2, Align: text.AlignRight},
+		{Number: 3, Align: text.AlignLeft},
+	}
+
+	// Set headers with duplication for auto-merge
+	latcats := []string{"Change", "vs. Duration"}
+	latps := []string{"P50", "P99"}
+	for _, latcat := range latcats {
+		for _, latp := range latps {
+			colConfigs = append(colConfigs,
+				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
+				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
+			)
+			midheader = append(midheader, latcat, latcat)
+			subheader = append(subheader, latp, latp) // Duplicate for value and significance columns
 		}
 	}
 
-	return *best
+	t.SetColumnConfigs(colConfigs)
+	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(midheader, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
+
+	configs, pairs := collectPairs(baseline, current, func(byLimit map[int]*BenchData) *BenchData {
+		return byLimit[0]
+	})
+
+	var lastRatio float64
+	for i, config := range configs {
+		// Add separator for ratio groups
+		currentRatio := float64(config.FlushPeriod) / float64(config.Duration)
+		if i != 0 && lastRatio != currentRatio {
+			t.AppendSeparator()
+		}
+		lastRatio = currentRatio
+
+		pair := pairs[config]
+		baseline, current := pair[0], pair[1]
+
+		row := table.Row{config}
+		row = appendPerformanceChanges(row, config, baseline, current)
+		row = appendLatenciesVsDuration(row, config, current)
+		t.AppendRow(row)
+	}
+
+	t.Render()
 }
 
-// Create a compact custom style based on StyleLight
+func printStaticCombinerConcurencyComparison(baseline, current map[Config]map[int]*BenchData) {
+
+	t := table.NewWriter()
+	t.SetTitle("Static Combiner Concurrency Benchmark Comparison")
+	t.SetOutputMirror(os.Stdout)
+	t.SetStyle(tableStyle)
+
+	bc1 := "Best"
+	bc2 := "Concurrency"
+	tp1 := "Throughput"
+	tp2 := "Change"
+	topheader := table.Row{"", "", "", "", "", ""}
+	midheader := table.Row{"", bc1, bc1, bc1, tp1, tp1}
+	subheader := table.Row{"Configuration", bc2, bc2, bc2, tp2, tp2}
+	colConfigs := []table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+		{Number: 2, Align: text.AlignRight},
+		{Number: 3, Align: text.AlignCenter},
+		{Number: 4, Align: text.AlignLeft},
+		{Number: 5, Align: text.AlignRight},
+		{Number: 6, Align: text.AlignLeft},
+	}
+
+	// Set headers with duplication for auto-merge
+	lat := "Latency"
+	latcats := []string{"Change", "vs. Duration"}
+	latps := []string{"P50", "P99"}
+	topheader = append(topheader, "", "", lat, lat, lat, lat, "", "")
+	for _, latcat := range latcats {
+		for _, latp := range latps {
+			colConfigs = append(colConfigs,
+				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
+				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
+			)
+			midheader = append(midheader, latcat, latcat)
+			subheader = append(subheader, latp, latp) // Duplicate for value and significance columns
+		}
+	}
+
+	t.SetColumnConfigs(colConfigs)
+	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(midheader, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
+
+	configs, pairs := collectPairs(baseline, current, findBestStaticLimit)
+
+	var lastRatio float64
+	for i, config := range configs {
+		// Add separator for ratio groups
+		currentRatio := float64(config.FlushPeriod) / float64(config.Duration)
+		if i != 0 && lastRatio != currentRatio {
+			t.AppendSeparator()
+		}
+		lastRatio = currentRatio
+
+		pair := pairs[config]
+		baseline, current := pair[0], pair[1]
+
+		// Build row
+		row := table.Row{
+			config,
+			fmt.Sprintf("%5d", baseline.CombinerLimit),
+			"→",
+			fmt.Sprintf("%-5d", current.CombinerLimit),
+		}
+		row = appendPerformanceChanges(row, config, baseline, current)
+		row = appendLatenciesVsDuration(row, config, current)
+		t.AppendRow(row)
+	}
+
+	t.Render()
+}
+
+func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
+	t := table.NewWriter()
+	t.SetTitle("Dynamic Combiner Concurrency Benchmark Comparison")
+	t.SetOutputMirror(os.Stdout)
+	t.SetStyle(tableStyle)
+
+	// Create header with merged cells using identical values and row config
+	topheader := table.Row{""}
+	mid1header := table.Row{""}
+	mid2header := table.Row{""}
+	subheader := table.Row{"Configuration"}
+	colConfigs := []table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+	}
+
+	addSubheaders := func() {
+		tp := "Throughput"
+		lat := "Latency"
+		mid2header = append(mid2header, tp, tp, lat, lat, lat, lat)
+		subheadings := []string{"Change", "P50", "P99"}
+		for _, sh := range subheadings {
+			colConfigs = append(colConfigs,
+				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
+				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
+			)
+			subheader = append(subheader, sh, sh)
+		}
+	}
+
+	mh1 := "Dynamic vs Dynamic"
+	topheader = append(topheader, "", "", "", "", "", "")
+	mid1header = append(mid1header, mh1, mh1, mh1, mh1, mh1, mh1)
+	addSubheaders()
+
+	th := "Best Static vs Dynamic"
+	mid1headings := []string{"Baseline", "Current"}
+	for _, mh1 := range mid1headings {
+		topheader = append(topheader, th, th, th, th, th, th)
+		mid1header = append(mid1header, mh1, mh1, mh1, mh1, mh1, mh1)
+		addSubheaders()
+	}
+
+	t.SetColumnConfigs(colConfigs)
+	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(mid1header, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(mid2header, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
+
+	bestStaticConfigs, bestStaticPairs := collectPairs(baseline, current, findBestStaticLimit)
+
+	var lastRatio float64
+	for i, config := range bestStaticConfigs {
+		// Add separator for ratio groups
+		currentRatio := float64(config.FlushPeriod) / float64(config.Duration)
+		if i != 0 && lastRatio != currentRatio {
+			t.AppendSeparator()
+		}
+		lastRatio = currentRatio
+
+		bestStaticPair := bestStaticPairs[config]
+		baselineBestStatic, currentBestStatic := bestStaticPair[0], bestStaticPair[1]
+
+		baselineDynamic := baseline[config][-1]
+		currentDynamic := current[config][-1]
+
+		row := table.Row{config}
+		row = appendPerformanceChanges(row, config, baselineDynamic, currentDynamic)
+		row = appendPerformanceChanges(row, config, baselineBestStatic, baselineDynamic)
+		row = appendPerformanceChanges(row, config, currentBestStatic, currentDynamic)
+		t.AppendRow(row)
+	}
+
+	t.Render()
+}
+
+func collectPairs(
+	baseline, current map[Config]map[int]*BenchData,
+	chooseLimitFn func(byLimit map[int]*BenchData) *BenchData,
+) ([]Config, map[Config][2]*BenchData) {
+
+	var pairs map[Config][2]*BenchData
+	for config, byLimit := range baseline {
+		data := chooseLimitFn(byLimit)
+		if data != nil {
+			pair := pairs[config]
+			pair[0] = data
+			if pairs == nil {
+				pairs = make(map[Config][2]*BenchData)
+			}
+			pairs[config] = pair
+		}
+	}
+	for config, byLimit := range current {
+		data := chooseLimitFn(byLimit)
+		if data != nil {
+			pair := pairs[config]
+			pair[1] = data
+			if pairs == nil {
+				pairs = make(map[Config][2]*BenchData)
+			}
+			pairs[config] = pair
+		}
+	}
+
+	// Sort configs by workload and then duration
+	configs := make([]Config, 0, len(pairs))
+	for config := range pairs {
+		configs = append(configs, config)
+	}
+	slices.SortFunc(configs, func(a, b Config) int {
+		// Primary: Sort by flush period / duration ratio
+		result := cmp.Compare(
+			float64(a.FlushPeriod)/float64(a.Duration),
+			float64(b.FlushPeriod)/float64(b.Duration),
+		)
+		if result != 0 {
+			return result
+		}
+		// Secondary: Sort by workload
+		if a.Workload != b.Workload {
+			return strings.Compare(a.Workload, b.Workload)
+		}
+		// Tertiary: Sort by duration
+		return cmp.Compare(a.Duration, b.Duration)
+	})
+
+	return configs, pairs
+}
+
+func appendPerformanceChanges(row table.Row, config Config, baseline, current *BenchData) table.Row {
+	row = append(row, formatChange(1, baseline.Throughput, current.Throughput)...)
+	row = append(row, formatChange(-1, baseline.P50Latency, current.P50Latency)...)
+	row = append(row, formatChange(-1, baseline.P99Latency, current.P99Latency)...)
+	return row
+}
+
+func appendLatenciesVsDuration(row table.Row, config Config, data *BenchData) table.Row {
+	row = append(row, formatLatencyVsDuration(config, data.P50Latency)...)
+	row = append(row, formatLatencyVsDuration(config, data.P99Latency)...)
+	return row
+}
+
+func formatChange(goodSign float64, baseline, current Measurement) []any {
+	comparison := compareMeasurements(baseline, current)
+	if comparison.P >= 0.01 {
+		return insignificant
+	}
+	return []any{
+		fmt.Sprintf("%+.1f%%",
+			100*computeRelativeDifference(baseline.Summary.Center, current.Summary.Center)),
+		formatIndicator(goodSign, baseline, current),
+	}
+}
+
+func formatLatencyVsDuration(config Config, current Measurement) []any {
+	duration := float64(config.Duration) / float64(time.Second)
+	delta := current.Summary.Center / duration
+	ind := neutralIndicator
+	if computeRelativeDifference(current.Summary.Hi, duration) <= -0.05 {
+		ind = badIndicator
+	}
+	return []any{fmt.Sprintf("%+.1f%%", 100*delta), ind}
+}
+
+func formatIndicator(goodSign float64, baseline, current Measurement) string {
+	if goodSign < 0 {
+		baseline, current = current, baseline
+	}
+	switch {
+	case computeRelativeDifference(baseline.Summary.Hi, current.Summary.Lo) >= 0.05:
+		return goodIndicator
+	case computeRelativeDifference(baseline.Summary.Lo, current.Summary.Hi) <= -0.05:
+		return badIndicator
+	}
+	return neutralIndicator
+}
+
+func computeRelativeDifference(baseline, current float64) float64 {
+	return (current / baseline) - 1
+}
+
 var tableStyle = table.StyleLight
 
 func init() {
@@ -448,332 +646,12 @@ func init() {
 	tableStyle.Box.LeftSeparator = ""
 }
 
-func printGatherOnlyResults(baselineData, currentData map[Config]map[int]*BenchData) {
-
-	t := table.NewWriter()
-	t.SetTitle("Gather-Only Benchmark Comparison")
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(tableStyle)
-
-	header := table.Row{"Configuration "}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-	}
-
-	headings := table.Row{"Throughput    ", "P99 Latency      ", "P99 Latency\n vs. Ideal"}
-	for _, h := range headings {
-		colConfigs = append(colConfigs,
-			table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
-			table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
-		)
-		header = append(header, h, h)
-	}
-
-	t.SetColumnConfigs(colConfigs)
-	t.AppendHeader(header, table.RowConfig{AutoMerge: true})
-
-	// Collect configs that have gatherOnly data (combinerLimit=0) in both baseline and current
-	var configs []Config
-	for config := range baselineData {
-		if baselineData[config][0] != nil && currentData[config] != nil && currentData[config][0] != nil {
-			configs = append(configs, config)
-		}
-	}
-
-	// Sort configs by workload and then duration
-	slices.SortFunc(configs, func(a, b Config) int {
-		if a.Workload != b.Workload {
-			return strings.Compare(a.Workload, b.Workload)
-		}
-		return int(a.Duration - b.Duration)
-	})
-
-	var lastRatio float64 = -1
-	for _, config := range configs {
-		baseline := baselineData[config][0]
-		current := currentData[config][0]
-
-		// Add separator for ratio groups
-		currentRatio := float64(config.FlushPeriod) / float64(config.Duration)
-		if lastRatio != -1 && lastRatio != currentRatio {
-			t.AppendSeparator()
-		}
-		lastRatio = currentRatio
-
-		// Calculate percentage changes
-		throughputChange := ((current.ThroughputSummary.Center - baseline.ThroughputSummary.Center) / baseline.ThroughputSummary.Center) * 100
-		latencyChange := ((current.P99LatencySummary.Center - baseline.P99LatencySummary.Center) / baseline.P99LatencySummary.Center) * 100
-
-		// Test significance
-		throughputComparison := benchmath.AssumeNothing.Compare(baseline.ThroughputSample, current.ThroughputSample)
-		latencyComparison := benchmath.AssumeNothing.Compare(baseline.P99LatencySample, current.P99LatencySample)
-
-		throughputSig := throughputComparison.P < 0.05
-		latencySig := latencyComparison.P < 0.05
-
-		row := table.Row{config}
-		row = append(row, formatChange(throughputChange, throughputSig)...)
-		row = append(row, formatLatencyChange(latencyChange, latencySig)...)
-
-		// Check threshold
-		currentLatency := time.Duration(current.P99LatencySummary.Center)
-		row = append(row, formatThreshold(config, currentLatency)...)
-
-		t.AppendRow(row)
-	}
-
-	t.Render()
-}
-
-func printSummaryResults(results []ComparisonResult) {
-
-	t := table.NewWriter()
-	t.SetTitle("Static Combiner Concurrency Benchmark Comparison")
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(tableStyle)
-
-	bc := "   Best\nConcurrency  "
-	header := table.Row{"Configuration", bc, bc, bc}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-		{Number: 2, Align: text.AlignRight},
-		{Number: 3, Align: text.AlignCenter},
-		{Number: 4, Align: text.AlignLeft},
-	}
-
-	// Set headers with duplication for auto-merge
-	headings := []string{"Throughput      ", "P99 Latency", "P99 Latency\n vs. Ideal"}
-	for _, h := range headings {
-		colConfigs = append(colConfigs,
-			table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
-			table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
-		)
-		header = append(header, h, h) // Duplicate for value and significance columns
-	}
-
-	t.SetColumnConfigs(colConfigs)
-	t.AppendHeader(header, table.RowConfig{AutoMerge: true})
-
-	var lastRatio float64 = -1 // Track previous ratio for blank line insertion
-	for _, result := range results {
-		// Add separator before each new ratio group
-		currentRatio := float64(result.Config.FlushPeriod) / float64(result.Config.Duration)
-		if lastRatio != -1 && lastRatio != currentRatio {
-			t.AppendSeparator()
-		}
-		lastRatio = currentRatio
-
-		// Build row
-		row := table.Row{
-			result.Config,
-			fmt.Sprintf("%5d", result.BaselineBest.CombinerLimit),
-			"→",
-			fmt.Sprintf("%-5d", result.CurrentBest.CombinerLimit),
-		}
-
-		// Add throughput value and significance
-		row = append(row, formatChange(result.ThroughputImprovement, result.ThroughputSignificant)...)
-
-		// Add latency value and significance
-		row = append(row, formatLatencyChange(result.LatencyImprovement, result.LatencySignificant)...)
-
-		// Add threshold value and significance
-		currentLatency := time.Duration(result.CurrentBest.P99LatencySummary.Center)
-		row = append(row, formatThreshold(result.Config, currentLatency)...)
-
-		t.AppendRow(row)
-	}
-
-	t.Render()
-}
-
-func printUnlimitedAnalysis(results []ComparisonResult) {
-	t := table.NewWriter()
-	t.SetTitle("Dynamic Combiner Concurrency Benchmark Comparison")
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(tableStyle)
-
-	// Create header with merged cells using identical values and row config
-	topheader := table.Row{""}
-	midheader := table.Row{""}
-	subheader := table.Row{"Configuration"}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-	}
-
-	addSubheaders := func() {
-		subheadings := []string{"Throughput  ", "P99 Latency"}
-		for _, sh := range subheadings {
-			colConfigs = append(colConfigs,
-				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
-				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
-			)
-			subheader = append(subheader, sh, sh)
-		}
-	}
-
-	mh := "Dynamic vs Dynamic"
-	topheader = append(topheader, "", "", "", "")
-	midheader = append(midheader, mh, mh, mh, mh)
-	addSubheaders()
-
-	th := "Best Static vs Dynamic"
-	midheadings := []string{"Baseline", "Current", "Change"}
-	for _, mh := range midheadings {
-		topheader = append(topheader, th, th, th, th)
-		midheader = append(midheader, mh, mh, mh, mh)
-		addSubheaders()
-	}
-
-	t.SetColumnConfigs(colConfigs)
-	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(midheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
-
-	var lastRatio float64 = -1 // Track previous ratio for blank line insertion
-	for _, result := range results {
-		// Skip if no unlimited data
-		if result.BaselineUnlimited == nil || result.CurrentUnlimited == nil {
-			continue
-		}
-
-		// Add separator before each new ratio group
-		currentRatio := float64(result.Config.FlushPeriod) / float64(result.Config.Duration)
-		if lastRatio != -1 && lastRatio != currentRatio {
-			t.AppendSeparator()
-		}
-		lastRatio = currentRatio
-
-		// Build row
-		row := table.Row{result.Config.String()}
-
-		// Add unlimited throughput and latency values with significance
-		row = append(row, formatChange(result.UnlimitedThroughputImprovement, result.UnlimitedThroughputSignificant)...)
-		row = append(row, formatLatencyChange(result.UnlimitedLatencyImprovement, result.UnlimitedLatencySignificant)...)
-
-		// Add baseline best-to-unlimited values with significance
-		row = append(row, formatChange(result.BaselineBestToUnlimitedThroughput, result.BaselineBestToUnlimitedThroughputSig)...)
-		row = append(row, formatChange(result.BaselineBestToUnlimitedLatency, result.BaselineBestToUnlimitedLatencySig)...)
-
-		// Add current best-to-unlimited values with significance
-		row = append(row, formatChange(result.CurrentBestToUnlimitedThroughput, result.CurrentBestToUnlimitedThroughputSig)...)
-		row = append(row, formatChange(result.CurrentBestToUnlimitedLatency, result.CurrentBestToUnlimitedLatencySig)...)
-
-		// Add efficiency delta values with significance
-		row = append(row, formatEfficiencyDelta(result.ThroughputEfficiencyDelta)...)
-		row = append(row, formatLatencyEfficiencyDelta(result.LatencyEfficiencyDelta)...)
-
-		t.AppendRow(row)
-	}
-
-	t.Render()
-}
-
-func formatUnlimitedChange(improvement float64, significant bool) []any {
-	if !significant {
-		return []any{"~ ", ""}
-	}
-
-	value := fmt.Sprintf("%+.0f%%", improvement)
-	if improvement == 0 {
-		value = "0%"
-	}
-
-	sig := ""
-	if improvement < 0 {
-		sig = "(!)"
-	}
-
-	return []any{value, sig}
-}
-
-func formatUnlimitedRatio(percentDiff float64, significant bool) []any {
-	if !significant {
-		return []any{"~ ", ""}
-	}
-
-	value := fmt.Sprintf("%+.0f%%", percentDiff)
-
-	sig := ""
-	if percentDiff < 0 { // Flag any drops as concerning (static limit worse than unlimited)
-		sig = "(!)"
-	}
-
-	return []any{value, sig}
-}
-
-func formatEfficiencyDelta(delta float64) []any {
-	value := fmt.Sprintf("%+.0f%%", delta)
-
-	sig := ""
-	if delta < 0 {
-		sig = "(!)"
-	}
-
-	return []any{value, sig}
-}
-
-func formatLatencyEfficiencyDelta(delta float64) []any {
-	// For latency: negative delta = improvement (good), positive delta = degradation (bad)
-	value := fmt.Sprintf("%+.0f%%", delta)
-
-	sig := ""
-	if delta > 0 { // Higher latency delta is bad
-		sig = "(!)"
-	}
-
-	return []any{value, sig}
-}
-
-func formatChange(change float64, significant bool) []any {
-	if !significant {
-		return []any{"~ ", ""}
-	}
-
-	value := fmt.Sprintf("%+.1f%%", change)
-	if change == 0 {
-		value = "0%"
-	}
-
-	sig := ""
-	if change < 0 {
-		sig = "(!)"
-	}
-
-	return []any{value, sig}
-}
-
-func formatLatencyChange(latencyImprovement float64, significant bool) []any {
-	if !significant {
-		return []any{"~ ", ""}
-	}
-
-	// For latency: positive improvement = lower latency = good (show as negative)
-	//              negative improvement = higher latency = bad (show as positive with !)
-	actualChange := -latencyImprovement // Flip to show actual latency change
-
-	value := fmt.Sprintf("%+.1f%%", actualChange)
-	if actualChange == 0 {
-		value = "0%"
-	}
-
-	sig := ""
-	if actualChange > 0 { // Higher latency is bad
-		sig = "(!)"
-	}
-
-	return []any{value, sig}
-}
-
-func formatThreshold(config Config, currentLatency time.Duration) []any {
-	threshold := config.FlushPeriod + config.Duration
-	thresholdNs := float64(threshold.Nanoseconds())
-	currentLatencyNs := float64(currentLatency.Nanoseconds())
-
-	if currentLatencyNs < thresholdNs {
-		return []any{"~ ", ""}
-	}
-
-	delta := ((currentLatencyNs - thresholdNs) / thresholdNs) * 100
-	return []any{fmt.Sprintf("+%.0f%%", delta), "(!)"}
-}
+const (
+	neutralIndicator = " "
+	goodIndicator    = "^"
+	badIndicator     = "!"
+)
+
+const insignificantIndicator = " ~ "
+
+var insignificant = []any{insignificantIndicator, neutralIndicator}

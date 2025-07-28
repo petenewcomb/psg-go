@@ -14,23 +14,24 @@ import (
 // wait for new work before exiting. Empirically determined; subject to change.
 const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 
-// DefaultMaxGCTimeRatioThreshold is the default GC time ratio threshold for [github.com/petenewcomb/psg-go.Job]
-// unless overridden with [WithMaxGCTimeRatioThreshold]. Triggers backpressure when
-// GC time ratio exceeds this threshold. Empirically determined; subject to change.
-const DefaultMaxGCTimeRatioThreshold = 0.5 // 50% of total CPU time used for GC
+// DefaultSchedulerLatencyThreshold is the default scheduler latency threshold for [github.com/petenewcomb/psg-go.Job]
+// unless overridden with [WithSchedulerLatencyThreshold]. Triggers backpressure when
+// scheduler latency exceeds this threshold. Empirically determined; subject to change.
+const DefaultSchedulerLatencyThreshold = 0 // disabled for now
 
-// DefaultGCTimeUpdateInterval is the default GC monitoring frequency for [github.com/petenewcomb/psg-go.Job]
-// unless overridden with [WithGCTimeUpdateInterval]. Controls how frequently GC time
-// ratios are monitored for backpressure decisions. Empirically determined; subject to change.
-const DefaultGCTimeUpdateInterval = 1 * time.Second
+// DefaultSchedulerLatencyMaxAge is the default max age for scheduler latency measurements
+// for [github.com/petenewcomb/psg-go.Job]
+// unless overridden with [WithSchedulerLatencyMaxAge]. Controls how old scheduler latency
+// measurements can be before they are ignored. Empirically determined; subject to change.
+const DefaultSchedulerLatencyMaxAge = 0 // disabled for now
 
 // JobOption is a configuration option that can be applied to Job.
 //
 // Available Job configuration options:
 //   - [WithTaskWorkerIdleTimeout] - Sets task worker idle timeout
-//   - [WithGCBackpressureSettings] - Sets both GC time ratio threshold and monitoring frequency
-//   - [WithMaxGCTimeRatioThreshold] - Sets GC time ratio threshold for backpressure
-//   - [WithGCTimeUpdateInterval] - Sets GC monitoring frequency
+//   - [WithSchedulerBackpressureSettings] - Sets both scheduler latency threshold and max age
+//   - [WithSchedulerLatencyThreshold] - Sets scheduler latency threshold for backpressure
+//   - [WithSchedulerLatencyMaxAge] - Sets max age for scheduler latency measurements
 //   - [WithFlushListener] - Registers callback for when all tasks complete
 type JobOption = opts.JobOption
 
@@ -55,63 +56,55 @@ type TaskWorkerIdleTimeoutOption interface {
 	JobOption
 }
 
-// WithGCBackpressureSettings sets both the GC time ratio threshold and
-// monitoring frequency for [github.com/petenewcomb/psg-go.Job]. This is a
-// convenience function for configuring GC-based backpressure settings at once.
+// WithSchedulerBackpressureSettings sets both the scheduler latency threshold and
+// max age for [github.com/petenewcomb/psg-go.Job]. This is a
+// convenience function for configuring scheduler-based backpressure settings at once.
 //
-// For setting individual GC parameters, see [WithMaxGCTimeRatioThreshold] and
-// [WithGCTimeUpdateInterval]. The default values are
-// [DefaultMaxGCTimeRatioThreshold] and [DefaultGCTimeUpdateInterval].
+// For setting individual scheduler parameters, see [WithSchedulerLatencyThreshold] and
+// [WithSchedulerLatencyMaxAge]. The default values are
+// [DefaultSchedulerLatencyThreshold] and [DefaultSchedulerLatencyMaxAge].
 //
-// Setting threshold to 0 disables GC-based backpressure entirely. Setting
-// interval to 0 disables GC monitoring entirely, which also disables GC-based
-// backpressure.
-func WithGCBackpressureSettings(threshold float64, interval time.Duration) GCBackpressureSettingsOption {
-	return opts.GCBackpressureSettings{Threshold: threshold, Interval: interval}
+// Setting threshold to 0 disables scheduler-based backpressure entirely.
+func WithSchedulerBackpressureSettings(threshold, maxAge time.Duration) SchedulerBackpressureSettingsOption {
+	return opts.SchedulerBackpressureSettings{Threshold: threshold, MaxAge: maxAge}
 }
 
-type GCBackpressureSettingsOption interface {
+type SchedulerBackpressureSettingsOption interface {
 	JobOption
 }
 
-// WithMaxGCTimeRatioThreshold sets the threshold for GC time ratio that
+// WithSchedulerLatencyThreshold sets the threshold for scheduler latency that
 // triggers backpressure during [github.com/petenewcomb/psg-go.Job] scatter
-// operations. When the ratio of GC CPU time to total CPU time exceeds this
-// threshold, new scatter operations will be delayed until GC pressure
-// decreases.
+// operations. When scheduler latency exceeds this threshold, new scatter
+// operations will be delayed until scheduler pressure decreases.
 //
-// The threshold must be in the range (0, 1], where 1.0 means 100% of CPU time
-// spent on GC. The default value is [DefaultMaxGCTimeRatioThreshold].
+// The default value is [DefaultSchedulerLatencyThreshold].
 //
-// Setting this to 0 disables GC-based backpressure entirely.
+// Setting this to 0 disables scheduler-based backpressure entirely.
 //
-// Related: [WithGCTimeUpdateInterval] controls monitoring frequency, and
-// [WithGCBackpressureSettings] sets both at once.
-func WithMaxGCTimeRatioThreshold(threshold float64) MaxGCTimeRatioThresholdOption {
-	return opts.MaxGCTimeRatioThreshold(threshold)
+// Related: [WithSchedulerLatencyMaxAge] controls how old measurements can be, and
+// [WithSchedulerBackpressureSettings] sets both at once.
+func WithSchedulerLatencyThreshold(threshold time.Duration) SchedulerLatencyThresholdOption {
+	return opts.SchedulerLatencyThreshold(threshold)
 }
 
-type MaxGCTimeRatioThresholdOption interface {
+type SchedulerLatencyThresholdOption interface {
 	JobOption
 }
 
-// WithGCTimeUpdateInterval sets how frequently
-// [github.com/petenewcomb/psg-go.Job] monitors GC time ratios for backpressure
-// decisions. More frequent updates provide more responsive backpressure but
-// consume more CPU for monitoring.
+// WithSchedulerLatencyMaxAge sets the maximum age for scheduler latency measurements
+// used by [github.com/petenewcomb/psg-go.Job] for backpressure decisions.
+// Measurements older than this age are ignored.
 //
-// The default value is [DefaultGCTimeUpdateInterval].
+// The default value is [DefaultSchedulerLatencyMaxAge].
 //
-// Setting this to 0 disables GC monitoring entirely, which also disables
-// GC-based backpressure.
-//
-// Related: [WithMaxGCTimeRatioThreshold] sets the threshold that triggers
-// backpressure, and [WithGCBackpressureSettings] sets both at once.
-func WithGCTimeUpdateInterval(interval time.Duration) GCTimeUpdateIntervalOption {
-	return opts.GCTimeUpdateInterval(interval)
+// Related: [WithSchedulerLatencyThreshold] sets the threshold that triggers
+// backpressure, and [WithSchedulerBackpressureSettings] sets both at once.
+func WithSchedulerLatencyMaxAge(maxAge time.Duration) SchedulerLatencyMaxAgeOption {
+	return opts.SchedulerLatencyMaxAge(maxAge)
 }
 
-type GCTimeUpdateIntervalOption interface {
+type SchedulerLatencyMaxAgeOption interface {
 	JobOption
 }
 

@@ -123,6 +123,7 @@ func scatterNowOrQueue(
 	queueFn workq.QueueWorkFunc,
 ) (startedOrQueued bool, err error) {
 	traceRegion := "scatterNowOrQueue"
+	j := target.getJob()
 
 	// Give previously scattered tasks a chance to run. Without this call, the
 	// normal use case of scattering many tasks in a tight loop tends not to
@@ -151,10 +152,15 @@ func scatterNowOrQueue(
 	}()
 
 	if meta.IsTopLevel() {
-		j := target.getJob()
-		err := j.yield(ctx)
-		if err != nil {
-			return false, err
+		for {
+			err := j.yield(ctx)
+			if err != nil {
+				return false, err
+			}
+			if !j.shouldWaitForSched() {
+				break
+			}
+			runtime.Gosched()
 		}
 
 		// Signal the work that it should block making Subscribe non-nil,

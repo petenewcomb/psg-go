@@ -11,19 +11,13 @@ import (
 
 type RenotifyFunc func()
 
-// WaitSelectFunc handles select operations on wait channels, returning the the
-// received RenotifyFunc or nil if the select exited without receiving one.
-type WaitSelectFunc func(waitCh <-chan RenotifyFunc) RenotifyFunc
+// WaitSelectFunc handles select operations on wait channels. The callback
+// MUST call waiter.Notified(renotifyFn) if a RenotifyFunc is received.
+// For best scheduler monitoring accuracy, this call SHOULD be made
+// immediately after receiving the RenotifyFunc.
+type WaitSelectFunc func(waiter *Waiter)
 
 type NotifyFunc func(RenotifyFunc)
-
-type Waiter struct {
-	inbox Inbox[RenotifyFunc]
-}
-
-func (w *Waiter) waiter() *Waiter {
-	return w
-}
 
 // Waiters provides a blocking wait and notification system for coordinating
 // between senders and receivers. It's used internally by Required to prevent
@@ -53,33 +47,31 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 	confirmFn func() bool,
 	orphanFn NotifyFunc,
 	selectFn WaitSelectFunc,
-) RenotifyFunc {
+) {
 	traceRegion := "rdvq.Waiter.WaitFuncWithOrphanHandler"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
+	waiter.renotifyFn = nil
+
 	if w == nil {
-		return selectFn(nil)
+		selectFn(nil)
+		return
 	}
-	var renotifyFn RenotifyFunc
+
 	w.q.PopFrontFunc(
 		&waiter.inbox,
 		orphanFn,
-		func(ch <-chan RenotifyFunc) SelectResult {
+		func(inbox *Inbox[RenotifyFunc]) {
 			if confirmFn() {
-				renotifyFn = selectFn(ch)
-				if renotifyFn != nil {
-					return SelectInboxEmptied
-				}
+				selectFn(waiter)
 			}
-			return SelectAborted
 		},
 	)
-	return renotifyFn
 }
 
-func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
-	return w.WaitFuncWithOrphanHandler(waiter, confirmFn, w.Notify, selectFn)
+func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) {
+	w.WaitFuncWithOrphanHandler(waiter, confirmFn, w.Notify, selectFn)
 }
 
 func (w *Waiters) WaitWithOrphanHandler(
@@ -87,26 +79,26 @@ func (w *Waiters) WaitWithOrphanHandler(
 	waiter *Waiter,
 	confirmFn func() bool,
 	orphanFn NotifyFunc,
-) (RenotifyFunc, error) {
+) error {
 	traceRegion := "rdvq.Waiter.WaitWithOrphanHandler"
 
 	var err error
-	renotifyFn := w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
-		trace.Logf(ctx, traceRegion, "entering select: waitCh=%p", waitCh)
+	w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waiter *Waiter) {
+		waitCh := waiter.Ch()
+		trace.Logf(ctx, traceRegion, "entering select: waiter=%p, waitCh=%p", waiter, waitCh)
 		select {
 		case renotifyFn := <-waitCh:
-			trace.Logf(ctx, traceRegion, "received renotifyFn from waitCh=%p", waitCh)
-			return renotifyFn
+			waiter.Notified(renotifyFn)
+			trace.Logf(ctx, traceRegion, "received renotifyFn from waiter=%p, waitCh=%p", waiter, waitCh)
 		case <-ctx.Done():
 			trace.Logf(ctx, traceRegion, "received context done signal")
 			err = ctx.Err()
 		}
-		return nil
 	})
-	return renotifyFn, err
+	return err
 }
 
-func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) (RenotifyFunc, error) {
+func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) error {
 	return w.WaitWithOrphanHandler(ctx, waiter, confirmFn, w.Notify)
 }
 

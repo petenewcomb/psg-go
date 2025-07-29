@@ -153,13 +153,16 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	bb := w.pool.job.protoBB
+	workFn := func(ctx context.Context, ex workq.Execution) error {
+		return w.target.scatter(ctx, ex, &w.taskPoolScatterWork, w.taskFn)
+	}
 
-	return w.pool.governor.Execute(ctx, ex, bb,
-		func(ctx context.Context, ex workq.Execution) error {
-			return w.target.scatter(ctx, ex, &w.taskPoolScatterWork, w.taskFn)
-		},
-	)
+	bb := w.pool.job.protoBB
+	if bb.ShouldBlock(ctx) != nil {
+		return w.pool.governor.Execute(ctx, ex, bb, workFn)
+	} else {
+		return workFn(ctx, ex)
+	}
 }
 
 func (w *combineScatterWork) Close() {

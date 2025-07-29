@@ -6,6 +6,7 @@ package workq
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -457,14 +458,32 @@ func (c *controller) shouldStillWait() bool {
 func (c *controller) requeueBuffer() {
 	traceRegion := "workq.controller.requeueBuffer"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
+	slices.SortFunc(c.buffer, func(a, b bufferedWork) int {
+		switch {
+		case a.work == nil && b.work == nil:
+			return 0
+		case a.work == nil:
+			return 1
+		case b.work == nil:
+			return -1
+		case a.work.ID() < b.work.ID():
+			return -1
+		case a.work.ID() > b.work.ID():
+			return 1
+		default:
+			panic("unexpected equal IDs in requeueBuffer")
+		}
+	})
 	for i := range c.buffer {
 		bw := &c.buffer[i]
 		work := bw.work
-		if work != nil {
-			bw.work = nil
-			trace.Logf(context.Background(), traceRegion, "pushing %v at index %d to deferred queue", work, i)
-			c.q.deferred.PushBack(work)
+		if work == nil {
+			// All nil from here on out
+			break
 		}
+		bw.work = nil
+		trace.Logf(context.Background(), traceRegion, "pushing %v to deferred queue", work)
+		c.q.deferred.PushBack(work)
 	}
 	c.buffer = c.buffer[:0]
 	c.currentIndex = 0

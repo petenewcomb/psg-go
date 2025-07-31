@@ -34,18 +34,20 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to create output file: %v", err)
 		}
-		defer outFile.Close()
+		defer func() {
+			_ = outFile.Close()
+		}()
 	}
 
 	writer := benchfmt.NewWriter(outFile)
 
 	if flag.NArg() == 0 {
 		if err := processFile("<stdin>", os.Stdin, writer); err != nil {
-			log.Fatal(err)
+			log.Fatal(err) //nolint:gocritic // ok for above defer to not run
 		}
 	} else {
 		for _, filename := range flag.Args() {
-			f, err := os.Open(filename)
+			f, err := os.Open(filename) //nolint:gosec // not sensitive
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -84,7 +86,7 @@ func processFile(filename string, f *os.File, writer *benchfmt.Writer) error {
 
 		case *benchfmt.SyntaxError:
 			// Report syntax errors
-			return fmt.Errorf("syntax error at %s:%d: %v", rec.FileName, rec.Line, rec)
+			return fmt.Errorf("syntax error at %s:%d: %w", rec.FileName, rec.Line, rec)
 		}
 	}
 

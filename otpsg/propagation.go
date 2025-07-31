@@ -72,7 +72,12 @@ func PropagateCombiner[I, O any](
 		innerCombiner := combinerFactory()
 
 		return psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]]{
-			CombineFn: func(ctx context.Context, input PropagatedResult[I], inputErr error, emit psgfn.Emit[PropagatedResult[O]]) {
+			CombineFn: func(
+				ctx context.Context,
+				input PropagatedResult[I],
+				inputErr error,
+				emit psgfn.Emit[PropagatedResult[O]],
+			) {
 				// Create context with propagated trace data
 				propagatedCtx := ctx
 				if input.TraceContext.IsValid() {

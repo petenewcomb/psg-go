@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,19 +25,21 @@ func main() {
 		input = os.Stdin
 	} else {
 		filename := os.Args[1]
-		file, err := os.Open(filename)
+		file, err := os.Open(filename) //nolint:gosec // not sensitive
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
 			os.Exit(1)
 		}
-		defer file.Close()
+		defer func() {
+			_ = file.Close()
+		}()
 		input = file
 	}
 
 	reader, err := trace.NewReader(input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating trace reader: %v\n", err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // ok to exit without running above defers
 	}
 
 	var startTimeNs, prevTimeNs trace.Time
@@ -70,21 +73,21 @@ func main() {
 		if firstEvent || threadID != prevThreadID || procID != prevProcID || goroutineID != prevGoroutineID {
 			var threadIDString string
 			if threadID == trace.NoThread {
-				threadIDString = "<NONE>"
+				threadIDString = "<NONE>" //nolint:goconst // different semantic than others below
 			} else {
 				threadIDString = fmt.Sprint(threadID)
 			}
 
 			var procIDString string
 			if procID == trace.NoProc {
-				procIDString = "<NONE>"
+				procIDString = "<NONE>" //nolint:goconst // different semantic than others above and below
 			} else {
 				procIDString = fmt.Sprint(procID)
 			}
 
 			var goroutineIDString string
 			if goroutineID == trace.NoGoroutine {
-				goroutineIDString = "<NONE>"
+				goroutineIDString = "<NONE>" //nolint:goconst // different semantic than others above
 			} else {
 				goroutineIDString = fmt.Sprint(goroutineID)
 			}
@@ -111,7 +114,7 @@ func main() {
 	for {
 		event, err := reader.ReadEvent()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			fmt.Fprintf(os.Stderr, "Error reading event: %v\n", err)
@@ -140,7 +143,7 @@ func main() {
 					}
 				}
 			}
-			if len(category) > 0 {
+			if category != "" {
 				fmt.Printf("%s: %s\n", category, log.Message)
 			} else {
 				fmt.Printf("%s\n", log.Message)

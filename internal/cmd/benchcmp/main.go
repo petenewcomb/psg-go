@@ -21,10 +21,15 @@ import (
 	"golang.org/x/perf/benchproc"
 )
 
+const alpha = 0.05
+const confidence = 0.95
+
+const percent = 100
+
 func main() {
 	flag.Parse()
 
-	if len(flag.Args()) != 2 {
+	if len(flag.Args()) != 2 { //nolint:mnd // 2 is the expected number of arguments
 		fmt.Fprintf(os.Stderr, "Usage: %s <baseline_file> <current_file>\n", os.Args[0])
 		os.Exit(1)
 	}
@@ -54,11 +59,13 @@ func main() {
 }
 
 func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
-	file, err := os.Open(filename)
+	file, err := os.Open(filename) //nolint:gosec // not sensitive
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	var pp benchproc.ProjectionParser
 
@@ -103,7 +110,11 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 			flushPeriodKey := flushPeriodP.Project(rec)
 			combinerLimitKey := combinerLimitP.Project(rec)
 
-			config, err := parseConfig(workloadKey.Get(workloadField), durationKey.Get(durationField), flushPeriodKey.Get(flushPeriodField))
+			config, err := parseConfig(
+				workloadKey.Get(workloadField),
+				durationKey.Get(durationField),
+				flushPeriodKey.Get(flushPeriodField),
+			)
 			if err != nil {
 				log.Printf("Skipping benchmark with invalid config: %v", err)
 				continue
@@ -203,8 +214,6 @@ func (m *Measurement) Add(v float64) {
 	m.Values = append(m.Values, v)
 }
 
-const confidence = 0.95
-
 func (m *Measurement) ComputeStats() {
 	m.Sample = benchmath.NewSample(m.Values, &benchmath.DefaultThresholds)
 	m.Summary = benchmath.AssumeNothing.Summary(m.Sample, confidence)
@@ -246,8 +255,8 @@ func findBestStaticLimit(configData map[int]*BenchData) *BenchData {
 			continue
 		}
 
-		comparison := compareMeasurements(best.P99Latency, data.P99Latency)
-		if comparison.P >= 0.05 {
+		comparison := compareMeasurements(&best.P99Latency, &data.P99Latency)
+		if comparison.P >= alpha {
 			candidates = append(candidates, data)
 		}
 	}
@@ -262,8 +271,8 @@ func findBestStaticLimit(configData map[int]*BenchData) *BenchData {
 	best = candidates[0]
 	for i := len(candidates) - 1; i > 0; i-- {
 		data := candidates[i]
-		comparison := compareMeasurements(best.Throughput, data.Throughput)
-		if comparison.P < 0.05 {
+		comparison := compareMeasurements(&best.Throughput, &data.Throughput)
+		if comparison.P < alpha {
 			candidates = slices.Delete(candidates, i, i+1)
 		}
 	}
@@ -289,7 +298,7 @@ type ComparisonResult struct {
 	P99Latency benchmath.Comparison
 }
 
-func compareMeasurements(baseline, current Measurement) benchmath.Comparison {
+func compareMeasurements(baseline, current *Measurement) benchmath.Comparison {
 	return benchmath.AssumeNothing.Compare(baseline.Sample, current.Sample)
 }
 
@@ -301,7 +310,7 @@ func printGatherOnlyComparison(baseline, current map[Config]map[int]*BenchData) 
 	t.SetStyle(tableStyle)
 
 	h := headersWithConfiguration()
-	h = appendPerformanceChangeHeaders(h, true)
+	appendPerformanceChangeHeaders(h, true)
 
 	setTableHeaders(t, h)
 
@@ -343,11 +352,13 @@ func printBestStaticCombinerConcurrencyComparison(baseline, current map[Config]m
 	h.top = append(h.top, "", "", "")
 	h.mid = append(h.mid, best, best, best)
 	h.sub = append(h.sub, concurrency, concurrency, concurrency)
-	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignRight})
-	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignCenter})
-	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignLeft})
+	h.colConfigs = append(h.colConfigs, []table.ColumnConfig{
+		{Align: text.AlignRight},
+		{Align: text.AlignCenter},
+		{Align: text.AlignLeft},
+	}...)
 
-	h = appendPerformanceChangeHeaders(h, true)
+	appendPerformanceChangeHeaders(h, true)
 
 	setTableHeaders(t, h)
 
@@ -387,7 +398,7 @@ func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[
 	t.SetStyle(tableStyle)
 
 	h := headersWithConfiguration()
-	h = appendPerformanceChangeHeaders(h, true)
+	appendPerformanceChangeHeaders(h, true)
 
 	setTableHeaders(t, h)
 
@@ -424,7 +435,7 @@ func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]ma
 	t.SetStyle(tableStyle)
 
 	h := headersWithConfiguration()
-	h = appendPerformanceChangeHeaders(h, false)
+	appendPerformanceChangeHeaders(h, false)
 
 	setTableHeaders(t, h)
 
@@ -454,9 +465,10 @@ func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]ma
 func collectPairs(
 	baseline, current map[Config]map[int]*BenchData,
 	chooseLimitFn func(byLimit map[int]*BenchData) *BenchData,
-) ([]Config, map[Config][2]*BenchData) {
-
-	var pairs map[Config][2]*BenchData
+) (
+	configs []Config,
+	pairs map[Config][2]*BenchData,
+) {
 	for config, byLimit := range baseline {
 		data := chooseLimitFn(byLimit)
 		if data != nil {
@@ -481,7 +493,7 @@ func collectPairs(
 	}
 
 	// Sort configs by workload and then duration
-	configs := make([]Config, 0, len(pairs))
+	configs = make([]Config, 0, len(pairs))
 	for config := range pairs {
 		configs = append(configs, config)
 	}
@@ -510,110 +522,112 @@ type Headers struct {
 	colConfigs    []table.ColumnConfig
 }
 
-func headersWithConfiguration() Headers {
-	return Headers{
+func headersWithConfiguration() *Headers {
+	return &Headers{
 		top: table.Row{""},
 		mid: table.Row{""},
 		sub: table.Row{"Configuration"},
 		colConfigs: []table.ColumnConfig{
-			{Number: 1, Align: text.AlignLeft},
+			{Align: text.AlignLeft},
 		},
 	}
 }
 
-func appendPerformanceChangeHeaders(h Headers, withIdeal bool) Headers {
+func appendPerformanceChangeHeaders(h *Headers, withIdeal bool) {
 	throughput := "Throughput"
 	change := "Change"
 	ideal := "%Ideal"
-	h = appendValueHeadersWithIndicator(h, "", throughput, change)
+	appendValueHeadersWithIndicator(h, "", throughput, change)
 	if withIdeal {
-		h = appendValueHeadersWithIndicator(h, "", throughput, ideal)
+		appendValueHeadersWithIndicator(h, "", throughput, ideal)
 	}
 
 	latency := "Latency"
 	percentiles := []string{"P50", "P99"}
 	for _, percentile := range percentiles {
-		h = appendValueHeadersWithIndicator(h, latency, change, percentile)
+		appendValueHeadersWithIndicator(h, latency, change, percentile)
 	}
 	if withIdeal {
 		for _, percentile := range percentiles {
-			h = appendValueHeadersWithIndicator(h, latency, ideal, percentile)
+			appendValueHeadersWithIndicator(h, latency, ideal, percentile)
 		}
 	}
-
-	return h
 }
 
-func appendValueHeadersWithIndicator(h Headers, top, mid, sub any) Headers {
+func appendValueHeadersWithIndicator(h *Headers, top, mid, sub any) {
 	h.top = append(h.top, top, top)
 	h.mid = append(h.mid, mid, mid)
 	h.sub = append(h.sub, sub, sub)
-	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignRight})
-	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignLeft})
-	return h
+	h.colConfigs = append(h.colConfigs, []table.ColumnConfig{
+		{Align: text.AlignRight},
+		{Align: text.AlignLeft},
+	}...)
 }
 
-func setTableHeaders(t table.Writer, h Headers) {
+func setTableHeaders(t table.Writer, h *Headers) {
 	t.AppendHeader(h.top, table.RowConfig{AutoMerge: true})
 	t.AppendHeader(h.mid, table.RowConfig{AutoMerge: true})
 	t.AppendHeader(h.sub, table.RowConfig{AutoMerge: true})
+	for i := range h.colConfigs {
+		h.colConfigs[i].Number = i + 1
+	}
 	t.SetColumnConfigs(h.colConfigs)
 }
 
 func appendPerformanceChanges(row table.Row, config Config, baseline, current, ideal *BenchData) table.Row {
-	row = append(row, formatChange(1, baseline.Throughput, current.Throughput)...)
+	row = append(row, formatChange(1, &baseline.Throughput, &current.Throughput)...)
 	if ideal != nil {
-		row = append(row, formatThroughputVsIdeal(config, ideal.Throughput)...)
+		row = append(row, formatThroughputVsIdeal(config, &ideal.Throughput)...)
 	}
-	row = append(row, formatChange(-1, baseline.P50Latency, current.P50Latency)...)
-	row = append(row, formatChange(-1, baseline.P99Latency, current.P99Latency)...)
+	row = append(row, formatChange(-1, &baseline.P50Latency, &current.P50Latency)...)
+	row = append(row, formatChange(-1, &baseline.P99Latency, &current.P99Latency)...)
 	if ideal != nil {
-		row = append(row, formatLatencyVsIdeal(config, ideal.P50Latency)...)
-		row = append(row, formatLatencyVsIdeal(config, ideal.P99Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, &ideal.P50Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, &ideal.P99Latency)...)
 	}
 	return row
 }
 
-func formatChange(goodSign float64, baseline, current Measurement) []any {
+func formatChange(goodSign float64, baseline, current *Measurement) []any {
 	comparison := compareMeasurements(baseline, current)
-	if comparison.P >= 0.01 {
+	if comparison.P >= alpha {
 		return insignificant
 	}
 	return []any{
 		fmt.Sprintf("%+.1f%%",
-			100*computeRelativeDifference(baseline.Summary.Center, current.Summary.Center)),
+			percent*computeRelativeDifference(baseline.Summary.Center, current.Summary.Center)),
 		formatIndicator(goodSign, baseline, current),
 	}
 }
 
-func formatThroughputVsIdeal(config Config, throughput Measurement) []any {
+func formatThroughputVsIdeal(config Config, throughput *Measurement) []any {
 	ideal := float64(config.FlushPeriod*time.Second) / float64(config.Duration*config.Duration)
 	delta := throughput.Summary.Center / ideal
 	ind := neutralIndicator
-	if computeRelativeDifference(ideal, throughput.Summary.Hi) <= -0.05 {
+	if computeRelativeDifference(ideal, throughput.Summary.Hi) <= -(1 - confidence) {
 		ind = badIndicator
 	}
-	return []any{fmt.Sprintf("%.1f%%", 100*delta), ind}
+	return []any{fmt.Sprintf("%.1f%%", percent*delta), ind}
 }
 
-func formatLatencyVsIdeal(config Config, latency Measurement) []any {
-	ideal := 2 * float64(config.Duration) / float64(time.Second) // combine + gather
+func formatLatencyVsIdeal(config Config, latency *Measurement) []any {
+	ideal := 2 * float64(config.Duration) / float64(time.Second) //nolint:mnd // combine + gather
 	delta := latency.Summary.Center / ideal
 	ind := neutralIndicator
-	if computeRelativeDifference(ideal, latency.Summary.Lo) >= 0.05 {
+	if computeRelativeDifference(ideal, latency.Summary.Lo) >= (1 - confidence) {
 		ind = badIndicator
 	}
-	return []any{fmt.Sprintf("%.1f%%", 100*delta), ind}
+	return []any{fmt.Sprintf("%.1f%%", percent*delta), ind}
 }
 
-func formatIndicator(goodSign float64, baseline, current Measurement) string {
+func formatIndicator(goodSign float64, baseline, current *Measurement) string {
 	if goodSign < 0 {
 		baseline, current = current, baseline
 	}
 	switch {
-	case computeRelativeDifference(baseline.Summary.Hi, current.Summary.Lo) >= 0.05:
+	case computeRelativeDifference(baseline.Summary.Hi, current.Summary.Lo) >= (1 - confidence):
 		return goodIndicator
-	case computeRelativeDifference(baseline.Summary.Lo, current.Summary.Hi) <= -0.05:
+	case computeRelativeDifference(baseline.Summary.Lo, current.Summary.Hi) <= -(1 - confidence):
 		return badIndicator
 	}
 	return neutralIndicator

@@ -35,7 +35,7 @@ type seriesPoints struct {
 	Labels []string
 }
 
-func (sp seriesPoints) Label(i int) string {
+func (sp *seriesPoints) Label(i int) string {
 	return sp.Labels[i]
 }
 
@@ -85,7 +85,7 @@ func plotScatter(c *chart, outputDir string) error {
 	}
 	plotutil.DefaultColors = palette.Colors()
 
-	series := make([]any, 0, 2*len(c.SeriesLabels))
+	series := make([]any, 0, 2*len(c.SeriesLabels)) //nolint:mnd // label + points
 	for i, label := range c.SeriesLabels {
 		series = append(series, label, c.SeriesPoints[i])
 	}
@@ -96,9 +96,11 @@ func plotScatter(c *chart, outputDir string) error {
 	p.X.Min = 1.0 / float64(time.Millisecond)
 	p.Y.Min = 0
 
+	//nolint:gocritic // useful for debugging
 	// p.Add(plotter.NewGlyphBoxes())
 
-	return savePlot(c, p, 10.0/6.0, outputDir)
+	const aspect = 10.0 / 6.0
+	return savePlot(c, p, aspect, outputDir)
 }
 
 func plotBars(c *chart, outputDir string) error {
@@ -120,28 +122,28 @@ func plotBars(c *chart, outputDir string) error {
 	}
 	colors := palette.Colors()
 
-	barSpacing := vg.Points(3)
-	barWidth := vg.Points(24)
+	const barSpacingPoints = 3
+	const barWidthPoints = 24
 
 	// Calculate the total width of the bar group, center to center.
-	groupWidth := (barWidth + barSpacing) * vg.Length(len(c.SeriesPoints)-1)
+	groupWidth := vg.Points(barWidthPoints+barSpacingPoints) * vg.Length(len(c.SeriesPoints)-1)
 
 	for i, label := range c.SeriesLabels {
 		points := c.SeriesPoints[i]
-		bc, err := newBarChart(points, barWidth)
+		bc, err := newBarChart(points, vg.Points(barWidthPoints))
 		if err != nil {
 			return err
 		}
-		bc.Offset = (barWidth+barSpacing)*vg.Length(i) - groupWidth/2
+		bc.Offset = vg.Points(barWidthPoints+barSpacingPoints)*vg.Length(i) - groupWidth/2 //nolint:mnd // centering
 		bc.Color = colors[i]
 		bc.LineStyle.Width = 0
 		bc.ErrorStyle.Color = color.Gray{128}
-		bc.ErrorStyle.Width = 0.2 * vg.Millimeter
+		bc.ErrorStyle.Width = 0.2 * vg.Millimeter //nolint:mnd // legit magic number
 		bc.LabelStyle = p.Y.Label.TextStyle
 		bc.LabelStyle.Font.Size *= 0.7
 		bc.LabelOffsets = make([]vg.Point, points.Len())
 		for j := range bc.LabelOffsets {
-			bc.LabelOffsets[j].Y = vg.Points(10)
+			bc.LabelOffsets[j].Y = vg.Points(10) //nolint:mnd // legit magic number
 		}
 
 		p.Add(bc)
@@ -151,33 +153,34 @@ func plotBars(c *chart, outputDir string) error {
 	p.Y.Min = 0
 	p.Y.Max *= c.YAxisGrowFactor
 
+	//nolint:gocritic // useful for debugging
 	// p.Add(plotter.NewGlyphBoxes())
 
-	return savePlot(c, p, 16.0/6.0, outputDir)
+	const aspect = 16.0 / 6.0
+	return savePlot(c, p, aspect, outputDir)
 }
 
 func savePlot(c *chart, p *plot.Plot, aspect float64, outputDir string) error {
-	height := 6 * vg.Inch
+	height := 6 * vg.Inch //nolint:mnd // legit magic number
 	width := vg.Length(aspect * float64(height))
 	svg := vgsvg.New(width, height)
 	dc := draw.New(svg)
 
 	p.Legend.Top = true
 	p.Legend.Left = true
-	p.Legend.Padding = vg.Points(6)
+	p.Legend.Padding = vg.Points(6) //nolint:mnd // legit magic number
 	// Calculate the width of the legend.
 	r := p.Legend.Rectangle(dc)
 	legendHeight := r.Max.Y - r.Min.Y
 	legendHeight += p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding
-	legendWidth := r.Max.X - r.Min.X + p.Legend.Padding/2
+	legendWidth := r.Max.X - r.Min.X + p.Legend.Padding/2 //nolint:mnd // centering
 	ddc := p.DataCanvas(dc)
-	ldc := draw.Crop(dc, dc.Max.X-legendWidth, 0, 0, -(ddc.Max.Y-ddc.Min.Y)/2+legendHeight/2)
+	ldc := draw.Crop(dc, dc.Max.X-legendWidth, 0, 0, -(ddc.Max.Y-ddc.Min.Y)/2+legendHeight/2) //nolint:mnd // centering
 	p.Legend.Draw(ldc)
 
 	r = p.Legend.Rectangle(ldc)
-	// r.Max.X += p.Legend.Padding / 2
-	r.Max.Y += p.Legend.Padding / 2
-	r.Min.Y -= p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding/2
+	r.Max.Y += p.Legend.Padding / 2                                          //nolint:mnd // centering
+	r.Min.Y -= p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding/2 //nolint:mnd // centering
 	ldc.StrokeLines(draw.LineStyle{
 		Color: color.Gray{128},
 		Width: vg.Points(1),
@@ -187,14 +190,18 @@ func savePlot(c *chart, p *plot.Plot, aspect float64, outputDir string) error {
 	})
 
 	p.Legend = plot.NewLegend()
-	dc = draw.Crop(dc, 0, -legendWidth-vg.Points(16), 0, 0) // Make space for the legend.
+
+	// Make space for the legend.
+	dc = draw.Crop(dc, 0, -legendWidth-vg.Points(16), 0, 0) //nolint:mnd // legit magic number
+
 	p.Draw(dc)
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(outputDir, 0750); err != nil {
+	if err := os.MkdirAll(outputDir, 0o750); err != nil { //nolint:mnd // legit magic number
 		return err
 	}
 
+	//nolint:gosec // not sensitive
 	w, err := os.Create(filepath.Join(outputDir, c.FileBasename+".svg"))
 	if err != nil {
 		return err
@@ -251,7 +258,8 @@ func main() {
 	}
 	residueP := pp.Residue()
 
-	dataByMethodWorkloadDurationFlushPeriodUnit := make(map[MethodKey]map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
+	dataByMethodWorkloadDurationFlushPeriodUnit := make(
+		map[MethodKey]map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
 	methodKeySet := make(map[MethodKey]struct{})
 	workloadKeySet := make(map[WorkloadKey]struct{})
 	workloadDurationKeySet := make(map[WorkloadDurationKey]struct{})
@@ -262,7 +270,8 @@ func main() {
 		methodKey := MethodKey{methodP.Project(res)}
 		dataByWorkloadDurationFlushPeriodUnit, ok := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
 		if !ok {
-			dataByWorkloadDurationFlushPeriodUnit = make(map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
+			dataByWorkloadDurationFlushPeriodUnit = make(
+				map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
 			dataByMethodWorkloadDurationFlushPeriodUnit[methodKey] = dataByWorkloadDurationFlushPeriodUnit
 			methodKeySet[methodKey] = struct{}{}
 		}
@@ -399,7 +408,8 @@ func main() {
 		if flushPeriodKeysPerWorkloadDuration == -1 {
 			flushPeriodKeysPerWorkloadDuration = len(flushPeriodKeys)
 		} else if len(flushPeriodKeys) != flushPeriodKeysPerWorkloadDuration {
-			log.Fatalf("%v has %d flush period keys, expected %d", workloadDurationKey, len(flushPeriodKeys), flushPeriodKeysPerWorkloadDuration)
+			log.Fatalf("%v has %d flush period keys, expected %d",
+				workloadDurationKey, len(flushPeriodKeys), flushPeriodKeysPerWorkloadDuration)
 		}
 	}
 
@@ -428,11 +438,11 @@ func main() {
 	slices.SortFunc(methodKeys, func(a, b MethodKey) int {
 		av := concurrencyLimits[a]
 		if av == -1 {
-			av = math.MaxInt / 2
+			av = math.MaxInt / 2 //nolint:mnd // effectively infinite without fear of wrapping
 		}
 		bv := concurrencyLimits[b]
 		if bv == -1 {
-			bv = math.MaxInt / 2
+			bv = math.MaxInt / 2 //nolint:mnd // effectively infinite without fear of wrapping
 		}
 		d := av - bv
 		switch {
@@ -481,7 +491,10 @@ func main() {
 		if i == 0 {
 			continue
 		}
-		logSpreadRatio := math.Log(float64(workloadDurations[workloadDurationKeys[i]]) / float64(workloadDurations[workloadDurationKeys[i-1]]))
+		logSpreadRatio := math.Log(
+			float64(workloadDurations[workloadDurationKeys[i]]) /
+				float64(workloadDurations[workloadDurationKeys[i-1]]),
+		)
 		if i == 1 || logSpreadRatio < minLogWorkloadDurationSpreadRatio {
 			minLogWorkloadDurationSpreadRatio = logSpreadRatio
 		}
@@ -533,21 +546,21 @@ func main() {
 		}
 
 		for _, workloadDurationKey := range workloadDurationKeys {
-			// workloadDuration := float64(workloadDurations[workloadDurationKey])
 			for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
-				// flushPeriod := float64(flushPeriods[flushPeriodKey])
 
 				workloadDurationString := workloadDurationKey.Get(workloadDurationP.Fields()[0])
 				flushPeriodString := flushPeriodKey.Get(flushPeriodP.Fields()[0])
 
 				chart := chart{
-					Title:           fmt.Sprintf("Throughput vs. P99 Latency\n(%v %s workload flushing every %v)", workloadDurationString, workloadName, flushPeriodString),
-					XAxisLabel:      "P99 Workflow Latency (milliseconds)",
-					YAxisLabel:      "Workflow Throughput (tasks per second)",
-					SeriesLabels:    make([]string, 0, len(methodKeys)),
-					SeriesPoints:    make([]seriesPoints, 0, len(methodKeys)),
-					FileBasename:    fmt.Sprintf("%s_%v@%v_throughput_vs_latency", workloadName, workloadDurationString, flushPeriodString),
-					YAxisGrowFactor: 1.2,
+					Title: fmt.Sprintf("Throughput vs. P99 Latency\n(%v %s workload flushing every %v)",
+						workloadDurationString, workloadName, flushPeriodString),
+					XAxisLabel:   "P99 Workflow Latency (milliseconds)",
+					YAxisLabel:   "Workflow Throughput (tasks per second)",
+					SeriesLabels: make([]string, 0, len(methodKeys)),
+					SeriesPoints: make([]seriesPoints, 0, len(methodKeys)),
+					FileBasename: fmt.Sprintf("%s_%v@%v_throughput_vs_latency",
+						workloadName, workloadDurationString, flushPeriodString),
+					YAxisGrowFactor: 1.2, //nolint:mnd // legit magic number
 				}
 
 				// Create lines for each workload type
@@ -559,7 +572,6 @@ func main() {
 					var methodDisplayName string
 					switch methodName {
 					case "gatherOnly":
-						// methodDisplayName = "Gather Only"
 						continue
 					case "combine":
 						if concurrencyLimit == -1 {
@@ -582,7 +594,7 @@ func main() {
 					var points seriesPoints
 					points.XYs = make(plotter.XYs, len(latency))
 					for i, x := range latency {
-						points.XYs[i].X = x * 1000 // scale to millseconds
+						points.XYs[i].X = x * 1000 //nolint:mnd // scale to millseconds
 						points.XYs[i].Y = throughput[i]
 					}
 					chart.SeriesPoints = append(chart.SeriesPoints, points)
@@ -604,7 +616,7 @@ func main() {
 			SeriesLabels:    make([]string, len(methodKeys)),
 			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
 			FileBasename:    workloadName + "_aggregation_throughput",
-			YAxisGrowFactor: 1.2,
+			YAxisGrowFactor: 1.2, //nolint:mnd // legit magic number
 		}
 
 		speedupChart := chart{
@@ -616,7 +628,7 @@ func main() {
 			SeriesLabels:    make([]string, len(methodKeys)),
 			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
 			FileBasename:    workloadName + "_aggregation_speedup",
-			YAxisGrowFactor: 1.2,
+			YAxisGrowFactor: 1.2, //nolint:mnd // legit magic number
 		}
 
 		allocationsChart := chart{
@@ -628,7 +640,7 @@ func main() {
 			SeriesLabels:    make([]string, len(methodKeys)),
 			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
 			FileBasename:    workloadName + "_aggregation_allocations",
-			YAxisGrowFactor: 1.6,
+			YAxisGrowFactor: 1.6, //nolint:mnd // legit magic number
 		}
 
 		allocBytesChart := chart{
@@ -640,7 +652,7 @@ func main() {
 			SeriesLabels:    make([]string, len(methodKeys)),
 			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
 			FileBasename:    workloadName + "_aggregation_bytes",
-			YAxisGrowFactor: 1.6,
+			YAxisGrowFactor: 1.6, //nolint:mnd // legit magic number
 		}
 
 		// Create lines for each workload type
@@ -703,7 +715,8 @@ func main() {
 					throughputPoints.XYs[pointIndex].X = flushPeriod
 
 					unit := "tasks/sec"
-					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
 					if data == nil {
 						return
 					}
@@ -738,7 +751,8 @@ func main() {
 					speedupPoints.XYs[pointIndex].X = workloadDuration
 
 					unit := "tasks/sec"
-					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
 					if data == nil {
 						return
 					}
@@ -763,7 +777,8 @@ func main() {
 					allocationsPoints.XYs[pointIndex].X = workloadDuration
 
 					unit := "allocs/op"
-					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
 					if data == nil {
 						return
 					}
@@ -780,7 +795,8 @@ func main() {
 					allocBytesPoints.XYs[pointIndex].X = workloadDuration
 
 					unit := "B/op"
-					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
 					if data == nil {
 						return
 					}

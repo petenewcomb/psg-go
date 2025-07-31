@@ -145,7 +145,7 @@ func (b *barChart) Plot(c draw.Canvas, plt *plot.Plot) {
 			}
 		}
 		cat += b.Offset
-		catMin := cat - b.Width/2
+		catMin := cat - b.Width/2 //nolint:mnd // by definition
 		catMax := catMin + b.Width
 		bottom := b.stackedOn.BarHeight(i)
 		valMin := trVal(bottom)

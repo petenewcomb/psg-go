@@ -296,6 +296,47 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }
 
+type benchmarkTaskResult struct {
+	Time    time.Time
+	Depth   int
+	Latency time.Duration
+}
+
+type benchmarkTask struct {
+	startTime time.Time
+	depth     int
+	executeFn psgfn.Task[benchmarkTaskResult]
+}
+
+var benchmarkTaskPool = omnipool.For[benchmarkTask]()
+
+func newBenchmarkTaskFn(startTime time.Time, depth int) psgfn.Task[benchmarkTaskResult] {
+	task := benchmarkTaskPool.Get()
+	task.startTime = startTime
+	task.depth = depth
+	return task.executeFn
+}
+
+func (t *benchmarkTask) Init() {
+	t.depth = -1
+	t.executeFn = t.execute
+}
+
+func (t *benchmarkTask) Reset() {
+	t.startTime = time.Time{}
+	t.depth = -1
+}
+
+func (t *benchmarkTask) execute(context.Context) (benchmarkTaskResult, error) {
+	defer benchmarkTaskPool.Put(t)
+	now := time.Now()
+	return benchmarkTaskResult{
+		Time:    now,
+		Latency: now.Sub(t.startTime),
+		Depth:   t.depth,
+	}, nil
+}
+
 // BenchmarkCombinerThroughput measures the maximum throughput of processing
 // a continuous stream of data with gather-only vs. combiner approaches
 func BenchmarkCombinerThroughput(b *testing.B) {
@@ -383,22 +424,18 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							job.CancelAndWait()
 						}()
 
-						type taskResult struct {
-							Time    time.Time
-							Depth   int
-							Latency time.Duration
-						}
+						type taskResult = benchmarkTaskResult
 
 						type combinedResult struct {
 							Time                time.Time
 							Depth               int
 							Count               int
-							TaskLatenciesNs     *tdigest.CentroidList
-							LatenciesNs         *tdigest.CentroidList
-							DurationsNs         *tdigest.CentroidList
+							TaskLatenciesNs     tdigest.CentroidList
+							LatenciesNs         tdigest.CentroidList
+							DurationsNs         tdigest.CentroidList
 							DurationSum         time.Duration
 							DurationCount       int
-							WorkflowLatenciesNs *tdigest.CentroidList
+							WorkflowLatenciesNs tdigest.CentroidList
 							MaxConcurrency      int
 						}
 
@@ -415,18 +452,18 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						centroidListPool := omnipool.ForSlice(tdigest.CentroidList(nil))
-						newCentroidList := func(c ...tdigest.Centroid) *tdigest.CentroidList {
+						newCentroidList := func(c ...tdigest.Centroid) tdigest.CentroidList {
 							cl := centroidListPool.Get()
 							cl = append(cl, c...)
-							return &cl
+							return cl
 						}
-						copyCentroidList := func(t *tdigest.TDigest) *tdigest.CentroidList {
+						copyCentroidList := func(t *tdigest.TDigest) tdigest.CentroidList {
 							cl := centroidListPool.Get()
 							cl = t.Centroids(cl)
-							return &cl
+							return cl
 						}
-						poolCentroidList := func(cl *tdigest.CentroidList) {
-							centroidListPool.Put(*cl)
+						poolCentroidList := func(cl tdigest.CentroidList) {
+							centroidListPool.Put(cl)
 						}
 
 						totalTasksGathered := 0
@@ -464,19 +501,19 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							// Front-load all measurement work before simulated work
 							gatherLatenciesNs.Add(gatherLatencyNs, 1.0)
 							totalTasksGathered += combineRes.Count
-							taskLatenciesNs.AddCentroidList(*combineRes.TaskLatenciesNs)
-							combineLatenciesNs.AddCentroidList(*combineRes.LatenciesNs)
-							combineDurationsNs.AddCentroidList(*combineRes.DurationsNs)
+							taskLatenciesNs.AddCentroidList(combineRes.TaskLatenciesNs)
+							combineLatenciesNs.AddCentroidList(combineRes.LatenciesNs)
+							combineDurationsNs.AddCentroidList(combineRes.DurationsNs)
 							combineDurationSum += combineRes.DurationSum
 							combineDurationCount += combineRes.DurationCount
-							combineWorkflowLatenciesNs.AddCentroidList(*combineRes.WorkflowLatenciesNs)
+							combineWorkflowLatenciesNs.AddCentroidList(combineRes.WorkflowLatenciesNs)
 							maxCombinerConcurrency = max(maxCombinerConcurrency, combineRes.MaxConcurrency)
 
 							// Add gather latency to workflow latencies to get scatter-to-gather-start time
-							for i := range *combineRes.WorkflowLatenciesNs {
-								(*combineRes.WorkflowLatenciesNs)[i].Mean += gatherLatencyNs
+							for i := range combineRes.WorkflowLatenciesNs {
+								combineRes.WorkflowLatenciesNs[i].Mean += gatherLatencyNs
 							}
-							workflowLatenciesNs.AddCentroidList(*combineRes.WorkflowLatenciesNs)
+							workflowLatenciesNs.AddCentroidList(combineRes.WorkflowLatenciesNs)
 
 							combineCounts.Add(float64(combineRes.Count), 1.0)
 
@@ -628,10 +665,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						var totalTasksLaunched atomic.Int64
 						newTaskFn = func(startTime time.Time, depth int) psgfn.Task[taskResult] {
 							totalTasksLaunched.Add(1)
-							return func(context.Context) (taskResult, error) {
-								now := time.Now()
-								return taskResult{Time: now, Latency: now.Sub(startTime), Depth: depth}, nil
-							}
+							return newBenchmarkTaskFn(startTime, depth)
 						}
 
 						opTasksGatheredOrigin := totalTasksGathered

@@ -40,9 +40,11 @@ func (s *schedulerLatencySensor) waitEnded() {
 	traceRegion := "rdvq.schedulerLatencySensor.waitEnded"
 	waitEndTime := time.Since(epoch)
 	triggerTime := time.Duration(s.triggerTime.Load())
-	trace.Logf(context.Background(), "rdvq.schedulerLatencySensor.waitEnded",
-		"schedulerLatencySensor=%p, waitStartTime=%d, triggerTime=%d, waitEndTime=%d",
-		s, s.waitStartTime, triggerTime, waitEndTime)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "rdvq.schedulerLatencySensor.waitEnded",
+			"schedulerLatencySensor=%p, waitStartTime=%d, triggerTime=%d, waitEndTime=%d",
+			s, s.waitStartTime, triggerTime, waitEndTime)
+	}
 	if triggerTime > s.waitStartTime && triggerTime < waitEndTime {
 		latency := waitEndTime - triggerTime
 		schedulerLatency.Store(int64(latency))
@@ -51,14 +53,18 @@ func (s *schedulerLatencySensor) waitEnded() {
 		// the update time. The important thing is that if the update time is
 		// recent, then the latency value is also recent.
 		schedulerLatencyUpdateTime.Store(int64(waitEndTime))
-		trace.Logf(context.Background(), traceRegion, "stored latency=%v", latency)
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion, "stored latency=%v", latency)
+		}
 	}
 }
 
 //nolint:contextcheck // background context used only for tracing
 func (s *schedulerLatencySensor) triggered() {
 	triggerTime := time.Since(epoch)
-	trace.Logf(context.Background(), "rdvq.schedulerLatencySensor.triggered",
-		"schedulerLatencySensor=%p triggerTime=%v", s, triggerTime)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "rdvq.schedulerLatencySensor.triggered",
+			"schedulerLatencySensor=%p triggerTime=%v", s, triggerTime)
+	}
 	s.triggerTime.Store(int64(triggerTime))
 }

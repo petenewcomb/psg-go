@@ -306,6 +306,8 @@ func (cp *CombinerPool) goroutine() {
 		if worker.idleTimer == nil {
 			if cp.spareElected.CompareAndSwap(false, true) {
 				worker.idleTimer = timerp.Get()
+				worker.idleFollowupFn = worker.idleFollowup // avoid reallocation of closure
+
 				defer func() { //nolint:gocritic // can execute only once due to CAS
 					cp.spareElected.Store(false)
 					timerp.Put(worker.idleTimer)

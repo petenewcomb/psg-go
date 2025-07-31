@@ -22,7 +22,9 @@ func (c *InFlightCounter) Increment() bool {
 	newValue := c.v.Add(1)
 	ok := newValue == 1
 
-	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d; returning %v", c, newValue, ok)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d; returning %v", c, newValue, ok)
+	}
 	return ok
 }
 

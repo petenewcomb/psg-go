@@ -26,6 +26,8 @@ type TaskPool struct {
 	maxConcurrency atomic.Int32
 	inFlight       jobstate.InFlightCounter
 	waiters        workq.Waiters
+
+	decrementInFlightFn func() // avoid closure reallocation
 }
 
 // Creates a new [TaskPool] bound to the specified job with the given options.
@@ -53,6 +55,8 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 
 	// Check if the job is done
 	job.panicIfDone()
+
+	p.decrementInFlightFn = p.decrementInFlight
 
 	p.waiters.Init()
 
@@ -129,7 +133,7 @@ func (p *TaskPool) scatter(
 
 	return p.waiters.Execute(ctx, ex, wb,
 		func(ctx context.Context, ex workq.Execution) error {
-			return p.job.scatterWithCompletedFn(ctx, group, ex, taskFn, p.decrementInFlight)
+			return p.job.scatterWithCompletedFn(ctx, group, ex, taskFn, p.decrementInFlightFn)
 		},
 	)
 }

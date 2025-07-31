@@ -316,9 +316,6 @@ func (cw *cpWorker) spareInnerPopSelect(
 	select {
 	case <-cw.idleTimerCh:
 		trace.Logf(ctx, traceRegion, "received idle timer signal")
-		if cw.idleFollowupFn == nil {
-			cw.idleFollowupFn = cw.idleFollowup
-		}
 		cw.followupFn = cw.idleFollowupFn
 
 	// Here down should be identical to primaryInnerPopSelect above

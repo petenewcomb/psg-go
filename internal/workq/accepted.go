@@ -165,6 +165,7 @@ type controller struct {
 
 	ex Execution // avoid closure reallocations
 
+	shouldStillWaitFn  func() bool     // avoid closure reallocations
 	shouldStillWaitCtx context.Context //nolint:containedctx // temporary to avoid closure allocation
 	shouldStillWaitErr error
 }
@@ -177,6 +178,7 @@ func (c *controller) Init() {
 	c.ex.Starting = c.starting
 	c.ex.Subscribe = c.subscribe
 	c.ex.Queue = c.queueFresh
+	c.shouldStillWaitFn = c.shouldStillWait
 }
 
 // Reset implements omnipool.Resetter to clear state while preserving allocations
@@ -188,8 +190,9 @@ func (c *controller) Reset() {
 
 	// Clear all but reusable allocations
 	*c = controller{
-		buffer: c.buffer[:0],
-		ex:     c.ex,
+		buffer:            c.buffer[:0],
+		ex:                c.ex,
+		shouldStillWaitFn: c.shouldStillWaitFn,
 	}
 }
 
@@ -310,7 +313,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 	}()
 
 	var err error
-	c.renotifyFn, err = c.addWorkFn(ctx, c.ex.Queue, &c.q.waiters, c.shouldStillWait)
+	c.renotifyFn, err = c.addWorkFn(ctx, c.ex.Queue, &c.q.waiters, c.shouldStillWaitFn)
 	err = errors.Join(c.shouldStillWaitErr, err)
 
 	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)

@@ -55,14 +55,14 @@ func (m *Map[K, T]) WithValue(
 	// Compute new value
 	computedCtx, value := computeFn(sourceValue, haveSourceValue)
 
-	stampedCtx = computedCtx
+	newStampedCtx := computedCtx
 	if computedCtx != ctx || !haveSourceValue || value != sourceValue {
-		stampedCtx = context.WithValue(computedCtx, key, value)
+		newStampedCtx = context.WithValue(computedCtx, key, value)
 	}
 
 	newEntry := &entry[T]{
 		value:      value,
-		stampedCtx: stampedCtx,
+		stampedCtx: newStampedCtx,
 	}
 
 	// Use LoadOrStore to handle race condition where another goroutine
@@ -85,18 +85,18 @@ func (m *Map[K, T]) WithValue(
 	// entry object because the stop function will be different.
 	newStampedEntry := &entry[T]{
 		value:      value,
-		stampedCtx: stampedCtx,
+		stampedCtx: newStampedCtx,
 	}
-	if _, loaded := m.cache.LoadOrStore(stampedCtx, newStampedEntry); !loaded {
+	if _, loaded := m.cache.LoadOrStore(newStampedCtx, newStampedEntry); !loaded {
 		// Set up cleanup. If the ctx is already canceled, this will immediately
 		// remove it from the cache.
-		newStampedEntry.stop = context.AfterFunc(stampedCtx, func() {
-			m.cache.Delete(stampedCtx)
+		newStampedEntry.stop = context.AfterFunc(newStampedCtx, func() {
+			m.cache.Delete(newStampedCtx)
 		})
 	}
 
 	// We successfully stored our result
-	return stampedCtx, value
+	return newStampedCtx, value
 }
 
 // Close cancels all AfterFunc cleanup functions and clears the cache.

@@ -4,7 +4,9 @@
 package omnipool
 
 import (
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Test types
@@ -14,13 +16,15 @@ type simpleStruct struct {
 }
 
 type resetterStruct struct {
-	A int
-	B string
+	A          int
+	B          string
+	resetCount int // tracks how many times this object has been reset
 }
 
 func (r *resetterStruct) Reset() {
 	r.A = 0
 	r.B = ""
+	r.resetCount++
 }
 
 func TestBasicPooling(t *testing.T) {
@@ -37,78 +41,157 @@ func TestBasicPooling(t *testing.T) {
 	// Put it back
 	Put(obj1)
 
-	// Get another object (might be the same one, zeroed)
-	obj2 := Get[simpleStruct]()
-	if obj2 == nil {
-		t.Fatal("Second Get() returned nil")
+	// Try to verify pooling by attempting to get the same pointer back
+	// Keep trying for up to 10ms to account for sync.Pool behavior
+	deadline := time.Now().Add(10 * time.Millisecond)
+	var gotPooled bool
+	for time.Now().Before(deadline) {
+		// Put the same object back to increase chances
+		Put(obj1)
+
+		obj2 := Get[simpleStruct]()
+		if obj2 == obj1 {
+			gotPooled = true
+			// Should be zeroed
+			if obj2.A != 0 || obj2.B != "" {
+				t.Errorf("Object not properly zeroed: A=%d, B=%q", obj2.A, obj2.B)
+			}
+			Put(obj2) // Put it back for cleanup
+			break
+		} else {
+			// Different object, put it back
+			Put(obj2)
+		}
 	}
 
-	// Should be zeroed
-	if obj2.A != 0 || obj2.B != "" {
-		t.Errorf("Object not properly zeroed: A=%d, B=%q", obj2.A, obj2.B)
+	if !gotPooled {
+		t.Errorf("Failed to get a pooled object after 10ms - pooling may not be working")
 	}
 }
 
 func TestResetterInterface(t *testing.T) {
-	// Get an object
-	obj1 := Get[resetterStruct]()
-	if obj1 == nil {
-		t.Fatal("Get() returned nil")
+	// Put some objects in the pool
+	for i := 0; i < 10; i++ {
+		obj := Get[resetterStruct]()
+		obj.A = i
+		obj.B = "test" //nolint:goconst // test string
+		Put(obj)       // This should call Reset()
 	}
 
-	// Modify it
-	obj1.A = 42
-	obj1.B = "resetter test"
+	// Try to get a pooled object with non-zero reset count
+	deadline := time.Now().Add(10 * time.Millisecond)
+	var foundPooled bool
 
-	// Put it back (should call Reset())
-	Put(obj1)
+	for time.Now().Before(deadline) {
+		obj := Get[resetterStruct]()
 
-	// Get another object
-	obj2 := Get[resetterStruct]()
-	if obj2 == nil {
-		t.Fatal("Second Get() returned nil")
+		// If resetCount > 0, this object was pooled and reset at least once
+		if obj.resetCount > 0 {
+			foundPooled = true
+			// Verify fields were reset
+			if obj.A != 0 || obj.B != "" {
+				t.Errorf("Pooled object not properly reset: A=%d, B=%q", obj.A, obj.B)
+			}
+			Put(obj)
+			break
+		}
+
+		// Put it back to try again
+		Put(obj)
 	}
 
-	// Should be reset
-	if obj2.A != 0 || obj2.B != "" {
-		t.Errorf("Object not properly reset: A=%d, B=%q", obj2.A, obj2.B)
+	if !foundPooled {
+		t.Errorf("No pooled objects found after 10ms - pooling may not be working")
 	}
 }
 
+// Types to test separate pooling - use structs with Init to track creation
+var positiveCounter atomic.Int64
+var negativeCounter atomic.Int64
+
+type PositiveID struct {
+	ID   int64 // Set during Init, preserved through Reset
+	Data string
+}
+
+func (p *PositiveID) Init() {
+	p.ID = positiveCounter.Add(1)
+}
+
+func (p *PositiveID) Reset() {
+	// Preserve ID to track object identity
+	p.Data = ""
+}
+
+type NegativeID struct {
+	ID   int64 // Set during Init, preserved through Reset
+	Data string
+}
+
+func (n *NegativeID) Init() {
+	n.ID = -negativeCounter.Add(1)
+}
+
+func (n *NegativeID) Reset() {
+	// Preserve ID to track object identity
+	n.Data = ""
+}
+
 func TestMultipleTypes(t *testing.T) {
-	// Test that different types are pooled separately
-	intPtr := Get[int]()
-	stringPtr := Get[string]()
-	structPtr := Get[simpleStruct]()
+	// Test that different types are pooled separately even when similar
+	positiveCounter.Store(0)
+	negativeCounter.Store(0)
 
-	if intPtr == nil || stringPtr == nil || structPtr == nil {
-		t.Fatal("One of the Get() calls returned nil")
+	// Create and put back some objects to populate pools
+	for i := 0; i < 10; i++ {
+		p := Get[PositiveID]()
+		p.Data = "test" //nolint:goconst // test string
+		Put(p)
+
+		n := Get[NegativeID]()
+		n.Data = "test" //nolint:goconst // test string
+		Put(n)
 	}
 
-	// Modify them
-	*intPtr = 42
-	*stringPtr = "multitype test"
-	structPtr.A = 100
+	// Now verify we only get appropriate IDs from each pool
+	deadline := time.Now().Add(10 * time.Millisecond)
+	var foundPositivePooled, foundNegativePooled bool
 
-	// Put them back
-	Put(intPtr)
-	Put(stringPtr)
-	Put(structPtr)
+	for time.Now().Before(deadline) {
+		// Get from PositiveID pool
+		p := Get[PositiveID]()
+		if p.ID > 0 {
+			// Correct - positive ID from positive pool
+			if p.ID <= 10 {
+				foundPositivePooled = true // This is a reused object
+			}
+		} else {
+			t.Errorf("Got negative ID %d from PositiveID pool", p.ID)
+		}
+		Put(p)
 
-	// Get new ones
-	intPtr2 := Get[int]()
-	stringPtr2 := Get[string]()
-	structPtr2 := Get[simpleStruct]()
+		// Get from NegativeID pool
+		n := Get[NegativeID]()
+		if n.ID < 0 {
+			// Correct - negative ID from negative pool
+			if n.ID >= -10 {
+				foundNegativePooled = true // This is a reused object
+			}
+		} else {
+			t.Errorf("Got positive ID %d from NegativeID pool", n.ID)
+		}
+		Put(n)
 
-	// Should be zeroed
-	if *intPtr2 != 0 {
-		t.Errorf("int not zeroed: %d", *intPtr2)
+		if foundPositivePooled && foundNegativePooled {
+			break
+		}
 	}
-	if *stringPtr2 != "" {
-		t.Errorf("string not zeroed: %q", *stringPtr2)
+
+	if !foundPositivePooled {
+		t.Errorf("Failed to get pooled objects from PositiveID pool")
 	}
-	if structPtr2.A != 0 || structPtr2.B != "" {
-		t.Errorf("struct not zeroed: A=%d, B=%q", structPtr2.A, structPtr2.B)
+	if !foundNegativePooled {
+		t.Errorf("Failed to get pooled objects from NegativeID pool")
 	}
 }
 

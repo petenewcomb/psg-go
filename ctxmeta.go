@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"maps"
 	"sync"
-	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -41,8 +40,9 @@ func (cm *ctxMeta) IsTopLevel() bool {
 }
 
 type executionEnvironment interface {
+	CurrentGroup() workq.GroupID
 	WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox))
-	LockAndSetQueueFunc(queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
+	LockAndSetQueueFunc(group workq.GroupID, queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
 		*workq.Receiver, *workq.Waiter, *workq.Waiter)
 	UnlockAndResetQueueFunc()
 	MayQueue() workq.QueueWorkFunc
@@ -51,11 +51,18 @@ type executionEnvironment interface {
 type topLevelExEnv struct {
 	mu             sync.Mutex
 	outboxMap      outboxMap
-	queueFn        workq.QueueWorkFunc
-	queueFnDepth   atomic.Int32
+	groupStack     []workq.GroupID
+	queueFnStack   []workq.QueueWorkFunc
 	workReceiver   workq.Receiver
 	workWaiter     workq.Waiter
 	blockWaiterMap map[*workq.Waiters]*workq.Waiter
+}
+
+func (ee *topLevelExEnv) CurrentGroup() workq.GroupID {
+	if len(ee.groupStack) == 0 {
+		return workq.InvalidGroupID
+	}
+	return ee.groupStack[len(ee.groupStack)-1]
 }
 
 func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox)) {
@@ -70,30 +77,35 @@ func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Ou
 	fn(outbox)
 }
 
-func (ee *topLevelExEnv) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
-	workReceiver *workq.Receiver, workWaiter *workq.Waiter, blockWaiter *workq.Waiter,
+func (ee *topLevelExEnv) LockAndSetQueueFunc(
+	group workq.GroupID,
+	queueFn workq.QueueWorkFunc,
+	blockWaiters *workq.Waiters,
+) (
+	workReceiver *workq.Receiver,
+	workWaiter *workq.Waiter,
+	blockWaiter *workq.Waiter,
 ) {
 	traceRegion := "topLevelExEnv.LockAndSetQueueFunc"
 
-	queueFnDepth := ee.queueFnDepth.Add(1)
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%d", ee, queueFnDepth)
-
-	// Handle reentrancy. Would be nice to assert that the queueFn is the same
-	// each time, but function pointers are not comparable in Go.
-	if queueFnDepth == 1 {
+	if len(ee.queueFnStack) == 0 {
 		ee.mu.Lock()
-		ee.queueFn = queueFn
-		if blockWaiters != nil {
-			blockWaiter = ee.blockWaiterMap[blockWaiters]
-			if blockWaiter == nil {
-				if ee.blockWaiterMap == nil {
-					ee.blockWaiterMap = make(map[*workq.Waiters]*workq.Waiter)
-				}
-				blockWaiter = &workq.Waiter{}
-				ee.blockWaiterMap[blockWaiters] = blockWaiter
+	}
+
+	ee.queueFnStack = append(ee.queueFnStack, queueFn)
+	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%d", ee, len(ee.queueFnStack))
+
+	if blockWaiters != nil {
+		blockWaiter = ee.blockWaiterMap[blockWaiters]
+		if blockWaiter == nil {
+			if ee.blockWaiterMap == nil {
+				ee.blockWaiterMap = make(map[*workq.Waiters]*workq.Waiter)
 			}
+			blockWaiter = &workq.Waiter{}
+			ee.blockWaiterMap[blockWaiters] = blockWaiter
 		}
 	}
+
 	return &ee.workReceiver, &ee.workWaiter, blockWaiter
 }
 
@@ -101,26 +113,21 @@ func (ee *topLevelExEnv) UnlockAndResetQueueFunc() {
 	traceRegion := "topLevelExEnv.UnlockAndResetQueueFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	queueFnDepth := ee.queueFnDepth.Add(-1)
-	if queueFnDepth < 0 {
-		panic("unbalanced calls to LockAndSet/UnlockAndResetQueueFunc")
+	ee.queueFnStack = ee.queueFnStack[:len(ee.queueFnStack)-1]
+
+	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%v", ee, len(ee.queueFnStack))
+
+	if len(ee.queueFnStack) == 0 {
+		ee.mu.Unlock()
 	}
-
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%v", ee, queueFnDepth)
-
-	if queueFnDepth > 0 {
-		// Reentrant. Would be nice to assert that the queueFn is the same, but
-		// function pointers are not comparable in Go.
-		return
-	}
-
-	ee.queueFn = nil
-	ee.mu.Unlock()
 }
 
 func (ee *topLevelExEnv) MayQueue() workq.QueueWorkFunc {
-	// Lock must already be held by WithQueueFunc
-	return ee.queueFn
+	// Lock must already be held by LockAndSetQueueFunc
+	if len(ee.queueFnStack) == 0 {
+		return nil
+	}
+	return ee.queueFnStack[len(ee.queueFnStack)-1]
 }
 
 type ctxMetaValueKey struct{}

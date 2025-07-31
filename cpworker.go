@@ -27,7 +27,8 @@ type cpWorker struct {
 	doneErr          func() error
 
 	idleTimerCh            <-chan time.Time
-	queueFn                []workq.QueueWorkFunc
+	groupStack             []workq.GroupID
+	queueFnStack           []workq.QueueWorkFunc
 	inbox                  *rdvq.Inbox[workq.Work]
 	flushDeadlineTimerCh   <-chan time.Time
 	nextJobFlushCh         <-chan struct{}
@@ -39,26 +40,32 @@ type cpWorker struct {
 	idleFollowupFn func(context.Context) // avoid closure reallocation
 }
 
+func (cw *cpWorker) CurrentGroup() workq.GroupID {
+	return cw.groupStack[len(cw.groupStack)-1]
+}
+
 func (cw *cpWorker) IsSpare() bool {
 	return cw.idleTimer != nil
 }
 
 func (cw *cpWorker) MayQueue() workq.QueueWorkFunc {
-	if len(cw.queueFn) == 0 {
+	if len(cw.queueFnStack) == 0 {
 		return nil
 	}
-	return cw.queueFn[len(cw.queueFn)-1]
+	return cw.queueFnStack[len(cw.queueFnStack)-1]
 }
 
-func (cw *cpWorker) LockAndSetQueueFunc(queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
+func (cw *cpWorker) LockAndSetQueueFunc(group workq.GroupID, queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
 	workReceiver *workq.Receiver, workWaiter *workq.Waiter, blockWaiter *workq.Waiter,
 ) {
-	cw.queueFn = append(cw.queueFn, queueFn)
+	cw.groupStack = append(cw.groupStack, group)
+	cw.queueFnStack = append(cw.queueFnStack, queueFn)
 	return &cw.workReceiver, &cw.workWaiter, nil
 }
 
 func (cw *cpWorker) UnlockAndResetQueueFunc() {
-	cw.queueFn = cw.queueFn[:len(cw.queueFn)-1]
+	cw.groupStack = cw.groupStack[:len(cw.groupStack)-1]
+	cw.queueFnStack = cw.queueFnStack[:len(cw.queueFnStack)-1]
 }
 
 func (cw *cpWorker) WithOutbox(key outboxKey[workq.Work], fn func(outbox *workq.Outbox)) {
@@ -83,9 +90,9 @@ func (cw *cpWorker) AddWork(
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
 ) (workq.RenotifyFunc, error) {
-	cw.queueFn = append(cw.queueFn, queueFn)
+	cw.queueFnStack = append(cw.queueFnStack, queueFn)
 	defer func() {
-		cw.queueFn = cw.queueFn[:len(cw.queueFn)-1]
+		cw.queueFnStack = cw.queueFnStack[:len(cw.queueFnStack)-1]
 	}()
 
 	if queuedFlush, _ := cw.flushToNextDeadline(ctx); queuedFlush {
@@ -95,7 +102,7 @@ func (cw *cpWorker) AddWork(
 	if workWaiters == nil {
 		// Non-blocking mode
 		if work, ok := cw.cp.combineQueue.TryPopFront(); ok {
-			cw.queueFn[len(cw.queueFn)-1](work)
+			cw.queue(work)
 		}
 		return nil, nil
 	}
@@ -110,7 +117,7 @@ func (cw *cpWorker) AddWork(
 	}()
 	if !cw.IsSpare() {
 		// Primary goroutine, no need for idle detection
-		cw.cp.combineQueue.PopFrontFunc(&cw.workReceiver, cw.queueFn[len(cw.queueFn)-1],
+		cw.cp.combineQueue.PopFrontFunc(&cw.workReceiver, cw.queueFnStack[len(cw.queueFnStack)-1],
 			func(inbox *rdvq.Inbox[workq.Work], outboxWaiter *rdvq.Waiter) {
 				cw.waitForWork(ctx, inbox, outboxWaiter, workWaiters, confirmWorkWaitFn,
 					func(inbox *rdvq.Inbox[workq.Work], outboxWaiter *rdvq.Waiter) {
@@ -148,13 +155,13 @@ func (cw *cpWorker) AddWork(
 			},
 		)
 		if ok {
-			cw.queueFn[len(cw.queueFn)-1](work)
+			cw.queue(work)
 		}
 	}
 
 	work := cw.newWork
 	if work != nil {
-		cw.queueFn[len(cw.queueFn)-1](work)
+		cw.queue(work)
 	}
 
 	followupFn := cw.followupFn
@@ -163,6 +170,10 @@ func (cw *cpWorker) AddWork(
 	}
 
 	return cw.workWaiter.RenotifyFn(), cw.err
+}
+
+func (cw *cpWorker) queue(work workq.Work) {
+	cw.queueFnStack[len(cw.queueFnStack)-1](work)
 }
 
 func (cw *cpWorker) waitForWork(
@@ -358,6 +369,6 @@ func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFu
 		// Make sure the job won't terminate before the combiner is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
-	combineFn(ctx, &cw.combinerMap, cw.queueFn[len(cw.queueFn)-1], cw.emitGatherOutbox)
+	combineFn(ctx, &cw.combinerMap, cw.queueFnStack[len(cw.queueFnStack)-1], cw.emitGatherOutbox)
 	cw.cp.state.IncrementCompleted()
 }

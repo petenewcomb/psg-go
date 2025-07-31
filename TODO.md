@@ -28,6 +28,7 @@ Items to complete before merging to main branch.
 - review again for readability
 - make sure all exported functions emit trace regions
 - reorganize code within large files like job.go
+- create a reusable WaiterMap to replace existing duplicated blockWaiterMap code
 - re-review tracing guidelines in DEVELOPMENT.md
 - check the scatter plots and review combiner pool controller settings
 - review and understand processing and waiting aggregation throughput and speedup graphs - interesting how flat they are, but seems potentially right

@@ -458,6 +458,11 @@ func (c *controller) shouldStillWait() bool {
 func (c *controller) requeueBuffer() {
 	traceRegion := "workq.controller.requeueBuffer"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	// Minimize latencies, especially tail latencies, by ensuring that collected
+	// work items are sorted by ascending group and work IDs before requeuing.
+	// This prioritizes older work groups and items over newer ones, preventing
+	// individual items from being starved by shuffling.
 	slices.SortFunc(c.buffer, func(a, b bufferedWork) int {
 		switch {
 		case a.work == nil && b.work == nil:
@@ -466,6 +471,10 @@ func (c *controller) requeueBuffer() {
 			return 1
 		case b.work == nil:
 			return -1
+		case a.work.Group() < b.work.Group():
+			return -1
+		case a.work.Group() > b.work.Group():
+			return 1
 		case a.work.ID() < b.work.ID():
 			return -1
 		case a.work.ID() > b.work.ID():

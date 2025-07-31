@@ -117,6 +117,7 @@ func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 
 func (cp *CombinerPool) postCombine(
 	ctx context.Context,
+	group workq.GroupID,
 	outbox *workq.Outbox,
 	combineFn boundCombineFunc,
 ) {
@@ -129,7 +130,7 @@ func (cp *CombinerPool) postCombine(
 		cp.spawnNewGoroutine()
 	}
 
-	work := cp.newCombineWork(combineFn)
+	work := cp.newCombineWork(group, combineFn)
 
 	cp.combineQueue.PushBackFunc(outbox, work, func(outbox *workq.Outbox) {
 		// Fallback to slow path when outbox would block
@@ -138,11 +139,11 @@ func (cp *CombinerPool) postCombine(
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (cp *CombinerPool) newCombineWork(combineFn boundCombineFunc) *combineWork {
+func (cp *CombinerPool) newCombineWork(group workq.GroupID, combineFn boundCombineFunc) *combineWork {
 	traceRegion := "CombinerPool.newCombineWork"
 
 	w := combineWorkPool.Get()
-	w.Init(cp, combineFn)
+	w.Init(group, cp, combineFn)
 
 	trace.Logf(context.Background(), traceRegion, "CombinerPool=%p created %v", cp, w)
 	return w
@@ -155,8 +156,8 @@ type combineWork struct {
 	combineFn boundCombineFunc
 }
 
-func (w *combineWork) Init(pool *CombinerPool, combineFn boundCombineFunc) {
-	w.jobWork.Init(pool.job)
+func (w *combineWork) Init(group workq.GroupID, pool *CombinerPool, combineFn boundCombineFunc) {
+	w.jobWork.Init(group, pool.job)
 	w.pool = pool
 	w.combineFn = combineFn
 }
@@ -169,7 +170,7 @@ func (w *combineWork) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	workerCtx, meta := w.pool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)
-	cw.LockAndSetQueueFunc(ex.Queue, nil)
+	cw.LockAndSetQueueFunc(w.Group(), ex.Queue, nil)
 	defer cw.UnlockAndResetQueueFunc()
 	cw.executeCombine(workerCtx, w.combineFn)
 	return nil
@@ -375,6 +376,7 @@ type combinerMapKey struct {
 
 func getCombineFunc[I, O any](
 	ctx context.Context,
+	group workq.GroupID,
 	cm *combinerMap,
 	cp *CombinerPool,
 	c *CombineOp[I, O],
@@ -400,7 +402,7 @@ func getCombineFunc[I, O any](
 				return c.gatherOp.gatherFn(ctx, output, outputErr)
 			}
 
-			j.postGather(ctx, emitGatherOutbox, gatherFn)
+			j.postGather(ctx, group, emitGatherOutbox, gatherFn)
 		}
 
 		combiner := func() Combiner[I, O] {

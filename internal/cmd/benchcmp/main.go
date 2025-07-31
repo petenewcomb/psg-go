@@ -43,10 +43,13 @@ func main() {
 	printGatherOnlyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printStaticCombinerConcurencyComparison(baseline, current)
+	printBestStaticCombinerConcurrencyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
 	printDynamicCombinerConcurrencyComparison(baseline, current)
+	fmt.Println()
+	fmt.Println()
+	printBestStaticVsDynamicCombinerConcurrencyComparison(current)
 	fmt.Println()
 }
 
@@ -130,23 +133,11 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 			for _, v := range rec.Values {
 				switch v.Unit {
 				case "tasks/sec":
-					benchData.Throughput.Add(v)
-				case "p50-combine-latency-sec":
-					if limit != 0 {
-						benchData.P50Latency.Add(v)
-					}
-				case "p99-combine-latency-sec":
-					if limit != 0 {
-						benchData.P99Latency.Add(v)
-					}
-				case "p50-gather-latency-sec":
-					if limit == 0 {
-						benchData.P50Latency.Add(v)
-					}
-				case "p99-gather-latency-sec":
-					if limit == 0 {
-						benchData.P99Latency.Add(v)
-					}
+					benchData.Throughput.Add(v.Value)
+				case "p50-workflow-latency-sec":
+					benchData.P50Latency.Add(v.Value)
+				case "p99-workflow-latency-sec":
+					benchData.P99Latency.Add(v.Value)
 				}
 			}
 
@@ -208,8 +199,8 @@ type Measurement struct {
 	Summary benchmath.Summary
 }
 
-func (m *Measurement) Add(v benchfmt.Value) {
-	m.Values = append(m.Values, v.Value)
+func (m *Measurement) Add(v float64) {
+	m.Values = append(m.Values, v)
 }
 
 const confidence = 0.95
@@ -309,36 +300,10 @@ func printGatherOnlyComparison(baseline, current map[Config]map[int]*BenchData) 
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
-	tp1 := "Throughput"
-	tp2 := "Change"
-	lat := "Latency"
-	topheader := table.Row{"", "", "", "", "", lat, lat, lat, lat, "", ""}
-	midheader := table.Row{"", tp1, tp1}
-	subheader := table.Row{"Configuration", tp2, tp2}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-		{Number: 2, Align: text.AlignRight},
-		{Number: 3, Align: text.AlignLeft},
-	}
+	h := headersWithConfiguration()
+	h = appendPerformanceChangeHeaders(h, true)
 
-	// Set headers with duplication for auto-merge
-	latcats := []string{"Change", "vs. Duration"}
-	latps := []string{"P50", "P99"}
-	for _, latcat := range latcats {
-		for _, latp := range latps {
-			colConfigs = append(colConfigs,
-				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
-				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
-			)
-			midheader = append(midheader, latcat, latcat)
-			subheader = append(subheader, latp, latp) // Duplicate for value and significance columns
-		}
-	}
-
-	t.SetColumnConfigs(colConfigs)
-	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(midheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
+	setTableHeaders(t, h)
 
 	configs, pairs := collectPairs(baseline, current, func(byLimit map[int]*BenchData) *BenchData {
 		return byLimit[0]
@@ -357,57 +322,34 @@ func printGatherOnlyComparison(baseline, current map[Config]map[int]*BenchData) 
 		baseline, current := pair[0], pair[1]
 
 		row := table.Row{config}
-		row = appendPerformanceChanges(row, config, baseline, current)
-		row = appendLatenciesVsDuration(row, config, current)
+		row = appendPerformanceChanges(row, config, baseline, current, current)
 		t.AppendRow(row)
 	}
 
 	t.Render()
 }
 
-func printStaticCombinerConcurencyComparison(baseline, current map[Config]map[int]*BenchData) {
+func printBestStaticCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Static Combiner Concurrency Benchmark Comparison")
+	t.SetTitle("Best Static Combiner Concurrency Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
-	bc1 := "Best"
-	bc2 := "Concurrency"
-	tp1 := "Throughput"
-	tp2 := "Change"
-	topheader := table.Row{"", "", "", "", "", ""}
-	midheader := table.Row{"", bc1, bc1, bc1, tp1, tp1}
-	subheader := table.Row{"Configuration", bc2, bc2, bc2, tp2, tp2}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-		{Number: 2, Align: text.AlignRight},
-		{Number: 3, Align: text.AlignCenter},
-		{Number: 4, Align: text.AlignLeft},
-		{Number: 5, Align: text.AlignRight},
-		{Number: 6, Align: text.AlignLeft},
-	}
+	h := headersWithConfiguration()
 
-	// Set headers with duplication for auto-merge
-	lat := "Latency"
-	latcats := []string{"Change", "vs. Duration"}
-	latps := []string{"P50", "P99"}
-	topheader = append(topheader, "", "", lat, lat, lat, lat, "", "")
-	for _, latcat := range latcats {
-		for _, latp := range latps {
-			colConfigs = append(colConfigs,
-				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
-				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
-			)
-			midheader = append(midheader, latcat, latcat)
-			subheader = append(subheader, latp, latp) // Duplicate for value and significance columns
-		}
-	}
+	best := "Best"
+	concurrency := "Concurrency"
+	h.top = append(h.top, "", "", "")
+	h.mid = append(h.mid, best, best, best)
+	h.sub = append(h.sub, concurrency, concurrency, concurrency)
+	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignRight})
+	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignCenter})
+	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignLeft})
 
-	t.SetColumnConfigs(colConfigs)
-	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(midheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
+	h = appendPerformanceChangeHeaders(h, true)
+
+	setTableHeaders(t, h)
 
 	configs, pairs := collectPairs(baseline, current, findBestStaticLimit)
 
@@ -430,8 +372,7 @@ func printStaticCombinerConcurencyComparison(baseline, current map[Config]map[in
 			"→",
 			fmt.Sprintf("%-5d", current.CombinerLimit),
 		}
-		row = appendPerformanceChanges(row, config, baseline, current)
-		row = appendLatenciesVsDuration(row, config, current)
+		row = appendPerformanceChanges(row, config, baseline, current, current)
 		t.AppendRow(row)
 	}
 
@@ -439,57 +380,23 @@ func printStaticCombinerConcurencyComparison(baseline, current map[Config]map[in
 }
 
 func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
+
 	t := table.NewWriter()
 	t.SetTitle("Dynamic Combiner Concurrency Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
-	// Create header with merged cells using identical values and row config
-	topheader := table.Row{""}
-	mid1header := table.Row{""}
-	mid2header := table.Row{""}
-	subheader := table.Row{"Configuration"}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-	}
+	h := headersWithConfiguration()
+	h = appendPerformanceChangeHeaders(h, true)
 
-	addSubheaders := func() {
-		tp := "Throughput"
-		lat := "Latency"
-		mid2header = append(mid2header, tp, tp, lat, lat, lat, lat)
-		subheadings := []string{"Change", "P50", "P99"}
-		for _, sh := range subheadings {
-			colConfigs = append(colConfigs,
-				table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight},
-				table.ColumnConfig{Number: len(colConfigs) + 2, Align: text.AlignLeft},
-			)
-			subheader = append(subheader, sh, sh)
-		}
-	}
+	setTableHeaders(t, h)
 
-	mh1 := "Dynamic vs Dynamic"
-	topheader = append(topheader, "", "", "", "", "", "")
-	mid1header = append(mid1header, mh1, mh1, mh1, mh1, mh1, mh1)
-	addSubheaders()
-
-	th := "Best Static vs Dynamic"
-	mid1headings := []string{"Baseline", "Current"}
-	for _, mh1 := range mid1headings {
-		topheader = append(topheader, th, th, th, th, th, th)
-		mid1header = append(mid1header, mh1, mh1, mh1, mh1, mh1, mh1)
-		addSubheaders()
-	}
-
-	t.SetColumnConfigs(colConfigs)
-	t.AppendHeader(topheader, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(mid1header, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(mid2header, table.RowConfig{AutoMerge: true})
-	t.AppendHeader(subheader, table.RowConfig{AutoMerge: true})
-
-	bestStaticConfigs, bestStaticPairs := collectPairs(baseline, current, findBestStaticLimit)
+	configs, pairs := collectPairs(baseline, current, func(byLimit map[int]*BenchData) *BenchData {
+		return byLimit[-1]
+	})
 
 	var lastRatio float64
-	for i, config := range bestStaticConfigs {
+	for i, config := range configs {
 		// Add separator for ratio groups
 		currentRatio := float64(config.FlushPeriod) / float64(config.Duration)
 		if i != 0 && lastRatio != currentRatio {
@@ -497,16 +404,47 @@ func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[
 		}
 		lastRatio = currentRatio
 
-		bestStaticPair := bestStaticPairs[config]
-		baselineBestStatic, currentBestStatic := bestStaticPair[0], bestStaticPair[1]
+		pair := pairs[config]
+		baseline, current := pair[0], pair[1]
 
-		baselineDynamic := baseline[config][-1]
-		currentDynamic := current[config][-1]
-
+		// Build row
 		row := table.Row{config}
-		row = appendPerformanceChanges(row, config, baselineDynamic, currentDynamic)
-		row = appendPerformanceChanges(row, config, baselineBestStatic, baselineDynamic)
-		row = appendPerformanceChanges(row, config, currentBestStatic, currentDynamic)
+		row = appendPerformanceChanges(row, config, baseline, current, current)
+		t.AppendRow(row)
+	}
+
+	t.Render()
+}
+
+func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]map[int]*BenchData) {
+
+	t := table.NewWriter()
+	t.SetTitle("Best Static Vs. Dynamic Combiner Concurrency Benchmark Comparison")
+	t.SetOutputMirror(os.Stdout)
+	t.SetStyle(tableStyle)
+
+	h := headersWithConfiguration()
+	h = appendPerformanceChangeHeaders(h, false)
+
+	setTableHeaders(t, h)
+
+	configs, pairs := collectPairs(current, current, findBestStaticLimit)
+
+	var lastRatio float64
+	for i, config := range configs {
+		// Add separator for ratio groups
+		currentRatio := float64(config.FlushPeriod) / float64(config.Duration)
+		if i != 0 && lastRatio != currentRatio {
+			t.AppendSeparator()
+		}
+		lastRatio = currentRatio
+
+		bestStatic := pairs[config][0]
+		dynamic := current[config][-1]
+
+		// Build row
+		row := table.Row{config}
+		row = appendPerformanceChanges(row, config, bestStatic, dynamic, nil)
 		t.AppendRow(row)
 	}
 
@@ -567,16 +505,72 @@ func collectPairs(
 	return configs, pairs
 }
 
-func appendPerformanceChanges(row table.Row, config Config, baseline, current *BenchData) table.Row {
-	row = append(row, formatChange(1, baseline.Throughput, current.Throughput)...)
-	row = append(row, formatChange(-1, baseline.P50Latency, current.P50Latency)...)
-	row = append(row, formatChange(-1, baseline.P99Latency, current.P99Latency)...)
-	return row
+type Headers struct {
+	top, mid, sub table.Row
+	colConfigs    []table.ColumnConfig
 }
 
-func appendLatenciesVsDuration(row table.Row, config Config, data *BenchData) table.Row {
-	row = append(row, formatLatencyVsDuration(config, data.P50Latency)...)
-	row = append(row, formatLatencyVsDuration(config, data.P99Latency)...)
+func headersWithConfiguration() Headers {
+	return Headers{
+		top: table.Row{""},
+		mid: table.Row{""},
+		sub: table.Row{"Configuration"},
+		colConfigs: []table.ColumnConfig{
+			{Number: 1, Align: text.AlignLeft},
+		},
+	}
+}
+
+func appendPerformanceChangeHeaders(h Headers, withIdeal bool) Headers {
+	throughput := "Throughput"
+	change := "Change"
+	ideal := "%Ideal"
+	h = appendValueHeadersWithIndicator(h, "", throughput, change)
+	if withIdeal {
+		h = appendValueHeadersWithIndicator(h, "", throughput, ideal)
+	}
+
+	latency := "Latency"
+	percentiles := []string{"P50", "P99"}
+	for _, percentile := range percentiles {
+		h = appendValueHeadersWithIndicator(h, latency, change, percentile)
+	}
+	if withIdeal {
+		for _, percentile := range percentiles {
+			h = appendValueHeadersWithIndicator(h, latency, ideal, percentile)
+		}
+	}
+
+	return h
+}
+
+func appendValueHeadersWithIndicator(h Headers, top, mid, sub any) Headers {
+	h.top = append(h.top, top, top)
+	h.mid = append(h.mid, mid, mid)
+	h.sub = append(h.sub, sub, sub)
+	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignRight})
+	h.colConfigs = append(h.colConfigs, table.ColumnConfig{Number: len(h.colConfigs) + 1, Align: text.AlignLeft})
+	return h
+}
+
+func setTableHeaders(t table.Writer, h Headers) {
+	t.AppendHeader(h.top, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(h.mid, table.RowConfig{AutoMerge: true})
+	t.AppendHeader(h.sub, table.RowConfig{AutoMerge: true})
+	t.SetColumnConfigs(h.colConfigs)
+}
+
+func appendPerformanceChanges(row table.Row, config Config, baseline, current, ideal *BenchData) table.Row {
+	row = append(row, formatChange(1, baseline.Throughput, current.Throughput)...)
+	if ideal != nil {
+		row = append(row, formatThroughputVsIdeal(config, ideal.Throughput)...)
+	}
+	row = append(row, formatChange(-1, baseline.P50Latency, current.P50Latency)...)
+	row = append(row, formatChange(-1, baseline.P99Latency, current.P99Latency)...)
+	if ideal != nil {
+		row = append(row, formatLatencyVsIdeal(config, ideal.P50Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, ideal.P99Latency)...)
+	}
 	return row
 }
 
@@ -592,14 +586,24 @@ func formatChange(goodSign float64, baseline, current Measurement) []any {
 	}
 }
 
-func formatLatencyVsDuration(config Config, current Measurement) []any {
-	duration := float64(config.Duration) / float64(time.Second)
-	delta := current.Summary.Center / duration
+func formatThroughputVsIdeal(config Config, throughput Measurement) []any {
+	ideal := float64(config.FlushPeriod*time.Second) / float64(config.Duration*config.Duration)
+	delta := throughput.Summary.Center / ideal
 	ind := neutralIndicator
-	if computeRelativeDifference(current.Summary.Hi, duration) <= -0.05 {
+	if computeRelativeDifference(ideal, throughput.Summary.Hi) <= -0.05 {
 		ind = badIndicator
 	}
-	return []any{fmt.Sprintf("%+.1f%%", 100*delta), ind}
+	return []any{fmt.Sprintf("%.1f%%", 100*delta), ind}
+}
+
+func formatLatencyVsIdeal(config Config, latency Measurement) []any {
+	ideal := 2 * float64(config.Duration) / float64(time.Second) // combine + gather
+	delta := latency.Summary.Center / ideal
+	ind := neutralIndicator
+	if computeRelativeDifference(ideal, latency.Summary.Lo) >= 0.05 {
+		ind = badIndicator
+	}
+	return []any{fmt.Sprintf("%.1f%%", 100*delta), ind}
 }
 
 func formatIndicator(goodSign float64, baseline, current Measurement) string {

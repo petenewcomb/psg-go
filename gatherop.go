@@ -71,7 +71,11 @@ func (g *GatherOp[T]) Scatter(
 	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	work := g.newScatterWork(target, taskFn)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+	work := g.newScatterWork(group, target, taskFn)
 	return scatterNow(ctx, meta, target, work)
 }
 
@@ -96,11 +100,18 @@ func (g *GatherOp[T]) TryScatter(
 	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	workFn := g.newScatterWork(target, taskFn)
+	workFn := g.newScatterWork(meta.CurrentGroup(), target, taskFn)
 	return tryScatterNow(ctx, meta, target, workFn)
 }
 
-func (g *GatherOp[T]) postResult(ctx context.Context, j *Job, taskWorkerOutboxMap *outboxMap, value T, err error) {
+func (g *GatherOp[T]) postResult(
+	ctx context.Context,
+	group workq.GroupID,
+	j *Job,
+	taskWorkerOutboxMap *outboxMap,
+	value T,
+	err error,
+) {
 	traceRegion := "GatherOp.postResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -113,17 +124,18 @@ func (g *GatherOp[T]) postResult(ctx context.Context, j *Job, taskWorkerOutboxMa
 		return g.gatherFn(ctx, value, err)
 	}
 
-	j.postGather(ctx, gatherOutbox, boundGatherFn)
+	j.postGather(ctx, group, gatherOutbox, boundGatherFn)
 }
 
 func (g *GatherOp[T]) newScatterWork(
+	group workq.GroupID,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) *gatherScatterWork {
 	traceRegion := "GatherOp.newScatterWork"
 
 	w := gatherScatterWorkPool.Get()
-	w.Init(target, bindTaskFunc(target.getJob(), taskFn, g.postResult))
+	w.Init(group, target, bindTaskFunc(group, target.getJob(), taskFn, g.postResult))
 
 	trace.Logf(context.Background(), traceRegion, "GatherOp=%p created %v", g, w)
 	return w
@@ -136,8 +148,8 @@ type gatherScatterWork struct {
 	taskFn boundTaskFunc
 }
 
-func (w *gatherScatterWork) Init(target TaskPoolOrJob, taskFn boundTaskFunc) {
-	w.jobWork.Init(target.getJob())
+func (w *gatherScatterWork) Init(group workq.GroupID, target TaskPoolOrJob, taskFn boundTaskFunc) {
+	w.jobWork.Init(group, target.getJob())
 	w.target = target
 	w.taskFn = taskFn
 }
@@ -147,7 +159,7 @@ func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) err
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	return w.target.scatter(ctx, ex, &w.taskPoolScatterWork, w.taskFn)
+	return w.target.scatter(ctx, w.Group(), ex, &w.taskPoolScatterWork, w.taskFn)
 }
 
 func (w *gatherScatterWork) Close() {

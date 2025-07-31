@@ -27,6 +27,7 @@ type WorkFunc func(context.Context, Execution) error
 
 type Work interface {
 	ID() WorkID
+	Group() GroupID
 	Execute(context.Context, Execution) error
 	Close()
 }
@@ -34,21 +35,38 @@ type Work interface {
 var workIDCounter atomic.Int64
 
 type WorkID int64
+type GroupID int64
+
+const InvalidWorkID = WorkID(0)
+const InvalidGroupID = GroupID(0)
 
 func NewWorkID() WorkID {
 	return WorkID(workIDCounter.Add(1))
 }
 
-type WorkItem struct {
-	id WorkID
+func NewGroupID() GroupID {
+	return GroupID(workIDCounter.Add(1))
 }
 
-func (wi *WorkItem) Init() {
+type WorkItem struct {
+	id    WorkID
+	group GroupID
+}
+
+func (wi *WorkItem) Init(group GroupID) {
 	wi.id = NewWorkID()
+	if group <= InvalidGroupID {
+		panic("must supply valid group ID")
+	}
+	wi.group = group
 }
 
 func (wi *WorkItem) ID() WorkID {
 	return wi.id
+}
+
+func (wi *WorkItem) Group() GroupID {
+	return wi.group
 }
 
 func (wi *WorkItem) Close() {

@@ -21,10 +21,10 @@ type TaskPoolOrJob interface {
 	// getJob returns the Job associated with this target
 	getJob() *Job
 	// Execute executes the task function in the target context
-	scatter(context.Context, workq.Execution, *taskPoolScatterWork, boundTaskFunc) error
+	scatter(context.Context, workq.GroupID, workq.Execution, *taskPoolScatterWork, boundTaskFunc) error
 }
 
-type boundTaskFunc func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap)
+type boundTaskFunc func(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap)
 
 func vetScatter[T any](
 	ctx context.Context,
@@ -59,11 +59,12 @@ func vetScatter[T any](
 // Binds type-specific task and gather functions together into a generic task
 // function
 func bindTaskFunc[T any](
+	group workq.GroupID,
 	job *Job,
 	taskFn psgfn.Task[T],
-	postResultFn func(context.Context, *Job, *outboxMap, T, error),
+	postResultFn func(context.Context, workq.GroupID, *Job, *outboxMap, T, error),
 ) boundTaskFunc {
-	return func(ctx context.Context, completedFn func(), taskWorkerOutboxMap *outboxMap) {
+	return func(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap) {
 		traceRegion := "bindTaskFunc.boundTaskFn"
 		defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -78,7 +79,7 @@ func bindTaskFunc[T any](
 			if err != nil {
 				trace.Logf(ctx, traceRegion, "posting task err=%v", err)
 			}
-			postResultFn(ctx, job, taskWorkerOutboxMap, value, err)
+			postResultFn(ctx, group, job, taskWorkerOutboxMap, value, err)
 		}()
 
 		// Actually execute the task function. Since this is the top-level

@@ -104,6 +104,7 @@ func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 
 func (p *TaskPool) scatter(
 	ctx context.Context,
+	group workq.GroupID,
 	ex workq.Execution,
 	tpSW *taskPoolScatterWork,
 	taskFn boundTaskFunc,
@@ -128,7 +129,7 @@ func (p *TaskPool) scatter(
 
 	return p.waiters.Execute(ctx, ex, wb,
 		func(ctx context.Context, ex workq.Execution) error {
-			return p.job.scatterWithCompletedFn(ctx, ex, taskFn, p.decrementInFlight)
+			return p.job.scatterWithCompletedFn(ctx, group, ex, taskFn, p.decrementInFlight)
 		},
 	)
 }

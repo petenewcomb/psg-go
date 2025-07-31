@@ -64,11 +64,11 @@ type Job struct {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) newTaskWork(taskFn boundTaskFunc, completedFn func()) *taskWork {
+func (j *Job) newTaskWork(group workq.GroupID, taskFn boundTaskFunc, completedFn func()) *taskWork {
 	traceRegion := "Job.newTaskWork"
 
 	w := taskWorkPool.Get()
-	w.Init(j, taskFn, completedFn)
+	w.Init(group, j, taskFn, completedFn)
 
 	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
 	return w
@@ -80,8 +80,8 @@ type taskWork struct {
 	completedFn func()
 }
 
-func (w *taskWork) Init(job *Job, taskFn boundTaskFunc, completedFn func()) {
-	w.jobWork.Init(job)
+func (w *taskWork) Init(group workq.GroupID, job *Job, taskFn boundTaskFunc, completedFn func()) {
+	w.jobWork.Init(group, job)
 	w.taskFn = taskFn
 	w.completedFn = completedFn
 }
@@ -89,7 +89,7 @@ func (w *taskWork) Init(job *Job, taskFn boundTaskFunc, completedFn func()) {
 func (w *taskWork) Execute(ctx context.Context, taskWorkerOutboxMap *outboxMap) {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	w.taskFn(ctx, w.completedFn, taskWorkerOutboxMap)
+	w.taskFn(ctx, w.Group(), w.completedFn, taskWorkerOutboxMap)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -351,7 +351,7 @@ func (j *Job) addWorkWhileMaybeBlocking(
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
 ) (workReadyRenotifyFn, blockWaitRenotifyFn workq.RenotifyFunc, err error) {
-	workReceiver, workWaiter, blockWaiter := meta.LockAndSetQueueFunc(queueFn, blockWaiters)
+	workReceiver, workWaiter, blockWaiter := meta.LockAndSetQueueFunc(workq.InvalidGroupID, queueFn, blockWaiters)
 	defer meta.UnlockAndResetQueueFunc()
 
 	if workWaiters == nil {
@@ -451,12 +451,12 @@ func (j *Job) gatherSelect(
 }
 
 // postGather sends a gather operation to the gather queue.
-func (j *Job) postGather(ctx context.Context, outbox *workq.Outbox, gatherFn boundGatherFunc) {
+func (j *Job) postGather(ctx context.Context, group workq.GroupID, outbox *workq.Outbox, gatherFn boundGatherFunc) {
 	traceRegion := "Job.postGather"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Job=%p, outbox=%p", j, outbox)
 
-	work := j.newGatherWork(gatherFn)
+	work := j.newGatherWork(group, gatherFn)
 
 	// Error can only be due to context cancellation, so safe to ignore here.
 	j.gatherQueue.PushBackFunc(outbox, work, func(outbox *workq.Outbox) {
@@ -485,11 +485,11 @@ func (j *Job) postGatherSlow(
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) newGatherWork(gatherFn boundGatherFunc) *gatherWork {
+func (j *Job) newGatherWork(group workq.GroupID, gatherFn boundGatherFunc) *gatherWork {
 	traceRegion := "Job.newGatherWork"
 
 	w := gatherWorkPool.Get()
-	w.Init(j, gatherFn)
+	w.Init(group, j, gatherFn)
 
 	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
 	return w
@@ -501,8 +501,8 @@ type gatherWork struct {
 	gatherFn boundGatherFunc
 }
 
-func (w *gatherWork) Init(job *Job, gatherFn boundGatherFunc) {
-	w.jobWork.Init(job)
+func (w *gatherWork) Init(group workq.GroupID, job *Job, gatherFn boundGatherFunc) {
+	w.jobWork.Init(group, job)
 	w.job = job
 	w.gatherFn = gatherFn
 }
@@ -515,7 +515,7 @@ func (w *gatherWork) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	ctx, meta := w.job.ctxMeta(ctx)
 
-	meta.LockAndSetQueueFunc(ex.Queue, nil)
+	meta.LockAndSetQueueFunc(w.Group(), ex.Queue, nil)
 	defer meta.UnlockAndResetQueueFunc()
 
 	return w.gatherFn(ctx)
@@ -712,8 +712,8 @@ type jobWork struct {
 	workq.WorkItem
 }
 
-func (w *jobWork) Init(job *Job) {
-	w.WorkItem.Init()
+func (w *jobWork) Init(group workq.GroupID, job *Job) {
+	w.WorkItem.Init(group)
 	trace.Logf(context.Background(), "jobWork.Init", "%v", &w.WorkItem)
 	job.state.IncrementWork()
 }
@@ -730,21 +730,23 @@ func (w *jobWork) Close(job *Job) {
 
 func (j *Job) scatter(
 	ctx context.Context,
+	group workq.GroupID,
 	ex workq.Execution,
 	_ *taskPoolScatterWork,
 	taskFn boundTaskFunc,
 ) error {
-	return j.scatterWithCompletedFn(ctx, ex, taskFn, nil)
+	return j.scatterWithCompletedFn(ctx, group, ex, taskFn, nil)
 }
 
 func (j *Job) scatterWithCompletedFn(
 	ctx context.Context,
+	group workq.GroupID,
 	ex workq.Execution,
 	taskFn boundTaskFunc,
 	completedFn func(),
 ) error {
 	ex.Starting()
-	work := j.newTaskWork(taskFn, completedFn)
+	work := j.newTaskWork(group, taskFn, completedFn)
 	j.startTask(ctx, work)
 	return nil
 }

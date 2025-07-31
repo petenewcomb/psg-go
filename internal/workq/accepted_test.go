@@ -23,7 +23,7 @@ func newWorkItem(workFn WorkFunc) *workFuncItem {
 }
 
 func (wi *workFuncItem) Init(workFn WorkFunc) {
-	wi.WorkItem.Init()
+	wi.WorkItem.Init(NewGroupID())
 	wi.workFn = workFn
 }
 

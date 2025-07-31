@@ -29,6 +29,7 @@ type CombineOp[I, O any] struct {
 	// avoid closure reallocation
 	postResultFn func(
 		ctx context.Context,
+		group workq.GroupID,
 		j *Job,
 		taskWorkerOutboxMap *outboxMap,
 		input I,
@@ -93,7 +94,11 @@ func (c *CombineOp[I, O]) Scatter(
 	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	work := c.newScatterWork(target, taskFn)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+	work := c.newScatterWork(group, target, taskFn)
 	return scatterNow(ctx, meta, target, work)
 }
 
@@ -111,11 +116,12 @@ func (c *CombineOp[I, O]) TryScatter(
 	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	work := c.newScatterWork(target, taskFn)
+	work := c.newScatterWork(meta.CurrentGroup(), target, taskFn)
 	return tryScatterNow(ctx, meta, target, work)
 }
 
 func (c *CombineOp[I, O]) newScatterWork(
+	group workq.GroupID,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) *combineScatterWork {
@@ -127,7 +133,7 @@ func (c *CombineOp[I, O]) newScatterWork(
 	}
 
 	w := combineScatterWorkPool.Get()
-	w.Init(c.pool, target, bindTaskFunc(j, taskFn, c.postResultFn))
+	w.Init(group, c.pool, target, bindTaskFunc(group, j, taskFn, c.postResultFn))
 
 	trace.Logf(context.Background(), traceRegion, "CombineOp=%p created %v", c, w)
 	return w
@@ -141,8 +147,8 @@ type combineScatterWork struct {
 	taskFn boundTaskFunc
 }
 
-func (w *combineScatterWork) Init(pool *CombinerPool, target TaskPoolOrJob, taskFn boundTaskFunc) {
-	w.jobWork.Init(pool.job)
+func (w *combineScatterWork) Init(group workq.GroupID, pool *CombinerPool, target TaskPoolOrJob, taskFn boundTaskFunc) {
+	w.jobWork.Init(group, pool.job)
 	w.pool = pool
 	w.target = target
 	w.taskFn = taskFn
@@ -154,7 +160,7 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	trace.Logf(ctx, traceRegion, "%v", w)
 
 	workFn := func(ctx context.Context, ex workq.Execution) error {
-		return w.target.scatter(ctx, ex, &w.taskPoolScatterWork, w.taskFn)
+		return w.target.scatter(ctx, w.Group(), ex, &w.taskPoolScatterWork, w.taskFn)
 	}
 
 	bb := w.pool.job.protoBB
@@ -222,6 +228,7 @@ func (c *CombineOp[I, O]) SetOptions(options ...psgopt.CombineOpOption) {
 
 func (c *CombineOp[I, O]) postResult(
 	ctx context.Context,
+	group workq.GroupID,
 	j *Job,
 	taskWorkerOutboxMap *outboxMap,
 	input I,
@@ -241,9 +248,9 @@ func (c *CombineOp[I, O]) postResult(
 		queueWork workq.QueueWorkFunc,
 		emitGatherOutbox *workq.Outbox,
 	) {
-		halfBoundCombineFn := getCombineFunc(ctx, cm, c.pool, c, queueWork, emitGatherOutbox)
+		halfBoundCombineFn := getCombineFunc(ctx, group, cm, c.pool, c, queueWork, emitGatherOutbox)
 		halfBoundCombineFn(ctx, input, inputErr)
 	}
 
-	c.pool.postCombine(ctx, combineOutbox, boundCombineFn)
+	c.pool.postCombine(ctx, group, combineOutbox, boundCombineFn)
 }

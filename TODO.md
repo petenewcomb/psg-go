@@ -38,7 +38,6 @@ Items to complete before merging to main branch.
 - implement scheduler health monitoring using near-instant event timing to detect Go runtime pressure
 - consider tracking combine/gather duration distributions rather than just averages to better understand tail behavior
 - enable cyclo and fix issues
-- can Inbox and Outbox just own their channels outright and not bother with channel pooling at all?
 - experiment further with different scheduler latency backpressure settings, esp. age 
 
 ## Post-Merge Enhancements

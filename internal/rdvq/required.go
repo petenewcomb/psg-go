@@ -43,9 +43,6 @@ type Required[T any] struct {
 
 // Init initializes the Required queue for use. Must be called before any other operations.
 //
-// The pool parameter provides channel allocation and recycling to minimize
-// garbage collection overhead during high-throughput operations.
-//
 //nolint:contextcheck // background context used only for tracing
 func (q *Required[T]) Init() {
 	traceRegion := "rdvq.Required.Init"
@@ -90,7 +87,7 @@ func (q *Required[T]) PushBackFunc(outbox *Outbox[T], value T, selectFn PushSele
 
 	if outbox.ch == nil {
 		// Outbox is empty, use it for "drop-and-go" semantics
-		outbox.ch = q.chanPool.Get()
+		outbox.ch = make(chan T, 1)
 	}
 
 	outbox.fillPending()
@@ -286,14 +283,10 @@ func (q *Required[T]) TryPopFront() (T, bool) {
 		select {
 		case value := <-outboxCh:
 			outbox.emptied()
-			// Can't pool the outbox here, because another goroutine might
-			// already be putting something into it
 			trace.Logf(context.Background(), traceRegion, "received value from outbox=%p outboxCh=%p, returning true",
 				outbox, outboxCh)
 			return value, true
 		default:
-			// Can't pool the outbox even here, again because another goroutine
-			// might be putting something into it
 			trace.Logf(context.Background(), traceRegion, "outbox=%p outboxCh=%p was empty, trying next", outbox, outboxCh)
 		}
 	}

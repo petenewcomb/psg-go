@@ -9,10 +9,9 @@ type Inbox[T any] struct {
 	wasEmptied bool
 }
 
-// Ch returns the inbox's channel for use in select statements.
-// Returns nil if the inbox itself is nil.
-// Panics if called when no channel has been allocated, which should only
-// happen if Ch() is called outside of a selectFn callback.
+// Ch returns the inbox's channel for use in select statements. Returns nil if
+// the inbox itself is nil. Panics if called when no channel has been allocated,
+// which should only happen if Ch() is called outside of a selectFn callback.
 func (ib *Inbox[T]) Ch() <-chan T {
 	if ib == nil {
 		return nil

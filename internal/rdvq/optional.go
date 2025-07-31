@@ -21,7 +21,6 @@ import (
 // direct handoff to waiting receivers, failing immediately if none are available.
 type Optional[T any] struct {
 	emptyInboxes nbcq.Queue[*Inbox[T]]
-	chanPool     *chanPool[T]
 }
 
 // Init initializes the queue. Must be called before first use.
@@ -31,7 +30,6 @@ func (q *Optional[T]) Init() {
 	trace.Logf(context.Background(), traceRegion, "Optional=%p, emptyInboxes=%p", q, &q.emptyInboxes)
 
 	q.emptyInboxes.Init()
-	q.chanPool = chanPoolFor[T]()
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -49,7 +47,7 @@ func (q *Optional[T]) TryPushBack(value T) bool {
 			return false
 		}
 
-		inboxCh := inbox.ch
+		inboxCh := inbox.ch // must be non-nil given that it was in the queue
 		// Loop to (re)attempt sending to the inbox channel
 		for {
 			trace.Logf(context.Background(), traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
@@ -99,24 +97,25 @@ func (q *Optional[T]) PopFrontFunc(
 
 	inboxCh := inbox.ch
 	if inboxCh == nil {
-		// Register ourselves as a waiting receiver.
-		inboxCh = q.chanPool.Get()
+		// New inbox, allocate a channel
+		inboxCh = make(chan T, 1)
 		inbox.ch = inboxCh
 		trace.Logf(context.Background(), traceRegion, "Optional=%p inbox=%p allocated inboxCh=%p", q, inbox, inboxCh)
 		q.emptyInboxes.PushBack(inbox)
 	} else {
-		// Reuse the existing inbox channel, which must still be in the queue
-		// and marked as abandoned.  Drain it and reuse.
+		// Reuse the existing inbox channel, but must check to see if it needs
+		// draining or requeuing.
 		select {
 		case <-inboxCh:
-			// This confirms that the channel has not yet been seen by
-			// TryPushBack, so we can reuse it without requeuing.
+			// We drained the abandonment marker, which confirms that the
+			// channel has not yet been seen by TryPushBack. We can reuse it
+			// without requeuing.
 			trace.Logf(context.Background(), traceRegion,
 				"Optional=%p inbox=%p reusing still-queued inboxCh=%p",
 				q, inbox, inboxCh)
 		default:
-			// Channel was drained by TryPushBack, so we can reuse it but need
-			// to requeue.
+			// Channel was must have been drained by TryPushBack already. We can
+			// reuse it but need to requeue.
 			trace.Logf(context.Background(), traceRegion,
 				"Optional=%p inbox=%p reusing and requeuing inboxCh=%p",
 				q, inbox, inboxCh)
@@ -127,33 +126,21 @@ func (q *Optional[T]) PopFrontFunc(
 	// Call the custom selecting function
 	inbox.emptyPending()
 	selectFn(inbox)
-	if inbox.WasEmptied() {
-		// PushBack must have pulled it out of the queue and the select just
-		// emptied it, so it's safe to return to the pool.
-		trace.Logf(context.Background(), traceRegion, "pooling emptied inbox=%p inboxCh=%p", inbox, inboxCh)
-		q.chanPool.Put(inbox.ch)
-		inbox.ch = nil
-		return
-	}
-
-	// Clean up the dedicated channel, which may still be in the queue or
-	// contain an orphaned value.
-	select {
-	case inboxCh <- *new(T):
-		// Successfully marked channel as abandoned, but it's still in
-		// the queue so we can't put it back in the pool.
-		trace.Logf(context.Background(), traceRegion, "marked inboxCh=%p abandoned", inboxCh)
-	default:
-		// Channel is full, drain the value and process it.
-		orphan := <-inboxCh
-		inbox.Emptied()
-		trace.Logf(context.Background(), traceRegion, "received orphan from inboxCh=%p", inboxCh)
-		processOrphanFn(orphan)
-		// PushBack must have pulled it out of the queue and we just
-		// emptied it, so it's safe to return to the pool.
-		trace.Logf(context.Background(), traceRegion, "pooling inboxCh=%p after draining orphan", inboxCh)
-		q.chanPool.Put(inboxCh)
-		inbox.ch = nil
+	if !inbox.WasEmptied() {
+		// The channel may still be in the queue or contain an orphaned value,
+		// so we must mark it abandoned or deal with the orphaned value.
+		select {
+		case inboxCh <- *new(T):
+			// Marked channel as abandoned, will be ignored by TryPushBack
+			// unless subsequently drained by the reuse logic above.
+			trace.Logf(context.Background(), traceRegion, "marked inboxCh=%p abandoned", inboxCh)
+		default:
+			// Channel is full, drain the orphaned value and process it.
+			orphan := <-inboxCh
+			inbox.Emptied()
+			trace.Logf(context.Background(), traceRegion, "drained orphan from inboxCh=%p", inboxCh)
+			processOrphanFn(orphan)
+		}
 	}
 }
 

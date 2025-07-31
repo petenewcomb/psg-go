@@ -13,7 +13,7 @@ import (
 // lifecycleStage represents the possible stages in a job's lifecycle
 type lifecycleStage int32
 
-//go:generate stringer -type=lifecycleStage -linecomment
+//go:generate go run golang.org/x/tools/cmd/stringer@v0.35.0 -type=lifecycleStage -linecomment
 const (
 	// stageOpen indicates that the job is accepting new tasks
 	stageOpen lifecycleStage = iota // Open

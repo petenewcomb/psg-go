@@ -16,7 +16,7 @@ import (
 
 type contextType int
 
-//go:generate stringer -type=contextType -linecomment
+//go:generate go run golang.org/x/tools/cmd/stringer@v0.35.0 -type=contextType -linecomment
 const (
 	topLevelContext contextType = iota // top-level
 	taskContext                        // task

@@ -12,7 +12,7 @@ type ProcessValueFunc[T any] = func(value T)
 // returns and making operation outcomes clear.
 type SelectResult int
 
-//go:generate stringer -type=SelectResult
+//go:generate go run golang.org/x/tools/cmd/stringer@v0.35.0 -type=SelectResult
 const (
 	// SelectAborted indicates the operation was cancelled or interrupted,
 	// typically due to context cancellation or other external factors.

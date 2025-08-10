@@ -67,7 +67,7 @@ func Example_scatterGather() {
 		fmt.Printf("%3dms Failing task started\n", msSinceStart())
 		time.Sleep(30 * time.Millisecond)
 		fmt.Printf("%3dms Failing task failed - cancelling workflow\n", msSinceStart())
-		wf.Cancel(fmt.Errorf("critical failure"))
+		wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 		return "", fmt.Errorf("task failed")
 	})
 	if err != nil {

@@ -53,7 +53,6 @@ func (q *Optional[T]) TryPushBack(value T) bool {
 			trace.Logf(context.Background(), traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
 			select {
 			case inboxCh <- value:
-				inbox.filled()
 				trace.Logf(context.Background(), traceRegion, "delivered value to inbox=%p inboxCh=%p, returning true",
 					inbox, inboxCh)
 				// Successfully delivered

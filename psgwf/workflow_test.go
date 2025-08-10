@@ -30,7 +30,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	// Register multiple AfterFuncs
 	for i := 0; i < 5; i++ {
 		i := i // Capture loop variable
-		wf.AfterFunc(func(ctx context.Context, completedWf *psgwf.Workflow) {
+		wf = psgwf.WithAfterFunc(wf, func(ctx context.Context, wf *psgwf.Workflow) {
 			called.Store(i, true)
 			mu.Lock()
 			callOrder = append(callOrder, i)
@@ -38,10 +38,10 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 			// Verify workflow context is cancelled
 			select {
-			case <-completedWf.Ctx().Done():
-				// Good - context should be cancelled
+			case <-wf.Ctx().Done():
+				t.Errorf("AfterFunc %d: workflow context should not be cancelled", i)
 			default:
-				t.Errorf("AfterFunc %d: workflow context should be cancelled", i)
+				// Good - context should not be cancelled
 			}
 		})
 	}
@@ -101,7 +101,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	wf := psgwf.New(context.Background())
 
 	// Register AfterFunc that scatters a new task
-	wf.AfterFunc(func(ctx context.Context, completedWf *psgwf.Workflow) {
+	wf = psgwf.WithAfterFunc(wf, func(ctx context.Context, wf *psgwf.Workflow) {
 		mu.Lock()
 		afterFuncRan = true
 		mu.Unlock()

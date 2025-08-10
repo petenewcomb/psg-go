@@ -5,51 +5,56 @@ package psgwf
 
 import (
 	"context"
+	"errors"
+	"time"
 
-	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// Combiner is the interface for workflow-aware combiners.
-// It mirrors psg.Combiner but uses the workflow Context type.
-type Combiner[I, O any] interface {
-	// Combine processes a single input and optionally emits outputs
-	Combine(ctx context.Context, wf *Workflow, input I, inputErr error, emit Emit[O])
+// Combiner instances perform partial aggregation of workflow task results
+// before final gathering. They are used by [psg.CombinerPool] to enable
+// scalable concurrent and parallel result aggregation without requiring
+// multiple gathering goroutines or use of thread-safe data structures and
+// algorithms. This interface mirrors [psg.Combiner] but includes a Workflow
+// parameter.
+type GenericCombiner[I, O, C any] interface {
+	// Combine processes a single input task result and optionally emits an
+	// output to be gathered.
+	Combine(ctx context.Context, wf *GenericWorkflow[C], input I, inputErr error) (time.Time, error)
 
-	// Flush emits any pending aggregated results. Since flush gets called
-	// independent of any specific workflow, it receives a job context but no
-	// workflow context. However, it must provide both to the emit function.
-	// It's up to the implementation to decide what workflow context to use for
-	// emit, but it cannot be nil.
-	Flush(ctx context.Context, wf *Workflow, emit Emit[O])
+	// Flush emits combined results to be gathered unless the returned error is
+	// ErrDoNotGather. Since calls to Flush are independent of any specific
+	// workflow, it does not receive a [Workflow] parameter. It must either
+	// create a new Workflow use one previously retained using [Pin]. A common
+	// pattern is to retain Workflow instances passed to Combine as their
+	// associated results are aggregated and then release them all after the
+	// aggregated result set has been emitted.
+	Flush(ctx context.Context) (*GenericWorkflow[C], O, error)
 }
 
-type Emit[T any] = func(context.Context, *Workflow, T, error)
+type Combiner[I, O any] = GenericCombiner[I, O, Context]
 
-type CombinerFactory[I, O any] = func() Combiner[I, O]
+type GenericCombinerFactory[I, O, C any] func() GenericCombiner[I, O, C]
+type CombinerFactory[I, O any] = GenericCombinerFactory[I, O, Context]
 
-func wrapCombinerFactory[I, O any](
-	combinerFactory CombinerFactory[I, O],
-) psg.CombinerFactory[result[I], result[O]] {
-	return func() psg.Combiner[result[I], result[O]] {
+func wrapCombinerFactory[I, O, C any](
+	combinerFactory GenericCombinerFactory[I, O, C],
+) psgfn.CombinerFactory[result[I, C], result[O, C]] {
+	return func() psgfn.Combiner[result[I, C], result[O, C]] {
 		innerCombiner := combinerFactory()
-		return psgfn.Combiner[result[I], result[O]]{
-			CombineFn: func(ctx context.Context, input result[I], inputErr error, emit psgfn.Emit[result[O]]) {
+		return psgfn.FuncCombiner[result[I, C], result[O, C]]{
+			CombineFn: func(ctx context.Context, input result[I, C], inputErr error) (time.Time, error) {
 				defer input.Workflow.unref(ctx)
-				innerCombiner.Combine(ctx, input.Workflow, input.Value, inputErr, wrapEmit(emit))
+				return innerCombiner.Combine(ctx, input.Workflow, input.Value, inputErr)
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[result[O]]) {
-				wf := New(ctx)
-				defer wf.unref(ctx)
-				innerCombiner.Flush(ctx, wf, wrapEmit(emit))
+			FlushFn: func(ctx context.Context) (result[O, C], error) {
+				wf, v, err := innerCombiner.Flush(ctx)
+				if errors.Is(err, psgfn.ErrDoNotGather) {
+					return result[O, C]{}, err
+				}
+				wf.ref()
+				return result[O, C]{Workflow: wf, Value: v}, err
 			},
 		}
-	}
-}
-
-func wrapEmit[O any](emit psgfn.Emit[result[O]]) Emit[O] {
-	return func(ctx context.Context, wf *Workflow, output O, outputErr error) {
-		wf.ref()
-		emit(ctx, result[O]{Workflow: wf, Value: output}, outputErr)
 	}
 }

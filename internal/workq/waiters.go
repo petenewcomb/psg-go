@@ -5,6 +5,7 @@ package workq
 
 import (
 	"context"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -29,14 +30,16 @@ func (w *Waiters) Init() {
 	w.Waiters.Init()
 }
 
-type BlockFunc func(ctx context.Context, waiters *Waiters, confirmWaitFn func() bool) (RenotifyFunc, error)
+type BlockFunc func(ctx context.Context, deadline time.Time, waiters *Waiters,
+	confirmWaitFn func() bool) (RenotifyFunc, error)
 
 type WaitBehavior struct {
 	BlockBehavior
 	ShouldWait func() bool
 }
 
-func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavior, workFn WorkFunc) error {
+func (w *Waiters) Execute(ctx context.Context, ex Execution, deadline time.Time,
+	behavior WaitBehavior, workFn WorkFunc) error {
 	traceRegion := "workq.Waiters.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -82,7 +85,7 @@ func (w *Waiters) Execute(ctx context.Context, ex Execution, behavior WaitBehavi
 			return true
 		}
 		var err error
-		renotifyFn, err = blockFn(ctx, w, confirmFn)
+		renotifyFn, err = blockFn(ctx, deadline, w, confirmFn)
 		if err != nil {
 			trace.Logf(ctx, traceRegion, "returning error from blockFn: %v", err)
 			return err

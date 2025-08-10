@@ -1,0 +1,58 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+package psgwf
+
+import (
+	"context"
+	"time"
+
+	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
+)
+
+type GenericCombineOp[I, O, C any] psg.CombineOp[result[I, C], result[O, C]]
+type CombineOp[I, O any] = GenericCombineOp[I, O, context.Context]
+
+// NewCombineOp creates a psg.CombineOp that propagates workflow contexts through the combine chain.
+// This ensures workflow context values and cancellation flow from inputs to outputs.
+func NewCombineOp[I, O, C any](
+	gatherOp GenericGatherOp[O, C],
+	combinerPool *psg.CombinerPool,
+	combinerFactory GenericCombinerFactory[I, O, C],
+) GenericCombineOp[I, O, C] {
+	return GenericCombineOp[I, O, C](psg.NewCombineOp(
+		psg.GatherOp[result[O, C]](gatherOp),
+		combinerPool,
+		wrapCombinerFactory(combinerFactory),
+	))
+}
+
+func (c GenericCombineOp[I, O, C]) Scatter(ctx context.Context, pool *psg.TaskPool,
+	wf *GenericWorkflow[C], taskFn GenericTaskFunc[I, C]) error {
+	_, err := scatterTask(ctx, pool, wf, taskFn,
+		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I, C]]) (bool, error) {
+			err := c.inner().Scatter(ctx, pool, taskFn)
+			return err == nil, err
+		},
+	)
+	return err
+}
+
+func (c GenericCombineOp[I, O, C]) TryScatter(
+	ctx context.Context,
+	deadline time.Time,
+	pool *psg.TaskPool,
+	wf *GenericWorkflow[C],
+	taskFn GenericTaskFunc[I, C],
+) (bool, error) {
+	return scatterTask(ctx, pool, wf, taskFn,
+		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I, C]]) (bool, error) {
+			return c.inner().TryScatter(ctx, deadline, pool, taskFn)
+		},
+	)
+}
+
+func (c GenericCombineOp[I, O, C]) inner() psg.CombineOp[result[I, C], result[O, C]] {
+	return psg.CombineOp[result[I, C], result[O, C]](c)
+}

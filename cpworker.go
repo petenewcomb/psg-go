@@ -234,18 +234,21 @@ func (cw *cpWorker) popSelect(ctx context.Context, outboxWaiter *rdvq.Waiter,
 func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duration) {
 	queuedFlush := false
 	for {
-		nextBCToFlush := cw.combinerMap.NextToFlush()
-		if nextBCToFlush == nil {
+		next := cw.combinerMap.NextToFlush()
+		if next == nil {
 			break
 		}
-		deadline := nextBCToFlush.FlushDeadline
+
+		deadline := next.FlushDeadline()
 		timeLeft := time.Until(deadline)
 		if timeLeft > 0 {
 			return queuedFlush, timeLeft
 		}
-		// Remove from heap immediately to prevent infinite loop
-		cw.combinerMap.deadlines.Remove(nextBCToFlush)
-		nextBCToFlush.FlushFn(ctx)
+
+		// Remove from map immediately to prevent infinite loop
+		cw.combinerMap.Remove(next)
+		next.Flush(ctx)
+		next.Free()
 		queuedFlush = true
 	}
 	return queuedFlush, 0
@@ -366,6 +369,6 @@ func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFu
 		// Make sure the job won't terminate before the combiner is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
-	combineFn(ctx, &cw.combinerMap, cw.queueFnStack[len(cw.queueFnStack)-1], cw.emitGatherOutbox)
+	combineFn(ctx, &cw.combinerMap, cw.emitGatherOutbox)
 	cw.cp.state.IncrementCompleted()
 }

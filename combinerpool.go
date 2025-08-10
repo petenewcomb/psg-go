@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/psg-go/psgfn"
 
 	"github.com/petenewcomb/psg-go/internal/cpstate"
 	"github.com/petenewcomb/psg-go/internal/heap"
@@ -115,6 +116,12 @@ func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 	cp.state.SetOptions(options...)
 }
 
+type boundCombineFunc func(
+	ctx context.Context,
+	cm *combinerMap,
+	gatherOutbox *workq.Outbox,
+)
+
 func (cp *CombinerPool) postCombine(
 	ctx context.Context,
 	group workq.GroupID,
@@ -177,15 +184,13 @@ func (w *combineWork) Execute(ctx context.Context, ex workq.Execution) error {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *combineWork) Close() {
-	traceRegion := "combineWork.Close"
+func (w *combineWork) Free() {
+	traceRegion := "combineWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
 	w.DownstreamWork.Close()
 	w.jobWork.Close(w.pool.job)
-
-	*w = combineWork{} // Clear the work item for garbage collection and reuse
 	combineWorkPool.Put(w)
 }
 
@@ -334,192 +339,243 @@ func (cp *CombinerPool) goroutine() {
 	}
 }
 
-type boundCombineFunc func(
-	ctx context.Context,
-	cm *combinerMap,
-	queueWork workq.QueueWorkFunc,
-	gatherOutbox *workq.Outbox,
-)
-
-type halfBoundCombineFunc[I any] = func(ctx context.Context, input I, inputErr error)
-
-type boundCombiner struct {
-	CombineFn     any
-	FlushFn       func(ctx context.Context)
-	FirstCombine  time.Time // When first unflushed input was received (for maxHoldTime)
-	FlushDeadline time.Time // The earliest time this combiner should be flushed
-	heapPosition  int       // Position in the deadline heap, 0 if not in heap
-}
-
-// Less implements heap.Item interface
-func (bc *boundCombiner) Less(other *boundCombiner) bool {
-	return bc.FlushDeadline.Before(other.FlushDeadline)
-}
-
-// SetPosition implements heap.Item interface
-func (bc *boundCombiner) SetPosition(position int) {
-	bc.heapPosition = position
-}
-
-// Position implements heap.Item interface
-func (bc *boundCombiner) Position() int {
-	return bc.heapPosition
-}
-
-type combinerMap struct {
-	m         map[combinerMapKey]*boundCombiner
-	deadlines heap.Heap[*boundCombiner]
-}
-
-type combinerMapKey struct {
-	Job     *Job
-	Combine any
-}
-
 func getCombineFunc[I, O any](
 	ctx context.Context,
+	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[I, O]],
+	boundGatherPool *omnipool.Pool[boundGather[O]],
 	group workq.GroupID,
 	cm *combinerMap,
 	cp *CombinerPool,
-	c *CombineOp[I, O],
-	queueWork workq.QueueWorkFunc,
+	opID combineOpID,
+	combinerFactory psgfn.CombinerFactory[I, O],
+	gatherFn psgfn.Gather[O],
 	emitGatherOutbox *workq.Outbox,
 ) halfBoundCombineFunc[I] {
 	j := cp.job
 	k := combinerMapKey{
-		Job:     j,
-		Combine: c,
+		Job:  j,
+		OpID: opID,
 	}
-	bc := cm.m[k]
-	var combineFn halfBoundCombineFunc[I]
-	if bc != nil {
-		combineFn = bc.CombineFn.(halfBoundCombineFunc[I])
-	} else {
-		emit := func(ctx context.Context, output O, outputErr error) {
-			traceRegion := "CombinerPool.emit"
-			defer trace.StartRegion(ctx, traceRegion).End()
-
-			// Bind the gatherFn to the combiner output
-			gatherFn := func(ctx context.Context) error {
-				return c.gatherOp.gatherFn(ctx, output, outputErr)
-			}
-
-			j.postGather(ctx, group, emitGatherOutbox, gatherFn)
+	entry := cm.m[k]
+	var c *halfBoundCombiner[I, O]
+	if entry != nil {
+		c = entry.(*halfBoundCombiner[I, O])
+		if group < c.earliestGroup {
+			c.earliestGroup = group
 		}
+	} else {
+		c = halfBoundCombinerPool.Get()
+		c.pool = halfBoundCombinerPool
+		c.boundGatherPool = boundGatherPool
+		c.opID = opID
+		c.job = j
+		c.earliestGroup = group
+		c.cm = cm
+		c.gatherFn = gatherFn
+		c.emitGatherOutbox = emitGatherOutbox
+		c.allocate(ctx, combinerFactory)
 
-		combiner := func() Combiner[I, O] {
-			traceRegion := "CombinerPool.newCombiner"
-			defer trace.StartRegion(ctx, traceRegion).End()
-
-			panicked := true
-			defer func() {
-				if panicked {
-					emit(ctx, *new(O), ErrCombinerFactoryPanicked)
-				}
-			}()
-			combiner := c.newCombiner()
-			panicked = false
-			if combiner == nil {
-				emit(ctx, *new(O), ErrCombinerFactoryReturnedNil)
-				return &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
-			}
-
-			trace.Logf(ctx, traceRegion, "CombineOp=%p returning new combiner=%v", c, combiner)
-			return combiner
-		}()
-
-		// Initialize the map if needed
 		if cm.m == nil {
-			cm.m = make(map[combinerMapKey]*boundCombiner)
+			cm.m = make(map[combinerMapKey]heldCombiner)
 		}
-
-		// Create the boundCombiner first
-		bc = &boundCombiner{}
-
-		// Define the combineFn with access to bc
-		combineFn = func(ctx context.Context, input I, inputErr error) {
-			traceRegion := "CombinerPool.combineFn"
-			defer trace.StartRegion(ctx, traceRegion).End()
-
-			now := time.Now()
-
-			// If this is the first combine since last flush, record the time
-			if bc.FirstCombine.IsZero() {
-				bc.FirstCombine = now
-			}
-
-			// Calculate flush deadline based on min/max hold times
-			var deadline time.Time
-
-			// Calculate minHoldTime deadline (time since this combine operation)
-			if c.minHoldTime >= 0 {
-				deadline = now.Add(c.minHoldTime)
-			}
-
-			// Calculate maxHoldTime deadline (time since first combine)
-			if c.maxHoldTime >= 0 {
-				maxDeadline := bc.FirstCombine.Add(c.maxHoldTime)
-				// Use maxDeadline if it's earlier or if no min deadline yet
-				if deadline.IsZero() || maxDeadline.Before(deadline) {
-					deadline = maxDeadline
-				}
-			}
-
-			cm.UpdateFlushDeadline(bc, deadline)
-
-			didNotPanic := false
-			defer func() {
-				if !didNotPanic {
-					// Just in case the panic is otherwise suppressed
-					emit(ctx, *new(O), ErrCombinePanicked)
-				}
-			}()
-
-			trace.Logf(ctx, traceRegion, "calling Combine on combiner=%v", combiner)
-			combiner.Combine(ctx, input, inputErr, emit)
-			didNotPanic = true
-		}
-
-		// Store the combineFn in the boundCombiner
-		bc.CombineFn = combineFn
-
-		// Define the FlushFn with access to bc
-		bc.FlushFn = func(ctx context.Context) {
-			traceRegion := "CombinerPool.flushFn"
-			defer trace.StartRegion(ctx, traceRegion).End()
-
-			// Reset FirstCombine for next batch, but keep combiner in map for reuse
-			bc.FirstCombine = time.Time{}
-
-			didNotPanic := false
-			defer func() {
-				if !didNotPanic {
-					// Just in case the panic is otherwise suppressed
-					emit(ctx, *new(O), ErrCombinerFlushPanicked)
-				}
-			}()
-
-			trace.Logf(ctx, traceRegion, "calling Flush on combiner=%v", combiner)
-			combiner.Flush(ctx, emit)
-			didNotPanic = true
-		}
-
-		// Add the boundCombiner to the map
-		cm.m[k] = bc
+		cm.m[k] = c
 	}
-	return combineFn
+	return c.combineFn
 }
 
-func (cm *combinerMap) UpdateFlushDeadline(bc *boundCombiner, deadline time.Time) {
-	bc.FlushDeadline = deadline
-	if deadline.IsZero() {
-		cm.deadlines.Remove(bc)
+type halfBoundCombineFunc[I any] = func(ctx context.Context, input I, inputErr error)
+
+type halfBoundCombiner[I, O any] struct {
+	pool             *omnipool.Pool[halfBoundCombiner[I, O]]
+	boundGatherPool  *omnipool.Pool[boundGather[O]]
+	opID             combineOpID
+	job              *Job
+	earliestGroup    workq.GroupID
+	cm               *combinerMap
+	combiner         psgfn.Combiner[I, O]
+	gatherFn         psgfn.Gather[O]
+	emitGatherOutbox *workq.Outbox
+
+	flushDeadline time.Time // The time this combiner should be flushed
+	heapPosition  int       // Position in the deadline heap, 0 if not in heap
+
+	combineFn halfBoundCombineFunc[I]
+}
+
+func (c *halfBoundCombiner[I, O]) Init() {
+	c.combineFn = c.combine
+}
+
+func (c *halfBoundCombiner[I, O]) Reset() {
+	*c = halfBoundCombiner[I, O]{
+		combineFn: c.combineFn,
+	}
+}
+
+func (c *halfBoundCombiner[I, O]) Free() {
+	c.pool.Put(c)
+}
+
+func (c *halfBoundCombiner[I, O]) allocate(
+	ctx context.Context,
+	newCombiner psgfn.CombinerFactory[I, O],
+) {
+	traceRegion := "unboundCombiner.allocate"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	panicked := true
+	defer func() {
+		if panicked {
+			c.emit(ctx, *new(O), ErrCombinerFactoryPanicked)
+		}
+	}()
+	c.combiner = newCombiner()
+	panicked = false
+	if c.combiner == nil {
+		c.emit(ctx, *new(O), ErrCombinerFactoryReturnedNil)
+		c.combiner = &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
+	}
+
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "CombineOp#%d returning new combiner=%v", c.opID, c.combiner)
+	}
+}
+
+type boundGather[T any] struct {
+	pool     *omnipool.Pool[boundGather[T]]
+	gatherFn psgfn.Gather[T]
+	value    T
+	err      error
+
+	boundGatherFn boundGatherFunc
+}
+
+func (g *boundGather[T]) Init() {
+	g.boundGatherFn = g.execute
+}
+
+func (g *boundGather[T]) Reset() {
+	*g = boundGather[T]{
+		boundGatherFn: g.boundGatherFn,
+	}
+}
+
+func (g *boundGather[T]) execute(ctx context.Context) error {
+	err := g.gatherFn(ctx, g.value, g.err)
+	g.pool.Put(g)
+	return err
+}
+
+func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, output O, outputErr error) {
+	traceRegion := "CombinerPool.emit"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	g := c.boundGatherPool.Get()
+	g.pool = c.boundGatherPool
+	g.gatherFn = c.gatherFn
+	g.value = output
+	g.err = outputErr
+
+	c.job.postGather(ctx, c.earliestGroup, c.emitGatherOutbox, g.boundGatherFn)
+}
+
+func (c *halfBoundCombiner[I, O]) combine(ctx context.Context, input I, inputErr error) {
+	traceRegion := "CombinerPool.combineFn"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	didNotPanic := false
+	defer func() {
+		if !didNotPanic {
+			// Just in case the panic is otherwise suppressed
+			c.emit(ctx, *new(O), ErrCombinePanicked)
+		}
+	}()
+
+	trace.Logf(ctx, traceRegion, "calling Combine on combiner=%v", c.combiner)
+	newFlushDeadline, err := c.combiner.Combine(ctx, input, inputErr)
+	didNotPanic = true
+
+	if newFlushDeadline != c.flushDeadline {
+		c.flushDeadline = newFlushDeadline
+		c.cm.UpdateForNewFlushDeadline(c)
+	}
+
+	if err != nil {
+		c.emit(ctx, *new(O), err)
+	}
+}
+
+func (c *halfBoundCombiner[I, O]) Flush(ctx context.Context) {
+	traceRegion := "CombinerPool.flushFn"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	panicked := true // Assume the worst
+	defer func() {
+		if panicked {
+			// Just in case the panic is otherwise suppressed
+			c.emit(ctx, *new(O), ErrCombinerFlushPanicked)
+		}
+	}()
+
+	trace.Logf(ctx, traceRegion, "calling Flush on combiner=%v", c.combiner)
+	v, err := c.combiner.Flush(ctx)
+	panicked = false
+	if !errors.Is(err, psgfn.ErrDoNotGather) {
+		c.emit(ctx, v, err)
+	}
+}
+
+func (c *halfBoundCombiner[I, O]) Key() combinerMapKey {
+	return combinerMapKey{Job: c.job, OpID: c.opID}
+}
+
+func (c *halfBoundCombiner[I, O]) FlushDeadline() time.Time {
+	return c.flushDeadline
+}
+
+// Less implements heap.Item interface
+func (c *halfBoundCombiner[I, O]) Less(other heldCombiner) bool {
+	return c.flushDeadline.Before(other.FlushDeadline())
+}
+
+// SetPosition implements heap.Item interface
+func (c *halfBoundCombiner[I, O]) SetPosition(position int) {
+	c.heapPosition = position
+}
+
+// Position implements heap.Item interface
+func (c *halfBoundCombiner[I, O]) Position() int {
+	return c.heapPosition
+}
+
+type heldCombiner interface {
+	heap.Item[heldCombiner]
+	Key() combinerMapKey
+	FlushDeadline() time.Time
+	Flush(context.Context)
+	Free()
+}
+
+type combinerMap struct {
+	m         map[combinerMapKey]heldCombiner
+	deadlines heap.Heap[heldCombiner]
+}
+
+type combinerMapKey struct {
+	Job  *Job
+	OpID combineOpID
+}
+
+func (cm *combinerMap) UpdateForNewFlushDeadline(hc heldCombiner) {
+	flushDeadline := hc.FlushDeadline()
+	if flushDeadline.IsZero() {
+		cm.deadlines.Remove(hc)
 	} else {
-		cm.deadlines.Push(bc)
+		cm.deadlines.Push(hc)
 	}
 }
 
-func (cm *combinerMap) NextToFlush() *boundCombiner {
+func (cm *combinerMap) NextToFlush() heldCombiner {
 	if cm.deadlines.Len() == 0 {
 		return nil
 	}
@@ -528,20 +584,19 @@ func (cm *combinerMap) NextToFlush() *boundCombiner {
 }
 
 // Remove removes a combiner from both the map and the deadline heap
-func (cm *combinerMap) Remove(k combinerMapKey, bc *boundCombiner) {
-	// Remove from the heap if it's there
-	_ = cm.deadlines.Remove(bc)
-	// Remove from the map
-	delete(cm.m, k)
+func (cm *combinerMap) Remove(hc heldCombiner) {
+	_ = cm.deadlines.Remove(hc)
+	delete(cm.m, hc.Key())
 }
 
 func (cm *combinerMap) FlushAll(ctx context.Context) {
 	traceRegion := "combinerMap.FlushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "len=%d", len(cm.m))
-	for _, bc := range cm.m {
-		bc.FlushFn(ctx)
+	cm.deadlines.Reset()
+	for k, hc := range cm.m {
+		hc.Flush(ctx)
+		delete(cm.m, k)
+		hc.Free()
 	}
-	cm.m = nil
-	cm.deadlines = heap.Heap[*boundCombiner]{} // Reset to zero value
 }

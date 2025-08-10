@@ -6,6 +6,7 @@ package workq
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
@@ -31,14 +32,15 @@ type BlockBehavior struct {
 	ShouldBlock func(context.Context) BlockFunc
 }
 
-func (g *Governor) Execute(ctx context.Context, ex Execution, behavior BlockBehavior, workFn WorkFunc) error {
+func (g *Governor) Execute(ctx context.Context, ex Execution, deadline time.Time,
+	behavior BlockBehavior, workFn WorkFunc) error {
 	traceRegion := "workq.Governor.Execution"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	wb := WaitBehavior{
 		BlockBehavior: behavior,
 		ShouldWait:    g.upstreamShouldWaitFn,
 	}
-	return g.upstream.Execute(ctx, ex, wb, workFn)
+	return g.upstream.Execute(ctx, ex, deadline, wb, workFn)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -126,5 +128,12 @@ func (g *Governor) decrementDownstream() {
 		panic("unbalanced decrement detected")
 	case newValue == 0:
 		g.upstream.NotifyAll()
+
+	case newValue%2 == 0:
+		// This clause releases backpressure gradually rather than only all at
+		// once, smoothing out governed work execution and thus reducing
+		// resource demand spikes. This in turn reduces resource allocation and
+		// increases utilization.
+		g.upstream.Notify(func() {})
 	}
 }

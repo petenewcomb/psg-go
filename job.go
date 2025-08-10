@@ -93,14 +93,12 @@ func (w *taskWork) Execute(ctx context.Context, taskWorkerOutboxMap *outboxMap) 
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *taskWork) Close(job *Job) {
-	traceRegion := "taskWork.Close"
+func (w *taskWork) Free(job *Job) {
+	traceRegion := "taskWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	w.jobWork.Close(job)
-
-	*w = taskWork{} // Clear the work item for garbage collection and reuse
+	w.Close(job)
 	taskWorkPool.Put(w)
 }
 
@@ -157,21 +155,6 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.SetOptions(options...)
 
 	return j
-}
-
-//nolint:contextcheck // background context used only for tracing
-func (j *Job) shouldWaitForSched() bool {
-	config := j.schedulerConfig.Load()
-	if config == nil || config.latencyThreshold == 0 {
-		return false // scheduler monitoring disabled
-	}
-	latency, updateTime := rdvq.SchedulerLatency()
-	age := time.Since(updateTime)
-	shouldWait := age < config.maxAge && latency > config.latencyThreshold
-	trace.Logf(context.Background(), "Job.shouldWaitForSched",
-		"latency=%v, age=%v, maxAge=%v, threshold=%v, shouldWait=%v",
-		latency, age, config.maxAge, config.latencyThreshold, shouldWait)
-	return shouldWait
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
@@ -271,7 +254,7 @@ func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
 // preemptively gather or gather results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
-func (j *Job) yield(ctx context.Context) error {
+func (j *Job) yield(ctx context.Context, deadline time.Time) error {
 	traceRegion := "Job.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -281,7 +264,8 @@ func (j *Job) yield(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !ok {
+		// Test for deadline passing only after trying at least one gather
+		if !ok || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			break
 		}
 	}
@@ -300,6 +284,7 @@ func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
 
 func (j *Job) block(
 	ctx context.Context,
+	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
 ) (workq.RenotifyFunc, error) {
@@ -318,7 +303,7 @@ func (j *Job) block(
 			var workReadyRenotifyFn workq.RenotifyFunc
 			var err error
 			workReadyRenotifyFn, blockWaitRenotifyFn, err = j.addWorkWhileMaybeBlocking(
-				ctx, meta, queueFn, workWaiters, confirmWorkWaitFn, blockWaiters, confirmBlockWaitFn)
+				ctx, meta, queueFn, workWaiters, confirmWorkWaitFn, blockDeadline, blockWaiters, confirmBlockWaitFn)
 			return workReadyRenotifyFn, err
 		},
 	)
@@ -338,7 +323,8 @@ func (j *Job) addWork(
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Job=%p", j)
 	ctx, meta := j.ctxMeta(ctx)
-	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters, confirmWaitFn, nil, nil)
+	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
+		confirmWaitFn, time.Time{}, nil, nil)
 	return workReadyRenotifyFn, err
 }
 
@@ -348,6 +334,7 @@ func (j *Job) addWorkWhileMaybeBlocking(
 	queueFn workq.QueueWorkFunc,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
+	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
 ) (workReadyRenotifyFn, blockWaitRenotifyFn workq.RenotifyFunc, err error) {
@@ -373,24 +360,33 @@ func (j *Job) addWorkWhileMaybeBlocking(
 								outboxWaiter,
 								workWaiter,
 								nil,
+								nil,
 							)
 						} else {
 							blockWaiters.WaitFunc(
 								blockWaiter,
 								func() bool {
-									shouldWait := confirmBlockWaitFn()
+									shouldWait := confirmBlockWaitFn() && (blockDeadline.IsZero() || time.Now().Before(blockDeadline))
 									if !shouldWait {
 										err = errBlockWaitSignaled
 									}
 									return shouldWait
 								},
 								func(blockWaiter *rdvq.Waiter) {
+									var blockTimerCh <-chan time.Time
+									if !blockDeadline.IsZero() {
+										blockTimer := timerp.Get()
+										defer timerp.Put(blockTimer)
+										timerp.Reset(blockTimer, max(0, time.Until(blockDeadline)))
+										blockTimerCh = blockTimer.C
+									}
 									err = j.gatherSelect(
 										ctx,
 										queueFn,
 										inbox,
 										outboxWaiter,
 										workWaiter,
+										blockTimerCh,
 										blockWaiter,
 									)
 								},
@@ -410,6 +406,7 @@ func (j *Job) gatherSelect(
 	inbox *rdvq.Inbox[workq.Work],
 	outboxWaiter *rdvq.Waiter,
 	workWaiter *rdvq.Waiter,
+	blockTimerCh <-chan time.Time,
 	blockWaiter *rdvq.Waiter,
 ) error {
 	traceRegion := "Job.gatherSelect"
@@ -436,6 +433,9 @@ func (j *Job) gatherSelect(
 	case renotifyFn := <-workWaiterCh:
 		workWaiter.Notified(renotifyFn)
 		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaiter=%p, workWaiterCh=%p", workWaiter, workWaiterCh)
+	case <-blockTimerCh:
+		trace.Logf(ctx, traceRegion, "received block deadline timer signal")
+		err = errBlockWaitSignaled
 	case renotifyFn := <-blockWaiterCh:
 		blockWaiter.Notified(renotifyFn)
 		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaiter=%p, blockWaiterCh=%p", blockWaiter, blockWaiterCh)
@@ -521,14 +521,12 @@ func (w *gatherWork) Execute(ctx context.Context, ex workq.Execution) error {
 	return w.gatherFn(ctx)
 }
 
-func (w *gatherWork) Close() {
-	traceRegion := "gatherWork.Close"
+func (w *gatherWork) Free() {
+	traceRegion := "gatherWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	w.jobWork.Close(w.job)
-
-	*w = gatherWork{} // Clear the work item for garbage collection and reuse
+	w.Close(w.job)
 	gatherWorkPool.Put(w)
 }
 
@@ -672,7 +670,7 @@ func (j *Job) spawnTaskWorker(_ context.Context, task *taskWork) {
 		for task != nil {
 			// Execute the task
 			func() {
-				defer task.Close(j)
+				defer task.Free(j)
 				task.Execute(ctx, &taskWorkerOutboxMap)
 			}()
 			task = nil
@@ -718,10 +716,11 @@ func (w *jobWork) Init(group workq.GroupID, job *Job) {
 	job.state.IncrementWork()
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (w *jobWork) Close(job *Job) {
 	if w.ID() == 0 {
 		// This check and panic is best-effort only as it may also be a race if
-		// Close() is called from multiple goroutines.
+		// Close() is called from multiple goroutines -- which it should not be.
 		panic("already closed")
 	}
 	trace.Logf(context.Background(), "jobWork.Close", "%v", &w.WorkItem)
@@ -732,6 +731,7 @@ func (j *Job) scatter(
 	ctx context.Context,
 	group workq.GroupID,
 	ex workq.Execution,
+	deadline time.Time,
 	_ *taskPoolScatterWork,
 	taskFn boundTaskFunc,
 ) error {

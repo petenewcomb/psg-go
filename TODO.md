@@ -12,14 +12,11 @@ Items to complete before merging to main branch.
 
 ### 5. API finalization
 - Review and document thread-safety guarantees for remaining public APIs
-- replace min/max hold time with flush deadline return value from combine operations
 - consider adding a timeout as a first-class option for scatters, to avoid context creation overhead when trying to propagate backpressure 503-style
-- consider adding value pools as options to reduce allocation overhead
+- add a way to force creation of a new work group
 
 ### 6. Implementation improvements
-- Improve detection of top-level vs. child tasks to prevent adding new top-level
-  tasks after Close() (use ctxMeta to allow new scatters only to finish
-  workflows already started)
+- Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 - consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
 - make sure that rdvq.Optional methods aren't inappropriately leaking through to Waiters or Required 
@@ -30,6 +27,7 @@ Items to complete before merging to main branch.
 - reorganize code within large files like job.go
 - create a reusable WaiterMap to replace existing duplicated blockWaiterMap code
 - re-review tracing guidelines in DEVELOPMENT.md
+- figure out what to do about trace.IsEnabled everywhere (if, how)
 - check the scatter plots and review combiner pool controller settings
 - review and understand processing and waiting aggregation throughput and speedup graphs - interesting how flat they are, but seems potentially right
 - fix LockAndSetQueueFunc ugliness

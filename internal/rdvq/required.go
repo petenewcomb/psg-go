@@ -282,7 +282,6 @@ func (q *Required[T]) TryPopFront() (T, bool) {
 		trace.Logf(context.Background(), traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
 		select {
 		case value := <-outboxCh:
-			outbox.emptied()
 			trace.Logf(context.Background(), traceRegion, "received value from outbox=%p outboxCh=%p, returning true",
 				outbox, outboxCh)
 			return value, true

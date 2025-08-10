@@ -5,4 +5,4 @@ package psgwf
 
 import "github.com/petenewcomb/psg-go/internal/cerr"
 
-const ErrWorkflowComplete = cerr.Error("workflow complete")
+const ErrWorkflowEnded = cerr.Error("workflow ended")

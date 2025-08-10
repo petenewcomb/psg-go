@@ -39,12 +39,12 @@ func ExampleCombine() {
 		}
 	}
 
-	newCombiner := func() psg.Combiner[string, map[string]int] {
+	newCombiner := func() psgfn.Combiner[string, map[string]int] {
 		// Aggregation state variable shared between combine and flush
 		var counts map[string]int
 
-		return psgfn.Combiner[string, map[string]int]{
-			CombineFn: func(ctx context.Context, result string, err error, emit psgfn.Emit[map[string]int]) {
+		return psgfn.FuncCombiner[string, map[string]int]{
+			CombineFn: func(ctx context.Context, result string, err error) (time.Time, error) {
 				time.Sleep(10 * time.Millisecond)
 				if counts == nil {
 					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
@@ -52,13 +52,11 @@ func ExampleCombine() {
 				}
 				counts[result]++
 				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
+				return time.Time{}, nil
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[map[string]int]) {
+			FlushFn: func(ctx context.Context) (map[string]int, error) {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-				if counts != nil {
-					emit(ctx, counts, nil)
-					counts = nil
-				}
+				return counts, nil
 			},
 		}
 	}

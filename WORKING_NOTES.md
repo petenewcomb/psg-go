@@ -72,5 +72,16 @@ All optimization commits (409d49d, c515383, 42ab341, 2911b9c) performed as inten
 
 **Decision**: Scheduler monitoring included but disabled by default. The rdvq API improvements provide immediate ergonomic benefits while keeping the backpressure feature available for future tuning if needed.
 
-### Current Status
-All major architecture and performance work complete. Scheduler monitoring infrastructure ready but dormant. Branch ready for commit and merge.
+## Current Status (2025-08-09)
+
+**Combiner Architecture Progress:**
+- Core combiner/gather infrastructure complete and tested
+- psgwf package refactored with cleaner combineop/gatherop pattern
+- Workflow context propagation and pinning mechanism implemented
+- New internal benchmarking application (internal/benchapp) added for performance testing
+
+**Upcoming Major Work - Reducer Concept:**
+Planning to introduce reducer functionality to support fan-in patterns needed by the benchmarking application. This was originally planned for post-merge but is now needed for the benchapp development. The reducer will complement the existing combiner architecture by providing keyed aggregation capabilities.
+
+**Branch Status:**
+Not yet ready for merge - significant reducer architecture work pending. After reducer implementation, will need to update documentation and finalize API before merging to main.

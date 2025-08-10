@@ -6,6 +6,7 @@ package psg_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/stretchr/testify/assert"
@@ -54,6 +55,7 @@ func TestGatherTryScatterNilTaskPanic(t *testing.T) {
 		)
 		_, _ = gatherOp.TryScatter(
 			ctx,
+			time.Time{},
 			pool,
 			nil, // Nil Task should panic
 		)

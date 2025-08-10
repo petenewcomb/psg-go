@@ -76,6 +76,12 @@ func (h *Heap[T]) Remove(item T) bool {
 	return true
 }
 
+// Reset clears the heap of its entries but retains the allocated capacity
+func (h *Heap[T]) Reset() {
+	clear(h.impl.items)
+	h.impl.items = h.impl.items[:0]
+}
+
 // Implementation of container/heap.Interface for heapImpl
 
 func (h *heapImpl[T]) Len() int {

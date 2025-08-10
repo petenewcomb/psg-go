@@ -5,6 +5,7 @@ package otpsg
 
 import (
 	"context"
+	"time"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
@@ -42,7 +43,7 @@ func TracedTask[T any](
 func TracedGather[T any](
 	operationName string,
 	gatherFn func(ctx context.Context, result T, err error) error,
-) *psg.GatherOp[PropagatedResult[T]] {
+) psg.GatherOp[PropagatedResult[T]] {
 	// Create a gather function that adds tracing
 	tracedGatherFn := func(ctx context.Context, result T, err error) error {
 		// Create span with meaningful name
@@ -64,30 +65,30 @@ func TracedGather[T any](
 func TracedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
 	// Create a combiner factory that adds tracing
-	tracedFactory := func() psg.Combiner[I, O] {
+	tracedFactory := func() psgfn.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 
-		return psgfn.Combiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
+		return psgfn.FuncCombiner[I, O]{
+			CombineFn: func(ctx context.Context, input I, inputErr error) (time.Time, error) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, combineOpName)
 				defer span.End()
 
 				// Call the original combine function
-				innerCombiner.Combine(ctx, input, inputErr, emit)
+				return innerCombiner.Combine(ctx, input, inputErr)
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[O]) {
+			FlushFn: func(ctx context.Context) (O, error) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, flushOpName)
 				defer span.End()
 
 				// Call the original flush function
-				innerCombiner.Flush(ctx, emit)
+				return innerCombiner.Flush(ctx)
 			},
 		}
 	}

@@ -7,7 +7,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"go.uber.org/zap"
 )
@@ -97,13 +96,13 @@ func LoggedGather[T any](
 func LoggedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[I, O] {
-	return func() psg.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[I, O] {
+	return func() psgfn.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 
-		return psgfn.Combiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
+		return psgfn.FuncCombiner[I, O]{
+			CombineFn: func(ctx context.Context, input I, inputErr error) (time.Time, error) {
 				// Get logger from context or use a default
 				logger := zap.L()
 
@@ -115,16 +114,19 @@ func LoggedCombiner[I, O any](
 
 				// Time the operation
 				startTime := time.Now()
-				innerCombiner.Combine(ctx, input, inputErr, emit)
+				flushTime, err := innerCombiner.Combine(ctx, input, inputErr)
 				duration := time.Since(startTime)
 
 				// Log completion
 				logger.Debug("Combine completed",
 					zap.String("operation", combineOpName),
 					zap.String("component", "otpsg"),
-					zap.Duration("duration", duration))
+					zap.Duration("duration", duration),
+					zap.Bool("has_error", err != nil))
+
+				return flushTime, err
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[O]) {
+			FlushFn: func(ctx context.Context) (O, error) {
 				// Get logger from context or use a default
 				logger := zap.L()
 
@@ -135,14 +137,17 @@ func LoggedCombiner[I, O any](
 
 				// Time the operation
 				startTime := time.Now()
-				innerCombiner.Flush(ctx, emit)
+				result, err := innerCombiner.Flush(ctx)
 				duration := time.Since(startTime)
 
 				// Log completion
 				logger.Debug("Flush completed",
 					zap.String("operation", flushOpName),
 					zap.String("component", "otpsg"),
-					zap.Duration("duration", duration))
+					zap.Duration("duration", duration),
+					zap.Bool("has_error", err != nil))
+
+				return result, err
 			},
 		}
 	}

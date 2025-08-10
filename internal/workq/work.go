@@ -29,7 +29,12 @@ type Work interface {
 	ID() WorkID
 	Group() GroupID
 	Execute(context.Context, Execution) error
-	Close()
+
+	// Free is called exactly once when this Work is no longer needed. After
+	// the call to Free is initiated, no further access to the Work will be
+	// attempted. This allows Free to deallocate or pool resources associated
+	// with the Work, including the Work itself.
+	Free()
 }
 
 var workIDCounter atomic.Int64
@@ -69,7 +74,7 @@ func (wi *WorkItem) Group() GroupID {
 	return wi.group
 }
 
-func (wi *WorkItem) Close() {
+func (wi *WorkItem) Free() {
 }
 
 func (wi *WorkItem) String() string {

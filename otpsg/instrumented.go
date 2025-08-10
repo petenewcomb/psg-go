@@ -32,7 +32,7 @@ func InstrumentedTask[T any](
 func InstrumentedGather[T any](
 	operationName string,
 	gatherFn func(ctx context.Context, result T, err error) error,
-) *psg.GatherOp[PropagatedResult[T]] {
+) psg.GatherOp[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedGather := LoggedGather(operationName, gatherFn)
@@ -49,8 +49,8 @@ func InstrumentedGather[T any](
 func InstrumentedCombiner[I, O any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedCombiner := LoggedCombiner(combineOpName, flushOpName, combinerFactory)
@@ -76,7 +76,7 @@ func InstrumentedScatter[T any](
 	ctx context.Context,
 	target psg.TaskPoolOrJob,
 	task psgfn.Task[PropagatedResult[T]],
-	gather *psg.GatherOp[PropagatedResult[T]],
+	gather psg.GatherOp[PropagatedResult[T]],
 ) error {
 	return gather.Scatter(ctx, target, task)
 }

@@ -8,6 +8,7 @@ package otpsg
 
 import (
 	"context"
+	"time"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
@@ -50,7 +51,7 @@ func PropagateTask[T any](
 // set, allowing spans created in the gather function to be properly parented.
 func PropagateGather[T any](
 	gatherFn func(ctx context.Context, result T, err error) error,
-) *psg.GatherOp[PropagatedResult[T]] {
+) psg.GatherOp[PropagatedResult[T]] {
 	return psg.NewGatherOp(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 		// Create context with propagated trace data
 		propagatedCtx := ctx
@@ -66,52 +67,37 @@ func PropagateGather[T any](
 // PropagateCombiner wraps a combiner factory to create combiners that propagate trace context.
 // Both the Combine and Flush methods will properly handle trace context propagation.
 func PropagateCombiner[I, O any](
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
-	return func() psg.Combiner[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	return func() psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]] {
 		innerCombiner := combinerFactory()
 
-		return psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]]{
+		return psgfn.FuncCombiner[PropagatedResult[I], PropagatedResult[O]]{
 			CombineFn: func(
 				ctx context.Context,
 				input PropagatedResult[I],
 				inputErr error,
-				emit psgfn.Emit[PropagatedResult[O]],
-			) {
+			) (time.Time, error) {
 				// Create context with propagated trace data
 				propagatedCtx := ctx
 				if input.TraceContext.IsValid() {
 					propagatedCtx = trace.ContextWithRemoteSpanContext(ctx, input.TraceContext)
 				}
 
-				// Extract current trace context for output propagation
-				currentTrace := trace.SpanFromContext(propagatedCtx).SpanContext()
-
-				// Wrap emit to continue propagation
-				wrappedEmit := func(ctx context.Context, output O, outputErr error) {
-					emit(ctx, PropagatedResult[O]{
-						UserResult:   output,
-						TraceContext: currentTrace,
-					}, outputErr)
-				}
-
 				// Process with inner combiner
-				innerCombiner.Combine(propagatedCtx, input.UserResult, inputErr, wrappedEmit)
+				return innerCombiner.Combine(propagatedCtx, input.UserResult, inputErr)
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[PropagatedResult[O]]) {
+			FlushFn: func(ctx context.Context) (PropagatedResult[O], error) {
 				// Extract current trace context for output propagation
 				currentTrace := trace.SpanFromContext(ctx).SpanContext()
 
-				// Wrap emit to continue propagation
-				wrappedEmit := func(ctx context.Context, output O, outputErr error) {
-					emit(ctx, PropagatedResult[O]{
-						UserResult:   output,
-						TraceContext: currentTrace,
-					}, outputErr)
-				}
-
 				// Process with inner combiner
-				innerCombiner.Flush(ctx, wrappedEmit)
+				result, err := innerCombiner.Flush(ctx)
+
+				return PropagatedResult[O]{
+					UserResult:   result,
+					TraceContext: currentTrace,
+				}, err
 			},
 		}
 	}

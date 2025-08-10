@@ -9,17 +9,18 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-type Task[T any] = func(context.Context, *Workflow) (T, error)
+type GenericTaskFunc[T, C any] func(context.Context, *GenericWorkflow[C]) (T, error)
+type TaskFunc[T any] = GenericTaskFunc[T, Context]
 
-func wrapTask[T any](wf *Workflow, taskFn Task[T]) psgfn.Task[result[T]] {
-	return func(ctx context.Context) (res result[T], err error) {
+func wrapTaskFunc[T, C any](wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) psgfn.Task[result[T, C]] {
+	return func(ctx context.Context) (res result[T, C], err error) {
 		res.Workflow = wf
 		res.Value, err = taskFn(ctx, wf)
 		return
 	}
 }
 
-type result[T any] struct {
-	Workflow *Workflow
+type result[T, C any] struct {
+	Workflow *GenericWorkflow[C]
 	Value    T
 }

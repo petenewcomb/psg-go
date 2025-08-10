@@ -83,15 +83,26 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Accepted=%p", q)
 
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
 	c := newController(q)
 	c.addWorkFn = addWorkFn
-	defer c.Close()
+	defer c.Free()
 
 	for {
 		workExecuted, err := c.ExecuteOne(ctx)
 		if workExecuted || err != nil {
 			return err
 		}
+
+		err = ctx.Err()
+		if err != nil {
+			return err
+		}
+
 		c.ResetForRetry()
 	}
 }
@@ -113,9 +124,14 @@ type TryAddWorkFunc func(context.Context, QueueWorkFunc) error
 // value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
 // been called but was nil.
 func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) (bool, error) {
+	err := ctx.Err()
+	if err != nil {
+		return false, err
+	}
+
 	c := newController(q)
 	c.tryAddWorkFn = addWorkFn
-	defer c.Close()
+	defer c.Free()
 
 	// Try accepted work first
 	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
@@ -141,7 +157,7 @@ func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) 
 	}
 
 	c.workWasDeferred = false
-	err := c.TryAccepted(ctx, false)
+	err = c.TryAccepted(ctx, false)
 	if !c.workWasDeferred && err == nil {
 		err = addErr
 	}
@@ -355,7 +371,7 @@ func (c *controller) execute(ctx context.Context, blockOrSubscribe bool) error {
 	}
 	defer func() {
 		if c.ex.Started() {
-			bw.work.Close()
+			bw.work.Free()
 		} else {
 			c.workWasDeferred = true
 		}
@@ -520,10 +536,7 @@ func (c *controller) addToBuffer(work Work, wasDeferred bool) {
 		"added %v at index %d, wasDeferred=%v", work, len(c.buffer)-1, wasDeferred)
 }
 
-func (c *controller) Close() {
-
-	// This must be called before c.Reset. Only Close should clear the started
-	// flag, Reset will panic if it is set.
+func (c *controller) Free() {
 	controllerPool.Put(c)
 }
 

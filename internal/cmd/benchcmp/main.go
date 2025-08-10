@@ -149,6 +149,8 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 					benchData.P50Latency.Add(v.Value)
 				case "p99-workflow-latency-sec":
 					benchData.P99Latency.Add(v.Value)
+				case "max-ideal-workflow-duration-sec":
+					benchData.MaxIdealWorkflowDuration = max(benchData.MaxIdealWorkflowDuration, v.Value)
 				}
 			}
 
@@ -220,11 +222,12 @@ func (m *Measurement) ComputeStats() {
 }
 
 type BenchData struct {
-	Config        Config
-	CombinerLimit int
-	Throughput    Measurement
-	P50Latency    Measurement
-	P99Latency    Measurement
+	Config                   Config
+	CombinerLimit            int
+	Throughput               Measurement
+	P50Latency               Measurement
+	P99Latency               Measurement
+	MaxIdealWorkflowDuration float64
 }
 
 func (d *BenchData) ComputeStats() {
@@ -280,10 +283,26 @@ func findBestStaticLimit(configData map[int]*BenchData) *BenchData {
 		return candidates[0]
 	}
 
-	// Tiebreaker: find candidate with best p50 latency
+	// Find candidates with best-in-class p50 latency
+	slices.SortFunc(candidates, func(a, b *BenchData) int {
+		return cmp.Compare(a.P50Latency.Summary.Center, b.P50Latency.Summary.Center)
+	})
+	best = candidates[0]
+	for i := len(candidates) - 1; i > 0; i-- {
+		data := candidates[i]
+		comparison := compareMeasurements(&best.P50Latency, &data.P50Latency)
+		if comparison.P < alpha {
+			candidates = slices.Delete(candidates, i, i+1)
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	// Finally, use lowest combiner limit as tiebreaker
 	best = nil
 	for _, data := range candidates {
-		if best == nil || data.P50Latency.Summary.Center < best.P50Latency.Summary.Center {
+		if best == nil || data.CombinerLimit < best.CombinerLimit {
 			best = data
 		}
 	}
@@ -430,7 +449,7 @@ func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[
 func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Best Static Vs. Dynamic Combiner Concurrency Benchmark Comparison")
+	t.SetTitle("Best Static Vs. Dynamic Combiner Concurrency")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
@@ -582,8 +601,8 @@ func appendPerformanceChanges(row table.Row, config Config, baseline, current, i
 	row = append(row, formatChange(-1, &baseline.P50Latency, &current.P50Latency)...)
 	row = append(row, formatChange(-1, &baseline.P99Latency, &current.P99Latency)...)
 	if ideal != nil {
-		row = append(row, formatLatencyVsIdeal(config, &ideal.P50Latency)...)
-		row = append(row, formatLatencyVsIdeal(config, &ideal.P99Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, ideal.MaxIdealWorkflowDuration, &ideal.P50Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, ideal.MaxIdealWorkflowDuration, &ideal.P99Latency)...)
 	}
 	return row
 }
@@ -610,11 +629,10 @@ func formatThroughputVsIdeal(config Config, throughput *Measurement) []any {
 	return []any{fmt.Sprintf("%.1f%%", percent*delta), ind}
 }
 
-func formatLatencyVsIdeal(config Config, latency *Measurement) []any {
-	ideal := 2 * float64(config.Duration) / float64(time.Second) //nolint:mnd // combine + gather
-	delta := latency.Summary.Center / ideal
+func formatLatencyVsIdeal(config Config, maxIdealWorkflowDuration float64, latency *Measurement) []any {
+	delta := latency.Summary.Center / maxIdealWorkflowDuration
 	ind := neutralIndicator
-	if computeRelativeDifference(ideal, latency.Summary.Lo) >= (1 - confidence) {
+	if computeRelativeDifference(maxIdealWorkflowDuration, latency.Summary.Lo) >= (1 - confidence) {
 		ind = badIndicator
 	}
 	return []any{fmt.Sprintf("%.1f%%", percent*delta), ind}

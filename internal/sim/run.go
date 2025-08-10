@@ -137,7 +137,8 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 			defer c.GathersLock.Unlock()
 			gatherOp := c.Gathers[rh.Index]
 			if gatherOp == nil {
-				gatherOp = psg.NewGatherOp(c.newGatherFunc(t))
+				op := psg.NewGatherOp(c.newGatherFunc(t))
+				gatherOp = &op
 				c.Gathers[rh.Index] = gatherOp
 			}
 			return gatherOp
@@ -178,11 +179,12 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 				}
 
 				// Create a combine operation that uses the gather and factory
-				combineOp = psg.NewCombineOp(
+				op := psg.NewCombineOp(
 					gatherOp,
 					combinerPool,
 					c.newCombinerFactory(t, rh.Index),
 				)
+				combineOp = &op
 				c.Combines[rh.Index] = combineOp
 			}
 			return combineOp
@@ -288,22 +290,17 @@ func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] 
 func (c *controller) newCombinerFactory(
 	t assert.TestingT,
 	combineIndex int,
-) psg.CombinerFactory[*taskResult, *combineResult] {
-	return func() psg.Combiner[*taskResult, *combineResult] {
+) psgfn.CombinerFactory[*taskResult, *combineResult] {
+	return func() psgfn.Combiner[*taskResult, *combineResult] {
 		cRes := &combineResult{
 			Index: combineIndex,
 		}
-		flush := func(ctx context.Context, combine *Combine, err error, emit psgfn.Emit[*combineResult]) {
-			cRes.Combine = combine
-			cRes.EndTime = time.Now()
-			emit(ctx, cRes, err)
-			cRes = &combineResult{
-				Index: cRes.Index,
-			}
-		}
-		return psgfn.Combiner[*taskResult, *combineResult]{
-			CombineFn: func(ctx context.Context, tRes *taskResult, err error, emit psgfn.Emit[*combineResult]) {
-				chk := assert.New(t)
+		var flushErr error
+		flushed := false
+		chk := assert.New(t)
+		return psgfn.FuncCombiner[*taskResult, *combineResult]{
+			CombineFn: func(ctx context.Context, tRes *taskResult, err error) (time.Time, error) {
+				chk.False(flushed)
 
 				c.updateTaskStats(t, tRes, err)
 
@@ -319,12 +316,19 @@ func (c *controller) newCombinerFactory(
 
 				cRes.TaskCount++
 
-				if combine.FlushHandler != nil || err != nil {
-					flush(ctx, combine, err, emit)
+				var flushDeadline time.Time
+				if combine.FlushHandler != nil {
+					cRes.Combine = combine
+					flushErr = err
+					flushDeadline = time.Now()
 				}
+				return flushDeadline, err
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[*combineResult]) {
-				flush(ctx, nil, nil, emit)
+			FlushFn: func(ctx context.Context) (*combineResult, error) {
+				chk.False(flushed)
+				flushed = true
+				cRes.EndTime = time.Now()
+				return cRes, flushErr
 			},
 		}
 	}
@@ -333,6 +337,14 @@ func (c *controller) newCombinerFactory(
 func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*combineResult] {
 	return func(ctx context.Context, res *combineResult, err error) error {
 		chk := assert.New(t)
+
+		if res == nil {
+			// Error from Combine case
+			chk.Error(err)
+			var ce ExpectedCombineError
+			chk.ErrorAs(err, &ce)
+			return nil
+		}
 
 		combine := res.Combine
 		if combine == nil {

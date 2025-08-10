@@ -5,142 +5,120 @@ package psgwf
 
 import (
 	"context"
-	"math/rand/v2"
-	"sync"
+	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 )
 
-// AfterFunc is a function called after a workflow completes. It receives:
-// - ctx: the context from the gather, combine, or flush operation that performed the final [Workflow.Unref]
-// - wf: the completed workflow with its cancelled context (usage other than accessing Ctx will panic)
-//
-// This allows operations that:
-//   - Release resources or commit source transactions
-//   - Scatter new tasks using the provided ctx with a new workflow (via [New])
-//   - Examine the cancellation cause via the workflow context
-//   - Collect values from the workflow context
-//
-// Multiple AfterFuncs may be registered on a single workflow. Their execution order
-// is explicitly randomized to prevent dependencies on ordering.
-type AfterFunc func(ctx context.Context, wf *Workflow)
+type GenericAfterFunc[C any] func(ctx context.Context, wf *GenericWorkflow[C])
+type AfterFunc = GenericAfterFunc[Context]
 
-// Workflow provides context for a family of tasks within a job. It is
-// propagated from tasks to gathers or combines, and then to additional tasks
-// scattered from those gathers or combines.
-type Workflow struct {
-	ctx        context.Context //nolint:containedctx // for the workflow, separate from normal call-tree context
-	mu         sync.Mutex
-	refCount   int
-	cancel     context.CancelCauseFunc
-	afterFuncs []AfterFunc
+// Workflow establishes a family of tasks, combines, and gathers within a job.
+// It is propagated from tasks to gathers or combines, and then to additional
+// tasks scattered from those gathers or combines.
+type GenericWorkflow[C any] struct {
+	pool     *omnipool.Pool[GenericWorkflow[C]]
+	refCount atomic.Int32
+	parent   parentWorkflow
+	ctx      C
+	afterFn  GenericAfterFunc[C]
 }
 
-// workflowTrait handles pooling for Workflow without exposing Reset on the public API
-type workflowTrait struct{}
-
-func (workflowTrait) Make() *Workflow {
-	return &Workflow{}
+type parentWorkflow interface {
+	ref()
+	unref(context.Context)
 }
 
-func (workflowTrait) Reset(wf *Workflow) {
-	// Clear references to allow garbage collection and prepare for next use
-	wf.ctx = nil
-	wf.cancel = nil
-	// Clear afterFuncs slice but preserve capacity
-	wf.afterFuncs = wf.afterFuncs[:0]
+type Workflow = GenericWorkflow[Context]
+
+// NewGenericWithParent creates a new root workflow with a user-defined context type and after function.
+func NewGeneric[C any](wfCtx C, afterFn GenericAfterFunc[C]) *GenericWorkflow[C] {
+	return NewGenericWithParent[C, C](nil, wfCtx, afterFn)
 }
 
-var wfPool = omnipool.ForCustom(workflowTrait{})
-
-func New(ctx context.Context) *Workflow {
-	wf := wfPool.Get()
-	wf.ctx = ctx
+// NewGenericWithParent creates a new child workflow with a user-defined context
+// type and after function. If called with a nil parent, it returns a root
+// workflow just like [NewGeneric].
+func NewGenericWithParent[PC, C any](parent *GenericWorkflow[PC], wfCtx C,
+	afterFn GenericAfterFunc[C]) *GenericWorkflow[C] {
+	pool := omnipool.For[GenericWorkflow[C]]()
+	wf := pool.Get()
+	if parent != nil {
+		wf.parent = parent
+	}
+	wf.pool = pool
+	wf.ctx = wfCtx
+	wf.afterFn = afterFn
 	return wf
 }
 
-func (wf *Workflow) Ctx() context.Context {
-	wf.mu.Lock()
-	defer wf.mu.Unlock()
+// Creates a new child workflow.
+func WithParent[PC, C any](parent *GenericWorkflow[PC], wfCtx C) *GenericWorkflow[C] {
+	return NewGenericWithParent(parent, wfCtx, nil)
+}
+
+// WithAfterFunc creates a new child workflow that runs the given function when
+// all associated work has finished.
+func WithAfterFunc[C any](parent *GenericWorkflow[C], afterFn GenericAfterFunc[C]) *GenericWorkflow[C] {
+	return NewGenericWithParent(parent, parent.Ctx(), afterFn)
+}
+
+// New creates a new workflow with its own cancellation domain.
+func New(ctx context.Context) *Workflow {
+	return NewWithParent[Context](nil, ctx)
+}
+
+// NewWithParent creates a new child workflow with its own cancellation domain. If called with
+// a nil parent, it returns a root workflow just like [New].
+func NewWithParent[PC any](parent *GenericWorkflow[PC], ctx context.Context) *Workflow {
+	return NewGenericWithParent(parent, newContext(ctx), func(ctx context.Context, wf *Workflow) {
+		wf.Ctx().Cancel(ErrWorkflowEnded)
+	})
+}
+
+// Creates a child workflow that inherits the cancellation domain of its parent.
+func WithContext(parent *Workflow, ctx context.Context) *Workflow {
+	return NewGenericWithParent(parent, newChildContext(parent.Ctx(), ctx), nil)
+}
+
+func (wf *GenericWorkflow[C]) Ctx() C {
 	return wf.ctx
 }
 
-func (wf *Workflow) Cancel(cause error) {
-	wf.mu.Lock()
-	// It's OK to initialize cancel here without incrementing reference count
-	// because we're also going to call it and therefore release the resources
-	// it holds.
-	wf.ensureInitCancel()
-	cancel := wf.cancel
-	wf.mu.Unlock()
-	cancel(cause)
-}
-
-// AfterFunc registers a function to be called after the workflow completes.
-// Multiple AfterFuncs may be registered and their execution order is randomized.
-// See the [AfterFunc] type documentation for details on usage.
-func (wf *Workflow) AfterFunc(fn AfterFunc) {
-	wf.mu.Lock()
-	wf.afterFuncs = append(wf.afterFuncs, fn)
-	wf.mu.Unlock()
-}
-
-func (wf *Workflow) ref() {
-	wf.mu.Lock()
-	wf.ensureInitCancel()
-	wf.refCount++
-	wf.mu.Unlock()
-}
-
-func (wf *Workflow) ensureInitCancel() {
-	if wf.refCount == 0 {
-		wf.ctx, wf.cancel = context.WithCancelCause(wf.ctx)
+func (wf *GenericWorkflow[C]) ref() {
+	refCount := wf.refCount.Add(1)
+	if refCount == 1 && wf.parent != nil {
+		wf.parent.ref()
 	}
 }
 
-// Unref decrements the workflow's reference count. If the count reaches zero,
-// the workflow is completed, its context is cancelled, and any registered
-// AfterFuncs are executed in random order.
-func (wf *Workflow) unref(ctx context.Context) {
-	wf.mu.Lock()
-	if wf.refCount <= 0 {
+func (wf *GenericWorkflow[C]) unref(ctx context.Context) {
+	refCount := wf.refCount.Add(-1)
+	if refCount < 0 {
 		panic("Workflow reference count underflow")
 	}
-	wf.refCount--
-	if wf.refCount > 0 {
-		wf.mu.Unlock()
+	if refCount > 0 {
 		return
 	}
 
-	cancel := wf.cancel
-	afterFuncs := wf.afterFuncs
-	wf.afterFuncs = nil
+	if wf.afterFn != nil {
 
-	// Avoid holding the lock while calling external functions
-	wf.mu.Unlock()
+		// Re-reference while we run afterFn
+		wf.refCount.Add(1)
+		defer func() {
+			refCount := wf.refCount.Add(-1)
+			if refCount < 0 {
+				panic("Workflow reference count underflow")
+			}
+			if refCount == 0 {
+				// Now we're really done with this workflow instance.
+				if wf.parent != nil {
+					wf.parent.unref(ctx)
+				}
+				wf.pool.Put(wf)
+			}
+		}()
 
-	cancel(ErrWorkflowComplete)
-
-	// Shuffle and execute the AfterFuncs
-	rand.Shuffle(len(afterFuncs), func(i, j int) {
-		afterFuncs[i], afterFuncs[j] = afterFuncs[j], afterFuncs[i]
-	})
-	for _, fn := range afterFuncs {
-		fn(ctx, wf)
+		wf.afterFn(ctx, wf)
 	}
-
-	// Check invariants and return to pool
-	func() {
-		wf.mu.Lock()
-		defer wf.mu.Unlock()
-		if wf.refCount > 0 {
-			panic("Workflow reference count increased during calls to its AfterFuncs")
-		}
-		if len(wf.afterFuncs) > 0 {
-			panic("AfterFunc added to Workflow during calls to its original AfterFuncs")
-		}
-	}()
-
-	// Put back in pool - the trait's Reset method will handle clearing
-	wfPool.Put(wf)
 }

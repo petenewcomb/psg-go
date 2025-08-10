@@ -7,7 +7,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"go.opentelemetry.io/otel"
 )
@@ -85,9 +84,9 @@ func MetricsGather[T any](
 func MetricsCombiner[I, O any](
 	combineMetricName string,
 	flushMetricName string,
-	combinerFactory psg.CombinerFactory[I, O],
-) psg.CombinerFactory[I, O] {
-	return func() psg.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) psgfn.CombinerFactory[I, O] {
+	return func() psgfn.Combiner[I, O] {
 		innerCombiner := combinerFactory()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
@@ -99,15 +98,18 @@ func MetricsCombiner[I, O any](
 		// Create metrics for flush operations
 		flushCounter, _ := meter.Int64Counter(flushMetricName + ".count")
 		flushDuration, _ := meter.Float64Histogram(flushMetricName + ".duration")
+		flushErrorCounter, _ := meter.Int64Counter(flushMetricName + ".errors")
 
-		return psgfn.Combiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error, emit psgfn.Emit[O]) {
+		return psgfn.FuncCombiner[I, O]{
+			CombineFn: func(ctx context.Context, input I, inputErr error) (time.Time, error) {
 				startTime := time.Now()
 
 				// Track execution
 				combineCounter.Add(ctx, 1)
 
 				// Execute combine with error tracking
+				var flushTime time.Time
+				var err error
 				didPanic := true
 				defer func() {
 					// Record duration
@@ -115,27 +117,33 @@ func MetricsCombiner[I, O any](
 					combineDuration.Record(ctx, duration)
 
 					// Record error or panic
-					if didPanic || inputErr != nil {
+					if didPanic || inputErr != nil || err != nil {
 						combineErrorCounter.Add(ctx, 1)
 					}
 				}()
 
 				// Execute original combine
-				innerCombiner.Combine(ctx, input, inputErr, emit)
+				flushTime, err = innerCombiner.Combine(ctx, input, inputErr)
 				didPanic = false
+				return flushTime, err
 			},
-			FlushFn: func(ctx context.Context, emit psgfn.Emit[O]) {
+			FlushFn: func(ctx context.Context) (O, error) {
 				startTime := time.Now()
 
 				// Track execution
 				flushCounter.Add(ctx, 1)
 
 				// Execute flush
-				innerCombiner.Flush(ctx, emit)
+				result, err := innerCombiner.Flush(ctx)
 
-				// Record duration (always succeeds since we don't check flush errors)
+				// Record duration and errors
 				duration := time.Since(startTime).Seconds()
 				flushDuration.Record(ctx, duration)
+				if err != nil {
+					flushErrorCounter.Add(ctx, 1)
+				}
+
+				return result, err
 			},
 		}
 	}

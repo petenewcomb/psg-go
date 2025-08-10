@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-var Epoch = time.Now()
+var epoch = time.Now()
 
 type TimeTracker struct {
 	StartedCount       int
@@ -17,12 +17,12 @@ type TimeTracker struct {
 
 func (tt *TimeTracker) Started(startTime time.Time) {
 	tt.StartedCount++
-	tt.StartTimeSum += startTime.Sub(Epoch)
+	tt.StartTimeSum += startTime.Sub(epoch)
 }
 
 func (tt *TimeTracker) Ended(startTime, timeOrigin time.Time) {
 	tt.StartedCount--
-	tt.StartTimeSum -= startTime.Sub(Epoch)
+	tt.StartTimeSum -= startTime.Sub(epoch)
 	if startTime.Before(timeOrigin) {
 		startTime = timeOrigin
 	}
@@ -34,7 +34,7 @@ func (tt *TimeTracker) Update(now, timeOrigin time.Time) {
 		panic("now is before timeOrigin")
 	}
 	if tt.StartedCount > 0 {
-		avgStartTime := Epoch.Add(tt.StartTimeSum / time.Duration(tt.StartedCount))
+		avgStartTime := epoch.Add(tt.StartTimeSum / time.Duration(tt.StartedCount))
 		if avgStartTime.Before(timeOrigin) {
 			avgStartTime = timeOrigin
 		}

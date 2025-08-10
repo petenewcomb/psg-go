@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -21,7 +22,7 @@ type TaskPoolOrJob interface {
 	// getJob returns the Job associated with this target
 	getJob() *Job
 	// Execute executes the task function in the target context
-	scatter(context.Context, workq.GroupID, workq.Execution, *taskPoolScatterWork, boundTaskFunc) error
+	scatter(context.Context, workq.GroupID, workq.Execution, time.Time, *taskPoolScatterWork, boundTaskFunc) error
 }
 
 type boundTaskFunc func(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap)
@@ -56,6 +57,16 @@ func vetScatter[T any](
 	return ctx, meta
 }
 
+type boundTask[T any] struct {
+	group        workq.GroupID
+	job          *Job
+	taskFn       psgfn.Task[T]
+	postResultFn func(context.Context, workq.GroupID, *Job, *outboxMap, T, error)
+
+	pool        *omnipool.Pool[boundTask[T]]
+	boundTaskFn boundTaskFunc
+}
+
 // Binds type-specific task and gather functions together into a generic task
 // function
 func bindTaskFunc[T any](
@@ -64,46 +75,72 @@ func bindTaskFunc[T any](
 	taskFn psgfn.Task[T],
 	postResultFn func(context.Context, workq.GroupID, *Job, *outboxMap, T, error),
 ) boundTaskFunc {
-	return func(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap) {
-		traceRegion := "bindTaskFunc.boundTaskFn"
-		defer trace.StartRegion(ctx, traceRegion).End()
+	pool := omnipool.For[boundTask[T]]()
+	bt := pool.Get()
+	bt.pool = pool
+	bt.group = group
+	bt.job = job
+	bt.taskFn = taskFn
+	bt.postResultFn = postResultFn
+	return bt.boundTaskFn
+}
 
-		// Make sure that a panic in a task function doesn't compromise the rest
-		// of the job.
-		var value T
-		var err error = ErrTaskPanicked
-		defer func() {
-			if completedFn != nil {
-				completedFn()
-			}
-			if err != nil {
-				trace.Logf(ctx, traceRegion, "posting task err=%v", err)
-			}
-			postResultFn(ctx, group, job, taskWorkerOutboxMap, value, err)
-		}()
+func (bt *boundTask[T]) Init() {
+	bt.boundTaskFn = bt.execute
+}
 
-		// Actually execute the task function. Since this is the top-level
-		// function of a goroutine, if the task function panics the whole
-		// program will terminate. The user can avoid this behavior by
-		// recovering from the panic within the task function itself and then
-		// returning normally with whatever results they want to pass to the
-		// Gather to represent the failure. We therefore do not defer
-		// posting a gather to the job's channel or otherwise attempt to
-		// maintain the integrity of the task pool or overall job in case of task
-		// panics.
-		trace.WithRegion(ctx, traceRegion+".taskFn", func() {
-			value, err = taskFn(ctx)
-		})
+func (bt *boundTask[T]) Reset() {
+	*bt = boundTask[T]{
+		boundTaskFn: bt.boundTaskFn,
 	}
+}
+
+func (bt *boundTask[T]) execute(
+	ctx context.Context,
+	group workq.GroupID,
+	completedFn func(),
+	taskWorkerOutboxMap *outboxMap,
+) {
+	traceRegion := "boundTask.execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	// Make sure that a panic in a task function doesn't compromise the rest
+	// of the job.
+	var value T
+	var err error = ErrTaskPanicked
+	defer func() {
+		if completedFn != nil {
+			completedFn()
+		}
+		if err != nil {
+			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
+		}
+		bt.postResultFn(ctx, bt.group, bt.job, taskWorkerOutboxMap, value, err)
+		bt.pool.Put(bt)
+	}()
+
+	// Actually execute the task function. Since this is the top-level
+	// function of a goroutine, if the task function panics the whole
+	// program will terminate. The user can avoid this behavior by
+	// recovering from the panic within the task function itself and then
+	// returning normally with whatever results they want to pass to the
+	// Gather to represent the failure. We therefore do not defer
+	// posting a gather to the job's channel or otherwise attempt to
+	// maintain the integrity of the task pool or overall job in case of task
+	// panics.
+	trace.WithRegion(ctx, traceRegion+".taskFn", func() {
+		value, err = bt.taskFn(ctx)
+	})
 }
 
 func tryScatterNow(
 	ctx context.Context,
 	meta *ctxMeta,
+	deadline time.Time,
 	target TaskPoolOrJob,
 	scatterWork workq.Work,
 ) (bool, error) {
-	return scatterNowOrQueue(ctx, meta, target, scatterWork, nil)
+	return scatterNowOrQueue(ctx, meta, deadline, target, scatterWork, nil)
 }
 
 func scatterNow(
@@ -112,13 +149,14 @@ func scatterNow(
 	target TaskPoolOrJob,
 	scatterWork workq.Work,
 ) error {
-	_, err := scatterNowOrQueue(ctx, meta, target, scatterWork, meta.MayQueue())
+	_, err := scatterNowOrQueue(ctx, meta, time.Time{}, target, scatterWork, meta.MayQueue())
 	return err
 }
 
 func scatterNowOrQueue(
 	ctx context.Context,
 	meta *ctxMeta,
+	deadline time.Time,
 	target TaskPoolOrJob,
 	scatterWork workq.Work,
 	queueFn workq.QueueWorkFunc,
@@ -128,10 +166,11 @@ func scatterNowOrQueue(
 
 	// Give previously scattered tasks a chance to run. Without this call, the
 	// normal use case of scattering many tasks in a tight loop tends not to
-	// give those tasks a chance to run until they've all been started. This
-	// call to runtime.GoSched not only not only smooths task startup, it allows
-	// backpressure to operate more effectively, spacing out tasks to avoid
-	// boom-and-bust cycles of activity more reminiscent of batch processing.
+	// give those tasks a chance to run until too many have been started,
+	// especially in an environment with low parallelism. This is also an
+	// essential component of backpressure, as other backpressure mechanisms
+	// don't kick in until at least some tasks have completed and are therefore
+	// waiting on combines or gathers.
 	runtime.Gosched()
 
 	executor := executorPool.Get()
@@ -141,7 +180,7 @@ func scatterNowOrQueue(
 	queued := false
 	defer func() {
 		if ex.Started() || !queued {
-			scatterWork.Close()
+			scatterWork.Free()
 		}
 
 		startedOrQueued = ex.Started() || queued
@@ -153,18 +192,16 @@ func scatterNowOrQueue(
 	}()
 
 	if meta.IsTopLevel() {
-		for {
-			err := j.yield(ctx)
-			if err != nil {
-				return false, err
-			}
-			if !j.shouldWaitForSched() {
-				break
-			}
-			runtime.Gosched()
+		// If there's outstanding ready-to-execute work that needs to be done by
+		// this goroutine, do it before starting the new work. This is the main
+		// backpressure mechanism that prevents unbounded queuing and minimizes
+		// end-to-end latency while preserving sustained throughput.
+		err := j.yield(ctx, deadline)
+		if err != nil {
+			return false, err
 		}
 
-		// Signal the work that it should block making Subscribe non-nil,
+		// Signal the work that it should block by making Subscribe non-nil,
 		// knowing at this point that it will block rather than subscribe
 		// because we're at the top level.
 		ex.Subscribe = func(*workq.Coordinator) {
@@ -172,7 +209,9 @@ func scatterNowOrQueue(
 		}
 	}
 
-	err = scatterWork.Execute(ctx, ex)
+	if deadline.IsZero() || time.Now().Before(deadline) {
+		err = scatterWork.Execute(ctx, ex)
+	}
 
 	if err == nil && !ex.Started() && queueFn != nil {
 		queued = true

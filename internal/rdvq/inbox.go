@@ -4,7 +4,6 @@
 package rdvq
 
 type Inbox[T any] struct {
-	sensor     schedulerLatencySensor
 	ch         chan T
 	wasEmptied bool
 }
@@ -23,17 +22,11 @@ func (ib *Inbox[T]) Ch() <-chan T {
 	return ch
 }
 
-func (ib *Inbox[T]) filled() {
-	ib.sensor.triggered()
-}
-
 func (ib *Inbox[T]) emptyPending() {
 	ib.wasEmptied = false
-	ib.sensor.waitStarting()
 }
 
 func (ib *Inbox[T]) Emptied() {
-	ib.sensor.waitEnded()
 	ib.wasEmptied = true
 }
 

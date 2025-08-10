@@ -4,7 +4,6 @@
 package rdvq
 
 type Outbox[T any] struct {
-	sensor    schedulerLatencySensor
 	ch        chan T
 	wasFilled bool
 }
@@ -26,16 +25,10 @@ func (ob *Outbox[T]) Ch() chan<- T {
 
 func (ob *Outbox[T]) fillPending() {
 	ob.wasFilled = false
-	ob.sensor.waitStarting()
 }
 
 func (ob *Outbox[T]) Filled() {
-	ob.sensor.waitEnded()
 	ob.wasFilled = true
-}
-
-func (ob *Outbox[T]) emptied() {
-	ob.sensor.triggered()
 }
 
 // WasFilled returns true if Filled() was called.

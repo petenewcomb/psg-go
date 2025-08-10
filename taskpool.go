@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sync/atomic"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -110,6 +111,7 @@ func (p *TaskPool) scatter(
 	ctx context.Context,
 	group workq.GroupID,
 	ex workq.Execution,
+	deadline time.Time,
 	tpSW *taskPoolScatterWork,
 	taskFn boundTaskFunc,
 ) error {
@@ -131,7 +133,7 @@ func (p *TaskPool) scatter(
 		}
 	}()
 
-	return p.waiters.Execute(ctx, ex, wb,
+	return p.waiters.Execute(ctx, ex, deadline, wb,
 		func(ctx context.Context, ex workq.Execution) error {
 			return p.job.scatterWithCompletedFn(ctx, group, ex, taskFn, p.decrementInFlightFn)
 		},

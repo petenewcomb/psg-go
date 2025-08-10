@@ -5,53 +5,46 @@ package psg
 
 import (
 	"context"
-	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
-	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // CombineOp represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
 type CombineOp[I, O any] struct {
-	gatherOp    *GatherOp[O]
-	pool        *CombinerPool
-	newCombiner CombinerFactory[I, O]
-	minHoldTime time.Duration // Minimum time since last combine before auto-flushing
-	maxHoldTime time.Duration // Maximum time since first combine before auto-flushing
-
-	// avoid closure reallocation
-	postResultFn func(
-		ctx context.Context,
-		group workq.GroupID,
-		j *Job,
-		taskWorkerOutboxMap *outboxMap,
-		input I,
-		inputErr error,
-	)
+	id                    combineOpID
+	gatherFn              psgfn.Gather[O]
+	pool                  *CombinerPool
+	newCombiner           psgfn.CombinerFactory[I, O]
+	instancePool          *omnipool.Pool[pooledCombine[I, O]]
+	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[I, O]]
+	boundGatherPool       *omnipool.Pool[boundGather[O]]
 }
+
+type combineOpID int64
+
+var combineOpCounter atomic.Int64
 
 // NewCombineOp creates a new CombineOp operation that uses the specified gather function,
 // combiner pool, and combiner factory.
 //
 //nolint:contextcheck // background context used only for tracing
 func NewCombineOp[I, O any](
-	gatherOp *GatherOp[O],
+	gatherOp GatherOp[O],
 	pool *CombinerPool,
-	combinerFactory CombinerFactory[I, O],
-	options ...psgopt.CombineOpOption,
-) *CombineOp[I, O] {
+	combinerFactory psgfn.CombinerFactory[I, O],
+) CombineOp[I, O] {
 	traceRegion := "NewCombineOp"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	if gatherOp == nil {
-		panic("gather must be non-nil")
+	if gatherOp.gatherFn == nil {
+		panic("gatherOp is uninitialized")
 	}
 	if pool == nil {
 		panic("combiner pool must be non-nil")
@@ -59,20 +52,19 @@ func NewCombineOp[I, O any](
 	if combinerFactory == nil {
 		panic("combiner factory must be non-nil")
 	}
-	c := &CombineOp[I, O]{
-		gatherOp:    gatherOp,
-		pool:        pool,
-		newCombiner: combinerFactory,
-		minHoldTime: -1, // Sentinel value: no idle-based flushing
-		maxHoldTime: -1, // Sentinel value: no absolute deadline
+	c := CombineOp[I, O]{
+		id:                    combineOpID(combineOpCounter.Add(1)),
+		gatherFn:              gatherOp.gatherFn,
+		pool:                  pool,
+		newCombiner:           combinerFactory,
+		instancePool:          omnipool.For[pooledCombine[I, O]](),
+		halfBoundCombinerPool: omnipool.For[halfBoundCombiner[I, O]](),
+		boundGatherPool:       omnipool.For[boundGather[O]](),
 	}
 
-	c.postResultFn = c.postResult
-
-	trace.Logf(context.Background(), traceRegion, "CombineOp=%p, pool=%p", c, pool)
-
-	// Apply user options
-	c.SetOptions(options...)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "CombineOp#%d, pool=%p", c.id, pool)
+	}
 
 	return c
 }
@@ -84,21 +76,23 @@ func NewCombineOp[I, O any](
 //
 // See [GatherOp.Scatter] for details about backpressure, concurrency limits,
 // context handling, and error behavior.
-func (c *CombineOp[I, O]) Scatter(
+func (c CombineOp[I, O]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) error {
 	traceRegion := "CombineOp.Scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
 	group := meta.CurrentGroup()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
-	work := c.newScatterWork(group, target, taskFn)
+	work := c.newScatterWork(group, time.Time{}, target, taskFn)
 	return scatterNow(ctx, meta, target, work)
 }
 
@@ -106,22 +100,28 @@ func (c *CombineOp[I, O]) Scatter(
 // the given target is at its concurrency limit.
 //
 // See [GatherOp.TryScatter] for details about behavior and return values.
-func (c *CombineOp[I, O]) TryScatter(
+func (c CombineOp[I, O]) TryScatter(
 	ctx context.Context,
+	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) (bool, error) {
 	traceRegion := "CombineOp.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp=%p", c)
+	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	work := c.newScatterWork(meta.CurrentGroup(), target, taskFn)
-	return tryScatterNow(ctx, meta, target, work)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+	work := c.newScatterWork(group, deadline, target, taskFn)
+	return tryScatterNow(ctx, meta, deadline, target, work)
 }
 
-func (c *CombineOp[I, O]) newScatterWork(
+func (c CombineOp[I, O]) newScatterWork(
 	group workq.GroupID,
+	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) *combineScatterWork {
@@ -132,24 +132,122 @@ func (c *CombineOp[I, O]) newScatterWork(
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	w := combineScatterWorkPool.Get()
-	w.Init(group, c.pool, target, bindTaskFunc(group, j, taskFn, c.postResultFn))
+	pc := c.instancePool.Get()
+	pc.instancePool = c.instancePool
+	pc.halfBoundCombinerPool = c.halfBoundCombinerPool
+	pc.boundGatherPool = c.boundGatherPool
+	pc.opID = c.id
+	pc.gatherFn = c.gatherFn
+	pc.combinerPool = c.pool
+	pc.newCombiner = c.newCombiner
 
-	trace.Logf(context.Background(), traceRegion, "CombineOp=%p created %v", c, w)
+	w := combineScatterWorkPool.Get()
+	w.Init(group, c.pool, deadline, target, bindTaskFunc(group, j, taskFn, pc.postResultFn))
+
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "CombineOp#%d created %v, pooledCombine=%p", c.id, w, pc)
+	}
 	return w
+}
+
+type pooledCombine[I, O any] struct {
+	instancePool          *omnipool.Pool[pooledCombine[I, O]]
+	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[I, O]]
+	boundGatherPool       *omnipool.Pool[boundGather[O]]
+	opID                  combineOpID
+	gatherFn              psgfn.Gather[O]
+	combinerPool          *CombinerPool
+	newCombiner           psgfn.CombinerFactory[I, O]
+
+	group    workq.GroupID
+	input    I
+	inputErr error
+
+	// avoid closure reallocation
+	postResultFn func(
+		ctx context.Context,
+		group workq.GroupID,
+		j *Job,
+		taskWorkerOutboxMap *outboxMap,
+		input I,
+		inputErr error,
+	)
+	boundCombineFn boundCombineFunc
+}
+
+func (pc *pooledCombine[I, O]) Init() {
+	pc.postResultFn = pc.postResult
+	pc.boundCombineFn = pc.execute
+}
+
+func (pc *pooledCombine[I, O]) Reset() {
+	*pc = pooledCombine[I, O]{
+		postResultFn:   pc.postResultFn,
+		boundCombineFn: pc.boundCombineFn,
+	}
+}
+
+func (pc *pooledCombine[I, O]) postResult(
+	ctx context.Context,
+	group workq.GroupID,
+	j *Job,
+	taskWorkerOutboxMap *outboxMap,
+	input I,
+	inputErr error,
+) {
+	traceRegion := "pooledCombine.postResult"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	// Post the combine using the task worker's outbox for the pool's combine queue
+	combineOutbox := OutboxFor[workq.Work](taskWorkerOutboxMap, pc.combinerPool.combineOutboxKey())
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "CombineOp#%d, outbox=%p", pc.opID, combineOutbox)
+	}
+
+	pc.group = group
+	pc.input = input
+	pc.inputErr = inputErr
+	pc.combinerPool.postCombine(ctx, group, combineOutbox, pc.boundCombineFn)
+}
+
+func (pc *pooledCombine[I, O]) execute(ctx context.Context, cm *combinerMap, emitGatherOutbox *workq.Outbox) {
+
+	halfBoundCombineFn := getCombineFunc(
+		ctx,
+		pc.halfBoundCombinerPool,
+		pc.boundGatherPool,
+		pc.group,
+		cm,
+		pc.combinerPool,
+		pc.opID,
+		pc.newCombiner,
+		pc.gatherFn,
+		emitGatherOutbox,
+	)
+	halfBoundCombineFn(ctx, pc.input, pc.inputErr)
+
+	pc.instancePool.Put(pc)
 }
 
 type combineScatterWork struct {
 	jobWork
-	pool   *CombinerPool
-	target TaskPoolOrJob
+	pool     *CombinerPool
+	deadline time.Time
+	target   TaskPoolOrJob
 	taskPoolScatterWork
 	taskFn boundTaskFunc
 }
 
-func (w *combineScatterWork) Init(group workq.GroupID, pool *CombinerPool, target TaskPoolOrJob, taskFn boundTaskFunc) {
+func (w *combineScatterWork) Init(
+	group workq.GroupID,
+	pool *CombinerPool,
+	deadline time.Time,
+	target TaskPoolOrJob,
+	taskFn boundTaskFunc,
+) {
 	w.jobWork.Init(group, pool.job)
 	w.pool = pool
+	w.deadline = deadline
 	w.target = target
 	w.taskFn = taskFn
 }
@@ -160,97 +258,24 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	trace.Logf(ctx, traceRegion, "%v", w)
 
 	workFn := func(ctx context.Context, ex workq.Execution) error {
-		return w.target.scatter(ctx, w.Group(), ex, &w.taskPoolScatterWork, w.taskFn)
+		return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.taskFn)
 	}
 
 	bb := w.pool.job.protoBB
 	if bb.ShouldBlock(ctx) != nil {
-		return w.pool.governor.Execute(ctx, ex, bb, workFn)
+		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, workFn)
 	} else {
 		return workFn(ctx, ex)
 	}
 }
 
-func (w *combineScatterWork) Close() {
-	traceRegion := "combineScatterWork.Close"
+func (w *combineScatterWork) Free() {
+	traceRegion := "combineScatterWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	w.jobWork.Close(w.pool.job)
-
-	*w = combineScatterWork{} // Clear the work item for garbage collection and reuse
+	w.Close(w.pool.job)
 	combineScatterWorkPool.Put(w)
 }
 
 var combineScatterWorkPool = omnipool.For[combineScatterWork]()
-
-// combineOpConfigWrapper wraps a CombineOp to implement the combineOpConfig interface for options
-type combineOpConfigWrapper[I, O any] struct {
-	combineOp *CombineOp[I, O]
-}
-
-func (w combineOpConfigWrapper[I, O]) Update(changes opts.CombineOpConfigChanges) {
-	// Validate all changes first
-	if changes.MinHoldTime != nil {
-		if *changes.MinHoldTime < -1 {
-			panic(fmt.Sprintf("invalid minHoldTime %v: must be >= -1", *changes.MinHoldTime))
-		}
-		if w.combineOp.maxHoldTime >= 0 && *changes.MinHoldTime > w.combineOp.maxHoldTime {
-			panic(fmt.Sprintf("minHoldTime (%v) cannot be greater than maxHoldTime (%v)",
-				*changes.MinHoldTime, w.combineOp.maxHoldTime))
-		}
-	}
-	if changes.MaxHoldTime != nil {
-		if *changes.MaxHoldTime < -1 {
-			panic(fmt.Sprintf("invalid maxHoldTime %v: must be >= -1", *changes.MaxHoldTime))
-		}
-		if w.combineOp.minHoldTime >= 0 && *changes.MaxHoldTime < w.combineOp.minHoldTime {
-			panic(fmt.Sprintf("maxHoldTime (%v) cannot be less than minHoldTime (%v)",
-				*changes.MaxHoldTime, w.combineOp.minHoldTime))
-		}
-	}
-
-	// Apply changes
-	if changes.MinHoldTime != nil {
-		w.combineOp.minHoldTime = *changes.MinHoldTime
-	}
-	if changes.MaxHoldTime != nil {
-		w.combineOp.maxHoldTime = *changes.MaxHoldTime
-	}
-}
-
-// SetOptions applies the given configuration options to the combine operation.
-// This method is safe to call at any time. However, the timing of when the new
-// values take effect within a running job is undefined.
-func (c *CombineOp[I, O]) SetOptions(options ...psgopt.CombineOpOption) {
-	opts.ApplyToCombineOp(combineOpConfigWrapper[I, O]{combineOp: c}, options...)
-}
-
-func (c *CombineOp[I, O]) postResult(
-	ctx context.Context,
-	group workq.GroupID,
-	j *Job,
-	taskWorkerOutboxMap *outboxMap,
-	input I,
-	inputErr error,
-) {
-	traceRegion := "CombineOp.postResult"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	// Post the combine using the task worker's outbox for the pool's combine queue
-	combineOutbox := OutboxFor[workq.Work](taskWorkerOutboxMap, c.pool.combineOutboxKey())
-	trace.Logf(ctx, traceRegion, "CombineOp=%p, outbox=%p", c, combineOutbox)
-
-	// Bind the halfBoundCombineFn to the result.
-	boundCombineFn := func(
-		ctx context.Context,
-		cm *combinerMap,
-		queueWork workq.QueueWorkFunc,
-		emitGatherOutbox *workq.Outbox,
-	) {
-		halfBoundCombineFn := getCombineFunc(ctx, group, cm, c.pool, c, queueWork, emitGatherOutbox)
-		halfBoundCombineFn(ctx, input, inputErr)
-	}
-
-	c.pool.postCombine(ctx, group, combineOutbox, boundCombineFn)
-}

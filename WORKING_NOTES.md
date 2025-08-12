@@ -80,8 +80,109 @@ All optimization commits (409d49d, c515383, 42ab341, 2911b9c) performed as inten
 - Workflow context propagation and pinning mechanism implemented
 - New internal benchmarking application (internal/benchapp) added for performance testing
 
-**Upcoming Major Work - Reducer Concept:**
-Planning to introduce reducer functionality to support fan-in patterns needed by the benchmarking application. This was originally planned for post-merge but is now needed for the benchapp development. The reducer will complement the existing combiner architecture by providing keyed aggregation capabilities.
+## Combiner Ownership Model Refactoring (2025-08-12)
 
-**Branch Status:**
-Not yet ready for merge - significant reducer architecture work pending. After reducer implementation, will need to update documentation and finalize API before merging to main.
+**Major Architectural Shift Completed (commit da1142a):**
+Fundamental change from per-goroutine combiner ownership to shared pool model. Combiner instances are no longer owned by specific goroutines but are instead pooled and shared across all combiner goroutines, maintaining single-threaded execution through lock-free per-CombineOp instance queues (nbcq.Queue).
+
+**Key Changes:**
+- **activeCombinerMap**: Extracted combiner management into dedicated structure with heap-based deadline tracking
+- **Reference-counted CombineOp/GatherOp**: Enable value-type copying while maintaining operation identity through shared internal state
+- **Per-operation instance queuing**: Lock-free queuing ensures single-threaded combiner execution without lock contention
+- **Simplified CombinerPool**: Delegates to activeCombinerMap, removing complex inline management (~300 lines reduced)
+
+This refactoring enables arbitrary composition patterns while maintaining performance and correctness.
+
+## Planned Reducer Architecture Design
+
+**Core Insight: User-Managed Key Mapping**
+Rather than building key-awareness into the framework, users maintain their own `map[KeyType]ReduceOp` mappings. This keeps the framework simple while providing maximum flexibility - different keys can use completely different reducer and gather functions.
+
+**Reducer vs Combiner Semantics:**
+- **Combiner**: Stateless, creates fresh instances via factory for each batch, then discards them
+- **Reducer**: Stateful, uses single persistent instance that accumulates state across all inputs
+
+**Proposed Type Structure:**
+```go
+type ReduceOp[I any] struct {
+    pool    *CombinerPool             // Pool specified at construction
+    reducer psgfn.Reducer[I]          // Single persistent instance (not factory)
+}
+
+type CombineOp[I any] struct {
+    pool    *CombinerPool             // Pool specified at construction  
+    factory psgfn.CombinerFactory[I]  // Creates fresh instances
+}
+
+type GatherOp[I any] struct {
+    gatherFn psgfn.Gather[I]          // Terminal operation
+}
+
+// All operations provide:
+// - Integrate(ctx, value, err) for direct value integration
+// - Close(ctx) for signaling completion (triggers final flush)
+```
+
+**Uniform Integration Interface:**
+All operations provide `Integrate()` method for direct value integration and `Close()` method for completion signaling. Pool remains an implementation detail hidden at construction time. Sink interface may be added later for polymorphic dataflow composition in the implicit layer.
+
+**Explicit vs Implicit Data Flow:**
+Current implicit model has operations configured with targets at creation time. Exploring explicit integration model where all data flow happens through explicit Integrate() calls:
+
+```go
+// Explicit integration (proposed core layer)
+combineOp.Integrate(ctx, value, err)  // Direct value integration
+gatherOp.Integrate(ctx, value, err)
+
+// Implicit convenience layer (syntactic sugar)
+combineOpWithTarget := NewCombineOpWithTarget(gatherOp, pool, factory)
+combineOpWithTarget.Scatter(ctx, target, taskFn)  // Auto-integrates to gatherOp
+```
+
+**Deadlock-Free Arbitrary Composition:**
+The shift to flush-as-work eliminates blocking sends. Instead of combiners directly posting to outboxes (which can block), flush operations become work items queued through the same system:
+
+1. **Combiner flushes** → generates flush work items → processed asynchronously
+2. **No blocking on send** → enables safe cycles in dataflow graphs  
+3. **Governor backpressure** → prevents unbounded queue growth
+4. **Unified work processing** → all work (tasks, flushes, posts) flows through same queues
+
+**Composition Patterns Enabled:**
+- Task → Combine → Reduce → Gather (hierarchical aggregation)
+- Task → Reduce (simple fan-in without combining)
+- Per-request Reduce → Cross-request Reduce (multi-level fan-in)
+- Arbitrary cycles via explicit Post() calls (safe due to queue-based flow)
+
+**Implementation Strategy:**
+Architecture designed with the following implementation steps:
+
+1. **Convert gather posting to work items** - Starting with `postGatherSlow()`, make all gather operations flow through work queue system
+2. **Add blocking behavior for top-level context** - Use `job.block()` like `scatterNowOrQueue()` when Integration calls can't proceed immediately  
+3. **Implement Sink interface and Integrate() API** - Create uniform interface for all operations
+4. **Implement ReduceOp** - Add stateful reducer operations with persistent instances
+5. **Create implicit convenience layer** - Build syntactic sugar on top of explicit integration
+6. **Update existing CombineOp** - Migrate to new integration mechanism
+7. **Add cycle prevention tooling** - Composable add-ons for detection and mitigation
+
+**Key Design Decisions:**
+- Pool-segregated instances (avoid complex cross-pool handoff of abandonedCombiners)
+- Pool specified at construction time (implementation detail hidden from users)
+- `Integrate()` method name for uniform integration API (active verb, semantically appropriate)
+- `Close()` method for completion signaling (leverages existing reference counting in inner objects)
+- CombineOp identity preserved (avoid interface values as map keys)
+
+**Fan-In Completion Pattern:**
+The `Close()` method enables clean fan-in patterns by signaling "no more inputs" to operations:
+```go
+// Fan-in example
+for _, item := range items {
+    go func(item Item) {
+        result := process(item)
+        reduceOp.Integrate(ctx, result, nil)
+    }(item)
+}
+reduceOp.Close(ctx)  // Triggers final flush when all work completes
+```
+
+**Implementation Status:**
+Architecture designed but not yet implemented. Next step is to convert gather queue posting to work items as foundation for the new integration model.

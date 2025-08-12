@@ -14,6 +14,13 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
+// GatherOp represents an operation that executes tasks and collects their results.
+//
+// Thread-safety and copying: A GatherOp value is designed to be copied. While
+// a single GatherOp value does not support concurrent calls to Scatter or
+// TryScatter, copies of a GatherOp can be used concurrently. All copies share
+// the same gather function binding. This allows GatherOp values to be safely
+// passed by value to goroutines or stored in structures.
 type GatherOp[T any] struct {
 	gatherFn     psgfn.Gather[T]
 	instancePool *omnipool.Pool[pooledGather[T]]

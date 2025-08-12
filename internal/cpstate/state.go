@@ -207,6 +207,12 @@ func (cps *CombinerPoolState) report(msg string) {
 	)
 }
 
+func (cps *CombinerPoolState) LiveGoroutineCount() int {
+	cps.mu.Lock()
+	defer cps.mu.Unlock()
+	return cps.liveGoroutineCount
+}
+
 func (cps *CombinerPoolState) GoroutineStarted() {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()

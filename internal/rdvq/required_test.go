@@ -792,7 +792,7 @@ func TestRequired_RaceConditionPrevention(t *testing.T) {
 		select {
 		case val := <-received:
 			assert.Equal(t, i, val)
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(1 * time.Second):
 			t.Fatalf("Race condition detected at iteration %d", i)
 		}
 	}

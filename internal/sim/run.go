@@ -295,7 +295,6 @@ func (c *controller) newCombinerFactory(
 		cRes := &combineResult{
 			Index: combineIndex,
 		}
-		var flushErr error
 		flushed := false
 		chk := assert.New(t)
 		return psgfn.FuncCombiner[*taskResult, *combineResult]{
@@ -314,12 +313,10 @@ func (c *controller) newCombinerFactory(
 					err = ExpectedCombineError{combine}
 				}
 
-				cRes.TaskCount++
-
 				var flushDeadline time.Time
 				if combine.FlushHandler != nil {
-					cRes.Combine = combine
-					flushErr = err
+					cRes.Combines = append(cRes.Combines, combine)
+					cRes.Errs = append(cRes.Errs, err)
 					flushDeadline = time.Now()
 				}
 				return flushDeadline, err
@@ -328,7 +325,13 @@ func (c *controller) newCombinerFactory(
 				chk.False(flushed)
 				flushed = true
 				cRes.EndTime = time.Now()
-				return cRes, flushErr
+				var err error
+				for _, err = range cRes.Errs {
+					if err != nil {
+						break
+					}
+				}
+				return cRes, err
 			},
 		}
 	}
@@ -336,6 +339,9 @@ func (c *controller) newCombinerFactory(
 
 func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*combineResult] {
 	return func(ctx context.Context, res *combineResult, err error) error {
+		traceRegion := "sim.combineGatherFunc"
+		defer trace.StartRegion(ctx, traceRegion).End()
+
 		chk := assert.New(t)
 
 		if res == nil {
@@ -346,12 +352,8 @@ func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*comb
 			return nil
 		}
 
-		combine := res.Combine
-		if combine == nil {
-			// Flush independent of combine case (i.e., linger timeout or job shutdown)
-			chk.NoError(err)
-		} else {
-			// FlushHandler and/or combine error case
+		for i, combine := range res.Combines {
+			err = res.Errs[i]
 			if combine.Func.ReturnError {
 				chk.Error(err)
 				var ce ExpectedCombineError
@@ -360,25 +362,22 @@ func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*comb
 				} else {
 					chk.NoError(err)
 				}
-				err = nil // reset for return value
 			} else {
-				chk.NotNil(combine.FlushHandler)
 				chk.NoError(err)
 			}
-			if combine.FlushHandler != nil {
-				gather := combine.FlushHandler.(*Gather)
-				if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
-					return err
-				}
-				if gather.Func.ReturnError {
-					err = ExpectedGatherError{gather}
-				} else {
-					err = nil
-				}
+
+			gather := combine.FlushHandler.(*Gather)
+			if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
+				return err
+			}
+			if gather.Func.ReturnError {
+				err = ExpectedGatherError{gather}
+			} else {
+				err = nil
 			}
 		}
 
-		gatheredCount := c.GatheredCount.Add(int64(res.TaskCount))
+		gatheredCount := c.GatheredCount.Add(int64(len(res.Combines)))
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
 		return err
@@ -453,10 +452,10 @@ type taskResult struct {
 
 // combineResult represents a result emitted by a simulated combiner.
 type combineResult struct {
-	Index     int
-	Combine   *Combine
-	TaskCount int
-	EndTime   time.Time
+	Index    int
+	Combines []*Combine
+	Errs     []error
+	EndTime  time.Time
 }
 
 type ExpectedGatherError struct {

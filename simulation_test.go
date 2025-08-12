@@ -39,6 +39,11 @@ func TestBySimulation(t *testing.T) {
 		// planConfig.Combine.Flush.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
+		// planConfig.Task.Func.ReturnError.Probability = 0
+		// planConfig.Combine.Func.ReturnError.Probability = 0
+		// planConfig.Gather.Func.ReturnError.Probability = 0
+
+		//nolint:gocritic // ignore commented-out code
 		// planConfig.Subjob.MaxDepth = 0
 		// planConfig.Task.Func.Subjob.Add.Probability = 0
 		// planConfig.Combine.Func.Subjob.Add.Probability = 0

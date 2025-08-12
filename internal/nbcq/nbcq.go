@@ -86,6 +86,7 @@ func (q *Queue[T]) Init() {
 // enqueue(Q: pointer to queue_t, value: data type)
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
+//nolint:contextcheck // background context used only for tracing
 func (q *Queue[T]) PushBack(value T) {
 	traceRegion := "nbcq.PushBack"
 
@@ -137,6 +138,7 @@ func (q *Queue[T]) PushBack(value T) {
 // dequeue(Q: pointer to queue_t, pvalue: pointer to data type): boolean
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
+//nolint:contextcheck // background context used only for tracing
 func (q *Queue[T]) PopFront() (T, bool) {
 	traceRegion := "nbcq.PopFront"
 

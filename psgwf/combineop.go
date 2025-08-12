@@ -53,6 +53,6 @@ func (c GenericCombineOp[I, O, C]) TryScatter(
 	)
 }
 
-func (c GenericCombineOp[I, O, C]) inner() psg.CombineOp[result[I, C], result[O, C]] {
-	return psg.CombineOp[result[I, C], result[O, C]](c)
+func (c GenericCombineOp[I, O, C]) inner() *psg.CombineOp[result[I, C], result[O, C]] {
+	return (*psg.CombineOp[result[I, C], result[O, C]])(&c)
 }

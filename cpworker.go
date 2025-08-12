@@ -17,14 +17,14 @@ import (
 type cpWorker struct {
 	cp *CombinerPool
 
-	combinerMap      combinerMap
-	workReceiver     workq.Receiver
-	workWaiter       workq.Waiter
-	outboxMap        outboxMap
-	emitGatherOutbox *workq.Outbox
-	idleTimer        *time.Timer
-	doneCh           <-chan struct{}
-	doneErr          func() error
+	activeCombiners *activeCombinerMap
+	workReceiver    workq.Receiver
+	workWaiter      workq.Waiter
+	outboxMap       outboxMap
+	emitOutbox      *workq.Outbox
+	idleTimer       *time.Timer
+	doneCh          <-chan struct{}
+	doneErr         func() error
 
 	idleTimerCh            <-chan time.Time
 	groupStack             []workq.GroupID
@@ -234,21 +234,19 @@ func (cw *cpWorker) popSelect(ctx context.Context, outboxWaiter *rdvq.Waiter,
 func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duration) {
 	queuedFlush := false
 	for {
-		next := cw.combinerMap.NextToFlush()
+		next, deadline := cw.activeCombiners.NextToFlush()
 		if next == nil {
 			break
 		}
 
-		deadline := next.FlushDeadline()
 		timeLeft := time.Until(deadline)
 		if timeLeft > 0 {
 			return queuedFlush, timeLeft
 		}
 
 		// Remove from map immediately to prevent infinite loop
-		cw.combinerMap.Remove(next)
-		next.Flush(ctx)
-		next.Free()
+		cw.activeCombiners.Remove(next)
+		next.Flush(ctx, cw.emitOutbox)
 		queuedFlush = true
 	}
 	return queuedFlush, 0
@@ -352,10 +350,12 @@ func (cw *cpWorker) idleFollowup(context.Context) {
 }
 
 func (cw *cpWorker) flushAll(ctx context.Context) bool {
+	traceRegion := "cpWorker.flushAll"
+	defer trace.StartRegion(ctx, traceRegion).End()
 	if cw.nextJobFlushCh == nil {
 		return false
 	}
-	cw.combinerMap.FlushAll(ctx)
+	cw.activeCombiners.FlushAll(ctx, cw.emitOutbox)
 	cw.nextJobFlushCh = nil
 	cw.unregisterAsJobFlusher()
 	return true
@@ -369,6 +369,6 @@ func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFu
 		// Make sure the job won't terminate before the combiner is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
-	combineFn(ctx, &cw.combinerMap, cw.emitGatherOutbox)
+	combineFn(ctx, cw.activeCombiners, cw.emitOutbox)
 	cw.cp.state.IncrementCompleted()
 }

@@ -12,40 +12,36 @@ Items to complete before merging to main branch.
 
 ### 5. API finalization
 - Review and document thread-safety guarantees for remaining public APIs
-- consider adding a timeout as a first-class option for scatters, to avoid context creation overhead when trying to propagate backpressure 503-style
 - add a way to force creation of a new work group
 
 ### 6. Implementation improvements
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
-- consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
 - make sure that rdvq.Optional methods aren't inappropriately leaking through to Waiters or Required 
 - consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path
 - profile (memory, cpu, blocking) again after all the recent refactoring, see if there are any more obvious targets or low-hanging fruit
 - review again for readability
 - make sure all exported functions emit trace regions
 - reorganize code within large files like job.go
-- create a reusable WaiterMap to replace existing duplicated blockWaiterMap code
 - re-review tracing guidelines in DEVELOPMENT.md
 - figure out what to do about trace.IsEnabled everywhere (if, how)
 - check the scatter plots and review combiner pool controller settings
-- review and understand processing and waiting aggregation throughput and speedup graphs - interesting how flat they are, but seems potentially right
-- fix LockAndSetQueueFunc ugliness
-- change taskQueue from Optional to Required and use outboxes to reduce task goroutine proliferation
-- fix addWork ugliness
-- implement scheduler health monitoring using near-instant event timing to detect Go runtime pressure
-- consider tracking combine/gather duration distributions rather than just averages to better understand tail behavior
+- review and understand processing and waiting aggregation throughput and speedup graphs
 - enable cyclo and fix issues
-- experiment further with different scheduler latency backpressure settings, esp. age 
 
 ## Post-Merge Enhancements
 
 Items that can be deferred to GitHub issues after the combiner branch is merged.
 
+### Implementation improvements
+- fix LockAndSetQueueFunc ugliness
+- fix addWork ugliness
+- fix inconsistencies between refcounting (and pooling) implementations: semantics re locking, naming, etc.
+- consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
+
 ### Performance Optimizations
-- Find a way for there to be only one instance of the GC monitor that can serve multiple jobs.
-- Add goroutine affinity to combiners to minimize the number of combiner instances and therefore also combiner-output gathers.  This will reduce memory overhead and improve scaling characteristics.  The key challenge will be to measure per-combiner utilization of goroutines and bin-pack them accordingly, though a first cut might just move heavy-hitters to their own dedicated goroutines.
-- Consider allowing (secondary) combiner goroutines to time out only after any pending time-based flushes have completed.  The scary thing here is that the goroutine management behavior can then be derailed by a combiner's minHoldTime setting, preventing timely scale-down of goroutines.  This concern might be addressed by leveraging an aspect of affinity: each combiner could have a different notion of "secondary".
+- Promote affinity between combiner goroutines and specific combiner instances to improve cache locality.
+- Make rdvq.Optional use a stack (LIFO) rather than a queue (FIFO) for inboxes (rdvq.Optional), so that receivers can time out if not needed.  See https://people.csail.mit.edu/shanir/publications/Lock_Free.pdf for a scalable lock-free stack algorithm.
 
 ### API Enhancements
 - Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)
@@ -61,20 +57,13 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 
 ### Additional Tests and Examples
 - Make sure that combiner pools scale down to zero
-- Test corner cases around combiner timeouts (idleTimeout, minHoldTime, maxHoldTime)
-- Test automatic flushing behavior based on timeout settings
+- Test automatic flushing behavior based on timeout settings somewhere other than just benchmarks
 - Test TaskPool.SetOptions and CombinerPool.SetOptions functionality, especially dynamic pool resizing
 - Ensure no goroutine leaks in any scenario
-- Add comprehensive tests for the heap implementation
-- Test job-binding of CombinerPool, including invalid cases
-- Test panic recovery in combiners (simulate panics in Combine and Flush)
+- Test and ensure correct ongoing behavior when user code recovers from panics that propagated through the framework
 - Test edge cases with cross-job context propagation
-- Test behavior when combiner factory panics
 - Add tests verifying proper shutdown sequence and resource cleanup
-- Thoroughly test multithreaded gathers
-- Verify cross-job Gather safety similar to Combine cross-job safety (may not be relevant since Gather doesn't bind to jobs like CombinerPool does)
-- Add integration tests with actual TaskPool to verify cross-system notification flow (may be covered by existing simulation/benchmark tests)
-- Improve selection of "best" in benchcmp to avoid spurious discrepencies
+- Test multithreaded gathers
 
 ### Design Documentation
 - Update and refine design docs to make them more readable and less AI-fueled dumps of bullet points

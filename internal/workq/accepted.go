@@ -28,7 +28,7 @@ type Accepted struct {
 	fresh    nbcq.Queue[Work]
 	deferred nbcq.Queue[Work]
 	waiters  rdvq.Waiters
-	monitor  Monitor
+	listener rdvq.Listener
 }
 
 // Init initializes the work queue using the global pool.
@@ -38,13 +38,13 @@ func (q *Accepted) Init() {
 	traceRegion := "workq.Accepted.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion,
-		"Accepted=%p, fresh=%p, deferred=%p, waiters=%p, monitor=%p",
-		q, &q.fresh, &q.deferred, &q.waiters, &q.monitor)
+		"Accepted=%p, fresh=%p, deferred=%p, waiters=%p, listener=%p",
+		q, &q.fresh, &q.deferred, &q.waiters, &q.listener)
 
 	q.fresh.Init()
 	q.deferred.Init()
 	q.waiters.Init()
-	q.monitor.Notify = q.waiters.Notify
+	q.listener.Notify = q.waiters.Notify
 }
 
 // AddWorkFunc provides new work to the queue processor. It is called with a
@@ -192,7 +192,7 @@ func (c *controller) Init() {
 	c.ex = c.executor.BaseEx()
 	c.ex.Blocking = c.blocking
 	c.ex.Starting = c.starting
-	c.ex.Subscribe = c.subscribe
+	c.ex.AddToListeners = c.addToListeners
 	c.ex.Queue = c.queueFresh
 	c.shouldStillWaitFn = c.shouldStillWait
 }
@@ -258,22 +258,22 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 
 // TryAccepted attempts to execute work from both accepted queues.
 // First exhausts newly accepted work, then tries deferred work.
-func (c *controller) TryAccepted(ctx context.Context, blockOrSubscribe bool) error {
+func (c *controller) TryAccepted(ctx context.Context, blockOrListen bool) error {
 	traceRegion := "workq.controller.TryAccepted"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "blockOrSubscribe=%v", blockOrSubscribe)
-	if err := c.tryAccepted(ctx, &c.q.fresh, blockOrSubscribe); c.ex.Started() || err != nil {
+	trace.Logf(ctx, traceRegion, "blockOrListen=%v", blockOrListen)
+	if err := c.tryAccepted(ctx, &c.q.fresh, blockOrListen); c.ex.Started() || err != nil {
 		trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
 		return err
 	}
-	err := c.tryAccepted(ctx, &c.q.deferred, blockOrSubscribe)
+	err := c.tryAccepted(ctx, &c.q.deferred, blockOrListen)
 	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
 	return err
 }
 
-func (c *controller) tryAccepted(ctx context.Context, q *nbcq.Queue[Work], blockOrSubscribe bool) error {
+func (c *controller) tryAccepted(ctx context.Context, q *nbcq.Queue[Work], blockOrListen bool) error {
 	for c.collectAccepted(q) {
-		if err := c.execute(ctx, blockOrSubscribe); c.ex.Started() || err != nil {
+		if err := c.execute(ctx, blockOrListen); c.ex.Started() || err != nil {
 			return err
 		}
 	}
@@ -330,7 +330,11 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 
 	var err error
 	c.renotifyFn, err = c.addWorkFn(ctx, c.ex.Queue, &c.q.waiters, c.shouldStillWaitFn)
-	err = errors.Join(c.shouldStillWaitErr, err)
+	if err == nil {
+		err = c.shouldStillWaitErr
+	} else if c.shouldStillWaitErr != nil {
+		err = errors.Join(c.shouldStillWaitErr, err)
+	}
 
 	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
 	return err
@@ -347,7 +351,7 @@ func (c *controller) collectAccepted(q *nbcq.Queue[Work]) bool {
 	return true
 }
 
-func (c *controller) execute(ctx context.Context, blockOrSubscribe bool) error {
+func (c *controller) execute(ctx context.Context, blockOrListen bool) error {
 	traceRegion := "workq.Accepted.execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -362,8 +366,8 @@ func (c *controller) execute(ctx context.Context, blockOrSubscribe bool) error {
 
 	ex := c.ex
 
-	if !blockOrSubscribe {
-		ex.Subscribe = nil
+	if !blockOrListen {
+		ex.AddToListeners = nil
 	}
 
 	if c.ex.Started() {
@@ -390,8 +394,8 @@ func (c *controller) execute(ctx context.Context, blockOrSubscribe bool) error {
 	return err
 }
 
-func (c *controller) subscribe(coordinator *Coordinator) {
-	c.q.monitor.Subscribe(coordinator)
+func (c *controller) addToListeners(listeners *Listeners) {
+	c.q.listener.AddTo(listeners)
 }
 
 func (c *controller) ResetForRetry() {

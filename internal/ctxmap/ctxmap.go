@@ -16,6 +16,11 @@ type entry[T comparable] struct {
 	value      T
 	stampedCtx context.Context //nolint:containedctx // context stamped with the value
 	stop       func() bool     // from context.AfterFunc
+	cache      *sync.Map
+}
+
+func (e *entry[T]) remove() {
+	e.cache.CompareAndDelete(e.stampedCtx, e)
 }
 
 // Map provides cached mapping of contexts to computed values with automatic cleanup.
@@ -63,6 +68,7 @@ func (m *Map[K, T]) WithValue(
 	newEntry := &entry[T]{
 		value:      value,
 		stampedCtx: newStampedCtx,
+		cache:      &m.cache,
 	}
 
 	// Use LoadOrStore to handle race condition where another goroutine
@@ -74,9 +80,7 @@ func (m *Map[K, T]) WithValue(
 
 	// Set up cleanup. If the ctx is already canceled, this will immediately
 	// remove it from the cache.
-	newEntry.stop = context.AfterFunc(ctx, func() {
-		m.cache.Delete(ctx)
-	})
+	newEntry.stop = context.AfterFunc(ctx, newEntry.remove)
 
 	// Go ahead and add a cache entry for the stamped context to avoid a
 	// slow-path lookup on first fetch. Use LoadOrStore to handle race condition
@@ -86,25 +90,24 @@ func (m *Map[K, T]) WithValue(
 	newStampedEntry := &entry[T]{
 		value:      value,
 		stampedCtx: newStampedCtx,
+		cache:      &m.cache,
 	}
 	if _, loaded := m.cache.LoadOrStore(newStampedCtx, newStampedEntry); !loaded {
 		// Set up cleanup. If the ctx is already canceled, this will immediately
 		// remove it from the cache.
-		newStampedEntry.stop = context.AfterFunc(newStampedCtx, func() {
-			m.cache.Delete(newStampedCtx)
-		})
+		newStampedEntry.stop = context.AfterFunc(newStampedCtx, newStampedEntry.remove)
 	}
 
 	// We successfully stored our result
 	return newStampedCtx, value
 }
 
-// Close cancels all AfterFunc cleanup functions and clears the cache.
+// Clear cancels all AfterFunc cleanup functions and clears the cache.
 // This should be called when the Map is no longer needed to prevent
 // resource leaks.
-func (m *Map[K, T]) Close() {
+func (m *Map[K, T]) Clear() {
 	m.cache.Range(func(_, value any) bool {
-		value.(*entry[T]).stop() // Cancel the AfterFunc
+		value.(*entry[T]).stop() // Cancel the AfterFunc that would call remove
 		return true
 	})
 	m.cache.Clear()

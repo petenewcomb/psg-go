@@ -68,10 +68,11 @@ func (cw *cpWorker) UnlockAndResetQueueFunc() {
 	cw.queueFnStack = cw.queueFnStack[:len(cw.queueFnStack)-1]
 }
 
-func (cw *cpWorker) WithOutbox(key outboxKey[workq.Work], fn func(outbox *workq.Outbox)) {
-	outbox := OutboxFor[workq.Work](&cw.outboxMap, key)
-	fn(outbox)
+func (cw *cpWorker) LockOutbox(key outboxKey[workq.Work]) *workq.Outbox {
+	return OutboxFor[workq.Work](&cw.outboxMap, key)
 }
+
+func (cw *cpWorker) UnlockOutbox() {}
 
 func (cw *cpWorker) TryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
 	if queuedFlush, _ := cw.flushToNextDeadline(ctx); queuedFlush {
@@ -169,7 +170,7 @@ func (cw *cpWorker) AddWork(
 		followupFn(ctx)
 	}
 
-	return cw.workWaiter.RenotifyFn(), cw.err
+	return cw.workWaiter.ExtractRenotifyFn(), cw.err
 }
 
 func (cw *cpWorker) queue(work workq.Work) {
@@ -361,7 +362,7 @@ func (cw *cpWorker) flushAll(ctx context.Context) bool {
 	return true
 }
 
-func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFunc) {
+func (cw *cpWorker) executeCombine(ctx context.Context, bc boundCombineWork) {
 	traceRegion := "cpWorker.executeCombine"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "cpWorker=%p", cw)
@@ -369,6 +370,6 @@ func (cw *cpWorker) executeCombine(ctx context.Context, combineFn boundCombineFu
 		// Make sure the job won't terminate before the combiner is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
-	combineFn(ctx, cw.activeCombiners, cw.emitOutbox)
+	bc.Combine(ctx, cw.activeCombiners, cw.emitOutbox)
 	cw.cp.state.IncrementCompleted()
 }

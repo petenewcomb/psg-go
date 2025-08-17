@@ -149,8 +149,6 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 					benchData.P50Latency.Add(v.Value)
 				case "p99-workflow-latency-sec":
 					benchData.P99Latency.Add(v.Value)
-				case "max-ideal-workflow-duration-sec":
-					benchData.MaxIdealWorkflowDuration = max(benchData.MaxIdealWorkflowDuration, v.Value)
 				}
 			}
 
@@ -222,12 +220,11 @@ func (m *Measurement) ComputeStats() {
 }
 
 type BenchData struct {
-	Config                   Config
-	CombinerLimit            int
-	Throughput               Measurement
-	P50Latency               Measurement
-	P99Latency               Measurement
-	MaxIdealWorkflowDuration float64
+	Config        Config
+	CombinerLimit int
+	Throughput    Measurement
+	P50Latency    Measurement
+	P99Latency    Measurement
 }
 
 func (d *BenchData) ComputeStats() {
@@ -601,8 +598,8 @@ func appendPerformanceChanges(row table.Row, config Config, baseline, current, i
 	row = append(row, formatChange(-1, &baseline.P50Latency, &current.P50Latency)...)
 	row = append(row, formatChange(-1, &baseline.P99Latency, &current.P99Latency)...)
 	if ideal != nil {
-		row = append(row, formatLatencyVsIdeal(config, ideal.MaxIdealWorkflowDuration, &ideal.P50Latency)...)
-		row = append(row, formatLatencyVsIdeal(config, ideal.MaxIdealWorkflowDuration, &ideal.P99Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, &ideal.P50Latency)...)
+		row = append(row, formatLatencyVsIdeal(config, &ideal.P99Latency)...)
 	}
 	return row
 }
@@ -620,7 +617,7 @@ func formatChange(goodSign float64, baseline, current *Measurement) []any {
 }
 
 func formatThroughputVsIdeal(config Config, throughput *Measurement) []any {
-	ideal := float64(config.FlushPeriod*time.Second) / float64(config.Duration*config.Duration)
+	ideal := config.FlushPeriod.Seconds() / (config.Duration.Seconds() * config.Duration.Seconds())
 	delta := throughput.Summary.Center / ideal
 	ind := neutralIndicator
 	if computeRelativeDifference(ideal, throughput.Summary.Hi) <= -(1 - confidence) {
@@ -629,10 +626,11 @@ func formatThroughputVsIdeal(config Config, throughput *Measurement) []any {
 	return []any{fmt.Sprintf("%.1f%%", percent*delta), ind}
 }
 
-func formatLatencyVsIdeal(config Config, maxIdealWorkflowDuration float64, latency *Measurement) []any {
-	delta := latency.Summary.Center / maxIdealWorkflowDuration
+func formatLatencyVsIdeal(config Config, latency *Measurement) []any {
+	ideal := (2*config.Duration + config.FlushPeriod).Seconds()
+	delta := latency.Summary.Center / ideal
 	ind := neutralIndicator
-	if computeRelativeDifference(maxIdealWorkflowDuration, latency.Summary.Lo) >= (1 - confidence) {
+	if computeRelativeDifference(ideal, latency.Summary.Lo) >= (1 - confidence) {
 		ind = badIndicator
 	}
 	return []any{fmt.Sprintf("%.1f%%", percent*delta), ind}

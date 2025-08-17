@@ -4,13 +4,12 @@
 package cpstate
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 
 	"github.com/petenewcomb/psg-go/internal/ema"
 	"github.com/petenewcomb/psg-go/internal/opts"
@@ -29,6 +28,8 @@ type CombinerPoolState struct {
 
 	// Mutex protects complex state analysis and scaling decisions
 	mu sync.Mutex
+
+	spawnNotifier rdvq.Notifier
 
 	// Configuration
 	idleTimeout     atomic.Int64 // time.Duration
@@ -51,6 +52,10 @@ type CombinerPoolState struct {
 	latestGoroutineCountChangeTime time.Time
 
 	waitChan chan struct{}
+}
+
+func (cps *CombinerPoolState) Init() {
+	cps.spawnNotifier.Init()
 }
 
 // SetOptions atomically applies the given set of configuration options (later options override earlier ones).
@@ -83,7 +88,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	newTarget := cps.controller.RecommendTarget()
 	if newTarget != cps.targetGoroutineCount {
 		cps.targetGoroutineCount = newTarget
-		cps.notifyWaiter()
+		cps.spawnNotifier.Notify(nil)
 	}
 }
 
@@ -112,19 +117,18 @@ func (cps *CombinerPoolState) SpareWaitEnded(startTime time.Time) {
 
 func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
 	if cps.spawnedGoroutineCount.Load() == 0 {
-		return cps.ShouldSpawnGoroutine() == nil
+		return cps.ShouldSpawnGoroutine()
 	}
 	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
 	nyquistRate := time.Duration(cps.retentionPeriod.Load()) / 2 //nolint:mnd // by definition
 	if time.Since(lastUpdate) > min(time.Duration(cps.tau), nyquistRate) {
-		return cps.ShouldSpawnGoroutine() == nil
+		return cps.ShouldSpawnGoroutine()
 	}
 	return false
 }
 
-// Returns nil if the caller should start a new combiner goroutine, otherwise a
-// channel that will be signaled if the caller should wake and retry.
-func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
+// Returns true if the caller should start a new combiner goroutine.
+func (cps *CombinerPoolState) ShouldSpawnGoroutine() bool {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 
@@ -140,14 +144,14 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
 	switch {
 	case spawnedCount < cps.targetGoroutineCount:
 		cps.spawnedGoroutineCount.Add(1)
-		return nil
+		return true
 	case spawnedCount > cps.targetGoroutineCount:
-		return cps.waitChan
+		return false
 	}
 
 	if !cps.updateStats() {
 		// Stats for this configuration are not yet stable
-		return cps.waitChan
+		return false
 	}
 
 	cps.targetGoroutineCount = cps.controller.RecommendTarget()
@@ -155,10 +159,10 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() <-chan struct{} {
 	if int(cps.spawnedGoroutineCount.Load()) < cps.targetGoroutineCount {
 		cps.spawnedGoroutineCount.Add(1)
 		cps.report("spawning")
-		return nil
+		return true
 	}
 
-	return cps.waitChan
+	return false
 }
 
 func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
@@ -225,7 +229,7 @@ func (cps *CombinerPoolState) GoroutineStarted() {
 	if cps.liveGoroutineCount == cps.targetGoroutineCount {
 		cps.report("started")
 	}
-	cps.notifyWaiter()
+	cps.spawnNotifier.Notify(nil)
 }
 
 func (cps *CombinerPoolState) GoroutineExited() {
@@ -251,7 +255,7 @@ func (cps *CombinerPoolState) GoroutineExited() {
 	if cps.liveGoroutineCount == cps.targetGoroutineCount {
 		cps.report("exited")
 	}
-	cps.notifyWaiter()
+	cps.spawnNotifier.Notify(nil)
 }
 
 func (cps *CombinerPoolState) updateStats() bool {
@@ -304,23 +308,6 @@ func (cps *CombinerPoolState) updateStats() bool {
 	return true
 }
 
-// Notify a single waiter that the state has changed so it will wake and retry
-// calling ShouldSpawnGoroutine. Notifying a single waiter instead of all
-// waiters avoids a thundering herd attempting to lock the mutex and also allows
-// us to reuse waitChan indefinitely. Only one goroutine need call
-// ShouldSpawnGoroutine, since all goroutines will benefit from any new
-// goroutine spawned.
-//
-//nolint:contextcheck // background context used only for tracing
-func (cps *CombinerPoolState) notifyWaiter() {
-	traceRegion := "CombinerPoolState.notifyWaiter"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	waitCh := cps.waitChan
-	trace.Logf(context.Background(), traceRegion, "entering select: CombinerPoolState=%p, waitChan=%p", cps, waitCh)
-	select {
-	case waitCh <- struct{}{}:
-		trace.Logf(context.Background(), traceRegion, "delivered signal to waitChan=%p", waitCh)
-	default:
-		trace.Logf(context.Background(), traceRegion, "no waiters waiting on waitChan=%p", waitCh)
-	}
+func (cps *CombinerPoolState) SpawnNotifier() *rdvq.Notifier {
+	return &cps.spawnNotifier
 }

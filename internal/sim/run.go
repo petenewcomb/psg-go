@@ -132,7 +132,7 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *Task) {
 	switch rh := task.ResultHandler.(type) {
 	case *Gather:
-		gatherOp := func() *psg.GatherOp[*taskResult] {
+		gatherOp := func() psg.GatherOp[*taskResult] {
 			c.GathersLock.Lock()
 			defer c.GathersLock.Unlock()
 			gatherOp := c.Gathers[rh.Index]
@@ -141,7 +141,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 				gatherOp = &op
 				c.Gathers[rh.Index] = gatherOp
 			}
-			return gatherOp
+			return *gatherOp
 		}()
 		taskPool := c.getTaskPool(task.PoolIndex)
 		taskFn := c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex])
@@ -161,7 +161,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 			}
 		}
 	case *Combine:
-		combineOp := func() *psg.CombineOp[*taskResult, *combineResult] {
+		combineOp := func() psg.CombineOp[*taskResult, *combineResult] {
 			c.CombinesLock.Lock()
 			defer c.CombinesLock.Unlock()
 			combineOp := c.Combines[rh.Index]
@@ -187,7 +187,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 				combineOp = &op
 				c.Combines[rh.Index] = combineOp
 			}
-			return combineOp
+			return *combineOp
 		}()
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure

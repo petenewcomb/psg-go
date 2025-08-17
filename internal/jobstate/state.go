@@ -74,14 +74,19 @@ func (js *JobState) DecrementWork() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
-	noMoreWork := js.inFlightWork.Decrement()
-
 	// Decrement the total references count and check if it hit zero. If noMoreWork is true,
 	// js.noMoreWork will handle the transition logic. But if noMoreWork is false
 	// and the total references counter hit zero, we need to call js.noMoreReferences directly to
 	// handle the race condition where flushers complete between the decrement and
 	// the IsZero() check in noMoreWork().
+	//
+	// Further, decrementing the total references counter first ensures that if
+	// both transition to zero then there's no gap within which a separate
+	// goroutine might observe zero work and non-zero references and thus
+	// trigger an unnecessary extra flush.
 	noMoreReferences := js.totalReferences.Decrement()
+
+	noMoreWork := js.inFlightWork.Decrement()
 
 	if noMoreWork {
 		// Last work just completed.

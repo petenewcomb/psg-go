@@ -15,11 +15,11 @@ import (
 // being abandoned and must release any acquired resources and exit without
 // executing its work. Otherwise, the work function must call ex.Starting before
 // starting execution to confirm it will execute, and must not call ex.Starting
-// if it cannot execute. If not executing immediately and ex.Subscribe is not
-// nil, it must call ex.Subscribe to register for notification when execution
+// if it cannot execute. If not executing immediately and ex.AddToListeners is not
+// nil, it must call ex.AddToListeners to register for notification when execution
 // should be retried (e.g., when resources become available).
 //
-// IMPORTANT: After calling ex.Subscribe the work function must re-check the
+// IMPORTANT: After calling ex.AddToListeners the work function must re-check the
 // condition that caused it to not execute and execute anyway if the condition
 // allows. This avoids a race in which the condition becomes true between the
 // initial check and the registration of the ReadyFn.

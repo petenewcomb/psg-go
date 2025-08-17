@@ -9,6 +9,7 @@ Items to complete before merging to main branch.
 - Update README with information about the new combining architecture
 - Add a Combiner example to the README Features section
 - Create a playground example for the new combining architecture
+- Ensure that examples do not use any internal packages (e.g. exmpclk)
 
 ### 5. API finalization
 - Review and document thread-safety guarantees for remaining public APIs
@@ -28,6 +29,11 @@ Items to complete before merging to main branch.
 - check the scatter plots and review combiner pool controller settings
 - review and understand processing and waiting aggregation throughput and speedup graphs
 - enable cyclo and fix issues
+- get rid of taskWorkerOutboxMap in favor of meta.WithOutbox
+- can we integrate taskWork into combineTask and gatherTask?
+- rename Free to Recycle, add Recycler interface from which other things can derive
+- Expose all user code integration points as interfaces with Recycle (Recycler), then add convenience functions that use pooled objects to wrap implementation-by-closure; perhaps reserve psgfn for the convenience functions and add a separate package for the integration interfaces? 
+- Make sure job.governor is really necessary 
 
 ## Post-Merge Enhancements
 

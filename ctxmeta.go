@@ -39,9 +39,19 @@ func (cm *ctxMeta) IsTopLevel() bool {
 	return cm.ctxType == topLevelContext
 }
 
+func (cm *ctxMeta) WouldBlock() bool {
+	switch cm.ctxType {
+	case topLevelContext, taskContext:
+		return true
+	default:
+		return false
+	}
+}
+
 type executionEnvironment interface {
 	CurrentGroup() workq.GroupID
-	WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox))
+	LockOutbox(key outboxKey[workq.Work]) *workq.Outbox
+	UnlockOutbox()
 	LockAndSetQueueFunc(group workq.GroupID, queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
 		*workq.Receiver, *workq.Waiter, *workq.Waiter)
 	UnlockAndResetQueueFunc()
@@ -65,16 +75,18 @@ func (ee *topLevelExEnv) CurrentGroup() workq.GroupID {
 	return ee.groupStack[len(ee.groupStack)-1]
 }
 
-func (ee *topLevelExEnv) WithOutbox(key outboxKey[workq.Work], fn func(*workq.Outbox)) {
-	traceRegion := "topLevelExEnv.WithOutbox"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p", ee)
-
+func (ee *topLevelExEnv) LockOutbox(key outboxKey[workq.Work]) *workq.Outbox {
+	traceRegion := "topLevelExEnv.LockOutbox"
 	ee.mu.Lock()
-	defer ee.mu.Unlock()
 	outbox := OutboxFor[workq.Work](&ee.outboxMap, key)
-	trace.Logf(context.Background(), traceRegion, "outbox=%p", outbox)
-	fn(outbox)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p, outbox=%p", ee, outbox)
+	}
+	return outbox
+}
+
+func (ee *topLevelExEnv) UnlockOutbox() {
+	ee.mu.Unlock()
 }
 
 func (ee *topLevelExEnv) LockAndSetQueueFunc(
@@ -128,6 +140,41 @@ func (ee *topLevelExEnv) MayQueue() workq.QueueWorkFunc {
 		return nil
 	}
 	return ee.queueFnStack[len(ee.queueFnStack)-1]
+}
+
+// Simple execution environment for task workers that only needs outbox access
+type taskWorkerExEnv struct {
+	outboxMap *outboxMap
+}
+
+func (ee *taskWorkerExEnv) CurrentGroup() workq.GroupID {
+	panic("CurrentGroup not supported in task worker context")
+}
+
+func (ee *taskWorkerExEnv) LockOutbox(key outboxKey[workq.Work]) *workq.Outbox {
+	return OutboxFor[workq.Work](ee.outboxMap, key)
+}
+
+func (ee *taskWorkerExEnv) UnlockOutbox() {}
+
+func (ee *taskWorkerExEnv) LockAndSetQueueFunc(
+	group workq.GroupID,
+	queueFn workq.QueueWorkFunc,
+	blockWaiters *workq.Waiters,
+) (
+	workReceiver *workq.Receiver,
+	workWaiter *workq.Waiter,
+	blockWaiter *workq.Waiter,
+) {
+	panic("LockAndSetQueueFunc not supported in task worker context")
+}
+
+func (ee *taskWorkerExEnv) UnlockAndResetQueueFunc() {
+	panic("UnlockAndResetQueueFunc not supported in task worker context")
+}
+
+func (ee *taskWorkerExEnv) MayQueue() workq.QueueWorkFunc {
+	return nil // Task workers use blocking calls instead
 }
 
 type ctxMetaValueKey struct{}
@@ -187,9 +234,7 @@ func (j *Job) ensureCtxMeta(
 
 			if sourceMeta == nil || sourceMeta.job != j {
 				newCtx, cancel := context.WithCancel(ctx)
-				stop := context.AfterFunc(j.ctx, func() {
-					cancel()
-				})
+				stop := context.AfterFunc(j.ctx, cancel)
 				context.AfterFunc(newCtx, func() {
 					stop()
 				})

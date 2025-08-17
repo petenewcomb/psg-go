@@ -8,9 +8,9 @@ type Waiter struct {
 	renotifyFn RenotifyFunc
 }
 
-func (w *Waiter) waiter() *Waiter {
-	return w
-}
+//func (w *Waiter) waiter() *Waiter {
+//	return w
+//}
 
 // Ch returns the waiter's inbox channel for use in select statements.
 // Returns nil if the waiter itself is nil.
@@ -43,9 +43,11 @@ func (w *Waiter) WasNotified() bool {
 
 // RenotifyFn returns the RenotifyFunc from the most recent notification.
 // Returns nil if the waiter itself is nil.
-func (w *Waiter) RenotifyFn() RenotifyFunc {
+func (w *Waiter) ExtractRenotifyFn() RenotifyFunc {
 	if w == nil {
 		return nil
 	}
-	return w.renotifyFn
+	renotifyFn := w.renotifyFn
+	w.renotifyFn = nil
+	return renotifyFn
 }

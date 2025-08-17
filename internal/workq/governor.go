@@ -8,11 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
 type Governor struct {
-	upstream   Waiters
+	upstream   rdvq.Notifier
 	downstream atomic.Int32
 
 	upstreamShouldWaitFn func() bool // avoid reallocating closure
@@ -40,7 +41,7 @@ func (g *Governor) Execute(ctx context.Context, ex Execution, deadline time.Time
 		BlockBehavior: behavior,
 		ShouldWait:    g.upstreamShouldWaitFn,
 	}
-	return g.upstream.Execute(ctx, ex, deadline, wb, workFn)
+	return ExecuteOrWait(ctx, ex, deadline, &g.upstream, wb, workFn)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -50,9 +51,11 @@ func (g *Governor) upstreamShouldWait() bool {
 
 	downstream := g.downstream.Load()
 	if downstream > 0 {
-		trace.Logf(context.Background(), traceRegion,
-			"Governor=%p has %d downstream waiters, applying backpressure",
-			g, downstream)
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion,
+				"Governor=%p has %d downstream waiters, applying backpressure",
+				g, downstream)
+		}
 		return true
 	}
 	return false
@@ -70,29 +73,6 @@ func (dw *DownstreamWork) Waiting(governor *Governor) {
 		governor.incrementDownstream()
 		dw.waiting = governor
 	}
-}
-
-//nolint:contextcheck // background context used only for tracing
-func (dw *DownstreamWork) Execute(ctx context.Context, ex Execution, governor *Governor, work Work) error {
-	traceRegion := "workq.DownstreamWork.Execute"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	// If the work function does not call ex.Starting but could have, then
-	// execution is deferred and we should increment the downstream waiter count
-	// if we haven't already.
-	defer func() {
-		if !ex.Started() && ex.ShouldBlockOrSubscribe() {
-			dw.Waiting(governor)
-		}
-	}()
-
-	originalStarting := ex.Starting
-	ex.Starting = func() {
-		dw.release()
-		originalStarting()
-	}
-
-	return work.Execute(ctx, ex)
 }
 
 func (dw *DownstreamWork) Close() {
@@ -113,16 +93,20 @@ func (dw *DownstreamWork) release() {
 func (g *Governor) incrementDownstream() {
 	traceRegion := "workq.Governor.incrementDownstream"
 	downstream := g.downstream.Add(1)
-	trace.Logf(context.Background(), traceRegion,
-		"Governor=%p added downstream waiter, total now %d", g, downstream)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"Governor=%p added downstream waiter, total now %d", g, downstream)
+	}
 }
 
 //nolint:contextcheck // background context used only for tracing
 func (g *Governor) decrementDownstream() {
 	traceRegion := "workq.Governor.decrementDownstream"
 	newValue := g.downstream.Add(-1)
-	trace.Logf(context.Background(), traceRegion,
-		"Governor=%p removed downstream waiter, total now %d", g, newValue)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"Governor=%p removed downstream waiter, total now %d", g, newValue)
+	}
 	switch {
 	case newValue < 0:
 		panic("unbalanced decrement detected")
@@ -134,6 +118,6 @@ func (g *Governor) decrementDownstream() {
 		// once, smoothing out governed work execution and thus reducing
 		// resource demand spikes. This in turn reduces resource allocation and
 		// increases utilization.
-		g.upstream.Notify(func() {})
+		g.upstream.Notify(nil)
 	}
 }

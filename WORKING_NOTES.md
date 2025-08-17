@@ -184,5 +184,69 @@ for _, item := range items {
 reduceOp.Close(ctx)  // Triggers final flush when all work completes
 ```
 
-**Implementation Status:**
-Architecture designed but not yet implemented. Next step is to convert gather queue posting to work items as foundation for the new integration model.
+## Integration Architecture Implementation (2025-08-14)
+
+**Major Progress: Core Integration Infrastructure Completed**
+
+The foundation for explicit integration has been fully implemented and tested. All gather operations now flow through the work queue system, eliminating blocking sends and enabling deadlock-free composition.
+
+**Implemented Components:**
+
+1. **Work Queue Foundation (✓ Complete)**
+   - Converted all gather posting to work items following `scatterNowOrQueue` pattern
+   - Added proper blocking behavior for top-level contexts using `job.block()`
+   - Created `taskWorkerExEnv` for execution environment support in task workers
+   - All operations now flow through unified work processing system
+
+2. **Integration API (✓ Complete)**
+   - Added `Integrate()` and `TryIntegrate()` methods to GatherOp and CombineOp
+   - Implemented explicit value/error parameter model instead of workq.Work
+   - Added deadline support for non-blocking variants
+   - Unified interface enables direct value integration across all operation types
+
+3. **Resource Management (✓ Complete)**
+   - Fixed resource leaks through proper `boundTask`/`boundCombineWork` interface implementation
+   - Eliminated double-free bugs with correct ownership transfer patterns
+   - Added proper work lifecycle management with reference counting
+   - Implemented robust cleanup for all work types (tasks, combines, gathers)
+
+4. **Subscription-Based Coordination (✓ Complete)**
+   - Renamed Coordinator to Notifier throughout codebase for clarity
+   - Implemented subscription pattern for goroutine spawning notifications
+   - Added `SpawnWaitNotifier()` method to CombinerPoolState
+   - Work items now subscribe to notifications when unable to post immediately
+
+5. **Type System Cleanup (✓ Complete)**
+   - Renamed `boundCombine` to `boundCombineWork` for consistency
+   - Updated `executeCombine` to take `boundCombineWork` interface
+   - Fixed ambiguous selector issues in embedded struct hierarchies
+   - All type boundaries now clearly defined and consistent
+
+**Architecture Validation:**
+- ✅ All tests passing including stress tests
+- ✅ Full build validation complete  
+- ✅ Resource leak prevention verified
+- ✅ Double-free prevention validated
+- ✅ Integration API functional and tested
+- ❌ **BLOCKER: Benchmarks hanging/deadlocking** - needs investigation
+
+**Current State:**
+The explicit integration foundation is architecturally complete but has a critical issue: benchmarks are hanging, suggesting possible deadlock or infinite loop in the benchmark code. This must be resolved before committing as it could indicate problems with the integration infrastructure.
+
+**Immediate Priority:**
+1. **Fix hanging benchmarks** - Investigate and resolve deadlock/hang in benchmark execution
+
+**Next Phase (after benchmark fix):**
+
+**Next Steps (Priority Order):**
+1. **Add Close() method to operations** - Enable completion signaling and final flush triggers
+2. **Remove implicit flow from core** - Strip out auto-targeting behavior in favor of explicit integration
+3. **Implement ReduceOp** - Add stateful reducer operations with single persistent instances
+4. **Re-layer implicit convenience on top** - Build syntactic sugar using explicit integration as foundation
+
+**Key Technical Insights:**
+- Work queue unification eliminates all blocking send operations
+- Subscription-based coordination scales without thundering herd effects
+- Reference counting enables safe composition with deterministic cleanup
+- Type-parameterized work objects eliminate allocation overhead
+- Integration API provides clean separation between explicit core and implicit convenience layers

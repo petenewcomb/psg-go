@@ -12,6 +12,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/internal/exmpclk"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -19,10 +20,10 @@ import (
 // Example_combine demonstrates how combiners can efficiently aggregate
 // results from multiple tasks before emitting a combined result.
 func ExampleCombine() {
-	startTime := time.Now()
+	var clock exmpclk.ExampleClock
+	clock.Start()
 	msSinceStart := func() int64 {
-		// Truncate to the nearest 10ms to make the output stable across runs
-		return (time.Since(startTime).Milliseconds() / 10) * 10
+		return clock.Elapsed(10 * time.Millisecond).Milliseconds()
 	}
 
 	var inFlight atomic.Int32
@@ -32,7 +33,7 @@ func ExampleCombine() {
 	newTaskFn := func(number int, delay time.Duration, result string) psgfn.Task[string] {
 		return func(context.Context) (string, error) {
 			// Simulate a long-running task
-			time.Sleep(delay)
+			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
 			return result, nil
@@ -45,7 +46,7 @@ func ExampleCombine() {
 
 		return psgfn.FuncCombiner[string, map[string]int]{
 			CombineFn: func(ctx context.Context, result string, err error) (time.Time, error) {
-				time.Sleep(10 * time.Millisecond)
+				clock.Sleep(10 * time.Millisecond)
 				if counts == nil {
 					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
 					counts = make(map[string]int)

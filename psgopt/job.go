@@ -14,17 +14,6 @@ import (
 // wait for new work before exiting. Empirically determined; subject to change.
 const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 
-// DefaultSchedulerLatencyThreshold is the default scheduler latency threshold for [github.com/petenewcomb/psg-go.Job]
-// unless overridden with [WithSchedulerLatencyThreshold]. Triggers backpressure when
-// scheduler latency exceeds this threshold. Empirically determined; subject to change.
-const DefaultSchedulerLatencyThreshold = 0 // disabled for now
-
-// DefaultSchedulerLatencyMaxAge is the default max age for scheduler latency measurements
-// for [github.com/petenewcomb/psg-go.Job]
-// unless overridden with [WithSchedulerLatencyMaxAge]. Controls how old scheduler latency
-// measurements can be before they are ignored. Empirically determined; subject to change.
-const DefaultSchedulerLatencyMaxAge = 0 // disabled for now
-
 // JobOption is a configuration option that can be applied to Job.
 //
 // Available Job configuration options:
@@ -53,58 +42,6 @@ func WithTaskWorkerIdleTimeout(timeout time.Duration) TaskWorkerIdleTimeoutOptio
 }
 
 type TaskWorkerIdleTimeoutOption interface {
-	JobOption
-}
-
-// WithSchedulerBackpressureSettings sets both the scheduler latency threshold and
-// max age for [github.com/petenewcomb/psg-go.Job]. This is a
-// convenience function for configuring scheduler-based backpressure settings at once.
-//
-// For setting individual scheduler parameters, see [WithSchedulerLatencyThreshold] and
-// [WithSchedulerLatencyMaxAge]. The default values are
-// [DefaultSchedulerLatencyThreshold] and [DefaultSchedulerLatencyMaxAge].
-//
-// Setting threshold to 0 disables scheduler-based backpressure entirely.
-func WithSchedulerBackpressureSettings(threshold, maxAge time.Duration) SchedulerBackpressureSettingsOption {
-	return opts.SchedulerBackpressureSettings{Threshold: threshold, MaxAge: maxAge}
-}
-
-type SchedulerBackpressureSettingsOption interface {
-	JobOption
-}
-
-// WithSchedulerLatencyThreshold sets the threshold for scheduler latency that
-// triggers backpressure during [github.com/petenewcomb/psg-go.Job] scatter
-// operations. When scheduler latency exceeds this threshold, new scatter
-// operations will be delayed until scheduler pressure decreases.
-//
-// The default value is [DefaultSchedulerLatencyThreshold].
-//
-// Setting this to 0 disables scheduler-based backpressure entirely.
-//
-// Related: [WithSchedulerLatencyMaxAge] controls how old measurements can be, and
-// [WithSchedulerBackpressureSettings] sets both at once.
-func WithSchedulerLatencyThreshold(threshold time.Duration) SchedulerLatencyThresholdOption {
-	return opts.SchedulerLatencyThreshold(threshold)
-}
-
-type SchedulerLatencyThresholdOption interface {
-	JobOption
-}
-
-// WithSchedulerLatencyMaxAge sets the maximum age for scheduler latency measurements
-// used by [github.com/petenewcomb/psg-go.Job] for backpressure decisions.
-// Measurements older than this age are ignored.
-//
-// The default value is [DefaultSchedulerLatencyMaxAge].
-//
-// Related: [WithSchedulerLatencyThreshold] sets the threshold that triggers
-// backpressure, and [WithSchedulerBackpressureSettings] sets both at once.
-func WithSchedulerLatencyMaxAge(maxAge time.Duration) SchedulerLatencyMaxAgeOption {
-	return opts.SchedulerLatencyMaxAge(maxAge)
-}
-
-type SchedulerLatencyMaxAgeOption interface {
 	JobOption
 }
 

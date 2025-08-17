@@ -40,16 +40,20 @@ func (cm *activeCombinerMap) Push(c combinerFlusher, flushDeadline time.Time) {
 	} else {
 		cm.h.Push(e)
 	}
-	trace.Logf(context.Background(), traceRegion,
-		"cm=%p, Combiner=%p, flushDeadline=%v, id=%v, len(m)=%d, h.Len()=%d",
-		cm, c, flushDeadline, id, len(cm.m), cm.h.Len())
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"cm=%p, Combiner=%p, flushDeadline=%v, id=%v, len(m)=%d, h.Len()=%d",
+			cm, c, flushDeadline, id, len(cm.m), cm.h.Len())
+	}
 }
 
 //nolint:contextcheck // background context used only for tracing
 func (cm *activeCombinerMap) NextToFlush() (combinerFlusher, time.Time) {
 	traceRegion := "activeCombinerMap.NextToFlush"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "cm=%p, len(m)=%d, h.Len()=%d", cm, len(cm.m), cm.h.Len())
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "cm=%p, len(m)=%d, h.Len()=%d", cm, len(cm.m), cm.h.Len())
+	}
 	if cm.h.Len() == 0 {
 		return nil, time.Time{}
 	}
@@ -66,9 +70,11 @@ func (cm *activeCombinerMap) Remove(c combinerFlusher) {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	id := c.InstanceID()
 	e := cm.m[id]
-	trace.Logf(context.Background(), traceRegion,
-		"cm=%p, id=%v, len(m)=%d, h.Len()=%d, e=%v",
-		cm, id, len(cm.m), cm.h.Len(), e)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"cm=%p, id=%v, len(m)=%d, h.Len()=%d, e=%v",
+			cm, id, len(cm.m), cm.h.Len(), e)
+	}
 	if e != nil {
 		_ = cm.h.Remove(e)
 		delete(cm.m, id)
@@ -79,7 +85,9 @@ func (cm *activeCombinerMap) Remove(c combinerFlusher) {
 func (cm *activeCombinerMap) Merge(other *activeCombinerMap) {
 	traceRegion := "activeCombinerMap.Merge"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "cm=%p, other=%p", cm, other)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "cm=%p, other=%p", cm, other)
+	}
 
 	if cm.m == nil {
 		cm.m = other.m
@@ -110,7 +118,9 @@ func (cm *activeCombinerMap) Merge(other *activeCombinerMap) {
 func (cm *activeCombinerMap) FlushExcess(ctx context.Context, emitOutbox *workq.Outbox, maxRetentionCount int) {
 	traceRegion := "activeCombinerMap.FlushExcess"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "cm=%p, len=%d", cm, len(cm.m))
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "cm=%p, len=%d", cm, len(cm.m))
+	}
 
 	// First iterate over the heap so that we preferentially flush the excess
 	// combiners that are nearest their deadline.
@@ -139,10 +149,14 @@ func (cm *activeCombinerMap) FlushExcess(ctx context.Context, emitOutbox *workq.
 func (cm *activeCombinerMap) FlushAll(ctx context.Context, emitOutbox *workq.Outbox) {
 	traceRegion := "activeCombinerMap.FlushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "cm=%p, len(m)=%d, h.Len()=%d", cm, len(cm.m), cm.h.Len())
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "cm=%p, len(m)=%d, h.Len()=%d", cm, len(cm.m), cm.h.Len())
+	}
 	cm.h.Reset()
 	for _, e := range cm.m {
-		trace.Logf(ctx, traceRegion, "Combiner=%p, flushDeadline=%v", e.c, e.flushDeadline)
+		if trace.IsEnabled() {
+			trace.Logf(ctx, traceRegion, "Combiner=%p, flushDeadline=%v", e.c, e.flushDeadline)
+		}
 		c := e.c
 		flushDeadlineEntryPool.Put(e)
 		c.Flush(ctx, emitOutbox)

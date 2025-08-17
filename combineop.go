@@ -32,7 +32,7 @@ import (
 // underlying combiner pool and operation identity.
 type CombineOp[I, O any] struct {
 	id              combineOpID
-	gatherFn        psgfn.Gather[O]
+	gatherOp        GatherOp[O]
 	pool            *CombinerPool
 	combinerFactory psgfn.CombinerFactory[I, O]
 
@@ -63,7 +63,7 @@ func NewCombineOp[I, O any](
 	}
 	c := CombineOp[I, O]{
 		id:              combineOpID(combineOpCounter.Add(1)),
-		gatherFn:        gatherOp.gatherFn,
+		gatherOp:        gatherOp,
 		pool:            pool,
 		combinerFactory: combinerFactory,
 	}
@@ -99,7 +99,8 @@ func (c *CombineOp[I, O]) Scatter(
 		group = workq.NewGroupID()
 	}
 	work := c.newScatterWork(group, time.Time{}, target, taskFn)
-	return scatterNow(ctx, meta, target, work)
+	_, err := scatterNowOrQueue(ctx, meta, time.Time{}, target, work, meta.MayQueue())
+	return err
 }
 
 // TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
@@ -114,7 +115,9 @@ func (c *CombineOp[I, O]) TryScatter(
 ) (bool, error) {
 	traceRegion := "CombineOp.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
 	group := meta.CurrentGroup()
@@ -122,7 +125,65 @@ func (c *CombineOp[I, O]) TryScatter(
 		group = workq.NewGroupID()
 	}
 	work := c.newScatterWork(group, deadline, target, taskFn)
-	return tryScatterNow(ctx, meta, deadline, target, work)
+	return scatterNowOrQueue(ctx, meta, deadline, target, work, nil)
+}
+
+// Integrate posts values to be combined by the combine queue.
+// This follows the same pattern as Scatter but for posting combine work instead
+// of launching tasks.
+func (c *CombineOp[I, O]) Integrate(
+	ctx context.Context,
+	value I,
+	err error,
+) error {
+	traceRegion := "CombineOp.Integrate"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+
+	ctx, meta := c.pool.job.ctxMeta(ctx)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+
+	inner := c.refInner()
+	defer inner.unref()
+
+	// Assert that queueFn consistency matches our expectations for Integrate
+	queueFn := meta.MayQueue()
+	if (queueFn == nil) != meta.WouldBlock() {
+		panic("meta.MayQueue() value does not match meta.WouldBlock()")
+	}
+
+	// startedOrQueued can only be false if an error was returned because:
+	// - if MayQueue() is non-nil, work will get queued
+	// - if MayQueue() is nil (top level), method will block until success or context cancellation
+	_, err = inner.integrate(ctx, meta, group, value, err, time.Time{}, queueFn)
+	return err
+}
+
+// TryIntegrate attempts to post values to be combined by the combine queue.
+// Like Integrate, but returns instead of blocking if queuing would be required.
+func (c *CombineOp[I, O]) TryIntegrate(
+	ctx context.Context,
+	deadline time.Time,
+	value I,
+	err error,
+) (bool, error) {
+	traceRegion := "CombineOp.TryIntegrate"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+
+	ctx, meta := c.pool.job.ctxMeta(ctx)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+
+	inner := c.refInner()
+	defer inner.unref()
+
+	return inner.integrate(ctx, meta, group, value, err, deadline, nil)
 }
 
 func (c *CombineOp[I, O]) newScatterWork(
@@ -139,17 +200,15 @@ func (c *CombineOp[I, O]) newScatterWork(
 	}
 
 	inner := c.refInner()
-
-	pc := inner.instancePool.Get()
-	pc.op = inner
+	defer inner.unref()
 
 	w := combineScatterWorkPool.Get()
-	w.Init(group, c.pool, deadline, target, bindTaskFunc(group, j, taskFn, pc.postResultFn))
+	w.Init(group, c.pool, deadline, target, inner.newTask(group, taskFn))
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion,
-			"CombineOp#%d created %v, pooledCombine=%p, inner=%p, instanceQueue=%p",
-			c.id, w, pc, inner, &inner.instanceQueue)
+			"CombineOp#%d created %v, inner=%p, instanceQueue=%p",
+			c.id, w, inner, &inner.instanceQueue)
 	}
 	return w
 }
@@ -184,7 +243,7 @@ func (c *CombineOp[I, O]) refInner() *combineOp[I, O] {
 	inner.mu.Lock()
 	inner.id = c.id
 	inner.refCount = 1
-	inner.gatherFn = c.gatherFn
+	inner.gatherOp = c.gatherOp
 	inner.combinerPool = c.pool
 	inner.combinerFactory = c.combinerFactory
 	inner.innerPool = innerPool
@@ -221,23 +280,23 @@ type combineOp[I, O any] struct {
 	id       combineOpID
 	refCount int
 
-	gatherFn        psgfn.Gather[O]
+	gatherOp        GatherOp[O]
 	combinerPool    *CombinerPool
 	combinerFactory psgfn.CombinerFactory[I, O]
 
 	innerPool             *omnipool.Pool[combineOp[I, O]]
-	instancePool          *omnipool.Pool[pooledCombine[I, O]]
 	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[I, O]]
-	boundGatherPool       *omnipool.Pool[boundGather[O]]
+	taskPool              *omnipool.Pool[combineTask[I, O]]
+	combineWorkPool       *omnipool.Pool[combineWork[I, O]]
 
 	instanceCount atomic.Int32
 	instanceQueue nbcq.Queue[*halfBoundCombiner[I, O]]
 }
 
 func (c *combineOp[I, O]) Init() {
-	c.instancePool = omnipool.For[pooledCombine[I, O]]()
 	c.halfBoundCombinerPool = omnipool.For[halfBoundCombiner[I, O]]()
-	c.boundGatherPool = omnipool.For[boundGather[O]]()
+	c.taskPool = omnipool.For[combineTask[I, O]]()
+	c.combineWorkPool = omnipool.For[combineWork[I, O]]()
 	c.instanceQueue.Init()
 }
 
@@ -252,7 +311,7 @@ func (c *combineOp[I, O]) Reset() {
 		panic("instance queue was not empty")
 	}
 	c.id = 0
-	c.gatherFn = nil
+	c.gatherOp = GatherOp[O]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
 	c.innerPool = nil
@@ -302,109 +361,6 @@ func (c *combineOp[I, O]) unref() {
 	combinerPool.combineOpMapMu.Unlock()
 
 	innerPool.Put(c)
-}
-
-type pooledCombine[I, O any] struct {
-	op *combineOp[I, O]
-
-	group    workq.GroupID
-	input    I
-	inputErr error
-
-	// avoid closure reallocation
-	postResultFn func(
-		ctx context.Context,
-		group workq.GroupID,
-		j *Job,
-		taskWorkerOutboxMap *outboxMap,
-		input I,
-		inputErr error,
-	)
-	boundCombineFn boundCombineFunc
-}
-
-func (pc *pooledCombine[I, O]) Init() {
-	pc.postResultFn = pc.postResult
-	pc.boundCombineFn = pc.execute
-}
-
-func (pc *pooledCombine[I, O]) Reset() {
-	if pc.op != nil {
-		pc.op.unref()
-	}
-	*pc = pooledCombine[I, O]{
-		postResultFn:   pc.postResultFn,
-		boundCombineFn: pc.boundCombineFn,
-	}
-}
-
-func (pc *pooledCombine[I, O]) postResult(
-	ctx context.Context,
-	group workq.GroupID,
-	j *Job,
-	taskWorkerOutboxMap *outboxMap,
-	input I,
-	inputErr error,
-) {
-	traceRegion := "pooledCombine.postResult"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	// Post the combine using the task worker's outbox for the pool's combine queue
-	combineOutbox := OutboxFor[workq.Work](taskWorkerOutboxMap, pc.op.combinerPool.combineOutboxKey())
-	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp#%d, outbox=%p", pc.op.id, combineOutbox)
-	}
-
-	pc.group = group
-	pc.input = input
-	pc.inputErr = inputErr
-	pc.op.combinerPool.postCombine(ctx, group, combineOutbox, pc.boundCombineFn)
-}
-
-func (pc *pooledCombine[I, O]) execute(ctx context.Context, cm *activeCombinerMap, emitOutbox *workq.Outbox) {
-	var hbc *halfBoundCombiner[I, O]
-	for {
-		hbc, _ = pc.op.instanceQueue.PopFront()
-		if hbc == nil {
-			break
-		}
-		hbc.mu.Lock()
-		if hbc.combiner != nil {
-			if pc.group < hbc.earliestGroup {
-				hbc.earliestGroup = pc.group
-			}
-			break // still holding hbc.mu lock
-		}
-		// Was flushed, so unref
-		finalRefDropped := hbc.unref()
-		hbc.mu.Unlock()
-		if finalRefDropped {
-			hbc.free()
-		}
-	}
-	if hbc == nil {
-		hbc = pc.op.halfBoundCombinerPool.Get()
-		hbc.mu.Lock()
-		hbc.refCount = 1
-		pc.op.ref()
-		pc.op.instanceCount.Add(1)
-		hbc.op = pc.op
-		hbc.id = combinerInstanceID(combinerInstanceCounter.Add(1))
-		hbc.earliestGroup = pc.group
-		hbc.allocate(ctx, pc.op.combinerFactory, emitOutbox)
-	}
-	defer func() {
-		flushed := hbc.combiner == nil
-		finalRefDropped := flushed && hbc.unref()
-		hbc.mu.Unlock()
-		if !flushed {
-			pc.op.instanceQueue.PushBack(hbc)
-		} else if finalRefDropped {
-			hbc.free()
-		}
-		pc.op.instancePool.Put(pc)
-	}()
-	hbc.combine(ctx, cm, emitOutbox, pc.input, pc.inputErr)
 }
 
 type halfBoundCombiner[I, O any] struct {
@@ -493,13 +449,12 @@ func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, emitOutbox *workq.Ou
 	traceRegion := "halfBoundCombiner.emit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	g := c.op.boundGatherPool.Get()
-	g.pool = c.op.boundGatherPool
-	g.gatherFn = c.op.gatherFn
-	g.value = output
-	g.err = outputErr
-
-	c.op.combinerPool.job.postGather(ctx, c.earliestGroup, emitOutbox, g.boundGatherFn)
+	// Use gatherOp.integrate to post the result
+	ctx, meta := c.op.combinerPool.job.ctxMeta(ctx)
+	queueFn := meta.MayQueue()
+	// We ignore return values as we're already in a combiner context
+	_, _ = c.op.gatherOp.integrate(
+		ctx, meta, c.op.combinerPool.job, c.earliestGroup, output, outputErr, time.Time{}, queueFn)
 }
 
 func (c *halfBoundCombiner[I, O]) combine(
@@ -586,7 +541,7 @@ type combineScatterWork struct {
 	deadline time.Time
 	target   TaskPoolOrJob
 	taskPoolScatterWork
-	taskFn boundTaskFunc
+	task boundTask
 }
 
 func (w *combineScatterWork) Init(
@@ -594,13 +549,13 @@ func (w *combineScatterWork) Init(
 	pool *CombinerPool,
 	deadline time.Time,
 	target TaskPoolOrJob,
-	taskFn boundTaskFunc,
+	task boundTask,
 ) {
 	w.jobWork.Init(group, pool.job)
 	w.pool = pool
 	w.deadline = deadline
 	w.target = target
-	w.taskFn = taskFn
+	w.task = task
 }
 
 func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -609,12 +564,21 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	trace.Logf(ctx, traceRegion, "%v", w)
 
 	workFn := func(ctx context.Context, ex workq.Execution) error {
-		return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.taskFn)
+		return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.task)
 	}
+
+	defer func() {
+		if ex.Started() {
+			w.task = nil // we no longer own the task
+		}
+	}()
 
 	bb := w.pool.job.protoBB
 	if bb.ShouldBlock(ctx) != nil {
-		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, workFn)
+		jobGovernedWorkFn := func(ctx context.Context, ex workq.Execution) error {
+			return w.pool.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
+		}
+		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, jobGovernedWorkFn)
 	} else {
 		return workFn(ctx, ex)
 	}
@@ -625,8 +589,188 @@ func (w *combineScatterWork) Free() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
+	if w.task != nil {
+		w.task.Free()
+	}
 	w.Close(w.pool.job)
 	combineScatterWorkPool.Put(w)
 }
 
 var combineScatterWorkPool = omnipool.For[combineScatterWork]()
+
+type combineTask[I, O any] struct {
+	group  workq.GroupID
+	taskFn psgfn.Task[I]
+	op     *combineOp[I, O]
+	pool   *omnipool.Pool[combineTask[I, O]]
+}
+
+func (c *combineOp[I, O]) newTask(group workq.GroupID, taskFn psgfn.Task[I]) boundTask {
+	ct := c.taskPool.Get()
+	ct.pool = c.taskPool
+	ct.group = group
+	ct.taskFn = taskFn
+	ct.op = c
+	c.ref() // Add reference for the task
+	return ct
+}
+
+func (ct *combineTask[I, O]) Execute(
+	ctx context.Context,
+	group workq.GroupID,
+	completedFn func(),
+	taskWorkerOutboxMap *outboxMap,
+) {
+	traceRegion := "combineTask.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	var value I
+	var err error = ErrTaskPanicked
+	defer func() {
+		traceRegion := traceRegion + ".defer"
+		defer trace.StartRegion(ctx, traceRegion).End()
+		if completedFn != nil {
+			completedFn()
+		}
+		if err != nil {
+			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
+		}
+		// Post result using combineOp integrate
+		ctx, meta := ct.op.combinerPool.job.ctxMeta(ctx)
+		queueFn := meta.MayQueue()
+		if (queueFn == nil) != meta.WouldBlock() {
+			panic("meta.MayQueue() value does not match meta.WouldBlock()")
+		}
+		// startedOrQueued can only be false if context was canceled, so we ignore both return values
+		_, _ = ct.op.integrate(ctx, meta, ct.group, value, err, time.Time{}, queueFn)
+	}()
+
+	trace.WithRegion(ctx, traceRegion+".taskFn", func() {
+		value, err = ct.taskFn(ctx)
+	})
+}
+
+func (ct *combineTask[I, O]) Free() {
+	traceRegion := "combineTask.Free"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	ct.op.unref() // Release reference from the task
+	ct.pool.Put(ct)
+}
+
+func (c *combineOp[I, O]) integrate(
+	ctx context.Context,
+	meta *ctxMeta,
+	group workq.GroupID,
+	value I,
+	err error,
+	deadline time.Time,
+	queueFn workq.QueueWorkFunc,
+) (bool, error) {
+	// Create combine work directly with values
+	combineWork := c.newCombineWork(group, value, err)
+	postWork := c.combinerPool.newCombinePostWork(group, combineWork)
+
+	// Handle posting with deadline and queueFn
+	return c.combinerPool.postCombineNowOrQueue(ctx, meta, deadline, postWork, queueFn)
+}
+
+// boundCombineWork interface allows type erasure for combineWork instances
+type boundCombineWork interface {
+	workq.Work
+	Combine(ctx context.Context, cm *activeCombinerMap, gatherOutbox *workq.Outbox)
+	Waiting(*workq.Governor)
+}
+
+type combineWork[I, O any] struct {
+	jobWork
+	workq.DownstreamWork
+	op       *combineOp[I, O]
+	input    I
+	inputErr error
+}
+
+func (c *combineOp[I, O]) newCombineWork(group workq.GroupID, value I, err error) *combineWork[I, O] {
+	w := c.combineWorkPool.Get()
+	w.Init(group, c, value, err)
+	return w
+}
+
+func (w *combineWork[I, O]) Init(group workq.GroupID, op *combineOp[I, O], input I, inputErr error) {
+	w.jobWork.Init(group, op.combinerPool.job)
+	w.op = op
+	w.input = input
+	w.inputErr = inputErr
+	op.ref() // Add reference for the combine work
+}
+
+func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, emitOutbox *workq.Outbox) {
+	var hbc *halfBoundCombiner[I, O]
+	for {
+		hbc, _ = w.op.instanceQueue.PopFront()
+		if hbc == nil {
+			break
+		}
+		hbc.mu.Lock()
+		if hbc.combiner != nil {
+			if w.Group() < hbc.earliestGroup {
+				hbc.earliestGroup = w.Group()
+			}
+			break // still holding hbc.mu lock
+		}
+		// Was flushed, so unref
+		finalRefDropped := hbc.unref()
+		hbc.mu.Unlock()
+		if finalRefDropped {
+			hbc.free()
+		}
+	}
+	if hbc == nil {
+		hbc = w.op.halfBoundCombinerPool.Get()
+		hbc.mu.Lock()
+		hbc.refCount = 1
+		w.op.ref()
+		w.op.instanceCount.Add(1)
+		hbc.op = w.op
+		hbc.id = combinerInstanceID(combinerInstanceCounter.Add(1))
+		hbc.earliestGroup = w.Group()
+		hbc.allocate(ctx, w.op.combinerFactory, emitOutbox)
+	}
+	defer func() {
+		flushed := hbc.combiner == nil
+		finalRefDropped := flushed && hbc.unref()
+		hbc.mu.Unlock()
+		if !flushed {
+			w.op.instanceQueue.PushBack(hbc)
+		} else if finalRefDropped {
+			hbc.free()
+		}
+	}()
+	hbc.combine(ctx, cm, emitOutbox, w.input, w.inputErr)
+}
+
+func (w *combineWork[I, O]) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "combineWork.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", w)
+
+	ex.Starting()
+	workerCtx, meta := w.op.combinerPool.job.ctxMeta(ctx)
+	cw := meta.executionEnvironment.(*cpWorker)
+	cw.LockAndSetQueueFunc(w.Group(), ex.Queue, nil)
+	defer cw.UnlockAndResetQueueFunc()
+	cw.executeCombine(workerCtx, w)
+	return nil
+}
+
+func (w *combineWork[I, O]) Free() {
+	traceRegion := "combineWork.Free"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "%v", w)
+
+	w.DownstreamWork.Close()
+	w.jobWork.Close(w.op.combinerPool.job)
+
+	pool := w.op.combineWorkPool
+	w.op.unref()
+	pool.Put(w)
+}

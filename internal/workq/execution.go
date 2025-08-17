@@ -3,19 +3,27 @@
 
 package workq
 
+import "github.com/petenewcomb/psg-go/internal/rdvq"
+
+// Listeners is an alias for rdvq.Listeners for convenience
+type Listeners = rdvq.Listeners
+
+// NotifyFunc is an alias for rdvq.NotifyFunc for convenience
+type NotifyFunc = rdvq.NotifyFunc
+
 // Execution provides the interface for a work function to interact with
 // the work queue system.
 type Execution struct {
-	Blocking  func()             // Call before blocking to release resources
-	Subscribe func(*Coordinator) // Call to subscribe to ready notifications
-	Starting  func()             // Call before starting execution to confirm execution
-	Queue     QueueWorkFunc      // Queue additional work items
+	Blocking       func()           // Call before blocking to release resources
+	AddToListeners func(*Listeners) // If non-nil, call to subscribe to ready notifications
+	Starting       func()           // Call before starting execution to confirm execution
+	Queue          QueueWorkFunc    // If non-nil, call to queue additional work items
 
 	started func() bool
 }
 
-func (ex Execution) ShouldBlockOrSubscribe() bool {
-	return ex.Subscribe != nil
+func (ex Execution) ShouldBlockOrListen() bool {
+	return ex.AddToListeners != nil
 }
 
 func (ex Execution) Started() bool {

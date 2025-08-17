@@ -13,17 +13,25 @@ type outboxMap struct {
 	m map[any]any
 }
 
+func (om *outboxMap) Reset() {
+	// Reset the map to allow reuse without reallocating
+	for _, v := range om.m {
+		v.(interface{ Free() }).Free() // Free the outbox
+	}
+	clear(om.m)
+}
+
 // OutboxFor returns the outbox for the given key, creating one if it doesn't exist.
 func OutboxFor[T any](om *outboxMap, key outboxKey[T]) *rdvq.Outbox[T] {
 	if om.m == nil {
 		om.m = make(map[any]any)
 	}
 
-	outbox := om.m[key]
-	if outbox == nil {
-		outbox = &rdvq.Outbox[T]{}
+	outboxAny := om.m[key]
+	if outboxAny == nil {
+		outbox := rdvq.NewOutbox[T]()
 		om.m[key] = outbox
+		return outbox
 	}
-
-	return outbox.(*rdvq.Outbox[T])
+	return outboxAny.(*rdvq.Outbox[T])
 }

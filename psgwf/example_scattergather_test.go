@@ -12,6 +12,7 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
+	"github.com/petenewcomb/psg-go/internal/exmpclk"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
@@ -26,10 +27,10 @@ func Example_scatterGather() {
 	// Create a task pool with limited concurrency to control timing
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(3))
 
-	startTime := time.Now()
+	var clock exmpclk.ExampleClock
+	clock.Start()
 	msSinceStart := func() int64 {
-		// Truncate to the nearest 10ms to make the output stable across runs
-		return (time.Since(startTime).Milliseconds() / 10) * 10
+		return clock.Elapsed(10 * time.Millisecond).Milliseconds()
 	}
 
 	// Create a gather for collecting results
@@ -51,7 +52,7 @@ func Example_scatterGather() {
 	// First task completes quickly
 	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		fmt.Printf("%3dms Quick task started\n", msSinceStart())
-		time.Sleep(10 * time.Millisecond)
+		clock.Sleep(10 * time.Millisecond)
 		fmt.Printf("%3dms Quick task completed\n", msSinceStart())
 		return "Quick result", nil
 	})
@@ -60,12 +61,12 @@ func Example_scatterGather() {
 	}
 
 	// Sleep to ensure quick task completes and result is gathered before starting failing task
-	time.Sleep(20 * time.Millisecond)
+	clock.Sleep(20 * time.Millisecond)
 
 	// Second task fails and cancels workflow
 	err = gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		fmt.Printf("%3dms Failing task started\n", msSinceStart())
-		time.Sleep(30 * time.Millisecond)
+		clock.Sleep(30 * time.Millisecond)
 		fmt.Printf("%3dms Failing task failed - cancelling workflow\n", msSinceStart())
 		wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 		return "", fmt.Errorf("task failed")
@@ -75,7 +76,7 @@ func Example_scatterGather() {
 	}
 
 	// Sleep to ensure failing task starts before slow task
-	time.Sleep(10 * time.Millisecond)
+	clock.Sleep(10 * time.Millisecond)
 
 	// Third task should be cancelled
 	err = gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
@@ -86,7 +87,7 @@ func Example_scatterGather() {
 			return "Slow result", nil
 		case <-wf.Ctx().Done():
 			// Add a small delay to ensure the cancellation prints after the failure
-			time.Sleep(10 * time.Millisecond)
+			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms Slow task cancelled\n", msSinceStart())
 			return "", context.Canceled
 		}
@@ -96,7 +97,7 @@ func Example_scatterGather() {
 	}
 
 	// Wait to ensure all tasks have been processed
-	time.Sleep(10 * time.Millisecond)
+	clock.Sleep(10 * time.Millisecond)
 
 	// Gather all results
 	err = job.CloseAndGatherAll(context.Background())

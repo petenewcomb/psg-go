@@ -22,8 +22,9 @@ import (
 // the same gather function binding. This allows GatherOp values to be safely
 // passed by value to goroutines or stored in structures.
 type GatherOp[T any] struct {
-	gatherFn     psgfn.Gather[T]
-	instancePool *omnipool.Pool[pooledGather[T]]
+	gatherFn psgfn.Gather[T]
+	workPool *omnipool.Pool[gatherWork[T]]
+	taskPool *omnipool.Pool[gatherTask[T]]
 }
 
 func NewGatherOp[T any](
@@ -33,8 +34,9 @@ func NewGatherOp[T any](
 		panic("gather function must be non-nil")
 	}
 	return GatherOp[T]{
-		gatherFn:     gatherFn,
-		instancePool: omnipool.For[pooledGather[T]](),
+		gatherFn: gatherFn,
+		workPool: omnipool.For[gatherWork[T]](),
+		taskPool: omnipool.For[gatherTask[T]](),
 	}
 }
 
@@ -72,7 +74,6 @@ func (g GatherOp[T]) Scatter(
 ) error {
 	traceRegion := "GatherOp.Scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
 	group := meta.CurrentGroup()
@@ -80,7 +81,8 @@ func (g GatherOp[T]) Scatter(
 		group = workq.NewGroupID()
 	}
 	work := g.newScatterWork(group, time.Time{}, target, taskFn)
-	return scatterNow(ctx, meta, target, work)
+	_, err := scatterNowOrQueue(ctx, meta, time.Time{}, target, work, meta.MayQueue())
+	return err
 }
 
 // TryScatter attempts to initiate asynchronous execution of the provided task
@@ -110,7 +112,154 @@ func (g GatherOp[T]) TryScatter(
 		group = workq.NewGroupID()
 	}
 	workFn := g.newScatterWork(group, deadline, target, taskFn)
-	return tryScatterNow(ctx, meta, deadline, target, workFn)
+	return scatterNowOrQueue(ctx, meta, deadline, target, workFn, nil)
+}
+
+// Integrate posts values to be gathered by the gather queue.
+// This follows the same pattern as Scatter but for posting gather work instead
+// of launching tasks.
+func (g GatherOp[T]) Integrate(
+	ctx context.Context,
+	target *Job,
+	value T,
+	err error,
+) error {
+	traceRegion := "GatherOp.Integrate"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
+
+	ctx, meta := target.ctxMeta(ctx)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+
+	// Assert that queueFn consistency matches our expectations for Integrate
+	queueFn := meta.MayQueue()
+	if (queueFn == nil) != meta.WouldBlock() {
+		panic("meta.MayQueue() value does not match meta.WouldBlock()")
+	}
+
+	// startedOrQueued can only be false if an error was returned because:
+	// - if MayQueue() is non-nil, work will get queued
+	// - if MayQueue() is nil (top level), method will block until success or context cancellation
+	_, err = g.integrate(ctx, meta, target, group, value, err, time.Time{}, queueFn)
+	return err
+}
+
+// TryIntegrate attempts to post values to be gathered by the gather queue.
+// Like Integrate, but returns instead of blocking if queuing would be required.
+func (g GatherOp[T]) TryIntegrate(
+	ctx context.Context,
+	deadline time.Time,
+	target *Job,
+	value T,
+	err error,
+) (bool, error) {
+	traceRegion := "GatherOp.TryIntegrate"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
+
+	ctx, meta := target.ctxMeta(ctx)
+	group := meta.CurrentGroup()
+	if group == workq.InvalidGroupID {
+		group = workq.NewGroupID()
+	}
+
+	return g.integrate(ctx, meta, target, group, value, err, deadline, nil)
+}
+
+// newTask creates a new gather task that will execute the task and integrate results
+func (g GatherOp[T]) newTask(group workq.GroupID, job *Job, taskFn psgfn.Task[T]) boundTask {
+	pt := g.taskPool.Get()
+	pt.pool = g.taskPool
+	pt.group = group
+	pt.job = job
+	pt.taskFn = taskFn
+	pt.gatherOp = g
+	return pt
+}
+
+// boundGatherWork interface allows type erasure for gatherWork instances
+type boundGatherWork interface {
+	workq.Work
+	Waiting(*workq.Governor)
+}
+
+type gatherWork[T any] struct {
+	jobWork
+	workq.DownstreamWork
+	job      *Job
+	pool     *omnipool.Pool[gatherWork[T]]
+	gatherFn psgfn.Gather[T]
+	value    T
+	err      error
+}
+
+// newGatherWork creates a new gather work item with the provided values
+func (g GatherOp[T]) newGatherWork(group workq.GroupID, job *Job, value T, err error) *gatherWork[T] {
+	w := g.workPool.Get()
+	w.Init(g.workPool, group, job, g.gatherFn, value, err)
+	return w
+}
+
+func (w *gatherWork[T]) Init(
+	pool *omnipool.Pool[gatherWork[T]],
+	group workq.GroupID,
+	job *Job,
+	gatherFn psgfn.Gather[T],
+	value T,
+	err error,
+) {
+	w.jobWork.Init(group, job)
+	w.job = job
+	w.pool = pool
+	w.gatherFn = gatherFn
+	w.value = value
+	w.err = err
+}
+
+func (w *gatherWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "gatherWork.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", w)
+
+	ex.Starting()
+	ctx, meta := w.job.ctxMeta(ctx)
+
+	meta.LockAndSetQueueFunc(w.Group(), ex.Queue, nil)
+	defer meta.UnlockAndResetQueueFunc()
+
+	return w.gatherFn(ctx, w.value, w.err)
+}
+
+func (w *gatherWork[T]) Free() {
+	traceRegion := "gatherWork.Free"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "%v", w)
+
+	w.DownstreamWork.Close()
+	w.jobWork.Close(w.job)
+	w.pool.Put(w)
+}
+
+// integrate creates gather work and posts it to the gather queue
+func (g GatherOp[T]) integrate(
+	ctx context.Context,
+	meta *ctxMeta,
+	job *Job,
+	group workq.GroupID,
+	value T,
+	err error,
+	deadline time.Time,
+	queueFn workq.QueueWorkFunc,
+) (bool, error) {
+	// Create gather work directly with values
+	gatherWork := g.newGatherWork(group, job, value, err)
+	postWork := job.newGatherPostWork(group, gatherWork)
+
+	// Handle posting with deadline and queueFn
+	return job.postGatherNowOrQueue(ctx, meta, deadline, postWork, queueFn)
 }
 
 func (g GatherOp[T]) newScatterWork(
@@ -121,67 +270,11 @@ func (g GatherOp[T]) newScatterWork(
 ) *gatherScatterWork {
 	traceRegion := "GatherOp.newScatterWork"
 
-	pg := g.instancePool.Get()
-	pg.instancePool = g.instancePool
-	pg.gatherFn = g.gatherFn
-
 	w := gatherScatterWorkPool.Get()
-	w.Init(group, deadline, target, bindTaskFunc(group, target.getJob(), taskFn, pg.postResultFn))
+	w.Init(group, deadline, target, g.newTask(group, target.getJob(), taskFn))
 
 	trace.Logf(context.Background(), traceRegion, "GatherOp=%p created %v", g, w)
 	return w
-}
-
-type pooledGather[T any] struct {
-	instancePool *omnipool.Pool[pooledGather[T]]
-	gatherFn     psgfn.Gather[T]
-	value        T
-	err          error
-
-	boundGatherFn boundGatherFunc
-	postResultFn  func(context.Context, workq.GroupID, *Job, *outboxMap, T, error)
-}
-
-func (pg *pooledGather[T]) Init() {
-	pg.boundGatherFn = pg.execute
-	pg.postResultFn = pg.postResult
-}
-
-func (pg *pooledGather[T]) Reset() {
-	*pg = pooledGather[T]{
-		boundGatherFn: pg.boundGatherFn,
-		postResultFn:  pg.postResultFn,
-	}
-}
-
-func (pg *pooledGather[T]) execute(ctx context.Context) error {
-	traceRegion := "pooledGather.execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	err := pg.gatherFn(ctx, pg.value, pg.err)
-	trace.Logf(ctx, traceRegion, "pooledGather=%p returned err=%v", pg, err)
-	pg.instancePool.Put(pg)
-	return err
-}
-
-func (pg *pooledGather[T]) postResult(
-	ctx context.Context,
-	group workq.GroupID,
-	j *Job,
-	taskWorkerOutboxMap *outboxMap,
-	value T,
-	err error,
-) {
-	traceRegion := "pooledGather.postResult"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	// Post the gather using the task worker's outbox for the job's gather queue
-	gatherOutbox := OutboxFor[workq.Work](taskWorkerOutboxMap, j.gatherOutboxKey())
-	trace.Logf(ctx, traceRegion, "pooledGather=%p outbox=%p", pg, gatherOutbox)
-
-	pg.value = value
-	pg.err = err
-	j.postGather(ctx, group, gatherOutbox, pg.boundGatherFn)
 }
 
 type gatherScatterWork struct {
@@ -189,14 +282,14 @@ type gatherScatterWork struct {
 	deadline time.Time
 	target   TaskPoolOrJob
 	taskPoolScatterWork
-	taskFn boundTaskFunc
+	task boundTask
 }
 
-func (w *gatherScatterWork) Init(group workq.GroupID, deadline time.Time, target TaskPoolOrJob, taskFn boundTaskFunc) {
+func (w *gatherScatterWork) Init(group workq.GroupID, deadline time.Time, target TaskPoolOrJob, task boundTask) {
 	w.jobWork.Init(group, target.getJob())
 	w.deadline = deadline
 	w.target = target
-	w.taskFn = taskFn
+	w.task = task
 }
 
 func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -204,7 +297,23 @@ func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) err
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.taskFn)
+	workFn := func(ctx context.Context, ex workq.Execution) error {
+		return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.task)
+	}
+
+	defer func() {
+		if ex.Started() {
+			w.task = nil // we no longer own the task
+		}
+	}()
+
+	j := w.target.getJob()
+	bb := j.protoBB
+	if bb.ShouldBlock(ctx) != nil {
+		return j.governor.Execute(ctx, ex, w.deadline, bb, workFn)
+	} else {
+		return workFn(ctx, ex)
+	}
 }
 
 func (w *gatherScatterWork) Free() {
@@ -212,6 +321,9 @@ func (w *gatherScatterWork) Free() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
+	if w.task != nil {
+		w.task.Free()
+	}
 	w.Close(w.target.getJob())
 	gatherScatterWorkPool.Put(w)
 }

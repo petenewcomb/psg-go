@@ -276,7 +276,7 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 			// First try does not call ex.Starting(), becomes deferred
 			return nil
 		}
-		if tryCount == 2 && ex.ShouldBlockOrSubscribe() {
+		if tryCount == 2 && ex.ShouldBlockOrListen() {
 			// Second try with notification - still not ready
 			notifyReceived = true
 			return nil

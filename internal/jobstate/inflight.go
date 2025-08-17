@@ -36,9 +36,11 @@ func (c *InFlightCounter) IsUnder(limit int) bool {
 	value := c.v.Load()
 	ok := value < int64(limit)
 
-	trace.Logf(context.Background(), traceRegion,
-		"InFlightCounter=%p, value=%d, limit=%d; returning %v",
-		c, value, limit, ok)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"InFlightCounter=%p, value=%d, limit=%d; returning %v",
+			c, value, limit, ok)
+	}
 	return ok
 }
 
@@ -46,7 +48,9 @@ func (c *InFlightCounter) IsUnder(limit int) bool {
 func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	traceRegion := "InFlightCounter.IncrementIfUnder"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p", c)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p", c)
+	}
 
 	// Tentatively increment the counter and check against limit. If over limit,
 	// remove the tentative increment and try again if we notice that another
@@ -59,22 +63,28 @@ func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 		}
 
 		// Back out tentative increment and re-check.
-		trace.Logf(context.Background(), traceRegion, "newValue=%d > limit=%d; backing out increment", newValue, limit)
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion, "newValue=%d > limit=%d; backing out increment", newValue, limit)
+		}
 		newValue = c.v.Add(-1)
 		if newValue < 0 {
 			panic("unbalanced decrement detected")
 		}
 		if newValue >= int64(limit) {
 			// Still at or over limit.
-			trace.Logf(context.Background(), traceRegion,
-				"newValue=%d >= limit=%d; still at or over limit, returning false",
-				newValue, limit)
+			if trace.IsEnabled() {
+				trace.Logf(context.Background(), traceRegion,
+					"newValue=%d >= limit=%d; still at or over limit, returning false",
+					newValue, limit)
+			}
 			return false
 		}
 		// Room might have been made, try again.
 	}
 
-	trace.Logf(context.Background(), traceRegion, "newValue=%d <= limit=%d; returning true", newValue, limit)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "newValue=%d <= limit=%d; returning true", newValue, limit)
+	}
 	return true
 }
 
@@ -85,7 +95,9 @@ func (c *InFlightCounter) Decrement() bool {
 
 	newValue := c.v.Add(-1)
 	ok := newValue == 0
-	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d; returning %v", c, newValue, ok)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, newValue=%d; returning %v", c, newValue, ok)
+	}
 
 	if newValue < 0 {
 		panic("unbalanced decrement detected")
@@ -104,9 +116,11 @@ func (c *InFlightCounter) DecrementAndCheckIfUnder(limit int) bool {
 	newValue := c.v.Add(-1)
 	// Check if new value is under limit
 	ok := limit < 0 || newValue < int64(limit)
-	trace.Logf(context.Background(), traceRegion,
-		"InFlightCounter=%p, newValue=%d, limit=%d; returning %v",
-		c, newValue, limit, ok)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"InFlightCounter=%p, newValue=%d, limit=%d; returning %v",
+			c, newValue, limit, ok)
+	}
 
 	if newValue < 0 {
 		panic("unbalanced decrement detected")
@@ -122,6 +136,8 @@ func (c *InFlightCounter) IsZero() bool {
 	value := c.v.Load()
 	ok := value == 0
 
-	trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, value=%d; returning %v", c, value, ok)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "InFlightCounter=%p, value=%d; returning %v", c, value, ok)
+	}
 	return ok
 }

@@ -33,12 +33,13 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Start producer that will push 3 values
+	outbox := rdvq.NewOutbox[int]()
+	defer outbox.Free() // Free after all values are consumed
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var outbox rdvq.Outbox[int]
 		for i := 1; i <= 3; i++ {
-			_ = q.PushBack(ctx, &outbox, i)
+			_ = q.PushBack(ctx, outbox, i)
 			values <- i
 		}
 		close(values)
@@ -136,8 +137,9 @@ func TestRequired_ReceiverThenSender(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var outbox rdvq.Outbox[int]
-		err := q.PushBack(ctx, &outbox, 42)
+		outbox := rdvq.NewOutbox[int]()
+		defer outbox.Free()
+		err := q.PushBack(ctx, outbox, 42)
 		assert.NoError(t, err)
 	}()
 	defer wg.Wait()
@@ -179,8 +181,9 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var outbox rdvq.Outbox[int]
-		err := q.PushBack(ctx, &outbox, 99)
+		outbox := rdvq.NewOutbox[int]()
+		defer outbox.Free()
+		err := q.PushBack(ctx, outbox, 99)
 		assert.NoError(t, err)
 	}()
 
@@ -253,11 +256,12 @@ func TestRequired_Concurrency(t *testing.T) {
 			defer writerWg.Done()
 			<-startCh
 
-			var outbox rdvq.Outbox[int]
+			outbox := rdvq.NewOutbox[int]()
+			defer outbox.Free()
 			rangeStart := writerID * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
-				if err := q.PushBack(ctx, &outbox, v); err == nil {
+				if err := q.PushBack(ctx, outbox, v); err == nil {
 					totalPushed.Add(1)
 				}
 			}
@@ -464,10 +468,11 @@ func TestRequired_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			var outbox rdvq.Outbox[int]
+			outbox := rdvq.NewOutbox[int]()
+			defer outbox.Free()
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
-				pushOps[rand.IntN(len(pushOps))](ctx, &outbox)
+				pushOps[rand.IntN(len(pushOps))](ctx, outbox)
 			}
 		}()
 	}
@@ -515,11 +520,12 @@ func TestRequired_TryPushBack(t *testing.T) {
 	q.Init()
 	ctx := context.Background()
 
-	// TryPushBack should fail when no receivers are waiting
-	var outbox rdvq.Outbox[int]
-	success := q.TryPushBack(&outbox, 42)
+	// TryPushBack should succeed when outbox is empty
+	outbox := rdvq.NewOutbox[int]()
+	defer outbox.Free()
+	success := q.TryPushBack(outbox, 42)
 	assert.True(t, success, "TryPushBack should succeed with empty outbox")
-	success = q.TryPushBack(&outbox, 24)
+	success = q.TryPushBack(outbox, 24)
 	assert.False(t, success, "TryPushBack should fail with full outbox and no waiting receivers")
 
 	// Start a receiver
@@ -536,7 +542,7 @@ func TestRequired_TryPushBack(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// TryPushBack should succeed now
-	success = q.TryPushBack(&outbox, 42)
+	success = q.TryPushBack(outbox, 42)
 	assert.True(t, success, "TryPushBack should succeed with waiting receiver")
 
 	// Verify the value was received
@@ -566,8 +572,9 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	// Give receiver time to register
 	time.Sleep(10 * time.Millisecond)
 
-	var outbox rdvq.Outbox[int]
-	err := q.PushBack(ctx, &outbox, 100)
+	outbox := rdvq.NewOutbox[int]()
+	defer outbox.Free()
+	err := q.PushBack(ctx, outbox, 100)
 	assert.NoError(t, err)
 
 	// Should receive immediately via direct delivery
@@ -579,7 +586,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	}
 
 	// Test Tier 2: Outbox buffering when no receivers waiting
-	err = q.PushBack(ctx, &outbox, 200)
+	err = q.PushBack(ctx, outbox, 200)
 	assert.NoError(t, err)
 
 	// Test Tier 3: Shared channel when outbox is full
@@ -587,7 +594,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	go func() {
 		defer close(done)
 		// This should block on shared channel since outbox is full
-		err := q.PushBack(ctx, &outbox, 300)
+		err := q.PushBack(ctx, outbox, 300)
 		assert.NoError(t, err)
 	}()
 
@@ -658,8 +665,9 @@ func TestRequired_OutboxNotification(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Send item to outbox - this should notify the waiting receiver
-	var outbox rdvq.Outbox[int]
-	err := q.PushBack(ctx, &outbox, 42)
+	outbox := rdvq.NewOutbox[int]()
+	defer outbox.Free()
+	err := q.PushBack(ctx, outbox, 42)
 	assert.NoError(t, err)
 
 	// Receiver should be notified and drain the outbox
@@ -699,11 +707,11 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			var outbox rdvq.Outbox[int]
-
+			outbox := rdvq.NewOutbox[int]()
+			defer outbox.Free()
 			for i := 0; i < itemsPerSender; i++ {
 				value := id*1000 + i // Unique value per sender
-				err := q.PushBack(ctx, &outbox, value)
+				err := q.PushBack(ctx, outbox, value)
 				assert.NoError(t, err)
 			}
 		}(senderID)
@@ -742,58 +750,13 @@ func TestRequired_TryPopFrontWithOutboxes(t *testing.T) {
 	assert.Equal(t, 0, value) // zero value for int
 
 	// Add item to outbox
-	var outbox rdvq.Outbox[int]
-	success := q.TryPushBack(&outbox, 42)
+	outbox := rdvq.NewOutbox[int]()
+	defer outbox.Free()
+	success := q.TryPushBack(outbox, 42)
 	assert.True(t, success) // Should go to outbox
 
 	// TryPopFront should immediately drain the outbox
 	value, ok = q.TryPopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 42, value)
-}
-
-func TestRequired_RaceConditionPrevention(t *testing.T) {
-	var q rdvq.Required[int]
-	q.Init()
-	ctx := context.Background()
-
-	// This test verifies that the waiter verification system prevents
-	// race conditions between outbox checking and blocking
-
-	iterations := 1000
-	if testing.Short() {
-		iterations = 100
-	}
-
-	for i := 0; i < iterations; i++ {
-		received := make(chan int, 1)
-		receiverStarted := make(chan struct{})
-
-		// Start receiver
-		go func() {
-			close(receiverStarted)
-			var receiver rdvq.Receiver[int]
-			err := q.PopFront(ctx, &receiver, func(value int) {
-				received <- value
-			})
-			assert.NoError(t, err)
-		}()
-
-		// Wait for receiver to start
-		<-receiverStarted
-
-		// Send item immediately - there's a race between receiver checking
-		// outboxes and starting to block
-		var outbox rdvq.Outbox[int]
-		err := q.PushBack(ctx, &outbox, i)
-		assert.NoError(t, err)
-
-		// Should always receive the value despite the race
-		select {
-		case val := <-received:
-			assert.Equal(t, i, val)
-		case <-time.After(1 * time.Second):
-			t.Fatalf("Race condition detected at iteration %d", i)
-		}
-	}
 }

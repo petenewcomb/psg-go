@@ -22,10 +22,13 @@ type TaskPoolOrJob interface {
 	// getJob returns the Job associated with this target
 	getJob() *Job
 	// Execute executes the task function in the target context
-	scatter(context.Context, workq.GroupID, workq.Execution, time.Time, *taskPoolScatterWork, boundTaskFunc) error
+	scatter(context.Context, workq.GroupID, workq.Execution, time.Time, *taskPoolScatterWork, boundTask) error
 }
 
-type boundTaskFunc func(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap)
+type boundTask interface {
+	Execute(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap)
+	Free()
+}
 
 func vetScatter[T any](
 	ctx context.Context,
@@ -57,51 +60,24 @@ func vetScatter[T any](
 	return ctx, meta
 }
 
-type boundTask[T any] struct {
-	group        workq.GroupID
-	job          *Job
-	taskFn       psgfn.Task[T]
-	postResultFn func(context.Context, workq.GroupID, *Job, *outboxMap, T, error)
+type gatherTask[T any] struct {
+	group    workq.GroupID
+	job      *Job
+	taskFn   psgfn.Task[T]
+	gatherOp GatherOp[T]
 
-	pool        *omnipool.Pool[boundTask[T]]
-	boundTaskFn boundTaskFunc
+	pool *omnipool.Pool[gatherTask[T]]
 }
 
 // Binds type-specific task and gather functions together into a generic task
 // function
-func bindTaskFunc[T any](
-	group workq.GroupID,
-	job *Job,
-	taskFn psgfn.Task[T],
-	postResultFn func(context.Context, workq.GroupID, *Job, *outboxMap, T, error),
-) boundTaskFunc {
-	pool := omnipool.For[boundTask[T]]()
-	bt := pool.Get()
-	bt.pool = pool
-	bt.group = group
-	bt.job = job
-	bt.taskFn = taskFn
-	bt.postResultFn = postResultFn
-	return bt.boundTaskFn
-}
-
-func (bt *boundTask[T]) Init() {
-	bt.boundTaskFn = bt.execute
-}
-
-func (bt *boundTask[T]) Reset() {
-	*bt = boundTask[T]{
-		boundTaskFn: bt.boundTaskFn,
-	}
-}
-
-func (bt *boundTask[T]) execute(
+func (pt *gatherTask[T]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
 	taskWorkerOutboxMap *outboxMap,
 ) {
-	traceRegion := "boundTask.execute"
+	traceRegion := "gatherTask.execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	// Make sure that a panic in a task function doesn't compromise the rest
@@ -115,8 +91,14 @@ func (bt *boundTask[T]) execute(
 		if err != nil {
 			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
 		}
-		bt.postResultFn(ctx, bt.group, bt.job, taskWorkerOutboxMap, value, err)
-		bt.pool.Put(bt)
+		// Post result using integrate
+		ctx, meta := pt.job.ctxMeta(ctx)
+		queueFn := meta.MayQueue()
+		if (queueFn == nil) != meta.WouldBlock() {
+			panic("meta.MayQueue() value does not match meta.WouldBlock()")
+		}
+		// startedOrQueued can only be false if context was canceled, so we ignore both return values
+		_, _ = pt.gatherOp.integrate(ctx, meta, pt.job, pt.group, value, err, time.Time{}, queueFn)
 	}()
 
 	// Actually execute the task function. Since this is the top-level
@@ -129,28 +111,13 @@ func (bt *boundTask[T]) execute(
 	// maintain the integrity of the task pool or overall job in case of task
 	// panics.
 	trace.WithRegion(ctx, traceRegion+".taskFn", func() {
-		value, err = bt.taskFn(ctx)
+		value, err = pt.taskFn(ctx)
 	})
 }
 
-func tryScatterNow(
-	ctx context.Context,
-	meta *ctxMeta,
-	deadline time.Time,
-	target TaskPoolOrJob,
-	scatterWork workq.Work,
-) (bool, error) {
-	return scatterNowOrQueue(ctx, meta, deadline, target, scatterWork, nil)
-}
-
-func scatterNow(
-	ctx context.Context,
-	meta *ctxMeta,
-	target TaskPoolOrJob,
-	scatterWork workq.Work,
-) error {
-	_, err := scatterNowOrQueue(ctx, meta, time.Time{}, target, scatterWork, meta.MayQueue())
-	return err
+// Free implements boundTask interface
+func (pt *gatherTask[T]) Free() {
+	pt.pool.Put(pt)
 }
 
 func scatterNowOrQueue(
@@ -201,11 +168,11 @@ func scatterNowOrQueue(
 			return false, err
 		}
 
-		// Signal the work that it should block by making Subscribe non-nil,
-		// knowing at this point that it will block rather than subscribe
+		// Signal the work that it should block by making AddToListeners non-nil,
+		// knowing at this point that it will block rather than addToListeners
 		// because we're at the top level.
-		ex.Subscribe = func(*workq.Coordinator) {
-			panic("unexpected call to scatterNowOrQueue.ex.Subscribe")
+		ex.AddToListeners = func(*workq.Listeners) {
+			panic("unexpected call to scatterNowOrQueue.ex.AddToListeners")
 		}
 	}
 

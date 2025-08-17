@@ -9,15 +9,24 @@ import (
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
-type RenotifyFunc func()
-
 // WaitSelectFunc handles select operations on wait channels. The callback
 // MUST call waiter.Notified(renotifyFn) if a RenotifyFunc is received.
-// For best scheduler monitoring accuracy, this call SHOULD be made
-// immediately after receiving the RenotifyFunc.
 type WaitSelectFunc func(waiter *Waiter)
 
-type NotifyFunc func(RenotifyFunc)
+func BasicWaitSelect(ctx context.Context, waiter *Waiter) error {
+	traceRegion := "rdvq.BasicWaitSelect"
+	waitCh := waiter.Ch()
+	trace.Logf(ctx, traceRegion, "entering select: waiter=%p, waitCh=%p", waiter, waitCh)
+	select {
+	case renotifyFn := <-waitCh:
+		waiter.Notified(renotifyFn)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from waiter=%p, waitCh=%p", waiter, waitCh)
+		return nil
+	case <-ctx.Done():
+		trace.Logf(ctx, traceRegion, "received context done signal")
+		return ctx.Err()
+	}
+}
 
 // Waiters provides a blocking wait and notification system for coordinating
 // between senders and receivers. It's used internally by Required to prevent
@@ -48,7 +57,7 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 	orphanFn NotifyFunc,
 	selectFn WaitSelectFunc,
 ) {
-	traceRegion := "rdvq.Waiter.WaitFuncWithOrphanHandler"
+	traceRegion := "rdvq.Waiters.WaitFuncWithOrphanHandler"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
@@ -61,7 +70,11 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 
 	w.q.PopFrontFunc(
 		&waiter.inbox,
-		orphanFn,
+		func(renotifyFn RenotifyFunc) {
+			if !orphanFn(renotifyFn) {
+				renotifyFn()
+			}
+		},
 		func(inbox *Inbox[RenotifyFunc]) {
 			if confirmFn() {
 				selectFn(waiter)
@@ -80,20 +93,9 @@ func (w *Waiters) WaitWithOrphanHandler(
 	confirmFn func() bool,
 	orphanFn NotifyFunc,
 ) error {
-	traceRegion := "rdvq.Waiter.WaitWithOrphanHandler"
-
 	var err error
 	w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waiter *Waiter) {
-		waitCh := waiter.Ch()
-		trace.Logf(ctx, traceRegion, "entering select: waiter=%p, waitCh=%p", waiter, waitCh)
-		select {
-		case renotifyFn := <-waitCh:
-			waiter.Notified(renotifyFn)
-			trace.Logf(ctx, traceRegion, "received renotifyFn from waiter=%p, waitCh=%p", waiter, waitCh)
-		case <-ctx.Done():
-			trace.Logf(ctx, traceRegion, "received context done signal")
-			err = ctx.Err()
-		}
+		err = BasicWaitSelect(ctx, waiter)
 	})
 	return err
 }
@@ -110,18 +112,15 @@ func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() boo
 // were available to notify.
 //
 //nolint:contextcheck // background context used only for tracing
-func (w *Waiters) Notify(renotifyFn RenotifyFunc) {
+func (w *Waiters) Notify(renotifyFn RenotifyFunc) bool {
 	traceRegion := "rdvq.Waiters.Notify"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
 	if renotifyFn == nil {
-		renotifyFn = noopRenotify
+		renotifyFn = NoopRenotify
 	}
-
-	if !w.q.TryPushBack(renotifyFn) {
-		renotifyFn()
-	}
+	return w.q.TryPushBack(renotifyFn)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -130,12 +129,7 @@ func (w *Waiters) NotifyAll() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
-	for w.q.TryPushBack(noopRenotify) {
+	for w.q.TryPushBack(NoopRenotify) {
 		// Keep notifying until we can't anymore
 	}
-}
-
-func noopRenotify() {
-	// noopRenotify is a no-op function used as a default renotify function to
-	// avoid nil checks in Notify.
 }

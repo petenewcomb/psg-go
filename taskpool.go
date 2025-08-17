@@ -26,7 +26,7 @@ type TaskPool struct {
 	job            *Job
 	maxConcurrency atomic.Int32
 	inFlight       jobstate.InFlightCounter
-	waiters        workq.Waiters
+	notifier       workq.Notifier
 
 	decrementInFlightFn func() // avoid closure reallocation
 }
@@ -47,8 +47,8 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	}
 
 	trace.Logf(context.Background(), traceRegion,
-		"TaskPool=%p, job=%p, inFlight=%p, waiters=%p",
-		p, job, &p.inFlight, &p.waiters)
+		"TaskPool=%p, job=%p, inFlight=%p, notifier=%p",
+		p, job, &p.inFlight, &p.notifier)
 
 	if job == nil {
 		panic("job must be non-nil")
@@ -59,7 +59,7 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 
 	p.decrementInFlightFn = p.decrementInFlight
 
-	p.waiters.Init()
+	p.notifier.Init()
 
 	// Set default unlimited concurrency
 	p.maxConcurrency.Store(-1)
@@ -92,10 +92,10 @@ func (w taskPoolConfigWrapper) SetMaxConcurrency(limit int) {
 	oldLimit := w.pool.maxConcurrency.Swap(int32(limit))
 	switch {
 	case limit == -1:
-		w.pool.waiters.NotifyAll()
+		w.pool.notifier.NotifyAll()
 	case oldLimit != -1:
 		for range max(0, limit-int(oldLimit)) {
-			w.pool.waiters.Notify(nil)
+			w.pool.notifier.Notify(nil)
 		}
 	}
 }
@@ -113,7 +113,7 @@ func (p *TaskPool) scatter(
 	ex workq.Execution,
 	deadline time.Time,
 	tpSW *taskPoolScatterWork,
-	taskFn boundTaskFunc,
+	taskFn boundTask,
 ) error {
 	traceRegion := "TaskPool.scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -133,7 +133,7 @@ func (p *TaskPool) scatter(
 		}
 	}()
 
-	return p.waiters.Execute(ctx, ex, deadline, wb,
+	return workq.ExecuteOrWait(ctx, ex, deadline, &p.notifier, wb,
 		func(ctx context.Context, ex workq.Execution) error {
 			return p.job.scatterWithCompletedFn(ctx, group, ex, taskFn, p.decrementInFlightFn)
 		},
@@ -188,6 +188,6 @@ func (p *TaskPool) decrementInFlight() {
 	limit := p.maxConcurrency.Load()
 	if p.inFlight.DecrementAndCheckIfUnder(int(limit)) {
 		// Signal any waiting task
-		p.waiters.Notify(nil)
+		p.notifier.Notify(nil)
 	}
 }

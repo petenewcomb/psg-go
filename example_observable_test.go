@@ -11,6 +11,7 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/internal/exmpclk"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -18,10 +19,10 @@ import (
 // Observable uses psg to run a few tasks and produce logging that demonstrate
 // the sequence of events.
 func Example_observable() {
-	startTime := time.Now()
+	var clock exmpclk.ExampleClock
+	clock.Start()
 	msSinceStart := func() int64 {
-		// Truncate to the nearest 10ms to make the output stable across runs
-		return (time.Since(startTime).Milliseconds() / 10) * 10
+		return clock.Elapsed(10 * time.Millisecond).Milliseconds()
 	}
 
 	ctx := context.Background()
@@ -33,11 +34,11 @@ func Example_observable() {
 			// Simulate latency
 			switch taskName {
 			case "A":
-				time.Sleep(60 * time.Millisecond)
+				clock.Sleep(60 * time.Millisecond)
 			case "B":
-				time.Sleep(10 * time.Millisecond)
+				clock.Sleep(10 * time.Millisecond)
 			case "C":
-				time.Sleep(30 * time.Millisecond)
+				clock.Sleep(30 * time.Millisecond)
 			}
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
@@ -50,7 +51,7 @@ func Example_observable() {
 	var results []string
 	gatherOp := psg.NewGatherOp(
 		func(ctx context.Context, result string, err error) error {
-			time.Sleep(10 * time.Millisecond)
+			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   gathered result %q\n", msSinceStart(), result)
 			// Safe because gather will only ever be called from the current
 			// goroutine within calls to Scatter and GatherAll below.
@@ -77,7 +78,7 @@ func Example_observable() {
 	}
 
 	// Wait a bit to ensure stable output
-	time.Sleep(10 * time.Millisecond)
+	clock.Sleep(10 * time.Millisecond)
 
 	// Wait for all tasks to complete
 	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())

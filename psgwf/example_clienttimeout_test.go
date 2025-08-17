@@ -12,6 +12,7 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
+	"github.com/petenewcomb/psg-go/internal/exmpclk"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
@@ -27,10 +28,10 @@ func Example_clientTimeout() {
 	// Create a task pool
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
 
-	startTime := time.Now()
+	var clock exmpclk.ExampleClock
+	clock.Start()
 	msSinceStart := func() int64 {
-		// Truncate to the nearest 10ms to make the output stable across runs
-		return (time.Since(startTime).Milliseconds() / 10) * 10
+		return clock.Elapsed(10 * time.Millisecond).Milliseconds()
 	}
 
 	// Create a gather for collecting results
@@ -41,8 +42,11 @@ func Example_clientTimeout() {
 
 	newRequestTaskFn := func(requestID string) psgwf.TaskFunc[string] {
 		return func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+			delay := 30 * time.Millisecond
+			calibrationTimer := clock.CalibrationTimer()
 			select {
-			case <-time.After(30 * time.Millisecond):
+			case <-time.After(delay):
+				calibrationTimer.Stop(delay)
 				fmt.Printf("%2dms [%s] task completed\n", msSinceStart(), requestID)
 			case <-wf.Ctx().Done():
 				fmt.Printf("%2dms [%s] workflow cancelled\n", msSinceStart(), requestID)

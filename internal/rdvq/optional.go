@@ -81,9 +81,24 @@ func (q *Optional[T]) TryPushBack(value T) bool {
 
 // OptionalPopSelectFunc handles the select operation for PopFrontFunc.
 // It should select on the inbox channel. The callback MUST call inbox.Emptied()
-// if a value is received from the inbox. For best scheduler monitoring accuracy,
-// this call SHOULD be made immediately after receiving the value.
+// if a value is received from the inbox.
 type OptionalPopSelectFunc[T any] = func(inbox *Inbox[T])
+
+func BasicOptionalPopSelect[T any](ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
+	traceRegion := "rdvq.BasicOptionalPopSelect"
+	inboxCh := inbox.Ch()
+	trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
+	select {
+	case value := <-inboxCh:
+		inbox.Emptied()
+		trace.Logf(ctx, traceRegion, "received value from inbox=%p, inboxCh=%p", inbox, inboxCh)
+		processFn(value)
+		return nil
+	case <-ctx.Done():
+		trace.Logf(ctx, traceRegion, "received context done signal")
+		return ctx.Err()
+	}
+}
 
 //nolint:contextcheck // background context used only for tracing
 func (q *Optional[T]) PopFrontFunc(
@@ -144,20 +159,9 @@ func (q *Optional[T]) PopFrontFunc(
 }
 
 func (q *Optional[T]) PopFront(ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
-	traceRegion := "rdvq.Optional.PopFront"
 	var err error
 	q.PopFrontFunc(inbox, processFn, func(inbox *Inbox[T]) {
-		inboxCh := inbox.Ch()
-		trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
-		select {
-		case value := <-inboxCh:
-			inbox.Emptied()
-			trace.Logf(ctx, traceRegion, "received value from inbox=%p, inboxCh=%p", inbox, inboxCh)
-			processFn(value)
-		case <-ctx.Done():
-			trace.Logf(ctx, traceRegion, "received context done signal")
-			err = ctx.Err()
-		}
+		err = BasicOptionalPopSelect(ctx, inbox, processFn)
 	})
 	return err
 }

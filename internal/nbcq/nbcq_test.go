@@ -156,6 +156,9 @@ func TestQueueConcurrency(t *testing.T) {
 	if testing.Short() {
 		iterations /= 10
 	}
+	if raceEnabled {
+		iterations /= 10
+	}
 
 	// Tracking statistics for each reader and writer independently
 	type readerStats struct {

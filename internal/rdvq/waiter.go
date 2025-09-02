@@ -8,9 +8,9 @@ type Waiter struct {
 	renotifyFn RenotifyFunc
 }
 
-//func (w *Waiter) waiter() *Waiter {
-//	return w
-//}
+func (w *Waiter) waiter() *Waiter {
+	return w
+}
 
 // Ch returns the waiter's inbox channel for use in select statements.
 // Returns nil if the waiter itself is nil.

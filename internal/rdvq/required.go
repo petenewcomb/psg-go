@@ -231,6 +231,10 @@ func (q *Required[T]) PopFrontFunc(
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Required=%p", q)
 
+	if processFn == nil {
+		panic("processFn is nil")
+	}
+
 	var ok bool
 	processOrphanFn := func(value T) {
 		ok = true

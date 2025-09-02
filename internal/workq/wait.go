@@ -27,7 +27,7 @@ type WaitBehavior struct {
 
 func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifier *Notifier,
 	behavior WaitBehavior, workFn WorkFunc) error {
-	traceRegion := "workq.Waiters.Execute"
+	traceRegion := "workq.ExecuteOrWait"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	var renotifyFn RenotifyFunc
@@ -45,7 +45,7 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 			renotifyFn()
 		}
 
-		if !ex.ShouldBlockOrListen() {
+		if !ex.ShouldBlockOrPostpone() {
 			return nil
 		}
 

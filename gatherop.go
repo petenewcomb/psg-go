@@ -76,13 +76,15 @@ func (g GatherOp[T]) Scatter(
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
+
 	work := g.newScatterWork(group, time.Time{}, target, taskFn)
-	_, err := scatterNowOrQueue(ctx, meta, time.Time{}, target, work, meta.MayQueue())
-	return err
+	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
 // TryScatter attempts to initiate asynchronous execution of the provided task
@@ -107,12 +109,19 @@ func (g GatherOp[T]) TryScatter(
 	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
-	workFn := g.newScatterWork(group, deadline, target, taskFn)
-	return scatterNowOrQueue(ctx, meta, deadline, target, workFn, nil)
+
+	work := g.newScatterWork(group, deadline, target, taskFn)
+	ok, err := meta.TryExecuteNow(ctx, deadline, work)
+	if !ok {
+		work.Free()
+	}
+	return ok, err
 }
 
 // Integrate posts values to be gathered by the gather queue.
@@ -129,22 +138,15 @@ func (g GatherOp[T]) Integrate(
 	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := target.ctxMeta(ctx)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
 
-	// Assert that queueFn consistency matches our expectations for Integrate
-	queueFn := meta.MayQueue()
-	if (queueFn == nil) != meta.WouldBlock() {
-		panic("meta.MayQueue() value does not match meta.WouldBlock()")
-	}
-
-	// startedOrQueued can only be false if an error was returned because:
-	// - if MayQueue() is non-nil, work will get queued
-	// - if MayQueue() is nil (top level), method will block until success or context cancellation
-	_, err = g.integrate(ctx, meta, target, group, value, err, time.Time{}, queueFn)
-	return err
+	return g.integrate(ctx, meta, target, group, value, err)
 }
 
 // TryIntegrate attempts to post values to be gathered by the gather queue.
@@ -161,12 +163,15 @@ func (g GatherOp[T]) TryIntegrate(
 	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := target.ctxMeta(ctx)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
 
-	return g.integrate(ctx, meta, target, group, value, err, deadline, nil)
+	return g.tryIntegrate(ctx, meta, target, group, value, err, deadline)
 }
 
 // newTask creates a new gather task that will execute the task and integrate results
@@ -227,12 +232,13 @@ func (w *gatherWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	ctx, meta := w.job.ctxMeta(ctx)
 
-	meta.LockAndSetQueueFunc(w.Group(), ex.Queue, nil)
-	defer meta.UnlockAndResetQueueFunc()
+	meta.PushGroup(w.Group())
+	defer meta.PopGroup()
 
 	return w.gatherFn(ctx, w.value, w.err)
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (w *gatherWork[T]) Free() {
 	traceRegion := "gatherWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -251,15 +257,29 @@ func (g GatherOp[T]) integrate(
 	group workq.GroupID,
 	value T,
 	err error,
-	deadline time.Time,
-	queueFn workq.QueueWorkFunc,
-) (bool, error) {
-	// Create gather work directly with values
+) error {
 	gatherWork := g.newGatherWork(group, job, value, err)
 	postWork := job.newGatherPostWork(group, gatherWork)
+	return meta.ExecuteNowOrQueue(ctx, postWork)
+}
 
-	// Handle posting with deadline and queueFn
-	return job.postGatherNowOrQueue(ctx, meta, deadline, postWork, queueFn)
+// integrate creates gather work and posts it to the gather queue
+func (g GatherOp[T]) tryIntegrate(
+	ctx context.Context,
+	meta *ctxMeta,
+	job *Job,
+	group workq.GroupID,
+	value T,
+	err error,
+	deadline time.Time,
+) (bool, error) {
+	gatherWork := g.newGatherWork(group, job, value, err)
+	postWork := job.newGatherPostWork(group, gatherWork)
+	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
+	if !ok {
+		postWork.Free()
+	}
+	return ok, err
 }
 
 func (g GatherOp[T]) newScatterWork(
@@ -273,7 +293,7 @@ func (g GatherOp[T]) newScatterWork(
 	w := gatherScatterWorkPool.Get()
 	w.Init(group, deadline, target, g.newTask(group, target.getJob(), taskFn))
 
-	trace.Logf(context.Background(), traceRegion, "GatherOp=%p created %v", g, w)
+	trace.Logf(context.Background(), traceRegion, "GatherOp created %v", w)
 	return w
 }
 
@@ -316,6 +336,7 @@ func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) err
 	}
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (w *gatherScatterWork) Free() {
 	traceRegion := "gatherScatterWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()

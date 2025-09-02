@@ -7,8 +7,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
-type outboxKey[T any] any
-
 type outboxMap struct {
 	m map[any]any
 }
@@ -22,15 +20,15 @@ func (om *outboxMap) Reset() {
 }
 
 // OutboxFor returns the outbox for the given key, creating one if it doesn't exist.
-func OutboxFor[T any](om *outboxMap, key outboxKey[T]) *rdvq.Outbox[T] {
+func OutboxFor[T any](om *outboxMap, q *rdvq.Required[T]) *rdvq.Outbox[T] {
 	if om.m == nil {
 		om.m = make(map[any]any)
 	}
 
-	outboxAny := om.m[key]
+	outboxAny := om.m[q]
 	if outboxAny == nil {
 		outbox := rdvq.NewOutbox[T]()
-		om.m[key] = outbox
+		om.m[q] = outbox
 		return outbox
 	}
 	return outboxAny.(*rdvq.Outbox[T])

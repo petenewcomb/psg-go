@@ -276,7 +276,7 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 			// First try does not call ex.Starting(), becomes deferred
 			return nil
 		}
-		if tryCount == 2 && ex.ShouldBlockOrListen() {
+		if tryCount == 2 && ex.ShouldBlockOrPostpone() {
 			// Second try with notification - still not ready
 			notifyReceived = true
 			return nil
@@ -308,63 +308,5 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 	}
 	if tryCount < 2 {
 		t.Errorf("Expected at least 2 tries, got %d", tryCount)
-	}
-}
-
-func TestAccepted_ExecuteOne_ExQueueFunction(t *testing.T) {
-	q := Accepted{}
-	q.Init()
-
-	var executionOrder []string
-
-	// Work item that queues additional work
-	parentWork := newWorkItem(func(ctx context.Context, ex Execution) error {
-		ex.Starting()
-		executionOrder = append(executionOrder, "parent")
-
-		// Queue a child work item
-		childWork := newWorkItem(func(ctx context.Context, ex Execution) error {
-			ex.Starting()
-			executionOrder = append(executionOrder, "child")
-			return nil
-		})
-		ex.Queue(childWork)
-
-		return nil
-	})
-
-	// TryAddWorkFunc that provides the parent work item
-	addWorkFn := func(ctx context.Context, queueFn QueueWorkFunc) error {
-		queueFn(parentWork)
-		return nil
-	}
-
-	// Execute the parent work - should execute immediately
-	result1, _ := q.TryExecuteOne(context.Background(), addWorkFn)
-	if !result1 {
-		t.Error("Expected true when parent work was processed")
-	}
-
-	// Execute again - should process the queued child work
-	addWorkFn2 := func(ctx context.Context, queueFn QueueWorkFunc) error {
-		// No new work
-		return nil
-	}
-
-	result2, _ := q.TryExecuteOne(context.Background(), addWorkFn2)
-	if !result2 {
-		t.Error("Expected true when child work was processed")
-	}
-
-	// Verify execution order
-	expectedOrder := []string{"parent", "child"}
-	if len(executionOrder) != len(expectedOrder) {
-		t.Errorf("Expected %d executions, got %d", len(expectedOrder), len(executionOrder))
-	}
-	for i, expected := range expectedOrder {
-		if i >= len(executionOrder) || executionOrder[i] != expected {
-			t.Errorf("Expected execution order %v, got %v", expectedOrder, executionOrder)
-			break
-		}
 	}
 }

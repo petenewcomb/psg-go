@@ -112,7 +112,6 @@ func (g *Governor) decrementDownstream() {
 		panic("unbalanced decrement detected")
 	case newValue == 0:
 		g.upstream.NotifyAll()
-
 	case newValue%2 == 0:
 		// This clause releases backpressure gradually rather than only all at
 		// once, smoothing out governed work execution and thus reducing

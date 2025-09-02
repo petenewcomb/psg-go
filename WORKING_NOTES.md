@@ -231,12 +231,56 @@ The foundation for explicit integration has been fully implemented and tested. A
 - ❌ **BLOCKER: Benchmarks hanging/deadlocking** - needs investigation
 
 **Current State:**
-The explicit integration foundation is architecturally complete but has a critical issue: benchmarks are hanging, suggesting possible deadlock or infinite loop in the benchmark code. This must be resolved before committing as it could indicate problems with the integration infrastructure.
+The explicit integration foundation is complete and functional. The benchmark deadlock has been resolved through a comprehensive rearchitecture of the notification and work posting systems.
 
-**Immediate Priority:**
-1. **Fix hanging benchmarks** - Investigate and resolve deadlock/hang in benchmark execution
+## Benchmark Deadlock Resolution (2025-09-02)
 
-**Next Phase (after benchmark fix):**
+**Root Cause:**
+The deadlock occurred due to a circular dependency in the work posting mechanism:
+1. Task workers tried to post results directly to gather queues
+2. Gather queues were full, causing workers to block waiting for space
+3. The goroutines that would drain the gather queues were blocked waiting for the task workers
+
+**Architectural Fix:**
+Implemented a hybrid synchronous/asynchronous posting model that breaks the circular dependency:
+
+1. **Notification System Refactoring:**
+   - Renamed `Coordinator` → `Notifier`/`Listener` pattern for clearer separation of concerns
+   - `Subscribe` → `AddToListeners` with proper double-registration prevention
+   - `ShouldBlockOrListen` → `ShouldBlockOrPostpone` to clarify postponement semantics
+   - Listeners track which collections they're registered with via `addedTo` map
+
+2. **Hybrid Posting Model:**
+   - **Fast path**: Synchronous `TryPushBack()` for immediate delivery to waiting receivers
+   - **Medium path**: Synchronous posting to outbox when space available
+   - **Slow path**: Create `gatherPostWork` items only when posting would block
+   - Work items register for notifications and retry when space becomes available
+
+3. **Resource Management Improvements:**
+   - Outboxes now have atomic `refCount` and proper lifecycle management
+   - `fillPending()`/`fillAttemptComplete()` pattern ensures correct ownership transfer
+   - `emptied()` notifies listeners AND frees the outbox atomically
+   - Reference counting prevents use-after-free in concurrent scenarios
+
+4. **Integration Pattern Unification:**
+   - Both `CombineOp` and `GatherOp` implement `integrate()` methods
+   - Tasks implement `boundTask` interface with `Execute()` and `Free()` methods
+   - Uniform work posting through the work queue system
+   - `gatherPostWork` and similar types handle asynchronous posting when needed
+
+5. **Execution Environment Refactoring:**
+   - Split into `baseExEnv`, `taskExEnv`, `integrationExEnv`, and `topLevelExEnv`
+   - Each environment type only exposes operations valid in its context
+   - Panics on invalid operations ensure fail-fast behavior for contract violations
+
+**Key Design Decisions:**
+- Preserve synchronous posting performance while providing asynchronous escape hatch
+- Aggressive invariant checking with panics ensures undefined behavior is caught early
+- The `ShouldBlockOrPostpone()` pattern allows work to be deferred without abandoning it
+- Work items only created when actually needed, not for every post operation
+
+**Result:**
+Benchmarks now run successfully without hanging. The hybrid model maintains the performance of synchronous posting while preventing deadlocks through selective asynchronous deferral.
 
 **Next Steps (Priority Order):**
 1. **Add Close() method to operations** - Enable completion signaling and final flush triggers
@@ -245,8 +289,8 @@ The explicit integration foundation is architecturally complete but has a critic
 4. **Re-layer implicit convenience on top** - Build syntactic sugar using explicit integration as foundation
 
 **Key Technical Insights:**
-- Work queue unification eliminates all blocking send operations
-- Subscription-based coordination scales without thundering herd effects
-- Reference counting enables safe composition with deterministic cleanup
-- Type-parameterized work objects eliminate allocation overhead
-- Integration API provides clean separation between explicit core and implicit convenience layers
+- Hybrid synchronous/asynchronous posting preserves performance while preventing deadlock
+- Notification system with listener pattern enables pull-based coordination
+- Reference counting with atomic operations ensures thread-safe resource management
+- Fail-fast invariant checking catches logic errors immediately in development
+- Type-specific execution environments prevent invalid operations at compile time where possible

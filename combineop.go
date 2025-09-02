@@ -6,6 +6,7 @@ package psg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,13 +95,15 @@ func (c *CombineOp[I, O]) Scatter(
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
+
 	work := c.newScatterWork(group, time.Time{}, target, taskFn)
-	_, err := scatterNowOrQueue(ctx, meta, time.Time{}, target, work, meta.MayQueue())
-	return err
+	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
 // TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
@@ -120,12 +123,19 @@ func (c *CombineOp[I, O]) TryScatter(
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
+
 	work := c.newScatterWork(group, deadline, target, taskFn)
-	return scatterNowOrQueue(ctx, meta, deadline, target, work, nil)
+	ok, err := meta.TryExecuteNow(ctx, deadline, work)
+	if !ok {
+		work.Free()
+	}
+	return ok, err
 }
 
 // Integrate posts values to be combined by the combine queue.
@@ -141,7 +151,9 @@ func (c *CombineOp[I, O]) Integrate(
 	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
 
 	ctx, meta := c.pool.job.ctxMeta(ctx)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
@@ -149,17 +161,7 @@ func (c *CombineOp[I, O]) Integrate(
 	inner := c.refInner()
 	defer inner.unref()
 
-	// Assert that queueFn consistency matches our expectations for Integrate
-	queueFn := meta.MayQueue()
-	if (queueFn == nil) != meta.WouldBlock() {
-		panic("meta.MayQueue() value does not match meta.WouldBlock()")
-	}
-
-	// startedOrQueued can only be false if an error was returned because:
-	// - if MayQueue() is non-nil, work will get queued
-	// - if MayQueue() is nil (top level), method will block until success or context cancellation
-	_, err = inner.integrate(ctx, meta, group, value, err, time.Time{}, queueFn)
-	return err
+	return inner.integrate(ctx, meta, group, value, err)
 }
 
 // TryIntegrate attempts to post values to be combined by the combine queue.
@@ -175,7 +177,9 @@ func (c *CombineOp[I, O]) TryIntegrate(
 	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
 
 	ctx, meta := c.pool.job.ctxMeta(ctx)
-	group := meta.CurrentGroup()
+	meta.Lock()
+	defer meta.Unlock()
+	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
@@ -183,7 +187,7 @@ func (c *CombineOp[I, O]) TryIntegrate(
 	inner := c.refInner()
 	defer inner.unref()
 
-	return inner.integrate(ctx, meta, group, value, err, deadline, nil)
+	return inner.tryIntegrate(ctx, meta, group, value, err, deadline)
 }
 
 func (c *CombineOp[I, O]) newScatterWork(
@@ -449,12 +453,12 @@ func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, emitOutbox *workq.Ou
 	traceRegion := "halfBoundCombiner.emit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	// Use gatherOp.integrate to post the result
 	ctx, meta := c.op.combinerPool.job.ctxMeta(ctx)
-	queueFn := meta.MayQueue()
-	// We ignore return values as we're already in a combiner context
-	_, _ = c.op.gatherOp.integrate(
-		ctx, meta, c.op.combinerPool.job, c.earliestGroup, output, outputErr, time.Time{}, queueFn)
+	err := c.op.gatherOp.integrate(
+		ctx, meta, c.op.combinerPool.job, c.earliestGroup, output, outputErr)
+	if err != nil && ctx.Err() == nil {
+		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
+	}
 }
 
 func (c *halfBoundCombiner[I, O]) combine(
@@ -584,6 +588,7 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	}
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (w *combineScatterWork) Free() {
 	traceRegion := "combineScatterWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -635,14 +640,11 @@ func (ct *combineTask[I, O]) Execute(
 		if err != nil {
 			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
 		}
-		// Post result using combineOp integrate
 		ctx, meta := ct.op.combinerPool.job.ctxMeta(ctx)
-		queueFn := meta.MayQueue()
-		if (queueFn == nil) != meta.WouldBlock() {
-			panic("meta.MayQueue() value does not match meta.WouldBlock()")
+		intErr := ct.op.integrate(ctx, meta, ct.group, value, err)
+		if intErr != nil && ctx.Err() == nil {
+			panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
 		}
-		// startedOrQueued can only be false if context was canceled, so we ignore both return values
-		_, _ = ct.op.integrate(ctx, meta, ct.group, value, err, time.Time{}, queueFn)
 	}()
 
 	trace.WithRegion(ctx, traceRegion+".taskFn", func() {
@@ -663,15 +665,28 @@ func (c *combineOp[I, O]) integrate(
 	group workq.GroupID,
 	value I,
 	err error,
+) error {
+	combineWork := c.newCombineWork(group, value, err)
+	postWork := c.combinerPool.newCombinePostWork(group, combineWork)
+	return meta.ExecuteNowOrQueue(ctx, postWork)
+}
+
+func (c *combineOp[I, O]) tryIntegrate(
+	ctx context.Context,
+	meta *ctxMeta,
+	group workq.GroupID,
+	value I,
+	err error,
 	deadline time.Time,
-	queueFn workq.QueueWorkFunc,
 ) (bool, error) {
 	// Create combine work directly with values
 	combineWork := c.newCombineWork(group, value, err)
 	postWork := c.combinerPool.newCombinePostWork(group, combineWork)
-
-	// Handle posting with deadline and queueFn
-	return c.combinerPool.postCombineNowOrQueue(ctx, meta, deadline, postWork, queueFn)
+	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
+	if !ok {
+		postWork.Free()
+	}
+	return ok, err
 }
 
 // boundCombineWork interface allows type erasure for combineWork instances
@@ -756,8 +771,8 @@ func (w *combineWork[I, O]) Execute(ctx context.Context, ex workq.Execution) err
 	ex.Starting()
 	workerCtx, meta := w.op.combinerPool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)
-	cw.LockAndSetQueueFunc(w.Group(), ex.Queue, nil)
-	defer cw.UnlockAndResetQueueFunc()
+	cw.PushGroup(w.Group())
+	defer cw.PopGroup()
 	cw.executeCombine(workerCtx, w)
 	return nil
 }

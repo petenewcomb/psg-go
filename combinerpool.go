@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -110,11 +109,6 @@ func (cp *CombinerPool) checkInitialized() {
 	}
 }
 
-// combineOutboxKey returns a unique identifier for this CombinerPool for combine outbox mapping.
-func (cp *CombinerPool) combineOutboxKey() outboxKey[workq.Work] {
-	return cp
-}
-
 // SetOptions applies the given configuration options to the pool.
 func (cp *CombinerPool) SetOptions(options ...psgopt.CombinerPoolOption) {
 	cp.checkInitialized()
@@ -184,7 +178,7 @@ func (cp *CombinerPool) goroutine() {
 	}()
 
 	// Create the dedicated outbox for this combiner goroutine to emit gathers to the job
-	worker.emitOutbox = OutboxFor[workq.Work](&worker.outboxMap, j.gatherOutboxKey())
+	worker.emitOutbox = OutboxFor(worker.OutboxMap(), &j.gatherQueue)
 
 	trace.Logf(ctx, traceRegion, "cpWorker=%p, combinerMap=%p, emitOutbox=%p",
 		worker, &worker.activeCombiners, worker.emitOutbox)
@@ -283,8 +277,10 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 		// Discover outbox from execution environment
 		ctx, meta := w.pool.job.ctxMeta(ctx)
 
-		outbox := meta.LockOutbox(w.pool.combineOutboxKey())
-		defer meta.UnlockOutbox()
+		outbox := OutboxFor(meta.OutboxMap(), &w.pool.combineQueue)
+
+		spawnWaiters := &w.pool.state.SpawnNotifier().Waiters
+		var spawnWaiter *rdvq.Waiter
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
@@ -296,11 +292,11 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 				return true, nil
 			}
 
-			if !ex.ShouldBlockOrListen() {
+			if !ex.ShouldBlockOrPostpone() {
 				return false, nil
 			}
 
-			if meta.MayQueue() != nil {
+			if !meta.ShouldBlock() {
 				// We expect to be queued and called again, so listen and don't block
 				ex.AddToListeners(outbox.Listeners())
 				// AddToListeners to be notified when spawning conditions change
@@ -313,39 +309,62 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 					// Call Waiting on the nested combineWork to notify the governor
 					w.work.Waiting(&w.pool.governor)
 				}
+				trace.Logf(ctx, traceRegion, "meta.QueueFunc() != nil, posted=%v", posted)
 				return posted, nil
 			}
 
-			// No queuing support (task worker context) - use blocking post
+			// Use blocking post
+			if spawnWaiter == nil {
+				spawnWaiter = meta.WaiterFor(spawnWaiters)
+			}
+
 			posted := true
 			var err error
-			w.pool.combineQueue.PushBackFunc(outbox, w.work, func(outbox *rdvq.Outbox[workq.Work]) {
-				posted = false
-
-				// Call Waiting on the nested combineWork to notify the governor
-				w.work.Waiting(&w.pool.governor)
-
-				// Slow path, really going to block now
-				ex.Blocking()
-
-				// Check if we should spawn another goroutine
-				if w.pool.state.ShouldSpawnGoroutine() {
-					w.pool.spawnNewGoroutine()
+			shouldWait := func() bool {
+				return !tryPost()
+			}
+			spawnWaiters.WaitFunc(spawnWaiter, shouldWait, func(waiter *rdvq.Waiter) {
+				if waiter != spawnWaiter {
+					panic("waiter does not match spawnWaiter")
 				}
+				w.pool.combineQueue.PushBackFunc(outbox, w.work, func(outbox *rdvq.Outbox[workq.Work]) {
+					// Slow path, posting no longer implicit
+					posted = false
 
-				outboxCh := outbox.Ch()
-				trace.Logf(ctx, traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
-				select {
-				case outboxCh <- w.work:
-					outbox.Filled()
-					posted = true
-					trace.Logf(ctx, traceRegion, "delivered value into outbox=%p, outboxCh=%p", outbox, outboxCh)
-				case <-spawnWaitCh:
-				case <-ctx.Done():
-					trace.Logf(ctx, traceRegion, "received context done signal")
-					err = ctx.Err()
-				}
+					// Call Waiting on the nested combineWork to notify the governor
+					w.work.Waiting(&w.pool.governor)
+
+					// Slow path, really going to block now
+					ex.Blocking()
+
+					// Check if we should spawn another goroutine
+					if w.pool.state.ShouldSpawnGoroutine() {
+						w.pool.spawnNewGoroutine()
+					}
+
+					outboxCh := outbox.Ch()
+					spawnWaitCh := spawnWaiter.Ch()
+					trace.Logf(ctx, traceRegion,
+						"entering select: outbox=%p, outboxCh=%p, spawnWaiter=%p, spawnWaitCh=%p",
+						outbox, outboxCh, spawnWaiter, spawnWaitCh)
+					select {
+					case outboxCh <- w.work:
+						outbox.Filled()
+						posted = true
+						trace.Logf(ctx, traceRegion, "delivered value into outbox=%p, outboxCh=%p", outbox, outboxCh)
+					case renotifyFn := <-spawnWaitCh:
+						spawnWaiter.Notified(renotifyFn)
+						trace.Logf(ctx, traceRegion, "received signal from spawnWaiter=%p, spawnWaitCh=%p", spawnWaiter, spawnWaitCh)
+					case <-ctx.Done():
+						trace.Logf(ctx, traceRegion, "received context done signal")
+						err = ctx.Err()
+					}
+				})
 			})
+			trace.Logf(ctx, traceRegion, "meta.ShouldBlock(), posted=%v, err=%v", posted, err)
+			if posted || err != nil {
+				return posted, err
+			}
 		}
 	}()
 
@@ -364,7 +383,7 @@ func (w *combinePostWork) Free() {
 
 	// Free the nested work item if we still own it
 	if w.work != nil {
-		trace.Logf(context.Background(), traceRegion, "freeing w.work")
+		trace.Logf(context.Background(), traceRegion, "w.work.Free()")
 		w.work.Free()
 		w.work = nil
 	}
@@ -384,57 +403,4 @@ func (cp *CombinerPool) newCombinePostWork(group workq.GroupID, bc boundCombineW
 
 	trace.Logf(context.Background(), traceRegion, "CombinerPool=%p created %v", cp, w)
 	return w
-}
-
-func (cp *CombinerPool) postCombineNowOrQueue(
-	ctx context.Context,
-	meta *ctxMeta,
-	deadline time.Time,
-	postWork *combinePostWork,
-	queueFn workq.QueueWorkFunc,
-) (startedOrQueued bool, err error) {
-	traceRegion := "postCombineNowOrQueue"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	executor := executorPool.Get()
-	defer executorPool.Put(executor)
-	ex := executor.BaseEx()
-
-	queued := false
-	defer func() {
-		if ex.Started() || !queued {
-			postWork.Free()
-		}
-
-		startedOrQueued = ex.Started() || queued
-		if err == nil {
-			trace.Logf(ctx, traceRegion, "returning startedOrQueued=%v", startedOrQueued)
-		} else {
-			trace.Logf(ctx, traceRegion, "returning startedOrQueued=%v, err=%v", startedOrQueued, err)
-		}
-	}()
-
-	if false && meta.IsTopLevel() {
-		// Apply backpressure at top level by processing some outstanding work first
-		err := cp.job.yield(ctx, deadline)
-		if err != nil {
-			return false, err
-		}
-
-		// Signal the work that it should block by making AddToListeners non-nil
-		ex.AddToListeners = func(*workq.Listeners) {
-			panic("unexpected call to postCombineNowOrQueue.ex.AddToListeners")
-		}
-	}
-
-	if deadline.IsZero() || time.Now().Before(deadline) {
-		err = postWork.Execute(ctx, ex)
-	}
-
-	if err == nil && !ex.Started() && queueFn != nil {
-		queued = true
-		queueFn(postWork)
-	}
-
-	return
 }

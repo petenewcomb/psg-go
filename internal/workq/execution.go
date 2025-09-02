@@ -17,21 +17,16 @@ type Execution struct {
 	Blocking       func()           // Call before blocking to release resources
 	AddToListeners func(*Listeners) // If non-nil, call to subscribe to ready notifications
 	Starting       func()           // Call before starting execution to confirm execution
-	Queue          QueueWorkFunc    // If non-nil, call to queue additional work items
 
 	started func() bool
 }
 
-func (ex Execution) ShouldBlockOrListen() bool {
+func (ex Execution) ShouldBlockOrPostpone() bool {
 	return ex.AddToListeners != nil
 }
 
 func (ex Execution) Started() bool {
 	return ex.started()
-}
-
-func (ex Execution) MayQueue() bool {
-	return ex.Queue != nil
 }
 
 type Executor struct {

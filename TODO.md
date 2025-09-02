@@ -13,7 +13,7 @@ Items to complete before merging to main branch.
 
 ### 5. API finalization
 - Review and document thread-safety guarantees for remaining public APIs
-- add a way to force creation of a new work group
+- Add a way to force creation of a new work group
 
 ### 6. Implementation improvements
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
@@ -34,6 +34,8 @@ Items to complete before merging to main branch.
 - rename Free to Recycle, add Recycler interface from which other things can derive
 - Expose all user code integration points as interfaces with Recycle (Recycler), then add convenience functions that use pooled objects to wrap implementation-by-closure; perhaps reserve psgfn for the convenience functions and add a separate package for the integration interfaces? 
 - Make sure job.governor is really necessary 
+- Add Deadline to workq.Execution and make sure that it's set and respected everywhere, especially when blocking
+- Abstract logic in *PostWork and perhaps make it extend from workq.ExecuteOrWait?
 
 ## Post-Merge Enhancements
 

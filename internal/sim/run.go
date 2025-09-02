@@ -106,6 +106,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	}
 
 	gatheredCount := c.GatheredCount.Load()
+	trace.Logf(ctx, traceRegion, "GatheredCount=%d", gatheredCount)
 	chk.GreaterOrEqual(gatheredCount, int64(c.Plan.MinGatherCount))
 	chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
@@ -273,7 +274,7 @@ func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] 
 		c.updateTaskStats(t, res, err)
 
 		gatheredCount := c.GatheredCount.Add(1)
-		trace.Logf(ctx, "sim.GatheredCount", "%d", gatheredCount)
+		trace.Logf(ctx, traceRegion, "GatheredCount=%d", gatheredCount)
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
 
 		if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
@@ -378,6 +379,7 @@ func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*comb
 		}
 
 		gatheredCount := c.GatheredCount.Add(int64(len(res.Combines)))
+		trace.Logf(ctx, traceRegion, "GatheredCount=%d", gatheredCount)
 		chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
 
 		return err

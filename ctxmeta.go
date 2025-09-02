@@ -7,8 +7,11 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"runtime"
 	"sync"
+	"time"
 
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/workq"
@@ -39,7 +42,7 @@ func (cm *ctxMeta) IsTopLevel() bool {
 	return cm.ctxType == topLevelContext
 }
 
-func (cm *ctxMeta) WouldBlock() bool {
+func (cm *ctxMeta) ShouldBlock() bool {
 	switch cm.ctxType {
 	case topLevelContext, taskContext:
 		return true
@@ -48,133 +51,253 @@ func (cm *ctxMeta) WouldBlock() bool {
 	}
 }
 
+func (cm *ctxMeta) Lock() {
+	if cm.IsTopLevel() {
+		cm.executionEnvironment.Lock()
+	}
+}
+
+func (cm *ctxMeta) Unlock() {
+	if cm.IsTopLevel() {
+		cm.executionEnvironment.Unlock()
+	}
+}
+
+func (cm *ctxMeta) TryExecuteNow(
+	ctx context.Context,
+	deadline time.Time,
+	work workq.Work,
+) (bool, error) {
+	traceRegion := "ctxMeta.TryExecuteNow"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	executor := executorPool.Get()
+	defer executorPool.Put(executor)
+	ex := executor.BaseEx()
+
+	if cm.IsTopLevel() {
+		// Make sure existing work has a chance to run before we add more.
+		runtime.Gosched()
+
+		// Apply backpressure at top level by processing some outstanding work first
+		err := cm.job.yield(ctx, deadline)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return false, nil
+	}
+
+	err := work.Execute(ctx, ex)
+	if !ex.Started() {
+		return false, err
+	}
+	work.Free()
+	return true, err
+}
+
+func (cm *ctxMeta) ExecuteNowOrQueue(
+	ctx context.Context,
+	work workq.Work,
+) error {
+	traceRegion := "ctxMeta.ExecuteNowOrQueue"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	executor := executorPool.Get()
+	defer executorPool.Put(executor)
+	ex := executor.BaseEx()
+
+	if cm.ShouldBlock() {
+		if cm.IsTopLevel() {
+			// Make sure existing work has a chance to run before we add more.
+			runtime.Gosched()
+
+			// Apply backpressure at top level by processing some outstanding work first
+			err := cm.job.yield(ctx, time.Time{})
+			if err != nil {
+				work.Free()
+				return err
+			}
+		}
+
+		// Signal the work that it should block by making AddToListeners non-nil
+		ex.AddToListeners = func(*workq.Listeners) {
+			panic("unexpected call to ctxMeta.TryExecuteOrQueue's ex.AddToListeners")
+		}
+	}
+
+	return cm.executionEnvironment.ExecuteNowOrQueue(ctx, ex, work)
+}
+
+var executorPool = omnipool.For[workq.Executor]()
+
 type executionEnvironment interface {
-	CurrentGroup() workq.GroupID
-	LockOutbox(key outboxKey[workq.Work]) *workq.Outbox
-	UnlockOutbox()
-	LockAndSetQueueFunc(group workq.GroupID, queueFn workq.QueueWorkFunc, blockWaiters *workq.Waiters) (
-		*workq.Receiver, *workq.Waiter, *workq.Waiter)
-	UnlockAndResetQueueFunc()
-	MayQueue() workq.QueueWorkFunc
+	Lock()
+	Unlock()
+
+	Group() workq.GroupID
+	PushGroup(workq.GroupID)
+	PopGroup()
+
+	QueueFunc() workq.QueueWorkFunc
+	PushQueueFunc(queueFn workq.QueueWorkFunc)
+	PopQueueFunc()
+	ExecuteNowOrQueue(context.Context, workq.Execution, workq.Work) error
+
+	Receiver() *workq.Receiver
+	OutboxMap() *outboxMap
+	WaiterFor(waiters *workq.Waiters) *workq.Waiter
 }
 
-type topLevelExEnv struct {
-	mu             sync.Mutex
-	outboxMap      outboxMap
-	groupStack     []workq.GroupID
-	queueFnStack   []workq.QueueWorkFunc
-	workReceiver   workq.Receiver
-	workWaiter     workq.Waiter
-	blockWaiterMap map[*workq.Waiters]*workq.Waiter
+type baseExEnv struct {
+	outboxMap outboxMap
+	waiterMap map[*workq.Waiters]*workq.Waiter
 }
 
-func (ee *topLevelExEnv) CurrentGroup() workq.GroupID {
+func (ee *baseExEnv) OutboxMap() *outboxMap {
+	return &ee.outboxMap
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (ee *baseExEnv) WaiterFor(waiters *workq.Waiters) *workq.Waiter {
+	traceRegion := "baseExEnv.WaiterFor"
+	if waiters == nil {
+		return nil
+	}
+	waiter := ee.waiterMap[waiters]
+	if waiter == nil {
+		if ee.waiterMap == nil {
+			ee.waiterMap = make(map[*workq.Waiters]*workq.Waiter)
+		}
+		waiter = &workq.Waiter{}
+		ee.waiterMap[waiters] = waiter
+	}
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "baseExEnv=%p, waiter=%p", ee, waiter)
+	}
+	return waiter
+}
+
+type taskExEnv struct {
+	baseExEnv
+}
+
+func (ee *taskExEnv) Lock() {
+	panic("Lock not supported in task context")
+}
+
+func (ee *taskExEnv) Unlock() {
+	panic("Unlock not supported in task context")
+}
+
+func (ee *taskExEnv) Group() workq.GroupID {
+	panic("Group not supported in task context")
+}
+
+func (ee *taskExEnv) PushGroup(workq.GroupID) {
+	panic("PushGroup not supported in task context")
+}
+
+func (ee *taskExEnv) PopGroup() {
+	panic("PopGroup not supported in task context")
+}
+
+func (ee *taskExEnv) QueueFunc() workq.QueueWorkFunc {
+	return nil
+}
+
+func (ee *taskExEnv) PushQueueFunc(workq.QueueWorkFunc) {
+	panic("PushQueueFunc not supported in task context")
+}
+
+func (ee *taskExEnv) PopQueueFunc() {
+	panic("PopQueueFunc not supported in task context")
+}
+
+func (ee *taskExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, work workq.Work) error {
+	err := work.Execute(ctx, ex)
+	if err != nil {
+		return err
+	}
+	if !ex.Started() {
+		panic("work not started")
+	}
+	work.Free()
+	return nil
+}
+
+func (ee *taskExEnv) Receiver() *workq.Receiver {
+	panic("Receiver not supported in task context")
+}
+
+type integrationExEnv struct {
+	baseExEnv
+	groupStack   []workq.GroupID
+	queueFnStack []workq.QueueWorkFunc
+	receiver     workq.Receiver
+}
+
+func (ee *integrationExEnv) Group() workq.GroupID {
 	if len(ee.groupStack) == 0 {
 		return workq.InvalidGroupID
 	}
 	return ee.groupStack[len(ee.groupStack)-1]
 }
 
-func (ee *topLevelExEnv) LockOutbox(key outboxKey[workq.Work]) *workq.Outbox {
-	traceRegion := "topLevelExEnv.LockOutbox"
-	ee.mu.Lock()
-	outbox := OutboxFor[workq.Work](&ee.outboxMap, key)
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p, outbox=%p", ee, outbox)
-	}
-	return outbox
+func (ee *integrationExEnv) PushGroup(group workq.GroupID) {
+	ee.groupStack = append(ee.groupStack, group)
 }
 
-func (ee *topLevelExEnv) UnlockOutbox() {
-	ee.mu.Unlock()
+func (ee *integrationExEnv) PopGroup() {
+	if len(ee.groupStack) == 0 {
+		panic("group stack underflow")
+	}
+	ee.groupStack = ee.groupStack[:len(ee.groupStack)-1]
 }
 
-func (ee *topLevelExEnv) LockAndSetQueueFunc(
-	group workq.GroupID,
-	queueFn workq.QueueWorkFunc,
-	blockWaiters *workq.Waiters,
-) (
-	workReceiver *workq.Receiver,
-	workWaiter *workq.Waiter,
-	blockWaiter *workq.Waiter,
-) {
-	traceRegion := "topLevelExEnv.LockAndSetQueueFunc"
-
-	if len(ee.queueFnStack) == 0 {
-		ee.mu.Lock()
-	}
-
-	ee.queueFnStack = append(ee.queueFnStack, queueFn)
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%d", ee, len(ee.queueFnStack))
-
-	if blockWaiters != nil {
-		blockWaiter = ee.blockWaiterMap[blockWaiters]
-		if blockWaiter == nil {
-			if ee.blockWaiterMap == nil {
-				ee.blockWaiterMap = make(map[*workq.Waiters]*workq.Waiter)
-			}
-			blockWaiter = &workq.Waiter{}
-			ee.blockWaiterMap[blockWaiters] = blockWaiter
-		}
-	}
-
-	return &ee.workReceiver, &ee.workWaiter, blockWaiter
-}
-
-func (ee *topLevelExEnv) UnlockAndResetQueueFunc() {
-	traceRegion := "topLevelExEnv.UnlockAndResetQueueFunc"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	ee.queueFnStack = ee.queueFnStack[:len(ee.queueFnStack)-1]
-
-	trace.Logf(context.Background(), traceRegion, "topLevelExEnv=%p queueFnDepth=%v", ee, len(ee.queueFnStack))
-
-	if len(ee.queueFnStack) == 0 {
-		ee.mu.Unlock()
-	}
-}
-
-func (ee *topLevelExEnv) MayQueue() workq.QueueWorkFunc {
-	// Lock must already be held by LockAndSetQueueFunc
+func (ee *integrationExEnv) QueueFunc() workq.QueueWorkFunc {
 	if len(ee.queueFnStack) == 0 {
 		return nil
 	}
 	return ee.queueFnStack[len(ee.queueFnStack)-1]
 }
 
-// Simple execution environment for task workers that only needs outbox access
-type taskWorkerExEnv struct {
-	outboxMap *outboxMap
+func (ee *integrationExEnv) PushQueueFunc(queueFn workq.QueueWorkFunc) {
+	if queueFn == nil {
+		panic("queueFn is nil")
+	}
+	ee.queueFnStack = append(ee.queueFnStack, queueFn)
 }
 
-func (ee *taskWorkerExEnv) CurrentGroup() workq.GroupID {
-	panic("CurrentGroup not supported in task worker context")
+func (ee *integrationExEnv) PopQueueFunc() {
+	if len(ee.queueFnStack) == 0 {
+		panic("queue function stack underflow")
+	}
+	ee.queueFnStack = ee.queueFnStack[:len(ee.queueFnStack)-1]
 }
 
-func (ee *taskWorkerExEnv) LockOutbox(key outboxKey[workq.Work]) *workq.Outbox {
-	return OutboxFor[workq.Work](ee.outboxMap, key)
+func (ee *integrationExEnv) Receiver() *workq.Receiver {
+	return &ee.receiver
 }
 
-func (ee *taskWorkerExEnv) UnlockOutbox() {}
-
-func (ee *taskWorkerExEnv) LockAndSetQueueFunc(
-	group workq.GroupID,
-	queueFn workq.QueueWorkFunc,
-	blockWaiters *workq.Waiters,
-) (
-	workReceiver *workq.Receiver,
-	workWaiter *workq.Waiter,
-	blockWaiter *workq.Waiter,
-) {
-	panic("LockAndSetQueueFunc not supported in task worker context")
+type topLevelExEnv struct {
+	integrationExEnv
+	mu        sync.Mutex
+	workQueue *workq.Accepted
 }
 
-func (ee *taskWorkerExEnv) UnlockAndResetQueueFunc() {
-	panic("UnlockAndResetQueueFunc not supported in task worker context")
+func (ee *topLevelExEnv) Lock() {
+	ee.mu.Lock()
 }
 
-func (ee *taskWorkerExEnv) MayQueue() workq.QueueWorkFunc {
-	return nil // Task workers use blocking calls instead
+func (ee *topLevelExEnv) Unlock() {
+	ee.mu.Unlock()
+}
+
+func (ee *topLevelExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, work workq.Work) error {
+	return ee.workQueue.ExecuteNowOrQueue(ctx, ex, work)
 }
 
 type ctxMetaValueKey struct{}
@@ -274,7 +397,9 @@ func (j *Job) topLevelCtxMeta(ctx context.Context, checkCtxType func(ctxType con
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			checkCtxType(meta.ctxType) // Avoid caching if invalid
 			if meta.executionEnvironment == nil {
-				exEnv := &topLevelExEnv{}
+				exEnv := &topLevelExEnv{
+					workQueue: &j.workQueue,
+				}
 				meta.executionEnvironment = exEnv
 				trace.Logf(ctx, traceRegion, "created new topLevelExEnv=%p, ctxMeta=%v", exEnv, meta)
 			}

@@ -109,6 +109,10 @@ func (q *Optional[T]) PopFrontFunc(
 	traceRegion := "rdvq.Optional.PopFrontFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
+	if processOrphanFn == nil {
+		panic("processOrphanFn is nil")
+	}
+
 	inboxCh := inbox.ch
 	if inboxCh == nil {
 		// New inbox, allocate a channel

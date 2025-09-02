@@ -282,11 +282,220 @@ Implemented a hybrid synchronous/asynchronous posting model that breaks the circ
 **Result:**
 Benchmarks now run successfully without hanging. The hybrid model maintains the performance of synchronous posting while preventing deadlocks through selective asynchronous deferral.
 
+## Proposed: LIFO Stack for Natural Worker Scaling (2025-09-02)
+
+### Problem Statement
+Current FIFO queue (rdvq.Optional) keeps all workers "warm" by cycling through them equally, preventing natural timeout-based scaling. Workers never go idle long enough to timeout and exit, requiring complex controller logic to manage pool sizes.
+
+### Proposed Solution: Replace Queue with Stack
+
+**Core Insight**: Using LIFO (stack) instead of FIFO (queue) for worker pools creates natural scaling behavior:
+- Recently used workers stay "hot" at top of stack
+- Idle workers sink to bottom and naturally timeout
+- System self-regulates to minimum workers needed for current load
+- Eliminates need for complex controller logic and primary/spare distinctions
+
+### Implementation Plan
+
+#### Worker Pool Architecture Analysis
+
+Current PSG has different patterns for different worker types:
+
+**Tasks**: Direct worker pool (`taskQueue` = `rdvq.Optional[*taskWork]`) with instant worker spawning
+- Task arrives → `TryPop()` worker → if none available, spawn immediately  
+- Low latency, but FIFO prevents natural worker scaling
+
+**Combines**: Two-tier system (`combineQueue` = `rdvq.Required[Work]`) with buffering
+- Work arrives → try inbox → if busy, buffer in outbox → worker picks up later
+- Higher latency due to outbox buffering
+
+**Gathers**: Two-tier system (`gatherQueue` = `rdvq.Required[Work]`) with buffering  
+- Must buffer because "workers" are user threads calling `Gather()` - PSG can't spawn them
+
+#### Proposed Unified Architecture
+
+**Approach A: Lock-Free Stack + Spawn (for PSG-managed workers)**
+```go
+// For tasks and combiners - PSG can spawn workers
+taskWorkers    LockFreeStack[*TaskWorker]
+combineWorkers LockFreeStack[*CombineWorker]
+
+// Work arrives → TryPop() worker → if empty, spawn new worker
+```
+
+**Approach B: Required Two-Tier (for user-managed workers)**
+```go
+// For gathers - PSG cannot spawn user threads
+gatherQueue rdvq.Required[*GatherWork]  // Must buffer when no gatherers
+```
+
+#### Critical Contention Analysis
+
+**Why Lock-Free Stack Is Essential**:
+Under high concurrency, many tasks arriving when no workers are idle:
+```
+Thread 1: TryPop() → lock mutex → find empty → unlock → spawn worker
+Thread 2: TryPop() → wait for mutex → find empty → unlock → spawn worker  
+Thread N: TryPop() → wait for mutex → ...
+```
+
+All concurrent arrivals serialize on the mutex just to discover "still empty, spawn worker". Unlike Required's two-tier system where outboxes absorb contention, the spawn-on-demand pattern puts the stack directly in the hot path.
+
+**For Task Workers**: Every task arrival when workers are busy hits the stack for empty check.
+
+**For Combiner Workers**: Same issue - combine operations are latency-critical and shouldn't wait for outbox buffering.
+
+#### Lock-Free Stack Implementation Strategy
+
+**Phase 1: Basic Treiber Stack**
+- Simple, well-understood algorithm
+- ABA problem handled by Go's GC (pointers stay valid)
+- Node recycling via sync.Pool
+
+**Phase 2: Performance Validation**
+- Benchmark against mutex version under various contention levels
+- Verify it enables natural worker timeout behavior
+- Measure latency improvements for tasks and combines
+
+**Phase 3: Advanced Optimizations (if needed)**
+- Elimination arrays (Hendler et al. algorithm) for very high contention
+- Other optimizations based on measured bottlenecks
+
+```go
+type LockFreeStack[T any] struct {
+    head atomic.Pointer[stackNode[T]]
+    pool *sync.Pool // Node recycling
+}
+
+type stackNode[T any] struct {
+    value T
+    next  *stackNode[T]
+}
+```
+
+#### What This Eliminates
+
+- **CombinerPoolController** and all controller complexity
+- **Primary/spare distinctions** in combiner pools  
+- **Controller goroutines** and periodic management
+- **Most rdvq.Required usage** (only gathers need it)
+- **Complex multi-tier coordination** in favor of simple "work queue + worker pool"
+
+#### Final Architecture Decision: Required + Spawn-on-Miss
+
+**Unified Pattern**: Use rdvq.Required for all work distribution, enhanced with spawn-on-miss capability:
+
+```go
+taskQueue    rdvq.Required[*taskWork]    // with task worker spawn hook
+combineQueue rdvq.Required[*combineWork] // with combiner spawn hook  
+gatherQueue  rdvq.Required[*gatherWork]  // no spawn hook (user threads)
+```
+
+**Spawn-on-Miss Implementation**:
+```go
+required.PushBackFunc(outbox, work, func(outbox *Outbox[Work]) {
+    // Spawn worker if under capacity (don't pass work directly)
+    if pool.currentCount < pool.maxWorkers {
+        go pool.spawnWorker() // Worker will check outboxes when ready
+    }
+    
+    // Normal select on outbox (work is already buffered)
+    BasicPushSelect(ctx, outbox, work)
+})
+```
+
+**Benefits of This Approach**:
+1. **Bounded Low Latency**: Work immediately buffered + worker immediately spawned
+2. **Natural Load Balancing**: Multiple workers compete for outbox work (fastest wins)
+3. **Capacity Limits**: Proper buffering when at max workers
+4. **LIFO Scaling**: Inbox stack (LIFO) enables natural worker timeout
+5. **Proven Architecture**: Leverages existing Required infrastructure
+
+**Contention Analysis Revisited**:
+Spawn-on-miss + outbox buffering significantly reduces inbox stack contention:
+- Work spreads across multiple outboxes under high load
+- Workers stay busy processing outboxes (rarely go idle)
+- Stack operations become rare scaling events, not per-task operations
+- Atomic empty flag handles the few remaining empty checks lock-free
+
+**Implementation Decision**: Start with mutex-based LIFO stack with atomic empty flag. The spawn-on-miss pattern likely makes this sufficient, with easy upgrade path to lock-free if needed.
+
+#### Implementation Plan
+
+**Phase 1: Internal Collection Architecture**
+- Create `inboxCollection[T]` interface with `Push()`, `TryPop()`, `Reset()` methods
+- Implement `fifoCollection[T]` wrapping `nbcq.Queue` for waiter fairness
+- Implement `lifoCollection[T]` with mutex + slice + atomic empty flag for worker scaling
+- Unify under single `optional[T, C inboxCollection[T]]` implementation
+
+**Phase 2: Public API Integration**
+- Rename `rdvq.Required` to `rdvq.Queue` for clearer semantics
+- `rdvq.Queue` uses `lifoCollection` for inbox management (natural worker scaling)
+- `rdvq.Waiters` uses `fifoCollection` for notification fairness
+- All collection types remain internal - users only see `Queue` and `Waiters`
+
+**Phase 3: Spawn-on-Miss Enhancement**
+- Add spawn capability to `rdvq.Queue.PushBackFunc()` selectFn
+- Work immediately buffered in outbox + worker spawned if under capacity
+- New worker competes with existing workers for outbox work (natural load balancing)
+- Preserves low latency while respecting capacity limits
+
+**Final Architecture**:
+```go
+// All work distribution uses Queue with spawn-on-miss
+taskQueue    rdvq.Queue[*taskWork]    // LIFO inboxes + task worker spawning
+combineQueue rdvq.Queue[*combineWork] // LIFO inboxes + combiner spawning  
+gatherQueue  rdvq.Queue[*gatherWork]  // LIFO inboxes, no spawning (user threads)
+```
+
+#### Adaptive Timeout Based on Churn Rate**
+- Instead of fixed idle timeout, adapt based on worker churn rate
+- User specifies acceptable churn rate (e.g., "10 workers/second max")
+- System automatically adjusts timeout to stay within churn budget:
+  ```
+  if churnRate > maxChurnRate:
+      timeout *= 2  // Reduce churn
+  else if churnRate < maxChurnRate/2:
+      timeout *= 0.9  // Can be more aggressive
+  ```
+- More intuitive than timeout: "How much CPU for worker management?" vs "How long should workers idle?"
+
+### Benefits
+
+1. **Simplification**: Removes entire controller subsystem
+2. **Natural Scaling**: Workers scale based on actual load patterns
+3. **Better Cache Locality**: Hot workers stay in CPU cache
+4. **Single Tuning Parameter**: Just churn rate limit (or timeout)
+5. **Self-Regulating**: No periodic ticks or state machines needed
+
+### Configuration Examples
+
+```go
+// Simple: Just timeout
+WithTaskWorkerIdleTimeout(5 * time.Second)
+
+// Advanced: Churn rate control  
+WithMaxChurnRate(10.0)  // Max 10 worker/sec turnover
+WithMinTimeout(100 * time.Millisecond)
+WithMaxTimeout(30 * time.Second)
+```
+
+### Key Design Decisions
+
+- **"Starvation" is good**: Idle workers timing out is the goal, not a problem
+- **No shuffling needed**: Let hot workers stay hot for cache locality
+- **Churn tracking**: Simple ring buffer of recent spawn/exit events
+- **Timeout adaptation**: Exponential backoff/advance within bounds
+
 **Next Steps (Priority Order):**
-1. **Add Close() method to operations** - Enable completion signaling and final flush triggers
-2. **Remove implicit flow from core** - Strip out auto-targeting behavior in favor of explicit integration
-3. **Implement ReduceOp** - Add stateful reducer operations with single persistent instances
-4. **Re-layer implicit convenience on top** - Build syntactic sugar using explicit integration as foundation
+1. **Implement lock-free stack for rdvq.Optional** - Start with task workers as proof of concept
+2. **Add churn rate tracking** - Measure current behavior before changing timeout logic
+3. **Implement adaptive timeout** - Based on measured churn rate
+4. **Apply to combiner pool** - Remove controller after validating approach
+5. **Add Close() method to operations** - Enable completion signaling and final flush triggers
+6. **Remove implicit flow from core** - Strip out auto-targeting behavior in favor of explicit integration
+7. **Implement ReduceOp** - Add stateful reducer operations with single persistent instances
+8. **Re-layer implicit convenience on top** - Build syntactic sugar using explicit integration as foundation
 
 **Key Technical Insights:**
 - Hybrid synchronous/asynchronous posting preserves performance while preventing deadlock

@@ -9,6 +9,9 @@ import (
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 )
 
+// Outbox provides per-sender buffering for overflow items when no receivers
+// are immediately available. Each Outbox is dedicated to sending items from
+// a specific Sender to a specific Queue.
 type Outbox[T any] struct {
 	ch        chan T
 	wasFilled bool
@@ -16,13 +19,13 @@ type Outbox[T any] struct {
 	refCount  atomic.Int32
 }
 
-func NewOutbox[T any]() *Outbox[T] {
+func newOutbox[T any]() *Outbox[T] {
 	ob := omnipool.GetCustom(outboxTrait[T]{})
 	ob.refCount.Store(1)
 	return ob
 }
 
-func (ob *Outbox[T]) Free() {
+func (ob *Outbox[T]) free() {
 	newValue := ob.refCount.Add(-1)
 	if newValue < 0 {
 		panic("reference count underflow")
@@ -67,32 +70,19 @@ func (ob *Outbox[T]) fillPending() {
 	ob.wasFilled = false
 }
 
+// Filled marks the outbox as having been successfully filled with a value.
+// This must be called by the sender after successfully sending to the outbox channel.
 func (ob *Outbox[T]) Filled() {
 	ob.wasFilled = true
 }
 
 func (ob *Outbox[T]) fillAttemptComplete() {
 	if !ob.wasFilled {
-		ob.Free()
+		ob.free()
 	}
-}
-
-// WasFilled returns true if Filled() was called.
-func (ob *Outbox[T]) WasFilled() bool {
-	return ob.wasFilled
 }
 
 func (ob *Outbox[T]) emptied() {
 	ob.listeners.Notify(nil)
-	ob.Free()
-}
-
-// Listeners returns the outbox's listeners for subscription to availability notifications.
-// Panics if called when no channel has been allocated, which should only
-// happen if Listeners() is called outside of a selectFn callback.
-func (ob *Outbox[T]) Listeners() *Listeners {
-	if ob.ch == nil {
-		panic("outbox channel is nil")
-	}
-	return &ob.listeners
+	ob.free()
 }

@@ -26,18 +26,20 @@ func TestWaiters_BasicNotification(t *testing.T) {
 		close(waiterStarted) // Signal that waiter is created
 
 		var waiter rdvq.Waiter
+		wasNotified := false
 		waiters.WaitFuncWithOrphanHandler(
 			&waiter,
 			func() bool { return true },
 			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-			func(waiter *rdvq.Waiter) {
+			func(waitInbox *rdvq.WaitInbox) {
 				// Block waiting for notification - no default case
-				ch := waiter.Ch()
-				renotifyFn := <-ch
-				waiter.Notified(renotifyFn)
+				ch := waitInbox.Ch()
+				<-ch
+				waitInbox.Emptied()
+				wasNotified = true
 			},
 		)
-		notified <- waiter.WasNotified()
+		notified <- wasNotified
 	}()
 
 	// Wait for waiter to be created and start waiting
@@ -66,14 +68,13 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 		&waiter,
 		func() bool { return false },
 		func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-		func(waiter *rdvq.Waiter) {
+		func(waitInbox *rdvq.WaitInbox) {
 			selectCalled = true
 		},
 	)
 
 	// Verification returned false, so select function should not be called
 	assert.False(t, selectCalled)
-	assert.False(t, waiter.WasNotified())
 }
 
 func TestWaiters_VerificationPreventsRace(t *testing.T) {
@@ -91,6 +92,7 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 		close(waiterStarted)
 
 		var waiter rdvq.Waiter
+		wasNotified := false
 		waiters.WaitFuncWithOrphanHandler(
 			&waiter,
 			func() bool {
@@ -99,14 +101,15 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 				return !workReady // Continue waiting only if no work ready
 			},
 			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-			func(waiter *rdvq.Waiter) {
+			func(waitInbox *rdvq.WaitInbox) {
 				// When verification succeeds, this should be called and block
-				ch := waiter.Ch()
-				renotifyFn := <-ch
-				waiter.Notified(renotifyFn)
+				ch := waitInbox.Ch()
+				<-ch
+				waitInbox.Emptied()
+				wasNotified = true
 			},
 		)
-		waitResult <- waiter.WasNotified()
+		waitResult <- wasNotified
 	}()
 
 	// Wait for waiter to start
@@ -139,14 +142,13 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 			return !workReady // Should return false (don't wait)
 		},
 		func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-		func(waiter *rdvq.Waiter) {
+		func(waitInbox *rdvq.WaitInbox) {
 			selectCalled = true
 		},
 	)
 
 	// Verification should have prevented waiting
-	assert.False(t, selectCalled)         // Select function should not be called
-	assert.False(t, waiter.WasNotified()) // Should not be notified
+	assert.False(t, selectCalled) // Select function should not be called
 }
 
 func TestWaiters_MultipleWaiters(t *testing.T) {
@@ -166,20 +168,18 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 				&waiter,
 				func() bool { return true },
 				func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-				func(waiter *rdvq.Waiter) {
-					ch := waiter.Ch()
+				func(waitInbox *rdvq.WaitInbox) {
+					ch := waitInbox.Ch()
 					select {
-					case renotifyFn := <-ch:
-						waiter.Notified(renotifyFn)
+					case <-ch:
+						waitInbox.Emptied()
 						notifications <- id
 					case <-time.After(200 * time.Millisecond):
 						// timeout - don't call Notified
+						notifications <- -1 // Indicate timeout/abort
 					}
 				},
 			)
-			if !waiter.WasNotified() {
-				notifications <- -1 // Indicate timeout/abort
-			}
 		}(waiterID)
 	}
 
@@ -223,18 +223,17 @@ func TestWaiters_NotifyAll(t *testing.T) {
 				&waiter,
 				func() bool { return true },
 				func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-				func(waiter *rdvq.Waiter) {
-					ch := waiter.Ch()
+				func(waitInbox *rdvq.WaitInbox) {
+					ch := waitInbox.Ch()
 					select {
-					case renotifyFn := <-ch:
-						waiter.Notified(renotifyFn)
+					case <-ch:
+						waitInbox.Emptied()
 						notifications <- true
 					case <-time.After(200 * time.Millisecond):
 						notifications <- false
 					}
 				},
 			)
-			notifications <- waiter.WasNotified()
 		}()
 	}
 
@@ -266,7 +265,7 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 			&waiter,
 			func() bool { return true },
 			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-			func(waiter *rdvq.Waiter) {
+			func(waitInbox *rdvq.WaitInbox) {
 				// Abandon immediately - don't wait on channel
 			},
 		)
@@ -285,18 +284,17 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 			&waiter,
 			func() bool { return true },
 			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
-			func(waiter *rdvq.Waiter) {
-				ch := waiter.Ch()
+			func(waitInbox *rdvq.WaitInbox) {
+				ch := waitInbox.Ch()
 				select {
-				case renotifyFn := <-ch:
-					waiter.Notified(renotifyFn)
+				case <-ch:
+					waitInbox.Emptied()
 					notified <- true
 				case <-time.After(50 * time.Millisecond):
 					notified <- false
 				}
 			},
 		)
-		notified <- waiter.WasNotified()
 	}()
 
 	// Give new waiter time to process orphaned notification

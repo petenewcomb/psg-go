@@ -20,7 +20,6 @@ format.
 - Comprehensive options pattern implementation via psgopt package
 - SetOptions methods for atomic configuration updates across all components
 - `PSGTRACEINTERNALS` environment variable to enable and configure `runtime/trace` instrumentation of PSG internals
-- Scheduler latency monitoring for intelligent backpressure control 
 
 ### Changed
 

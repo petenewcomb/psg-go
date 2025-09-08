@@ -7,11 +7,8 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
-// Specialization of [rdvq.Required] for [Work].
-type Pending = rdvq.Required[Work]
-
-// See [rdvq.Receiver]
-type Receiver = rdvq.Receiver[Work]
+// Specialization of [rdvq.Queue] for [Work].
+type Pending = rdvq.Queue[Work]
 
 // See [rdvq.Outbox]
 type Outbox = rdvq.Outbox[Work]
@@ -19,11 +16,8 @@ type Outbox = rdvq.Outbox[Work]
 // See [rdvq.PushSelectFunc]
 type PushSelectFunc = rdvq.PushSelectFunc[Work]
 
-// See [rdvq.RequiredPopSelectFunc]
-type PopSelectFunc = rdvq.RequiredPopSelectFunc[Work]
-
-// See [rdvq.WaiterOrReceiver]
-type WaiterOrReceiver = rdvq.WaiterOrReceiver
+// See [rdvq.PopSelectFunc]
+type PopSelectFunc = rdvq.PopSelectFunc[Work]
 
 // See [rdvq.PushSelectFunc]
 type WaitSelectFunc = rdvq.WaitSelectFunc

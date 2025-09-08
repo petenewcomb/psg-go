@@ -836,7 +836,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								return gatherOp.TryScatter(ctx, deadline, target, task)
 							}
 						} else {
-							combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(max(0, combinerLimit), combinerLimit))
+							combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(combinerLimit))
 							combinerFactory := func() psgfn.Combiner[benchmarkTaskResult, benchmarkCombinedResult] {
 								return newBenchmarkCombiner(
 									&testStartTime,
@@ -881,7 +881,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						totalTopLevelTasks := 0
 						op := func() int {
 							for {
-								deadline := time.Now().Add(workloadDuration)
+								deadline := time.Now().Add(1 * time.Millisecond)
 								taskFn := newTaskFn(time.Now(), 0, 12, 3, 0)
 								ok, err := scatter(ctx, deadline, job, taskFn)
 								if ok {
@@ -903,7 +903,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						}
 
 						warmupStartTime := time.Now()
-						for time.Since(warmupStartTime) < 1*time.Second {
+						for time.Since(warmupStartTime) < flushPeriod {
 							op()
 						}
 

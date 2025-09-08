@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
@@ -311,7 +312,7 @@ func (c *combineOp[I, O]) Reset() {
 	if c.instanceCount.Load() != 0 {
 		panic("instance count is not zero")
 	}
-	if _, ok := c.instanceQueue.PopFront(); ok {
+	if _, ok := c.instanceQueue.TryPopFront(); ok {
 		panic("instance queue was not empty")
 	}
 	c.id = 0
@@ -426,7 +427,7 @@ func (c *halfBoundCombiner[I, O]) free() {
 func (c *halfBoundCombiner[I, O]) allocate(
 	ctx context.Context,
 	newCombiner psgfn.CombinerFactory[I, O],
-	emitOutbox *workq.Outbox,
+	sender *rdvq.Sender,
 ) {
 	traceRegion := "halfBoundCombiner.allocate"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -434,13 +435,13 @@ func (c *halfBoundCombiner[I, O]) allocate(
 	panicked := true
 	defer func() {
 		if panicked {
-			c.emit(ctx, emitOutbox, *new(O), ErrCombinerFactoryPanicked)
+			c.emit(ctx, sender, *new(O), ErrCombinerFactoryPanicked)
 		}
 	}()
 	c.combiner = newCombiner()
 	panicked = false
 	if c.combiner == nil {
-		c.emit(ctx, emitOutbox, *new(O), ErrCombinerFactoryReturnedNil)
+		c.emit(ctx, sender, *new(O), ErrCombinerFactoryReturnedNil)
 		c.combiner = &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
 	}
 
@@ -449,7 +450,7 @@ func (c *halfBoundCombiner[I, O]) allocate(
 	}
 }
 
-func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, emitOutbox *workq.Outbox, output O, outputErr error) {
+func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, sender *rdvq.Sender, output O, outputErr error) {
 	traceRegion := "halfBoundCombiner.emit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -464,7 +465,7 @@ func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, emitOutbox *workq.Ou
 func (c *halfBoundCombiner[I, O]) combine(
 	ctx context.Context,
 	cm *activeCombinerMap,
-	emitOutbox *workq.Outbox,
+	sender *rdvq.Sender,
 	input I,
 	inputErr error,
 ) {
@@ -476,7 +477,7 @@ func (c *halfBoundCombiner[I, O]) combine(
 	defer func() {
 		if !didNotPanic {
 			// Just in case the panic is otherwise suppressed
-			c.emit(ctx, emitOutbox, *new(O), ErrCombinePanicked)
+			c.emit(ctx, sender, *new(O), ErrCombinePanicked)
 		}
 	}()
 
@@ -485,19 +486,19 @@ func (c *halfBoundCombiner[I, O]) combine(
 	didNotPanic = true
 
 	if err != nil {
-		c.emit(ctx, emitOutbox, *new(O), err)
+		c.emit(ctx, sender, *new(O), err)
 	}
 
 	if !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0 {
 		cm.Remove(c)
-		c.flush(ctx, emitOutbox)
+		c.flush(ctx, sender)
 	} else {
 		cm.Push(c, newFlushDeadline)
 	}
 }
 
 // Must not already hold c.mu
-func (c *halfBoundCombiner[I, O]) Flush(ctx context.Context, emitOutbox *workq.Outbox) {
+func (c *halfBoundCombiner[I, O]) Flush(ctx context.Context, sender *rdvq.Sender) {
 	traceRegion := "halfBoundCombiner.Flush"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -509,11 +510,11 @@ func (c *halfBoundCombiner[I, O]) Flush(ctx context.Context, emitOutbox *workq.O
 			c.free()
 		}
 	}()
-	c.flush(ctx, emitOutbox)
+	c.flush(ctx, sender)
 }
 
 // Must already hold c.mu
-func (c *halfBoundCombiner[I, O]) flush(ctx context.Context, emitOutbox *workq.Outbox) {
+func (c *halfBoundCombiner[I, O]) flush(ctx context.Context, sender *rdvq.Sender) {
 	traceRegion := "halfBoundCombiner.flush"
 
 	combiner := c.combiner
@@ -527,7 +528,7 @@ func (c *halfBoundCombiner[I, O]) flush(ctx context.Context, emitOutbox *workq.O
 	defer func() {
 		if panicked {
 			// Just in case the panic is otherwise suppressed
-			c.emit(ctx, emitOutbox, *new(O), ErrCombinerFlushPanicked)
+			c.emit(ctx, sender, *new(O), ErrCombinerFlushPanicked)
 		}
 	}()
 
@@ -535,7 +536,7 @@ func (c *halfBoundCombiner[I, O]) flush(ctx context.Context, emitOutbox *workq.O
 	v, err := combiner.Flush(ctx)
 	panicked = false
 	if !errors.Is(err, psgfn.ErrDoNotGather) {
-		c.emit(ctx, emitOutbox, v, err)
+		c.emit(ctx, sender, v, err)
 	}
 }
 
@@ -624,7 +625,7 @@ func (ct *combineTask[I, O]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
-	taskWorkerOutboxMap *outboxMap,
+	taskWorkerSender *rdvq.Sender,
 ) {
 	traceRegion := "combineTask.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -692,7 +693,7 @@ func (c *combineOp[I, O]) tryIntegrate(
 // boundCombineWork interface allows type erasure for combineWork instances
 type boundCombineWork interface {
 	workq.Work
-	Combine(ctx context.Context, cm *activeCombinerMap, gatherOutbox *workq.Outbox)
+	Combine(ctx context.Context, cm *activeCombinerMap, sender *rdvq.Sender)
 	Waiting(*workq.Governor)
 }
 
@@ -715,13 +716,14 @@ func (w *combineWork[I, O]) Init(group workq.GroupID, op *combineOp[I, O], input
 	w.op = op
 	w.input = input
 	w.inputErr = inputErr
+	op.combinerPool.inFlight.Increment()
 	op.ref() // Add reference for the combine work
 }
 
-func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, emitOutbox *workq.Outbox) {
+func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, sender *rdvq.Sender) {
 	var hbc *halfBoundCombiner[I, O]
 	for {
-		hbc, _ = w.op.instanceQueue.PopFront()
+		hbc, _ = w.op.instanceQueue.TryPopFront()
 		if hbc == nil {
 			break
 		}
@@ -748,7 +750,7 @@ func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, 
 		hbc.op = w.op
 		hbc.id = combinerInstanceID(combinerInstanceCounter.Add(1))
 		hbc.earliestGroup = w.Group()
-		hbc.allocate(ctx, w.op.combinerFactory, emitOutbox)
+		hbc.allocate(ctx, w.op.combinerFactory, sender)
 	}
 	defer func() {
 		flushed := hbc.combiner == nil
@@ -760,13 +762,13 @@ func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, 
 			hbc.free()
 		}
 	}()
-	hbc.combine(ctx, cm, emitOutbox, w.input, w.inputErr)
+	hbc.combine(ctx, cm, sender, w.input, w.inputErr)
 }
 
 func (w *combineWork[I, O]) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "combineWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
+	trace.Logf(ctx, traceRegion, "combineWork(%p), %v", w, w)
 
 	ex.Starting()
 	workerCtx, meta := w.op.combinerPool.job.ctxMeta(ctx)
@@ -780,7 +782,9 @@ func (w *combineWork[I, O]) Execute(ctx context.Context, ex workq.Execution) err
 func (w *combineWork[I, O]) Free() {
 	traceRegion := "combineWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "combineWork(%p), %v", w, w)
+
+	w.op.combinerPool.inFlight.Decrement()
 
 	w.DownstreamWork.Close()
 	w.jobWork.Close(w.op.combinerPool.job)

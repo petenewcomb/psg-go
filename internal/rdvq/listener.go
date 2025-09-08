@@ -10,13 +10,25 @@ import (
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
+// Listener provides a reusable notification subscription that can be added to
+// multiple Listeners instances. It tracks which Listeners it has been added to
+// and ensures it's only added once per Listeners instance.
+//
+// The mutex protects against concurrent calls to the internal notify method,
+// which can occur when multiple Listeners instances fire notifications from
+// different goroutines. The Listener itself is typically owned by a single entity.
 type Listener struct {
+	// Notify is the function called when this listener is signaled.
 	Notify NotifyFunc
 
 	mu      sync.Mutex
 	addedTo map[*Listeners]struct{}
 }
 
+// AddTo subscribes this listener to the given Listeners instance.
+// If already subscribed, this is a no-op. The listener will be called
+// when the Listeners instance receives a notification.
+//
 //nolint:contextcheck // background context used only for tracing
 func (m *Listener) AddTo(listeners *Listeners) {
 	traceRegion := "rdvq.Listener.AddTo"

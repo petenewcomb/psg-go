@@ -106,7 +106,6 @@ func (g GatherOp[T]) TryScatter(
 ) (bool, error) {
 	traceRegion := "GatherOp.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
 	meta.Lock()
@@ -135,7 +134,6 @@ func (g GatherOp[T]) Integrate(
 ) error {
 	traceRegion := "GatherOp.Integrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
@@ -160,7 +158,6 @@ func (g GatherOp[T]) TryIntegrate(
 ) (bool, error) {
 	traceRegion := "GatherOp.TryIntegrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "GatherOp=%p", g)
 
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()

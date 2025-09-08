@@ -6,26 +6,19 @@ package rdvq
 // ProcessValueFunc is called to process a value retrieved from a queue.
 type ProcessValueFunc[T any] = func(value T)
 
-// SelectResult indicates the outcome of a select operation in rdvq.
-// This enumeration provides type-safe, explicit results for all select
-// operations throughout the rdvq package, replacing inconsistent boolean
-// returns and making operation outcomes clear.
-type SelectResult int
+// RenotifyFunc is called when a notification cannot be delivered and needs to be retried.
+// It's typically used to re-queue a notification for later delivery.
+type RenotifyFunc func()
 
-//go:generate go run golang.org/x/tools/cmd/stringer@v0.35.0 -type=SelectResult
-const (
-	// SelectAborted indicates the operation was cancelled or interrupted,
-	// typically due to context cancellation or other external factors.
-	SelectAborted SelectResult = iota
-
-	// SelectInboxEmptied indicates an inbox channel was successfully read from,
-	// meaning a value was received from a sender's dedicated channel.
-	SelectInboxEmptied
-
-	// SelectOutboxFilled indicates an outbox channel was successfully written
-	// to, meaning a value was successfully sent to a sender's outbox buffer. It
-	// is used by PushSelectFunc to signal that the select function filled an
-	// empty outbox and by RequiredPopSelectFunc to signal that a full outbox
-	// has been added to the outboxWaiters queue.
-	SelectOutboxFilled
-)
+// NotifyFunc is used to deliver a notification to a subscriber that is
+// waiting for it. If unable to deliver the notification to such a subscriber,
+// it must arrange for the given RenotifyFunc to be called. This may happen
+// synchronously or asynchronously, though synchronous is preferred for
+// efficiency. For maximal efficiency, especially with respect to stack depth, a
+// NotifyFunc that synchronously determines that it is unable to deliver the
+// notification to a suitable subscriber should return false instead of calling
+// the RenotifyFunc. This signals the caller that it should find another
+// subscriber or call the RenotifyFunc itself. In all other cases, the
+// NotifyFunc must return true and synchronously or asynchronously find another
+// subscriber or else call the RenotifyFunc.
+type NotifyFunc func(RenotifyFunc) bool

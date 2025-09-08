@@ -33,7 +33,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		return nil
 	})
 
-	combinerPool := psg.NewCombinerPool(job, psgopt.WithConcurrencyBounds(1, 1)) // Force exactly 1 goroutine
+	combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
 	combineOp := psg.NewCombineOp(gatherOp, combinerPool, func() psgfn.Combiner[int, int] {
 		return psgfn.FuncCombiner[int, int]{

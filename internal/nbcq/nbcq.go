@@ -50,7 +50,7 @@ func (n *node[T]) Init() {
 func (n *node[T]) Reset() {
 	n.value.Store(nil)
 	// Don't reset next here as it must be specially handled for the lock-free
-	// algorithm. See note at D19 in PopFront where next.count is preserved to
+	// algorithm. See note at D19 in TryPopFront where next.count is preserved to
 	// ensure other goroutines can still safely use their references to this
 	// node even while it's pooled and after re-use.
 }
@@ -74,7 +74,7 @@ func (q *Queue[T]) Init() {
 
 	// We do not pull from the pool here to ensure that once a node has been
 	// used its next count will never be reset to zero. See note at D19 in
-	// PopFront for more detail.
+	// TryPopFront for more detail.
 	node := &node[T]{}
 	node.Init()
 
@@ -139,8 +139,8 @@ func (q *Queue[T]) PushBack(value T) {
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code
 //nolint:contextcheck // background context used only for tracing
-func (q *Queue[T]) PopFront() (T, bool) {
-	traceRegion := "nbcq.PopFront"
+func (q *Queue[T]) TryPopFront() (T, bool) {
+	traceRegion := "nbcq.TryPopFront"
 
 	// D1: loop // Keep trying until Dequeue is done
 	for {

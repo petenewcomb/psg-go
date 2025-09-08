@@ -361,7 +361,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 //nolint:contextcheck // background context used only for tracing
 func (c *controller) collectAccepted(q *nbcq.Queue[Work]) bool {
 	c.currentIndex = len(c.buffer)
-	work, ok := q.PopFront()
+	work, ok := q.TryPopFront()
 	if !ok {
 		return false
 	}
@@ -391,18 +391,17 @@ func (c *controller) execute(ctx context.Context, blockOrListen bool) error {
 	if c.ex.Started() {
 		panic("started should not be set before execution")
 	}
-	defer func() {
-		if c.ex.Started() {
-			bw.work.Free()
-		} else {
-			c.workWasPostponed = true
-		}
-	}()
 
 	err := bw.work.Execute(ctx, ex)
 
 	if err != nil {
 		trace.Logf(ctx, traceRegion, "%v returned err=%v", bw.work, err)
+	}
+
+	if c.ex.Started() {
+		bw.work.Free()
+	} else {
+		c.workWasPostponed = true
 	}
 
 	if errors.Is(err, ErrEndOfWork) {

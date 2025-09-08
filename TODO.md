@@ -29,7 +29,6 @@ Items to complete before merging to main branch.
 - check the scatter plots and review combiner pool controller settings
 - review and understand processing and waiting aggregation throughput and speedup graphs
 - enable cyclo and fix issues
-- get rid of taskWorkerOutboxMap in favor of meta.WithOutbox
 - can we integrate taskWork into combineTask and gatherTask?
 - rename Free to Recycle, add Recycler interface from which other things can derive
 - Expose all user code integration points as interfaces with Recycle (Recycler), then add convenience functions that use pooled objects to wrap implementation-by-closure; perhaps reserve psgfn for the convenience functions and add a separate package for the integration interfaces? 
@@ -49,7 +48,6 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 
 ### Performance Optimizations
 - Promote affinity between combiner goroutines and specific combiner instances to improve cache locality.
-- Make rdvq.Optional use a stack (LIFO) rather than a queue (FIFO) for inboxes (rdvq.Optional), so that receivers can time out if not needed.  See https://people.csail.mit.edu/shanir/publications/Lock_Free.pdf for a scalable lock-free stack algorithm.
 
 ### API Enhancements
 - Consider adding helper methods for common combining operations (e.g., counting, grouping, mapping)

@@ -1,7 +1,8 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package rdvq_test
+//nolint:thelper // these are sub-test functions, not test helpers
+package rdvq
 
 import (
 	"context"
@@ -13,13 +14,44 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestOptional_BasicFunctionality(t *testing.T) {
-	var q rdvq.Optional[int]
-	q.Init()
+// testInboxOnlyQueue is an interface for testing both queue types
+type testInboxOnlyQueue[T any] interface {
+	Init()
+	TryPushBack(value T) bool
+	PopFront(ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error
+	PopFrontFunc(inbox *Inbox[T], processOrphanFn ProcessValueFunc[T], selectFn inboxOnlyPopSelectFunc[T])
+}
+
+// inboxOnlyQueueTestCases returns test cases for both queue implementations
+func inboxOnlyQueueTestCases[T any]() []struct {
+	name      string
+	makeQueue func() testInboxOnlyQueue[T]
+} {
+	return []struct {
+		name      string
+		makeQueue func() testInboxOnlyQueue[T]
+	}{
+		{
+			name: "InboxQueueQueue",
+			makeQueue: func() testInboxOnlyQueue[T] {
+				q := &inboxQueueQueue[T]{}
+				return q
+			},
+		},
+		{
+			name: "InboxStackQueue",
+			makeQueue: func() testInboxOnlyQueue[T] {
+				q := &inboxStackQueue[T]{}
+				return q
+			},
+		},
+	}
+}
+
+func testBasicFunctionality(t *testing.T, q testInboxOnlyQueue[int]) {
 	ctx := context.Background()
 
 	// TryPushBack should fail when no receivers are waiting
@@ -29,7 +61,7 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 	// Start a receiver
 	receivedCh := make(chan int)
 	go func() {
-		var inbox rdvq.Inbox[int]
+		var inbox Inbox[int]
 		err := q.PopFront(ctx, &inbox, func(value int) {
 			receivedCh <- value
 		})
@@ -52,9 +84,7 @@ func TestOptional_BasicFunctionality(t *testing.T) {
 	}
 }
 
-func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
-	var q rdvq.Optional[int]
-	q.Init()
+func testTryPushBackMultipleReceivers(t *testing.T, q testInboxOnlyQueue[int]) {
 	ctx := context.Background()
 
 	const numReceivers = 5
@@ -66,7 +96,7 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var inbox rdvq.Inbox[int]
+			var inbox Inbox[int]
 			err := q.PopFront(ctx, &inbox, func(value int) {
 				received <- value
 			})
@@ -97,14 +127,11 @@ func TestOptional_TryPushBackMultipleReceivers(t *testing.T) {
 	assert.ElementsMatch(t, []int{1, 2, 3, 4, 5}, receivedValues)
 }
 
-func TestOptional_AbandonedReceiver(t *testing.T) {
-	var q rdvq.Optional[int]
-	q.Init()
-
+func testAbandonedReceiver(t *testing.T, q testInboxOnlyQueue[int]) {
 	// Start a receiver that will be cancelled
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		var inbox rdvq.Inbox[int]
+		var inbox Inbox[int]
 		err := q.PopFront(ctx, &inbox, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
@@ -125,16 +152,13 @@ func TestOptional_AbandonedReceiver(t *testing.T) {
 	assert.False(t, success, "TryPushBack should fail with abandoned receiver")
 }
 
-func TestOptional_PopFrontFunc(t *testing.T) {
-	var q rdvq.Optional[int]
-	q.Init()
-
+func testPopFrontFunc(t *testing.T, q testInboxOnlyQueue[int]) {
 	// Test custom select function that always times out
-	var inbox rdvq.Inbox[int]
+	var inbox Inbox[int]
 	var orphanValues []int
 	q.PopFrontFunc(&inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(inbox *rdvq.Inbox[int]) {
+	}, func(inbox *Inbox[int]) {
 		// Always return aborted (timeout immediately)
 		// Don't call inbox.Emptied() to simulate abort
 	})
@@ -152,7 +176,7 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	orphanValues = nil
 	q.PopFrontFunc(&inbox, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(inbox *rdvq.Inbox[int]) {
+	}, func(inbox *Inbox[int]) {
 		time.Sleep(10 * time.Millisecond) // Let the sender send first
 		// Don't call inbox.Emptied() to simulate timeout/abandonment
 	})
@@ -162,9 +186,7 @@ func TestOptional_PopFrontFunc(t *testing.T) {
 	assert.Equal(t, 99, orphanValues[0])
 }
 
-func TestOptional_Stress(t *testing.T) {
-	var q rdvq.Optional[int]
-	q.Init()
+func testStress(t *testing.T, q testInboxOnlyQueue[int]) {
 
 	numPushers := runtime.GOMAXPROCS(-1)
 	numPoppers := runtime.GOMAXPROCS(-1)
@@ -187,8 +209,8 @@ func TestOptional_Stress(t *testing.T) {
 	pushErrCh := make(chan error, 1)
 	popErrCh := make(chan error, 1)
 
-	popOps := []func(context.Context, *rdvq.Inbox[int]){
-		func(ctx context.Context, inbox *rdvq.Inbox[int]) {
+	popOps := []func(context.Context, *Inbox[int]){
+		func(ctx context.Context, inbox *Inbox[int]) {
 			// Normal popper
 			err := q.PopFront(ctx, inbox, func(value int) {
 				popped.Add(1)
@@ -203,7 +225,7 @@ func TestOptional_Stress(t *testing.T) {
 				}
 			}
 		},
-		func(ctx context.Context, inbox *rdvq.Inbox[int]) {
+		func(ctx context.Context, inbox *Inbox[int]) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
 			err := q.PopFront(shortCtx, inbox, func(value int) {
@@ -235,7 +257,7 @@ func TestOptional_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			var inbox rdvq.Inbox[int]
+			var inbox Inbox[int]
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
 				popOps[rand.IntN(len(popOps))](ctx, &inbox)
@@ -284,4 +306,33 @@ func TestOptional_Stress(t *testing.T) {
 	actuallyPushed := tryPushed.Load() - refused.Load()
 	actuallyPopped := popped.Load()
 	assert.Equal(t, actuallyPushed, actuallyPopped)
+}
+
+func TestInboxOnly(t *testing.T) {
+	for _, tc := range inboxOnlyQueueTestCases[int]() {
+		t.Run(tc.name, func(t *testing.T) {
+			q := tc.makeQueue()
+			q.Init()
+
+			t.Run("BasicFunctionality", func(t *testing.T) {
+				testBasicFunctionality(t, q)
+			})
+
+			t.Run("TryPushBackMultipleReceivers", func(t *testing.T) {
+				testTryPushBackMultipleReceivers(t, q)
+			})
+
+			t.Run("AbandonedReceiver", func(t *testing.T) {
+				testAbandonedReceiver(t, q)
+			})
+
+			t.Run("PopFrontFunc", func(t *testing.T) {
+				testPopFrontFunc(t, q)
+			})
+
+			t.Run("Stress", func(t *testing.T) {
+				testStress(t, q)
+			})
+		})
+	}
 }

@@ -8,8 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
+	"github.com/petenewcomb/psg-go/internal/jobstate"
+	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -28,24 +29,15 @@ type CombinerPool struct {
 	// CombinerPoolState hosts the data and core logic for managing the pool of
 	// goroutines to maximize throughput with the minimum number of goroutines
 	// and therefore duplication of individual combiners.
-	state cpstate.CombinerPoolState
+	state    cpstate.CombinerPoolState
+	inFlight jobstate.InFlightCounter
 
-	// Work posting uses two-tier delivery via combineQueue:
-	// 1. Try immediate delivery to waiting receivers
-	// 2. If no waiting receiver, use sender's outbox and block if needed
-	//
-	// Primary goroutines register for immediate delivery, while the spare
-	// goroutine uses PopFrontExcessFunc to process outboxes and shared channel
-	// without registering for immediate delivery.
-	//
-	// Only one goroutine at a time can elect itself "spare" for scaling.
 	combineQueue workq.Pending
-	spareElected atomic.Bool
 
 	combineOpMapMu sync.Mutex
 	combineOpMap   map[combineOpID]any
 
-	abandonedCombiners *activeCombinerMap
+	abandonedCombiners nbcq.Queue[*activeCombinerMap]
 
 	// If there are tasks waiting to post work to combineQueue, the governor
 	// will block new top-level scatters, thereby applying backpressure to
@@ -78,21 +70,14 @@ func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPo
 		cp, job, &cp.state, &cp.combineQueue, &cp.governor, &cp.workQueue)
 
 	cp.combineQueue.Init()
+	cp.abandonedCombiners.Init()
 	cp.governor.Init()
 	cp.workQueue.Init()
 	cp.state.Init()
 
 	// Apply default configuration
 	cp.state.SetOptions(
-		psgopt.WithConcurrencyBounds(0, -1), // unlimited by default
-		psgopt.WithHighUtilizationThreshold(psgopt.DefaultCombinerPoolHighUtilizationThreshold),
-		psgopt.WithMeasurementTimeConstant(psgopt.DefaultCombinerPoolMeasurementTimeConstant),
-		psgopt.WithHistoryRetentionPeriod(psgopt.DefaultCombinerPoolHistoryRetentionPeriod),
-		psgopt.WithMinThroughputROI(psgopt.DefaultCombinerPoolMinThroughputROI),
-		psgopt.WithGrowthFactors(
-			psgopt.DefaultCombinerPoolAggressiveGrowthFactor,
-			psgopt.DefaultCombinerPoolConservativeGrowthFactor,
-		),
+		psgopt.WithMaxConcurrency(-1), // unlimited by default
 		psgopt.WithIdleTimeout(psgopt.DefaultCombinerPoolIdleTimeout),
 	)
 
@@ -177,69 +162,64 @@ func (cp *CombinerPool) goroutine() {
 		close(doneCh)
 	}()
 
-	// Create the dedicated outbox for this combiner goroutine to emit gathers to the job
-	worker.emitOutbox = OutboxFor(worker.OutboxMap(), &j.gatherQueue)
+	trace.Logf(ctx, traceRegion, "cpWorker=%p, combinerMap=%p",
+		worker, &worker.activeCombiners)
 
-	trace.Logf(ctx, traceRegion, "cpWorker=%p, combinerMap=%p, emitOutbox=%p",
-		worker, &worker.activeCombiners, worker.emitOutbox)
-
-	// This executes after the deferred call to cp.state.GoroutineExited() so
-	// that cp.state.LiveGoroutineCount() will have been updated before this
-	// deferred function executes and a new spare goroutine is elected.
-	defer func() {
-		if worker.idleTimer != nil {
-			timerp.Put(worker.idleTimer)
-			// If the idle timer is set, we are the spare goroutine
-			cp.spareElected.Store(false)
-		}
-	}()
+	worker.idleTimer = timerp.Get()
+	defer timerp.Put(worker.idleTimer)
 
 	cp.state.GoroutineStarted()
-	defer cp.state.GoroutineExited()
 
 	addWorkFn := worker.AddWork
 
-	for {
-		if worker.idleTimer == nil {
-			if cp.spareElected.CompareAndSwap(false, true) {
-				worker.idleTimer = timerp.Get()
-				worker.idleFollowupFn = worker.idleFollowup // avoid reallocation of closure
-
-				abandonedCombiners := cp.abandonedCombiners
-				cp.abandonedCombiners = nil
-				if abandonedCombiners != nil {
-					worker.activeCombiners.Merge(abandonedCombiners)
-					worker.activeCombiners.FlushExcess(ctx, worker.emitOutbox, cp.state.LiveGoroutineCount())
-				}
+	mergeAbandonedCombiners := func() {
+		for {
+			abandonedCombiners, _ := cp.abandonedCombiners.TryPopFront()
+			if abandonedCombiners == nil {
+				break
+			}
+			worker.activeCombiners.Merge(abandonedCombiners)
+			worker.activeCombiners.FlushExcess(ctx, worker.Sender(), cp.state.LiveGoroutineCount())
+			if worker.nextJobFlushCh == nil {
+				// Make sure the job won't terminate before the combiner is flushed
+				worker.nextJobFlushCh, worker.unregisterAsJobFlusher = worker.cp.job.state.RegisterFlusher()
 			}
 		}
+	}
+
+	confirmEndOfWork := false
+	for {
+		confirmingEndOfWork := confirmEndOfWork
+		confirmEndOfWork = false
+
+		mergeAbandonedCombiners()
 
 		err := cp.workQueue.ExecuteOne(ctx, addWorkFn)
 		switch {
 		case err == nil:
 		case errors.Is(err, workq.ErrEndOfWork):
-			// End of work for this (spare) goroutine
-			if worker.idleTimer == nil {
-				panic("end of work received for non-spare goroutine")
-			}
-			if cp.state.LiveGoroutineCount() > 1 {
-				trace.Logf(ctx, traceRegion, "spare goroutine exiting")
-				// Stash active combiners for the next spare goroutine to pick up.
-				if cp.abandonedCombiners != nil {
-					panic("abandonedCombiners was not nil at end of spare goroutine")
+			if confirmingEndOfWork {
+				trace.Logf(ctx, traceRegion, "last goroutine at end of work, flushing combiners")
+				if !worker.flushAll(ctx) {
+					if cp.state.GoroutineExiting() {
+						trace.Logf(ctx, traceRegion, "last goroutine exiting")
+					} else {
+						trace.Logf(ctx, traceRegion, "no-longer-last goroutine exiting")
+					}
+					return
 				}
-				cp.abandonedCombiners = worker.activeCombiners
-				worker.activeCombiners = nil
+			}
+			if cp.state.GoroutineExiting() {
+				// Keep running a bit longer to confirm that there's nothing more to do
+				cp.state.GoroutineRestarted()
+				confirmEndOfWork = cp.inFlight.IsZero()
+			} else {
+				trace.Logf(ctx, traceRegion, "goroutine exiting")
+				// Stash active combiners for the next spare goroutine to pick up.
+				cp.abandonedCombiners.PushBack(worker.activeCombiners)
 				if worker.nextJobFlushCh != nil {
 					worker.nextJobFlushCh = nil
 					worker.unregisterAsJobFlusher()
-				}
-				return
-			} else {
-				trace.Logf(ctx, traceRegion, "last goroutine at end of work, flushing combiners")
-				if !worker.flushAll(ctx) {
-					trace.Logf(ctx, traceRegion, "last goroutine exiting")
-					return
 				}
 				return
 			}
@@ -269,22 +249,28 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	if w.pool.state.MaybeSpawnGoroutine() {
-		w.pool.spawnNewGoroutine()
-	}
-
 	posted, err := func() (bool, error) {
 		// Discover outbox from execution environment
 		ctx, meta := w.pool.job.ctxMeta(ctx)
 
-		outbox := OutboxFor(meta.OutboxMap(), &w.pool.combineQueue)
-
 		spawnWaiters := &w.pool.state.SpawnNotifier().Waiters
-		var spawnWaiter *rdvq.Waiter
+
+		maybeSpawn := func() {
+			if w.pool.state.ShouldSpawnGoroutine() {
+				w.pool.spawnNewGoroutine()
+			}
+		}
+
+		waiting := func() {
+			// Call Waiting on the nested combineWork to notify the governor
+			w.work.Waiting(&w.pool.governor)
+
+			maybeSpawn()
+		}
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.pool.combineQueue.TryPushBack(outbox, w.work)
+			return w.pool.combineQueue.TryPushBack(meta.Sender(), w.work, maybeSpawn)
 		}
 
 		for {
@@ -298,7 +284,7 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 
 			if !meta.ShouldBlock() {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(outbox.Listeners())
+				ex.AddToListeners(w.pool.combineQueue.ListenersFor(meta.Sender()))
 				// AddToListeners to be notified when spawning conditions change
 				ex.AddToListeners(&w.pool.state.SpawnNotifier().Listeners)
 
@@ -306,16 +292,10 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 				// and expect to be called again if needed
 				posted := tryPost()
 				if !posted {
-					// Call Waiting on the nested combineWork to notify the governor
-					w.work.Waiting(&w.pool.governor)
+					waiting()
 				}
 				trace.Logf(ctx, traceRegion, "meta.QueueFunc() != nil, posted=%v", posted)
 				return posted, nil
-			}
-
-			// Use blocking post
-			if spawnWaiter == nil {
-				spawnWaiter = meta.WaiterFor(spawnWaiters)
 			}
 
 			posted := true
@@ -323,38 +303,36 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 			shouldWait := func() bool {
 				return !tryPost()
 			}
-			spawnWaiters.WaitFunc(spawnWaiter, shouldWait, func(waiter *rdvq.Waiter) {
-				if waiter != spawnWaiter {
-					panic("waiter does not match spawnWaiter")
-				}
-				w.pool.combineQueue.PushBackFunc(outbox, w.work, func(outbox *rdvq.Outbox[workq.Work]) {
+			// Can ignore the returned renotifyFn since it will always be nil
+			spawnWaiters.WaitFunc(meta.Waiter(), shouldWait, func(spawnWaitInbox *rdvq.WaitInbox) {
+
+				w.pool.combineQueue.PushBackFunc(meta.Sender(), w.work, maybeSpawn, func(outbox *rdvq.Outbox[workq.Work]) {
 					// Slow path, posting no longer implicit
 					posted = false
 
-					// Call Waiting on the nested combineWork to notify the governor
-					w.work.Waiting(&w.pool.governor)
-
-					// Slow path, really going to block now
+					// Really going to block now
 					ex.Blocking()
 
-					// Check if we should spawn another goroutine
-					if w.pool.state.ShouldSpawnGoroutine() {
-						w.pool.spawnNewGoroutine()
-					}
+					waiting()
 
 					outboxCh := outbox.Ch()
-					spawnWaitCh := spawnWaiter.Ch()
+					spawnWaitCh := spawnWaitInbox.Ch()
 					trace.Logf(ctx, traceRegion,
-						"entering select: outbox=%p, outboxCh=%p, spawnWaiter=%p, spawnWaitCh=%p",
-						outbox, outboxCh, spawnWaiter, spawnWaitCh)
+						"entering select: outbox=%p, outboxCh=%p, spawnWaitInbox=%p, spawnWaitCh=%p",
+						outbox, outboxCh, spawnWaitInbox, spawnWaitCh)
 					select {
 					case outboxCh <- w.work:
 						outbox.Filled()
 						posted = true
 						trace.Logf(ctx, traceRegion, "delivered value into outbox=%p, outboxCh=%p", outbox, outboxCh)
-					case renotifyFn := <-spawnWaitCh:
-						spawnWaiter.Notified(renotifyFn)
-						trace.Logf(ctx, traceRegion, "received signal from spawnWaiter=%p, spawnWaitCh=%p", spawnWaiter, spawnWaitCh)
+					case <-spawnWaitCh:
+						// Didn't need to capture the renotifyFn because we always check ShouldSpawnGoroutine
+						spawnWaitInbox.Emptied()
+						trace.Logf(ctx, traceRegion,
+							"received signal from spawnWaitInbox=%p, spawnWaitCh=%p", spawnWaitInbox, spawnWaitCh)
+						if w.pool.state.ShouldSpawnGoroutine() {
+							w.pool.spawnNewGoroutine()
+						}
 					case <-ctx.Done():
 						trace.Logf(ctx, traceRegion, "received context done signal")
 						err = ctx.Err()
@@ -371,6 +349,16 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 	if posted {
 		ex.Starting() // Signal success only if we actually posted
 		w.work = nil  // Clear the work reference since it's now owned by the queue
+
+		// Now that the work is in the queue, make sure there's a goroutine to
+		// pick it up
+		trace.Logf(ctx, traceRegion, "calling ShouldSpawnFirstGoroutine")
+		if w.pool.state.ShouldSpawnFirstGoroutine() {
+			trace.Logf(ctx, traceRegion, "spawning first goroutine")
+			w.pool.spawnNewGoroutine()
+		} else {
+			trace.Logf(ctx, traceRegion, "no need to spawn first goroutine")
+		}
 	}
 	return err
 }

@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRequired_BasicFunctionality(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_BasicFunctionality(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
@@ -33,13 +33,13 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Start producer that will push 3 values
-	outbox := rdvq.NewOutbox[int]()
-	defer outbox.Free() // Free after all values are consumed
+	var sender rdvq.Sender
+	defer sender.Reset() // Free after all values are consumed
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 1; i <= 3; i++ {
-			_ = q.PushBack(ctx, outbox, i)
+			_ = q.PushBack(ctx, &sender, i, nil)
 			values <- i
 		}
 		close(values)
@@ -56,7 +56,7 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 
 	// Consume remaining values with PopFront
 	// Note: PopFront may process multiple values due to timing
-	var receiver rdvq.Receiver[int]
+	var receiver rdvq.Receiver
 	var received []int
 	for len(received) < 2 {
 		err := q.PopFront(ctx, &receiver, func(value int) {
@@ -82,8 +82,8 @@ func TestRequired_BasicFunctionality(t *testing.T) {
 	assert.Equal(t, 0, value) // zero value
 }
 
-func TestRequired_ContextCancellation(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_ContextCancellation(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 
 	// Test receiver cancellation
@@ -92,7 +92,7 @@ func TestRequired_ContextCancellation(t *testing.T) {
 	// Start a receiver that will block
 	done := make(chan struct{})
 	go func() {
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 		err := q.PopFront(ctx, &receiver, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
@@ -114,15 +114,15 @@ func TestRequired_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestRequired_ReceiverThenSender(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_ReceiverThenSender(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
 	// Start receiver first
 	received := make(chan int)
 	go func() {
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 		err := q.PopFront(ctx, &receiver, func(value int) {
 			received <- value
 		})
@@ -137,9 +137,9 @@ func TestRequired_ReceiverThenSender(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		outbox := rdvq.NewOutbox[int]()
-		defer outbox.Free()
-		err := q.PushBack(ctx, outbox, 42)
+		var sender rdvq.Sender
+		defer sender.Reset()
+		err := q.PushBack(ctx, &sender, 42, nil)
 		assert.NoError(t, err)
 	}()
 	defer wg.Wait()
@@ -153,15 +153,15 @@ func TestRequired_ReceiverThenSender(t *testing.T) {
 	}
 }
 
-func TestRequired_AbandonedReceivers(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_AbandonedReceivers(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 
 	// Create multiple receivers that abandon their channels
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
-			var receiver rdvq.Receiver[int]
+			var receiver rdvq.Receiver
 			// This will block and then abandon
 			err := q.PopFront(ctx, &receiver, func(value int) {
 				t.Error("Should not receive value when cancelled")
@@ -181,14 +181,14 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		outbox := rdvq.NewOutbox[int]()
-		defer outbox.Free()
-		err := q.PushBack(ctx, outbox, 99)
+		var sender rdvq.Sender
+		defer sender.Reset()
+		err := q.PushBack(ctx, &sender, 99, nil)
 		assert.NoError(t, err)
 	}()
 
 	// New receiver should get the value
-	var receiver rdvq.Receiver[int]
+	var receiver rdvq.Receiver
 	var received []int
 	err := q.PopFront(ctx, &receiver, func(value int) {
 		received = append(received, value)
@@ -199,8 +199,8 @@ func TestRequired_AbandonedReceivers(t *testing.T) {
 	wg.Wait()
 }
 
-func TestRequired_Concurrency(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_Concurrency(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
@@ -234,7 +234,7 @@ func TestRequired_Concurrency(t *testing.T) {
 			defer readerWg.Done()
 			<-startCh
 
-			var receiver rdvq.Receiver[int]
+			var receiver rdvq.Receiver
 			for {
 				err := q.PopFront(readerCtx, &receiver, func(val int) {
 					receivedValueMap[val].Add(1)
@@ -256,12 +256,12 @@ func TestRequired_Concurrency(t *testing.T) {
 			defer writerWg.Done()
 			<-startCh
 
-			outbox := rdvq.NewOutbox[int]()
-			defer outbox.Free()
+			var sender rdvq.Sender
+			defer sender.Reset()
 			rangeStart := writerID * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
-				if err := q.PushBack(ctx, outbox, v); err == nil {
+				if err := q.PushBack(ctx, &sender, v, nil); err == nil {
 					totalPushed.Add(1)
 				}
 			}
@@ -301,16 +301,15 @@ func TestRequired_Concurrency(t *testing.T) {
 	assert.Equal(t, 0, value) // zero value for int
 }
 
-func TestRequired_Stress(t *testing.T) {
-	traceRegion := "TestRequired_Stress"
+func TestQueue_Stress(t *testing.T) {
+	traceRegion := "TestQueue_Stress"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	var q rdvq.Required[int]
+	var q rdvq.Queue[int]
 	q.Init()
 
 	numPushers := runtime.GOMAXPROCS(-1)
 	numPoppers := runtime.GOMAXPROCS(-1)
-	numExcessPoppers := min(3, runtime.GOMAXPROCS(-1))
 	duration := 10 * time.Second
 
 	if testing.Short() {
@@ -328,29 +327,28 @@ func TestRequired_Stress(t *testing.T) {
 		pushCanceled atomic.Int64
 		popped       atomic.Int64
 		tryPopped    atomic.Int64
-		excess       atomic.Int64
 		abandoned    atomic.Int64
 	)
 
 	pushErrCh := make(chan error, 1)
 	popErrCh := make(chan error, 1)
 
-	pushOps := []func(context.Context, *rdvq.Outbox[int]){
-		func(ctx context.Context, outbox *rdvq.Outbox[int]) {
+	pushOps := []func(context.Context, *rdvq.Sender){
+		func(ctx context.Context, sender *rdvq.Sender) {
 			// Trying pusher
 			tryPushed.Add(1)
 			value := values.Add(1)
-			if q.TryPushBack(outbox, int(value)) {
+			if q.TryPushBack(sender, int(value), nil) {
 				trace.Logf(ctx, traceRegion, "TryPushBack value=%d", value)
 			} else {
 				pushRefused.Add(1)
 			}
 		},
-		func(ctx context.Context, outbox *rdvq.Outbox[int]) {
+		func(ctx context.Context, sender *rdvq.Sender) {
 			// Normal pusher
 			pushed.Add(1)
 			value := values.Add(1)
-			err := q.PushBack(ctx, outbox, int(value))
+			err := q.PushBack(ctx, sender, int(value), nil)
 			switch {
 			case err == nil:
 				trace.Logf(ctx, traceRegion, "PushBack value=%d", value)
@@ -365,8 +363,8 @@ func TestRequired_Stress(t *testing.T) {
 		},
 	}
 
-	popOps := []func(context.Context, *rdvq.Receiver[int]){
-		func(ctx context.Context, receiver *rdvq.Receiver[int]) {
+	popOps := []func(context.Context, *rdvq.Receiver){
+		func(ctx context.Context, receiver *rdvq.Receiver) {
 			// Normal popper
 			err := q.PopFront(ctx, receiver, func(value int) {
 				trace.Logf(ctx, traceRegion, "PopFront value=%d", value)
@@ -382,14 +380,14 @@ func TestRequired_Stress(t *testing.T) {
 				}
 			}
 		},
-		func(ctx context.Context, receiver *rdvq.Receiver[int]) {
+		func(ctx context.Context, receiver *rdvq.Receiver) {
 			// Trying popper
 			if value, ok := q.TryPopFront(); ok {
 				trace.Logf(ctx, traceRegion, "TryPopFront value=%d", value)
 				tryPopped.Add(1)
 			}
 		},
-		func(ctx context.Context, receiver *rdvq.Receiver[int]) {
+		func(ctx context.Context, receiver *rdvq.Receiver) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
 			err := q.PopFront(shortCtx, receiver, func(value int) {
@@ -422,39 +420,10 @@ func TestRequired_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			var receiver rdvq.Receiver[int]
+			var receiver rdvq.Receiver
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
 				popOps[rand.IntN(len(popOps))](ctx, &receiver)
-			}
-		}()
-	}
-
-	// Start separate excess poppers, as they would otherwise block and slow
-	// down the other poppers
-	for range numExcessPoppers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			// Create a new context to reduce contention
-			ctx, cancel := context.WithCancel(ctx)
-			defer cancel()
-
-			var waiter rdvq.Waiter
-			for ctx.Err() == nil {
-				value, err := q.PopFrontExcess(ctx, &waiter)
-				switch {
-				case err == nil:
-					trace.Logf(ctx, traceRegion, "PopFrontExcess value=%d", value)
-					excess.Add(1)
-				case errors.Is(err, context.Canceled) && ctx.Err() != nil:
-				default:
-					select {
-					case popErrCh <- err:
-					default:
-					}
-				}
 			}
 		}()
 	}
@@ -468,11 +437,11 @@ func TestRequired_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			outbox := rdvq.NewOutbox[int]()
-			defer outbox.Free()
+			var sender rdvq.Sender
+			defer sender.Reset()
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
-				pushOps[rand.IntN(len(pushOps))](ctx, outbox)
+				pushOps[rand.IntN(len(pushOps))](ctx, &sender)
 			}
 		}()
 	}
@@ -494,8 +463,8 @@ func TestRequired_Stress(t *testing.T) {
 	}
 
 	//nolint:lll // doesn't make sense to break up more
-	t.Logf("Pushed: %d, TryPushed: %d, PushRefused: %d, PushCanceled: %d, Popped: %d, TryPopped: %d, Excess: %d, Abandoned: %d, Remaining: %d",
-		pushed.Load(), tryPushed.Load(), pushRefused.Load(), pushCanceled.Load(), popped.Load(), tryPopped.Load(), excess.Load(), abandoned.Load(), remaining)
+	t.Logf("Pushed: %d, TryPushed: %d, PushRefused: %d, PushCanceled: %d, Popped: %d, TryPopped: %d, Abandoned: %d, Remaining: %d",
+		pushed.Load(), tryPushed.Load(), pushRefused.Load(), pushCanceled.Load(), popped.Load(), tryPopped.Load(), abandoned.Load(), remaining)
 
 	// Error but context not cancelled - unexpected
 	select {
@@ -511,27 +480,27 @@ func TestRequired_Stress(t *testing.T) {
 	}
 
 	actuallyPushed := pushed.Load() + tryPushed.Load() - pushRefused.Load() - pushCanceled.Load()
-	actuallyPopped := popped.Load() + tryPopped.Load() + excess.Load() + remaining
+	actuallyPopped := popped.Load() + tryPopped.Load() + remaining
 	assert.Equal(t, actuallyPushed, actuallyPopped)
 }
 
-func TestRequired_TryPushBack(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_TryPushBack(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
 	// TryPushBack should succeed when outbox is empty
-	outbox := rdvq.NewOutbox[int]()
-	defer outbox.Free()
-	success := q.TryPushBack(outbox, 42)
+	var sender rdvq.Sender
+	defer sender.Reset()
+	success := q.TryPushBack(&sender, 42, nil)
 	assert.True(t, success, "TryPushBack should succeed with empty outbox")
-	success = q.TryPushBack(outbox, 24)
+	success = q.TryPushBack(&sender, 24, nil)
 	assert.False(t, success, "TryPushBack should fail with full outbox and no waiting receivers")
 
 	// Start a receiver
 	received := make(chan int)
 	go func() {
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 		err := q.PopFront(ctx, &receiver, func(value int) {
 			received <- value
 		})
@@ -542,7 +511,7 @@ func TestRequired_TryPushBack(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// TryPushBack should succeed now
-	success = q.TryPushBack(outbox, 42)
+	success = q.TryPushBack(&sender, 42, nil)
 	assert.True(t, success, "TryPushBack should succeed with waiting receiver")
 
 	// Verify the value was received
@@ -554,15 +523,15 @@ func TestRequired_TryPushBack(t *testing.T) {
 	}
 }
 
-func TestRequired_ThreeTierDelivery(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_ThreeTierDelivery(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
 	// Test Tier 1: Direct delivery to waiting receiver
 	received := make(chan int, 1)
 	go func() {
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 		err := q.PopFront(ctx, &receiver, func(value int) {
 			received <- value
 		})
@@ -572,9 +541,9 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	// Give receiver time to register
 	time.Sleep(10 * time.Millisecond)
 
-	outbox := rdvq.NewOutbox[int]()
-	defer outbox.Free()
-	err := q.PushBack(ctx, outbox, 100)
+	var sender rdvq.Sender
+	defer sender.Reset()
+	err := q.PushBack(ctx, &sender, 100, nil)
 	assert.NoError(t, err)
 
 	// Should receive immediately via direct delivery
@@ -586,7 +555,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	}
 
 	// Test Tier 2: Outbox buffering when no receivers waiting
-	err = q.PushBack(ctx, outbox, 200)
+	err = q.PushBack(ctx, &sender, 200, nil)
 	assert.NoError(t, err)
 
 	// Test Tier 3: Shared channel when outbox is full
@@ -594,7 +563,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	go func() {
 		defer close(done)
 		// This should block on shared channel since outbox is full
-		err := q.PushBack(ctx, outbox, 300)
+		err := q.PushBack(ctx, &sender, 300, nil)
 		assert.NoError(t, err)
 	}()
 
@@ -604,7 +573,7 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	// Start receiver to unblock the sender - need two PopFront calls:
 	// one for the outboxed item (200) and one for the shared channel item (300)
 	go func() {
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 
 		// First PopFront should get the outboxed item
 		err := q.PopFront(ctx, &receiver, func(value int) {
@@ -643,8 +612,8 @@ func TestRequired_ThreeTierDelivery(t *testing.T) {
 	}
 }
 
-func TestRequired_OutboxNotification(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_OutboxNotification(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
@@ -653,7 +622,7 @@ func TestRequired_OutboxNotification(t *testing.T) {
 	receiverStarted := make(chan struct{})
 	go func() {
 		close(receiverStarted)
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 		err := q.PopFront(ctx, &receiver, func(value int) {
 			received <- value
 		})
@@ -665,9 +634,9 @@ func TestRequired_OutboxNotification(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Send item to outbox - this should notify the waiting receiver
-	outbox := rdvq.NewOutbox[int]()
-	defer outbox.Free()
-	err := q.PushBack(ctx, outbox, 42)
+	var sender rdvq.Sender
+	defer sender.Reset()
+	err := q.PushBack(ctx, &sender, 42, nil)
 	assert.NoError(t, err)
 
 	// Receiver should be notified and drain the outbox
@@ -679,8 +648,8 @@ func TestRequired_OutboxNotification(t *testing.T) {
 	}
 }
 
-func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_MultipleSendersWithSeparateOutboxes(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 	ctx := context.Background()
 
@@ -692,7 +661,7 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 
 	// Start receiver
 	go func() {
-		var receiver rdvq.Receiver[int]
+		var receiver rdvq.Receiver
 		for i := 0; i < numSenders*itemsPerSender; i++ {
 			err := q.PopFront(ctx, &receiver, func(value int) {
 				received <- value
@@ -707,11 +676,11 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			outbox := rdvq.NewOutbox[int]()
-			defer outbox.Free()
+			var sender rdvq.Sender
+			defer sender.Reset()
 			for i := 0; i < itemsPerSender; i++ {
 				value := id*1000 + i // Unique value per sender
-				err := q.PushBack(ctx, outbox, value)
+				err := q.PushBack(ctx, &sender, value, nil)
 				assert.NoError(t, err)
 			}
 		}(senderID)
@@ -740,8 +709,8 @@ func TestRequired_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 	}
 }
 
-func TestRequired_TryPopFrontWithOutboxes(t *testing.T) {
-	var q rdvq.Required[int]
+func TestQueue_TryPopFrontWithOutboxes(t *testing.T) {
+	var q rdvq.Queue[int]
 	q.Init()
 
 	// TryPopFront should return immediately when no work available
@@ -750,9 +719,9 @@ func TestRequired_TryPopFrontWithOutboxes(t *testing.T) {
 	assert.Equal(t, 0, value) // zero value for int
 
 	// Add item to outbox
-	outbox := rdvq.NewOutbox[int]()
-	defer outbox.Free()
-	success := q.TryPushBack(outbox, 42)
+	var sender rdvq.Sender
+	defer sender.Reset()
+	success := q.TryPushBack(&sender, 42, nil)
 	assert.True(t, success) // Should go to outbox
 
 	// TryPopFront should immediately drain the outbox

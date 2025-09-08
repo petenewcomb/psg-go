@@ -3,6 +3,9 @@
 
 package rdvq
 
+// Inbox provides per-receiver buffering for direct handoff from senders.
+// Each Inbox is dedicated to a specific Receiver receiving items from
+// a specific Queue.
 type Inbox[T any] struct {
 	ch         chan T
 	wasEmptied bool
@@ -26,11 +29,8 @@ func (ib *Inbox[T]) emptyPending() {
 	ib.wasEmptied = false
 }
 
+// Emptied marks the inbox as having been successfully emptied of a value.
+// This must be called by the receiver after successfully receiving from the inbox channel.
 func (ib *Inbox[T]) Emptied() {
 	ib.wasEmptied = true
-}
-
-// WasFilled returns true if Filled() was called.
-func (ib *Inbox[T]) WasEmptied() bool {
-	return ib.wasEmptied
 }

@@ -14,7 +14,7 @@ func BenchmarkQueue(b *testing.B) {
 	b.Run("PushPop", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			q.PushBack(i)
-			if _, ok := q.PopFront(); !ok {
+			if _, ok := q.TryPopFront(); !ok {
 				b.Fatal("PopFront failed")
 			}
 		}

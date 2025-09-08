@@ -11,27 +11,18 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 )
 
-// A NotifyFunc is used to deliver a notification to a subscriber that is
-// waiting for it. If unable to deliver the notification to such a subscriber,
-// it must arrange for the given RenotifyFunc to be called. This may happen
-// synchronously or asynchronously, though synchronous is preferred for
-// efficiency. For maximal efficiency, especially with respect to stack depth, a
-// NotifyFunc that synchronously determines that it is unable to deliver the
-// notification to a suitable subscriber should return false instead of calling
-// the RenotifyFunc. This signals the caller that it should find another
-// subscriber or call the RenotifyFunc itself. In all other cases, the
-// NotifyFunc must return true and synchronously or asynchronously find another
-// subscriber or else call the RenotifyFunc.
-type NotifyFunc func(RenotifyFunc) bool
-
-type RenotifyFunc = func()
-
+// NoopRenotify is a no-op RenotifyFunc that can be used when no re-notification
+// action is needed. It serves as a placeholder in notification systems.
 func NoopRenotify() {}
 
+// Listeners manages a queue of notification functions waiting to be signaled.
+// It provides a subscription mechanism for goroutines to register for notifications
+// when work becomes available.
 type Listeners struct {
 	q nbcq.Queue[NotifyFunc]
 }
 
+// Init initializes the Listeners for use. Must be called before any other operations.
 func (c *Listeners) Init() {
 	traceRegion := "rdvq.Listeners.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -52,6 +43,10 @@ func (c *Listeners) add(notifyFn NotifyFunc) {
 	c.q.PushBack(notifyFn)
 }
 
+// Notify attempts to signal one waiting listener.
+// Returns true if a listener was successfully notified, false if no listeners were available.
+// The renotifyFn will be passed to the listener's NotifyFunc.
+//
 //nolint:contextcheck // background context used only for tracing
 func (c *Listeners) Notify(renotifyFn RenotifyFunc) bool {
 	traceRegion := "rdvq.Listeners.notify"
@@ -59,7 +54,7 @@ func (c *Listeners) Notify(renotifyFn RenotifyFunc) bool {
 	trace.Logf(context.Background(), traceRegion, "Listeners=%p", c)
 
 	for {
-		notifyFn, ok := c.q.PopFront()
+		notifyFn, ok := c.q.TryPopFront()
 		if !ok {
 			return false
 		}
@@ -70,6 +65,9 @@ func (c *Listeners) Notify(renotifyFn RenotifyFunc) bool {
 	}
 }
 
+// NotifyAll signals all waiting listeners.
+// This is typically used during shutdown or when conditions change globally.
+//
 //nolint:contextcheck // background context used only for tracing
 func (c *Listeners) NotifyAll() {
 	traceRegion := "rdvq.Listeners.NotifyAll"
@@ -77,7 +75,7 @@ func (c *Listeners) NotifyAll() {
 	trace.Logf(context.Background(), traceRegion, "Listeners=%p", c)
 
 	for {
-		notifyFn, ok := c.q.PopFront()
+		notifyFn, ok := c.q.TryPopFront()
 		if !ok {
 			break
 		}
@@ -85,8 +83,10 @@ func (c *Listeners) NotifyAll() {
 	}
 }
 
+// Reset prepares the Listeners for reuse.
+// Panics if called when there are still pending listeners.
 func (c *Listeners) Reset() {
-	if _, ok := c.q.PopFront(); ok {
+	if _, ok := c.q.TryPopFront(); ok {
 		panic("resetting non-empty Listeners")
 	}
 }

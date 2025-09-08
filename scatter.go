@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
@@ -25,7 +26,7 @@ type TaskPoolOrJob interface {
 }
 
 type boundTask interface {
-	Execute(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerOutboxMap *outboxMap)
+	Execute(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerSender *rdvq.Sender)
 	Free()
 }
 
@@ -74,7 +75,7 @@ func (pt *gatherTask[T]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
-	taskWorkerOutboxMap *outboxMap,
+	taskWorkerSender *rdvq.Sender,
 ) {
 	traceRegion := "gatherTask.execute"
 	defer trace.StartRegion(ctx, traceRegion).End()

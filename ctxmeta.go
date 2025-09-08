@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/workq"
@@ -146,38 +147,23 @@ type executionEnvironment interface {
 	PopQueueFunc()
 	ExecuteNowOrQueue(context.Context, workq.Execution, workq.Work) error
 
-	Receiver() *workq.Receiver
-	OutboxMap() *outboxMap
-	WaiterFor(waiters *workq.Waiters) *workq.Waiter
+	Receiver() *rdvq.Receiver
+	Sender() *rdvq.Sender
+	Waiter() *rdvq.Waiter
 }
 
 type baseExEnv struct {
-	outboxMap outboxMap
-	waiterMap map[*workq.Waiters]*workq.Waiter
+	sender rdvq.Sender
+	waiter rdvq.Waiter
 }
 
-func (ee *baseExEnv) OutboxMap() *outboxMap {
-	return &ee.outboxMap
+func (ee *baseExEnv) Sender() *rdvq.Sender {
+	return &ee.sender
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (ee *baseExEnv) WaiterFor(waiters *workq.Waiters) *workq.Waiter {
-	traceRegion := "baseExEnv.WaiterFor"
-	if waiters == nil {
-		return nil
-	}
-	waiter := ee.waiterMap[waiters]
-	if waiter == nil {
-		if ee.waiterMap == nil {
-			ee.waiterMap = make(map[*workq.Waiters]*workq.Waiter)
-		}
-		waiter = &workq.Waiter{}
-		ee.waiterMap[waiters] = waiter
-	}
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "baseExEnv=%p, waiter=%p", ee, waiter)
-	}
-	return waiter
+func (ee *baseExEnv) Waiter() *rdvq.Waiter {
+	return &ee.waiter
 }
 
 type taskExEnv struct {
@@ -228,7 +214,7 @@ func (ee *taskExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, 
 	return nil
 }
 
-func (ee *taskExEnv) Receiver() *workq.Receiver {
+func (ee *taskExEnv) Receiver() *rdvq.Receiver {
 	panic("Receiver not supported in task context")
 }
 
@@ -236,7 +222,7 @@ type integrationExEnv struct {
 	baseExEnv
 	groupStack   []workq.GroupID
 	queueFnStack []workq.QueueWorkFunc
-	receiver     workq.Receiver
+	receiver     rdvq.Receiver
 }
 
 func (ee *integrationExEnv) Group() workq.GroupID {
@@ -278,7 +264,7 @@ func (ee *integrationExEnv) PopQueueFunc() {
 	ee.queueFnStack = ee.queueFnStack[:len(ee.queueFnStack)-1]
 }
 
-func (ee *integrationExEnv) Receiver() *workq.Receiver {
+func (ee *integrationExEnv) Receiver() *rdvq.Receiver {
 	return &ee.receiver
 }
 

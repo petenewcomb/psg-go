@@ -7,11 +7,11 @@ import (
 	"context"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/heap"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/workq"
 )
 
 type activeCombinerMap struct {
@@ -82,6 +82,7 @@ func (cm *activeCombinerMap) Remove(c combinerFlusher) {
 	}
 }
 
+//nolint:contextcheck // background context used only for tracing
 func (cm *activeCombinerMap) Merge(other *activeCombinerMap) {
 	traceRegion := "activeCombinerMap.Merge"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -115,7 +116,7 @@ func (cm *activeCombinerMap) Merge(other *activeCombinerMap) {
 	}
 }
 
-func (cm *activeCombinerMap) FlushExcess(ctx context.Context, emitOutbox *workq.Outbox, maxRetentionCount int) {
+func (cm *activeCombinerMap) FlushExcess(ctx context.Context, sender *rdvq.Sender, maxRetentionCount int) {
 	traceRegion := "activeCombinerMap.FlushExcess"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	if trace.IsEnabled() {
@@ -131,7 +132,7 @@ func (cm *activeCombinerMap) FlushExcess(ctx context.Context, emitOutbox *workq.
 		if c.InstanceCount() > maxRetentionCount {
 			delete(cm.m, id)
 			flushDeadlineEntryPool.Put(e)
-			c.Flush(ctx, emitOutbox)
+			c.Flush(ctx, sender)
 		}
 	}
 
@@ -141,12 +142,12 @@ func (cm *activeCombinerMap) FlushExcess(ctx context.Context, emitOutbox *workq.
 		if c.InstanceCount() > maxRetentionCount {
 			delete(cm.m, id)
 			flushDeadlineEntryPool.Put(e)
-			c.Flush(ctx, emitOutbox)
+			c.Flush(ctx, sender)
 		}
 	}
 }
 
-func (cm *activeCombinerMap) FlushAll(ctx context.Context, emitOutbox *workq.Outbox) {
+func (cm *activeCombinerMap) FlushAll(ctx context.Context, sender *rdvq.Sender) {
 	traceRegion := "activeCombinerMap.FlushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	if trace.IsEnabled() {
@@ -159,7 +160,7 @@ func (cm *activeCombinerMap) FlushAll(ctx context.Context, emitOutbox *workq.Out
 		}
 		c := e.c
 		flushDeadlineEntryPool.Put(e)
-		c.Flush(ctx, emitOutbox)
+		c.Flush(ctx, sender)
 	}
 	clear(cm.m)
 }
@@ -171,7 +172,7 @@ type combinerFlusher interface {
 	Unref()
 
 	// Flush is assumed to also Unref()
-	Flush(ctx context.Context, emitOutbox *workq.Outbox)
+	Flush(ctx context.Context, sender *rdvq.Sender)
 }
 
 type flushDeadlineEntry struct {

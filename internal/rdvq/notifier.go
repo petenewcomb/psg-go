@@ -18,6 +18,9 @@ type Notifier struct {
 	Waiters
 }
 
+// Init initializes the Notifier's embedded Listeners and Waiters.
+// Must be called before any other operations.
+//
 //nolint:contextcheck // background context used only for tracing
 func (n *Notifier) Init() {
 	traceRegion := "rdvq.Notifier.Init"
@@ -29,6 +32,10 @@ func (n *Notifier) Init() {
 	n.Waiters.Init()
 }
 
+// Notify attempts to signal a listener or waiter. It prioritizes listeners
+// over waiters since listeners typically represent in-process work.
+// Returns true if a notification was successfully delivered, false otherwise.
+//
 //nolint:contextcheck // background context used only for tracing
 func (n *Notifier) Notify(renotifyFn RenotifyFunc) bool {
 	traceRegion := "rdvq.Notifier.Notify"
@@ -49,6 +56,9 @@ func (n *Notifier) Notify(renotifyFn RenotifyFunc) bool {
 	return n.Waiters.Notify(renotifyFn)
 }
 
+// NotifyAll signals all listeners and waiters.
+// This is typically used during shutdown or when conditions change globally.
+//
 //nolint:contextcheck // background context used only for tracing
 func (n *Notifier) NotifyAll() {
 	traceRegion := "rdvq.Notifier.NotifyAll"

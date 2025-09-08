@@ -48,13 +48,13 @@ func main() {
 	printGatherOnlyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printBestStaticCombinerConcurrencyComparison(baseline, current)
+	printBestLimitedCombinerConcurrencyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printDynamicCombinerConcurrencyComparison(baseline, current)
+	printUnlimitedCombinerConcurrencyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printBestStaticVsDynamicCombinerConcurrencyComparison(current)
+	printBestLimitedVsUnlimitedCombinerConcurrencyComparison(current)
 	fmt.Println()
 }
 
@@ -233,10 +233,10 @@ func (d *BenchData) ComputeStats() {
 	d.P99Latency.ComputeStats()
 }
 
-func findBestStaticLimit(configData map[int]*BenchData) *BenchData {
+func findBestLimitedLimit(configData map[int]*BenchData) *BenchData {
 	var best *BenchData
 
-	// Find lowest p99 latency static combiner limit
+	// Find lowest p99 latency limited combiner limit
 	for limit, data := range configData {
 		if limit <= 0 {
 			continue
@@ -354,10 +354,10 @@ func printGatherOnlyComparison(baseline, current map[Config]map[int]*BenchData) 
 	t.Render()
 }
 
-func printBestStaticCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
+func printBestLimitedCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Best Static Combiner Concurrency Benchmark Comparison")
+	t.SetTitle("Best Limited Combiner Concurrency Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
@@ -378,7 +378,7 @@ func printBestStaticCombinerConcurrencyComparison(baseline, current map[Config]m
 
 	setTableHeaders(t, h)
 
-	configs, pairs := collectPairs(baseline, current, findBestStaticLimit)
+	configs, pairs := collectPairs(baseline, current, findBestLimitedLimit)
 
 	var lastRatio float64
 	for i, config := range configs {
@@ -406,10 +406,10 @@ func printBestStaticCombinerConcurrencyComparison(baseline, current map[Config]m
 	t.Render()
 }
 
-func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
+func printUnlimitedCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Dynamic Combiner Concurrency Benchmark Comparison")
+	t.SetTitle("Unlimited Combiner Concurrency Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
@@ -443,10 +443,10 @@ func printDynamicCombinerConcurrencyComparison(baseline, current map[Config]map[
 	t.Render()
 }
 
-func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]map[int]*BenchData) {
+func printBestLimitedVsUnlimitedCombinerConcurrencyComparison(current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Best Static Vs. Dynamic Combiner Concurrency")
+	t.SetTitle("Best Limited Vs. Unlimited Combiner Concurrency")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
@@ -455,7 +455,7 @@ func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]ma
 
 	setTableHeaders(t, h)
 
-	configs, pairs := collectPairs(current, current, findBestStaticLimit)
+	configs, pairs := collectPairs(current, current, findBestLimitedLimit)
 
 	var lastRatio float64
 	for i, config := range configs {
@@ -466,12 +466,12 @@ func printBestStaticVsDynamicCombinerConcurrencyComparison(current map[Config]ma
 		}
 		lastRatio = currentRatio
 
-		bestStatic := pairs[config][0]
-		dynamic := current[config][-1]
+		bestLimited := pairs[config][0]
+		unlimited := current[config][-1]
 
 		// Build row
 		row := table.Row{config}
-		row = appendPerformanceChanges(row, config, bestStatic, dynamic, nil)
+		row = appendPerformanceChanges(row, config, bestLimited, unlimited, nil)
 		t.AppendRow(row)
 	}
 
@@ -627,7 +627,7 @@ func formatThroughputVsIdeal(config Config, throughput *Measurement) []any {
 }
 
 func formatLatencyVsIdeal(config Config, latency *Measurement) []any {
-	ideal := (2*config.Duration + config.FlushPeriod).Seconds()
+	ideal := (1*time.Millisecond + 2*config.Duration + config.FlushPeriod).Seconds()
 	delta := latency.Summary.Center / ideal
 	ind := neutralIndicator
 	if computeRelativeDifference(ideal, latency.Summary.Lo) >= (1 - confidence) {

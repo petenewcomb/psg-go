@@ -4,27 +4,21 @@
 package cpstate
 
 import (
-	"fmt"
+	"context"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/psg-go/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/ema"
 	"github.com/petenewcomb/psg-go/internal/opts"
-	"github.com/petenewcomb/psg-go/internal/ttrk"
 )
-
-var epoch = time.Now()
-
-// cpDebug enables detailed combiner pool state reporting.
-const cpDebug = false
 
 type CombinerPoolState struct {
 	// High-frequency atomic counters updated lock-free from multiple goroutines
 	cumulativeCompletedCount atomic.Int64 // monotonic
-	timeOrigin               atomic.Int64 // time.Duration since epoch
 
 	// Mutex protects complex state analysis and scaling decisions
 	mu sync.Mutex
@@ -32,26 +26,11 @@ type CombinerPoolState struct {
 	spawnNotifier rdvq.Notifier
 
 	// Configuration
-	idleTimeout     atomic.Int64 // time.Duration
-	tau             ema.Tau
-	retentionPeriod atomic.Int64 // time.Duration
+	maxConcurrency atomic.Int32 // -1 means unlimited
+	idleTimeout    atomic.Int64 // time.Duration
 
-	completedCountOrigin int64
-	spareWait            ttrk.TimeTracker
-	spareWaitOrigin      time.Duration
-
-	throughput ema.EMA // count/time.Duration
-	spareUtil  ema.EMA // spare goroutine utilization (0-1)
-
-	// Size controller for intelligent scaling decisions
-	controller controller
-
-	targetGoroutineCount           int
-	spawnedGoroutineCount          atomic.Int32
-	liveGoroutineCount             int
-	latestGoroutineCountChangeTime time.Time
-
-	waitChan chan struct{}
+	spawnedGoroutineCount atomic.Int32
+	liveGoroutineCount    int
 }
 
 func (cps *CombinerPoolState) Init() {
@@ -64,12 +43,12 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 
+	oldMaxConcurrency := int(cps.maxConcurrency.Load())
+
 	// Create a copy of the current configuration
 	newConfig := Config{
-		controllerConfig:        cps.controller.config,
-		IdleTimeout:             time.Duration(cps.idleTimeout.Load()),
-		MeasurementTimeConstant: time.Duration(cps.tau),
-		RetentionPeriod:         time.Duration(cps.retentionPeriod.Load()),
+		MaxConcurrency: oldMaxConcurrency,
+		IdleTimeout:    time.Duration(cps.idleTimeout.Load()),
 	}
 
 	// Apply changes to the copy
@@ -78,16 +57,14 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	// Validate the new configuration (panics if invalid)
 	newConfig.validate()
 
-	// Apply the validated configuration to the actual state
-	cps.controller.SetConfig(newConfig.controllerConfig)
-	cps.idleTimeout.Store(int64(newConfig.IdleTimeout))
-	cps.tau = ema.Tau(newConfig.MeasurementTimeConstant)
-	cps.retentionPeriod.Store(int64(newConfig.RetentionPeriod))
+	newConfig.MaxConcurrency = min(newConfig.MaxConcurrency, int(math.MaxInt32))
 
-	// Ask controller if the target should change given new limits
-	newTarget := cps.controller.RecommendTarget()
-	if newTarget != cps.targetGoroutineCount {
-		cps.targetGoroutineCount = newTarget
+	// Apply the validated configuration to the actual state
+	cps.maxConcurrency.Store(int32(newConfig.MaxConcurrency)) //nolint:gosec // bounded by MaxInt32 above
+	cps.idleTimeout.Store(int64(newConfig.IdleTimeout))
+
+	if newConfig.MaxConcurrency != oldMaxConcurrency &&
+		(newConfig.MaxConcurrency == -1 || newConfig.MaxConcurrency > oldMaxConcurrency) {
 		cps.spawnNotifier.Notify(nil)
 	}
 }
@@ -100,115 +77,52 @@ func (cps *CombinerPoolState) IncrementCompleted() {
 	cps.cumulativeCompletedCount.Add(1)
 }
 
-func (cps *CombinerPoolState) SpareWaitStarted(startTime time.Time) {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.spareWait.Started(startTime)
-	if cps.spareWait.StartedCount != 1 {
-		panic("SpareWaitStarted called when already started")
+//nolint:contextcheck // background context used only for tracing
+func (cps *CombinerPoolState) ShouldSpawnFirstGoroutine() bool {
+	traceRegion := "CombinerPoolState.ShouldSpawnFirstGoroutine"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	for {
+		newCount := cps.spawnedGoroutineCount.Add(1)
+		trace.Logf(context.Background(), traceRegion, "CombinerPoolState=%p, newCount=%d", cps, newCount)
+		if newCount == 1 {
+			trace.Logf(context.Background(), traceRegion, "returning true")
+			return true
+		}
+		restoredCount := cps.spawnedGoroutineCount.Add(-1)
+		if restoredCount < 0 {
+			panic("restoredCount < 0")
+		}
+		trace.Logf(context.Background(), traceRegion, "restoredCount=%d", restoredCount)
+		if restoredCount > 0 {
+			trace.Logf(context.Background(), traceRegion, "returning false")
+			return false
+		}
 	}
-}
-
-func (cps *CombinerPoolState) SpareWaitEnded(startTime time.Time) {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-	cps.spareWait.Ended(startTime, epoch.Add(time.Duration(cps.timeOrigin.Load())))
-}
-
-func (cps *CombinerPoolState) MaybeSpawnGoroutine() bool {
-	if cps.spawnedGoroutineCount.Load() == 0 {
-		return cps.ShouldSpawnGoroutine()
-	}
-	lastUpdate := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	nyquistRate := time.Duration(cps.retentionPeriod.Load()) / 2 //nolint:mnd // by definition
-	if time.Since(lastUpdate) > min(time.Duration(cps.tau), nyquistRate) {
-		return cps.ShouldSpawnGoroutine()
-	}
-	return false
-}
-
-// Returns true if the caller should start a new combiner goroutine.
-func (cps *CombinerPoolState) ShouldSpawnGoroutine() bool {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-
-	if cps.timeOrigin.Load() == 0 {
-		cps.timeOrigin.Store(int64(time.Since(epoch)))
-		cps.targetGoroutineCount = cps.controller.RecommendTarget()
-		cps.waitChan = make(chan struct{}, 1)
-	}
-
-	// Spawn immediately if we haven't yet reached target, and don't make
-	// matters worse if we're above target.
-	spawnedCount := int(cps.spawnedGoroutineCount.Load())
-	switch {
-	case spawnedCount < cps.targetGoroutineCount:
-		cps.spawnedGoroutineCount.Add(1)
-		return true
-	case spawnedCount > cps.targetGoroutineCount:
-		return false
-	}
-
-	if !cps.updateStats() {
-		// Stats for this configuration are not yet stable
-		return false
-	}
-
-	cps.targetGoroutineCount = cps.controller.RecommendTarget()
-
-	if int(cps.spawnedGoroutineCount.Load()) < cps.targetGoroutineCount {
-		cps.spawnedGoroutineCount.Add(1)
-		cps.report("spawning")
-		return true
-	}
-
-	return false
-}
-
-func (cps *CombinerPoolState) ShouldExitGoroutine() bool {
-	cps.mu.Lock()
-	defer cps.mu.Unlock()
-
-	// Exit immediately if we haven't reduced to target yet, and don't make
-	// matters worse if we're below target.
-	spawnedCount := int(cps.spawnedGoroutineCount.Load())
-	switch {
-	case spawnedCount > cps.targetGoroutineCount:
-		return true
-	case spawnedCount < cps.targetGoroutineCount:
-		return false
-	}
-
-	if !cps.updateStats() {
-		// Stats for this configuration not yet stable
-		return false
-	}
-
-	cps.targetGoroutineCount = cps.controller.RecommendTarget()
-
-	if int(cps.spawnedGoroutineCount.Load()) > cps.targetGoroutineCount {
-		cps.report("exiting")
-		return true
-	}
-	return false
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (cps *CombinerPoolState) report(msg string) {
-	if !cpDebug {
-		return
+func (cps *CombinerPoolState) ShouldSpawnGoroutine() bool {
+	traceRegion := "CombinerPoolState.ShouldSpawnGoroutine"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	for {
+		newCount := cps.spawnedGoroutineCount.Add(1)
+		maxConcurrency := cps.maxConcurrency.Load()
+		trace.Logf(context.Background(), traceRegion,
+			"CombinerPoolState=%p, newCount=%d, maxConcurrency=%d", cps, newCount, maxConcurrency)
+		if maxConcurrency == -1 || newCount <= maxConcurrency {
+			trace.Logf(context.Background(), traceRegion, "returning true")
+			return true
+		}
+		restoredCount := cps.spawnedGoroutineCount.Add(-1)
+		trace.Logf(context.Background(), traceRegion, "restoredCount=%d", restoredCount)
+		if restoredCount < 0 {
+			panic("restoredCount < 0")
+		}
+		if restoredCount >= maxConcurrency {
+			trace.Logf(context.Background(), traceRegion, "returning false")
+			return false
+		}
 	}
-	fmt.Printf(
-		"%s: goroutines: %d->%d->%d throughput: %.1f/s (%.1f/s each) util: %.1f%% controller: %v\n",
-		msg,
-		cps.spawnedGoroutineCount.Load(),
-		cps.liveGoroutineCount,
-		cps.targetGoroutineCount,
-		cps.throughput.Get()*float64(time.Second),
-		cps.throughput.Get()*float64(time.Second)/float64(cps.liveGoroutineCount),
-		cps.spareUtil.Get()*100, //nolint:mnd // by definition
-		&cps.controller,
-	)
 }
 
 func (cps *CombinerPoolState) LiveGoroutineCount() int {
@@ -218,94 +132,45 @@ func (cps *CombinerPoolState) LiveGoroutineCount() int {
 }
 
 func (cps *CombinerPoolState) GoroutineStarted() {
+	traceRegion := "CombinerPoolState.GoroutineStarted"
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
-	if cps.liveGoroutineCount > 0 {
-		cps.updateStats()
-	}
 	cps.liveGoroutineCount++
 
-	cps.latestGoroutineCountChangeTime = time.Now()
-	if cps.liveGoroutineCount == cps.targetGoroutineCount {
-		cps.report("started")
-	}
-	cps.spawnNotifier.Notify(nil)
+	trace.Logf(context.Background(), traceRegion,
+		"CombinerPoolState=%p, spawnedCount=%d, liveCount=%d",
+		cps, cps.spawnedGoroutineCount.Load(), cps.liveGoroutineCount)
 }
 
-func (cps *CombinerPoolState) GoroutineExited() {
+func (cps *CombinerPoolState) GoroutineRestarted() {
+	traceRegion := "CombinerPoolState.GoroutineStarted"
+	cps.mu.Lock()
+	defer cps.mu.Unlock()
+	cps.liveGoroutineCount++
+	spawnedCount := cps.spawnedGoroutineCount.Add(1)
+	trace.Logf(context.Background(), traceRegion,
+		"CombinerPoolState=%p, spawnedCount=%d, liveCount=%d", cps, spawnedCount, cps.liveGoroutineCount)
+}
+
+func (cps *CombinerPoolState) GoroutineExiting() bool {
+	traceRegion := "CombinerPoolState.GoroutineExiting"
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	if cps.liveGoroutineCount <= 0 {
 		panic("underflow")
 	}
-	cps.updateStats()
 	cps.liveGoroutineCount--
 
 	// Always decrement spawned count when a goroutine actually exits
 	// This ensures the atomic counter stays in sync with reality
-	cps.spawnedGoroutineCount.Add(-1)
-
-	if cps.liveGoroutineCount == 0 {
-		cps.controller.Reset()
-		cps.throughput.Set(0)
-		cps.spareUtil.Set(0)
+	spawnedCount := cps.spawnedGoroutineCount.Add(-1)
+	trace.Logf(context.Background(), traceRegion,
+		"CombinerPoolState=%p, spawnedCount=%d, liveCount=%d", cps, spawnedCount, cps.liveGoroutineCount)
+	if spawnedCount < 0 {
+		panic("spawnedCount < 0")
 	}
 
-	cps.latestGoroutineCountChangeTime = time.Now()
-	if cps.liveGoroutineCount == cps.targetGoroutineCount {
-		cps.report("exited")
-	}
-	cps.spawnNotifier.Notify(nil)
-}
-
-func (cps *CombinerPoolState) updateStats() bool {
-	// No meaningful stats to update with zero goroutines
-	if cps.liveGoroutineCount == 0 {
-		return false
-	}
-
-	// Capture raw datapoints
-	now := time.Now()
-	curCompletedCount := cps.cumulativeCompletedCount.Load()
-
-	// Calculate deltas, reset origins, and update EMAs
-	timeOrigin := epoch.Add(time.Duration(cps.timeOrigin.Load()))
-	elapsedTime := now.Sub(timeOrigin)
-	cps.timeOrigin.Store(int64(now.Sub(epoch)))
-
-	alpha := cps.tau.Alpha(elapsedTime)
-
-	completedCount := curCompletedCount - cps.completedCountOrigin
-	cps.completedCountOrigin = curCompletedCount
-	cps.throughput.Update(alpha, float64(completedCount)/float64(elapsedTime))
-
-	cps.spareWait.Update(now, timeOrigin)
-	spareWait := cps.spareWait.CumulativeDuration - cps.spareWaitOrigin
-	cps.spareWaitOrigin = cps.spareWait.CumulativeDuration
-	if spareWait > elapsedTime {
-		panic(fmt.Sprintf("spareWait %d greater than elapsed time %d!", spareWait, elapsedTime))
-	}
-	// Calculate spare utilization: fraction of time spare goroutine was working
-	spareUtilization := 1.0 - float64(spareWait)/float64(elapsedTime)
-	cps.spareUtil.Update(alpha, spareUtilization)
-
-	if time.Since(cps.latestGoroutineCountChangeTime) < 3*time.Duration(cps.tau) {
-		return false
-	}
-
-	// Update size controller with latest sample
-	cps.controller.AddSample(time.Duration(cps.retentionPeriod.Load()), perfSample{
-		Time:           timeOrigin,
-		GoroutineCount: cps.liveGoroutineCount,
-		Throughput:     cps.throughput.Get(),
-		SpareUtil:      cps.spareUtil.Get(),
-	})
-
-	if cpDebug && now.Sub(epoch)/time.Second != timeOrigin.Sub(epoch)/time.Second {
-		cps.report("updated")
-	}
-
-	return true
+	return cps.liveGoroutineCount == 0
 }
 
 func (cps *CombinerPoolState) SpawnNotifier() *rdvq.Notifier {

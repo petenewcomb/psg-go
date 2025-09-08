@@ -11,14 +11,31 @@
 // overflow scenarios. It provides functionality similar to buffered channels
 // but with unbounded capacity and multi-tier performance optimizations.
 //
-// # Architecture
+// The system uses different consumer selection strategies:
+// - Queue uses LIFO (stack) for worker selection, enabling natural timeout-based scaling
+// - Waiters uses FIFO (queue) for notification fairness
+// Items are always delivered in FIFO order; only consumer selection varies.
 //
-// The package implements a layered architecture:
+// # Primary Types
 //
-//	Optional[T]  - Base layer: direct sender-receiver rendezvous
-//	Required[T]  - Extended layer: adds outboxes with per-sender backpressure
-//	Waiters      - Notification system: prevents race conditions in overflow handling
-//	Outbox[T]    - Per-sender buffer: provides "drop-and-go" semantics
+// The package provides these main coordination primitives:
+//
+//	Queue[T]     - Rendezvous queue with overflow handling and backpressure
+//	Waiters      - Rendezvous-based notification coordination for waiting goroutines
+//	Listeners    - Queue of notification functions waiting to be signaled
+//	Notifier     - Combines Listeners and Waiters for prioritized notification routing
+//
+// Supporting types for queue operations:
+//
+//	Outbox[T]    - Per-sender buffer for overflow handling
+//	Inbox[T]     - Per-receiver message buffer
+//	Sender       - Manages outboxes across multiple queues for a single goroutine
+//	Waiter       - Coordination primitive for blocking/notification
+//	Receiver     - Combines Inbox and Waiter for queue operations
+//	Listener     - Reusable notification subscription for multiple Listeners
+//
+// Note: Sender and Waiter instances are typically managed per-goroutine,
+// with each goroutine maintaining its own instances for the queues it interacts with.
 //
 // # Performance Tiers
 //
@@ -32,30 +49,18 @@
 // providing excellent performance under bursty load patterns while maintaining
 // per-sender backpressure when receivers can't keep up.
 //
-// # SelectResult API Pattern
-//
-// The package uses a consistent SelectResult enumeration for all select operations,
-// providing clear indication of what happened in each select statement:
-//
-//	SelectAborted       - Operation was cancelled/interrupted
-//	SelectInboxEmptied  - Inbox channel was successfully read from
-//	SelectOutboxFilled  - Outbox channel was successfully written to
-//	SelectWaitSignaled  - Wait channel was signaled
-//
-// This pattern replaces inconsistent boolean returns and makes select operation
-// outcomes explicit and type-safe.
-//
 // # Typical Usage
 //
-//	var queue Required[MyType]
+//	var queue Queue[MyType]
 //	queue.Init()
 //
 //	// Sender side
-//	var outbox Outbox[MyType]
-//	err := queue.PushBack(ctx, &outbox, value)
+//	var sender Sender
+//	err := queue.PushBack(ctx, &sender, value, nil)
 //
 //	// Receiver side
-//	err := queue.PopFront(ctx, func(value MyType) {
+//	var receiver Receiver
+//	err := queue.PopFront(ctx, &receiver, func(value MyType) {
 //		// Process value
 //	})
 //
@@ -67,9 +72,31 @@
 // outbox items after registration but before blocking, ensuring no items are
 // missed.
 //
-// # Thread Safety
+// # Thread Safety and Ownership
 //
 // All operations are thread-safe and lock-free. Multiple senders and receivers
 // can operate concurrently without external synchronization. The implementation
 // uses atomic operations and careful memory ordering to ensure correctness.
+//
+// However, certain types have ownership requirements for correct usage:
+//
+//	Sender instances must be dedicated to a single goroutine. Each Sender
+//	manages outboxes across multiple Queue instances for that goroutine.
+//	Sharing a Sender between goroutines will cause data races.
+//
+//	Receiver instances must be dedicated to a single goroutine. Each Receiver
+//	manages inboxes across multiple Queue instances for that goroutine.
+//	Sharing a Receiver between goroutines will cause data races.
+//
+//	Waiter instances must be dedicated to a single goroutine. Each Waiter
+//	manages wait state across multiple Waiters instances for that goroutine.
+//	Sharing a Waiter between goroutines will cause data races.
+//
+//	Listener instances are typically owned by a single entity but use internal
+//	synchronization because their notify method can be called concurrently
+//	from multiple goroutines when subscribed Listeners fire notifications.
+//
+// These ownership requirements ensure optimal performance and correctness.
+// The Queue and Waiters instances themselves can be safely shared across
+// multiple goroutines.
 package rdvq

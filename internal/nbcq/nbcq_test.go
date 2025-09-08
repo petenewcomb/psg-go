@@ -24,7 +24,7 @@ func TestQueueBasicFunctionality(t *testing.T) {
 	q.Init()
 
 	// Test empty queue
-	_, ok := q.PopFront()
+	_, ok := q.TryPopFront()
 	assert.False(t, ok)
 
 	// Test adding and removing elements
@@ -32,19 +32,19 @@ func TestQueueBasicFunctionality(t *testing.T) {
 	q.PushBack(2)
 	q.PushBack(3)
 
-	val, ok := q.PopFront()
+	val, ok := q.TryPopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 1, val)
 
-	val, ok = q.PopFront()
+	val, ok = q.TryPopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 2, val)
 
-	val, ok = q.PopFront()
+	val, ok = q.TryPopFront()
 	assert.True(t, ok)
 	assert.Equal(t, 3, val)
 
-	_, ok = q.PopFront()
+	_, ok = q.TryPopFront()
 	assert.False(t, ok)
 }
 
@@ -75,7 +75,7 @@ func TestQueueWithRapid(t *testing.T) {
 		checkQM := func(q *nbcq.Queue[int], m *[]int) {
 			// If model is empty, verify queue behaves as empty
 			if len(*m) == 0 {
-				_, ok := q.PopFront()
+				_, ok := q.TryPopFront()
 				assert.False(t, ok, "PopFront should fail on empty queue")
 			}
 		}
@@ -111,7 +111,7 @@ func TestQueueWithRapid(t *testing.T) {
 				*m = (*m)[1:]
 
 				// Get actual value from queue
-				val, ok := q.PopFront()
+				val, ok := q.TryPopFront()
 
 				// Verify the operation succeeded
 				assert.True(t, ok, "PopFront failed on non-empty queue")
@@ -221,7 +221,7 @@ func TestQueueConcurrency(t *testing.T) {
 			data.startTime = time.Now()
 
 			pop := func(q *nbcq.Queue[int]) bool {
-				v, ok := q.PopFront()
+				v, ok := q.TryPopFront()
 				if !ok {
 					return false
 				}
@@ -379,11 +379,11 @@ func TestQueueConcurrency(t *testing.T) {
 
 	for i := range activeQueues {
 		q := activeQueues[i].Load()
-		_, ok := q.PopFront()
+		_, ok := q.TryPopFront()
 		chk.False(ok)
 	}
 	for _, q := range oldQueues {
-		_, ok := q.PopFront()
+		_, ok := q.TryPopFront()
 		chk.False(ok)
 	}
 

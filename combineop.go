@@ -33,22 +33,17 @@ import (
 // to goroutines or stored in structures without losing their binding to the
 // underlying combiner pool and operation identity.
 type CombineOp[I, O any] struct {
-	id              combineOpID
-	gatherOp        GatherOp[O]
-	pool            *CombinerPool
-	combinerFactory psgfn.CombinerFactory[I, O]
-
-	innerPool *omnipool.Pool[combineOp[I, O]]
-	inner     *combineOp[I, O]
+	handleID combineOpHandleID
+	inner    *combineOp[I, O]
 }
 
 // NewCombineOp creates a new CombineOp operation that uses the specified gather function,
 // combiner pool, and combiner factory.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewCombineOp[I, O any](
+func NewCombineOp[I any, O any](
 	gatherOp GatherOp[O],
-	pool *CombinerPool,
+	combinerPool *CombinerPool,
 	combinerFactory psgfn.CombinerFactory[I, O],
 ) CombineOp[I, O] {
 	traceRegion := "NewCombineOp"
@@ -57,24 +52,61 @@ func NewCombineOp[I, O any](
 	if gatherOp.gatherFn == nil {
 		panic("gatherOp is uninitialized")
 	}
-	if pool == nil {
-		panic("combiner pool must be non-nil")
+	if combinerPool == nil {
+		panic("combinerPool must be non-nil")
 	}
 	if combinerFactory == nil {
-		panic("combiner factory must be non-nil")
+		panic("combinerFactory must be non-nil")
 	}
-	c := CombineOp[I, O]{
-		id:              combineOpID(combineOpCounter.Add(1)),
-		gatherOp:        gatherOp,
-		pool:            pool,
-		combinerFactory: combinerFactory,
+
+	innerPool := omnipool.For[combineOp[I, O]]()
+	id := combineOpID(combineOpCounter.Add(1))
+	var inner *combineOp[I, O]
+	for {
+		inner = innerPool.Get()
+		inner.mu.Lock()
+		if inner.id == 0 {
+			break
+		}
+		inner.mu.Unlock()
 	}
+
+	defer inner.mu.Unlock()
+
+	inner.id = id
+
+	// Register first handle
+	handleID := combineOpHandleID(combineOpHandleCounter.Add(1))
+	inner.handleIDs[handleID] = struct{}{}
+
+	if inner.refCount != 0 {
+		panic("unexpected nonzero inner.refCount")
+	}
+	if inner.gatherOp.gatherFn != nil {
+		panic("unexpected non-nil inner.gatherOp.gatherFn")
+	}
+	if inner.combinerPool != nil {
+		panic("unexpected non-nil inner.combinerPool")
+	}
+	if inner.combinerFactory != nil {
+		panic("unexpected non-nil inner.combinerFactory")
+	}
+	if inner.instanceCount.Load() != 0 {
+		panic("unexpected nonzero inner.instanceCount")
+	}
+
+	inner.refCount = 1
+	inner.gatherOp = gatherOp
+	inner.combinerPool = combinerPool
+	inner.combinerFactory = combinerFactory
+	inner.innerPool = innerPool
 
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "CombineOp#%d, pool=%p", c.id, pool)
+		trace.Logf(context.Background(), traceRegion, "CombineOp#%d, handleID=%d, combineOp=%p, pool=%p",
+			id, handleID, inner, combinerPool)
 	}
 
-	return c
+	return CombineOp[I, O]{handleID: handleID, inner: inner}
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
@@ -92,7 +124,7 @@ func (c *CombineOp[I, O]) Scatter(
 	traceRegion := "CombineOp.Scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -120,7 +152,7 @@ func (c *CombineOp[I, O]) TryScatter(
 	traceRegion := "CombineOp.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -149,18 +181,18 @@ func (c *CombineOp[I, O]) Integrate(
 ) error {
 	traceRegion := "CombineOp.Integrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
 
-	ctx, meta := c.pool.job.ctxMeta(ctx)
+	inner := c.refInner()
+	defer inner.unref(0)
+
+	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
-
-	inner := c.refInner()
-	defer inner.unref()
 
 	return inner.integrate(ctx, meta, group, value, err)
 }
@@ -175,18 +207,18 @@ func (c *CombineOp[I, O]) TryIntegrate(
 ) (bool, error) {
 	traceRegion := "CombineOp.TryIntegrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.id)
+	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
 
-	ctx, meta := c.pool.job.ctxMeta(ctx)
+	inner := c.refInner()
+	defer inner.unref(0)
+
+	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
 	if group == workq.InvalidGroupID {
 		group = workq.NewGroupID()
 	}
-
-	inner := c.refInner()
-	defer inner.unref()
 
 	return inner.tryIntegrate(ctx, meta, group, value, err, deadline)
 }
@@ -199,82 +231,90 @@ func (c *CombineOp[I, O]) newScatterWork(
 ) *combineScatterWork {
 	traceRegion := "CombineOp.newScatterWork"
 
+	inner := c.refInner()
+	defer inner.unref(0)
+
 	j := target.getJob()
-	if j != c.pool.job {
+	if j != inner.combinerPool.job {
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	inner := c.refInner()
-	defer inner.unref()
-
 	w := combineScatterWorkPool.Get()
-	w.Init(group, c.pool, deadline, target, inner.newTask(group, taskFn))
+	w.Init(group, inner.combinerPool, deadline, target, inner.newTask(group, taskFn))
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion,
 			"CombineOp#%d created %v, inner=%p, instanceQueue=%p",
-			c.id, w, inner, &inner.instanceQueue)
+			inner.id, w, inner, &inner.instanceQueue)
 	}
 	return w
 }
 
+// Dup creates a duplicate handle to the same underlying CombineOp.
+// Like file descriptor duplication, this creates a new handle that shares
+// the same underlying combiner state but requires its own Close() call.
+// This is useful for passing CombineOp handles to different goroutines
+// or async operations that need their own lifecycle management.
+func (c *CombineOp[I, O]) Dup() CombineOp[I, O] {
+	c.inner.mu.Lock()
+	defer c.inner.mu.Unlock()
+
+	// Check if this handle is still valid
+	if _, ok := c.inner.handleIDs[c.handleID]; !ok {
+		panic(fmt.Sprintf("Dup() called on closed handle %d", c.handleID))
+	}
+
+	// Create new handle
+	handleID := combineOpHandleID(combineOpHandleCounter.Add(1))
+	c.inner.handleIDs[handleID] = struct{}{}
+	c.inner.refCount++
+
+	return CombineOp[I, O]{
+		handleID: handleID,
+		inner:    c.inner,
+	}
+}
+
+// Close releases this handle to the CombineOp. Each handle (including dups)
+// must be closed exactly once. The underlying combiner state is cleaned up
+// when the last handle is closed.
+func (c *CombineOp[I, O]) Close() {
+	if c.inner == nil {
+		panic("operation not initialized")
+	}
+	c.inner.unref(c.handleID)
+}
+
 func (c *CombineOp[I, O]) refInner() *combineOp[I, O] {
 	inner := c.inner
-	if inner != nil && inner.tryRefAs(c.id) {
-		return inner
+	if inner == nil {
+		panic("operation not initialized")
 	}
 
-	c.pool.combineOpMapMu.Lock()
-	innerAny := c.pool.combineOpMap[c.id]
-	c.pool.combineOpMapMu.Unlock()
-	if innerAny != nil {
-		inner = innerAny.(*combineOp[I, O])
-		if inner.tryRefAs(c.id) {
-			return inner
-		}
-	}
-
-	innerPool := c.innerPool
-	if innerPool == nil {
-		innerPool = omnipool.For[combineOp[I, O]]()
-		c.innerPool = innerPool
-	}
-
-	inner = innerPool.Get()
-	// inner might still be referenced by a different CombineOp, but the above
-	// inner.id == c.id block will ensure that it is not used again by that
-	// CombineOp because unref() below set the id to zero before putting it back
-	// in the pool.
 	inner.mu.Lock()
-	inner.id = c.id
-	inner.refCount = 1
-	inner.gatherOp = c.gatherOp
-	inner.combinerPool = c.pool
-	inner.combinerFactory = c.combinerFactory
-	inner.innerPool = innerPool
-	inner.mu.Unlock()
+	defer inner.mu.Unlock()
 
-	c.pool.combineOpMapMu.Lock()
-	innerAny = c.pool.combineOpMap[c.id]
-	if innerAny != nil {
-		existingInner := innerAny.(*combineOp[I, O])
-		if existingInner.tryRefAs(c.id) {
-			c.pool.combineOpMapMu.Unlock()
-			inner.unref()
-			return existingInner
-		}
+	// Check if all handles have been closed
+	if len(inner.handleIDs) == 0 {
+		panic("operation closed")
 	}
-	if c.pool.combineOpMap == nil {
-		c.pool.combineOpMap = make(map[combineOpID]any)
+
+	// Check if this specific handle is still valid
+	if _, ok := inner.handleIDs[c.handleID]; !ok {
+		panic(fmt.Sprintf("Handle %d already closed", c.handleID))
 	}
-	c.pool.combineOpMap[c.id] = inner
-	c.pool.combineOpMapMu.Unlock()
+
+	inner.refCount++
 	return inner
 }
 
 type combineOpID int64
 
 var combineOpCounter atomic.Int64
+
+type combineOpHandleID int64
+
+var combineOpHandleCounter atomic.Int64
 
 type combinerInstanceID int64
 
@@ -284,6 +324,9 @@ type combineOp[I, O any] struct {
 	mu       sync.Mutex
 	id       combineOpID
 	refCount int
+
+	// Handle tracking for Dup/Close
+	handleIDs map[combineOpHandleID]struct{}
 
 	gatherOp        GatherOp[O]
 	combinerPool    *CombinerPool
@@ -303,68 +346,82 @@ func (c *combineOp[I, O]) Init() {
 	c.taskPool = omnipool.For[combineTask[I, O]]()
 	c.combineWorkPool = omnipool.For[combineWork[I, O]]()
 	c.instanceQueue.Init()
+	c.handleIDs = make(map[combineOpHandleID]struct{})
 }
 
 func (c *combineOp[I, O]) Reset() {
-	if c.refCount != 0 {
-		panic("reference count is not zero")
+	// Reset logic is now handled in unref() while holding the mutex to prevent races.
+	// We keep this empty method to satisfy the Resetter interface - if we didn't,
+	// omnipool would zero the entire struct including the mutex, which would be bad.
+}
+
+func (c *combineOp[I, O]) ref() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refCount <= 0 {
+		panic("expected existing references")
 	}
+	c.refCount++
+}
+
+// unref closes the handle if non-zero and always decrements the reference
+// count. If this was the last reference, it also clears fields and returns to
+// pool.
+func (c *combineOp[I, O]) unref(handleID combineOpHandleID) {
+	c.mu.Lock()
+	needUnlock := true
+	defer func() {
+		if needUnlock {
+			c.mu.Unlock()
+		}
+	}()
+
+	// If handleID is non-zero, this is a Close() call
+	if handleID != 0 {
+		// Check if this handle was already closed
+		if _, ok := c.handleIDs[handleID]; !ok {
+			panic(fmt.Sprintf("Double close or value copy close on handle %d", handleID))
+		}
+
+		// Remove this handle
+		delete(c.handleIDs, handleID)
+	}
+
+	if c.refCount <= 0 {
+		panic("reference count underflow")
+	}
+	c.refCount--
+
+	if c.refCount != 0 {
+		return
+	}
+
+	// Last reference - clean up and return to pool
+
+	// Validate cleanup invariants
 	if c.instanceCount.Load() != 0 {
 		panic("instance count is not zero")
 	}
 	if _, ok := c.instanceQueue.TryPopFront(); ok {
 		panic("instance queue was not empty")
 	}
-	c.id = 0
+
+	// Save innerPool before clearing
+	innerPool := c.innerPool
+
+	// Clear all fields while holding the mutex to prevent races
+	c.id = 0 // Must clear to mark as available for reuse (checked in NewCombineOp)
 	c.gatherOp = GatherOp[O]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
-	c.innerPool = nil
-}
+	// Keep c.innerPool - it's metadata about where to return this object
+	// Clear handle map for reuse
+	clear(c.handleIDs)
 
-func (c *combineOp[I, O]) tryRefAs(id combineOpID) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.id != id {
-		return false
-	}
-	if c.refCount <= 0 {
-		panic("expected existing references")
-	}
-	c.refCount++
-	return true
-}
-
-func (c *combineOp[I, O]) ref() {
-	c.mu.Lock()
-	if c.refCount <= 0 {
-		panic("expected existing references")
-	}
-	c.refCount++
-	c.mu.Unlock()
-}
-
-func (c *combineOp[I, O]) unref() {
-	c.mu.Lock()
-	if c.refCount <= 0 {
-		panic("reference count underflow")
-	}
-	c.refCount--
-	if c.refCount != 0 {
-		c.mu.Unlock()
-		return
-	}
-
-	id := c.id
-	combinerPool := c.combinerPool
-	c.id = 0
-	innerPool := c.innerPool
+	needUnlock = false
 	c.mu.Unlock()
 
-	combinerPool.combineOpMapMu.Lock()
-	delete(combinerPool.combineOpMap, id)
-	combinerPool.combineOpMapMu.Unlock()
-
+	// Return to pool
 	innerPool.Put(c)
 }
 
@@ -421,7 +478,7 @@ func (c *halfBoundCombiner[I, O]) free() {
 	op := c.op
 	pool.Put(c)
 	op.instanceCount.Add(-1)
-	op.unref()
+	op.unref(0)
 }
 
 func (c *halfBoundCombiner[I, O]) allocate(
@@ -656,7 +713,7 @@ func (ct *combineTask[I, O]) Execute(
 func (ct *combineTask[I, O]) Free() {
 	traceRegion := "combineTask.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	ct.op.unref() // Release reference from the task
+	ct.op.unref(0) // Release reference from the task
 	ct.pool.Put(ct)
 }
 
@@ -790,6 +847,6 @@ func (w *combineWork[I, O]) Free() {
 	w.jobWork.Close(w.op.combinerPool.job)
 
 	pool := w.op.combineWorkPool
-	w.op.unref()
+	w.op.unref(0)
 	pool.Put(w)
 }

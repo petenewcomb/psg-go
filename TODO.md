@@ -14,6 +14,7 @@ Items to complete before merging to main branch.
 ### 5. API finalization
 - Review and document thread-safety guarantees for remaining public APIs
 - Add a way to force creation of a new work group
+- Maybe remove psg prefixes from psg-go subfolders, but leave the prefixes in the package names?
 
 ### 6. Implementation improvements
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
@@ -35,6 +36,9 @@ Items to complete before merging to main branch.
 - Make sure job.governor is really necessary 
 - Add Deadline to workq.Execution and make sure that it's set and respected everywhere, especially when blocking
 - Abstract logic in *PostWork and perhaps make it extend from workq.ExecuteOrWait?
+- Pool closure passed to listeners.add() in rdvq/listener.go (line 49).  Test using `cd ~/src/psg-go && go test -v -run '^$' -bench '/waiting/10.s/10.s//4$' -benchtime 10s -count 1  -memprofile=mem.prof -memprofilerate=1`
+- Consider adding size threshold for combineOp.handleIDs map to prevent large maps from staying in pool after pathological Dup() usage
+- Consider atomic-only fast mode for CombineOp: Skip handle tracking and use atomic refcount only for high-concurrency scenarios with many Dups. Trade safety (no misuse detection) for performance (no mutex contention). Could be build tag or runtime flag controlled.
 
 ## Post-Merge Enhancements
 

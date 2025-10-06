@@ -34,9 +34,6 @@ type CombinerPool struct {
 
 	combineQueue workq.Pending
 
-	combineOpMapMu sync.Mutex
-	combineOpMap   map[combineOpID]any
-
 	abandonedCombiners nbcq.Queue[*activeCombinerMap]
 
 	// If there are tasks waiting to post work to combineQueue, the governor

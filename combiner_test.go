@@ -855,6 +855,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 							gatherOp := psg.NewGatherOp(gatherFn)
 							combineOp := psg.NewCombineOp(gatherOp, combinerPool, combinerFactory)
+							defer combineOp.Close()
 
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
@@ -862,6 +863,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								if idealCombinesPerGather == 1 {
 									// Tests to make sure that NewCombineOp does not incur allocation overhead
 									localCombineOp = psg.NewCombineOp(gatherOp, combinerPool, combinerFactory)
+									defer localCombineOp.Close()
 								}
 								if deadline.IsZero() {
 									return true, localCombineOp.Scatter(ctx, target, task)

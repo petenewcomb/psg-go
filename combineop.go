@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/leakguard"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -19,6 +20,23 @@ import (
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgfn"
 )
+
+// combineOpHandleTrait implements leakguard.DupTrait for combineOp resources.
+// It manages the lifecycle of combineOp instances through reference counting.
+type combineOpHandleTrait[I, O any] struct{}
+
+func (combineOpHandleTrait[I, O]) Close(c *combineOp[I, O]) {
+	c.unref()
+}
+
+func (combineOpHandleTrait[I, O]) Dup(c *combineOp[I, O]) (*combineOp[I, O], error) {
+	c.ref()
+	return c, nil
+}
+
+func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
+	return fmt.Sprintf("CombineOp(%p)", c)
+}
 
 // CombineOp represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
@@ -32,9 +50,14 @@ import (
 // combiner instances. This allows CombineOp values to be safely passed by value
 // to goroutines or stored in structures without losing their binding to the
 // underlying combiner pool and operation identity.
+//
+// Resource management: CombineOp uses leakguard for safe handle management.
+// Each CombineOp must be explicitly closed via Close(). Dup() creates independent
+// handles that share the same underlying state. The combineOp resource is
+// cleaned up when the last handle is closed and all internal references
+// (from tasks and work items) are released.
 type CombineOp[I, O any] struct {
-	handleID combineOpHandleID
-	inner    *combineOp[I, O]
+	h leakguard.Handle[combineOp[I, O], combineOpHandleTrait[I, O]]
 }
 
 // NewCombineOp creates a new CombineOp operation that uses the specified gather function,
@@ -60,26 +83,9 @@ func NewCombineOp[I any, O any](
 	}
 
 	innerPool := omnipool.For[combineOp[I, O]]()
-	id := combineOpID(combineOpCounter.Add(1))
-	var inner *combineOp[I, O]
-	for {
-		inner = innerPool.Get()
-		inner.mu.Lock()
-		if inner.id == 0 {
-			break
-		}
-		inner.mu.Unlock()
-	}
+	inner := innerPool.Get()
 
-	defer inner.mu.Unlock()
-
-	inner.id = id
-
-	// Register first handle
-	handleID := combineOpHandleID(combineOpHandleCounter.Add(1))
-	inner.handleIDs[handleID] = struct{}{}
-
-	if inner.refCount != 0 {
+	if inner.refCount.Load() != 0 {
 		panic("unexpected nonzero inner.refCount")
 	}
 	if inner.gatherOp.gatherFn != nil {
@@ -95,18 +101,20 @@ func NewCombineOp[I any, O any](
 		panic("unexpected nonzero inner.instanceCount")
 	}
 
-	inner.refCount = 1
+	inner.refCount.Store(1)
 	inner.gatherOp = gatherOp
 	inner.combinerPool = combinerPool
 	inner.combinerFactory = combinerFactory
 	inner.innerPool = innerPool
 
+	h := leakguard.New[combineOp[I, O], combineOpHandleTrait[I, O]](inner)
+
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "CombineOp#%d, handleID=%d, combineOp=%p, pool=%p",
-			id, handleID, inner, combinerPool)
+		trace.Logf(context.Background(), traceRegion, "CombineOp(%p), handleID=%d, pool=%p",
+			inner, h.HandleID(), combinerPool)
 	}
 
-	return CombineOp[I, O]{handleID: handleID, inner: inner}
+	return CombineOp[I, O]{h: h}
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
@@ -123,8 +131,12 @@ func (c *CombineOp[I, O]) Scatter(
 ) error {
 	traceRegion := "CombineOp.Scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
+	inner := c.h.Get()
+	if inner == nil {
+		panic("CombineOp has been closed")
+	}
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
+		trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -151,8 +163,12 @@ func (c *CombineOp[I, O]) TryScatter(
 ) (bool, error) {
 	traceRegion := "CombineOp.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
+	inner := c.h.Get()
+	if inner == nil {
+		panic("CombineOp has been closed")
+	}
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
+		trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -181,10 +197,9 @@ func (c *CombineOp[I, O]) Integrate(
 ) error {
 	traceRegion := "CombineOp.Integrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
-
 	inner := c.refInner()
-	defer inner.unref(0)
+	defer inner.unref()
+	trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
 
 	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
 	meta.Lock()
@@ -207,10 +222,9 @@ func (c *CombineOp[I, O]) TryIntegrate(
 ) (bool, error) {
 	traceRegion := "CombineOp.TryIntegrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "CombineOp#%d", c.inner.id)
-
 	inner := c.refInner()
-	defer inner.unref(0)
+	defer inner.unref()
+	trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
 
 	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
 	meta.Lock()
@@ -232,7 +246,7 @@ func (c *CombineOp[I, O]) newScatterWork(
 	traceRegion := "CombineOp.newScatterWork"
 
 	inner := c.refInner()
-	defer inner.unref(0)
+	defer inner.unref()
 
 	j := target.getJob()
 	if j != inner.combinerPool.job {
@@ -244,8 +258,8 @@ func (c *CombineOp[I, O]) newScatterWork(
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion,
-			"CombineOp#%d created %v, inner=%p, instanceQueue=%p",
-			inner.id, w, inner, &inner.instanceQueue)
+			"CombineOp(%p) created %v, instanceQueue=%p",
+			inner, w, &inner.instanceQueue)
 	}
 	return w
 }
@@ -256,77 +270,38 @@ func (c *CombineOp[I, O]) newScatterWork(
 // This is useful for passing CombineOp handles to different goroutines
 // or async operations that need their own lifecycle management.
 func (c *CombineOp[I, O]) Dup() CombineOp[I, O] {
-	c.inner.mu.Lock()
-	defer c.inner.mu.Unlock()
-
-	// Check if this handle is still valid
-	if _, ok := c.inner.handleIDs[c.handleID]; !ok {
-		panic(fmt.Sprintf("Dup() called on closed handle %d", c.handleID))
+	h, err := leakguard.Dup(c.h)
+	if err != nil {
+		panic(fmt.Sprintf("Dup() failed: %v", err))
 	}
-
-	// Create new handle
-	handleID := combineOpHandleID(combineOpHandleCounter.Add(1))
-	c.inner.handleIDs[handleID] = struct{}{}
-	c.inner.refCount++
-
-	return CombineOp[I, O]{
-		handleID: handleID,
-		inner:    c.inner,
-	}
+	return CombineOp[I, O]{h: h}
 }
 
 // Close releases this handle to the CombineOp. Each handle (including dups)
 // must be closed exactly once. The underlying combiner state is cleaned up
 // when the last handle is closed.
 func (c *CombineOp[I, O]) Close() {
-	if c.inner == nil {
-		panic("operation not initialized")
-	}
-	c.inner.unref(c.handleID)
+	c.h.Close()
 }
 
+// refInner gets the inner combineOp, checks if closed, and adds a reference.
+// Panics if the CombineOp has been closed.
+// The caller must ensure a matching unref() is called.
 func (c *CombineOp[I, O]) refInner() *combineOp[I, O] {
-	inner := c.inner
+	inner := c.h.Get()
 	if inner == nil {
-		panic("operation not initialized")
+		panic("CombineOp has been closed")
 	}
-
-	inner.mu.Lock()
-	defer inner.mu.Unlock()
-
-	// Check if all handles have been closed
-	if len(inner.handleIDs) == 0 {
-		panic("operation closed")
-	}
-
-	// Check if this specific handle is still valid
-	if _, ok := inner.handleIDs[c.handleID]; !ok {
-		panic(fmt.Sprintf("Handle %d already closed", c.handleID))
-	}
-
-	inner.refCount++
+	inner.ref()
 	return inner
 }
-
-type combineOpID int64
-
-var combineOpCounter atomic.Int64
-
-type combineOpHandleID int64
-
-var combineOpHandleCounter atomic.Int64
 
 type combinerInstanceID int64
 
 var combinerInstanceCounter atomic.Int64
 
 type combineOp[I, O any] struct {
-	mu       sync.Mutex
-	id       combineOpID
-	refCount int
-
-	// Handle tracking for Dup/Close
-	handleIDs map[combineOpHandleID]struct{}
+	refCount atomic.Int64
 
 	gatherOp        GatherOp[O]
 	combinerPool    *CombinerPool
@@ -346,57 +321,37 @@ func (c *combineOp[I, O]) Init() {
 	c.taskPool = omnipool.For[combineTask[I, O]]()
 	c.combineWorkPool = omnipool.For[combineWork[I, O]]()
 	c.instanceQueue.Init()
-	c.handleIDs = make(map[combineOpHandleID]struct{})
 }
 
 func (c *combineOp[I, O]) Reset() {
-	// Reset logic is now handled in unref() while holding the mutex to prevent races.
+	// Reset logic is now handled in unref() when refCount hits zero.
 	// We keep this empty method to satisfy the Resetter interface - if we didn't,
-	// omnipool would zero the entire struct including the mutex, which would be bad.
+	// omnipool would zero the entire struct including pool pointers set by Init().
 }
 
+// ref increments the refCount to track handle ownership and internal references.
+// It is called by leakguard when a handle is created via Dup(), and also used
+// for internal refs (tasks, work items).
 func (c *combineOp[I, O]) ref() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.refCount <= 0 {
-		panic("expected existing references")
+	newCount := c.refCount.Add(1)
+	if newCount <= 1 {
+		panic("ref() called with no existing references")
 	}
-	c.refCount++
 }
 
-// unref closes the handle if non-zero and always decrements the reference
-// count. If this was the last reference, it also clears fields and returns to
-// pool.
-func (c *combineOp[I, O]) unref(handleID combineOpHandleID) {
-	c.mu.Lock()
-	needUnlock := true
-	defer func() {
-		if needUnlock {
-			c.mu.Unlock()
-		}
-	}()
-
-	// If handleID is non-zero, this is a Close() call
-	if handleID != 0 {
-		// Check if this handle was already closed
-		if _, ok := c.handleIDs[handleID]; !ok {
-			panic(fmt.Sprintf("Double close or value copy close on handle %d", handleID))
-		}
-
-		// Remove this handle
-		delete(c.handleIDs, handleID)
-	}
-
-	if c.refCount <= 0 {
+// unref is called by leakguard when a handle is closed.
+// It decrements refCount and cleans up if this was the last reference.
+func (c *combineOp[I, O]) unref() {
+	newCount := c.refCount.Add(-1)
+	if newCount < 0 {
 		panic("reference count underflow")
 	}
-	c.refCount--
 
-	if c.refCount != 0 {
+	if newCount != 0 {
 		return
 	}
 
-	// Last reference - clean up and return to pool
+	// Last reference - we now have exclusive access, no mutex needed
 
 	// Validate cleanup invariants
 	if c.instanceCount.Load() != 0 {
@@ -409,17 +364,11 @@ func (c *combineOp[I, O]) unref(handleID combineOpHandleID) {
 	// Save innerPool before clearing
 	innerPool := c.innerPool
 
-	// Clear all fields while holding the mutex to prevent races
-	c.id = 0 // Must clear to mark as available for reuse (checked in NewCombineOp)
+	// Clear all fields
 	c.gatherOp = GatherOp[O]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
 	// Keep c.innerPool - it's metadata about where to return this object
-	// Clear handle map for reuse
-	clear(c.handleIDs)
-
-	needUnlock = false
-	c.mu.Unlock()
 
 	// Return to pool
 	innerPool.Put(c)
@@ -478,7 +427,7 @@ func (c *halfBoundCombiner[I, O]) free() {
 	op := c.op
 	pool.Put(c)
 	op.instanceCount.Add(-1)
-	op.unref(0)
+	op.unref()
 }
 
 func (c *halfBoundCombiner[I, O]) allocate(
@@ -503,7 +452,7 @@ func (c *halfBoundCombiner[I, O]) allocate(
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp#%d returning new combiner=%v", c.op.id, c.combiner)
+		trace.Logf(ctx, traceRegion, "CombineOp(%p) returning new combiner=%v", c.op, c.combiner)
 	}
 }
 
@@ -713,7 +662,7 @@ func (ct *combineTask[I, O]) Execute(
 func (ct *combineTask[I, O]) Free() {
 	traceRegion := "combineTask.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	ct.op.unref(0) // Release reference from the task
+	ct.op.unref() // Release reference from the task
 	ct.pool.Put(ct)
 }
 
@@ -847,6 +796,6 @@ func (w *combineWork[I, O]) Free() {
 	w.jobWork.Close(w.op.combinerPool.job)
 
 	pool := w.op.combineWorkPool
-	w.op.unref(0)
+	w.op.unref()
 	pool.Put(w)
 }

@@ -66,6 +66,7 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - consider adding environment variable-based configuration of PSG default tuning parameters 
 
 ### Additional Tests and Examples
+- Investigate and fix workflow cancellation test flakiness in psgwf (observed timing-dependent failures in example tests)
 - Make sure that combiner pools scale down to zero
 - Test automatic flushing behavior based on timeout settings somewhere other than just benchmarks
 - Test TaskPool.SetOptions and CombinerPool.SetOptions functionality, especially dynamic pool resizing

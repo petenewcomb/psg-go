@@ -1,6 +1,6 @@
 module github.com/petenewcomb/psg-go/internal/cmd/benchcmp
 
-go 1.24
+go 1.25
 
 require (
 	github.com/jedib0t/go-pretty/v6 v6.6.7

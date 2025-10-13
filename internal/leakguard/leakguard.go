@@ -101,9 +101,43 @@ var (
 	logLevel     = slog.LevelWarn
 )
 
-// formatLeakMessage formats a leak message with optional stack trace.
-// This is the default formatting used by LogLeak and PanicLeak.
-func formatLeakMessage(id HandleID, resource string, pcs []uintptr) string {
+// LogLeak logs leak messages using the default slog logger with structured fields.
+// The log level can be configured via SetLogLevel (default: LevelWarn).
+// Use this for production to detect leaks without crashing.
+func LogLeak(id HandleID, resource string, pcs []uintptr) {
+	// Build structured stack trace
+	var stackAttrs []slog.Attr
+	if len(pcs) > 0 {
+		frames := runtime.CallersFrames(pcs)
+		idx := 0
+		for {
+			frame, more := frames.Next()
+			offset := frame.PC - frame.Entry
+			stackAttrs = append(stackAttrs, slog.GroupAttrs(fmt.Sprintf("%d", idx),
+				slog.String("function", frame.Function),
+				slog.String("file", frame.File),
+				slog.String("line", strconv.Itoa(frame.Line)),
+				slog.String("offset", fmt.Sprintf("+0x%x", offset)),
+			))
+			idx++
+			if !more {
+				break
+			}
+		}
+	}
+
+	// Log with structured fields
+	slog.LogAttrs(context.Background(), logLevel,
+		"Close() was not called on handle before finalization",
+		slog.String("handle_id", strconv.FormatInt(int64(id), 10)),
+		slog.String("resource", resource),
+		slog.GroupAttrs("creation_stack", stackAttrs...),
+	)
+}
+
+// PanicLeak calls panic with the leak message and stack trace.
+// Use this during development and testing to catch bugs immediately.
+func PanicLeak(id HandleID, resource string, pcs []uintptr) {
 	var msg strings.Builder
 	fmt.Fprintf(&msg, "Close() was not called on %s handle %d before finalization", resource, id)
 	if len(pcs) > 0 {
@@ -111,28 +145,14 @@ func formatLeakMessage(id HandleID, resource string, pcs []uintptr) string {
 		frames := runtime.CallersFrames(pcs)
 		for {
 			frame, more := frames.Next()
-			fmt.Fprintf(&msg, "\n%s\n\t%s:%d", frame.Function, frame.File, frame.Line)
+			offset := frame.PC - frame.Entry
+			fmt.Fprintf(&msg, "\n%s\n\t%s:%d +0x%x", frame.Function, frame.File, frame.Line, offset)
 			if !more {
 				break
 			}
 		}
 	}
-	return msg.String()
-}
-
-// LogLeak logs leak messages using the default slog logger.
-// The log level can be configured via SetLogLevel (default: LevelWarn).
-// Use this for production to detect leaks without crashing.
-func LogLeak(id HandleID, resource string, pcs []uintptr) {
-	msg := formatLeakMessage(id, resource, pcs)
-	slog.Log(context.Background(), logLevel, msg)
-}
-
-// PanicLeak calls panic with the leak message.
-// Use this during development and testing to catch bugs immediately.
-func PanicLeak(id HandleID, resource string, pcs []uintptr) {
-	msg := formatLeakMessage(id, resource, pcs)
-	panic(msg)
+	panic(msg.String())
 }
 
 // SetLogLevel sets the slog level used by LogLeak.
@@ -173,30 +193,28 @@ func SetLeakReporter(fn ReportLeakFunc) {
 }
 
 func init() {
-	// Parse PSG_LEAK_HANDLING
-	handlingStr := os.Getenv("PSG_LEAK_HANDLING")
+	// Parse PSG_LEAK_REPORTING
+	reportingStr := os.Getenv("PSG_LEAK_REPORTING")
 	var reporter ReportLeakFunc
-	switch handlingStr {
-	case "":
-		// Default: Panic during tests (catch bugs), Log in production (don't crash)
-		if testing.Testing() {
-			reporter = PanicLeak
-		} else {
-			reporter = LogLeak
-		}
+	switch reportingStr {
 	case "log":
 		reporter = LogLeak
 	case "panic":
 		reporter = PanicLeak
-	case "off", "ignore":
+	case "off":
 		reporter = nil
 	default:
-		slog.Warn("Unknown PSG_LEAK_HANDLING, using default", "value", handlingStr)
-		// Use same logic as empty string case
+		// Default: Panic during tests (catch bugs), Log in production (don't crash)
+		var defaultStr string
 		if testing.Testing() {
+			defaultStr = "panic"
 			reporter = PanicLeak
 		} else {
+			defaultStr = "log"
 			reporter = LogLeak
+		}
+		if reportingStr != "" {
+			slog.Warn("Invalid PSG_LEAK_REPORTING value, using default", "value", reportingStr, "default", defaultStr)
 		}
 	}
 	SetLeakReporter(reporter)
@@ -211,7 +229,7 @@ func init() {
 		if d, err := strconv.Atoi(depthStr); err == nil && d >= 0 {
 			depth = d
 		} else {
-			slog.Warn("Invalid PSG_LEAK_STACK_DEPTH, using default", "value", depthStr)
+			slog.Warn("Invalid PSG_LEAK_STACK_DEPTH value, using default", "value", depthStr, "default", depth)
 		}
 	}
 	SetStackDepth(depth)

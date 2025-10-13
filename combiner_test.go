@@ -68,6 +68,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 			combinerPool,
 			newPassthroughTestCombinerFactory[int](t),
 		)
+		defer combineOp.Close()
 
 		// Should panic with nil task function
 		_ = combineOp.Scatter(
@@ -128,6 +129,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 		combinerPool,
 		newPassthroughTestCombinerFactory[int](t),
 	)
+	defer combineOp.Close()
 	err := combineOp.Scatter(
 		ctx,
 		taskPool,
@@ -184,6 +186,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		combinerPool,
 		newPassthroughTestCombinerFactory[bool](t),
 	)
+	defer combineOp.Close()
 	err := combineOp.Scatter(
 		ctx,
 		parentTaskPool,
@@ -247,6 +250,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 		combinerPool,
 		newPassthroughTestCombinerFactory[bool](t),
 	)
+	defer combineOp.Close()
 	err := combineOp.Scatter(
 		ctx,
 		parentTaskPool,

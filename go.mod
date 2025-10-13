@@ -3,9 +3,7 @@
 
 module github.com/petenewcomb/psg-go
 
-// Go 1.24 is the latest stable release at time of writing and at least 1.23
-// with GOEXPERIMENT=aliastypeparams is required for generic type aliases
-go 1.24
+go 1.25
 
 require (
 	github.com/influxdata/tdigest v0.0.2-0.20210216194612-fc98d27c9e8b

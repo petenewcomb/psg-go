@@ -92,6 +92,7 @@ func ExampleCombine() {
 
 	// Create a Combine operation with the gather function and inline combiner factory
 	combineOp := psg.NewCombineOp(gatherOp, combinerPool, newCombiner)
+	defer combineOp.Close()
 
 	// Launch some tasks
 	fmt.Println("starting job")

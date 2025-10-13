@@ -19,6 +19,10 @@
 //   - BenchmarkGet: 0 allocs, <1ns (just an atomic load)
 //   - BenchmarkClose: 0 allocs in fast path
 //   - BenchmarkConcurrentClose: Good scaling under concurrent load
+//
+// IMPORTANT: These tests modify global package state (leakReporter, stackDepth, logLevel).
+// DO NOT use t.Parallel() in any tests in this file, as it would cause races on the
+// global state even with save/restore patterns.
 package leakguard
 
 import (
@@ -33,15 +37,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/stretchr/testify/require"
 )
-
-// testLeakReporter creates a leak reporter that fails the test if a leak is detected.
-func testLeakReporter(t *testing.T) ReportLeakFunc {
-	t.Helper()
-	return func(id HandleID, resource string, pcs []uintptr) {
-		msg := formatLeakMessage(id, resource, pcs)
-		t.Errorf("Unexpected leak detected:\n%s", msg)
-	}
-}
 
 // Test resource that tracks cleanup calls
 type testResource struct {
@@ -110,7 +105,7 @@ func (benchDupTrait) Dup(r *testResource) (*testResource, error) {
 func TestBasicNewClose(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -132,7 +127,7 @@ func TestBasicNewClose(t *testing.T) {
 func TestIdempotentClose(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -154,7 +149,7 @@ func TestIdempotentClose(t *testing.T) {
 func TestCopiedHandleClose(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -185,7 +180,7 @@ func TestCopiedHandleClose(t *testing.T) {
 func TestConcurrentClose(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -213,7 +208,7 @@ func TestConcurrentClose(t *testing.T) {
 func TestDup(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -251,7 +246,7 @@ func TestDup(t *testing.T) {
 func TestDupAfterClose(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -270,7 +265,7 @@ func TestDupAfterClose(t *testing.T) {
 func TestHandleID(t *testing.T) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
-	SetLeakReporter(testLeakReporter(t))
+	SetLeakReporter(PanicLeak)
 	SetStackDepth(5)
 	defer func() {
 		SetLeakReporter(oldReporter)
@@ -474,52 +469,6 @@ func BenchmarkDup(b *testing.B) {
 	}
 }
 
-func BenchmarkDupWithResourceChurn(b *testing.B) {
-	oldReporter := leakReporter
-	oldDepth := stackDepth
-	SetLeakReporter(nil)
-	SetStackDepth(0)
-	defer func() {
-		SetLeakReporter(oldReporter)
-		SetStackDepth(oldDepth)
-	}()
-
-	r := testResourcePool.Get()
-	h := New[testResource, benchDupTrait](r)
-	defer h.Close()
-
-	b.ReportAllocs()
-	for b.Loop() {
-		// Also churn the resource pool to see if it dilutes the B/op
-		r2 := testResourcePool.Get()
-		testResourcePool.Put(r2)
-
-		h2, _ := Dup(h)
-		h2.Close()
-	}
-}
-
-func BenchmarkDupNoSetup(b *testing.B) {
-	oldReporter := leakReporter
-	oldDepth := stackDepth
-	SetLeakReporter(nil)
-	SetStackDepth(0)
-	defer func() {
-		SetLeakReporter(oldReporter)
-		SetStackDepth(oldDepth)
-	}()
-
-	b.ReportAllocs()
-	for b.Loop() {
-		// Create fresh handles each time like NewClose does
-		r := testResourcePool.Get()
-		h1 := New[testResource, benchDupTrait](r)
-		h2, _ := Dup(h1)
-		h2.Close()
-		h1.Close()
-	}
-}
-
 func BenchmarkGet(b *testing.B) {
 	oldReporter := leakReporter
 	oldDepth := stackDepth
@@ -537,25 +486,6 @@ func BenchmarkGet(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = h.Get()
-	}
-}
-
-func BenchmarkClose(b *testing.B) {
-	oldReporter := leakReporter
-	oldDepth := stackDepth
-	SetLeakReporter(nil)
-	SetStackDepth(0)
-	defer func() {
-		SetLeakReporter(oldReporter)
-		SetStackDepth(oldDepth)
-	}()
-
-	b.ReportAllocs()
-	for b.Loop() {
-		r := testResourcePool.Get()
-		h := New[testResource, benchTrait](r)
-		// Benchmark just the Close operation
-		h.Close()
 	}
 }
 

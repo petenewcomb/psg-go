@@ -1,6 +1,6 @@
 module github.com/petenewcomb/psg-go/internal/cmd/chartgen
 
-go 1.24
+go 1.25
 
 require (
 	golang.org/x/perf v0.0.0-20250414141303-3fc2b901edf3

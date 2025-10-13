@@ -1066,3 +1066,159 @@ func PanicLeak(id HandleID, resource string, pcs []uintptr)
 
 **Implementation Complete:**
 All tests and benchmarks pass successfully. The generalized reporting infrastructure is clean, minimal, and follows Go idioms while enabling advanced reporting scenarios through structured data.
+
+## CombineOp Refactored to Use Leakguard (2025-10-12)
+
+**Completed Migration:**
+CombineOp now uses the leakguard package for handle management, eliminating the manual handleIDs map and simplifying the reference counting model.
+
+**Key Changes:**
+
+1. **CombineOp Structure:**
+   ```go
+   type CombineOp[I, O any] struct {
+       h leakguard.Handle[combineOp[I, O], combineOpHandleTrait[I, O]]
+   }
+   ```
+   - Replaced direct `inner` pointer with leakguard handle
+   - Removed `handleID` field (now managed by leakguard)
+   - Leak detection automatically provided by finalizers
+
+2. **Handle Trait Implementation:**
+   ```go
+   type combineOpHandleTrait[I, O any] struct{}
+
+   func (combineOpHandleTrait[I, O]) Close(c *combineOp[I, O]) {
+       c.unref()
+   }
+
+   func (combineOpHandleTrait[I, O]) Dup(c *combineOp[I, O]) (*combineOp[I, O], error) {
+       c.ref()
+       return c, nil
+   }
+
+   func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
+       return fmt.Sprintf("CombineOp(%p)", c)
+   }
+   ```
+   - Trait implements DupTrait for handle duplication support
+   - String method provides pointer-based identification for leak reports
+
+3. **Simplified Reference Counting:**
+   - **Removed**: `sync.Mutex`, `combineOpID` type, `id` field, `handleIDs` map, `nextHandleID` counter
+   - **Changed**: `refCount int` → `atomic.Int64` for lock-free operations
+   - **Insight**: When refCount hits zero, we have exclusive access (no mutex needed)
+
+   ```go
+   type combineOp[I, O any] struct {
+       refCount atomic.Int64  // Changed from: mu sync.Mutex, id combineOpID, refCount int
+       // ... rest of fields
+   }
+
+   func (c *combineOp[I, O]) ref() {
+       newCount := c.refCount.Add(1)
+       if newCount <= 1 {
+           panic("ref() called with no existing references")
+       }
+   }
+
+   func (c *combineOp[I, O]) unref() {
+       newCount := c.refCount.Add(-1)
+       if newCount < 0 {
+           panic("reference count underflow")
+       }
+       if newCount != 0 {
+           return
+       }
+       // Last reference - we now have exclusive access, no mutex needed
+       // ... cleanup and return to pool
+   }
+   ```
+
+4. **Reference Counting Model:**
+   - **Handle references**: Managed by leakguard through Close()/Dup() calls
+   - **Internal references**: Tasks, work items, and combiners call `refInternal()`/`unrefInternal()`
+   - Both increment the same `refCount` - when it hits zero, cleanup occurs
+   - Semantic distinction helps understand reference sources, but implementation is identical
+
+5. **Pointer-Based Identification:**
+   - Changed from `CombineOp#%d` to `CombineOp(%p)` in all trace logging
+   - Pointer values sufficient for debugging (reuse isn't ambiguous)
+   - Removed the for loop in NewCombineOp that checked for `id == 0`
+   - Simpler initialization without ID management
+
+6. **API Changes:**
+   - Added `Dup()` method: Creates independent handle to same underlying state
+   - `Close()` now delegates to leakguard: `c.h.Close()`
+   - All handle operations go through `c.h.Get()` to access the inner combineOp
+
+**Benefits:**
+
+- **Automatic leak detection**: Finalizers catch unclosed handles in tests
+- **Zero allocation**: Handles pooled via omnipool after warmup
+- **Lock-free fast path**: Atomic operations only, no mutex contention
+- **Cleaner code**: Removed ~100 lines of manual handle tracking
+- **Consistent pattern**: Same handle management across all PSG resources
+- **Better debugging**: Stack traces show where unclosed handles were created
+
+**Test Updates:**
+Added `defer combineOp.Close()` to all tests that create CombineOp instances:
+- `example_combiner_test.go`
+- `combiner_test.go` (4 tests)
+- `maxholdtime_test.go`
+
+**Performance Verification:**
+All tests and benchmarks pass with performance characteristics unchanged. The refactoring eliminated complexity without sacrificing performance.
+
+## Leakguard Structured Logging and Go 1.25 Migration (2025-10-13)
+
+**Structured Logging Improvements:**
+
+Refactored leakguard's `LogLeak` function to use proper slog structured logging with hierarchical data:
+
+1. **Structured Stack Traces**: Changed from formatted strings to proper `slog.GroupAttrs` structure
+   - Each frame is a numbered group containing function, file, line, and offset fields
+   - Stack renamed from "stack_trace" to "creation_stack" for clarity
+   - All numeric fields (handle_id, line) output as decimal strings for better log aggregation
+
+2. **Added Offset Field**: Stack frames now include PC offset from function entry in Go's standard `+0xHEX` format, matching the format used in panic stack traces
+
+3. **Test Improvements**:
+   - Enhanced `TestLogLeakStructured` to actually create and detect leaks through leakguard's finalizer mechanism
+   - Test now validates exact line number where handle was created
+   - Validates proper structured JSON output with all required fields
+
+4. **Benchmark Cleanup**: Removed investigative benchmarks (BenchmarkDupWithResourceChurn, BenchmarkDupNoSetup, BenchmarkClose) that were used for debugging but don't have ongoing value
+
+**Go 1.25 Migration:**
+
+Updated all 6 modules from `go 1.24` to `go 1.25`:
+- Main module and 5 internal command modules
+- Removed obsolete Go version comments (Go 1.23 is now n-2)
+- Removed unnecessary `toolchain go1.24.2` directive from otpsg module
+- Required for `slog.GroupAttrs` API added in Go 1.25
+
+**Performance Analysis:**
+
+Benchmarked leakguard with leak reporting ON vs OFF to isolate overhead:
+
+**Key Findings:**
+1. **Finalizer overhead is the dominant cost**: When `SetLeakReporter(nil)` disables leak detection, performance is nearly identical to baseline
+2. **Handle reuse matters**: The benchmark revealed a critical usage pattern difference:
+   - **Gather-only mode**: Creates new `GatherOp` handle per task → high frequency finalizer overhead
+   - **Combiner mode**: Reuses one `CombineOp` handle across many operations → amortized finalizer cost
+3. **Production-ready tradeoff**: Users can enable full leak detection during development/testing (`SetLeakReporter(PanicLeak)`) and disable it in production (`SetLeakReporter(nil)`) for near-zero overhead
+
+**Overhead Breakdown:**
+- **Processing workloads**: Minimal impact (<5%) regardless of leak detection setting
+- **Waiting workloads**: 15-20% regression with leak detection enabled, ~0% with it disabled
+- **Root cause**: Finalizer registration/cancellation (`runtime.SetFinalizer`) dominates overhead in high-frequency, low-latency scenarios
+
+**Design Validation:**
+This performance characteristic validates the current API design:
+- Development mode: Full leak detection with stack traces catches bugs early
+- Production mode: Zero-overhead operation when leak detection disabled
+- The handle abstraction itself (atomic operations, pointer indirection) is essentially free
+
+**Current State:**
+All leakguard improvements complete, tested, and lint-clean. Ready for commit.

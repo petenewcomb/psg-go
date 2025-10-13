@@ -1,8 +1,6 @@
 module github.com/petenewcomb/psg-go/otpsg
 
-go 1.24
-
-toolchain go1.24.2
+go 1.25
 
 require (
 	github.com/petenewcomb/psg-go v0.0.0

@@ -47,6 +47,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 			},
 		}
 	})
+	defer combineOp.Close()
 
 	taskPool := psg.NewTaskPool(job)
 

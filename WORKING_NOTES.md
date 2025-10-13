@@ -878,3 +878,191 @@ The map-based handle tracking has been fully implemented and committed. The solu
 - Robust pooling with proper cleanup
 
 The implementation is production-ready with the race condition fully resolved.
+
+## Auto-Close Handle Infrastructure (2025-10-11)
+
+**Reusable leakguard Package Created**
+
+Extracted the CombineOp handle management pattern into a reusable `internal/leakguard` package that provides reference-counted handles with automatic cleanup via finalizers for any resource.
+
+**Final Design:**
+- **Trait-based interface**: Zero-sized `HandleTrait[R]` with `Unref(*R)` method, `DupableHandleTrait[R]` adds `Ref(*R)`
+- **User-defined handle types**: Users wrap `*leakguard.Handle[R, Trait]` in their own types with domain methods
+- **Pooled handles**: Zero allocation after warmup via omnipool
+- **Atomic operations**: `atomic.Pointer[R]` stores concrete pointer type (no interface allocation)
+- **No trait storage**: Declare `var trait Trait` locally when needed (zero-sized)
+- **Idempotent Close()**: Safe to call multiple times, safe to defer + explicit close
+
+**Leak Detection Modes (PSG_LEAK_HANDLING):**
+- `auto` (default): Silent auto-cleanup via finalizer, no stack traces
+- `log`: Log warning + auto-cleanup (with stack traces)
+- `panic`: Panic with detailed error message
+- `off`: No finalizer, maximum performance
+
+**Stack Capture (PSG_LEAK_STACK_DEPTH):**
+- Uses `runtime.Callers()` to capture program counters (not formatted strings)
+- Stack formatting deferred until leak is actually reported
+- Default: 0 frames for `auto`, 5 frames for `log`/`panic`
+- Memory: `depth * 8 bytes` per handle (40 bytes for default 5 frames)
+- Users can override: `PSG_LEAK_STACK_DEPTH=10` for deeper traces
+
+**Async Leak Reporting:**
+- Spawns goroutine for expensive formatting and reporting
+- Doesn't block the finalizer thread
+- Isolates panics from finalizer infrastructure
+- Resource stays alive until after `%v` formatting completes
+- Programmable via `leakguard.LeakReporter func(msg string)` global variable
+
+**Key Simplifications:**
+1. Removed `ID()` and `TypeName()` from interface - use `%v` formatting
+2. Removed Log-without-Auto mode - all detections clean up resources
+3. Individual global variables instead of config struct
+4. No stored trait field - declare locally when needed
+5. Users define their own handle types for domain-specific methods
+
+**Usage Pattern:**
+```go
+type combineOpTrait struct{}
+func (combineOpTrait) Unref(c *combineOp) bool { return c.unref() }
+
+type CombineOpHandle struct {
+    h *leakguard.Handle[*combineOp, combineOpTrait]
+}
+
+func NewCombineOpHandle(op *combineOp) CombineOpHandle {
+    return CombineOpHandle{h: leakguard.New[*combineOp, combineOpTrait](op)}
+}
+
+func (c CombineOpHandle) Scatter(...) { ... }
+func (c CombineOpHandle) Close() { c.h.Close() }
+```
+
+**Next Steps:**
+- Update combineOp to work with leakguard package
+- Remove old handleIDs map and manual refcounting logic
+- Apply same pattern to GatherOp and other resources needing handles
+
+This establishes a clean, reusable, zero-allocation foundation for all PSG resource handle management.
+
+## Leakguard Generalized Reporting (2025-10-12)
+
+**Completed Enhancements:**
+
+**1. Type Alias for Leak Reporter Function:**
+Added `LeakReporterFunc` type alias for improved type safety and documentation:
+```go
+type LeakReporterFunc func(HandleID, string, []uintptr)
+```
+
+**2. Structured Leak Reporting:**
+Refactored leak reporter to receive structured data instead of pre-formatted messages:
+- **Before**: `func(msg string)` - received fully formatted message
+- **After**: `func(HandleID, string, []uintptr)` - receives handle ID, resource string, and program counters
+
+This allows custom reporters to:
+- Format messages in their preferred style
+- Filter or aggregate based on handle ID or resource type
+- Store stack traces in structured format for analysis
+- Implement custom stack formatting strategies
+
+**3. Optional ReportTrait Interface:**
+Added `ReportTrait` interface for custom resource string representation:
+```go
+type ReportTrait[R any] interface {
+    Trait[R]
+    String(*R) string
+}
+```
+
+Resources can now provide custom string representations for leak reports. Falls back to `fmt.Sprintf("%v", resource)` if not implemented.
+
+**4. FormatStackTrace Helper:**
+Extracted stack formatting logic into public helper function:
+```go
+func FormatStackTrace(pcs []uintptr) string {
+    // Formats program counters into readable stack trace
+}
+```
+
+This allows custom reporters to use the default formatting strategy while maintaining full control over message structure.
+
+**5. Updated Pre-defined Reporters:**
+`LogReporter` and `PanicReporter` now use the new structured format:
+- Accept structured data (ID, resource, PCs)
+- Format stack traces using FormatStackTrace helper
+- Include or omit stack traces based on PCs length
+
+**6. Documentation Updates:**
+- README.md examples updated to show new reporter signature
+- All example tests updated (Example_leakDetectionWithLeak)
+- All unit tests updated (testLeakReporter helper, inline reporters)
+
+**7. Unified Message Formatting:**
+Created `formatLeakMessage()` internal function to ensure consistent formatting across LogLeak and PanicLeak. Stack formatting is merged directly into this function rather than exposed as a separate API - users who need custom formatting can easily call `runtime.CallersFrames(pcs)` themselves.
+
+Uses `strings.Builder` for efficient string construction and follows Go's standard stack trace format:
+
+```go
+func formatLeakMessage(id HandleID, resource string, pcs []uintptr) string {
+    var msg strings.Builder
+    fmt.Fprintf(&msg, "Close() was not called on %s handle %d before finalization", resource, id)
+    if len(pcs) > 0 {
+        fmt.Fprintf(&msg, "\nHandle %d created at:", id)
+        frames := runtime.CallersFrames(pcs)
+        for {
+            frame, more := frames.Next()
+            fmt.Fprintf(&msg, "\n%s\n\t%s:%d", frame.Function, frame.File, frame.Line)
+            if !more {
+                break
+            }
+        }
+    }
+    return msg.String()
+}
+```
+
+Message format matches Go's standard error/panic format: function names left-aligned, file:line indented.
+
+**8. Idiomatic Naming:**
+Renamed types and functions to follow Go stdlib conventions:
+- `LeakReporterFunc` → `ReportLeakFunc` (follows `context.CancelFunc` pattern)
+- `LogReporter` → `LogLeak` (verb-based, action-oriented)
+- `PanicReporter` → `PanicLeak` (verb-based, action-oriented)
+
+The verb-based naming reads more naturally and matches the "report leak" action being performed.
+
+**Key Benefits:**
+- **Flexibility**: Custom reporters can format/filter/aggregate as needed
+- **Performance**: Stack formatting only happens if leak is actually reported (uses `strings.Builder`)
+- **Testability**: Tests can capture structured data without parsing formatted strings
+- **Extensibility**: ReportTrait enables domain-specific resource descriptions
+- **Consistency**: Single internal formatting function ensures uniform output
+- **Idiomatic**: Naming follows Go stdlib conventions (verb-based function types)
+
+**Final API Surface:**
+```go
+// Core types
+type ReportLeakFunc func(HandleID, string, []uintptr)
+type Trait[R any] interface { Close(*R) }
+type ReportTrait[R any] interface { Trait[R]; String(*R) string }
+type DupTrait[R any] interface { Trait[R]; Dup(*R) (*R, error) }
+
+// Handle operations
+func New[R, T](resource *R) Handle[R, T]
+func Dup[R, T](h Handle[R, T]) (Handle[R, T], error)
+func (h Handle[R, T]) Get() *R
+func (h Handle[R, T]) Close()
+func (h Handle[R, T]) HandleID() HandleID
+
+// Configuration
+func SetLeakReporter(fn ReportLeakFunc)
+func SetStackDepth(depth int)
+func SetLogLevel(level slog.Level)
+
+// Pre-defined reporters
+func LogLeak(id HandleID, resource string, pcs []uintptr)
+func PanicLeak(id HandleID, resource string, pcs []uintptr)
+```
+
+**Implementation Complete:**
+All tests and benchmarks pass successfully. The generalized reporting infrastructure is clean, minimal, and follows Go idioms while enabling advanced reporting scenarios through structured data.

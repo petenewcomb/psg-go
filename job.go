@@ -6,6 +6,7 @@ package psg
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/ctxmap"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
+	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
@@ -39,16 +41,27 @@ type Job struct {
 
 	workQueue workq.Accepted
 
-	taskQueue             rdvq.Queue[*taskWork]
-	taskWorkerIdleTimeout atomic.Int64 // stores time.Duration as nanoseconds
+	taskQueue                       rdvq.Queue[*taskWork]
+	taskWorkerIdleTimeout           atomic.Int64 // stores time.Duration as nanoseconds
+	taskWorkerIdleJitter            atomic.Int64 // stores time.Duration as nanoseconds
+	taskWorkerSpawnConcurrencyLimit atomic.Int64 // maximum concurrent task worker spawns
+
+	// Orphan task handling
+	orphanedTasks         nbcq.Queue[*orphanedTaskWork] // buffer for orphaned tasks
+	orphanWaiters         rdvq.Waiters                  // notification infrastructure
+	taskWorkersSpawning   jobstate.InFlightCounter      // count of workers in spawning state
+	unmetTaskWorkerDemand nbcq.Queue[*unmetDemandToken] // tracks tasks waiting for workers
+
+	taskWorkerMu             sync.Mutex
+	latestTaskWorkerIdleExit time.Time // protected by taskWorkerMu
 
 	ctxMetaMap       ctxmap.Map[ctxMetaValueKey, *ctxMeta]
 	gatherCtxMetaMap ctxmap.Map[gatherCtxMetaValueKey, *Job]
 
-	protoBB      workq.BlockBehavior // avoid closure reallocation
-	blockFn      workq.BlockFunc     // avoid closure reallocation
-	tryAddWorkFn workq.TryAddWorkFunc
-	addWorkFn    workq.AddWorkFunc
+	protoBB      workq.BlockBehavior  // avoid closure reallocation
+	blockFn      workq.BlockFunc      // avoid closure reallocation
+	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
+	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -77,6 +90,8 @@ func (w *taskWork) Init(group workq.GroupID, job *Job, task boundTask, completed
 func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
+
+	defer w.task.Free()
 	w.task.Execute(ctx, w.Group(), w.completedFn, taskWorkerSender)
 }
 
@@ -86,7 +101,6 @@ func (w *taskWork) Free(job *Job) {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	w.task.Free()
 	w.Close(job)
 	taskWorkPool.Put(w)
 }
@@ -131,7 +145,13 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.governor.Init()
 	j.workQueue.Init()
 	j.taskQueue.Init()
+	j.orphanedTasks.Init()
+	j.orphanWaiters.Init()
+	j.unmetTaskWorkerDemand.Init()
+	// taskWorkersSpawning zero-value ready, no init needed
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
+	j.taskWorkerIdleJitter.Store(int64(psgopt.DefaultTaskWorkerIdleJitter))
+	j.taskWorkerSpawnConcurrencyLimit.Store(int64(psgopt.DefaultTaskWorkerSpawnConcurrencyLimit))
 
 	// Apply user options
 	j.SetOptions(options...)
@@ -231,7 +251,7 @@ func (j *Job) tryGather(ctx context.Context, _ *ctxMeta) (bool, error) {
 }
 
 func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
-	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn)
+	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn, nil)
 }
 
 // This function is designed to be called before scattering a new task to
@@ -284,7 +304,7 @@ func (j *Job) block(
 	adder.blockWaiters = blockWaiters
 	adder.confirmBlockWaitFn = confirmBlockWaitFn
 
-	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn)
+	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn, nil)
 	if errors.Is(err, errBlockWaitSignaled) {
 		err = nil
 	}
@@ -679,20 +699,147 @@ func (j *Job) gatherAll(ctx context.Context, gatherFn func(context.Context, *ctx
 	}
 }
 
-func (j *Job) startTaskWorker(ctx context.Context, task *taskWork) {
-	traceRegion := "Job.startTaskWorker"
-	defer trace.StartRegion(ctx, traceRegion).End()
+// spawnTaskWorkerGoroutine spawns a new task worker goroutine.
+// Caller must have already incremented taskWorkersSpawning.
+//
+//nolint:contextcheck // goroutine will use job context
+func (j *Job) spawnTaskWorkerGoroutine() {
 	j.wg.Add(1)
-	go j.runTasks(task)
+	go j.runTasks()
+}
+
+// registerTaskWorkerDemand increments the demand counter and attempts to spawn
+// a worker if we're under the spawn concurrency limit. This should be called
+// once per task that needs a worker. Returns zero value if the demand was
+// immediately satisfied by spawning a new worker, or an unmetDemand handle if
+// the demand could not be immediately met.
+//
+//nolint:contextcheck // background context used only for tracing
+func (j *Job) registerTaskWorkerDemand() unmetDemand {
+	traceRegion := "Job.registerTaskWorkerDemand"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	// Try to spawn within concurrency limit
+	limit := int(j.taskWorkerSpawnConcurrencyLimit.Load())
+	var canSpawn bool
+	if limit == -1 {
+		// Unlimited - always spawn
+		j.taskWorkersSpawning.Increment()
+		canSpawn = true
+	} else {
+		// Limited - spawn only if under limit
+		canSpawn = j.taskWorkersSpawning.IncrementIfUnder(limit)
+	}
+
+	if canSpawn {
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion, "Job=%p, spawning worker", j)
+		}
+		j.spawnTaskWorkerGoroutine()
+		return unmetDemand{} // zero value = no demand token
+	}
+
+	token := unmetDemandTokenPool.Get()
+	token.mu.Lock()
+	token.id = unmetDemandID(unmetDemandTokenCounter.Add(1))
+	token.stillNeeded = true
+	id := token.id
+	token.mu.Unlock()
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "Job=%p, at spawn limit, unmetDemandID=%d", j, id)
+	}
+	j.unmetTaskWorkerDemand.PushBack(token)
+	return unmetDemand{token: token, id: id}
+}
+
+type unmetDemandID int64
+
+type unmetDemandToken struct {
+	mu          sync.Mutex
+	id          unmetDemandID
+	stillNeeded bool
+}
+
+// Don't reinitialize the mutex
+func (t *unmetDemandToken) Reset() {}
+
+var unmetDemandTokenCounter atomic.Int64
+var unmetDemandTokenPool = omnipool.For[unmetDemandToken]()
+
+// unmetDemand represents registered demand for a task worker.
+// The zero value is valid and represents no demand.
+type unmetDemand struct {
+	token *unmetDemandToken
+	id    unmetDemandID
+}
+
+// Cancel cancels this demand if it hasn't already been satisfied.
+// Safe to call on zero value or multiple times.
+func (d *unmetDemand) Cancel() {
+	if d.token == nil {
+		return
+	}
+	d.token.mu.Lock()
+	defer d.token.mu.Unlock()
+	if d.token.id == d.id {
+		d.token.stillNeeded = false
+	}
+}
+
+type orphanedTaskWork struct {
+	job              *Job
+	work             *taskWork
+	demand           unmetDemand
+	registerDemandFn rdvq.RenotifyFunc
+}
+
+func (w *orphanedTaskWork) Init() {
+	w.registerDemandFn = w.registerDemand
+}
+
+func (w *orphanedTaskWork) registerDemand() {
+	w.demand = w.job.registerTaskWorkerDemand()
+}
+
+func (w *orphanedTaskWork) Unwrap() *taskWork {
+	w.demand.Cancel()
+	task := w.work
+	orphanedTaskWorkPool.Put(w)
+	return task
+}
+
+func (w *orphanedTaskWork) Reset() {
+	w.job = nil
+	w.work = nil
+	w.demand = unmetDemand{}
+	// Preserve registerDemandFn to avoid reallocation
+}
+
+var orphanedTaskWorkPool = omnipool.For[orphanedTaskWork]()
+
+func (j *Job) tryGetOrphanedTask() *taskWork {
+	if orphan, ok := j.orphanedTasks.TryPopFront(); ok {
+		return orphan.Unwrap()
+	}
+	return nil
 }
 
 //nolint:contextcheck // task worker goroutine will use job context
-func (j *Job) runTasks(task *taskWork) {
+func (j *Job) runTasks() {
 	defer j.wg.Done()
+
+	var task *taskWork
+
+	spawning := true
+	defer func() {
+		if spawning {
+			j.taskWorkersSpawning.Decrement() // Safety: always release if still spawning
+		}
+	}()
 
 	traceRegion := "taskWorker.Run"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Job=%p", j)
+	trace.Logf(context.Background(), traceRegion, "Job=%p, spawning=%v", j, spawning)
 
 	goroutineCtx, cancelGoroutineCtx := context.WithCancel(j.ctx)
 	defer func() {
@@ -712,54 +859,145 @@ func (j *Job) runTasks(task *taskWork) {
 	)
 
 	var receiver rdvq.Receiver
+	var waiter rdvq.Waiter
 
-	idleTimer := timerp.Get()
-	defer timerp.Put(idleTimer)
+	var idleTimer *time.Timer
+	defer func() {
+		if idleTimer != nil {
+			timerp.Put(idleTimer)
+		}
+	}()
 
 	for {
+		// Fast-path: check both queues before expensive waiter registration
+		if task == nil {
+			task = j.tryGetOrphanedTask()
+		}
+		if task == nil {
+			if t, ok := j.taskQueue.TryPopFront(); ok {
+				task = t
+			}
+		}
+
 		if task != nil {
+			// Secured task - release spawn counter
+			if spawning {
+				spawning = false
+				decrementSpawning := true
+				for {
+					token, ok := j.unmetTaskWorkerDemand.TryPopFront()
+					if !ok {
+						break
+					}
+					spawnAnother := func() bool {
+						token.mu.Lock()
+						defer token.mu.Unlock()
+						stillNeeded := token.stillNeeded
+						token.id = 0
+						token.stillNeeded = false
+						return stillNeeded
+					}()
+					unmetDemandTokenPool.Put(token)
+					if spawnAnother {
+						j.spawnTaskWorkerGoroutine()
+						decrementSpawning = false
+						break
+					}
+				}
+				if decrementSpawning {
+					j.taskWorkersSpawning.Decrement()
+				}
+			}
+
 			// Execute the task
 			func() {
 				defer task.Free(j)
 				task.Execute(ctx, exEnv.Sender())
 			}()
 			task = nil
+			continue
 		}
 
+		// No immediately available work - now worth paying waiter registration cost
 		// Wait for next task with timeout
-		timerp.Reset(idleTimer, time.Duration(j.taskWorkerIdleTimeout.Load()))
+		idleTimeout := time.Duration(j.taskWorkerIdleTimeout.Load())
+		var idleTimerCh <-chan time.Time
+		if idleTimeout != -1 {
+			// Timeout enabled - ensure we have a timer and set it
+			if idleTimer == nil {
+				idleTimer = timerp.Get()
+			}
+			maxJitter := time.Duration(j.taskWorkerIdleJitter.Load())
+			jitter := time.Duration(rand.Int64N(int64(maxJitter))) //nolint:gosec // jitter doesn't need crypto/rand
+			timerp.Reset(idleTimer, idleTimeout+jitter)
+			idleTimerCh = idleTimer.C
+		} else if idleTimer != nil {
+			// Timeout disabled - return timer to pool
+			timerp.Put(idleTimer)
+			idleTimer = nil
+		}
 
+		exit := false
 		j.taskQueue.PopFrontFunc(
 			&receiver,
 			func(orphanedTask *taskWork) {
 				if task == nil {
 					task = orphanedTask
+					exit = false // Orphans are detected after selectFn returns
 				} else {
-					// Hand this one off to a different or new goroutine
-					j.startTaskWorker(ctx, orphanedTask)
+					orphan := orphanedTaskWorkPool.Get()
+					orphan.job = j
+					orphan.work = orphanedTask
+					j.orphanedTasks.PushBack(orphan)
+					j.orphanWaiters.Notify(orphan.registerDemandFn)
 				}
 			},
 			func(inbox *rdvq.Inbox[*taskWork], outboxWaitInbox *rdvq.WaitInbox) rdvq.RenotifyFunc {
-				inboxCh := inbox.Ch()
-				outboxWaitCh := outboxWaitInbox.Ch()
-				trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p, outboxWaitInbox=%p, outboxWaitCh=%p",
-					inbox, inboxCh, outboxWaitInbox, outboxWaitCh)
-				select {
-				case task = <-inboxCh:
-					inbox.Emptied()
-					trace.Logf(ctx, traceRegion, "received task from inbox=%p, inboxCh=%p", inbox, inboxCh)
-				case renotifyFn := <-outboxWaitCh:
-					outboxWaitInbox.Emptied()
-					return renotifyFn
-				case <-idleTimer.C:
-					trace.Logf(ctx, traceRegion, "received signal from idle timer")
-				case <-ctx.Done():
-					trace.Logf(ctx, traceRegion, "received context done signal")
-				}
-				return nil
+				var renotifyFn rdvq.RenotifyFunc
+				j.orphanWaiters.WaitFunc(&waiter,
+					func() bool {
+						// Check orphan queue after registration to avoid race
+						task = j.tryGetOrphanedTask()
+						if task != nil {
+							return false // Don't wait, we found an orphan
+						}
+						return true // Wait for notification
+					},
+					func(orphanWaitInbox *rdvq.WaitInbox) {
+						inboxCh := inbox.Ch()
+						outboxWaitCh := outboxWaitInbox.Ch()
+						orphanWaitCh := orphanWaitInbox.Ch()
+						//nolint:lll // trace message readability
+						trace.Logf(ctx, traceRegion,
+							"entering select: inbox=%p, inboxCh=%p, outboxWaitInbox=%p, outboxWaitCh=%p, orphanWaitInbox=%p, orphanWaitCh=%p",
+							inbox, inboxCh, outboxWaitInbox, outboxWaitCh, orphanWaitInbox, orphanWaitCh)
+						select {
+						case task = <-inboxCh:
+							inbox.Emptied()
+							trace.Logf(ctx, traceRegion, "received task from inbox=%p, inboxCh=%p", inbox, inboxCh)
+						case renotifyFn = <-outboxWaitCh:
+							outboxWaitInbox.Emptied()
+						case <-orphanWaitCh:
+							orphanWaitInbox.Emptied()
+							trace.Logf(ctx, traceRegion, "received orphan notification from orphanWaitInbox=%p, orphanWaitCh=%p",
+								orphanWaitInbox, orphanWaitCh)
+							// Check orphan queue again after notification
+							task = j.tryGetOrphanedTask()
+						case <-idleTimerCh:
+							trace.Logf(ctx, traceRegion, "received signal from idle timer")
+							exit = j.tryTaskWorkerIdleExit()
+						case <-ctx.Done():
+							trace.Logf(ctx, traceRegion, "received context done signal")
+							exit = true
+						}
+					})
+				return renotifyFn
 			},
 		)
-		if task == nil {
+		if exit {
+			if task != nil {
+				panic("exiting with non-nil task")
+			}
 			break
 		}
 	}
@@ -780,16 +1018,86 @@ func (w *taskPostWork) Init(group workq.GroupID, job *Job, work *taskWork) {
 func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskPostWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
+	if trace.IsEnabled() {
+		trace.Logf(ctx, traceRegion, "%v", w)
+	}
 
-	ex.Starting() // Signal success only if we actually posted
-	work := w.work
-	w.work = nil
+	var demand unmetDemand
+	registerDemand := func() {
+		if demand.token == nil {
+			demand = w.job.registerTaskWorkerDemand()
+		}
+	}
+	defer demand.Cancel()
 
-	ctx, meta := w.job.ctxMeta(ctx)
-	return w.job.taskQueue.PushBack(ctx, meta.Sender(), work, func() {
-		w.job.startTaskWorker(ctx, nil)
-	})
+	posted, err := func() (bool, error) {
+		ctx, meta := w.job.ctxMeta(ctx)
+
+		bufferedFn := func() {
+			// Work was buffered in the sender's outbox because a task worker wasn't
+			// immediately available -- go ahead and start one if we can.
+			registerDemand()
+		}
+
+		tryPost := func() bool {
+			// Try non-blocking post - can be retried if it fails
+			return w.job.taskQueue.TryPushBack(meta.Sender(), w.work, bufferedFn)
+		}
+
+		for {
+			if tryPost() {
+				return true, nil
+			}
+
+			if !ex.ShouldBlockOrPostpone() {
+				return false, nil
+			}
+
+			// Post attempt failed, need more task workers
+			registerDemand()
+
+			if !meta.ShouldBlock() {
+				// We expect to be queued and called again, so listen and don't block
+				ex.AddToListeners(w.job.taskQueue.ListenersFor(meta.Sender()))
+
+				// Check again after registering for notification, but return
+				// and expect to be called again if needed
+				posted := tryPost()
+				if trace.IsEnabled() {
+					trace.Logf(ctx, traceRegion, "meta.ShouldBlock() == false, posted=%v", posted)
+				}
+
+				return posted, nil
+			}
+
+			// Use blocking post
+			posted := true
+			var err error
+			w.job.taskQueue.PushBackFunc(meta.Sender(), w.work, bufferedFn, func(outbox *rdvq.Outbox[*taskWork]) {
+				posted = false
+
+				// Slow path, really going to block now
+				ex.Blocking()
+
+				err = rdvq.BasicPushSelect[*taskWork](ctx, outbox, w.work)
+				if err == nil {
+					posted = true
+				}
+			})
+			if trace.IsEnabled() {
+				trace.Logf(ctx, traceRegion, "meta.ShouldBlock() == true, posted=%v, err=%v", posted, err)
+			}
+			if posted || err != nil {
+				return posted, err
+			}
+		}
+	}()
+
+	if posted {
+		ex.Starting() // Signal success only if we actually posted
+		w.work = nil  // Clear the work reference since it's now owned by the queue
+	}
+	return err
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -914,9 +1222,31 @@ func (w jobConfigWrapper) Update(changes opts.JobConfigChanges) {
 	if changes.TaskWorkerIdleTimeout != nil {
 		w.job.taskWorkerIdleTimeout.Store(int64(*changes.TaskWorkerIdleTimeout))
 	}
+	if changes.TaskWorkerIdleJitter != nil {
+		w.job.taskWorkerIdleJitter.Store(int64(*changes.TaskWorkerIdleJitter))
+	}
+	if changes.TaskWorkerSpawnConcurrencyLimit != nil {
+		w.job.taskWorkerSpawnConcurrencyLimit.Store(int64(*changes.TaskWorkerSpawnConcurrencyLimit))
+	}
 	if changes.FlushListener != nil {
 		w.job.state.SetFlushListener(*changes.FlushListener)
 	}
+}
+
+// tryTaskWorkerIdleExit attempts to record an idle task worker exit. Returns true if this worker
+// is allowed to exit (enough time has passed since latest exit), false if
+// another worker exited too recently and this worker should retry later.
+func (j *Job) tryTaskWorkerIdleExit() bool {
+	j.taskWorkerMu.Lock()
+	defer j.taskWorkerMu.Unlock()
+
+	now := time.Now()
+	idleTimeout := time.Duration(j.taskWorkerIdleTimeout.Load())
+	if now.Sub(j.latestTaskWorkerIdleExit) >= idleTimeout {
+		j.latestTaskWorkerIdleExit = now
+		return true
+	}
+	return false
 }
 
 // SetOptions applies the given configuration options to the job.

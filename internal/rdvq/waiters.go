@@ -52,6 +52,8 @@ type Waiters struct {
 }
 
 // Init initializes the Waiters for use. Must be called before any other operations.
+//
+//nolint:contextcheck // background context used only for tracing
 func (w *Waiters) Init() {
 	traceRegion := "rdvq.Waiters.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()

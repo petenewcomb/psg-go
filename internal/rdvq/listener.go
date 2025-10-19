@@ -7,6 +7,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
@@ -24,6 +25,34 @@ type Listener struct {
 	mu      sync.Mutex
 	addedTo map[*Listeners]struct{}
 }
+
+// listenerNotifyWrapper wraps the parameters needed to call Listener.notify,
+// avoiding the allocation of a closure in Listener.AddTo. The wrapper is pooled
+// and reused across calls.
+type listenerNotifyWrapper struct {
+	listener  *Listener
+	listeners *Listeners
+
+	notifyFn NotifyFunc // avoid reallocating closure
+}
+
+func (w *listenerNotifyWrapper) Init() {
+	w.notifyFn = w.notify
+}
+
+func (w *listenerNotifyWrapper) Reset() {
+	*w = listenerNotifyWrapper{
+		notifyFn: w.notifyFn,
+	}
+}
+
+func (w *listenerNotifyWrapper) notify(renotifyFn RenotifyFunc) bool {
+	result := w.listener.notify(w.listeners, renotifyFn)
+	listenerNotifyWrapperPool.Put(w)
+	return result
+}
+
+var listenerNotifyWrapperPool = omnipool.For[listenerNotifyWrapper]()
 
 // AddTo subscribes this listener to the given Listeners instance.
 // If already subscribed, this is a no-op. The listener will be called
@@ -46,9 +75,10 @@ func (m *Listener) AddTo(listeners *Listeners) {
 	m.mu.Unlock()
 
 	if !alreadyAdded {
-		listeners.add(func(renotifyFn RenotifyFunc) bool {
-			return m.notify(listeners, renotifyFn)
-		})
+		w := listenerNotifyWrapperPool.Get()
+		w.listener = m
+		w.listeners = listeners
+		listeners.add(w.notifyFn)
 	}
 }
 

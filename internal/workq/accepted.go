@@ -92,10 +92,14 @@ func (q *Accepted) ExecuteNowOrQueue(
 //
 // Priority order: fresh → postponed → new work
 //
+// The unmetDemandFn is called when excess fresh work accumulates (count > 1) and
+// no idle workers are available. This enables spawning new workers when needed.
+// Pass nil if worker spawning is not applicable for this queue.
+//
 // Returns the error value from the work item if one was executed, the error
 // value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
 // been called but was nil.
-func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error {
+func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc, unmetDemandFn RenotifyFunc) error {
 	traceRegion := "workq.Accepted.ExecuteOne"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Accepted=%p", q)
@@ -107,6 +111,7 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 
 	c := newController(q)
 	c.addWorkFn = addWorkFn
+	c.unmetDemandFn = unmetDemandFn
 	defer c.Free()
 
 	for {
@@ -191,7 +196,8 @@ type controller struct {
 	addWorkFn                AddWorkFunc
 	tryAddWorkFn             TryAddWorkFunc
 	renotifyFn               RenotifyFunc
-	workWasAdded             bool
+	unmetDemandFn            RenotifyFunc
+	workAddedCount           int
 	postponedWorkWasExecuted bool
 	workWasPostponed         bool
 	endOfWorkErr             error
@@ -305,7 +311,10 @@ func (c *controller) queueFresh(work Work) {
 	traceRegion := "workq.Accepted.queueFresh"
 	trace.Logf(context.Background(), traceRegion, "Accepted(%p) adding fresh %v", c.q, work)
 	c.q.fresh.PushBack(work)
-	c.workWasAdded = true
+	c.workAddedCount++
+	if c.workAddedCount > 1 && c.unmetDemandFn != nil {
+		c.q.waiters.Notify(c.unmetDemandFn)
+	}
 }
 
 func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
@@ -316,9 +325,9 @@ func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
 		return false, ErrEndOfWork
 	}
 
-	c.workWasAdded = false
+	c.workAddedCount = 0
 	defer func() {
-		c.workWasAdded = false
+		c.workAddedCount = 0
 	}()
 
 	var err error
@@ -327,8 +336,9 @@ func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
 	} else {
 		_, err = c.addWorkFn(ctx, c.queueFreshFn, nil, nil)
 	}
-	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", c.workWasAdded, err)
-	return c.workWasAdded, err
+	workWasAdded := c.workAddedCount > 0
+	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", workWasAdded, err)
+	return workWasAdded, err
 }
 
 func (c *controller) WaitForNew(ctx context.Context) error {
@@ -376,10 +386,12 @@ func (c *controller) execute(ctx context.Context, blockOrListen bool) error {
 	bw := c.buffer[c.currentIndex]
 	c.currentWasPostponed = bw.wasPostponed
 
-	if bw.wasPostponed {
-		trace.Logf(ctx, traceRegion, "executing postponed %v at buffer index %d", bw.work, c.currentIndex)
-	} else {
-		trace.Logf(ctx, traceRegion, "executing fresh %v at buffer index %d", bw.work, c.currentIndex)
+	if trace.IsEnabled() {
+		if bw.wasPostponed {
+			trace.Logf(ctx, traceRegion, "executing postponed %v at buffer index %d", bw.work, c.currentIndex)
+		} else {
+			trace.Logf(ctx, traceRegion, "executing fresh %v at buffer index %d", bw.work, c.currentIndex)
+		}
 	}
 
 	ex := c.ex
@@ -420,7 +432,7 @@ func (c *controller) ResetForRetry() {
 	if c.ex.Started() {
 		panic("Reset called after work was executed")
 	}
-	c.workWasAdded = false
+	c.workAddedCount = 0
 	c.currentWasPostponed = false
 	c.othersReleased = false
 	c.workWasPostponed = false
@@ -553,8 +565,10 @@ func (c *controller) addToBuffer(work Work, wasPostponed bool) {
 		work:         work,
 		wasPostponed: wasPostponed,
 	})
-	trace.Logf(context.Background(), traceRegion,
-		"added %v at index %d, wasPostponed=%v", work, len(c.buffer)-1, wasPostponed)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"added %v at index %d, wasPostponed=%v", work, len(c.buffer)-1, wasPostponed)
+	}
 }
 
 func (c *controller) Free() {

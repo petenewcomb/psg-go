@@ -14,11 +14,16 @@ import (
 // [WithIdleTimeout]. Empirically determined; subject to change.
 const DefaultCombinerPoolIdleTimeout = 100 * time.Millisecond
 
+// DefaultCombinerPoolIdleJitter is the default jitter added to combiner goroutine idle timeouts
+// to spread mutex contention when multiple workers timeout. Empirically determined; subject to change.
+const DefaultCombinerPoolIdleJitter = 10 * time.Millisecond
+
 // CombinerPoolOption is a configuration option that can be applied to CombinerPool.
 //
 // Available CombinerPool configuration options:
 //   - [WithMaxConcurrency] - Sets maximum concurrency only
 //   - [WithIdleTimeout] - Sets goroutine idle timeout before termination
+//   - [WithIdleJitter] - Sets idle jitter to spread out mutex contention
 type CombinerPoolOption = opts.CombinerPoolOption
 
 // WithIdleTimeout sets how long excess combiner goroutines in
@@ -31,5 +36,17 @@ func WithIdleTimeout(timeout time.Duration) IdleTimeoutOption {
 }
 
 type IdleTimeoutOption interface {
+	CombinerPoolOption
+}
+
+// WithIdleJitter sets the random jitter added to combiner goroutine idle timeouts.
+// This spreads out mutex contention when multiple workers timeout simultaneously.
+//
+// The default value is [DefaultCombinerPoolIdleJitter].
+func WithIdleJitter(jitter time.Duration) IdleJitterOption {
+	return opts.IdleJitter(jitter)
+}
+
+type IdleJitterOption interface {
 	CombinerPoolOption
 }

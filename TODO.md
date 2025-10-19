@@ -15,11 +15,11 @@ Items to complete before merging to main branch.
 - Review and document thread-safety guarantees for remaining public APIs
 - Add a way to force creation of a new work group
 - Maybe remove psg prefixes from psg-go subfolders, but leave the prefixes in the package names?
+- should combiner concurrency limits be specified per-combineop instead of or in addition to the combiner pool?
 
 ### 6. Implementation improvements
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
-- make sure that rdvq.Optional methods aren't inappropriately leaking through to Waiters or Required 
 - consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path
 - profile (memory, cpu, blocking) again after all the recent refactoring, see if there are any more obvious targets or low-hanging fruit
 - review again for readability
@@ -27,18 +27,15 @@ Items to complete before merging to main branch.
 - reorganize code within large files like job.go
 - re-review tracing guidelines in DEVELOPMENT.md
 - figure out what to do about trace.IsEnabled everywhere (if, how)
-- check the scatter plots and review combiner pool controller settings
 - review and understand processing and waiting aggregation throughput and speedup graphs
 - enable cyclo and fix issues
 - can we integrate taskWork into combineTask and gatherTask?
 - rename Free to Recycle, add Recycler interface from which other things can derive
-- Expose all user code integration points as interfaces with Recycle (Recycler), then add convenience functions that use pooled objects to wrap implementation-by-closure; perhaps reserve psgfn for the convenience functions and add a separate package for the integration interfaces? 
-- Make sure job.governor is really necessary 
+- Expose all user code integration points as interfaces with Recycle (Recycler), then add convenience functions that use pooled objects to wrap implementation-by-closure; perhaps reserve psgfn for the convenience functions and add a separate package for the integration interfaces?
+- Make sure job.governor is really necessary
 - Add Deadline to workq.Execution and make sure that it's set and respected everywhere, especially when blocking
 - Abstract logic in *PostWork and perhaps make it extend from workq.ExecuteOrWait?
-- Pool closure passed to listeners.add() in rdvq/listener.go (line 49).  Test using `cd ~/src/psg-go && go test -v -run '^$' -bench '/waiting/10.s/10.s//4$' -benchtime 10s -count 1  -memprofile=mem.prof -memprofilerate=1`
-- Consider adding size threshold for combineOp.handleIDs map to prevent large maps from staying in pool after pathological Dup() usage
-- Consider atomic-only fast mode for CombineOp: Skip handle tracking and use atomic refcount only for high-concurrency scenarios with many Dups. Trade safety (no misuse detection) for performance (no mutex contention). Could be build tag or runtime flag controlled.
+- Consider an addition to omnipool to codify the pattern in which a monotonic ID field is used to guard against reuse of a object that has already been pooled.  it's a form of weak reference.
 
 ## Post-Merge Enhancements
 

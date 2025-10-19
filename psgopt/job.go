@@ -14,13 +14,20 @@ import (
 // wait for new work before exiting. Empirically determined; subject to change.
 const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
 
+// DefaultTaskWorkerIdleJitter is the default jitter added to task worker idle timeouts to spread
+// mutex contention when multiple workers timeout. Empirically determined; subject to change.
+const DefaultTaskWorkerIdleJitter = 10 * time.Millisecond
+
+// DefaultTaskWorkerSpawnConcurrencyLimit is the default maximum number of task workers that can
+// be spawning concurrently. Empirically determined; subject to change.
+const DefaultTaskWorkerSpawnConcurrencyLimit = 1
+
 // JobOption is a configuration option that can be applied to Job.
 //
 // Available Job configuration options:
 //   - [WithTaskWorkerIdleTimeout] - Sets task worker idle timeout
-//   - [WithSchedulerBackpressureSettings] - Sets both scheduler latency threshold and max age
-//   - [WithSchedulerLatencyThreshold] - Sets scheduler latency threshold for backpressure
-//   - [WithSchedulerLatencyMaxAge] - Sets max age for scheduler latency measurements
+//   - [WithTaskWorkerIdleJitter] - Sets task worker idle jitter
+//   - [WithTaskWorkerSpawnConcurrencyLimit] - Sets max concurrent task worker spawns
 //   - [WithFlushListener] - Registers callback for when all tasks complete
 type JobOption = opts.JobOption
 
@@ -32,6 +39,7 @@ type JobOption = opts.JobOption
 // overhead when load patterns are bursty. A longer timeout keeps workers alive
 // longer, reducing spawn/teardown overhead but potentially wasting resources.
 //
+// Valid values are -1 (disabled, workers never idle-exit) or positive durations.
 // The default value is [DefaultTaskWorkerIdleTimeout].
 //
 // This setting is safe to change at any time via SetOptions, but only affects
@@ -42,6 +50,22 @@ func WithTaskWorkerIdleTimeout(timeout time.Duration) TaskWorkerIdleTimeoutOptio
 }
 
 type TaskWorkerIdleTimeoutOption interface {
+	JobOption
+}
+
+// WithTaskWorkerIdleJitter sets the random jitter added to task worker idle timeouts.
+// This spreads out mutex contention when multiple workers timeout simultaneously.
+//
+// Jitter must be non-negative.
+// The default value is [DefaultTaskWorkerIdleJitter].
+//
+// This setting is safe to change at any time via SetOptions, but only affects
+// workers that begin waiting after the change.
+func WithTaskWorkerIdleJitter(jitter time.Duration) TaskWorkerIdleJitterOption {
+	return opts.TaskWorkerIdleJitter(jitter)
+}
+
+type TaskWorkerIdleJitterOption interface {
 	JobOption
 }
 
@@ -67,5 +91,28 @@ func WithFlushListener(callback func()) FlushListenerOption {
 }
 
 type FlushListenerOption interface {
+	JobOption
+}
+
+// WithTaskWorkerSpawnConcurrencyLimit sets the maximum number of task workers
+// that can be spawning concurrently when handling orphaned tasks. This prevents
+// thundering herd behavior when many tasks arrive while all workers are busy.
+//
+// When an orphaned task is detected and no idle workers are available, the
+// system will spawn a new task worker only if the number of workers currently
+// in the spawning state is below this limit. Once a spawned worker secures a
+// task to execute, it releases its spawn slot, allowing additional spawns.
+//
+// Valid values are -1 (unlimited) or positive integers.
+// The default value is [DefaultTaskWorkerSpawnConcurrencyLimit]. Higher values
+// may be appropriate for workloads with sustained high task arrival rates and
+// very short task durations.
+//
+// This setting is safe to change at any time via SetOptions.
+func WithTaskWorkerSpawnConcurrencyLimit(limit int) TaskWorkerSpawnConcurrencyLimitOption {
+	return opts.TaskWorkerSpawnConcurrencyLimit(limit)
+}
+
+type TaskWorkerSpawnConcurrencyLimitOption interface {
 	JobOption
 }

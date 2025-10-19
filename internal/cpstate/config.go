@@ -14,14 +14,18 @@ import (
 type Config struct {
 	MaxConcurrency int
 	IdleTimeout    time.Duration
+	IdleJitter     time.Duration
 }
 
-func (c *Config) Update(changes opts.CombinerPoolConfigChanges) {
+func (c *Config) Update(changes *opts.CombinerPoolConfigChanges) {
 	if changes.MaxConcurrency != nil {
 		c.MaxConcurrency = *changes.MaxConcurrency
 	}
 	if changes.IdleTimeout != nil {
 		c.IdleTimeout = *changes.IdleTimeout
+	}
+	if changes.IdleJitter != nil {
+		c.IdleJitter = *changes.IdleJitter
 	}
 }
 

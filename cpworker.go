@@ -5,6 +5,7 @@ package psg
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -87,7 +88,10 @@ func (cw *cpWorker) AddWork(
 	// Capture the current idle timeout value to ensure consistency
 	idleTimeout := cw.cp.state.IdleTimeout()
 	if idleTimeout >= 0 {
-		cw.idleTimer.Reset(idleTimeout)
+		// Add jitter to spread out mutex contention when multiple workers timeout
+		maxJitter := cw.cp.state.IdleJitter()
+		jitter := time.Duration(rand.Int64N(int64(maxJitter))) //nolint:gosec // jitter doesn't need crypto/rand
+		cw.idleTimer.Reset(idleTimeout + jitter)
 		cw.idleTimerCh = cw.idleTimer.C
 		defer func() {
 			cw.idleTimerCh = nil
@@ -172,7 +176,9 @@ func (cw *cpWorker) popSelect(
 		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.idleTimerCh:
 		trace.Logf(ctx, traceRegion, "received idle timer signal")
-		cw.err = workq.ErrEndOfWork
+		if cw.cp.state.TryIdleExit() {
+			cw.err = workq.ErrEndOfWork
+		}
 	case <-cw.nextJobFlushCh:
 		trace.Logf(ctx, traceRegion, "received job flush signal")
 		cw.followupFn = func(ctx context.Context) {

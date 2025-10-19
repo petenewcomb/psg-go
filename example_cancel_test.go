@@ -117,6 +117,9 @@ func ExampleJob_Cancel_task() {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
+	// Give the first task time to complete and post its result
+	time.Sleep(10 * time.Millisecond)
+
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be gathered.
 	fmt.Println("Launching second task")

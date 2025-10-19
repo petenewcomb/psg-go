@@ -28,9 +28,11 @@ type CombinerPoolState struct {
 	// Configuration
 	maxConcurrency atomic.Int32 // -1 means unlimited
 	idleTimeout    atomic.Int64 // time.Duration
+	idleJitter     atomic.Int64 // time.Duration
 
 	spawnedGoroutineCount atomic.Int32
 	liveGoroutineCount    int
+	latestIdleExit        time.Time // protected by mu
 }
 
 func (cps *CombinerPoolState) Init() {
@@ -49,6 +51,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	newConfig := Config{
 		MaxConcurrency: oldMaxConcurrency,
 		IdleTimeout:    time.Duration(cps.idleTimeout.Load()),
+		IdleJitter:     time.Duration(cps.idleJitter.Load()),
 	}
 
 	// Apply changes to the copy
@@ -62,6 +65,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	// Apply the validated configuration to the actual state
 	cps.maxConcurrency.Store(int32(newConfig.MaxConcurrency)) //nolint:gosec // bounded by MaxInt32 above
 	cps.idleTimeout.Store(int64(newConfig.IdleTimeout))
+	cps.idleJitter.Store(int64(newConfig.IdleJitter))
 
 	if newConfig.MaxConcurrency != oldMaxConcurrency &&
 		(newConfig.MaxConcurrency == -1 || newConfig.MaxConcurrency > oldMaxConcurrency) {
@@ -71,6 +75,10 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 
 func (cps *CombinerPoolState) IdleTimeout() time.Duration {
 	return time.Duration(cps.idleTimeout.Load())
+}
+
+func (cps *CombinerPoolState) IdleJitter() time.Duration {
+	return time.Duration(cps.idleJitter.Load())
 }
 
 func (cps *CombinerPoolState) IncrementCompleted() {
@@ -83,7 +91,9 @@ func (cps *CombinerPoolState) ShouldSpawnFirstGoroutine() bool {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	for {
 		newCount := cps.spawnedGoroutineCount.Add(1)
-		trace.Logf(context.Background(), traceRegion, "CombinerPoolState=%p, newCount=%d", cps, newCount)
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion, "CombinerPoolState=%p, newCount=%d", cps, newCount)
+		}
 		if newCount == 1 {
 			trace.Logf(context.Background(), traceRegion, "returning true")
 			return true
@@ -92,7 +102,9 @@ func (cps *CombinerPoolState) ShouldSpawnFirstGoroutine() bool {
 		if restoredCount < 0 {
 			panic("restoredCount < 0")
 		}
-		trace.Logf(context.Background(), traceRegion, "restoredCount=%d", restoredCount)
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion, "restoredCount=%d", restoredCount)
+		}
 		if restoredCount > 0 {
 			trace.Logf(context.Background(), traceRegion, "returning false")
 			return false
@@ -175,4 +187,20 @@ func (cps *CombinerPoolState) GoroutineExiting() bool {
 
 func (cps *CombinerPoolState) SpawnNotifier() *rdvq.Notifier {
 	return &cps.spawnNotifier
+}
+
+// TryIdleExit attempts to record an idle exit. Returns true if this worker
+// is allowed to exit (enough time has passed since latest exit), false if
+// another worker exited too recently and this worker should retry later.
+func (cps *CombinerPoolState) TryIdleExit() bool {
+	cps.mu.Lock()
+	defer cps.mu.Unlock()
+
+	now := time.Now()
+	idleTimeout := time.Duration(cps.idleTimeout.Load())
+	if now.Sub(cps.latestIdleExit) >= idleTimeout {
+		cps.latestIdleExit = now
+		return true
+	}
+	return false
 }

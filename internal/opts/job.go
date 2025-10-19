@@ -4,6 +4,7 @@
 package opts
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -15,10 +16,10 @@ type JobOption interface {
 // JobConfigChanges holds configuration changes for a Job.
 // Fields use pointers to distinguish between "not set" (nil) and "set to zero value" (non-nil).
 type JobConfigChanges struct {
-	TaskWorkerIdleTimeout     *time.Duration
-	FlushListener             *func()
-	SchedulerLatencyThreshold *time.Duration
-	SchedulerLatencyMaxAge    *time.Duration
+	TaskWorkerIdleTimeout           *time.Duration
+	TaskWorkerIdleJitter            *time.Duration
+	FlushListener                   *func()
+	TaskWorkerSpawnConcurrencyLimit *int
 }
 
 type jobConfig interface {
@@ -33,36 +34,36 @@ func ApplyToJob(c jobConfig, options ...JobOption) {
 	c.Update(changes)
 }
 
-// TaskWorkerIdleTimeout sets the idle timeout for task workers.
-type TaskWorkerIdleTimeout time.Duration
+// taskWorkerIdleTimeout sets the idle timeout for task workers.
+type taskWorkerIdleTimeout time.Duration
 
-func (o TaskWorkerIdleTimeout) applyToJob(c *JobConfigChanges) {
+func (o taskWorkerIdleTimeout) applyToJob(c *JobConfigChanges) {
 	c.TaskWorkerIdleTimeout = (*time.Duration)(&o)
 }
 
-// SchedulerLatencyThreshold sets the scheduler latency threshold for backpressure.
-type SchedulerLatencyThreshold time.Duration
-
-func (o SchedulerLatencyThreshold) applyToJob(c *JobConfigChanges) {
-	c.SchedulerLatencyThreshold = (*time.Duration)(&o)
+// TaskWorkerIdleTimeout creates a task worker idle timeout option.
+// Valid values are -1 (disabled, workers never idle-exit) or positive durations.
+func TaskWorkerIdleTimeout(timeout time.Duration) taskWorkerIdleTimeout {
+	if timeout != -1 && timeout <= 0 {
+		panic(fmt.Sprintf("task worker idle timeout must be -1 (disabled) or positive, got %v", timeout))
+	}
+	return taskWorkerIdleTimeout(timeout)
 }
 
-// SchedulerLatencyMaxAge sets the max age for scheduler latency measurements.
-type SchedulerLatencyMaxAge time.Duration
+// taskWorkerIdleJitter sets the idle jitter for task workers.
+type taskWorkerIdleJitter time.Duration
 
-func (o SchedulerLatencyMaxAge) applyToJob(c *JobConfigChanges) {
-	c.SchedulerLatencyMaxAge = (*time.Duration)(&o)
+func (o taskWorkerIdleJitter) applyToJob(c *JobConfigChanges) {
+	c.TaskWorkerIdleJitter = (*time.Duration)(&o)
 }
 
-// SchedulerBackpressureSettings sets both the scheduler latency threshold and max age.
-type SchedulerBackpressureSettings struct {
-	Threshold time.Duration
-	MaxAge    time.Duration
-}
-
-func (o SchedulerBackpressureSettings) applyToJob(c *JobConfigChanges) {
-	c.SchedulerLatencyThreshold = &o.Threshold
-	c.SchedulerLatencyMaxAge = &o.MaxAge
+// TaskWorkerIdleJitter creates a task worker idle jitter option.
+// Jitter must be non-negative.
+func TaskWorkerIdleJitter(jitter time.Duration) taskWorkerIdleJitter {
+	if jitter < 0 {
+		panic(fmt.Sprintf("task worker idle jitter must be non-negative, got %v", jitter))
+	}
+	return taskWorkerIdleJitter(jitter)
 }
 
 // FlushListener sets the flush listener callback.
@@ -72,4 +73,20 @@ type FlushListener struct {
 
 func (o FlushListener) applyToJob(c *JobConfigChanges) {
 	c.FlushListener = &o.Callback
+}
+
+// taskWorkerSpawnConcurrencyLimit sets the maximum number of task workers that can be spawning concurrently.
+type taskWorkerSpawnConcurrencyLimit int
+
+func (o taskWorkerSpawnConcurrencyLimit) applyToJob(c *JobConfigChanges) {
+	c.TaskWorkerSpawnConcurrencyLimit = (*int)(&o)
+}
+
+// TaskWorkerSpawnConcurrencyLimit creates a task worker spawn concurrency limit option.
+// Valid values are -1 (unlimited) or positive integers.
+func TaskWorkerSpawnConcurrencyLimit(limit int) taskWorkerSpawnConcurrencyLimit {
+	if limit != -1 && limit <= 0 {
+		panic(fmt.Sprintf("task worker spawn concurrency limit must be -1 (unlimited) or positive, got %d", limit))
+	}
+	return taskWorkerSpawnConcurrencyLimit(limit)
 }

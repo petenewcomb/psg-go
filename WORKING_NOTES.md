@@ -1,1224 +1,356 @@
 # PSG-Go Combiner Branch Working Notes
 
-This document contains working notes and context for development on the `combiner` branch. It tracks current implementation insights and architectural understanding needed for remaining work.
+This document contains working notes and context for development on the `combiner` branch.
 
 Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
 
-## Recent Performance Analysis (2025-07-25)
+## Architecture Highlights (Completed)
 
-### Rdvq Outbox Optimization (2911b9c)
+**Core Infrastructure:**
+- LIFO stack architecture for natural worker scaling (eliminates controller complexity)
+- Leakguard package for safe resource handle management with finalizer-based leak detection
+- Demand-based worker spawning with token tracking for precise spawn chaining
+- Hardware-accelerated 128-bit atomics in nbcq for improved performance
+- Orphan task buffering with notification infrastructure
 
-Implemented non-blocking fast path for all outbox channels, not just fresh ones. Previously, non-fresh outboxes were forced through expensive selectFn path (waiter setup, notification registration) even when they had available capacity.
+**Key Design Patterns:**
+- Reference-counted CombineOp/GatherOp handles with Dup()/Close() semantics
+- Pool-segregated combiner instances to avoid complex cross-pool handoff
+- Trait-based generic collection system (FIFO for fairness, LIFO for scaling)
+- Subscription-based coordination with Notifier/Listener pattern
 
-**Performance Impact:**
-- Processing workloads: +88-142% throughput improvements in high task multiplier scenarios
-- Waiting workloads: +36-189% throughput improvements but with some latency increases
-- The optimization eliminates unnecessary waiter overhead for reused outboxes with capacity
+## Task Worker Demand-Based Spawning (2025-10-19)
 
-**Key Insight:** The latency increases in waiting workloads likely reflect the optimization exposing underlying Go runtime scheduler pressure rather than PSG algorithmic issues. Waiting workloads create many park/unpark events that strain the scheduler, and higher task creation rates amplify this pressure.
+**Problem Solved:**
 
-**Next Steps:** Implement scheduler health monitoring using near-instant event timing to detect runtime pressure and add backpressure mechanisms when thresholds are exceeded.
+Fixed livelock in `taskPostWork.Execute()` where blocking path would call spawn-on-demand, but if spawn failed due to concurrency limit, the code would block indefinitely with no retry opportunity.
 
-## Previous Performance Analysis (2025-07-22)
+**Solution: Token-Based Demand Tracking**
 
-### Important Note on Benchmark Baseline
-The original analysis used bench_norm_old.txt which was found to be from a different benchmark configuration (simplified test with different task scattering and max hold time settings). The analysis has been corrected using bench_12f5955_20250722T130401Z_norm.txt as the proper baseline.
+Implemented demand tracking where:
+- Tasks register demand tokens when they can't immediately post
+- Spawning workers check for unmet demand on completion and chain spawns
+- Demand is cancelled when tasks successfully post or give up
+- Orphaned tasks wrapped with demand tracking for consistent handling
 
-### Summary of Previous Optimizations
-The benchmark comparison (new baseline from commit 12f5955 vs current) captures the impact of:
-- Hardware-accelerated 128-bit atomics in nbcq (409d49d)
-- Data race fix in CombinerPool goroutine context setup (c515383)
-- Receiver/waiter reuse to prevent stale notification buildup (42ab341)
+**Key Components:**
 
-### Performance Validation Summary
+1. **Demand Token Queue** (`unmetTaskWorkerDemand nbcq.Queue[*unmetDemandToken]`):
+   - Tracks tasks waiting for workers with unique token IDs
+   - Each token has `stillNeeded` flag for safe cancellation across retries
+   - Tokens pooled via omnipool for zero allocation after warmup
 
-**IMPORTANT**: All recent optimization commits have been validated through targeted benchmarking and proper statistical analysis.
+2. **unmetDemand Wrapper Struct**:
+   ```go
+   type unmetDemand struct {
+       token *unmetDemandToken
+       id    unmetDemandID
+   }
 
-#### Key Discovery: Measurement Variance
-Initial comprehensive analysis suggested performance regressions, but when baseline measurement variance (±13%) was properly accounted for, all reported regressions fell within overlapping statistical ranges.
+   func (d *unmetDemand) Cancel() {
+       if d.token == nil { return }
+       d.token.mu.Lock()
+       defer d.token.mu.Unlock()
+       if d.token.id == d.id {
+           d.token.stillNeeded = false
+       }
+   }
+   ```
 
-#### Targeted Benchmarking Results
+3. **Spawn Chaining**:
+   - When worker secures a task, checks demand queue
+   - Spawns another worker if there's unmet demand
+   - Chains spawns to satisfy all waiting tasks
+   - Skips cancelled tokens (task already posted or gave up)
 
-**Hardware-accelerated 128-bit atomics (409d49d):**
-- Processing workloads: p99 latency improved ~5%, throughput improved ~1%
-- GatherOnly operations: no statistically significant impact
-- **Result**: Optimization worked exactly as intended
+**Benefits:**
+- Eliminates livelock - tasks no longer wait indefinitely when spawn capacity becomes available
+- Precise demand tracking with safe cancellation
+- Spawn chaining ensures all waiting tasks eventually get workers
+- Zero allocation after warmup
 
-**Data race fix (c515383) and receiver/waiter reuse (42ab341):**
-- Targeted testing shows performance consistent with intended behavior
-- No actual regressions when measurement variance properly considered
-- **Result**: Infrastructure changes performed as expected
+## Scatter Work Persistence Refactoring (2025-10-19)
 
-#### Final Assessment
-All optimization commits (409d49d, c515383, 42ab341, 2911b9c) performed as intended. The rdvq optimization provides the largest performance gains while exposing scheduler-related constraints that need to be addressed through runtime pressure monitoring.
+**Problem Identified - Demand Signal Livelock:**
 
-**The optimization work was entirely successful with clear next steps identified.**
+The current scatter architecture creates and destroys `taskPostWork` objects on every scatter operation. This causes **correctness issues** with the demand-based worker spawning because work items remain alive across retries but recreate their underlying post work each time:
 
-## Recent Implementation (2025-07-28)
+**The Flow:**
+1. `combineScatterWork` is created, calls `target.scatter()`
+2. `scatter()` creates NEW `taskPostWork` from pool
+3. `taskPostWork.Execute()` registers `unmetDemand` if posting fails and work needs postponement
+4. `taskPostWork.Execute()` returns (not posted)
+5. `taskPostWork.Free()` is called immediately, which **cancels the demand** via `defer demand.Cancel()`
+6. `scatter()` returns (not started)
+7. **`combineScatterWork` stays alive** - it goes into workq as postponed work (NOT back to pool)
+8. Later, workq retries: `combineScatterWork.Execute()` is called AGAIN
+9. This calls `scatter()` again, which creates a **NEW `taskPostWork`** from pool
+10. **LIVELOCK**: The old demand signal was cancelled in step 5, new one hasn't been created yet
 
-**Scheduler Latency Backpressure**: Implemented scheduler monitoring infrastructure to replace GC-based backpressure. The system can detect Go runtime scheduler pressure and apply backpressure when thresholds are exceeded. Configuration available via `WithSchedulerLatencyThreshold()` and `WithSchedulerLatencyMaxAge()`.
+The demand tokens are being created and destroyed on each retry attempt, even though the parent work object (`combineScatterWork`) remains alive across all retry attempts.
 
-**Key Changes:**
-- **Rdvq API improvements**: Inbox/Outbox objects now encapsulate channels + metadata instead of exposing raw channels directly
-- **Proper scheduler latency measurement**: Fixed measurement to track actual Go scheduler delays (runnable→running time) rather than application operation delays
-- **Performance neutral when disabled**: Benchmarking confirms no significant performance impact when scheduler monitoring is disabled
-- **Disabled by default**: `DefaultSchedulerLatencyThreshold = 0` to avoid premature optimization
+**Current Architecture:**
 
-**Implementation Details:**
-- `schedulerLatencySensor` tracks wait cycles: `waitStarting()` → `triggered()` (runnable) → `waitEnded()` (running)  
-- Latency calculated as time from goroutine becoming runnable to actually executing
-- Global measurements shared across jobs (can be filtered per-job if needed)
-- Trace logging integration for debugging
+```
+combineScatterWork (stays alive across retries)
+  → Execute() called attempt #1
+    → calls target.scatter()
+      → creates NEW taskPostWork from pool
+      → taskPostWork.Execute() [registers demand token #1]
+      → taskPostWork.Free() [cancels demand token #1]  ← DEMAND LOST!
+    → returns (not started)
 
-**Decision**: Scheduler monitoring included but disabled by default. The rdvq API improvements provide immediate ergonomic benefits while keeping the backpressure feature available for future tuning if needed.
-
-## Current Status (2025-08-09)
-
-**Combiner Architecture Progress:**
-- Core combiner/gather infrastructure complete and tested
-- psgwf package refactored with cleaner combineop/gatherop pattern
-- Workflow context propagation and pinning mechanism implemented
-- New internal benchmarking application (internal/benchapp) added for performance testing
-
-## Combiner Ownership Model Refactoring (2025-08-12)
-
-**Major Architectural Shift Completed (commit da1142a):**
-Fundamental change from per-goroutine combiner ownership to shared pool model. Combiner instances are no longer owned by specific goroutines but are instead pooled and shared across all combiner goroutines, maintaining single-threaded execution through lock-free per-CombineOp instance queues (nbcq.Queue).
-
-**Key Changes:**
-- **activeCombinerMap**: Extracted combiner management into dedicated structure with heap-based deadline tracking
-- **Reference-counted CombineOp/GatherOp**: Enable value-type copying while maintaining operation identity through shared internal state
-- **Per-operation instance queuing**: Lock-free queuing ensures single-threaded combiner execution without lock contention
-- **Simplified CombinerPool**: Delegates to activeCombinerMap, removing complex inline management (~300 lines reduced)
-
-This refactoring enables arbitrary composition patterns while maintaining performance and correctness.
-
-## Planned Reducer Architecture Design
-
-**Core Insight: User-Managed Key Mapping**
-Rather than building key-awareness into the framework, users maintain their own `map[KeyType]ReduceOp` mappings. This keeps the framework simple while providing maximum flexibility - different keys can use completely different reducer and gather functions.
-
-**Reducer vs Combiner Semantics:**
-- **Combiner**: Stateless, creates fresh instances via factory for each batch, then discards them
-- **Reducer**: Stateful, uses single persistent instance that accumulates state across all inputs
-
-**Proposed Type Structure:**
-```go
-type ReduceOp[I any] struct {
-    pool    *CombinerPool             // Pool specified at construction
-    reducer psgfn.Reducer[I]          // Single persistent instance (not factory)
-}
-
-type CombineOp[I any] struct {
-    pool    *CombinerPool             // Pool specified at construction  
-    factory psgfn.CombinerFactory[I]  // Creates fresh instances
-}
-
-type GatherOp[I any] struct {
-    gatherFn psgfn.Gather[I]          // Terminal operation
-}
-
-// All operations provide:
-// - Integrate(ctx, value, err) for direct value integration
-// - Close(ctx) for signaling completion (triggers final flush)
+  → Execute() called attempt #2 (retry)
+    → calls target.scatter()
+      → creates NEW taskPostWork from pool (demand token #1 is gone!)
+      → taskPostWork.Execute() [might register demand token #2]
+      → taskPostWork.Free() [cancels demand token #2]  ← DEMAND LOST AGAIN!
+    → returns (not started)
 ```
 
-**Uniform Integration Interface:**
-All operations provide `Integrate()` method for direct value integration and `Close()` method for completion signaling. Pool remains an implementation detail hidden at construction time. Sink interface may be added later for polymorphic dataflow composition in the implicit layer.
+**Key Insight:**
 
-**Explicit vs Implicit Data Flow:**
-Current implicit model has operations configured with targets at creation time. Exploring explicit integration model where all data flow happens through explicit Integrate() calls:
+The parent work objects (`combineScatterWork`, `gatherScatterWork`) already persist across retries by design - they stay in the workq postponed queue. We need the underlying `taskPostWork` to persist with the same lifetime.
 
-```go
-// Explicit integration (proposed core layer)
-combineOp.Integrate(ctx, value, err)  // Direct value integration
-gatherOp.Integrate(ctx, value, err)
+**Solution: Embed by Value**
 
-// Implicit convenience layer (syntactic sugar)
-combineOpWithTarget := NewCombineOpWithTarget(gatherOp, pool, factory)
-combineOpWithTarget.Scatter(ctx, target, taskFn)  // Auto-integrates to gatherOp
+If we embed the scatter work hierarchy using struct composition, the `taskPostWork` lives and dies with its parent:
+
 ```
-
-**Deadlock-Free Arbitrary Composition:**
-The shift to flush-as-work eliminates blocking sends. Instead of combiners directly posting to outboxes (which can block), flush operations become work items queued through the same system:
-
-1. **Combiner flushes** → generates flush work items → processed asynchronously
-2. **No blocking on send** → enables safe cycles in dataflow graphs  
-3. **Governor backpressure** → prevents unbounded queue growth
-4. **Unified work processing** → all work (tasks, flushes, posts) flows through same queues
-
-**Composition Patterns Enabled:**
-- Task → Combine → Reduce → Gather (hierarchical aggregation)
-- Task → Reduce (simple fan-in without combining)
-- Per-request Reduce → Cross-request Reduce (multi-level fan-in)
-- Arbitrary cycles via explicit Post() calls (safe due to queue-based flow)
-
-**Implementation Strategy:**
-Architecture designed with the following implementation steps:
-
-1. **Convert gather posting to work items** - Starting with `postGatherSlow()`, make all gather operations flow through work queue system
-2. **Add blocking behavior for top-level context** - Use `job.block()` like `scatterNowOrQueue()` when Integration calls can't proceed immediately  
-3. **Implement Sink interface and Integrate() API** - Create uniform interface for all operations
-4. **Implement ReduceOp** - Add stateful reducer operations with persistent instances
-5. **Create implicit convenience layer** - Build syntactic sugar on top of explicit integration
-6. **Update existing CombineOp** - Migrate to new integration mechanism
-7. **Add cycle prevention tooling** - Composable add-ons for detection and mitigation
-
-**Key Design Decisions:**
-- Pool-segregated instances (avoid complex cross-pool handoff of abandonedCombiners)
-- Pool specified at construction time (implementation detail hidden from users)
-- `Integrate()` method name for uniform integration API (active verb, semantically appropriate)
-- `Close()` method for completion signaling (leverages existing reference counting in inner objects)
-- CombineOp identity preserved (avoid interface values as map keys)
-
-**Fan-In Completion Pattern:**
-The `Close()` method enables clean fan-in patterns by signaling "no more inputs" to operations:
-```go
-// Fan-in example
-for _, item := range items {
-    go func(item Item) {
-        result := process(item)
-        reduceOp.Integrate(ctx, result, nil)
-    }(item)
-}
-reduceOp.Close(ctx)  // Triggers final flush when all work completes
-```
-
-## Integration Architecture Implementation (2025-08-14)
-
-**Major Progress: Core Integration Infrastructure Completed**
-
-The foundation for explicit integration has been fully implemented and tested. All gather operations now flow through the work queue system, eliminating blocking sends and enabling deadlock-free composition.
-
-**Implemented Components:**
-
-1. **Work Queue Foundation (✓ Complete)**
-   - Converted all gather posting to work items following `scatterNowOrQueue` pattern
-   - Added proper blocking behavior for top-level contexts using `job.block()`
-   - Created `taskWorkerExEnv` for execution environment support in task workers
-   - All operations now flow through unified work processing system
-
-2. **Integration API (✓ Complete)**
-   - Added `Integrate()` and `TryIntegrate()` methods to GatherOp and CombineOp
-   - Implemented explicit value/error parameter model instead of workq.Work
-   - Added deadline support for non-blocking variants
-   - Unified interface enables direct value integration across all operation types
-
-3. **Resource Management (✓ Complete)**
-   - Fixed resource leaks through proper `boundTask`/`boundCombineWork` interface implementation
-   - Eliminated double-free bugs with correct ownership transfer patterns
-   - Added proper work lifecycle management with reference counting
-   - Implemented robust cleanup for all work types (tasks, combines, gathers)
-
-4. **Subscription-Based Coordination (✓ Complete)**
-   - Renamed Coordinator to Notifier throughout codebase for clarity
-   - Implemented subscription pattern for goroutine spawning notifications
-   - Added `SpawnWaitNotifier()` method to CombinerPoolState
-   - Work items now subscribe to notifications when unable to post immediately
-
-5. **Type System Cleanup (✓ Complete)**
-   - Renamed `boundCombine` to `boundCombineWork` for consistency
-   - Updated `executeCombine` to take `boundCombineWork` interface
-   - Fixed ambiguous selector issues in embedded struct hierarchies
-   - All type boundaries now clearly defined and consistent
-
-**Architecture Validation:**
-- ✅ All tests passing including stress tests
-- ✅ Full build validation complete  
-- ✅ Resource leak prevention verified
-- ✅ Double-free prevention validated
-- ✅ Integration API functional and tested
-- ❌ **BLOCKER: Benchmarks hanging/deadlocking** - needs investigation
-
-**Current State:**
-The explicit integration foundation is complete and functional. The benchmark deadlock has been resolved through a comprehensive rearchitecture of the notification and work posting systems.
-
-## Benchmark Deadlock Resolution (2025-09-02)
-
-**Root Cause:**
-The deadlock occurred due to a circular dependency in the work posting mechanism:
-1. Task workers tried to post results directly to gather queues
-2. Gather queues were full, causing workers to block waiting for space
-3. The goroutines that would drain the gather queues were blocked waiting for the task workers
-
-**Architectural Fix:**
-Implemented a hybrid synchronous/asynchronous posting model that breaks the circular dependency:
-
-1. **Notification System Refactoring:**
-   - Renamed `Coordinator` → `Notifier`/`Listener` pattern for clearer separation of concerns
-   - `Subscribe` → `AddToListeners` with proper double-registration prevention
-   - `ShouldBlockOrListen` → `ShouldBlockOrPostpone` to clarify postponement semantics
-   - Listeners track which collections they're registered with via `addedTo` map
-
-2. **Hybrid Posting Model:**
-   - **Fast path**: Synchronous `TryPushBack()` for immediate delivery to waiting receivers
-   - **Medium path**: Synchronous posting to outbox when space available
-   - **Slow path**: Create `gatherPostWork` items only when posting would block
-   - Work items register for notifications and retry when space becomes available
-
-3. **Resource Management Improvements:**
-   - Outboxes now have atomic `refCount` and proper lifecycle management
-   - `fillPending()`/`fillAttemptComplete()` pattern ensures correct ownership transfer
-   - `emptied()` notifies listeners AND frees the outbox atomically
-   - Reference counting prevents use-after-free in concurrent scenarios
-
-4. **Integration Pattern Unification:**
-   - Both `CombineOp` and `GatherOp` implement `integrate()` methods
-   - Tasks implement `boundTask` interface with `Execute()` and `Free()` methods
-   - Uniform work posting through the work queue system
-   - `gatherPostWork` and similar types handle asynchronous posting when needed
-
-5. **Execution Environment Refactoring:**
-   - Split into `baseExEnv`, `taskExEnv`, `integrationExEnv`, and `topLevelExEnv`
-   - Each environment type only exposes operations valid in its context
-   - Panics on invalid operations ensure fail-fast behavior for contract violations
-
-**Key Design Decisions:**
-- Preserve synchronous posting performance while providing asynchronous escape hatch
-- Aggressive invariant checking with panics ensures undefined behavior is caught early
-- The `ShouldBlockOrPostpone()` pattern allows work to be deferred without abandoning it
-- Work items only created when actually needed, not for every post operation
-
-**Result:**
-Benchmarks now run successfully without hanging. The hybrid model maintains the performance of synchronous posting while preventing deadlocks through selective asynchronous deferral.
-
-## Proposed: LIFO Stack for Natural Worker Scaling (2025-09-02)
-
-### Problem Statement
-Current FIFO queue (rdvq.Optional) keeps all workers "warm" by cycling through them equally, preventing natural timeout-based scaling. Workers never go idle long enough to timeout and exit, requiring complex controller logic to manage pool sizes.
-
-### Proposed Solution: Replace Queue with Stack
-
-**Core Insight**: Using LIFO (stack) instead of FIFO (queue) for worker pools creates natural scaling behavior:
-- Recently used workers stay "hot" at top of stack
-- Idle workers sink to bottom and naturally timeout
-- System self-regulates to minimum workers needed for current load
-- Eliminates need for complex controller logic and primary/spare distinctions
-
-### Implementation Plan
-
-#### Worker Pool Architecture Analysis
-
-Current PSG has different patterns for different worker types:
-
-**Tasks**: Direct worker pool (`taskQueue` = `rdvq.Optional[*taskWork]`) with instant worker spawning
-- Task arrives → `TryPop()` worker → if none available, spawn immediately  
-- Low latency, but FIFO prevents natural worker scaling
-
-**Combines**: Two-tier system (`combineQueue` = `rdvq.Required[Work]`) with buffering
-- Work arrives → try inbox → if busy, buffer in outbox → worker picks up later
-- Higher latency due to outbox buffering
-
-**Gathers**: Two-tier system (`gatherQueue` = `rdvq.Required[Work]`) with buffering  
-- Must buffer because "workers" are user threads calling `Gather()` - PSG can't spawn them
-
-#### Proposed Unified Architecture
-
-**Approach A: Lock-Free Stack + Spawn (for PSG-managed workers)**
-```go
-// For tasks and combiners - PSG can spawn workers
-taskWorkers    LockFreeStack[*TaskWorker]
-combineWorkers LockFreeStack[*CombineWorker]
-
-// Work arrives → TryPop() worker → if empty, spawn new worker
-```
-
-**Approach B: Required Two-Tier (for user-managed workers)**
-```go
-// For gathers - PSG cannot spawn user threads
-gatherQueue rdvq.Required[*GatherWork]  // Must buffer when no gatherers
-```
-
-#### Critical Contention Analysis
-
-**Why Lock-Free Stack Is Essential**:
-Under high concurrency, many tasks arriving when no workers are idle:
-```
-Thread 1: TryPop() → lock mutex → find empty → unlock → spawn worker
-Thread 2: TryPop() → wait for mutex → find empty → unlock → spawn worker  
-Thread N: TryPop() → wait for mutex → ...
-```
-
-All concurrent arrivals serialize on the mutex just to discover "still empty, spawn worker". Unlike Required's two-tier system where outboxes absorb contention, the spawn-on-demand pattern puts the stack directly in the hot path.
-
-**For Task Workers**: Every task arrival when workers are busy hits the stack for empty check.
-
-**For Combiner Workers**: Same issue - combine operations are latency-critical and shouldn't wait for outbox buffering.
-
-#### Lock-Free Stack Implementation Strategy
-
-**Phase 1: Basic Treiber Stack**
-- Simple, well-understood algorithm
-- ABA problem handled by Go's GC (pointers stay valid)
-- Node recycling via sync.Pool
-
-**Phase 2: Performance Validation**
-- Benchmark against mutex version under various contention levels
-- Verify it enables natural worker timeout behavior
-- Measure latency improvements for tasks and combines
-
-**Phase 3: Advanced Optimizations (if needed)**
-- Elimination arrays (Hendler et al. algorithm) for very high contention
-- Other optimizations based on measured bottlenecks
-
-```go
-type LockFreeStack[T any] struct {
-    head atomic.Pointer[stackNode[T]]
-    pool *sync.Pool // Node recycling
-}
-
-type stackNode[T any] struct {
-    value T
-    next  *stackNode[T]
-}
-```
-
-#### What This Eliminates
-
-- **CombinerPoolController** and all controller complexity
-- **Primary/spare distinctions** in combiner pools  
-- **Controller goroutines** and periodic management
-- **Most rdvq.Required usage** (only gathers need it)
-- **Complex multi-tier coordination** in favor of simple "work queue + worker pool"
-
-#### Final Architecture Decision: Required + Spawn-on-Miss
-
-**Unified Pattern**: Use rdvq.Required for all work distribution, enhanced with spawn-on-miss capability:
-
-```go
-taskQueue    rdvq.Required[*taskWork]    // with task worker spawn hook
-combineQueue rdvq.Required[*combineWork] // with combiner spawn hook  
-gatherQueue  rdvq.Required[*gatherWork]  // no spawn hook (user threads)
-```
-
-**Spawn-on-Miss Implementation**:
-```go
-required.PushBackFunc(outbox, work, func(outbox *Outbox[Work]) {
-    // Spawn worker if under capacity (don't pass work directly)
-    if pool.currentCount < pool.maxWorkers {
-        go pool.spawnWorker() // Worker will check outboxes when ready
-    }
-    
-    // Normal select on outbox (work is already buffered)
-    BasicPushSelect(ctx, outbox, work)
-})
-```
-
-**Benefits of This Approach**:
-1. **Bounded Low Latency**: Work immediately buffered + worker immediately spawned
-2. **Natural Load Balancing**: Multiple workers compete for outbox work (fastest wins)
-3. **Capacity Limits**: Proper buffering when at max workers
-4. **LIFO Scaling**: Inbox stack (LIFO) enables natural worker timeout
-5. **Proven Architecture**: Leverages existing Required infrastructure
-
-**Contention Analysis Revisited**:
-Spawn-on-miss + outbox buffering significantly reduces inbox stack contention:
-- Work spreads across multiple outboxes under high load
-- Workers stay busy processing outboxes (rarely go idle)
-- Stack operations become rare scaling events, not per-task operations
-- Atomic empty flag handles the few remaining empty checks lock-free
-
-**Implementation Decision**: Start with mutex-based LIFO stack with atomic empty flag. The spawn-on-miss pattern likely makes this sufficient, with easy upgrade path to lock-free if needed.
-
-#### Implementation Plan
-
-**Phase 1: Internal Collection Architecture**
-- Create `inboxCollection[T]` interface with `Push()`, `TryPop()`, `Reset()` methods
-- Implement `fifoCollection[T]` wrapping `nbcq.Queue` for waiter fairness
-- Implement `lifoCollection[T]` with mutex + slice + atomic empty flag for worker scaling
-- Unify under single `optional[T, C inboxCollection[T]]` implementation
-
-**Phase 2: Public API Integration**
-- Rename `rdvq.Required` to `rdvq.Queue` for clearer semantics
-- `rdvq.Queue` uses `lifoCollection` for inbox management (natural worker scaling)
-- `rdvq.Waiters` uses `fifoCollection` for notification fairness
-- All collection types remain internal - users only see `Queue` and `Waiters`
-
-**Phase 3: Spawn-on-Miss Enhancement**
-- Add spawn capability to `rdvq.Queue.PushBackFunc()` selectFn
-- Work immediately buffered in outbox + worker spawned if under capacity
-- New worker competes with existing workers for outbox work (natural load balancing)
-- Preserves low latency while respecting capacity limits
-
-**Final Architecture**:
-```go
-// All work distribution uses Queue with spawn-on-miss
-taskQueue    rdvq.Queue[*taskWork]    // LIFO inboxes + task worker spawning
-combineQueue rdvq.Queue[*combineWork] // LIFO inboxes + combiner spawning  
-gatherQueue  rdvq.Queue[*gatherWork]  // LIFO inboxes, no spawning (user threads)
-```
-
-#### Adaptive Timeout Based on Churn Rate**
-- Instead of fixed idle timeout, adapt based on worker churn rate
-- User specifies acceptable churn rate (e.g., "10 workers/second max")
-- System automatically adjusts timeout to stay within churn budget:
-  ```
-  if churnRate > maxChurnRate:
-      timeout *= 2  // Reduce churn
-  else if churnRate < maxChurnRate/2:
-      timeout *= 0.9  // Can be more aggressive
-  ```
-- More intuitive than timeout: "How much CPU for worker management?" vs "How long should workers idle?"
-
-### Benefits
-
-1. **Simplification**: Removes entire controller subsystem
-2. **Natural Scaling**: Workers scale based on actual load patterns
-3. **Better Cache Locality**: Hot workers stay in CPU cache
-4. **Single Tuning Parameter**: Just churn rate limit (or timeout)
-5. **Self-Regulating**: No periodic ticks or state machines needed
-
-### Configuration Examples
-
-```go
-// Simple: Just timeout
-WithTaskWorkerIdleTimeout(5 * time.Second)
-
-// Advanced: Churn rate control  
-WithMaxChurnRate(10.0)  // Max 10 worker/sec turnover
-WithMinTimeout(100 * time.Millisecond)
-WithMaxTimeout(30 * time.Second)
-```
-
-### Key Design Decisions
-
-- **"Starvation" is good**: Idle workers timing out is the goal, not a problem
-- **No shuffling needed**: Let hot workers stay hot for cache locality
-- **Churn tracking**: Simple ring buffer of recent spawn/exit events
-- **Timeout adaptation**: Exponential backoff/advance within bounds
-
-## LIFO Stack Architecture Implementation (2025-09-06)
-
-**COMPLETED: Full LIFO Stack Implementation (2025-09-08)**
-
-Successfully completed the entire LIFO stack architecture implementation for natural worker scaling. All core components are implemented, tested, and lint-clean:
-
-**Implementation Details:**
-
-1. **Trait-based Generic Collection System (✓ Complete)**
-   - Created `emptyInboxesTrait[T, C]` interface for unified collection abstraction
-   - `inboxQueueTrait` provides FIFO behavior using `nbcq.Queue` for waiter fairness
-   - `inboxStackTrait` provides LIFO behavior using mutex + slice + atomic empty flag for worker scaling
-   - Generic `inboxOnlyQueue[T, C, CT]` implementation supports both collection types
-
-2. **Collection Implementations (✓ Complete)**
-   - **FIFO Collection**: Fast lock-free queue for notification fairness (waiters)
-   - **LIFO Collection**: Mutex-protected stack with atomic empty flag for natural scaling (workers)
-   - Atomic empty flag enables fast-path optimization to avoid lock contention
-   - Both collections handle reset/cleanup properly for resource management
-
-3. **API Restructuring (✓ Complete)**
-   - Renamed `rdvq.Optional` → internal `inboxOnlyQueue` (no longer public)
-   - Renamed `rdvq.Required` → `rdvq.Queue` for clearer semantics
-   - `rdvq.Queue` uses LIFO `inboxStackQueue` for inbox management (natural worker scaling)
-   - `rdvq.Waiters` uses FIFO `inboxQueueQueue` for notification fairness
-   - Updated `nbcq.Queue.PopFront()` → `TryPopFront()` for consistency
-
-4. **Comprehensive Testing (✓ Complete)**
-   - Refactored tests to run on both FIFO and LIFO implementations
-   - Single `TestInboxOnly()` function with sub-tests for each queue type  
-   - All existing functionality preserved and validated for both collection types
-   - Tests moved to same package (`rdvq`) to access internal types
-
-**Architecture Benefits Achieved:**
-- **Natural Worker Scaling**: LIFO behavior allows idle workers to naturally timeout 
-- **Notification Fairness**: FIFO behavior ensures fair waiter processing
-- **Performance Preservation**: Fast-path optimizations maintain performance
-- **Zero Breaking Changes**: All existing public APIs work unchanged
-- **Implementation Flexibility**: Trait system allows easy future collection types
-
-**Current State:**
-All LIFO stack infrastructure is complete and operational. The foundation is ready for the next phase:
-- Task workers will naturally scale down using LIFO inbox behavior  
-- Waiters maintain fair notification processing using FIFO behavior
-- Controller complexity can be removed in favor of simple timeout-based scaling
-
-**COMPLETED Implementation:**
-1. ✅ **Updated job.go to use new rdvq.Queue API** - All references migrated successfully
-2. ✅ **Fixed compilation issues** - All `PopFront()` → `TryPopFront()` calls updated  
-3. ✅ **Added spawn-on-miss capability** - Enhanced `rdvq.Queue.PushBackFunc()` with worker spawning
-4. ✅ **Applied to combiner pool** - Controller complexity removed, natural timeout-based scaling implemented
-5. ✅ **Comprehensive testing** - Both FIFO and LIFO collections tested through unified test suite
-6. ✅ **Documentation updated** - API docs reflect new architecture and consumer selection semantics
-7. ✅ **Lint compliance** - All golangci-lint issues resolved
-
-**Future Work (moved to TODO.md):**
-- **Fix CombineOp.refInner related race** - See race.txt
-- **Add Close() method to operations** - Enable completion signaling and final flush triggers
-- **Remove implicit flow from core** - Strip out auto-targeting behavior in favor of explicit integration
-- **Implement ReduceOp** - Add stateful reducer operations with single persistent instances
-- **Re-layer implicit convenience on top** - Build syntactic sugar using explicit integration as foundation
-- **Churn rate tracking** - Part of general observability improvements
-- **Adaptive timeout** - Only if problems emerge with current approach
-
-**Key Technical Insights:**
-- Trait-based generics avoid interface overhead while providing abstraction
-- Atomic flags enable fast-path optimizations in hot code paths
-- LIFO vs FIFO choice affects system scaling behavior fundamentally
-- Comprehensive test coverage essential when changing core infrastructure
-- Hybrid synchronous/asynchronous posting preserves performance while preventing deadlock
-- Notification system with listener pattern enables pull-based coordination
-- Reference counting with atomic operations ensures thread-safe resource management
-- Fail-fast invariant checking catches logic errors immediately in development
-- Type-specific execution environments prevent invalid operations at compile time where possible
-
-## CombineOp Race Condition Fix (2025-10-05)
-
-### Problem Identified
-The original `CombineOp` design had fundamental race conditions:
-- Value type with mutable fields (`inner`, `innerPool`) that were accessed concurrently
-- `combineOpMap` created contention bottleneck for high-volume per-request patterns
-- Weak reference approach failed due to GC issues (no strong reference anchor)
-
-### Root Cause Analysis
-Attempting to optimize simultaneously for two wildly different use cases:
-1. **Shared CombineOp**: One logical operation used across many goroutines (needs coordination)
-2. **Per-request CombineOps**: Many independent operations (coordination is pure overhead)
-
-The original design forced all cases through map coordination, pessimizing the common per-request pattern.
-
-### Solution: User-Managed Lifecycle Pattern
-
-Shift responsibility to users via explicit lifecycle management:
-
-```go
-type CombineOp[I, O any] struct {
-    // Configuration
-    id              combineOpID
-    gatherOp        GatherOp[O]
-    pool            *CombinerPool
-    combinerFactory psgfn.CombinerFactory[I, O]
-    
-    // State management
-    inner *combineOp[I, O]
-    state combineOpState // uninitialized, initialized, closed
-}
-
-// Init: uninitialized → initialized
-func (c *CombineOp[I, O]) Init(gatherOp, pool, factory) {
-    if c.state != combineOpUninitialized {
-        panic("invalid state")
-    }
-    // Get inner from pool, set config
-    c.state = combineOpInitialized
-}
-
-// Close: initialized → closed
-func (c *CombineOp[I, O]) Close() {
-    if c.state != combineOpInitialized {
-        if c.state == combineOpClosed {
-            return // Idempotent
-        }
-        panic("not initialized")
-    }
-    // Unref inner, cleanup
-    c.state = combineOpClosed
-}
-
-// Reset: uninitialized or closed → uninitialized
-func (c *CombineOp[I, O]) Reset() {
-    if c.state == combineOpInitialized {
-        panic("must close before reset")
-    }
-    *c = CombineOp[I, O]{} // Clear to zero
-}
-```
-
-### Key Design Decisions
-
-1. **No more NewCombineOp** - Users manage lifecycle explicitly
-2. **No combineOpMap** - Eliminates contention entirely
-3. **User controls sharing** - Copy struct to share inner, manage refcounting carefully
-4. **User controls pooling** - Can pool CombineOp structs if desired
-5. **Strict state checking** - Panics on invalid transitions (programming errors)
-6. **Reset is idempotent** - Safe to call multiple times when not initialized
-7. **Close is idempotent** - Safe to call multiple times
-
-### Usage Patterns
-
-**Pattern 1: Per-request (independent)**
-```go
-var op CombineOp[Input, Output]
-op.Init(gatherOp, pool, factory)
-defer op.Close()
-// Use op...
-```
-
-**Pattern 2: Pooled CombineOps**
-```go
-pool := &sync.Pool{
-    New: func() any { return new(CombineOp[Input, Output]) },
-}
-
-op := pool.Get().(*CombineOp[Input, Output])
-defer func() {
-    op.Close()
-    op.Reset()
-    pool.Put(op)
-}()
-op.Init(gatherOp, combinerPool, factory)
-// Use op...
-```
-
-**Pattern 3: Shared across goroutines**
-```go
-var sharedOp CombineOp[Input, Output]  
-sharedOp.Init(gatherOp, pool, factory)
-defer sharedOp.Close() // Called once!
-
-// Copies share the inner pointer
-for i := 0; i < 10; i++ {
-    go func(op CombineOp[Input, Output]) {
-        op.Scatter(...) // Uses shared inner
-    }(sharedOp)
-}
-```
-
-### Benefits
-
-- **Zero contention** - No shared map, no locks on fast path
-- **User control** - Explicit lifecycle management 
-- **Flexibility** - Users choose sharing vs independence
-- **Go idiomatic** - Follows standard Init/Close/Reset patterns
-- **Omnipool compatible** - Reset() works with object pooling
-- **Clear semantics** - State transitions are explicit and strict
-
-### Evolution to Final Simplified Design (2025-10-06)
-
-After implementing the Init/Close/Reset pattern and discovering it added significant complexity without proportional benefits, we simplified to a clean NewCombineOp + Close + Dup pattern.
-
-#### Final Architecture
-
-**Core Design:**
-```go
-type CombineOp[I, O any] struct {
-    id    combineOpID
-    inner *combineOp[I, O]  // Direct pointer to pooled inner object
-}
-
-// Construction: Creates and initializes in one step
-func NewCombineOp[I, O](...) CombineOp[I, O] {
-    innerPool := omnipool.For[combineOp[I, O]]()  // Type-keyed global pool
-    inner := innerPool.Get()
-    // Initialize inner with refCount = 1
-    return CombineOp[I, O]{id: id, inner: inner}
-}
-
-// Duplication: Creates additional handle to same inner
-func (c *CombineOp[I, O]) Dup() CombineOp[I, O] {
-    inner := c.refInner()  // Increments refCount
-    return CombineOp[I, O]{id: c.id, inner: inner}
-}
-
-// Cleanup: Required for proper pooling
-func (c *CombineOp[I, O]) Close() {
-    c.inner.unref(true)  // Decrements refCount, returns to pool when zero
-}
-```
-
-**Key Simplifications:**
-1. **Removed Init/Reset complexity** - No user-managed lifecycle states
-2. **Removed innerPool caching** - Each NewCombineOp calls `omnipool.For` (but it's globally cached by type)
-3. **Preserved value semantics** - CombineOp remains copyable
-4. **No weak references** - Direct pointers with reference counting
-5. **No combineOpMap** - Eliminated contention source entirely
-
-#### Handle Tracking Problem and Solution
-
-**The Problem:**
-With Dup(), multiple CombineOp values share the same `inner` pointer but need independent Close() semantics:
-```go
-c1 := NewCombineOp(...)
-c2 := c1.Dup()
-c1.Close()  // Can't set inner.id = 0 yet, c2 still needs it
-c2.Close()  // Now can set inner.id = 0
-```
-
-Original approach had race conditions between checking closed state and using the inner.
-
-**The Solution: Map-Based Handle Tracking**
-
-Track active handles using a map in the shared inner object:
-
-```go
-type combineOpHandleID int64
-
-type combineOp[I, O any] struct {
-    mu           sync.Mutex
-    id           combineOpID
-    
-    // Separate refcounting for different purposes  
-    handleIDs    map[combineOpHandleID]struct{}  // Active handle IDs
-    nextHandleID combineOpHandleID               // Counter for handle IDs
-    internalRefs int                              // Tasks, combiners, work items
-    
-    // ... rest of fields
-}
-
-type CombineOp[I, O any] struct {
-    id       combineOpID
-    handleID combineOpHandleID  // This specific handle's unique ID
-    inner    *combineOp[I, O]
-}
-
-func NewCombineOp[I, O](...) CombineOp[I, O] {
-    // ...
-    handleID := inner.nextHandleID
-    inner.nextHandleID++
-    inner.handleIDs[handleID] = struct{}{}
-    
-    return CombineOp[I, O]{id: id, handleID: handleID, inner: inner}
-}
-
-func (c *CombineOp[I, O]) Dup() CombineOp[I, O] {
-    c.inner.mu.Lock()
-    if _, ok := c.inner.handleIDs[c.handleID]; !ok {
-        panic(fmt.Sprintf("Dup() on closed handle %d", c.handleID))
-    }
-    handleID := c.inner.nextHandleID
-    inner.nextHandleID++
-    inner.handleIDs[handleID] = struct{}{}
-    c.inner.mu.Unlock()
-    
-    return CombineOp[I, O]{id: c.id, handleID: handleID, inner: c.inner}
-}
-
-func (c *CombineOp[I, O]) Close() {
-    c.inner.mu.Lock()
-    if _, ok := c.inner.handleIDs[c.handleID]; !ok {
-        panic(fmt.Sprintf("Double close on handle %d", c.handleID))
-    }
-    delete(c.inner.handleIDs, c.handleID)
-    
-    if len(c.inner.handleIDs) == 0 {
-        c.inner.id = 0  // All handles closed - mark as closed
-        // Don't clear the map - reuse it next time from pool!
-    }
-    // ... cleanup logic with separate refcounting
-}
-```
-
-#### Benefits of Final Design
-
-**Safety:**
-- Detects double-close with clear error messages including handle ID
-- Detects Dup() on closed handles  
-- Detects use-after-close via inner.id = 0 check
-- Handles value copies correctly (they can't close because handleID not in map)
-
-**Performance:**
-- No allocation for map per operation (reused from pool)
-- No global coordination structures
-- Type-keyed global pools via omnipool.For
-- Fast path for single-handle operations
-
-**Debuggability:**
-- Clear error messages with specific handle IDs
-- Unlimited number of Dups
-- Map reused across pool cycles (amortized allocation cost)
-
-**Potential Optimization (Added to TODO.md):**
-Consider size threshold for handleIDs map to prevent pathologically large maps from staying in pool after operations that create thousands of Dups.
-
-#### Usage Patterns
-
-**Per-request pattern (most common):**
-```go
-c := NewCombineOp(gatherOp, pool, factory)
-defer c.Close()
-// Use c for this request...
-```
-
-**Async operations pattern:**
-```go
-c := NewCombineOp(gatherOp, pool, factory)
-defer c.Close()
-
-// Create handles for async operations
-handle1 := c.Dup()
-handle2 := c.Dup()
-
-go func() {
-    defer handle1.Close()
-    handle1.Integrate(ctx, value1, err1)
-}()
-
-go func() {
-    defer handle2.Close()  
-    handle2.Integrate(ctx, value2, err2)
-}()
-```
-
-**File descriptor semantics:**
-The Dup()/Close() pattern follows familiar file descriptor duplication semantics - each handle must be closed independently, sharing the same underlying resource.
-
-### Final Implementation Status (2025-10-06)
-
-The map-based handle tracking has been fully implemented and committed. The solution successfully eliminates all race conditions while providing robust error detection and excellent debugging capabilities.
-
-**Key Implementation Details:**
-- Each CombineOp has a `handleID` from a global counter
-- The inner `combineOp` maintains a `handleIDs` map tracking active handles
-- `unref()` takes a handleID parameter (0 for internal refs, non-zero for Close)
-- `refInner()` validates both that handles exist and the specific handle is valid
-- The handle map is cleared and reused across pool cycles
-- Reference counting is completely separate from handle tracking
-- `needUnlock` pattern in `unref()` ensures mutex is unlocked even on panic
-
-**Performance Considerations:**
-- Map allocation is amortized across pool lifetime
-- No global coordination structures (eliminated combineOpMap)
-- Future optimization possible: atomic-only mode for high-concurrency scenarios (added to TODO.md)
-
-**Current Architecture Benefits:**
-- Zero contention for per-request patterns
-- Detects all forms of handle misuse with clear error messages
-- Maintains Go value semantics
-- Clean separation between user-facing handles and internal references
-- Robust pooling with proper cleanup
-
-The implementation is production-ready with the race condition fully resolved.
-
-## Auto-Close Handle Infrastructure (2025-10-11)
-
-**Reusable leakguard Package Created**
-
-Extracted the CombineOp handle management pattern into a reusable `internal/leakguard` package that provides reference-counted handles with automatic cleanup via finalizers for any resource.
-
-**Final Design:**
-- **Trait-based interface**: Zero-sized `HandleTrait[R]` with `Unref(*R)` method, `DupableHandleTrait[R]` adds `Ref(*R)`
-- **User-defined handle types**: Users wrap `*leakguard.Handle[R, Trait]` in their own types with domain methods
-- **Pooled handles**: Zero allocation after warmup via omnipool
-- **Atomic operations**: `atomic.Pointer[R]` stores concrete pointer type (no interface allocation)
-- **No trait storage**: Declare `var trait Trait` locally when needed (zero-sized)
-- **Idempotent Close()**: Safe to call multiple times, safe to defer + explicit close
-
-**Leak Detection Modes (PSG_LEAK_HANDLING):**
-- `auto` (default): Silent auto-cleanup via finalizer, no stack traces
-- `log`: Log warning + auto-cleanup (with stack traces)
-- `panic`: Panic with detailed error message
-- `off`: No finalizer, maximum performance
-
-**Stack Capture (PSG_LEAK_STACK_DEPTH):**
-- Uses `runtime.Callers()` to capture program counters (not formatted strings)
-- Stack formatting deferred until leak is actually reported
-- Default: 0 frames for `auto`, 5 frames for `log`/`panic`
-- Memory: `depth * 8 bytes` per handle (40 bytes for default 5 frames)
-- Users can override: `PSG_LEAK_STACK_DEPTH=10` for deeper traces
-
-**Async Leak Reporting:**
-- Spawns goroutine for expensive formatting and reporting
-- Doesn't block the finalizer thread
-- Isolates panics from finalizer infrastructure
-- Resource stays alive until after `%v` formatting completes
-- Programmable via `leakguard.LeakReporter func(msg string)` global variable
-
-**Key Simplifications:**
-1. Removed `ID()` and `TypeName()` from interface - use `%v` formatting
-2. Removed Log-without-Auto mode - all detections clean up resources
-3. Individual global variables instead of config struct
-4. No stored trait field - declare locally when needed
-5. Users define their own handle types for domain-specific methods
-
-**Usage Pattern:**
-```go
-type combineOpTrait struct{}
-func (combineOpTrait) Unref(c *combineOp) bool { return c.unref() }
-
-type CombineOpHandle struct {
-    h *leakguard.Handle[*combineOp, combineOpTrait]
-}
-
-func NewCombineOpHandle(op *combineOp) CombineOpHandle {
-    return CombineOpHandle{h: leakguard.New[*combineOp, combineOpTrait](op)}
-}
-
-func (c CombineOpHandle) Scatter(...) { ... }
-func (c CombineOpHandle) Close() { c.h.Close() }
-```
-
-**Next Steps:**
-- Update combineOp to work with leakguard package
-- Remove old handleIDs map and manual refcounting logic
-- Apply same pattern to GatherOp and other resources needing handles
-
-This establishes a clean, reusable, zero-allocation foundation for all PSG resource handle management.
-
-## Leakguard Generalized Reporting (2025-10-12)
-
-**Completed Enhancements:**
-
-**1. Type Alias for Leak Reporter Function:**
-Added `LeakReporterFunc` type alias for improved type safety and documentation:
-```go
-type LeakReporterFunc func(HandleID, string, []uintptr)
-```
-
-**2. Structured Leak Reporting:**
-Refactored leak reporter to receive structured data instead of pre-formatted messages:
-- **Before**: `func(msg string)` - received fully formatted message
-- **After**: `func(HandleID, string, []uintptr)` - receives handle ID, resource string, and program counters
-
-This allows custom reporters to:
-- Format messages in their preferred style
-- Filter or aggregate based on handle ID or resource type
-- Store stack traces in structured format for analysis
-- Implement custom stack formatting strategies
-
-**3. Optional ReportTrait Interface:**
-Added `ReportTrait` interface for custom resource string representation:
-```go
-type ReportTrait[R any] interface {
-    Trait[R]
-    String(*R) string
-}
-```
-
-Resources can now provide custom string representations for leak reports. Falls back to `fmt.Sprintf("%v", resource)` if not implemented.
-
-**4. FormatStackTrace Helper:**
-Extracted stack formatting logic into public helper function:
-```go
-func FormatStackTrace(pcs []uintptr) string {
-    // Formats program counters into readable stack trace
-}
-```
-
-This allows custom reporters to use the default formatting strategy while maintaining full control over message structure.
-
-**5. Updated Pre-defined Reporters:**
-`LogReporter` and `PanicReporter` now use the new structured format:
-- Accept structured data (ID, resource, PCs)
-- Format stack traces using FormatStackTrace helper
-- Include or omit stack traces based on PCs length
-
-**6. Documentation Updates:**
-- README.md examples updated to show new reporter signature
-- All example tests updated (Example_leakDetectionWithLeak)
-- All unit tests updated (testLeakReporter helper, inline reporters)
-
-**7. Unified Message Formatting:**
-Created `formatLeakMessage()` internal function to ensure consistent formatting across LogLeak and PanicLeak. Stack formatting is merged directly into this function rather than exposed as a separate API - users who need custom formatting can easily call `runtime.CallersFrames(pcs)` themselves.
-
-Uses `strings.Builder` for efficient string construction and follows Go's standard stack trace format:
-
-```go
-func formatLeakMessage(id HandleID, resource string, pcs []uintptr) string {
-    var msg strings.Builder
-    fmt.Fprintf(&msg, "Close() was not called on %s handle %d before finalization", resource, id)
-    if len(pcs) > 0 {
-        fmt.Fprintf(&msg, "\nHandle %d created at:", id)
-        frames := runtime.CallersFrames(pcs)
-        for {
-            frame, more := frames.Next()
-            fmt.Fprintf(&msg, "\n%s\n\t%s:%d", frame.Function, frame.File, frame.Line)
-            if !more {
-                break
-            }
+combineScatterWork (stays alive until success) {
+    taskPoolScatterWork (embedded by value) {
+        taskScatterWork (embedded by value) {
+            demand unmetDemand  // PERSISTS until combineScatterWork freed!
         }
     }
-    return msg.String()
 }
 ```
 
-Message format matches Go's standard error/panic format: function names left-aligned, file:line indented.
+When `combineScatterWork.Execute()` is called multiple times (retries), the same embedded `taskScatterWork` is reused, and **the demand signal persists across all attempts**!
 
-**8. Idiomatic Naming:**
-Renamed types and functions to follow Go stdlib conventions:
-- `LeakReporterFunc` → `ReportLeakFunc` (follows `context.CancelFunc` pattern)
-- `LogReporter` → `LogLeak` (verb-based, action-oriented)
-- `PanicReporter` → `PanicLeak` (verb-based, action-oriented)
+### Proposed Design
 
-The verb-based naming reads more naturally and matches the "report leak" action being performed.
+**Type Hierarchy:**
 
-**Key Benefits:**
-- **Flexibility**: Custom reporters can format/filter/aggregate as needed
-- **Performance**: Stack formatting only happens if leak is actually reported (uses `strings.Builder`)
-- **Testability**: Tests can capture structured data without parsing formatted strings
-- **Extensibility**: ReportTrait enables domain-specific resource descriptions
-- **Consistency**: Single internal formatting function ensures uniform output
-- **Idiomatic**: Naming follows Go stdlib conventions (verb-based function types)
-
-**Final API Surface:**
 ```go
-// Core types
-type ReportLeakFunc func(HandleID, string, []uintptr)
-type Trait[R any] interface { Close(*R) }
-type ReportTrait[R any] interface { Trait[R]; String(*R) string }
-type DupTrait[R any] interface { Trait[R]; Dup(*R) (*R, error) }
+// Layer 1: Base task scatter work (renamed from taskPostWork)
+type taskScatterWork struct {
+    jobWork
+    job      *Job
+    taskWork *taskWork
+    demand   unmetDemand  // Persists across Execute() calls!
+}
 
-// Handle operations
-func New[R, T](resource *R) Handle[R, T]
-func Dup[R, T](h Handle[R, T]) (Handle[R, T], error)
-func (h Handle[R, T]) Get() *R
-func (h Handle[R, T]) Close()
-func (h Handle[R, T]) HandleID() HandleID
+func (w *taskScatterWork) Init() {
+    // One-time initialization - no arguments
+}
 
-// Configuration
-func SetLeakReporter(fn ReportLeakFunc)
-func SetStackDepth(depth int)
-func SetLogLevel(level slog.Level)
+// No Reset() needed - pool uses default zero value reset
 
-// Pre-defined reporters
-func LogLeak(id HandleID, resource string, pcs []uintptr)
-func PanicLeak(id HandleID, resource string, pcs []uintptr)
+func newTaskScatterWork(job *Job, group workq.GroupID) *taskScatterWork {
+    w := taskScatterWorkPool.Get()
+    w.jobWork.Init(group, job)
+    w.job = job
+    return w
+}
+
+func (w *taskScatterWork) SetTask(taskFn boundTask, completedFn func()) {
+    if w.taskWork == nil {
+        w.taskWork = w.job.newTaskWork(w.Group(), taskFn, completedFn)
+    } else {
+        w.taskWork.task = taskFn
+        w.taskWork.completedFn = completedFn
+    }
+}
+
+func (w *taskScatterWork) Execute(ctx, ex) error {
+    registerDemand := func() {
+        if w.demand.token == nil {
+            w.demand = w.job.registerTaskWorkerDemand()
+        }
+    }
+    // Existing execute logic...
+}
+
+func (w *taskScatterWork) Free() {
+    // Free sub-objects before putting to pool
+    w.demand.Cancel()
+    if w.taskWork != nil {
+        w.taskWork.Free(w.job)
+    }
+    w.Close(w.job)
+    taskScatterWorkPool.Put(w)  // Pool calls Reset
+}
+
+// Layer 2: TaskPool wrapper adds in-flight tracking
+type taskPoolScatterWork struct {
+    taskScatterWork      // embedded by value
+    pool                *TaskPool
+    inFlightIncremented bool
+}
+
+func (w *taskPoolScatterWork) Init() {
+    w.taskScatterWork.Init()
+}
+
+func newTaskPoolScatterWork(pool *TaskPool, group workq.GroupID) *taskPoolScatterWork {
+    w := taskPoolScatterWorkPool.Get()
+    w.pool = pool
+    w.taskScatterWork.jobWork.Init(group, pool.job)
+    w.taskScatterWork.job = pool.job
+    return w
+}
+
+func (w *taskPoolScatterWork) Execute(ctx, ex, deadline) error {
+    wb := workq.WaitBehavior{
+        BlockBehavior: w.pool.job.protoBB,
+        ShouldWait: func() bool { return w.pool.scatterShouldWait(w) },
+    }
+
+    defer func() {
+        if !ex.Started() && w.inFlightIncremented {
+            w.pool.decrementInFlight()
+            w.inFlightIncremented = false
+        }
+    }()
+
+    return workq.ExecuteOrWait(ctx, ex, deadline, &w.pool.notifier, wb,
+        func(ctx context.Context, ex workq.Execution) error {
+            return w.taskScatterWork.Execute(ctx, ex)
+        })
+}
+
+func (w *taskPoolScatterWork) Free() {
+    w.taskScatterWork.Free()
+    taskPoolScatterWorkPool.Put(w)
+}
+
+// Layer 3: Combine/Gather wrappers
+type combineScatterWork struct {
+    jobWork
+    pool     *CombinerPool
+    deadline time.Time
+    target   TaskPoolOrJob
+    work     taskPoolScatterWork  // embedded by value - persists!
+    task     boundTask
+}
+
+func (w *combineScatterWork) Init() {
+    w.work.Init()
+}
+
+func newCombineScatterWork(
+    pool *CombinerPool,
+    group workq.GroupID,
+    deadline time.Time,
+    target TaskPoolOrJob,
+    task boundTask,
+) *combineScatterWork {
+    w := combineScatterWorkPool.Get()
+    w.jobWork.Init(group, pool.job)
+    w.pool = pool
+    w.deadline = deadline
+    w.target = target
+    w.task = task
+
+    // Configure embedded work based on target type
+    if tp, ok := target.(*TaskPool); ok {
+        w.work.pool = tp
+        w.work.taskScatterWork.job = tp.job
+        w.work.taskScatterWork.jobWork.Init(group, tp.job)
+    } else {
+        j := target.(*Job)
+        w.work.taskScatterWork.job = j
+        w.work.taskScatterWork.jobWork.Init(group, j)
+    }
+
+    return w
+}
+
+func (w *combineScatterWork) Execute(ctx, ex) error {
+    w.work.taskScatterWork.SetTask(w.task, nil)
+
+    workFn := func(ctx context.Context, ex workq.Execution) error {
+        return w.work.Execute(ctx, ex, w.deadline)
+    }
+
+    defer func() {
+        if ex.Started() {
+            w.task = nil
+        }
+    }()
+
+    bb := w.pool.job.protoBB
+    if bb.ShouldBlock(ctx) != nil {
+        jobGovernedWorkFn := func(ctx context.Context, ex workq.Execution) error {
+            return w.pool.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
+        }
+        return w.pool.governor.Execute(ctx, ex, w.deadline, bb, jobGovernedWorkFn)
+    }
+    return workFn(ctx, ex)
+}
+
+func (w *combineScatterWork) Free() {
+    w.work.Free()
+    if w.task != nil {
+        w.task.Free()
+    }
+    w.Close(w.pool.job)
+    combineScatterWorkPool.Put(w)
+}
 ```
 
-**Implementation Complete:**
-All tests and benchmarks pass successfully. The generalized reporting infrastructure is clean, minimal, and follows Go idioms while enabling advanced reporting scenarios through structured data.
+**API Changes:**
 
-## CombineOp Refactored to Use Leakguard (2025-10-12)
-
-**Completed Migration:**
-CombineOp now uses the leakguard package for handle management, eliminating the manual handleIDs map and simplifying the reference counting model.
-
-**Key Changes:**
-
-1. **CombineOp Structure:**
+1. **TaskPoolOrJob interface** - Remove `scatter()` method:
    ```go
-   type CombineOp[I, O any] struct {
-       h leakguard.Handle[combineOp[I, O], combineOpHandleTrait[I, O]]
-   }
-   ```
-   - Replaced direct `inner` pointer with leakguard handle
-   - Removed `handleID` field (now managed by leakguard)
-   - Leak detection automatically provided by finalizers
-
-2. **Handle Trait Implementation:**
-   ```go
-   type combineOpHandleTrait[I, O any] struct{}
-
-   func (combineOpHandleTrait[I, O]) Close(c *combineOp[I, O]) {
-       c.unref()
+   // OLD
+   type TaskPoolOrJob interface {
+       getJob() *Job
+       scatter(ctx, group, ex, deadline, *taskPoolScatterWork, boundTask) error
    }
 
-   func (combineOpHandleTrait[I, O]) Dup(c *combineOp[I, O]) (*combineOp[I, O], error) {
-       c.ref()
-       return c, nil
-   }
-
-   func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
-       return fmt.Sprintf("CombineOp(%p)", c)
-   }
-   ```
-   - Trait implements DupTrait for handle duplication support
-   - String method provides pointer-based identification for leak reports
-
-3. **Simplified Reference Counting:**
-   - **Removed**: `sync.Mutex`, `combineOpID` type, `id` field, `handleIDs` map, `nextHandleID` counter
-   - **Changed**: `refCount int` → `atomic.Int64` for lock-free operations
-   - **Insight**: When refCount hits zero, we have exclusive access (no mutex needed)
-
-   ```go
-   type combineOp[I, O any] struct {
-       refCount atomic.Int64  // Changed from: mu sync.Mutex, id combineOpID, refCount int
-       // ... rest of fields
-   }
-
-   func (c *combineOp[I, O]) ref() {
-       newCount := c.refCount.Add(1)
-       if newCount <= 1 {
-           panic("ref() called with no existing references")
-       }
-   }
-
-   func (c *combineOp[I, O]) unref() {
-       newCount := c.refCount.Add(-1)
-       if newCount < 0 {
-           panic("reference count underflow")
-       }
-       if newCount != 0 {
-           return
-       }
-       // Last reference - we now have exclusive access, no mutex needed
-       // ... cleanup and return to pool
+   // NEW
+   type TaskPoolOrJob interface {
+       getJob() *Job
    }
    ```
 
-4. **Reference Counting Model:**
-   - **Handle references**: Managed by leakguard through Close()/Dup() calls
-   - **Internal references**: Tasks, work items, and combiners call `refInternal()`/`unrefInternal()`
-   - Both increment the same `refCount` - when it hits zero, cleanup occurs
-   - Semantic distinction helps understand reference sources, but implementation is identical
-
-5. **Pointer-Based Identification:**
-   - Changed from `CombineOp#%d` to `CombineOp(%p)` in all trace logging
-   - Pointer values sufficient for debugging (reuse isn't ambiguous)
-   - Removed the for loop in NewCombineOp that checked for `id == 0`
-   - Simpler initialization without ID management
-
-6. **API Changes:**
-   - Added `Dup()` method: Creates independent handle to same underlying state
-   - `Close()` now delegates to leakguard: `c.h.Close()`
-   - All handle operations go through `c.h.Get()` to access the inner combineOp
+2. **Rename types**:
+   - `taskPostWork` → `taskScatterWork`
+   - Remove `*taskPoolScatterWork` argument from interfaces
 
 **Benefits:**
 
-- **Automatic leak detection**: Finalizers catch unclosed handles in tests
-- **Zero allocation**: Handles pooled via omnipool after warmup
-- **Lock-free fast path**: Atomic operations only, no mutex contention
-- **Cleaner code**: Removed ~100 lines of manual handle tracking
-- **Consistent pattern**: Same handle management across all PSG resources
-- **Better debugging**: Stack traces show where unclosed handles were created
+1. **Fixes Livelock** - Demand signals persist across retry attempts
+2. **Zero allocation for embedded structs** - No get/put during retries
+3. **Better cache locality** - Embedded structs keep data together
+4. **Cleaner API** - No passing pointers through interface
+5. **Simplified interface** - `TaskPoolOrJob` no longer needs `scatter()` method
+6. **Correct lifetimes** - Demand lives exactly as long as work attempting the scatter
 
-**Test Updates:**
-Added `defer combineOp.Close()` to all tests that create CombineOp instances:
-- `example_combiner_test.go`
-- `combiner_test.go` (4 tests)
-- `maxholdtime_test.go`
+**Implementation Plan:**
 
-**Performance Verification:**
-All tests and benchmarks pass with performance characteristics unchanged. The refactoring eliminated complexity without sacrificing performance.
+1. Rename `taskPostWork` → `taskScatterWork` throughout codebase
+2. Move `demand unmetDemand` field into `taskScatterWork` struct
+3. Remove `defer demand.Cancel()` from `Execute()`, move to `Free()`
+4. Add `SetTask()` method to `taskScatterWork`
+5. Refactor `taskPoolScatterWork` to embed `taskScatterWork`
+6. Add `Execute()` and `Free()` methods to `taskPoolScatterWork`
+7. Remove `scatter()` method from `TaskPoolOrJob` interface
+8. Update `combineScatterWork` to embed `taskPoolScatterWork` by value
+9. Update `combineScatterWork` constructor and methods
+10. Update `gatherScatterWork` to follow same pattern
+11. Update all call sites
+12. Verify demand tokens persist across retries
+13. Run tests and benchmarks
 
-## Leakguard Structured Logging and Go 1.25 Migration (2025-10-13)
+**Files Affected:**
+- `job.go` - Core taskScatterWork implementation
+- `scatter.go` - TaskPoolOrJob interface
+- `taskpool.go` - taskPoolScatterWork embedding
+- `combineop.go` - combineScatterWork embedding
+- `gatherop.go` - gatherScatterWork embedding
+- `combiner_test.go` - Test code
 
-**Structured Logging Improvements:**
-
-Refactored leakguard's `LogLeak` function to use proper slog structured logging with hierarchical data:
-
-1. **Structured Stack Traces**: Changed from formatted strings to proper `slog.GroupAttrs` structure
-   - Each frame is a numbered group containing function, file, line, and offset fields
-   - Stack renamed from "stack_trace" to "creation_stack" for clarity
-   - All numeric fields (handle_id, line) output as decimal strings for better log aggregation
-
-2. **Added Offset Field**: Stack frames now include PC offset from function entry in Go's standard `+0xHEX` format, matching the format used in panic stack traces
-
-3. **Test Improvements**:
-   - Enhanced `TestLogLeakStructured` to actually create and detect leaks through leakguard's finalizer mechanism
-   - Test now validates exact line number where handle was created
-   - Validates proper structured JSON output with all required fields
-
-4. **Benchmark Cleanup**: Removed investigative benchmarks (BenchmarkDupWithResourceChurn, BenchmarkDupNoSetup, BenchmarkClose) that were used for debugging but don't have ongoing value
-
-**Go 1.25 Migration:**
-
-Updated all 6 modules from `go 1.24` to `go 1.25`:
-- Main module and 5 internal command modules
-- Removed obsolete Go version comments (Go 1.23 is now n-2)
-- Removed unnecessary `toolchain go1.24.2` directive from otpsg module
-- Required for `slog.GroupAttrs` API added in Go 1.25
-
-**Performance Analysis:**
-
-Benchmarked leakguard with leak reporting ON vs OFF to isolate overhead:
-
-**Key Findings:**
-1. **Finalizer overhead is the dominant cost**: When `SetLeakReporter(nil)` disables leak detection, performance is nearly identical to baseline
-2. **Handle reuse matters**: The benchmark revealed a critical usage pattern difference:
-   - **Gather-only mode**: Creates new `GatherOp` handle per task → high frequency finalizer overhead
-   - **Combiner mode**: Reuses one `CombineOp` handle across many operations → amortized finalizer cost
-3. **Production-ready tradeoff**: Users can enable full leak detection during development/testing (`SetLeakReporter(PanicLeak)`) and disable it in production (`SetLeakReporter(nil)`) for near-zero overhead
-
-**Overhead Breakdown:**
-- **Processing workloads**: Minimal impact (<5%) regardless of leak detection setting
-- **Waiting workloads**: 15-20% regression with leak detection enabled, ~0% with it disabled
-- **Root cause**: Finalizer registration/cancellation (`runtime.SetFinalizer`) dominates overhead in high-frequency, low-latency scenarios
-
-**Design Validation:**
-This performance characteristic validates the current API design:
-- Development mode: Full leak detection with stack traces catches bugs early
-- Production mode: Zero-overhead operation when leak detection disabled
-- The handle abstraction itself (atomic operations, pointer indirection) is essentially free
-
-**Current State:**
-All leakguard improvements complete, tested, and lint-clean. Ready for commit.
+**Current Status:** Design documented, ready to commit current state and begin refactoring.

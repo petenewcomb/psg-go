@@ -23,11 +23,12 @@ type CombinerPoolConfigChanges struct {
 	AggressiveGrowthFactor   *float64
 	ConservativeGrowthFactor *float64
 	IdleTimeout              *time.Duration
+	IdleJitter               *time.Duration
 	MeasurementTimeConstant  *time.Duration
 }
 
 type combinerPoolConfig interface {
-	Update(changes CombinerPoolConfigChanges)
+	Update(changes *CombinerPoolConfigChanges)
 }
 
 func ApplyToCombinerPool(c combinerPoolConfig, options ...CombinerPoolOption) {
@@ -35,7 +36,7 @@ func ApplyToCombinerPool(c combinerPoolConfig, options ...CombinerPoolOption) {
 	for _, opt := range options {
 		opt.applyToCombinerPool(&changes)
 	}
-	c.Update(changes)
+	c.Update(&changes)
 }
 
 // ConcurrencyBounds sets both min and max concurrency for CombinerPool.
@@ -62,6 +63,13 @@ type IdleTimeout time.Duration
 
 func (o IdleTimeout) applyToCombinerPool(c *CombinerPoolConfigChanges) {
 	c.IdleTimeout = (*time.Duration)(&o)
+}
+
+// IdleJitter sets the idle jitter for CombinerPool.
+type IdleJitter time.Duration
+
+func (o IdleJitter) applyToCombinerPool(c *CombinerPoolConfigChanges) {
+	c.IdleJitter = (*time.Duration)(&o)
 }
 
 // MeasurementTimeConstant sets the measurement time constant for CombinerPool.

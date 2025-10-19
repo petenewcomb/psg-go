@@ -122,7 +122,7 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 		return nil, nil
 	}
 
-	_ = q.ExecuteOne(context.Background(), addWorkFn) // blocking to retry deferred work
+	_ = q.ExecuteOne(context.Background(), addWorkFn, nil) // blocking to retry deferred work
 	if !executed {
 		t.Error("Expected work to be executed")
 	}
@@ -302,7 +302,7 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 		return nil, nil // No new work on subsequent calls
 	}
 
-	_ = q.ExecuteOne(context.Background(), addWorkFn) // blocking
+	_ = q.ExecuteOne(context.Background(), addWorkFn, nil) // blocking
 	if !notifyReceived {
 		t.Error("Expected notification function to be called")
 	}

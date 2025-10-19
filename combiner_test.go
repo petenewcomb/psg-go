@@ -908,8 +908,10 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						}
 
+						// Run for a while so that garbage collection and
+						// pooling can find the pattern
 						warmupStartTime := time.Now()
-						for time.Since(warmupStartTime) < flushPeriod {
+						for time.Since(warmupStartTime) < 1*time.Second {
 							op()
 						}
 

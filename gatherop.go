@@ -287,26 +287,30 @@ func (g GatherOp[T]) newScatterWork(
 ) *gatherScatterWork {
 	traceRegion := "GatherOp.newScatterWork"
 
-	w := gatherScatterWorkPool.Get()
-	w.Init(group, deadline, target, g.newTask(group, target.getJob(), taskFn))
+	targetScatterWork := target.newScatterWork(group, deadline, g.newTask(group, target.getJob(), taskFn))
+	w := newGatherScatterWork(target.getJob(), group, deadline, targetScatterWork)
 
 	trace.Logf(context.Background(), traceRegion, "GatherOp created %v", w)
 	return w
 }
 
 type gatherScatterWork struct {
-	jobWork
+	workq.Work
+	job      *Job
 	deadline time.Time
-	target   TaskPoolOrJob
-	taskPoolScatterWork
-	task boundTask
 }
 
-func (w *gatherScatterWork) Init(group workq.GroupID, deadline time.Time, target TaskPoolOrJob, task boundTask) {
-	w.jobWork.Init(group, target.getJob())
+func newGatherScatterWork(
+	job *Job,
+	group workq.GroupID,
+	deadline time.Time,
+	targetScatterWork workq.Work,
+) *gatherScatterWork {
+	w := gatherScatterWorkPool.Get()
+	w.Work = targetScatterWork
+	w.job = job
 	w.deadline = deadline
-	w.target = target
-	w.task = task
+	return w
 }
 
 func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -314,23 +318,12 @@ func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) err
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	workFn := func(ctx context.Context, ex workq.Execution) error {
-		return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.task)
-	}
-
-	defer func() {
-		if ex.Started() {
-			w.task = nil // we no longer own the task
-		}
-	}()
-
-	j := w.target.getJob()
-	bb := j.protoBB
+	workFn := w.Work.Execute
+	bb := w.job.protoBB
 	if bb.ShouldBlock(ctx) != nil {
-		return j.governor.Execute(ctx, ex, w.deadline, bb, workFn)
-	} else {
-		return workFn(ctx, ex)
+		return w.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
 	}
+	return workFn(ctx, ex)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -339,10 +332,7 @@ func (w *gatherScatterWork) Free() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	if w.task != nil {
-		w.task.Free()
-	}
-	w.Close(w.target.getJob())
+	w.Work.Free()
 	gatherScatterWorkPool.Put(w)
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/jobstate"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgopt"
@@ -107,42 +108,55 @@ func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 	opts.ApplyToTaskPool(taskPoolConfigWrapper{pool: p}, options...)
 }
 
-func (p *TaskPool) scatter(
-	ctx context.Context,
-	group workq.GroupID,
-	ex workq.Execution,
-	deadline time.Time,
-	tpSW *taskPoolScatterWork,
-	taskFn boundTask,
-) error {
-	traceRegion := "TaskPool.scatter"
-	defer trace.StartRegion(ctx, traceRegion).End()
+func (p *TaskPool) newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work {
+	taskWork := p.job.newTaskWork(group, task, p.decrementInFlightFn)
+	taskPostWork := p.job.newTaskPostWork(group, deadline, taskWork)
+	return newTaskPoolScatterWork(p, deadline, taskPostWork)
+}
 
+type taskPoolScatterWork struct {
+	workq.Work
+	pool                *TaskPool
+	deadline            time.Time
+	inFlightIncremented bool
+}
+
+func newTaskPoolScatterWork(pool *TaskPool, deadline time.Time, jobScatterWork workq.Work) *taskPoolScatterWork {
+	w := taskPoolScatterWorkPool.Get()
+	w.Work = jobScatterWork
+	w.pool = pool
+	w.deadline = deadline
+	return w
+}
+
+func (w *taskPoolScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
 	wb := workq.WaitBehavior{
-		BlockBehavior: p.job.protoBB,
+		BlockBehavior: w.pool.job.protoBB,
 		ShouldWait: func() bool {
-			return p.scatterShouldWait(tpSW)
+			return w.pool.scatterShouldWait(w)
 		},
 	}
 
 	defer func() {
 		// If we didn't start, we must release our slot
-		if !ex.Started() && tpSW.inFlightIncremented {
-			p.decrementInFlight()
-			tpSW.inFlightIncremented = false
+		if !ex.Started() && w.inFlightIncremented {
+			w.pool.decrementInFlight()
+			w.inFlightIncremented = false
 		}
 	}()
 
-	return workq.ExecuteOrWait(ctx, ex, deadline, &p.notifier, wb,
+	return workq.ExecuteOrWait(ctx, ex, w.deadline, &w.pool.notifier, wb,
 		func(ctx context.Context, ex workq.Execution) error {
-			return p.job.scatterWithCompletedFn(ctx, group, ex, taskFn, p.decrementInFlightFn)
-		},
-	)
+			return w.Work.Execute(ctx, ex)
+		})
 }
 
-type taskPoolScatterWork struct {
-	inFlightIncremented bool
+func (w *taskPoolScatterWork) Free() {
+	w.Work.Free()
+	taskPoolScatterWorkPool.Put(w)
 }
+
+var taskPoolScatterWorkPool = omnipool.For[taskPoolScatterWork]()
 
 //nolint:contextcheck // background context used only for tracing
 func (p *TaskPool) scatterShouldWait(w *taskPoolScatterWork) bool {

@@ -69,7 +69,9 @@ func (j *Job) newTaskWork(group workq.GroupID, task boundTask, completedFn func(
 	traceRegion := "Job.newTaskWork"
 
 	w := taskWorkPool.Get()
-	w.Init(group, j, task, completedFn)
+	w.Init(group, j)
+	w.task = task
+	w.completedFn = completedFn
 
 	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
 	return w
@@ -79,12 +81,6 @@ type taskWork struct {
 	jobWork
 	task        boundTask
 	completedFn func()
-}
-
-func (w *taskWork) Init(group workq.GroupID, job *Job, task boundTask, completedFn func()) {
-	w.jobWork.Init(group, job)
-	w.task = task
-	w.completedFn = completedFn
 }
 
 func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
@@ -703,9 +699,32 @@ func (j *Job) gatherAll(ctx context.Context, gatherFn func(context.Context, *ctx
 // Caller must have already incremented taskWorkersSpawning.
 //
 //nolint:contextcheck // goroutine will use job context
-func (j *Job) spawnTaskWorkerGoroutine() {
+func (j *Job) spawnTaskWorker() {
+	traceRegion := "Job.spawnTaskWorker"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
 	j.wg.Add(1)
 	go j.runTasks()
+}
+
+// Attempts to spawn a worker if we're under the spawn concurrency limit.
+//
+//nolint:contextcheck // background context used only for tracing
+func (j *Job) trySpawnTaskWorker() bool {
+	traceRegion := "Job.trySpawnTaskWorker"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	// Try to spawn within concurrency limit
+	limit := int(j.taskWorkerSpawnConcurrencyLimit.Load())
+	if limit == -1 {
+		// Unlimited - always spawn
+		j.taskWorkersSpawning.Increment()
+	} else if !j.taskWorkersSpawning.IncrementIfUnder(limit) {
+		// Limited - spawn only if under limit
+		return false
+	}
+
+	j.spawnTaskWorker()
+	return true
 }
 
 // registerTaskWorkerDemand increments the demand counter and attempts to spawn
@@ -719,23 +738,7 @@ func (j *Job) registerTaskWorkerDemand() unmetDemand {
 	traceRegion := "Job.registerTaskWorkerDemand"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	// Try to spawn within concurrency limit
-	limit := int(j.taskWorkerSpawnConcurrencyLimit.Load())
-	var canSpawn bool
-	if limit == -1 {
-		// Unlimited - always spawn
-		j.taskWorkersSpawning.Increment()
-		canSpawn = true
-	} else {
-		// Limited - spawn only if under limit
-		canSpawn = j.taskWorkersSpawning.IncrementIfUnder(limit)
-	}
-
-	if canSpawn {
-		if trace.IsEnabled() {
-			trace.Logf(context.Background(), traceRegion, "Job=%p, spawning worker", j)
-		}
-		j.spawnTaskWorkerGoroutine()
+	if j.trySpawnTaskWorker() {
 		return unmetDemand{} // zero value = no demand token
 	}
 
@@ -773,49 +776,126 @@ type unmetDemand struct {
 	id    unmetDemandID
 }
 
+func (d *unmetDemand) RegisterDemand(j *Job) {
+	token := d.token
+	if token == nil {
+		*d = j.registerTaskWorkerDemand()
+	} else {
+		trySpawn := false
+		func() {
+			token.mu.Lock()
+			defer token.mu.Unlock()
+			if token.id == d.id {
+				trySpawn = token.stillNeeded
+			}
+		}()
+		if trySpawn && j.trySpawnTaskWorker() {
+			token.mu.Lock()
+			defer token.mu.Unlock()
+			token.stillNeeded = false
+		}
+	}
+}
+
 // Cancel cancels this demand if it hasn't already been satisfied.
 // Safe to call on zero value or multiple times.
 func (d *unmetDemand) Cancel() {
-	if d.token == nil {
+	token := d.token
+	if token == nil {
 		return
 	}
-	d.token.mu.Lock()
-	defer d.token.mu.Unlock()
-	if d.token.id == d.id {
-		d.token.stillNeeded = false
+	id := d.id
+	d.id = 0
+	d.token = nil
+
+	token.mu.Lock()
+	defer token.mu.Unlock()
+	if token.id == id {
+		token.stillNeeded = false
 	}
 }
 
 type orphanedTaskWork struct {
-	job              *Job
-	work             *taskWork
-	demand           unmetDemand
-	registerDemandFn rdvq.RenotifyFunc
+	mu     sync.Mutex
+	id     orphanedTaskID
+	job    *Job
+	work   *taskWork
+	demand unmetDemand
 }
 
-func (w *orphanedTaskWork) Init() {
-	w.registerDemandFn = w.registerDemand
-}
-
-func (w *orphanedTaskWork) registerDemand() {
-	w.demand = w.job.registerTaskWorkerDemand()
-}
-
-func (w *orphanedTaskWork) Unwrap() *taskWork {
-	w.demand.Cancel()
-	task := w.work
-	orphanedTaskWorkPool.Put(w)
-	return task
+func newOrphanedTaskWork(j *Job, tw *taskWork) *orphanedTaskWork {
+	w := orphanedTaskWorkPool.Get()
+	w.id = orphanedTaskID(orphanedTaskIDCounter.Add(1))
+	w.job = j
+	w.work = tw
+	return w
 }
 
 func (w *orphanedTaskWork) Reset() {
-	w.job = nil
-	w.work = nil
-	w.demand = unmetDemand{}
-	// Preserve registerDemandFn to avoid reallocation
+	// No-op. All is done while the mutex is still held in Unwrap()
+}
+
+func (w *orphanedTaskWork) registerDemand(id orphanedTaskID) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.id == id {
+		w.demand.RegisterDemand(w.job)
+	}
+}
+
+func (w *orphanedTaskWork) Unwrap() *taskWork {
+	var work *taskWork
+	func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		work = w.work
+		w.id = 0
+		w.job = nil
+		w.work = nil
+		w.demand.Cancel()
+	}()
+	orphanedTaskWorkPool.Put(w)
+	return work
 }
 
 var orphanedTaskWorkPool = omnipool.For[orphanedTaskWork]()
+
+type orphanedTaskID int64
+
+var orphanedTaskIDCounter atomic.Int64
+
+type orphanedTaskRenotify struct {
+	id         orphanedTaskID
+	work       *orphanedTaskWork
+	RenotifyFn rdvq.RenotifyFunc
+}
+
+func newOrphanedTaskRenotify(work *orphanedTaskWork) *orphanedTaskRenotify {
+	r := orphanedTaskRenotifyPool.Get()
+	r.id = work.id
+	r.work = work
+	return r
+}
+
+func (r *orphanedTaskRenotify) Init() {
+	r.RenotifyFn = r.renotify
+}
+
+func (r *orphanedTaskRenotify) Reset() {
+	r.work = nil
+	r.id = 0
+}
+
+func (r *orphanedTaskRenotify) renotify() {
+	r.work.registerDemand(r.id)
+	r.Free()
+}
+
+func (r *orphanedTaskRenotify) Free() {
+	orphanedTaskRenotifyPool.Put(r)
+}
+
+var orphanedTaskRenotifyPool = omnipool.For[orphanedTaskRenotify]()
 
 func (j *Job) tryGetOrphanedTask() *taskWork {
 	if orphan, ok := j.orphanedTasks.TryPopFront(); ok {
@@ -899,7 +979,7 @@ func (j *Job) runTasks() {
 					}()
 					unmetDemandTokenPool.Put(token)
 					if spawnAnother {
-						j.spawnTaskWorkerGoroutine()
+						j.spawnTaskWorker()
 						decrementSpawning = false
 						break
 					}
@@ -945,11 +1025,10 @@ func (j *Job) runTasks() {
 					task = orphanedTask
 					exit = false // Orphans are detected after selectFn returns
 				} else {
-					orphan := orphanedTaskWorkPool.Get()
-					orphan.job = j
-					orphan.work = orphanedTask
+					orphan := newOrphanedTaskWork(j, orphanedTask)
+					orphanRenotify := newOrphanedTaskRenotify(orphan)
 					j.orphanedTasks.PushBack(orphan)
-					j.orphanWaiters.Notify(orphan.registerDemandFn)
+					j.orphanWaiters.Notify(orphanRenotify.RenotifyFn)
 				}
 			},
 			func(inbox *rdvq.Inbox[*taskWork], outboxWaitInbox *rdvq.WaitInbox) rdvq.RenotifyFunc {
@@ -1005,14 +1084,9 @@ func (j *Job) runTasks() {
 
 type taskPostWork struct {
 	jobWork
-	job  *Job
-	work *taskWork
-}
-
-func (w *taskPostWork) Init(group workq.GroupID, job *Job, work *taskWork) {
-	w.jobWork.Init(group, job)
-	w.job = job
-	w.work = work
+	job    *Job
+	task   *taskWork
+	demand unmetDemand
 }
 
 func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -1022,13 +1096,9 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 		trace.Logf(ctx, traceRegion, "%v", w)
 	}
 
-	var demand unmetDemand
 	registerDemand := func() {
-		if demand.token == nil {
-			demand = w.job.registerTaskWorkerDemand()
-		}
+		w.demand.RegisterDemand(w.job)
 	}
-	defer demand.Cancel()
 
 	posted, err := func() (bool, error) {
 		ctx, meta := w.job.ctxMeta(ctx)
@@ -1041,7 +1111,7 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.job.taskQueue.TryPushBack(meta.Sender(), w.work, bufferedFn)
+			return w.job.taskQueue.TryPushBack(meta.Sender(), w.task, bufferedFn)
 		}
 
 		for {
@@ -1073,13 +1143,13 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.taskQueue.PushBackFunc(meta.Sender(), w.work, bufferedFn, func(outbox *rdvq.Outbox[*taskWork]) {
+			w.job.taskQueue.PushBackFunc(meta.Sender(), w.task, bufferedFn, func(outbox *rdvq.Outbox[*taskWork]) {
 				posted = false
 
 				// Slow path, really going to block now
 				ex.Blocking()
 
-				err = rdvq.BasicPushSelect[*taskWork](ctx, outbox, w.work)
+				err = rdvq.BasicPushSelect[*taskWork](ctx, outbox, w.task)
 				if err == nil {
 					posted = true
 				}
@@ -1095,7 +1165,7 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 	if posted {
 		ex.Starting() // Signal success only if we actually posted
-		w.work = nil  // Clear the work reference since it's now owned by the queue
+		w.task = nil  // Clear the work reference since it's now owned by the queue
 	}
 	return err
 }
@@ -1106,11 +1176,13 @@ func (w *taskPostWork) Free() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	// Free the nested work item if we still own it
-	if w.work != nil {
-		trace.Logf(context.Background(), traceRegion, "w.work.Free()")
-		w.work.Free(w.job)
-		w.work = nil
+	// Cancel demand before returning to pool
+	w.demand.Cancel()
+
+	// Free the nested task work if we still own it
+	if w.task != nil {
+		trace.Logf(context.Background(), traceRegion, "w.task.Free()")
+		w.task.Free(w.job)
 	}
 
 	w.Close(w.job)
@@ -1118,17 +1190,6 @@ func (w *taskPostWork) Free() {
 }
 
 var taskPostWorkPool = omnipool.For[taskPostWork]()
-
-//nolint:contextcheck // background context used only for tracing
-func (j *Job) newTaskPostWork(group workq.GroupID, taskWork *taskWork) *taskPostWork {
-	traceRegion := "Job.newTaskPostWork"
-
-	w := taskPostWorkPool.Get()
-	w.Init(group, j, taskWork)
-
-	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
-	return w
-}
 
 type jobWork struct {
 	workq.WorkItem
@@ -1151,29 +1212,17 @@ func (w *jobWork) Close(job *Job) {
 	job.state.DecrementWork()
 }
 
-func (j *Job) scatter(
-	ctx context.Context,
-	group workq.GroupID,
-	ex workq.Execution,
-	deadline time.Time,
-	_ *taskPoolScatterWork,
-	taskFn boundTask,
-) error {
-	return j.scatterWithCompletedFn(ctx, group, ex, taskFn, nil)
+func (j *Job) newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work {
+	taskWork := j.newTaskWork(group, task, nil)
+	return j.newTaskPostWork(group, deadline, taskWork)
 }
 
-func (j *Job) scatterWithCompletedFn(
-	ctx context.Context,
-	group workq.GroupID,
-	ex workq.Execution,
-	taskFn boundTask,
-	completedFn func(),
-) error {
-	work := j.newTaskWork(group, taskFn, completedFn)
-	postWork := j.newTaskPostWork(group, work)
-	err := postWork.Execute(ctx, ex)
-	postWork.Free()
-	return err
+func (j *Job) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
+	w := taskPostWorkPool.Get()
+	w.Init(group, j)
+	w.job = j
+	w.task = task
+	return w
 }
 
 // panicIfDone panics if the job is in the done state

@@ -253,8 +253,8 @@ func (c *CombineOp[I, O]) newScatterWork(
 		panic("target and combiner pools are associated with different jobs")
 	}
 
-	w := combineScatterWorkPool.Get()
-	w.Init(group, inner.combinerPool, deadline, target, inner.newTask(group, taskFn))
+	targetScatterWork := target.newScatterWork(group, deadline, inner.newTask(group, taskFn))
+	w := newCombineScatterWork(inner.combinerPool, group, deadline, targetScatterWork)
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion,
@@ -547,26 +547,22 @@ func (c *halfBoundCombiner[I, O]) flush(ctx context.Context, sender *rdvq.Sender
 }
 
 type combineScatterWork struct {
-	jobWork
+	workq.Work
 	pool     *CombinerPool
 	deadline time.Time
-	target   TaskPoolOrJob
-	taskPoolScatterWork
-	task boundTask
 }
 
-func (w *combineScatterWork) Init(
-	group workq.GroupID,
+func newCombineScatterWork(
 	pool *CombinerPool,
+	group workq.GroupID,
 	deadline time.Time,
-	target TaskPoolOrJob,
-	task boundTask,
-) {
-	w.jobWork.Init(group, pool.job)
+	targetScatterWork workq.Work,
+) *combineScatterWork {
+	w := combineScatterWorkPool.Get()
+	w.Work = targetScatterWork
 	w.pool = pool
 	w.deadline = deadline
-	w.target = target
-	w.task = task
+	return w
 }
 
 func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -574,25 +570,15 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
-	workFn := func(ctx context.Context, ex workq.Execution) error {
-		return w.target.scatter(ctx, w.Group(), ex, w.deadline, &w.taskPoolScatterWork, w.task)
-	}
-
-	defer func() {
-		if ex.Started() {
-			w.task = nil // we no longer own the task
-		}
-	}()
-
+	workFn := w.Work.Execute
 	bb := w.pool.job.protoBB
 	if bb.ShouldBlock(ctx) != nil {
 		jobGovernedWorkFn := func(ctx context.Context, ex workq.Execution) error {
 			return w.pool.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
 		}
 		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, jobGovernedWorkFn)
-	} else {
-		return workFn(ctx, ex)
 	}
+	return workFn(ctx, ex)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -601,10 +587,7 @@ func (w *combineScatterWork) Free() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
-	if w.task != nil {
-		w.task.Free()
-	}
-	w.Close(w.pool.job)
+	w.Work.Free()
 	combineScatterWorkPool.Put(w)
 }
 

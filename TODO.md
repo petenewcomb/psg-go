@@ -18,6 +18,32 @@ Items to complete before merging to main branch.
 - should combiner concurrency limits be specified per-combineop instead of or in addition to the combiner pool?
 
 ### 6. Implementation improvements
+- **Investigate and fix intermittent benchmark deadlock** (CRITICAL)
+  - Benchmarks hang after ~463 seconds with 5 goroutines stuck in select for 5+ minutes
+  - Key goroutine stuck in `combinePostWork.Execute` → `PushBackFunc` waiting on outbox
+  - Likely notification conservation violation or demand coordination race condition
+  - See bench_20251020T105451Z.txt and WORKING_NOTES.md "Benchmark Deadlock Issue"
+  - May be related to orphan renotify changes or demand token lifecycle
+  - Need trace logging and systematic review of notification paths
+- **Change RenotifyFunc to Renotifier interface for proper lifecycle management**
+  - RenotifyFunc is just `func()` with no Free capability
+  - Current workaround: both `orphanedTaskRenotify` and `wrappedRenotify` free themselves in their renotify callbacks
+  - This only works when renotifiers are invoked; doesn't handle replacement/discard cases
+  - Need Renotifier interface with `Renotify()` and `Free()` methods
+  - Allows rdvq infrastructure to properly reclaim pooled renotifier objects in all scenarios
+  - Targets: `orphanedTaskRenotify` (job.go:839), `wrappedRenotify` (internal/rdvq/notifier.go:72)
+  - See WORKING_NOTES.md "Orphan Renotify Allocation Leak" for detailed analysis
+  - Files affected: internal/rdvq/notifier.go, internal/rdvq/waiters.go, job.go, all Notify() callsites
+- **Add deadline field to taskPostWork and use it in blocking post operations** (job.go:1011-1118)
+  - Currently `newTaskPostWork()` receives deadline parameter but doesn't store or use it
+  - All other scatter work types (taskPoolScatterWork, combineScatterWork, gatherScatterWork) properly store and use their deadlines
+  - Should add `deadline time.Time` field to struct and pass to BasicPushSelect via context with deadline
+- **Consider refactoring taskPostWork.Execute() to reduce duplication with workq.ExecuteOrWait pattern** (job.go:1018-1099)
+  - 80+ lines implement similar wait/block/postpone logic to workq.ExecuteOrWait
+  - However, has unique requirements: custom TryPushBack, demand tracking, PushBackFunc+BasicPushSelect
+  - Evaluate whether common pattern can be extracted without over-abstracting
+  - Possible approaches: keep as-is, extract TryPostBehavior pattern, or generalize ExecuteOrWait
+  - See WORKING_NOTES.md "Deadline and ExecuteOrWait Refactoring Analysis" for detailed analysis
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 - consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path

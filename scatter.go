@@ -21,8 +21,8 @@ import (
 type TaskPoolOrJob interface {
 	// getJob returns the Job associated with this target
 	getJob() *Job
-	// Execute executes the task function in the target context
-	scatter(context.Context, workq.GroupID, workq.Execution, time.Time, *taskPoolScatterWork, boundTask) error
+	// newScatterWork creates work for scattering a task
+	newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work
 }
 
 type boundTask interface {

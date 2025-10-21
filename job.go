@@ -47,10 +47,10 @@ type Job struct {
 	taskWorkerSpawnConcurrencyLimit atomic.Int64 // maximum concurrent task worker spawns
 
 	// Orphan task handling
-	orphanedTasks         nbcq.Queue[*orphanedTaskWork] // buffer for orphaned tasks
-	orphanWaiters         rdvq.Waiters                  // notification infrastructure
-	taskWorkersSpawning   jobstate.InFlightCounter      // count of workers in spawning state
-	unmetTaskWorkerDemand nbcq.Queue[*unmetDemandToken] // tracks tasks waiting for workers
+	orphanedTasks       nbcq.Queue[*orphanedTaskWork] // buffer for orphaned tasks
+	orphanWaiters       rdvq.Waiters                  // notification infrastructure
+	taskWorkersSpawning jobstate.InFlightCounter      // count of workers in spawning state
+	taskWorkerDemand    jobstate.InFlightCounter      // count of tasks waiting for workers
 
 	taskWorkerMu             sync.Mutex
 	latestTaskWorkerIdleExit time.Time // protected by taskWorkerMu
@@ -79,15 +79,15 @@ func (j *Job) newTaskWork(group workq.GroupID, task boundTask, completedFn func(
 
 type taskWork struct {
 	jobWork
-	task        boundTask
-	completedFn func()
+	task             boundTask
+	completedFn      func()
+	demandRegistered bool
 }
 
 func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	defer w.task.Free()
 	w.task.Execute(ctx, w.Group(), w.completedFn, taskWorkerSender)
 }
 
@@ -97,6 +97,7 @@ func (w *taskWork) Free(job *Job) {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
+	w.task.Free()
 	w.Close(job)
 	taskWorkPool.Put(w)
 }
@@ -143,7 +144,6 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.taskQueue.Init()
 	j.orphanedTasks.Init()
 	j.orphanWaiters.Init()
-	j.unmetTaskWorkerDemand.Init()
 	// taskWorkersSpawning zero-value ready, no init needed
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
 	j.taskWorkerIdleJitter.Store(int64(psgopt.DefaultTaskWorkerIdleJitter))
@@ -727,100 +727,11 @@ func (j *Job) trySpawnTaskWorker() bool {
 	return true
 }
 
-// registerTaskWorkerDemand increments the demand counter and attempts to spawn
-// a worker if we're under the spawn concurrency limit. This should be called
-// once per task that needs a worker. Returns zero value if the demand was
-// immediately satisfied by spawning a new worker, or an unmetDemand handle if
-// the demand could not be immediately met.
-//
-//nolint:contextcheck // background context used only for tracing
-func (j *Job) registerTaskWorkerDemand() unmetDemand {
-	traceRegion := "Job.registerTaskWorkerDemand"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	if j.trySpawnTaskWorker() {
-		return unmetDemand{} // zero value = no demand token
-	}
-
-	token := unmetDemandTokenPool.Get()
-	token.mu.Lock()
-	token.id = unmetDemandID(unmetDemandTokenCounter.Add(1))
-	token.stillNeeded = true
-	id := token.id
-	token.mu.Unlock()
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "Job=%p, at spawn limit, unmetDemandID=%d", j, id)
-	}
-	j.unmetTaskWorkerDemand.PushBack(token)
-	return unmetDemand{token: token, id: id}
-}
-
-type unmetDemandID int64
-
-type unmetDemandToken struct {
-	mu          sync.Mutex
-	id          unmetDemandID
-	stillNeeded bool
-}
-
-// Don't reinitialize the mutex
-func (t *unmetDemandToken) Reset() {}
-
-var unmetDemandTokenCounter atomic.Int64
-var unmetDemandTokenPool = omnipool.For[unmetDemandToken]()
-
-// unmetDemand represents registered demand for a task worker.
-// The zero value is valid and represents no demand.
-type unmetDemand struct {
-	token *unmetDemandToken
-	id    unmetDemandID
-}
-
-func (d *unmetDemand) RegisterDemand(j *Job) {
-	token := d.token
-	if token == nil {
-		*d = j.registerTaskWorkerDemand()
-	} else {
-		trySpawn := false
-		func() {
-			token.mu.Lock()
-			defer token.mu.Unlock()
-			if token.id == d.id {
-				trySpawn = token.stillNeeded
-			}
-		}()
-		if trySpawn && j.trySpawnTaskWorker() {
-			token.mu.Lock()
-			defer token.mu.Unlock()
-			token.stillNeeded = false
-		}
-	}
-}
-
-// Cancel cancels this demand if it hasn't already been satisfied.
-// Safe to call on zero value or multiple times.
-func (d *unmetDemand) Cancel() {
-	token := d.token
-	if token == nil {
-		return
-	}
-	id := d.id
-	d.id = 0
-	d.token = nil
-
-	token.mu.Lock()
-	defer token.mu.Unlock()
-	if token.id == id {
-		token.stillNeeded = false
-	}
-}
-
 type orphanedTaskWork struct {
-	mu     sync.Mutex
-	id     orphanedTaskID
-	job    *Job
-	work   *taskWork
-	demand unmetDemand
+	mu   sync.Mutex
+	id   orphanedTaskID
+	job  *Job
+	work *taskWork
 }
 
 func newOrphanedTaskWork(j *Job, tw *taskWork) *orphanedTaskWork {
@@ -839,7 +750,11 @@ func (w *orphanedTaskWork) registerDemand(id orphanedTaskID) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.id == id {
-		w.demand.RegisterDemand(w.job)
+		if !w.work.demandRegistered {
+			w.job.taskWorkerDemand.Increment()
+			w.work.demandRegistered = true
+		}
+		w.job.trySpawnTaskWorker()
 	}
 }
 
@@ -848,11 +763,11 @@ func (w *orphanedTaskWork) Unwrap() *taskWork {
 	func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
+
 		work = w.work
 		w.id = 0
 		w.job = nil
 		w.work = nil
-		w.demand.Cancel()
 	}()
 	orphanedTaskWorkPool.Put(w)
 	return work
@@ -960,32 +875,19 @@ func (j *Job) runTasks() {
 		}
 
 		if task != nil {
+			// Decrement demand counter when worker receives task
+			if task.demandRegistered {
+				j.taskWorkerDemand.Decrement()
+				task.demandRegistered = false
+			}
+
 			// Secured task - release spawn counter
 			if spawning {
 				spawning = false
-				decrementSpawning := true
-				for {
-					token, ok := j.unmetTaskWorkerDemand.TryPopFront()
-					if !ok {
-						break
-					}
-					spawnAnother := func() bool {
-						token.mu.Lock()
-						defer token.mu.Unlock()
-						stillNeeded := token.stillNeeded
-						token.id = 0
-						token.stillNeeded = false
-						return stillNeeded
-					}()
-					unmetDemandTokenPool.Put(token)
-					if spawnAnother {
-						j.spawnTaskWorker()
-						decrementSpawning = false
-						break
-					}
-				}
-				if decrementSpawning {
+				if j.taskWorkerDemand.IsZero() {
 					j.taskWorkersSpawning.Decrement()
+				} else {
+					j.spawnTaskWorker()
 				}
 			}
 
@@ -1084,9 +986,8 @@ func (j *Job) runTasks() {
 
 type taskPostWork struct {
 	jobWork
-	job    *Job
-	task   *taskWork
-	demand unmetDemand
+	job  *Job
+	task *taskWork
 }
 
 func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -1097,7 +998,11 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	}
 
 	registerDemand := func() {
-		w.demand.RegisterDemand(w.job)
+		if !w.task.demandRegistered {
+			w.job.taskWorkerDemand.Increment()
+			w.task.demandRegistered = true
+		}
+		w.job.trySpawnTaskWorker()
 	}
 
 	posted, err := func() (bool, error) {
@@ -1175,9 +1080,6 @@ func (w *taskPostWork) Free() {
 	traceRegion := "taskPostWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
-
-	// Cancel demand before returning to pool
-	w.demand.Cancel()
 
 	// Free the nested task work if we still own it
 	if w.task != nil {

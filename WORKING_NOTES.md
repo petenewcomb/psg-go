@@ -713,3 +713,452 @@ After thousands of successful iterations, this specific queue state alignment oc
 4. **Demand-based spawning for combiner workers**:
    - Similar to task worker spawning
    - Spawn new combiner worker when integrate operations block
+
+## Task Worker Demand-Based Spawning v2 - Simple Counter (2025-10-21)
+
+**Problem with v1 (Token-Based):**
+The complex token-based demand tracking system with retry spawn logic still failed to prevent livelock/deadlock in benchmarks.
+
+**Solution: Simple Atomic Counter**
+
+Replaced token queue with simple atomic counter following this rule:
+- **Always increment demand counter when a scatter begins** (task needs to be posted)
+- **Always decrement demand counter when a task worker picks up a task**
+- **Repeatedly try to spawn at every opportunity** within post work and from task workers as long as there's continued demand
+
+**Implementation:**
+
+1. **Removed complex token system:**
+   ```go
+   // REMOVED:
+   unmetTaskWorkerDemand nbcq.Queue[*unmetDemandToken]
+   type unmetDemandToken struct { ... }
+   type unmetDemand struct { ... }
+   func registerTaskWorkerDemand() unmetDemand { ... }
+   ```
+
+2. **Added simple counter:**
+   ```go
+   // job.go:53
+   taskWorkerDemand jobstate.InFlightCounter
+   ```
+
+3. **Moved demandRegistered to taskWork:**
+   ```go
+   // job.go:84
+   type taskWork struct {
+       jobWork
+       task             boundTask
+       completedFn      func()
+       demandRegistered bool  // NEW - tracks if demand registered for this task
+   }
+   ```
+
+4. **Increment when registering demand (taskPostWork.Execute):**
+   ```go
+   // job.go:1001-1007
+   registerDemand := func() {
+       if !w.task.demandRegistered {
+           w.job.taskWorkerDemand.Increment()
+           w.task.demandRegistered = true
+       }
+       w.job.trySpawnTaskWorker()
+   }
+   ```
+
+5. **Decrement when worker receives task (Job.runTasks):**
+   ```go
+   // job.go:883-888
+   if task != nil {
+       // Decrement demand counter when worker receives task
+       if task.demandRegistered {
+           j.taskWorkerDemand.Decrement()
+           task.demandRegistered = false
+       }
+   }
+   ```
+
+6. **Worker checks demand and spawns after securing first task:**
+   ```go
+   // job.go:890-898
+   // Secured task - release spawn counter
+   if spawning {
+       spawning = false
+       if j.taskWorkerDemand.IsZero() {
+           j.taskWorkersSpawning.Decrement()
+       } else {
+           j.spawnTaskWorker()  // Chain spawn if demand exists
+       }
+   }
+   ```
+
+**Key Differences from Token System:**
+
+| Aspect | Token-Based (v1) | Counter-Based (v2) |
+|--------|------------------|-------------------|
+| Tracking | Queue of unique tokens | Single atomic counter |
+| Lifecycle | Create/cancel tokens | Increment/decrement counter |
+| Cancellation | Token ID matching | Simple flag on taskWork |
+| Complexity | ~100 lines | ~20 lines |
+| Overhead | Allocations + queue ops | 2 atomic operations |
+| Spawning | Check token validity | Check counter > 0 |
+
+**Benefits:**
+- Much simpler implementation
+- Fewer allocations (no tokens)
+- Direct demand tracking (no indirection through token IDs)
+- Aggressive spawning: repeatedly tries at every opportunity
+- Still prevents livelock: workers spawn when demand exists
+
+**Result:** Benchmarks now complete successfully without hanging. The simpler approach works better than the complex token system.
+
+## Combiner Worker Demand Tracking (2025-10-21)
+
+**Analysis Question:** Should combiner workers have similar demand tracking to prevent livelock?
+
+**Answer:** YES - Combiner workers have the same livelock risk as task workers.
+
+### Current Architecture
+
+**Task Workers** (job.go):
+- Execute tasks
+- Post results to `combineQueue` via `combinePostWork.Execute()`
+- Can block if combineQueue is full
+- **HAVE demand tracking** (taskWorkerDemand counter - implemented 2025-10-21)
+
+**Combiner Workers** (combinerpool.go):
+- Receive work from `combineQueue` via `cpWorker.AddWork()`
+- Execute combine operations
+- Post results to `gatherQueue` via `gatherPostWork.Execute()` (job.go:505-575)
+- Can block at job.go:550-562 if gatherQueue is full
+- **DO NOT have demand tracking**
+
+**User Gather Calls**:
+- Receive work from `gatherQueue`
+- Execute user gather functions
+
+### Potential Deadlock Scenario
+
+1. **All combiner workers are blocked** trying to post to `gatherQueue` (job.go:550-562):
+   ```go
+   w.job.gatherQueue.PushBackFunc(meta.Sender(), w.work, nil, func(outbox *rdvq.Outbox[workq.Work]) {
+       // All workers stuck in blocking select here
+       err = rdvq.BasicPushSelect[workq.Work](ctx, outbox, w.work)
+   })
+   ```
+
+2. **New combine work arrives** and queues up in `combineQueue`
+
+3. **No combiner workers available** to process the queued work (all blocked on gather posting)
+
+4. **Current spawn mechanism insufficient:**
+   - `combinePostWork.Execute()` calls `maybeSpawn()` when buffering (combinerpool.go:266-270, 281)
+   - `maybeSpawn()` checks `ShouldSpawnGoroutine()` which enforces concurrency limit
+   - **If at concurrency limit, no new worker is spawned**
+
+5. **unmetDemandFn mechanism fails** (combinerpool.go:67 + workq/accepted.go:315-317):
+   ```go
+   func (c *controller) queueFresh(work Work) {
+       c.q.fresh.PushBack(work)
+       c.workAddedCount++
+       if c.workAddedCount > 1 && c.unmetDemandFn != nil {
+           c.q.waiters.Notify(c.unmetDemandFn)  // spawn combiner worker
+       }
+   }
+   ```
+   - This only fires when `AddWork` receives multiple items during active receive
+   - **If all workers are blocked on gather posting, none are in receive loop to trigger this**
+   - Same problem we just fixed for task workers!
+
+### Critical Difference from Task Workers
+
+**Task Workers (fixed 2025-10-21):**
+- Explicit demand tracking with `taskWorkerDemand` counter
+- When worker receives task, checks demand and spawns another worker if needed
+- Even if workers are blocked posting to combineQueue, new workers can be spawned when existing ones complete
+
+**Combiner Workers (current state):**
+- Rely on `unmetDemandFn` callback from `workq.Accepted` infrastructure
+- Callback only fires when workers are actively receiving work
+- **If all workers are blocked on gather posting, none are in receive loop to trigger callback**
+- **This is the SAME problem we just fixed for task workers!**
+
+### Recommended Solution
+
+Implement the same demand tracking pattern used for task workers:
+
+1. **Add to CombinerPool:**
+   ```go
+   combinerWorkerDemand jobstate.InFlightCounter
+   ```
+
+2. **Add to combineWork:**
+   ```go
+   demandRegistered bool
+   ```
+
+3. **In `combinePostWork.Execute()`:** Increment demand counter when registering demand (similar to taskPostWork.go:1001-1007)
+   ```go
+   registerDemand := func() {
+       if !w.work.demandRegistered {
+           w.pool.combinerWorkerDemand.Increment()
+           w.work.demandRegistered = true
+       }
+       maybeSpawn()
+   }
+   ```
+
+4. **In `CombinerPool.goroutine()`:** When worker receives work from `workQueue.ExecuteOne()`, decrement demand and check if should spawn more workers (similar to job.go:883-898)
+   ```go
+   // After work is received
+   if work.demandRegistered {
+       cp.combinerWorkerDemand.Decrement()
+       work.demandRegistered = false
+   }
+
+   // After work is secured
+   if spawning {
+       spawning = false
+       if cp.combinerWorkerDemand.IsZero() {
+           cp.combinerWorkersSpawning.Decrement()
+       } else {
+           cp.spawnNewGoroutine()  // Chain spawn
+       }
+   }
+   ```
+
+5. **In `combineWork.Init()`:** Initialize `demandRegistered = false`
+
+**Benefits:**
+- Prevents livelock when all combiner workers blocked on gather posting
+- Mirrors proven task worker demand tracking architecture
+- Simple counter approach (not complex token system)
+- Aggressive spawning ensures work gets processed
+- Complements spawn concurrency limits (see next section)
+
+**Files Affected:**
+- combinerpool.go - Add counter, spawn logic
+- combineop.go - Add demandRegistered field to combineWork
+- cpworker.go - Demand decrement when work received
+
+## Worker Spawn Rate Limiting (2025-10-21)
+
+**Better Approach: Rate Limiting Instead of Concurrency Limiting**
+
+**Problem with Current Spawn Concurrency Model:**
+- Spawn concurrency limit (default=1) restricts how many goroutines can be spawning simultaneously
+- Too restrictive during bursts of demand - creates artificial bottleneck
+- Can contribute to livelock when all workers blocked but spawn limit prevents new workers
+- Doesn't reflect the actual problem: we want to prevent thundering herd, not limit concurrent spawns
+
+**Proposed Solution: Spawn Rate Limiting**
+
+Replace spawn *concurrency* limits with spawn *rate* limits:
+- Instead of `taskWorkerSpawnConcurrencyLimit` → use `taskWorkerSpawnDelay` (e.g., 100µs)
+- Track time of last spawn
+- Only allow new spawn if `time.Since(lastSpawn) >= spawnDelay`
+- Allows rapid spawning during bursts, but prevents thundering herd
+
+**Key Benefits:**
+1. **No artificial concurrency bottleneck** - can spawn multiple workers quickly when needed
+2. **Rate limiting prevents thundering herd** - can't spawn unlimited workers instantly
+3. **Responsive to sustained demand** - if demand persists beyond delay, spawn another
+4. **Wake timer for blocked work** - spawn if blocked waiting > spawnDelay
+
+**Implementation for Task Workers:**
+
+```go
+type Job struct {
+    taskWorkerSpawnDelay atomic.Int64  // time.Duration
+    lastTaskWorkerSpawn  atomic.Int64  // time.Time (UnixNano)
+}
+
+func (j *Job) trySpawnTaskWorker() bool {
+    delay := time.Duration(j.taskWorkerSpawnDelay.Load())
+    if delay == -1 {
+        // No rate limiting
+        j.spawnTaskWorker()
+        return true
+    }
+
+    now := time.Now()
+    for {
+        last := j.lastTaskWorkerSpawn.Load()
+        lastTime := time.Unix(0, last)
+        if now.Sub(lastTime) < delay {
+            // Too soon, don't spawn
+            return false
+        }
+
+        // Try to claim spawn slot by updating lastSpawn
+        if j.lastTaskWorkerSpawn.CompareAndSwap(last, now.UnixNano()) {
+            j.spawnTaskWorker()
+            return true
+        }
+        // CAS failed, someone else spawned, retry check
+    }
+}
+```
+
+**Wake Timer in taskPostWork.Execute():**
+
+Instead of using `BasicPushSelect` in blocking path, use timed select:
+
+```go
+// In taskPostWork.Execute() blocking path
+spawnDelay := time.Duration(j.taskWorkerSpawnDelay.Load())
+timer := time.NewTimer(spawnDelay)
+defer timer.Stop()
+
+select {
+case outboxCh <- w.work:
+    // Posted successfully
+case <-timer.C:
+    // Been waiting >= spawnDelay, try to spawn a worker
+    j.trySpawnTaskWorker()
+    // Continue blocking or give up based on deadline
+case <-ctx.Done():
+    return ctx.Err()
+}
+```
+
+**For Combiner Workers:**
+
+Same pattern:
+- Add `combinerWorkerSpawnDelay` to CombinerPoolState
+- Add `lastCombinerWorkerSpawn` timestamp
+- Use timed select in `combinePostWork.Execute()`
+- Wake timer ensures spawn if blocked too long
+
+**Default Values:**
+- `DefaultTaskWorkerSpawnDelay = 100µs` (allow ~10k spawns/sec)
+- `DefaultCombinerWorkerSpawnDelay = 100µs`
+- Set to `-1` for unlimited (no rate limiting)
+
+**Comparison:**
+
+| Aspect | Concurrency Limit | Rate Limit |
+|--------|-------------------|------------|
+| Controls | Simultaneous spawns | Spawns per time unit |
+| Burst response | Blocked after limit | Rapid until delay |
+| Sustained demand | Must wait for slot | Spawn every delay period |
+| Thundering herd | Prevents (too aggressive) | Prevents (just right) |
+| Livelock risk | Higher (blocked spawns) | Lower (time-based) |
+| Complexity | Counter + CAS loop | Timestamp + CAS loop |
+
+**Files Affected:**
+- job.go - Replace taskWorkerSpawnConcurrencyLimit with taskWorkerSpawnDelay
+- combinerpool.go / cpstate/state.go - Add combinerWorkerSpawnDelay
+- psgopt/job.go, psgopt/combinerpool.go - New options
+- taskPostWork.Execute() - Add wake timer select
+- combinePostWork.Execute() - Add wake timer select
+
+## TryScatter Task Allocation Leak (2025-10-21)
+
+**Problem Identified:** Tasks created with `TryScatter` are not being returned to the pool when abandoned due to deadline expiration.
+
+**Evidence:** Benchmark results (bench_20251021T020646Z.txt) show high allocation rates:
+- Processing workload: 28-57 allocs/op with 2-5KB/op
+- Most severe in waiting workload + low combiner limits
+- Allocations traced to combineop.go:604 (`ct := c.taskPool.Get()`)
+
+**Root Cause:** Missing `task.Free()` call in `taskWork.Free()`
+
+**Allocation Path:**
+1. `CombineOp.TryScatter()` calls `newScatterWork()` (combineop.go:182)
+2. `newScatterWork()` calls `inner.newTask(group, taskFn)` (combineop.go:256)
+3. `newTask()` allocates `combineTask` from pool and refs combineOp (combineop.go:604-609):
+   ```go
+   func (c *combineOp[I, O]) newTask(group workq.GroupID, taskFn psgfn.Task[I]) boundTask {
+       ct := c.taskPool.Get()         // Allocates from pool
+       ct.pool = c.taskPool
+       ct.group = group
+       ct.taskFn = taskFn
+       ct.op = c
+       c.ref()                         // Adds reference to combineOp
+       return ct
+   }
+   ```
+
+**Free Chain When TryScatter Fails:**
+When `TryExecuteNow()` returns `ok=false`, `TryScatter` calls `work.Free()` (combineop.go:185):
+1. `combineScatterWork.Free()` → calls `w.Work.Free()` (combineop.go:590)
+2. `taskPoolScatterWork.Free()` → calls `w.Work.Free()` (taskpool.go:155)
+3. `taskPostWork.Free()` → calls `w.task.Free(w.job)` if `w.task != nil` (job.go:1085-1088)
+4. **`taskWork.Free(job)` → MISSING: does NOT call `w.task.Free()`** (job.go:96-103)
+
+**The Bug (job.go:96-103):**
+```go
+func (w *taskWork) Free(job *Job) {
+    traceRegion := "taskWork.Free"
+    defer trace.StartRegion(context.Background(), traceRegion).End()
+    trace.Logf(context.Background(), traceRegion, "%v", w)
+
+    w.Close(job)
+    taskWorkPool.Put(w)
+    // MISSING: should call w.task.Free() here!
+}
+```
+
+**Consequences:**
+- `combineTask` objects leak (not returned to `c.taskPool`)
+- The `c.op.unref()` in `combineTask.Free()` is never called (combineop.go:648)
+- Potentially leaks references to `combineOp` (though leakguard may catch this)
+- Continuous allocation pressure from unreturned pooled objects
+- Particularly severe when TryScatter is used heavily (waiting workload benchmarks)
+
+**Solution:**
+
+Make `Free()` the single point of responsibility for cleanup by:
+1. **Remove** `defer w.task.Free()` from `Execute()` (job.go:91)
+2. **Add** `w.task.Free()` to `Free()` (job.go:101, before `w.Close(job)`)
+
+No nil check needed - `w.task` is always set at creation (job.go:73) and should only be freed once.
+
+```go
+// Execute() - just does the work, no cleanup
+func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
+    traceRegion := "taskWork.Execute"
+    defer trace.StartRegion(ctx, traceRegion).End()
+
+    // REMOVED: defer w.task.Free()
+    w.task.Execute(ctx, w.Group(), w.completedFn, taskWorkerSender)
+}
+
+// Free() - always responsible for cleanup
+func (w *taskWork) Free(job *Job) {
+    traceRegion := "taskWork.Free"
+    defer trace.StartRegion(context.Background(), traceRegion).End()
+    trace.Logf(context.Background(), traceRegion, "%v", w)
+
+    // ADDED: Free the bound task (no nil check - always set)
+    w.task.Free()
+
+    w.Close(job)
+    taskWorkPool.Put(w)
+}
+```
+
+**Why This is Correct:**
+- Single responsibility: `Free()` owns all cleanup
+- Consistent: task freed whether executed or abandoned
+- No nil check needed: `w.task` always non-nil (set at creation)
+- Clearer lifecycle: Execute() → work, Free() → cleanup
+
+**Impact Analysis:**
+- **When does this leak occur?** Only when work is freed before execution starts:
+  - `TryScatter` fails due to deadline
+  - Work postponed then freed without retry
+  - Scatter cancelled before execution
+
+- **When is it NOT a problem?** When task successfully executes:
+  - `taskWork.Execute()` calls `w.task.Execute()` then `w.task.Free()` (job.go:87-92)
+  - Normal execution path properly frees the task
+
+- **Why high allocations in waiting workload?**
+  - Waiting workload likely has many TryScatter calls with tight deadlines
+  - Low combiner limits increase contention and deadline failures
+  - Each failed TryScatter leaks a combineTask
+
+**Files Affected:**
+- job.go:96-103 - Add w.task.Free() call in taskWork.Free()

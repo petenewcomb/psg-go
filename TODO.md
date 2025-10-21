@@ -18,13 +18,39 @@ Items to complete before merging to main branch.
 - should combiner concurrency limits be specified per-combineop instead of or in addition to the combiner pool?
 
 ### 6. Implementation improvements
-- **Investigate and fix intermittent benchmark deadlock** (CRITICAL)
-  - Benchmarks hang after ~463 seconds with 5 goroutines stuck in select for 5+ minutes
-  - Key goroutine stuck in `combinePostWork.Execute` → `PushBackFunc` waiting on outbox
-  - Likely notification conservation violation or demand coordination race condition
-  - See bench_20251020T105451Z.txt and WORKING_NOTES.md "Benchmark Deadlock Issue"
-  - May be related to orphan renotify changes or demand token lifecycle
-  - Need trace logging and systematic review of notification paths
+- **Fix TryScatter task allocation leak** (CRITICAL - memory leak)
+  - Tasks allocated at combineop.go:604 not returned to pool when TryScatter fails due to deadline
+  - Root cause: Split cleanup responsibility - Execute() frees task via defer, but Free() doesn't
+  - When work freed before execution (TryScatter deadline, postponed work), task leaks
+  - Benchmarks show 28-57 allocs/op with 2-5KB/op in processing workload
+  - Consequences: combineTask objects not returned to pool, c.op.unref() never called
+  - Solution: Remove `defer w.task.Free()` from Execute() (job.go:91), add `w.task.Free()` to Free() (job.go:101)
+  - Makes Free() single point of cleanup responsibility (no nil check needed - task always set)
+  - See WORKING_NOTES.md "TryScatter Task Allocation Leak" for detailed analysis
+- **Implement demand tracking for combiner workers** (CRITICAL - prevents livelock)
+  - Task workers now have demand tracking (taskWorkerDemand counter) to prevent livelock
+  - Combiner workers need similar mechanism to prevent circular blocking scenario:
+    * All combiner workers blocked trying to post to gatherQueue
+    * New combine work arrives and queues up in combineQueue
+    * No workers available to process queued work (all blocked downstream)
+    * Current unmetDemandFn only fires when workers are actively receiving, not when blocked
+  - Add combinerWorkerDemand counter to CombinerPool (mirror taskWorkerDemand in Job)
+  - Add demandRegistered field to combineWork (mirror taskWork.demandRegistered)
+  - Increment demand in combinePostWork.Execute() when registering demand
+  - Decrement demand in CombinerPool.goroutine() when worker receives work
+  - Worker checks demand after receiving work and spawns if demand exists
+  - See WORKING_NOTES.md "Combiner Worker Demand Tracking" for detailed analysis
+- **Replace spawn concurrency limits with spawn rate limits** (improves responsiveness)
+  - Current: spawn concurrency limit (default=1) too restrictive, creates artificial bottleneck
+  - Problem: limits simultaneous spawns, not spawn rate - can contribute to livelock
+  - Better: spawn rate limiting - limit spawns per time unit, not concurrent spawns
+  - Replace taskWorkerSpawnConcurrencyLimit with taskWorkerSpawnDelay (e.g., 100µs = ~10k spawns/sec)
+  - Track lastTaskWorkerSpawn timestamp, only spawn if time.Since >= delay
+  - Allows burst spawning when needed, prevents thundering herd via rate limit
+  - Add wake timer in taskPostWork.Execute(): if blocked >= spawnDelay, spawn worker
+  - Same for combiner workers: combinerWorkerSpawnDelay in CombinerPoolState
+  - Benefits: no concurrency bottleneck, responsive to bursts, prevents thundering herd
+  - See WORKING_NOTES.md "Worker Spawn Rate Limiting" for detailed design
 - **Change RenotifyFunc to Renotifier interface for proper lifecycle management**
   - RenotifyFunc is just `func()` with no Free capability
   - Current workaround: both `orphanedTaskRenotify` and `wrappedRenotify` free themselves in their renotify callbacks

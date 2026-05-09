@@ -14,6 +14,11 @@ import (
 // BufferedFunc is called when a value is buffered in an outbox rather than
 // delivered directly to a receiver. This allows senders to track when their
 // values are stored for later pickup.
+//
+// Ordering guarantee: BufferedFunc runs synchronously on the sender's
+// goroutine and completes before the buffered value can be observed by any
+// receiver. Callers may therefore rely on side effects of BufferedFunc being
+// visible to whichever receiver eventually picks up the value.
 type BufferedFunc func()
 
 // Queue implements a rendezvous queue that provides direct handoff between
@@ -117,11 +122,11 @@ func (q *Queue[T]) PushBackFunc(sender *Sender, value T, bufferedFn BufferedFunc
 		trace.Logf(context.Background(), traceRegion,
 			"outbox=%p was empty, delivered value into outboxCh=%p",
 			outbox, outbox.ch)
-		q.fullOutboxes.PushBack(outbox)
-		q.outboxWaiters.Notify(nil)
 		if bufferedFn != nil {
 			bufferedFn()
 		}
+		q.fullOutboxes.PushBack(outbox)
+		q.outboxWaiters.Notify(nil)
 		return
 	default:
 	}
@@ -140,11 +145,11 @@ func (q *Queue[T]) PushBackFunc(sender *Sender, value T, bufferedFn BufferedFunc
 	}
 
 	// Value was successfully sent to outbox, so queue it and notify waiters
-	q.fullOutboxes.PushBack(outbox)
-	q.outboxWaiters.Notify(nil)
 	if bufferedFn != nil {
 		bufferedFn()
 	}
+	q.fullOutboxes.PushBack(outbox)
+	q.outboxWaiters.Notify(nil)
 }
 
 // PushBack sends a value using the two-tier delivery system with context support.

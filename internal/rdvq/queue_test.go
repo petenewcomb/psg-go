@@ -523,6 +523,71 @@ func TestQueue_TryPushBack(t *testing.T) {
 	}
 }
 
+// TestQueue_BufferedFuncOrdering pins the documented ordering guarantee for
+// BufferedFunc: it must run synchronously and complete before any receiver can
+// observe the buffered value via the queue.
+func TestQueue_BufferedFuncOrdering(t *testing.T) {
+	t.Run("fast path: empty outbox", func(t *testing.T) {
+		var q rdvq.Queue[int]
+		q.Init()
+
+		var sender rdvq.Sender
+		defer sender.Reset()
+
+		var sawValueDuringBufferedFn bool
+		bufferedFn := func() {
+			if _, ok := q.TryPopFront(); ok {
+				sawValueDuringBufferedFn = true
+			}
+		}
+
+		ok := q.TryPushBack(&sender, 42, bufferedFn)
+		assert.True(t, ok, "TryPushBack should succeed with empty outbox")
+		assert.False(t, sawValueDuringBufferedFn,
+			"value must not be observable via TryPopFront while bufferedFn runs")
+
+		val, ok := q.TryPopFront()
+		assert.True(t, ok)
+		assert.Equal(t, 42, val)
+	})
+
+	t.Run("slow path: outbox full when selectFn runs", func(t *testing.T) {
+		var q rdvq.Queue[int]
+		q.Init()
+
+		var sender rdvq.Sender
+		defer sender.Reset()
+
+		// Fill the outbox so the next send takes the slow path.
+		ok := q.TryPushBack(&sender, 1, nil)
+		assert.True(t, ok)
+
+		var sawValueDuringBufferedFn bool
+		bufferedFn := func() {
+			if _, ok := q.TryPopFront(); ok {
+				sawValueDuringBufferedFn = true
+			}
+		}
+
+		// Custom selectFn drains the previous value to free outbox.ch, then
+		// sends the new value, exercising the slow path synchronously.
+		q.PushBackFunc(&sender, 2, bufferedFn, func(outbox *rdvq.Outbox[int]) {
+			drained, ok := q.TryPopFront()
+			assert.True(t, ok)
+			assert.Equal(t, 1, drained)
+			outbox.Ch() <- 2
+			outbox.Filled()
+		})
+
+		assert.False(t, sawValueDuringBufferedFn,
+			"value must not be observable via TryPopFront while bufferedFn runs")
+
+		val, ok := q.TryPopFront()
+		assert.True(t, ok)
+		assert.Equal(t, 2, val)
+	})
+}
+
 func TestQueue_ThreeTierDelivery(t *testing.T) {
 	var q rdvq.Queue[int]
 	q.Init()

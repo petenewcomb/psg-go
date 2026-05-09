@@ -4,6 +4,17 @@ This document contains working notes and context for development on the `combine
 
 Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
 
+## rdvq BufferedFunc Ordering Fix (2026-05-09)
+
+The "Benchmark Deadlock Issue" investigation below misdiagnosed the root cause as a circular task↔combiner queue dependency. The actual cause was a race in `rdvq.Queue.PushBackFunc`: `bufferedFn` ran *after* `q.fullOutboxes.PushBack` and `Notify`, so a receiver could pick up and free the buffered value before `bufferedFn` fired. `taskPostWork.bufferedFn = registerDemand` mutates per-message state (`taskWork.demandRegistered`) and the global demand counter; when it ran late on a recycled `taskWork`, the demand counter drifted negative and spawning stopped, producing the observed livelock.
+
+Fixed by reordering `bufferedFn()` before `q.fullOutboxes.PushBack(outbox)` in both the fast and slow paths in `internal/rdvq/queue.go`. Pinned with `TestQueue_BufferedFuncOrdering`. The new contract is documented on `BufferedFunc`: it runs synchronously and completes before the value can be observed by any receiver.
+
+Also tightened `taskWork.demandRegistered` from a plain `bool` to `atomic.Bool` (the bool was being touched from multiple goroutines), added a decrement path in `taskWork.Free()` for work freed before pickup, and a `Reset()` panic as an invariant check.
+
+This likely closes the "Benchmark Deadlock Issue" notes and makes the v3 dedicated-spawner design less load-bearing — needs re-evaluation once benchmarks confirm stability.
+
+
 ## Architecture Highlights (Completed)
 
 **Core Infrastructure:**
@@ -719,98 +730,143 @@ After thousands of successful iterations, this specific queue state alignment oc
 **Problem with v1 (Token-Based):**
 The complex token-based demand tracking system with retry spawn logic still failed to prevent livelock/deadlock in benchmarks.
 
-**Solution: Simple Atomic Counter**
+**Solution v2a: Simple Atomic Counter with Distributed Spawning**
 
 Replaced token queue with simple atomic counter following this rule:
 - **Always increment demand counter when a scatter begins** (task needs to be posted)
 - **Always decrement demand counter when a task worker picks up a task**
 - **Repeatedly try to spawn at every opportunity** within post work and from task workers as long as there's continued demand
 
-**Implementation:**
+**Issues with v2a:**
+- Multiple goroutines contending to spawn workers
+- Coordination overhead via CAS on lastSpawn timestamp
+- Each demanding goroutine needs spawn logic
+- Potential thundering herd around spawn attempts
 
-1. **Removed complex token system:**
-   ```go
-   // REMOVED:
-   unmetTaskWorkerDemand nbcq.Queue[*unmetDemandToken]
-   type unmetDemandToken struct { ... }
-   type unmetDemand struct { ... }
-   func registerTaskWorkerDemand() unmetDemand { ... }
-   ```
+## Task Worker Demand-Based Spawning v3 - Dedicated Spawner Goroutine (2025-10-22)
 
-2. **Added simple counter:**
-   ```go
-   // job.go:53
-   taskWorkerDemand jobstate.InFlightCounter
-   ```
+**Design Evolution:** Instead of distributed spawn attempts with rate limiting via shared timestamp, use a single dedicated spawner goroutine that bears total responsibility for spawning.
 
-3. **Moved demandRegistered to taskWork:**
-   ```go
-   // job.go:84
-   type taskWork struct {
-       jobWork
-       task             boundTask
-       completedFn      func()
-       demandRegistered bool  // NEW - tracks if demand registered for this task
-   }
-   ```
+**Architecture:**
 
-4. **Increment when registering demand (taskPostWork.Execute):**
-   ```go
-   // job.go:1001-1007
-   registerDemand := func() {
-       if !w.task.demandRegistered {
-           w.job.taskWorkerDemand.Increment()
-           w.task.demandRegistered = true
-       }
-       w.job.trySpawnTaskWorker()
-   }
-   ```
+```go
+// Job struct additions
+type Job struct {
+    taskWorkerDemand      jobstate.InFlightCounter  // Atomic counter of unmet demand
+    taskWorkerSpawner     rdvq.Waiters              // Notification point for spawner
+    taskWorkerSpawnDelay  time.Duration             // Minimum interval between spawns
+    lastTaskWorkerSpawn   time.Time                 // Last spawn time (no atomic needed - single goroutine)
+}
 
-5. **Decrement when worker receives task (Job.runTasks):**
-   ```go
-   // job.go:883-888
-   if task != nil {
-       // Decrement demand counter when worker receives task
-       if task.demandRegistered {
-           j.taskWorkerDemand.Decrement()
-           task.demandRegistered = false
-       }
-   }
-   ```
+// Spawner goroutine (started in Job.init or first scatter)
+func (j *Job) runTaskWorkerSpawner(ctx context.Context) {
+    for {
+        // Wait for demand notification
+        j.taskWorkerSpawner.Wait(ctx)
+        if ctx.Done() != nil {
+            return
+        }
 
-6. **Worker checks demand and spawns after securing first task:**
-   ```go
-   // job.go:890-898
-   // Secured task - release spawn counter
-   if spawning {
-       spawning = false
-       if j.taskWorkerDemand.IsZero() {
-           j.taskWorkersSpawning.Decrement()
-       } else {
-           j.spawnTaskWorker()  // Chain spawn if demand exists
-       }
-   }
-   ```
+        // Demand exists - enter spawn loop
+        for !j.taskWorkerDemand.IsZero() {
+            // Check rate limit
+            elapsed := time.Since(j.lastTaskWorkerSpawn)
+            if elapsed < j.taskWorkerSpawnDelay {
+                // Wait for remainder of interval
+                time.Sleep(j.taskWorkerSpawnDelay - elapsed)
+            }
 
-**Key Differences from Token System:**
+            // Spawn worker
+            j.spawnTaskWorker()
+            j.lastTaskWorkerSpawn = time.Now()
 
-| Aspect | Token-Based (v1) | Counter-Based (v2) |
-|--------|------------------|-------------------|
-| Tracking | Queue of unique tokens | Single atomic counter |
-| Lifecycle | Create/cancel tokens | Increment/decrement counter |
-| Cancellation | Token ID matching | Simple flag on taskWork |
-| Complexity | ~100 lines | ~20 lines |
-| Overhead | Allocations + queue ops | 2 atomic operations |
-| Spawning | Check token validity | Check counter > 0 |
+            // Check if more demand exists (may have been satisfied while sleeping)
+        }
+    }
+}
+```
 
-**Benefits:**
-- Much simpler implementation
-- Fewer allocations (no tokens)
-- Direct demand tracking (no indirection through token IDs)
-- Aggressive spawning: repeatedly tries at every opportunity
-- Still prevents livelock: workers spawn when demand exists
+**Demanding code pattern:**
 
-**Result:** Benchmarks now complete successfully without hanging. The simpler approach works better than the complex token system.
+```go
+// In taskPostWork.Execute() or similar
+func registerDemand() {
+    if !w.task.demandRegistered {
+        w.job.taskWorkerDemand.Increment()
+        w.task.demandRegistered = true
+        w.job.taskWorkerSpawner.Notify(nil)  // Wake spawner
+    }
+}
+```
+
+**Worker decrement pattern (unchanged):**
+
+```go
+// In Job.runTasks() when worker receives task
+if task != nil && task.demandRegistered {
+    j.taskWorkerDemand.Decrement()
+    task.demandRegistered = false
+}
+```
+
+**Key Benefits:**
+
+1. **Single point of coordination** - No contention between multiple goroutines trying to spawn
+2. **Simplified demanding code** - Just increment + notify, no spawn logic needed
+3. **Clean rate limiting** - Centralized in spawner, no CAS coordination needed
+4. **No thundering herd** - Single goroutine ensures controlled spawn rate
+5. **Separation of concerns** - Demand registration separate from spawn mechanics
+6. **rdvq.Waiters handles notification consolidation** - Multiple Notify() calls while spawner working are automatically collapsed
+
+**Spawner Lifecycle:**
+
+- Start: Spawner goroutine started during Job initialization
+- Run: Waits on `taskWorkerSpawner.Wait(ctx)` until demand registered
+- Active: Spawns workers at rate-limited intervals while demand > 0
+- Stop: Context cancellation on job.Close() terminates spawner
+
+**Comparison with v2a:**
+
+| Aspect | v2a (Distributed) | v3 (Dedicated Spawner) |
+|--------|-------------------|------------------------|
+| Spawn coordination | CAS on atomic timestamp | Single goroutine |
+| Contention | High (all demanders) | None |
+| Rate limiting | Distributed checks | Centralized loop |
+| Code complexity | Spawn logic in every demander | Spawn logic in one place |
+| Thundering herd | Possible despite CAS | Impossible |
+| Demand signaling | Implicit (check counter) | Explicit (Notify()) |
+
+**Files Affected:**
+
+- `job.go`:
+  - Add `taskWorkerSpawner rdvq.Waiters` field
+  - Add `taskWorkerSpawnDelay time.Duration` field
+  - Add `lastTaskWorkerSpawn time.Time` field (non-atomic, single goroutine)
+  - Add `runTaskWorkerSpawner()` goroutine
+  - Update `registerDemand()` to call `taskWorkerSpawner.Notify(nil)`
+  - Remove `trySpawnTaskWorker()` and CAS coordination code
+  - Keep `taskWorkerDemand` counter (unchanged)
+  - Keep demand decrement in `runTasks()` (unchanged)
+
+- `psgopt/job.go`:
+  - Add `WithTaskWorkerSpawnDelay(time.Duration)` option
+  - Default value: 100µs (allows ~10k spawns/sec)
+
+**Migration from v2a:**
+
+| What Changed | v2a | v3 |
+|-------------|-----|-----|
+| Spawn coordination | `trySpawnTaskWorker()` with CAS | `runTaskWorkerSpawner()` goroutine |
+| Rate limiting | Atomic `lastTaskWorkerSpawn` | Local `lastTaskWorkerSpawn` |
+| Notification | Implicit (check counter) | Explicit `Notify()` |
+| Spawning goroutines | Many (all demanders) | One (dedicated) |
+
+**Next Steps:**
+
+1. Implement v3 for task workers
+2. Apply same pattern to combiner workers
+3. Benchmark and verify no livelock/deadlock
+4. Document pattern for future worker types
 
 ## Combiner Worker Demand Tracking (2025-10-21)
 
@@ -941,119 +997,27 @@ Implement the same demand tracking pattern used for task workers:
 - combineop.go - Add demandRegistered field to combineWork
 - cpworker.go - Demand decrement when work received
 
-## Worker Spawn Rate Limiting (2025-10-21)
+## Worker Spawn Rate Limiting (2025-10-21 → 2025-10-22)
 
-**Better Approach: Rate Limiting Instead of Concurrency Limiting**
+**Evolution: From Distributed Rate Limiting to Dedicated Spawner**
 
-**Problem with Current Spawn Concurrency Model:**
-- Spawn concurrency limit (default=1) restricts how many goroutines can be spawning simultaneously
-- Too restrictive during bursts of demand - creates artificial bottleneck
-- Can contribute to livelock when all workers blocked but spawn limit prevents new workers
-- Doesn't reflect the actual problem: we want to prevent thundering herd, not limit concurrent spawns
+**Initial Idea (2025-10-21):** Replace spawn concurrency limits with rate limits via atomic timestamp + CAS coordination.
 
-**Proposed Solution: Spawn Rate Limiting**
+**Problem with Distributed Rate Limiting:**
+- Multiple goroutines still contending (CAS loop on shared timestamp)
+- Wake timer in blocking code adds complexity
+- Each demanding goroutine duplicates spawn logic
+- Coordination overhead persists despite rate limiting
 
-Replace spawn *concurrency* limits with spawn *rate* limits:
-- Instead of `taskWorkerSpawnConcurrencyLimit` → use `taskWorkerSpawnDelay` (e.g., 100µs)
-- Track time of last spawn
-- Only allow new spawn if `time.Since(lastSpawn) >= spawnDelay`
-- Allows rapid spawning during bursts, but prevents thundering herd
+**Final Design (2025-10-22):** Dedicated spawner goroutine per worker type.
 
-**Key Benefits:**
-1. **No artificial concurrency bottleneck** - can spawn multiple workers quickly when needed
-2. **Rate limiting prevents thundering herd** - can't spawn unlimited workers instantly
-3. **Responsive to sustained demand** - if demand persists beyond delay, spawn another
-4. **Wake timer for blocked work** - spawn if blocked waiting > spawnDelay
+See "Task Worker Demand-Based Spawning v3 - Dedicated Spawner Goroutine" section above for full design.
 
-**Implementation for Task Workers:**
-
-```go
-type Job struct {
-    taskWorkerSpawnDelay atomic.Int64  // time.Duration
-    lastTaskWorkerSpawn  atomic.Int64  // time.Time (UnixNano)
-}
-
-func (j *Job) trySpawnTaskWorker() bool {
-    delay := time.Duration(j.taskWorkerSpawnDelay.Load())
-    if delay == -1 {
-        // No rate limiting
-        j.spawnTaskWorker()
-        return true
-    }
-
-    now := time.Now()
-    for {
-        last := j.lastTaskWorkerSpawn.Load()
-        lastTime := time.Unix(0, last)
-        if now.Sub(lastTime) < delay {
-            // Too soon, don't spawn
-            return false
-        }
-
-        // Try to claim spawn slot by updating lastSpawn
-        if j.lastTaskWorkerSpawn.CompareAndSwap(last, now.UnixNano()) {
-            j.spawnTaskWorker()
-            return true
-        }
-        // CAS failed, someone else spawned, retry check
-    }
-}
-```
-
-**Wake Timer in taskPostWork.Execute():**
-
-Instead of using `BasicPushSelect` in blocking path, use timed select:
-
-```go
-// In taskPostWork.Execute() blocking path
-spawnDelay := time.Duration(j.taskWorkerSpawnDelay.Load())
-timer := time.NewTimer(spawnDelay)
-defer timer.Stop()
-
-select {
-case outboxCh <- w.work:
-    // Posted successfully
-case <-timer.C:
-    // Been waiting >= spawnDelay, try to spawn a worker
-    j.trySpawnTaskWorker()
-    // Continue blocking or give up based on deadline
-case <-ctx.Done():
-    return ctx.Err()
-}
-```
-
-**For Combiner Workers:**
-
-Same pattern:
-- Add `combinerWorkerSpawnDelay` to CombinerPoolState
-- Add `lastCombinerWorkerSpawn` timestamp
-- Use timed select in `combinePostWork.Execute()`
-- Wake timer ensures spawn if blocked too long
-
-**Default Values:**
-- `DefaultTaskWorkerSpawnDelay = 100µs` (allow ~10k spawns/sec)
-- `DefaultCombinerWorkerSpawnDelay = 100µs`
-- Set to `-1` for unlimited (no rate limiting)
-
-**Comparison:**
-
-| Aspect | Concurrency Limit | Rate Limit |
-|--------|-------------------|------------|
-| Controls | Simultaneous spawns | Spawns per time unit |
-| Burst response | Blocked after limit | Rapid until delay |
-| Sustained demand | Must wait for slot | Spawn every delay period |
-| Thundering herd | Prevents (too aggressive) | Prevents (just right) |
-| Livelock risk | Higher (blocked spawns) | Lower (time-based) |
-| Complexity | Counter + CAS loop | Timestamp + CAS loop |
-
-**Files Affected:**
-- job.go - Replace taskWorkerSpawnConcurrencyLimit with taskWorkerSpawnDelay
-- combinerpool.go / cpstate/state.go - Add combinerWorkerSpawnDelay
-- psgopt/job.go, psgopt/combinerpool.go - New options
-- taskPostWork.Execute() - Add wake timer select
-- combinePostWork.Execute() - Add wake timer select
+**Key Insight:** Rate limiting is best implemented in a single dedicated goroutine rather than coordinated across many demanding goroutines. This eliminates contention entirely and simplifies demanding code to just "increment + notify".
 
 ## TryScatter Task Allocation Leak (2025-10-21)
+
+**Status: FIXED (2025-10-21)** - `w.task.Free()` call added to `taskWork.Free()` at job.go:100.
 
 **Problem Identified:** Tasks created with `TryScatter` are not being returned to the pool when abandoned due to deadline expiration.
 

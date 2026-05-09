@@ -18,15 +18,8 @@ Items to complete before merging to main branch.
 - should combiner concurrency limits be specified per-combineop instead of or in addition to the combiner pool?
 
 ### 6. Implementation improvements
-- **Fix TryScatter task allocation leak** (CRITICAL - memory leak)
-  - Tasks allocated at combineop.go:604 not returned to pool when TryScatter fails due to deadline
-  - Root cause: Split cleanup responsibility - Execute() frees task via defer, but Free() doesn't
-  - When work freed before execution (TryScatter deadline, postponed work), task leaks
-  - Benchmarks show 28-57 allocs/op with 2-5KB/op in processing workload
-  - Consequences: combineTask objects not returned to pool, c.op.unref() never called
-  - Solution: Remove `defer w.task.Free()` from Execute() (job.go:91), add `w.task.Free()` to Free() (job.go:101)
-  - Makes Free() single point of cleanup responsibility (no nil check needed - task always set)
-  - See WORKING_NOTES.md "TryScatter Task Allocation Leak" for detailed analysis
+- **Re-evaluate demand-tracking and dedicated-spawner items below** in light of the rdvq BufferedFunc ordering fix (2026-05-09). The original livelock motivating "combiner worker demand tracking (CRITICAL)" and "v3 dedicated spawner goroutine" was rooted in the rdvq race, not the absence of those mechanisms. Pending benchmark confirmation.
+- **Eliminate the orphan concept entirely**: Instead of creating orphans in RDVQ, check for a value in the inbox _before_ grabbing an outbox from the queue.  If a value exists in the inbox, call the renotifyFn returned by the outbox waiter and just return the inbox value.
 - **Implement demand tracking for combiner workers** (CRITICAL - prevents livelock)
   - Task workers now have demand tracking (taskWorkerDemand counter) to prevent livelock
   - Combiner workers need similar mechanism to prevent circular blocking scenario:
@@ -40,17 +33,15 @@ Items to complete before merging to main branch.
   - Decrement demand in CombinerPool.goroutine() when worker receives work
   - Worker checks demand after receiving work and spawns if demand exists
   - See WORKING_NOTES.md "Combiner Worker Demand Tracking" for detailed analysis
-- **Replace spawn concurrency limits with spawn rate limits** (improves responsiveness)
-  - Current: spawn concurrency limit (default=1) too restrictive, creates artificial bottleneck
-  - Problem: limits simultaneous spawns, not spawn rate - can contribute to livelock
-  - Better: spawn rate limiting - limit spawns per time unit, not concurrent spawns
-  - Replace taskWorkerSpawnConcurrencyLimit with taskWorkerSpawnDelay (e.g., 100µs = ~10k spawns/sec)
-  - Track lastTaskWorkerSpawn timestamp, only spawn if time.Since >= delay
-  - Allows burst spawning when needed, prevents thundering herd via rate limit
-  - Add wake timer in taskPostWork.Execute(): if blocked >= spawnDelay, spawn worker
-  - Same for combiner workers: combinerWorkerSpawnDelay in CombinerPoolState
-  - Benefits: no concurrency bottleneck, responsive to bursts, prevents thundering herd
-  - See WORKING_NOTES.md "Worker Spawn Rate Limiting" for detailed design
+- **Implement dedicated spawner goroutine pattern** (v3 design - improves responsiveness, eliminates contention)
+  - Replace distributed spawn attempts (v2a) with single dedicated spawner goroutine per worker type
+  - Spawner waits on rdvq.Waiters, wakes on demand notification, spawns at rate-limited intervals
+  - Demanding code simplified: just increment counter + call Notify(), no spawn logic
+  - Benefits: no contention, no thundering herd, clean rate limiting, single responsibility
+  - Task workers: Add taskWorkerSpawner (rdvq.Waiters), runTaskWorkerSpawner() goroutine
+  - Combiner workers: Same pattern with combinerWorkerSpawner
+  - Default spawn delay: 100µs (~10k spawns/sec rate limit)
+  - See WORKING_NOTES.md "Task Worker Demand-Based Spawning v3" for detailed design
 - **Change RenotifyFunc to Renotifier interface for proper lifecycle management**
   - RenotifyFunc is just `func()` with no Free capability
   - Current workaround: both `orphanedTaskRenotify` and `wrappedRenotify` free themselves in their renotify callbacks

@@ -6,6 +6,7 @@ package psg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -81,7 +82,20 @@ type taskWork struct {
 	jobWork
 	task             boundTask
 	completedFn      func()
-	demandRegistered bool
+	demandRegistered atomic.Bool
+}
+
+func (w *taskWork) Reset() {
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "taskWork.Reset",
+			"DEMAND_RESET task=%p demandRegistered=%v", w, w.demandRegistered.Load())
+	}
+	w.jobWork = jobWork{}
+	w.task = nil
+	w.completedFn = nil
+	if w.demandRegistered.Load() {
+		panic(fmt.Sprintf("taskWork.Reset: demandRegistered still true - unbalanced demand counter (task=%p)", w))
+	}
 }
 
 func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
@@ -98,6 +112,13 @@ func (w *taskWork) Free(job *Job) {
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
 	w.task.Free()
+	// If demand was registered but task never picked up, decrement the counter
+	if w.demandRegistered.CompareAndSwap(true, false) {
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), traceRegion, "DEMAND_DEC_FREE task=%p counter=%p", w, &job.taskWorkerDemand)
+		}
+		job.taskWorkerDemand.Decrement()
+	}
 	w.Close(job)
 	taskWorkPool.Put(w)
 }
@@ -750,9 +771,13 @@ func (w *orphanedTaskWork) registerDemand(id orphanedTaskID) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.id == id {
-		if !w.work.demandRegistered {
+		if w.work.demandRegistered.CompareAndSwap(false, true) {
 			w.job.taskWorkerDemand.Increment()
-			w.work.demandRegistered = true
+			if trace.IsEnabled() {
+				trace.Logf(context.Background(), "orphanedTaskWork.registerDemand",
+					"DEMAND_INC_ORPHAN task=%p orphan_id=%d counter=%p",
+					w.work, id, &w.job.taskWorkerDemand)
+			}
 		}
 		w.job.trySpawnTaskWorker()
 	}
@@ -876,9 +901,11 @@ func (j *Job) runTasks() {
 
 		if task != nil {
 			// Decrement demand counter when worker receives task
-			if task.demandRegistered {
+			if task.demandRegistered.CompareAndSwap(true, false) {
+				if trace.IsEnabled() {
+					trace.Logf(ctx, traceRegion, "DEMAND_DEC_WORKER task=%p counter_before=%p", task, &j.taskWorkerDemand)
+				}
 				j.taskWorkerDemand.Decrement()
-				task.demandRegistered = false
 			}
 
 			// Secured task - release spawn counter
@@ -998,9 +1025,11 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	}
 
 	registerDemand := func() {
-		if !w.task.demandRegistered {
+		if w.task.demandRegistered.CompareAndSwap(false, true) {
 			w.job.taskWorkerDemand.Increment()
-			w.task.demandRegistered = true
+			if trace.IsEnabled() {
+				trace.Logf(ctx, traceRegion, "DEMAND_INC task=%p counter=%p", w.task, &w.job.taskWorkerDemand)
+			}
 		}
 		w.job.trySpawnTaskWorker()
 	}

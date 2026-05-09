@@ -10,6 +10,23 @@ if [ "$(cpupower frequency-info -o proc | tail -n +2 | fgrep -v performance)" !=
     exit 1
 fi
 
+# Also warn if the clock isn't pinned. The "performance" governor still allows
+# turbo boost up to the max frequency, which causes variance from thermal
+# throttling and from per-core boost residency. Pinning min == max == base
+# frequency removes both sources.
+MIN_FREQ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq 2>/dev/null || true)
+MAX_FREQ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || true)
+if [ -n "$MIN_FREQ" ] && [ -n "$MAX_FREQ" ] && [ "$MIN_FREQ" != "$MAX_FREQ" ]; then
+    echo "Warning: CPU frequency is not pinned (min=${MIN_FREQ}kHz, max=${MAX_FREQ}kHz)."
+    echo "For lower variance, pin both bounds to the CPU's base frequency:"
+    BASE_FREQ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/base_frequency 2>/dev/null || true)
+    if [ -n "$BASE_FREQ" ]; then
+        echo "  sudo cpupower frequency-set -d ${BASE_FREQ} -u ${BASE_FREQ}"
+    else
+        echo "  sudo cpupower frequency-set -d <base_freq_kHz> -u <base_freq_kHz>"
+    fi
+fi
+
 if [ $# -gt 0 ]; then
     TAG="$1"; shift
 fi

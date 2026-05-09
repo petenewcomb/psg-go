@@ -41,7 +41,7 @@ type BufferedFunc func()
 // themselves are always delivered in first-in-first-out (FIFO) order.
 type Queue[T any] struct {
 	inboxStackQueue[T]
-	fullOutboxes  nbcq.Queue[*Outbox[T]] // Queue of outboxes containing items
+	fullOutboxes  nbcq.Queue[*outbox[T]] // Queue of outboxes containing items
 	outboxWaiters Waiters                // Notification system for new outbox items
 }
 
@@ -60,34 +60,25 @@ func (q *Queue[T]) Init() {
 	q.outboxWaiters.Init()
 }
 
-// PushSelectFunc is called when PushBackFunc needs to send a value when the outbox is full.
-// It should wait for the outbox to become available, typically using a select statement
-// to handle context cancellation and other events. The callback MUST call outbox.Filled()
-// if the value was sent successfully.
-type PushSelectFunc[T any] = func(outbox *Outbox[T])
+// PushSelectFunc handles the select operation for PushBackFunc when the
+// outbox is full. It receives the outbox channel and returns true if it
+// successfully sent the value; PushBackFunc handles the post-send bookkeeping
+// based on that return.
+type PushSelectFunc[T any] = func(outboxCh chan<- T) bool
 
-// BasicPushSelect provides a standard implementation of PushSelectFunc that waits
-// for the outbox to become available or the context to be cancelled.
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - outbox: The outbox to send the value to
-//   - value: The value to send
-//
-// Returns an error only if the context is cancelled. Automatically calls
-// outbox.Filled() when the value is successfully sent.
-func BasicPushSelect[T any](ctx context.Context, outbox *Outbox[T], value T) error {
+// BasicPushSelect provides a standard implementation of [PushSelectFunc]
+// that selects on the outbox channel and ctx.Done(). Returns (true, nil) on
+// successful send; returns (false, err) if the context was cancelled.
+func BasicPushSelect[T any](ctx context.Context, outboxCh chan<- T, value T) (bool, error) {
 	traceRegion := "rdvq.BasicPushSelect"
-	outboxCh := outbox.Ch()
-	trace.Logf(ctx, traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
+	trace.Logf(ctx, traceRegion, "entering select: outboxCh=%p", outboxCh)
 	select {
 	case outboxCh <- value:
-		outbox.Filled()
-		trace.Logf(ctx, traceRegion, "delivered value into outbox=%p, outboxCh=%p", outbox, outboxCh)
-		return nil
+		trace.Logf(ctx, traceRegion, "delivered value into outboxCh=%p", outboxCh)
+		return true, nil
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 }
 
@@ -118,7 +109,7 @@ func (q *Queue[T]) PushBackFunc(sender *Sender, value T, bufferedFn BufferedFunc
 	defer outbox.fillAttemptComplete()
 	select {
 	case outbox.ch <- value:
-		outbox.Filled()
+		outbox.filled()
 		trace.Logf(context.Background(), traceRegion,
 			"outbox=%p was empty, delivered value into outboxCh=%p",
 			outbox, outbox.ch)
@@ -135,14 +126,14 @@ func (q *Queue[T]) PushBackFunc(sender *Sender, value T, bufferedFn BufferedFunc
 	trace.Logf(context.Background(), traceRegion,
 		"outbox=%p is full (outboxCh=%p), calling selectFn",
 		outbox, outbox.ch)
-	selectFn(outbox)
-	if !outbox.wasFilled {
+	if !selectFn(outbox.ch) {
 		// Value was not sent via outbox, so there's no further action to take
 		trace.Logf(context.Background(), traceRegion,
 			"selectFn returned without filling outbox=%p (outboxCh=%p)",
 			outbox, outbox.ch)
 		return
 	}
+	outbox.filled()
 
 	// Value was successfully sent to outbox, so queue it and notify waiters
 	if bufferedFn != nil {
@@ -163,8 +154,10 @@ func (q *Queue[T]) PushBackFunc(sender *Sender, value T, bufferedFn BufferedFunc
 // "drop-and-go" semantics for senders.
 func (q *Queue[T]) PushBack(ctx context.Context, sender *Sender, value T, bufferedFn BufferedFunc) error {
 	var err error
-	q.PushBackFunc(sender, value, bufferedFn, func(outbox *Outbox[T]) {
-		err = BasicPushSelect(ctx, outbox, value)
+	q.PushBackFunc(sender, value, bufferedFn, func(outboxCh chan<- T) bool {
+		var sent bool
+		sent, err = BasicPushSelect(ctx, outboxCh, value)
+		return sent
 	})
 	return err
 }
@@ -178,17 +171,17 @@ func (q *Queue[T]) TryPushBack(sender *Sender, value T, bufferedFn BufferedFunc)
 	traceRegion := "rdvq.Queue.TryPushBack"
 
 	sent := true
-	q.PushBackFunc(sender, value, bufferedFn, func(outbox *Outbox[T]) {
+	q.PushBackFunc(sender, value, bufferedFn, func(outboxCh chan<- T) bool {
 		// Don't block waiting for outbox to become available
-		outboxCh := outbox.Ch()
-		trace.Logf(context.Background(), traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
+		trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
 		select {
 		case outboxCh <- value:
-			outbox.Filled()
-			trace.Logf(context.Background(), traceRegion, "delivered value into outbox=%p, outboxCh=%p", outbox, outboxCh)
+			trace.Logf(context.Background(), traceRegion, "delivered value into outboxCh=%p", outboxCh)
+			return true
 		default:
-			trace.Logf(context.Background(), traceRegion, "outbox=%p, outboxCh=%p full, aborting", outbox, outboxCh)
+			trace.Logf(context.Background(), traceRegion, "outboxCh=%p full, aborting", outboxCh)
 			sent = false
+			return false
 		}
 	})
 

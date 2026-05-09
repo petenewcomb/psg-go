@@ -551,12 +551,12 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 
 		// Custom selectFn drains the previous value to free outbox.ch, then
 		// sends the new value, exercising the slow path synchronously.
-		q.PushBackFunc(&sender, 2, bufferedFn, func(outbox *rdvq.Outbox[int]) {
+		q.PushBackFunc(&sender, 2, bufferedFn, func(outboxCh chan<- int) bool {
 			drained, ok := q.TryPopFront()
 			assert.True(t, ok)
 			assert.Equal(t, 1, drained)
-			outbox.Ch() <- 2
-			outbox.Filled()
+			outboxCh <- 2
+			return true
 		})
 
 		assert.False(t, sawValueDuringBufferedFn,

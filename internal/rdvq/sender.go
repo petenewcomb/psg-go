@@ -21,16 +21,16 @@ func (s *Sender) Reset() {
 }
 
 // outboxFor returns the outbox for the given key, creating one if it doesn't exist.
-func outboxFor[T any](s *Sender, q *Queue[T]) *Outbox[T] {
+func outboxFor[T any](s *Sender, q *Queue[T]) *outbox[T] {
 	if s.outboxMap == nil {
 		s.outboxMap = make(map[any]any)
 	}
 
-	outboxAny := s.outboxMap[q]
-	if outboxAny == nil {
-		outbox := newOutbox[T]()
-		s.outboxMap[q] = outbox
-		return outbox
+	obAny := s.outboxMap[q]
+	if obAny == nil {
+		ob := newOutbox[T]()
+		s.outboxMap[q] = ob
+		return ob
 	}
-	return outboxAny.(*Outbox[T])
+	return obAny.(*outbox[T])
 }

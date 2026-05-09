@@ -27,11 +27,9 @@
 //
 // Supporting types for queue operations:
 //
-//	Outbox[T]    - Per-sender buffer for overflow handling
-//	Inbox[T]     - Per-receiver message buffer
 //	Sender       - Manages outboxes across multiple queues for a single goroutine
 //	Waiter       - Coordination primitive for blocking/notification
-//	Receiver     - Combines Inbox and Waiter for queue operations
+//	Receiver     - Combines an inbox and waiter for queue operations
 //	Listener     - Reusable notification subscription for multiple Listeners
 //
 // Note: Sender and Waiter instances are typically managed per-goroutine,

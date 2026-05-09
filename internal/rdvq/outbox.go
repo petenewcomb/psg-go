@@ -9,23 +9,23 @@ import (
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 )
 
-// Outbox provides per-sender buffering for overflow items when no receivers
-// are immediately available. Each Outbox is dedicated to sending items from
+// outbox provides per-sender buffering for overflow items when no receivers
+// are immediately available. Each outbox is dedicated to sending items from
 // a specific Sender to a specific Queue.
-type Outbox[T any] struct {
+type outbox[T any] struct {
 	ch        chan T
 	wasFilled bool
 	listeners Listeners
 	refCount  atomic.Int32
 }
 
-func newOutbox[T any]() *Outbox[T] {
+func newOutbox[T any]() *outbox[T] {
 	ob := omnipool.GetCustom(outboxTrait[T]{})
 	ob.refCount.Store(1)
 	return ob
 }
 
-func (ob *Outbox[T]) free() {
+func (ob *outbox[T]) free() {
 	newValue := ob.refCount.Add(-1)
 	if newValue < 0 {
 		panic("reference count underflow")
@@ -37,52 +37,37 @@ func (ob *Outbox[T]) free() {
 
 type outboxTrait[T any] struct{}
 
-func (outboxTrait[T]) Make() *Outbox[T] {
-	ob := &Outbox[T]{
+func (outboxTrait[T]) Make() *outbox[T] {
+	ob := &outbox[T]{
 		ch: make(chan T, 1),
 	}
 	ob.listeners.Init()
 	return ob
 }
 
-func (outboxTrait[T]) Reset(ob *Outbox[T]) {
+func (outboxTrait[T]) Reset(ob *outbox[T]) {
 	ob.wasFilled = false
 	ob.listeners.Reset()
 }
 
-// Ch returns the outbox's channel for use in select statements.
-// Returns nil if the outbox itself is nil.
-// Panics if called when no channel has been allocated, which should only
-// happen if Ch() is called outside of a selectFn callback.
-func (ob *Outbox[T]) Ch() chan<- T {
-	if ob == nil {
-		return nil
-	}
-	ch := ob.ch
-	if ch == nil {
-		panic("outbox channel is nil")
-	}
-	return ch
-}
-
-func (ob *Outbox[T]) fillPending() {
+func (ob *outbox[T]) fillPending() {
 	ob.refCount.Add(1)
 	ob.wasFilled = false
 }
 
-// Filled marks the outbox as having been successfully filled with a value.
-// This must be called by the sender after successfully sending to the outbox channel.
-func (ob *Outbox[T]) Filled() {
+// filled marks the outbox as having been successfully filled with a value.
+// Must be called by PushBackFunc after a successful send to ob.ch.
+func (ob *outbox[T]) filled() {
 	ob.wasFilled = true
 }
 
-func (ob *Outbox[T]) fillAttemptComplete() {
+func (ob *outbox[T]) fillAttemptComplete() {
 	if !ob.wasFilled {
 		ob.free()
 	}
 }
 
-func (ob *Outbox[T]) emptied() {
+func (ob *outbox[T]) emptied() {
 	ob.listeners.Notify(nil)
 	ob.free()
 }

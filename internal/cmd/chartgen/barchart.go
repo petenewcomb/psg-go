@@ -284,11 +284,13 @@ func (b *barChart) Thumbnail(c *draw.Canvas) {
 		{X: c.Min.X, Y: c.Max.Y},
 		{X: c.Max.X, Y: c.Max.Y},
 		{X: c.Max.X, Y: c.Min.Y},
+
+		// final segment for outline
+		{X: c.Min.X, Y: c.Min.Y},
 	}
-	poly := c.ClipPolygonY(pts)
+	poly := c.ClipPolygonY(pts[:4])
 	c.FillPolygon(b.Color, poly)
 
-	pts = append(pts, vg.Point{X: c.Min.X, Y: c.Min.Y})
 	outline := c.ClipLinesY(pts)
 	c.StrokeLines(b.LineStyle, outline...)
 }

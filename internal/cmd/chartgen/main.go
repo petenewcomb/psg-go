@@ -607,9 +607,11 @@ func main() {
 			}
 		}
 
+		const xAxisLabel = "Aggregation Workload Duration @ Flush Period"
+
 		throughputChart := chart{
 			Title:           fmt.Sprintf("Aggregation Workload Throughput (%s)", workloadDisplayName),
-			XAxisLabel:      "Aggregation Workload Duration @ Flush Period",
+			XAxisLabel:      xAxisLabel,
 			YAxisLabel:      "Tasks / Second",
 			XTickLabels:     make([]string, flushPeriodKeysPerWorkloadDuration),
 			XTickPositions:  make([]float64, flushPeriodKeysPerWorkloadDuration),
@@ -621,7 +623,7 @@ func main() {
 
 		speedupChart := chart{
 			Title:           fmt.Sprintf("Aggregation Workload Speedup (%s)", workloadDisplayName),
-			XAxisLabel:      "Aggregation Workload Duration @ Flush Period",
+			XAxisLabel:      xAxisLabel,
 			YAxisLabel:      "Throughput vs. Direct",
 			XTickLabels:     make([]string, len(workloadDurationKeys)),
 			XTickPositions:  make([]float64, len(workloadDurationKeys)),
@@ -633,7 +635,7 @@ func main() {
 
 		allocationsChart := chart{
 			Title:           fmt.Sprintf("Allocations Per Task Aggregated (%s)", workloadDisplayName),
-			XAxisLabel:      "Aggregation Workload Duration @ Flush Period",
+			XAxisLabel:      xAxisLabel,
 			YAxisLabel:      "Allocations / Task",
 			XTickLabels:     make([]string, len(workloadDurationKeys)),
 			XTickPositions:  make([]float64, len(workloadDurationKeys)),
@@ -645,7 +647,7 @@ func main() {
 
 		allocBytesChart := chart{
 			Title:           fmt.Sprintf("Bytes Allocated Per Task Aggregated (%s)", workloadDisplayName),
-			XAxisLabel:      "Aggregation Workload Duration @ Flush Period",
+			XAxisLabel:      xAxisLabel,
 			YAxisLabel:      "Allocated Bytes / Task",
 			XTickLabels:     make([]string, len(workloadDurationKeys)),
 			XTickPositions:  make([]float64, len(workloadDurationKeys)),

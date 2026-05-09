@@ -4,8 +4,24 @@
 package rdvq
 
 // WaitInbox is an inbox specialized for receiving RenotifyFunc notifications.
-// It's used by Waiters to deliver notifications to waiting goroutines.
-type WaitInbox = Inbox[RenotifyFunc]
+// It is used by Waiters to deliver notifications to waiting goroutines and is
+// passed to nested wait selectFn callbacks (see Waiters.WaitFunc).
+type WaitInbox inbox[RenotifyFunc]
+
+// Ch returns the WaitInbox's channel for use in select statements. Returns
+// nil if the WaitInbox itself is nil. Panics if called when no channel has
+// been allocated, which should only happen if it is called outside of a
+// selectFn callback.
+func (w *WaitInbox) Ch() <-chan RenotifyFunc {
+	return (*inbox[RenotifyFunc])(w).channel()
+}
+
+// Emptied marks the WaitInbox as having been successfully emptied of a
+// notification. Must be called after successfully receiving from the channel
+// returned by Ch.
+func (w *WaitInbox) Emptied() {
+	(*inbox[RenotifyFunc])(w).emptied()
+}
 
 // Waiter manages waiting state across multiple Waiters instances for a single
 // goroutine. Each goroutine should have its own Waiter instance.

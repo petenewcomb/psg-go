@@ -55,19 +55,12 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 	assert.Equal(t, 1, <-values)
 
 	// Consume remaining values with PopFront
-	// Note: PopFront may process multiple values due to timing
 	var receiver rdvq.Receiver
-	var received []int
-	for len(received) < 2 {
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			received = append(received, value)
-		})
-		assert.NoError(t, err)
-	}
-
-	// We should have received both values 2 and 3
-	assert.Contains(t, received, 2)
-	assert.Contains(t, received, 3)
+	val2, err := q.PopFront(ctx, &receiver)
+	assert.NoError(t, err)
+	val3, err := q.PopFront(ctx, &receiver)
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []int{2, 3}, []int{val2, val3})
 
 	// All three values should already be available in the model
 	assert.Equal(t, 2, <-values)
@@ -93,9 +86,7 @@ func TestQueue_ContextCancellation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		var receiver rdvq.Receiver
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			t.Error("Should not receive value when cancelled")
-		})
+		_, err := q.PopFront(ctx, &receiver)
 		assert.Error(t, err, "Should not receive value when cancelled")
 		close(done)
 	}()
@@ -123,10 +114,9 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	received := make(chan int)
 	go func() {
 		var receiver rdvq.Receiver
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			received <- value
-		})
+		val, err := q.PopFront(ctx, &receiver)
 		assert.NoError(t, err)
+		received <- val
 	}()
 
 	// Give receiver time to register
@@ -163,9 +153,7 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 		go func() {
 			var receiver rdvq.Receiver
 			// This will block and then abandon
-			err := q.PopFront(ctx, &receiver, func(value int) {
-				t.Error("Should not receive value when cancelled")
-			})
+			_, err := q.PopFront(ctx, &receiver)
 			assert.Error(t, err)
 		}()
 		time.Sleep(5 * time.Millisecond)
@@ -189,13 +177,9 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 
 	// New receiver should get the value
 	var receiver rdvq.Receiver
-	var received []int
-	err := q.PopFront(ctx, &receiver, func(value int) {
-		received = append(received, value)
-	})
+	val, err := q.PopFront(ctx, &receiver)
 	assert.NoError(t, err)
-	assert.Len(t, received, 1)
-	assert.Equal(t, 99, received[0])
+	assert.Equal(t, 99, val)
 	wg.Wait()
 }
 
@@ -236,13 +220,12 @@ func TestQueue_Concurrency(t *testing.T) {
 
 			var receiver rdvq.Receiver
 			for {
-				err := q.PopFront(readerCtx, &receiver, func(val int) {
-					receivedValueMap[val].Add(1)
-					totalPopped.Add(1)
-				})
+				val, err := q.PopFront(readerCtx, &receiver)
 				if err != nil {
 					return // Context cancelled
 				}
+				receivedValueMap[val].Add(1)
+				totalPopped.Add(1)
 				if totalPopped.Load() >= int64(numWriters*iterations) {
 					return
 				}
@@ -366,12 +349,11 @@ func TestQueue_Stress(t *testing.T) {
 	popOps := []func(context.Context, *rdvq.Receiver){
 		func(ctx context.Context, receiver *rdvq.Receiver) {
 			// Normal popper
-			err := q.PopFront(ctx, receiver, func(value int) {
-				trace.Logf(ctx, traceRegion, "PopFront value=%d", value)
-				popped.Add(1)
-			})
+			value, err := q.PopFront(ctx, receiver)
 			switch {
 			case err == nil:
+				trace.Logf(ctx, traceRegion, "PopFront value=%d", value)
+				popped.Add(1)
 			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
 			default:
 				select {
@@ -390,12 +372,11 @@ func TestQueue_Stress(t *testing.T) {
 		func(ctx context.Context, receiver *rdvq.Receiver) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
-			err := q.PopFront(shortCtx, receiver, func(value int) {
-				trace.Logf(ctx, traceRegion, "AbandoningPopFront value=%d", value)
-				popped.Add(1)
-			})
+			value, err := q.PopFront(shortCtx, receiver)
 			switch {
 			case err == nil:
+				trace.Logf(ctx, traceRegion, "AbandoningPopFront value=%d", value)
+				popped.Add(1)
 			case errors.Is(err, context.DeadlineExceeded) && shortCtx.Err() != nil:
 				abandoned.Add(1)
 			case errors.Is(err, context.Canceled) && ctx.Err() != nil:
@@ -501,10 +482,9 @@ func TestQueue_TryPushBack(t *testing.T) {
 	received := make(chan int)
 	go func() {
 		var receiver rdvq.Receiver
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			received <- value
-		})
+		val, err := q.PopFront(ctx, &receiver)
 		assert.NoError(t, err)
+		received <- val
 	}()
 
 	// Give receiver time to register
@@ -597,10 +577,9 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	received := make(chan int, 1)
 	go func() {
 		var receiver rdvq.Receiver
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			received <- value
-		})
+		val, err := q.PopFront(ctx, &receiver)
 		assert.NoError(t, err)
+		received <- val
 	}()
 
 	// Give receiver time to register
@@ -641,16 +620,14 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 		var receiver rdvq.Receiver
 
 		// First PopFront should get the outboxed item
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			received <- value
-		})
+		val, err := q.PopFront(ctx, &receiver)
 		assert.NoError(t, err)
+		received <- val
 
 		// Second PopFront should get the shared channel item
-		err = q.PopFront(ctx, &receiver, func(value int) {
-			received <- value
-		})
+		val, err = q.PopFront(ctx, &receiver)
 		assert.NoError(t, err)
+		received <- val
 	}()
 
 	// Should receive the outboxed item first
@@ -688,10 +665,9 @@ func TestQueue_OutboxNotification(t *testing.T) {
 	go func() {
 		close(receiverStarted)
 		var receiver rdvq.Receiver
-		err := q.PopFront(ctx, &receiver, func(value int) {
-			received <- value
-		})
+		val, err := q.PopFront(ctx, &receiver)
 		assert.NoError(t, err)
+		received <- val
 	}()
 
 	// Wait for receiver to start waiting
@@ -728,10 +704,9 @@ func TestQueue_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 	go func() {
 		var receiver rdvq.Receiver
 		for i := 0; i < numSenders*itemsPerSender; i++ {
-			err := q.PopFront(ctx, &receiver, func(value int) {
-				received <- value
-			})
+			val, err := q.PopFront(ctx, &receiver)
 			assert.NoError(t, err)
+			received <- val
 		}
 	}()
 

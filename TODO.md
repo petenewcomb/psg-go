@@ -40,6 +40,7 @@ Items to complete before merging to main branch.
 - Add Deadline to workq.Execution and make sure that it's set and respected everywhere, especially when blocking
 - Abstract logic in *PostWork and perhaps make it extend from workq.ExecuteOrWait?
 - Consider an addition to omnipool to codify the pattern in which a monotonic ID field is used to guard against reuse of a object that has already been pooled.  it's a form of weak reference.
+- Always return context.Cause(ctx) instead of ctx.Err()
 
 ## Post-Merge Enhancements
 

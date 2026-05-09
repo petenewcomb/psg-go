@@ -21,8 +21,8 @@ import (
 type testInboxOnlyQueue[T any] interface {
 	Init()
 	TryPushBack(value T) bool
-	PopFront(ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error
-	PopFrontFunc(inbox *Inbox[T], processOrphanFn ProcessValueFunc[T], selectFn inboxOnlyPopSelectFunc[T])
+	PopFront(ctx context.Context, inbox *inbox[T], processFn ProcessValueFunc[T]) error
+	PopFrontFunc(inbox *inbox[T], processOrphanFn ProcessValueFunc[T], selectFn inboxOnlyPopSelectFunc[T])
 }
 
 // inboxOnlyQueueTestCases returns test cases for both queue implementations
@@ -61,7 +61,7 @@ func testBasicFunctionality(t *testing.T, q testInboxOnlyQueue[int]) {
 	// Start a receiver
 	receivedCh := make(chan int)
 	go func() {
-		var inbox Inbox[int]
+		var inbox inbox[int]
 		err := q.PopFront(ctx, &inbox, func(value int) {
 			receivedCh <- value
 		})
@@ -96,7 +96,7 @@ func testTryPushBackMultipleReceivers(t *testing.T, q testInboxOnlyQueue[int]) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var inbox Inbox[int]
+			var inbox inbox[int]
 			err := q.PopFront(ctx, &inbox, func(value int) {
 				received <- value
 			})
@@ -131,7 +131,7 @@ func testAbandonedReceiver(t *testing.T, q testInboxOnlyQueue[int]) {
 	// Start a receiver that will be cancelled
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		var inbox Inbox[int]
+		var inbox inbox[int]
 		err := q.PopFront(ctx, &inbox, func(value int) {
 			t.Error("Should not receive value when cancelled")
 		})
@@ -154,13 +154,13 @@ func testAbandonedReceiver(t *testing.T, q testInboxOnlyQueue[int]) {
 
 func testPopFrontFunc(t *testing.T, q testInboxOnlyQueue[int]) {
 	// Test custom select function that always times out
-	var inbox Inbox[int]
+	var ib inbox[int]
 	var orphanValues []int
-	q.PopFrontFunc(&inbox, func(value int) {
+	q.PopFrontFunc(&ib, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(inbox *Inbox[int]) {
+	}, func(*inbox[int]) {
 		// Always return aborted (timeout immediately)
-		// Don't call inbox.Emptied() to simulate abort
+		// Don't call ib.emptied() to simulate abort
 	})
 
 	// Should not have received any orphan values since no sender
@@ -174,11 +174,11 @@ func testPopFrontFunc(t *testing.T, q testInboxOnlyQueue[int]) {
 
 	// Use PopFrontFunc with a select that should timeout
 	orphanValues = nil
-	q.PopFrontFunc(&inbox, func(value int) {
+	q.PopFrontFunc(&ib, func(value int) {
 		orphanValues = append(orphanValues, value)
-	}, func(inbox *Inbox[int]) {
+	}, func(*inbox[int]) {
 		time.Sleep(10 * time.Millisecond) // Let the sender send first
-		// Don't call inbox.Emptied() to simulate timeout/abandonment
+		// Don't call ib.emptied() to simulate timeout/abandonment
 	})
 
 	// Should have received the orphaned value
@@ -209,8 +209,8 @@ func testStress(t *testing.T, q testInboxOnlyQueue[int]) {
 	pushErrCh := make(chan error, 1)
 	popErrCh := make(chan error, 1)
 
-	popOps := []func(context.Context, *Inbox[int]){
-		func(ctx context.Context, inbox *Inbox[int]) {
+	popOps := []func(context.Context, *inbox[int]){
+		func(ctx context.Context, inbox *inbox[int]) {
 			// Normal popper
 			err := q.PopFront(ctx, inbox, func(value int) {
 				popped.Add(1)
@@ -225,7 +225,7 @@ func testStress(t *testing.T, q testInboxOnlyQueue[int]) {
 				}
 			}
 		},
-		func(ctx context.Context, inbox *Inbox[int]) {
+		func(ctx context.Context, inbox *inbox[int]) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
 			err := q.PopFront(shortCtx, inbox, func(value int) {
@@ -257,7 +257,7 @@ func testStress(t *testing.T, q testInboxOnlyQueue[int]) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			var inbox Inbox[int]
+			var inbox inbox[int]
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
 				popOps[rand.IntN(len(popOps))](ctx, &inbox)

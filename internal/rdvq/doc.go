@@ -60,9 +60,7 @@
 //
 //	// Receiver side
 //	var receiver Receiver
-//	err := queue.PopFront(ctx, &receiver, func(value MyType) {
-//		// Process value
-//	})
+//	value, err := queue.PopFront(ctx, &receiver)
 //
 // # Race Condition Prevention
 //

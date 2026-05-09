@@ -38,11 +38,11 @@ type emptyInboxesTrait[T any, C any] interface {
 	Init(c *C)
 
 	// Push adds an inbox to the collection.
-	Push(c *C, inbox *Inbox[T])
+	Push(c *C, ib *inbox[T])
 
 	// TryPop attempts to remove and return an inbox from the collection.
 	// Returns false if the collection is empty.
-	TryPop(c *C) (*Inbox[T], bool)
+	TryPop(c *C) (*inbox[T], bool)
 }
 
 // Init initializes the queue. Must be called before first use.
@@ -65,21 +65,21 @@ func (q *inboxOnlyQueue[T, C, CT]) TryPushBack(value T) bool {
 
 	// Loop through available inboxes
 	for {
-		inbox, ok := ct.TryPop(&q.emptyInboxes)
+		ib, ok := ct.TryPop(&q.emptyInboxes)
 		if !ok {
 			trace.Logf(context.Background(), traceRegion, "no empty inboxes to try, returning false")
 			// No waiting empty inboxes
 			return false
 		}
 
-		inboxCh := inbox.ch // must be non-nil given that it was in the queue
+		inboxCh := ib.ch // must be non-nil given that it was in the queue
 		// Loop to (re)attempt sending to the inbox channel
 		for {
-			trace.Logf(context.Background(), traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
+			trace.Logf(context.Background(), traceRegion, "entering select: inbox=%p, inboxCh=%p", ib, inboxCh)
 			select {
 			case inboxCh <- value:
 				trace.Logf(context.Background(), traceRegion, "delivered value to inbox=%p inboxCh=%p, returning true",
-					inbox, inboxCh)
+					ib, inboxCh)
 				// Successfully delivered
 				return true
 			default:
@@ -105,18 +105,18 @@ func (q *inboxOnlyQueue[T, C, CT]) TryPushBack(value T) bool {
 }
 
 // inboxOnlyPopSelectFunc handles the select operation for PopFrontFunc.
-// It should select on the inbox channel. The callback MUST call inbox.Emptied()
+// It should select on the inbox channel. The callback MUST call ib.emptied()
 // if a value is received from the inbox.
-type inboxOnlyPopSelectFunc[T any] = func(inbox *Inbox[T])
+type inboxOnlyPopSelectFunc[T any] = func(ib *inbox[T])
 
-func basicInboxOnlyPopSelect[T any](ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
+func basicInboxOnlyPopSelect[T any](ctx context.Context, ib *inbox[T], processFn ProcessValueFunc[T]) error {
 	traceRegion := "rdvq.basicInboxOnlyPopSelect"
-	inboxCh := inbox.Ch()
-	trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p", inbox, inboxCh)
+	inboxCh := ib.channel()
+	trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p", ib, inboxCh)
 	select {
 	case value := <-inboxCh:
-		inbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received value from inbox=%p, inboxCh=%p", inbox, inboxCh)
+		ib.emptied()
+		trace.Logf(ctx, traceRegion, "received value from inbox=%p, inboxCh=%p", ib, inboxCh)
 		processFn(value)
 		return nil
 	case <-ctx.Done():
@@ -127,7 +127,7 @@ func basicInboxOnlyPopSelect[T any](ctx context.Context, inbox *Inbox[T], proces
 
 //nolint:contextcheck // background context used only for tracing
 func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
-	inbox *Inbox[T],
+	ib *inbox[T],
 	processOrphanFn ProcessValueFunc[T],
 	selectFn inboxOnlyPopSelectFunc[T],
 ) {
@@ -140,13 +140,13 @@ func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
 
 	var ct CT
 
-	inboxCh := inbox.ch
+	inboxCh := ib.ch
 	if inboxCh == nil {
 		// New inbox, allocate a channel
 		inboxCh = make(chan T, 1)
-		inbox.ch = inboxCh
-		trace.Logf(context.Background(), traceRegion, "inboxOnlyQueue=%p inbox=%p allocated inboxCh=%p", q, inbox, inboxCh)
-		ct.Push(&q.emptyInboxes, inbox)
+		ib.ch = inboxCh
+		trace.Logf(context.Background(), traceRegion, "inboxOnlyQueue=%p inbox=%p allocated inboxCh=%p", q, ib, inboxCh)
+		ct.Push(&q.emptyInboxes, ib)
 	} else {
 		// Reuse the existing inbox channel, but must check to see if it needs
 		// draining or requeuing.
@@ -157,21 +157,21 @@ func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
 			// without requeuing.
 			trace.Logf(context.Background(), traceRegion,
 				"inboxOnlyQueue=%p inbox=%p reusing still-queued inboxCh=%p",
-				q, inbox, inboxCh)
+				q, ib, inboxCh)
 		default:
-			// Channel was must have been drained by TryPushBack already. We can
+			// Channel must have been drained by TryPushBack already. We can
 			// reuse it but need to requeue.
 			trace.Logf(context.Background(), traceRegion,
 				"inboxOnlyQueue=%p inbox=%p reusing and requeuing inboxCh=%p",
-				q, inbox, inboxCh)
-			ct.Push(&q.emptyInboxes, inbox)
+				q, ib, inboxCh)
+			ct.Push(&q.emptyInboxes, ib)
 		}
 	}
 
 	// Call the custom selecting function
-	inbox.emptyPending()
-	selectFn(inbox)
-	if !inbox.wasEmptied {
+	ib.emptyPending()
+	selectFn(ib)
+	if !ib.wasEmptied {
 		// The channel may still be in the queue or contain an orphaned value,
 		// so we must mark it abandoned or deal with the orphaned value.
 		select {
@@ -182,17 +182,17 @@ func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
 		default:
 			// Channel is full, drain the orphaned value and process it.
 			orphan := <-inboxCh
-			inbox.Emptied()
+			ib.emptied()
 			trace.Logf(context.Background(), traceRegion, "drained orphan from inboxCh=%p", inboxCh)
 			processOrphanFn(orphan)
 		}
 	}
 }
 
-func (q *inboxOnlyQueue[T, C, CT]) PopFront(ctx context.Context, inbox *Inbox[T], processFn ProcessValueFunc[T]) error {
+func (q *inboxOnlyQueue[T, C, CT]) PopFront(ctx context.Context, ib *inbox[T], processFn ProcessValueFunc[T]) error {
 	var err error
-	q.PopFrontFunc(inbox, processFn, func(inbox *Inbox[T]) {
-		err = basicInboxOnlyPopSelect(ctx, inbox, processFn)
+	q.PopFrontFunc(ib, processFn, func(ib *inbox[T]) {
+		err = basicInboxOnlyPopSelect(ctx, ib, processFn)
 	})
 	return err
 }
@@ -200,19 +200,19 @@ func (q *inboxOnlyQueue[T, C, CT]) PopFront(ctx context.Context, inbox *Inbox[T]
 // inboxQueue is a FIFO collection of waiting consumer inboxes, implemented
 // using a lock-free queue. This provides fair consumer selection - the
 // consumer that has been waiting longest gets the next item.
-type inboxQueue[T any] = nbcq.Queue[*Inbox[T]]
+type inboxQueue[T any] = nbcq.Queue[*inbox[T]]
 
 type inboxQueueTrait[T any] struct{}
 
-func (inboxQueueTrait[T]) Init(q *nbcq.Queue[*Inbox[T]]) {
+func (inboxQueueTrait[T]) Init(q *nbcq.Queue[*inbox[T]]) {
 	q.Init()
 }
 
-func (inboxQueueTrait[T]) Push(q *nbcq.Queue[*Inbox[T]], inbox *Inbox[T]) {
-	q.PushBack(inbox)
+func (inboxQueueTrait[T]) Push(q *nbcq.Queue[*inbox[T]], ib *inbox[T]) {
+	q.PushBack(ib)
 }
 
-func (inboxQueueTrait[T]) TryPop(q *nbcq.Queue[*Inbox[T]]) (*Inbox[T], bool) {
+func (inboxQueueTrait[T]) TryPop(q *nbcq.Queue[*inbox[T]]) (*inbox[T], bool) {
 	return q.TryPopFront()
 }
 
@@ -222,7 +222,7 @@ func (inboxQueueTrait[T]) TryPop(q *nbcq.Queue[*Inbox[T]]) (*Inbox[T], bool) {
 // next item, enabling natural worker scaling through timeout.
 type inboxStack[T any] struct {
 	mu      sync.Mutex
-	inboxes []*Inbox[T]
+	inboxes []*inbox[T]
 	empty   atomic.Bool // Atomic flag for lock-free empty check
 }
 
@@ -230,14 +230,14 @@ type inboxStackTrait[T any] struct{}
 
 func (inboxStackTrait[T]) Init(*inboxStack[T]) {}
 
-func (inboxStackTrait[T]) Push(s *inboxStack[T], inbox *Inbox[T]) {
+func (inboxStackTrait[T]) Push(s *inboxStack[T], ib *inbox[T]) {
 	s.mu.Lock()
-	s.inboxes = append(s.inboxes, inbox)
+	s.inboxes = append(s.inboxes, ib)
 	s.empty.Store(false)
 	s.mu.Unlock()
 }
 
-func (inboxStackTrait[T]) TryPop(s *inboxStack[T]) (*Inbox[T], bool) {
+func (inboxStackTrait[T]) TryPop(s *inboxStack[T]) (*inbox[T], bool) {
 	// Fast path: check if empty without acquiring lock
 	if s.empty.Load() {
 		return nil, false
@@ -251,7 +251,7 @@ func (inboxStackTrait[T]) TryPop(s *inboxStack[T]) (*Inbox[T], bool) {
 		return nil, false
 	}
 
-	inbox := s.inboxes[i]
+	ib := s.inboxes[i]
 	s.inboxes[i] = nil // clear reference
 	s.inboxes = s.inboxes[:i]
 
@@ -260,5 +260,5 @@ func (inboxStackTrait[T]) TryPop(s *inboxStack[T]) (*Inbox[T], bool) {
 		s.empty.Store(true)
 	}
 
-	return inbox, true
+	return ib, true
 }

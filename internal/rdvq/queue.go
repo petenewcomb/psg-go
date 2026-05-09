@@ -201,113 +201,94 @@ func (q *Queue[T]) ListenersFor(s *Sender) *Listeners {
 	return &outboxFor(s, q).listeners
 }
 
-// PopSelectFunc handles the select operation for PopFrontFunc when no
-// outboxes are available. It should select on the inbox channel and outbox
-// filled channel. If a value is received from the inbox the callback MUST call
-// inbox.Emptied(). If a RenotifyFunc is received from the outboxWaiter the
-// callback MUST call outboxWaiter.Notified() and SHOULD return the RenotifyFunc
-// or otherwise ensure that it will be called if the notification cannot
-// otherwise be productively used.
-type PopSelectFunc[T any] = func(
-	inbox *Inbox[T],
-	outboxWaitInbox *WaitInbox,
-) RenotifyFunc
+// PopSelectResult is returned by a PopSelectFunc to communicate what
+// happened during the wait.
+//
+//   - InboxEmptied == true: a value was received from the inbox channel.
+//     InboxValue holds it. PopFrontFunc will mark the inbox as emptied on
+//     the caller's behalf.
+//   - OutboxRenotifyFn != nil: a notification was received from the outbox
+//     wait channel. PopFrontFunc will mark the outbox-wait inbox as emptied
+//     on the caller's behalf and chain the notification appropriately.
+//   - Both zero: neither inbox nor outbox-wait fired (e.g., context cancel,
+//     idle timeout). PopFrontFunc returns without a value.
+type PopSelectResult[T any] struct {
+	InboxValue       T
+	InboxEmptied     bool
+	OutboxRenotifyFn RenotifyFunc
+}
 
-// BasicPopSelect provides a standard implementation of PopSelectFunc that handles
-// context cancellation and waits for either an inbox delivery or outbox notification.
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - processFn: Function called if a value is received from the inbox
-//   - inbox: The inbox to receive from
-//   - outboxWaitInbox: Wait inbox for outbox notifications
-//
-// Returns a RenotifyFunc if an outbox notification was received, or an error
-// if the context was cancelled. Calls processFn if a value is received from inbox.
+// PopSelectFunc handles the select operation for PopFrontFunc when no outbox
+// is immediately available. It receives the inbox and outbox-wait channels
+// and returns a [PopSelectResult] describing what was received.
+type PopSelectFunc[T any] = func(
+	inboxCh <-chan T,
+	outboxWaitCh <-chan RenotifyFunc,
+) PopSelectResult[T]
+
+// BasicPopSelect provides a standard implementation of [PopSelectFunc] that
+// selects on the inbox, the outbox-wait channel, and ctx.Done(). Returns the
+// result and an error if the context was cancelled.
 func BasicPopSelect[T any](
 	ctx context.Context,
-	processFn ProcessValueFunc[T],
-	inbox *Inbox[T],
-	outboxWaitInbox *WaitInbox,
-) (RenotifyFunc, error) {
+	inboxCh <-chan T,
+	outboxWaitCh <-chan RenotifyFunc,
+) (PopSelectResult[T], error) {
 	traceRegion := "rdvq.BasicPopSelect"
-	inboxCh := inbox.Ch()
-	outboxWaitInboxCh := outboxWaitInbox.Ch()
-	trace.Logf(ctx, traceRegion, "entering select: inbox=%p, inboxCh=%p, outboxWaitInbox=%p, outboxWaitInboxCh=%p",
-		inbox, inboxCh, outboxWaitInbox, outboxWaitInboxCh)
+	trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
 	select {
 	case value := <-inboxCh:
-		inbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received value from inbox=%p, inboxCh=%p", inbox, inboxCh)
-		processFn(value)
-	case renotifyFn := <-outboxWaitInboxCh:
-		outboxWaitInbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received signal from outboxWaitInbox=%p, outboxWaitInboxCh=%p",
-			outboxWaitInbox, outboxWaitInboxCh)
-		return renotifyFn, nil
+		trace.Logf(ctx, traceRegion, "received value from inboxCh=%p", inboxCh)
+		return PopSelectResult[T]{InboxValue: value, InboxEmptied: true}, nil
+	case renotifyFn := <-outboxWaitCh:
+		trace.Logf(ctx, traceRegion, "received signal from outboxWaitCh=%p", outboxWaitCh)
+		return PopSelectResult[T]{OutboxRenotifyFn: renotifyFn}, nil
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
-		return nil, ctx.Err()
+		return PopSelectResult[T]{}, context.Cause(ctx)
 	}
-	return nil, nil
 }
 
-func (q *Queue[T]) tryOutboxes(processFn ProcessValueFunc[T]) bool {
-	if value, ok := q.TryPopFront(); ok {
-		processFn(value)
-		return true
-	}
-	return false
-}
-
-// PopFrontFunc receives values using the two-tier delivery system with custom
-// select handling. This is the lower-level function that PopFront wraps.
+// PopFrontFunc receives a value using the two-tier delivery system with
+// custom select handling. This is the lower-level function that PopFront
+// wraps.
 //
-// Parameters:
-//   - receiver: Receiver instance managing inboxes for this goroutine
-//   - processFn: Function called with each received value
-//   - selectFn: Custom select function for handling blocking and cancellation
-//
-// It first tries to get items from outboxes, then calls selectFn to handle
-// waiting for direct handoff from senders. May call processFn multiple times
-// if multiple items are received (i.e., an item retrieved from an outbox plus
-// an item delivered to the receiver's inbox).
+// First tries to grab a value from any waiting outbox, then registers as an
+// inbox waiter and calls selectFn to handle blocking. Returns the value and
+// true if one was received via any path; returns the zero value and false
+// only if selectFn signalled completion without a value.
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Queue[T]) PopFrontFunc(
 	receiver *Receiver,
-	processFn ProcessValueFunc[T],
 	selectFn PopSelectFunc[T],
-) {
+) (T, bool) {
 	traceRegion := "rdvq.Queue.PopFrontFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Queue=%p", q)
 
-	if processFn == nil {
-		panic("processFn is nil")
-	}
-
+	var value T
 	var ok bool
-	processOrphanFn := func(value T) {
+	processOrphanFn := func(v T) {
+		if ok {
+			panic(traceRegion + ": ok already true in processOrphanFn")
+		}
+		value = v
 		ok = true
-		processFn(value)
 	}
 	confirmFn := func() bool {
-		ok = q.tryOutboxes(processFn)
+		if ok {
+			panic(traceRegion + ": ok already true in confirmFn")
+		}
+		value, ok = q.TryPopFront()
 		return !ok
 	}
 
-	inbox := inboxFor(receiver, q)
 	var renotifyFn RenotifyFunc
+	ib := inboxFor(receiver, q)
 	for {
-		if q.tryOutboxes(processFn) {
-			// We grabbed an outbox value. If we held a pending renotifyFn from
-			// a prior iteration's outbox-wait notification, forward it — it
-			// may have been for a different outbox than the one we just took.
-			if renotifyFn != nil {
-				renotifyFn()
-			}
-			return
+		if value, ok = q.TryPopFront(); ok {
+			return value, true
 		}
 
 		if renotifyFn != nil {
@@ -315,55 +296,74 @@ func (q *Queue[T]) PopFrontFunc(
 			renotifyFn = nil
 		}
 
-		q.inboxStackQueue.PopFrontFunc(inbox, processOrphanFn, func(inbox *Inbox[T]) {
-			q.outboxWaiters.WaitFunc(&receiver.outboxWaiter, confirmFn, func(waitInbox *WaitInbox) {
-				renotifyFn = selectFn(inbox, waitInbox)
+		// Register as outbox waiter first; only register ib in the inbox stack
+		// if confirmFn says we should actually wait. This makes ib visible to
+		// senders only during the wait window itself, eliminating the race
+		// where confirmFn consumes an outbox value AND a parallel sender
+		// direct-delivers to ib (which would otherwise produce a second
+		// orphan value via post-cleanup that the (T, bool) return cannot
+		// carry).
+		q.outboxWaiters.WaitFunc(&receiver.outboxWaiter, confirmFn, func(waitInbox *WaitInbox) {
+			q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
+				result := selectFn(ib.channel(), waitInbox.Ch())
+				if result.InboxEmptied {
+					if result.OutboxRenotifyFn != nil {
+						panic(traceRegion + ": selectFn returned Emptied and OutboxRenotifyFn != nil")
+					}
+					ib.emptied()
+					value = result.InboxValue
+					ok = true
+				}
+				if result.OutboxRenotifyFn != nil {
+					waitInbox.Emptied()
+					renotifyFn = result.OutboxRenotifyFn
+				}
 			})
 		})
 		if ok {
-			// Got a value. If selectFn also picked up an outbox-wait
-			// notification, forward it so the next waiter isn't stalled.
+			// Got a value via confirmFn (outbox grab during waiter registration),
+			// processOrphanFn (post-selectFn inbox drain), or selectFn (direct
+			// inbox receive). If selectFn also returned an outbox-wait
+			// notification, forward it so the next waiter isn't stalled — the
+			// inbox-drain and direct-inbox paths did NOT consume an outbox, so
+			// the notification is still unfulfilled. (For the confirmFn path,
+			// renotifyFn is always nil since selectFn never ran.)
 			if renotifyFn != nil {
 				renotifyFn()
 			}
-			return
+			return value, true
 		}
 		if renotifyFn == nil {
-			return
+			return value, false
 		}
 	}
 }
 
-// PopFront receives values using the two-tier delivery system with context
+// PopFront receives a value using the two-tier delivery system with context
 // support. This is a convenience wrapper around PopFrontFunc that handles
 // context cancellation.
 //
-// Parameters:
-//   - ctx: Context for cancellation
-//   - receiver: Receiver instance managing inboxes for this goroutine
-//   - processFn: Function called with each received value
-//
-// It first tries to get items from outboxes, then waits for direct handoff
-// from senders. May call processFn multiple times if multiple items are
-// received (i.e., an item retrieved from an outbox plus an item delivered
-// to the receiver's inbox). Returns an error only if the context is cancelled.
+// First tries to grab a value from any waiting outbox, then waits for direct
+// handoff from senders. Returns the value and a nil error on success; returns
+// the zero value and a non-nil error if the context was cancelled before a
+// value was available.
 func (q *Queue[T]) PopFront(
 	ctx context.Context,
 	receiver *Receiver,
-	processFn ProcessValueFunc[T],
-) error {
+) (T, error) {
 	var err error
-	q.PopFrontFunc(receiver, processFn, func(inbox *Inbox[T], outboxWaitInbox *WaitInbox) RenotifyFunc {
-		var renotifyFn RenotifyFunc
-		renotifyFn, err = BasicPopSelect(ctx, processFn, inbox, outboxWaitInbox)
-		if err != nil && renotifyFn != nil {
-			// Break out of PopFrontFunc retry loop
-			renotifyFn()
-			return nil
-		}
-		return renotifyFn
+	value, ok := q.PopFrontFunc(receiver, func(inboxCh <-chan T, outboxWaitCh <-chan RenotifyFunc) PopSelectResult[T] {
+		var result PopSelectResult[T]
+		result, err = BasicPopSelect(ctx, inboxCh, outboxWaitCh)
+		return result
 	})
-	return err
+	if ok {
+		// If both a value and a context error happened, prefer the value: ctx
+		// cancellation can only affect future operations, and we already have
+		// what the caller asked for.
+		return value, nil
+	}
+	return value, err
 }
 
 // TryPopFront attempts to retrieve a value from the queue without blocking.

@@ -19,16 +19,16 @@ func (r *Receiver) Reset() {
 }
 
 // inboxFor returns the inbox for the given key, creating one if it doesn't exist.
-func inboxFor[T any](r *Receiver, q *Queue[T]) *Inbox[T] {
+func inboxFor[T any](r *Receiver, q *Queue[T]) *inbox[T] {
 	if r.inboxMap == nil {
 		r.inboxMap = make(map[any]any)
 	}
 
-	inboxAny := r.inboxMap[q]
-	if inboxAny == nil {
-		inbox := &Inbox[T]{}
-		r.inboxMap[q] = inbox
-		return inbox
+	ibAny := r.inboxMap[q]
+	if ibAny == nil {
+		ib := &inbox[T]{}
+		r.inboxMap[q] = ib
+		return ib
 	}
-	return inboxAny.(*Inbox[T])
+	return ibAny.(*inbox[T])
 }

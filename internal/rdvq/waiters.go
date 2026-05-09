@@ -90,13 +90,13 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 
 	waitInbox := waitInboxFor(waiter, w)
 	w.q.PopFrontFunc(
-		waitInbox,
+		(*inbox[RenotifyFunc])(waitInbox),
 		func(renotifyFn RenotifyFunc) {
 			if !orphanFn(renotifyFn) {
 				renotifyFn()
 			}
 		},
-		func(inbox *Inbox[RenotifyFunc]) {
+		func(*inbox[RenotifyFunc]) {
 			if confirmFn() {
 				selectFn(waitInbox)
 			}

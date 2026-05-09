@@ -18,49 +18,10 @@ Items to complete before merging to main branch.
 - should combiner concurrency limits be specified per-combineop instead of or in addition to the combiner pool?
 
 ### 6. Implementation improvements
-- **Re-evaluate demand-tracking and dedicated-spawner items below** in light of the rdvq BufferedFunc ordering fix (2026-05-09). The original livelock motivating "combiner worker demand tracking (CRITICAL)" and "v3 dedicated spawner goroutine" was rooted in the rdvq race, not the absence of those mechanisms. Pending benchmark confirmation.
-- **Eliminate the orphan concept entirely**: Instead of creating orphans in RDVQ, check for a value in the inbox _before_ grabbing an outbox from the queue.  If a value exists in the inbox, call the renotifyFn returned by the outbox waiter and just return the inbox value.
-- **Implement demand tracking for combiner workers** (CRITICAL - prevents livelock)
-  - Task workers now have demand tracking (taskWorkerDemand counter) to prevent livelock
-  - Combiner workers need similar mechanism to prevent circular blocking scenario:
-    * All combiner workers blocked trying to post to gatherQueue
-    * New combine work arrives and queues up in combineQueue
-    * No workers available to process queued work (all blocked downstream)
-    * Current unmetDemandFn only fires when workers are actively receiving, not when blocked
-  - Add combinerWorkerDemand counter to CombinerPool (mirror taskWorkerDemand in Job)
-  - Add demandRegistered field to combineWork (mirror taskWork.demandRegistered)
-  - Increment demand in combinePostWork.Execute() when registering demand
-  - Decrement demand in CombinerPool.goroutine() when worker receives work
-  - Worker checks demand after receiving work and spawns if demand exists
-  - See WORKING_NOTES.md "Combiner Worker Demand Tracking" for detailed analysis
-- **Implement dedicated spawner goroutine pattern** (v3 design - improves responsiveness, eliminates contention)
-  - Replace distributed spawn attempts (v2a) with single dedicated spawner goroutine per worker type
-  - Spawner waits on rdvq.Waiters, wakes on demand notification, spawns at rate-limited intervals
-  - Demanding code simplified: just increment counter + call Notify(), no spawn logic
-  - Benefits: no contention, no thundering herd, clean rate limiting, single responsibility
-  - Task workers: Add taskWorkerSpawner (rdvq.Waiters), runTaskWorkerSpawner() goroutine
-  - Combiner workers: Same pattern with combinerWorkerSpawner
-  - Default spawn delay: 100µs (~10k spawns/sec rate limit)
-  - See WORKING_NOTES.md "Task Worker Demand-Based Spawning v3" for detailed design
-- **Change RenotifyFunc to Renotifier interface for proper lifecycle management**
-  - RenotifyFunc is just `func()` with no Free capability
-  - Current workaround: both `orphanedTaskRenotify` and `wrappedRenotify` free themselves in their renotify callbacks
-  - This only works when renotifiers are invoked; doesn't handle replacement/discard cases
-  - Need Renotifier interface with `Renotify()` and `Free()` methods
-  - Allows rdvq infrastructure to properly reclaim pooled renotifier objects in all scenarios
-  - Targets: `orphanedTaskRenotify` (job.go:839), `wrappedRenotify` (internal/rdvq/notifier.go:72)
-  - See WORKING_NOTES.md "Orphan Renotify Allocation Leak" for detailed analysis
-  - Files affected: internal/rdvq/notifier.go, internal/rdvq/waiters.go, job.go, all Notify() callsites
-- **Add deadline field to taskPostWork and use it in blocking post operations** (job.go:1011-1118)
-  - Currently `newTaskPostWork()` receives deadline parameter but doesn't store or use it
-  - All other scatter work types (taskPoolScatterWork, combineScatterWork, gatherScatterWork) properly store and use their deadlines
-  - Should add `deadline time.Time` field to struct and pass to BasicPushSelect via context with deadline
-- **Consider refactoring taskPostWork.Execute() to reduce duplication with workq.ExecuteOrWait pattern** (job.go:1018-1099)
-  - 80+ lines implement similar wait/block/postpone logic to workq.ExecuteOrWait
-  - However, has unique requirements: custom TryPushBack, demand tracking, PushBackFunc+BasicPushSelect
-  - Evaluate whether common pattern can be extracted without over-abstracting
-  - Possible approaches: keep as-is, extract TryPostBehavior pattern, or generalize ExecuteOrWait
-  - See WORKING_NOTES.md "Deadline and ExecuteOrWait Refactoring Analysis" for detailed analysis
+- **Eliminate the orphan concept entirely**: Instead of creating orphans in RDVQ, check for a value in the inbox _before_ grabbing an outbox from the queue. If a value exists in the inbox, call the renotifyFn returned by the outbox waiter and just return the inbox value.
+- **Change `rdvq.RenotifyFunc` to a `Renotifier` interface** so the infrastructure can free pooled renotifier objects in all cases (not just when invoked). Current workaround in `orphanedTaskRenotify` and `wrappedRenotify` is to self-free inside the renotify callback — works on invocation, leaks on replacement/discard. See WORKING_NOTES "Orphan renotifier lifecycle". Files: `internal/rdvq/notifier.go`, `internal/rdvq/waiters.go`, `job.go`, all `Notify()` callsites.
+- **Add deadline field to `taskPostWork`** and use it in the blocking post path. Currently `newTaskPostWork()` receives the parameter but doesn't store or use it; sibling scatter work types do. See WORKING_NOTES "Deadline propagation in taskPostWork".
+- **Consider refactoring `taskPostWork.Execute()` to reduce duplication with `workq.ExecuteOrWait`** — about 80 lines of similar try/subscribe/block logic. Has unique requirements (custom TryPushBack, demand-registration side effects, blocking via PushBackFunc + BasicPushSelect) so not trivial. Evaluate if a `TryPostBehavior` abstraction is worth the complexity. See WORKING_NOTES "ExecuteOrWait duplication".
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
 - Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
 - consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path

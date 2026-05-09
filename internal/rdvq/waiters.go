@@ -9,27 +9,22 @@ import (
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
-// WaitSelectFunc handles select operations on wait channels. The callback
-// MUST call waitInbox.Emptied() if a RenotifyFunc is received.
-type WaitSelectFunc func(waitInbox *WaitInbox)
+// WaitSelectFunc handles the select operation for a Waiters wait. It receives
+// the wait channel and returns the RenotifyFunc that came across, or nil if
+// it received from some other case (e.g., ctx.Done). The Waiters caller
+// handles Emptied() bookkeeping; the user does not need to call it.
+type WaitSelectFunc func(waitCh <-chan RenotifyFunc) RenotifyFunc
 
-// BasicWaitSelect provides a standard implementation of WaitSelectFunc that waits
-// for a notification or context cancellation.
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - waitInbox: Wait inbox to receive notifications from
-//
-// Returns a RenotifyFunc if notified, or an error if the context was cancelled.
-// Automatically calls waitInbox.Emptied() when a notification is received.
-func BasicWaitSelect(ctx context.Context, waitInbox *WaitInbox) (RenotifyFunc, error) {
+// BasicWaitSelect provides a standard implementation of [WaitSelectFunc] that
+// selects on the wait channel and ctx.Done(). Returns the RenotifyFunc and a
+// nil error on success; returns nil RenotifyFunc and a non-nil error if the
+// context was cancelled.
+func BasicWaitSelect(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyFunc, error) {
 	traceRegion := "rdvq.BasicWaitSelect"
-	waitCh := waitInbox.Ch()
-	trace.Logf(ctx, traceRegion, "entering select: waitInbox=%p, waitCh=%p", waitInbox, waitCh)
+	trace.Logf(ctx, traceRegion, "entering select: waitCh=%p", waitCh)
 	select {
 	case renotifyFn := <-waitCh:
-		waitInbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received renotifyFn from waitInbox=%p, waitCh=%p", waitInbox, waitCh)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from waitCh=%p", waitCh)
 		return renotifyFn, nil
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
@@ -60,17 +55,22 @@ func (w *Waiters) Init() {
 	w.q.Init()
 }
 
-// WaitFuncWithOrphanHandler registers a waiter and handles the blocking wait with custom
-// orphan notification handling. This is the lower-level function that other Wait methods wrap.
+// WaitFuncWithOrphanHandler registers a waiter and handles the blocking wait
+// with custom orphan notification handling. This is the lower-level function
+// that other Wait methods wrap.
 //
 // Parameters:
 //   - waiter: Waiter instance for this goroutine
-//   - confirmFn: Function called to verify conditions after registration but before blocking
+//   - confirmFn: Function called to verify conditions after registration but
+//     before blocking. The confirmFn prevents missed notifications by
+//     re-checking conditions after the waiter is registered. If it returns
+//     false, the wait is aborted (selectFn is not called).
 //   - orphanFn: Custom function to handle orphaned renotify functions
 //   - selectFn: Custom select function for handling the wait operation
 //
-// The confirmFn prevents race conditions by re-checking conditions after the waiter
-// is registered but before blocking. If confirmFn returns false, the wait is aborted.
+// Returns the RenotifyFunc that selectFn received, or nil if no notification
+// arrived (e.g., the wait was aborted by confirmFn or selectFn picked some
+// other case such as ctx.Done).
 //
 //nolint:contextcheck // background context used only for tracing
 func (w *Waiters) WaitFuncWithOrphanHandler(
@@ -78,80 +78,72 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 	confirmFn func() bool,
 	orphanFn NotifyFunc,
 	selectFn WaitSelectFunc,
-) {
+) RenotifyFunc {
 	traceRegion := "rdvq.Waiters.WaitFuncWithOrphanHandler"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
 	if w == nil {
-		selectFn(nil)
-		return
+		// No waiters infrastructure to register against; let selectFn run
+		// against a nil channel (its non-channel cases — ctx.Done, etc. —
+		// can still fire).
+		return selectFn(nil)
 	}
 
 	waitInbox := waitInboxFor(waiter, w)
+	var rf RenotifyFunc
 	w.q.PopFrontFunc(
-		(*inbox[RenotifyFunc])(waitInbox),
+		waitInbox,
 		func(renotifyFn RenotifyFunc) {
 			if !orphanFn(renotifyFn) {
 				renotifyFn()
 			}
 		},
-		func(*inbox[RenotifyFunc]) {
+		func(ib *inbox[RenotifyFunc]) {
 			if confirmFn() {
-				selectFn(waitInbox)
+				rf = selectFn(ib.channel())
+				if rf != nil {
+					ib.emptied()
+				}
 			}
 		},
 	)
+	return rf
 }
 
-// WaitFunc registers a waiter and handles the blocking wait with custom select handling.
-// This is a convenience wrapper around WaitFuncWithOrphanHandler that uses the default
-// orphan handler (w.Notify).
+// WaitFunc registers a waiter and handles the blocking wait with custom
+// select handling. This is a convenience wrapper around
+// WaitFuncWithOrphanHandler that uses the default orphan handler (w.Notify).
 //
-// Parameters:
-//   - waiter: Waiter instance for this goroutine
-//   - confirmFn: Function called to verify conditions after registration but before blocking
-//   - selectFn: Custom select function for handling the wait operation
-func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) {
-	w.WaitFuncWithOrphanHandler(waiter, confirmFn, w.Notify, selectFn)
+// Returns the RenotifyFunc that selectFn received, or nil if no notification
+// arrived.
+func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
+	return w.WaitFuncWithOrphanHandler(waiter, confirmFn, w.Notify, selectFn)
 }
 
-// WaitWithOrphanHandler registers a waiter and blocks until notified or context cancelled,
-// with custom orphan notification handling.
+// WaitWithOrphanHandler registers a waiter and blocks until notified or
+// context cancelled, with custom orphan notification handling.
 //
-// Parameters:
-//   - ctx: Context for cancellation
-//   - waiter: Waiter instance for this goroutine
-//   - confirmFn: Function called to verify conditions after registration but before blocking
-//   - orphanFn: Custom function to handle orphaned renotify functions
-//
-// Returns a RenotifyFunc if notified, or an error if the context was cancelled.
-// The confirmFn prevents race conditions by re-checking conditions after registration.
+// Returns the RenotifyFunc on notification, or a non-nil error if the
+// context was cancelled.
 func (w *Waiters) WaitWithOrphanHandler(
 	ctx context.Context,
 	waiter *Waiter,
 	confirmFn func() bool,
 	orphanFn NotifyFunc,
 ) (RenotifyFunc, error) {
-	var renotifyFn RenotifyFunc
 	var err error
-	w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waitInbox *WaitInbox) {
-		renotifyFn, err = BasicWaitSelect(ctx, waitInbox)
+	rf := w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+		var got RenotifyFunc
+		got, err = BasicWaitSelect(ctx, waitCh)
+		return got
 	})
-	return renotifyFn, err
+	return rf, err
 }
 
 // Wait registers a waiter and blocks until notified or context cancelled.
-// This is a convenience wrapper around WaitWithOrphanHandler that uses the default
+// Convenience wrapper around WaitWithOrphanHandler that uses the default
 // orphan handler (w.Notify).
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - waiter: Waiter instance for this goroutine
-//   - confirmFn: Function called to verify conditions after registration but before blocking
-//
-// Returns a RenotifyFunc if notified, or an error if the context was cancelled.
-// The confirmFn prevents race conditions by re-checking conditions after registration.
 func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) (RenotifyFunc, error) {
 	return w.WaitWithOrphanHandler(ctx, waiter, confirmFn, w.Notify)
 }

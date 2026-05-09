@@ -303,9 +303,10 @@ func (q *Queue[T]) PopFrontFunc(
 		// direct-delivers to ib (which would otherwise produce a second
 		// orphan value via post-cleanup that the (T, bool) return cannot
 		// carry).
-		q.outboxWaiters.WaitFunc(&receiver.outboxWaiter, confirmFn, func(waitInbox *WaitInbox) {
+		renotifyFn = q.outboxWaiters.WaitFunc(&receiver.outboxWaiter, confirmFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+			var rf RenotifyFunc
 			q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
-				result := selectFn(ib.channel(), waitInbox.Ch())
+				result := selectFn(ib.channel(), waitCh)
 				if result.InboxEmptied {
 					if result.OutboxRenotifyFn != nil {
 						panic(traceRegion + ": selectFn returned Emptied and OutboxRenotifyFn != nil")
@@ -314,11 +315,9 @@ func (q *Queue[T]) PopFrontFunc(
 					value = result.InboxValue
 					ok = true
 				}
-				if result.OutboxRenotifyFn != nil {
-					waitInbox.Emptied()
-					renotifyFn = result.OutboxRenotifyFn
-				}
+				rf = result.OutboxRenotifyFn
 			})
+			return rf
 		})
 		if ok {
 			// Got a value via confirmFn (outbox grab during waiter registration),

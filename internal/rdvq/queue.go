@@ -301,11 +301,18 @@ func (q *Queue[T]) PopFrontFunc(
 	var renotifyFn RenotifyFunc
 	for {
 		if q.tryOutboxes(processFn) {
+			// We grabbed an outbox value. If we held a pending renotifyFn from
+			// a prior iteration's outbox-wait notification, forward it — it
+			// may have been for a different outbox than the one we just took.
+			if renotifyFn != nil {
+				renotifyFn()
+			}
 			return
 		}
 
 		if renotifyFn != nil {
 			renotifyFn()
+			renotifyFn = nil
 		}
 
 		q.inboxStackQueue.PopFrontFunc(inbox, processOrphanFn, func(inbox *Inbox[T]) {
@@ -313,7 +320,15 @@ func (q *Queue[T]) PopFrontFunc(
 				renotifyFn = selectFn(inbox, waitInbox)
 			})
 		})
-		if ok || renotifyFn == nil {
+		if ok {
+			// Got a value. If selectFn also picked up an outbox-wait
+			// notification, forward it so the next waiter isn't stalled.
+			if renotifyFn != nil {
+				renotifyFn()
+			}
+			return
+		}
+		if renotifyFn == nil {
 			return
 		}
 	}

@@ -55,9 +55,8 @@ func (w *Waiters) Init() {
 	w.q.Init()
 }
 
-// WaitFuncWithOrphanHandler registers a waiter and handles the blocking wait
-// with custom orphan notification handling. This is the lower-level function
-// that other Wait methods wrap.
+// WaitFunc registers a waiter and handles the blocking wait with custom
+// select handling.
 //
 // Parameters:
 //   - waiter: Waiter instance for this goroutine
@@ -65,7 +64,6 @@ func (w *Waiters) Init() {
 //     before blocking. The confirmFn prevents missed notifications by
 //     re-checking conditions after the waiter is registered. If it returns
 //     false, the wait is aborted (selectFn is not called).
-//   - orphanFn: Custom function to handle orphaned renotify functions
 //   - selectFn: Custom select function for handling the wait operation
 //
 // Returns the RenotifyFunc that selectFn received, or nil if no notification
@@ -73,13 +71,8 @@ func (w *Waiters) Init() {
 // other case such as ctx.Done).
 //
 //nolint:contextcheck // background context used only for tracing
-func (w *Waiters) WaitFuncWithOrphanHandler(
-	waiter *Waiter,
-	confirmFn func() bool,
-	orphanFn NotifyFunc,
-	selectFn WaitSelectFunc,
-) RenotifyFunc {
-	traceRegion := "rdvq.Waiters.WaitFuncWithOrphanHandler"
+func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
+	traceRegion := "rdvq.Waiters.WaitFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
@@ -95,7 +88,9 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 	w.q.PopFrontFunc(
 		waitInbox,
 		func(renotifyFn RenotifyFunc) {
-			if !orphanFn(renotifyFn) {
+			// Stranded renotifyFn from an abandoned inbox: re-queue it for
+			// another waiter, or invoke directly if no waiters are available.
+			if !w.Notify(renotifyFn) {
 				renotifyFn()
 			}
 		},
@@ -111,41 +106,15 @@ func (w *Waiters) WaitFuncWithOrphanHandler(
 	return rf
 }
 
-// WaitFunc registers a waiter and handles the blocking wait with custom
-// select handling. This is a convenience wrapper around
-// WaitFuncWithOrphanHandler that uses the default orphan handler (w.Notify).
-//
-// Returns the RenotifyFunc that selectFn received, or nil if no notification
-// arrived.
-func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
-	return w.WaitFuncWithOrphanHandler(waiter, confirmFn, w.Notify, selectFn)
-}
-
-// WaitWithOrphanHandler registers a waiter and blocks until notified or
-// context cancelled, with custom orphan notification handling.
-//
-// Returns the RenotifyFunc on notification, or a non-nil error if the
-// context was cancelled.
-func (w *Waiters) WaitWithOrphanHandler(
-	ctx context.Context,
-	waiter *Waiter,
-	confirmFn func() bool,
-	orphanFn NotifyFunc,
-) (RenotifyFunc, error) {
+// Wait registers a waiter and blocks until notified or context cancelled.
+func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) (RenotifyFunc, error) {
 	var err error
-	rf := w.WaitFuncWithOrphanHandler(waiter, confirmFn, orphanFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+	rf := w.WaitFunc(waiter, confirmFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
 		var got RenotifyFunc
 		got, err = BasicWaitSelect(ctx, waitCh)
 		return got
 	})
 	return rf, err
-}
-
-// Wait registers a waiter and blocks until notified or context cancelled.
-// Convenience wrapper around WaitWithOrphanHandler that uses the default
-// orphan handler (w.Notify).
-func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) (RenotifyFunc, error) {
-	return w.WaitWithOrphanHandler(ctx, waiter, confirmFn, w.Notify)
 }
 
 // Notify signals one waiting goroutine to re-check for work.

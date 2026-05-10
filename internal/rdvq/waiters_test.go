@@ -26,10 +26,9 @@ func TestWaiters_BasicNotification(t *testing.T) {
 		close(waiterStarted) // Signal that waiter is created
 
 		var waiter rdvq.Waiter
-		rf := waiters.WaitFuncWithOrphanHandler(
+		rf := waiters.WaitFunc(
 			&waiter,
 			func() bool { return true },
-			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 			func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				return <-waitCh
 			},
@@ -59,10 +58,9 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 
 	var waiter rdvq.Waiter
 	selectCalled := false
-	waiters.WaitFuncWithOrphanHandler(
+	waiters.WaitFunc(
 		&waiter,
 		func() bool { return false },
-		func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 		func(<-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			selectCalled = true
 			return nil
@@ -88,14 +86,13 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 		close(waiterStarted)
 
 		var waiter rdvq.Waiter
-		rf := waiters.WaitFuncWithOrphanHandler(
+		rf := waiters.WaitFunc(
 			&waiter,
 			func() bool {
 				mu.Lock()
 				defer mu.Unlock()
 				return !workReady // Continue waiting only if no work ready
 			},
-			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 			func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				// When verification succeeds, this should be called and block
 				return <-waitCh
@@ -128,12 +125,11 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 
 	var waiter rdvq.Waiter
 	selectCalled := false
-	waiters.WaitFuncWithOrphanHandler(
+	waiters.WaitFunc(
 		&waiter,
 		func() bool {
 			return !workReady // Should return false (don't wait)
 		},
-		func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 		func(<-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			selectCalled = true
 			return nil
@@ -157,10 +153,9 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 
 		go func(id int) {
 			var waiter rdvq.Waiter
-			rf := waiters.WaitFuncWithOrphanHandler(
+			rf := waiters.WaitFunc(
 				&waiter,
 				func() bool { return true },
-				func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 				func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 					select {
 					case rf := <-waitCh:
@@ -214,10 +209,9 @@ func TestWaiters_NotifyAll(t *testing.T) {
 	for i := 0; i < numWaiters; i++ {
 		go func() {
 			var waiter rdvq.Waiter
-			rf := waiters.WaitFuncWithOrphanHandler(
+			rf := waiters.WaitFunc(
 				&waiter,
 				func() bool { return true },
-				func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 				func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 					select {
 					case rf := <-waitCh:
@@ -255,10 +249,9 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	// Start waiting but abandon immediately
 	go func() {
 		var waiter rdvq.Waiter
-		waiters.WaitFuncWithOrphanHandler(
+		waiters.WaitFunc(
 			&waiter,
 			func() bool { return true },
-			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 			func(<-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				// Abandon immediately - don't wait on channel
 				return nil
@@ -275,10 +268,9 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	notified := make(chan bool, 1)
 	go func() {
 		var waiter rdvq.Waiter
-		rf := waiters.WaitFuncWithOrphanHandler(
+		rf := waiters.WaitFunc(
 			&waiter,
 			func() bool { return true },
-			func(rdvq.RenotifyFunc) bool { panic("orphan notify") },
 			func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				select {
 				case rf := <-waitCh:

@@ -457,10 +457,10 @@ func (j *Job) gatherSelect(
 	select {
 	case work := <-inboxCh:
 		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
-		psResult = rdvq.InboxEmptied(work)
+		psResult.InboxEmptied(work)
 	case rf := <-outboxWaitCh:
 		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
-		psResult = rdvq.OutboxReady[workq.Work](rf)
+		psResult.OutboxReady(rf)
 	case workRf = <-workWaitCh:
 		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitCh=%p", workWaitCh)
 	case <-blockTimerCh:
@@ -819,16 +819,16 @@ func (j *Job) runTasks() {
 		exit := false
 		t, ok := j.taskQueue.PopFrontFunc(
 			&receiver,
-			func(inboxCh <-chan *taskWork, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[*taskWork] {
+			func(inboxCh <-chan *taskWork, outboxWaitCh <-chan rdvq.RenotifyFunc) (result rdvq.PopSelectResult[*taskWork]) {
 				trace.Logf(ctx, traceRegion,
 					"entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
 				select {
 				case received := <-inboxCh:
 					trace.Logf(ctx, traceRegion, "received task from inboxCh=%p", inboxCh)
-					return rdvq.InboxEmptied(received)
+					result.InboxEmptied(received)
 				case rf := <-outboxWaitCh:
 					trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
-					return rdvq.OutboxReady[*taskWork](rf)
+					result.OutboxReady(rf)
 				case <-idleTimerCh:
 					trace.Logf(ctx, traceRegion, "received signal from idle timer")
 					exit = j.tryTaskWorkerIdleExit()
@@ -836,7 +836,7 @@ func (j *Job) runTasks() {
 					trace.Logf(ctx, traceRegion, "received context done signal")
 					exit = true
 				}
-				return rdvq.PopSelectResult[*taskWork]{}
+				return
 			},
 		)
 		if ok {

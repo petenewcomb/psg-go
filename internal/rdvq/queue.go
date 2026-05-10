@@ -194,30 +194,65 @@ func (q *Queue[T]) ListenersFor(s *Sender) *Listeners {
 	return &outboxFor(s, q).listeners
 }
 
-// PopSelectResult is returned by a PopSelectFunc to communicate what
-// happened during the wait. Construct with [InboxValue], [OutboxRenotify], or
-// the zero value (for "neither fired" cases like context cancellation or
-// idle timeout). Fields are unexported to prevent constructing invalid
-// combinations.
+// PopSelectResult is the result returned by a PopSelectFunc to communicate
+// what happened during the wait. Use [PopSelectResult.InboxEmptied] /
+// [PopSelectResult.OutboxReady] to record what fired; the zero value means
+// "neither fired" (e.g., context cancellation or idle timeout).
+//
+// Idiomatic usage is to declare a named return variable of this type and
+// call its methods from the matching select case, then bare-return:
+//
+//	func selectFn(inboxCh <-chan T, outboxWaitCh <-chan RenotifyFunc) (result PopSelectResult[T]) {
+//	    select {
+//	    case v := <-inboxCh:
+//	        result.InboxEmptied(v)
+//	    case rf := <-outboxWaitCh:
+//	        result.OutboxReady(rf)
+//	    case <-ctx.Done():
+//	        // result stays zero
+//	    }
+//	    return
+//	}
 type PopSelectResult[T any] struct {
 	inboxValue       T
 	inboxEmptied     bool
 	outboxRenotifyFn RenotifyFunc
 }
 
-// InboxEmptied constructs a [PopSelectResult] indicating that the selectFn
-// received the given value from the inbox channel. PopFrontFunc will mark
-// the inbox as emptied on the caller's behalf.
-func InboxEmptied[T any](value T) PopSelectResult[T] {
-	return PopSelectResult[T]{inboxValue: value, inboxEmptied: true}
+// InboxEmptied records that the selectFn received the given value from the
+// inbox channel. PopFrontFunc will mark the inbox as emptied on the
+// caller's behalf.
+//
+// Panics if InboxEmptied or OutboxReady was already called on this result.
+func (r *PopSelectResult[T]) InboxEmptied(value T) {
+	if r.inboxEmptied {
+		panic("rdvq.PopSelectResult.InboxEmptied: already called")
+	}
+	if r.outboxRenotifyFn != nil {
+		panic("rdvq.PopSelectResult.InboxEmptied: OutboxReady already called")
+	}
+	r.inboxValue = value
+	r.inboxEmptied = true
 }
 
-// OutboxReady constructs a [PopSelectResult] indicating that the selectFn
-// received a notification from the outbox-wait channel that an outbox is
-// ready. PopFrontFunc will mark the outbox-wait inbox as emptied on the
-// caller's behalf and chain the notification.
-func OutboxReady[T any](renotifyFn RenotifyFunc) PopSelectResult[T] {
-	return PopSelectResult[T]{outboxRenotifyFn: renotifyFn}
+// OutboxReady records that the selectFn received a notification from the
+// outbox-wait channel that an outbox is ready. PopFrontFunc will mark the
+// outbox-wait inbox as emptied on the caller's behalf and chain the
+// notification.
+//
+// Panics if renotifyFn is nil, or if InboxEmptied or OutboxReady was
+// already called on this result.
+func (r *PopSelectResult[T]) OutboxReady(renotifyFn RenotifyFunc) {
+	if renotifyFn == nil {
+		panic("rdvq.PopSelectResult.OutboxReady: nil renotifyFn")
+	}
+	if r.inboxEmptied {
+		panic("rdvq.PopSelectResult.OutboxReady: InboxEmptied already called")
+	}
+	if r.outboxRenotifyFn != nil {
+		panic("rdvq.PopSelectResult.OutboxReady: already called")
+	}
+	r.outboxRenotifyFn = renotifyFn
 }
 
 // PopSelectFunc handles the select operation for PopFrontFunc when no outbox
@@ -235,20 +270,21 @@ func BasicPopSelect[T any](
 	ctx context.Context,
 	inboxCh <-chan T,
 	outboxWaitCh <-chan RenotifyFunc,
-) (PopSelectResult[T], error) {
+) (result PopSelectResult[T], err error) {
 	traceRegion := "rdvq.BasicPopSelect"
 	trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
 	select {
 	case value := <-inboxCh:
 		trace.Logf(ctx, traceRegion, "received value from inboxCh=%p", inboxCh)
-		return InboxEmptied[T](value), nil
+		result.InboxEmptied(value)
 	case renotifyFn := <-outboxWaitCh:
 		trace.Logf(ctx, traceRegion, "received signal from outboxWaitCh=%p", outboxWaitCh)
-		return OutboxReady[T](renotifyFn), nil
+		result.OutboxReady(renotifyFn)
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
-		return PopSelectResult[T]{}, context.Cause(ctx)
+		err = context.Cause(ctx)
 	}
+	return
 }
 
 // PopFrontFunc receives a value using the two-tier delivery system with

@@ -10,14 +10,11 @@ import (
 // Specialization of [rdvq.Queue] for [Work].
 type Pending = rdvq.Queue[Work]
 
-// See [rdvq.Outbox]
-type Outbox = rdvq.Outbox[Work]
-
 // See [rdvq.PushSelectFunc]
 type PushSelectFunc = rdvq.PushSelectFunc[Work]
 
 // See [rdvq.PopSelectFunc]
 type PopSelectFunc = rdvq.PopSelectFunc[Work]
 
-// See [rdvq.PushSelectFunc]
+// See [rdvq.WaitSelectFunc]
 type WaitSelectFunc = rdvq.WaitSelectFunc

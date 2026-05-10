@@ -17,7 +17,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/ctxmap"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
-	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
@@ -47,11 +46,8 @@ type Job struct {
 	taskWorkerIdleJitter            atomic.Int64 // stores time.Duration as nanoseconds
 	taskWorkerSpawnConcurrencyLimit atomic.Int64 // maximum concurrent task worker spawns
 
-	// Orphan task handling
-	orphanedTasks       nbcq.Queue[*orphanedTaskWork] // buffer for orphaned tasks
-	orphanWaiters       rdvq.Waiters                  // notification infrastructure
-	taskWorkersSpawning jobstate.InFlightCounter      // count of workers in spawning state
-	taskWorkerDemand    jobstate.InFlightCounter      // count of tasks waiting for workers
+	taskWorkersSpawning jobstate.InFlightCounter // count of workers in spawning state
+	taskWorkerDemand    jobstate.InFlightCounter // count of tasks waiting for workers
 
 	taskWorkerMu             sync.Mutex
 	latestTaskWorkerIdleExit time.Time // protected by taskWorkerMu
@@ -163,8 +159,6 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.governor.Init()
 	j.workQueue.Init()
 	j.taskQueue.Init()
-	j.orphanedTasks.Init()
-	j.orphanWaiters.Init()
 	// taskWorkersSpawning zero-value ready, no init needed
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
 	j.taskWorkerIdleJitter.Store(int64(psgopt.DefaultTaskWorkerIdleJitter))
@@ -392,30 +386,25 @@ func (j *Job) addWorkWhileMaybeBlocking(
 	meta.PushQueueFunc(queueFn)
 	defer meta.PopQueueFunc()
 
-	var renotifyFns gatherRenotifyFuncs
+	var workRf, blockRf rdvq.RenotifyFunc
 	if workWaiters == nil {
 		err = j.tryAddWork(ctx, queueFn)
 	} else {
-		j.gatherQueue.PopFrontFunc(
+		var psResult rdvq.PopSelectResult[workq.Work]
+		work, ok := j.gatherQueue.PopFrontFunc(
 			meta.Receiver(),
-			queueFn,
-			func(inbox *rdvq.Inbox[workq.Work], outboxWaitInbox *rdvq.WaitInbox) rdvq.RenotifyFunc {
-				workWaiters.WaitFunc(
+			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
+				workRf = workWaiters.WaitFunc(
 					meta.Waiter(),
 					confirmWorkWaitFn,
-					func(workWaitInbox *rdvq.WaitInbox) {
+					func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+						var innerWorkRf rdvq.RenotifyFunc
 						if blockWaiters == nil {
-							renotifyFns, err = j.gatherSelect(
-								ctx,
-								queueFn,
-								inbox,
-								outboxWaitInbox,
-								workWaitInbox,
-								nil,
-								nil,
+							psResult, innerWorkRf, _, err = j.gatherSelect(
+								ctx, inboxCh, outboxWaitCh, workWaitCh, nil, nil,
 							)
 						} else {
-							blockWaiters.WaitFunc(
+							blockRf = blockWaiters.WaitFunc(
 								meta.Waiter(),
 								func() bool {
 									shouldWait := confirmBlockWaitFn()
@@ -424,7 +413,7 @@ func (j *Job) addWorkWhileMaybeBlocking(
 									}
 									return shouldWait
 								},
-								func(blockWaitInbox *rdvq.WaitInbox) {
+								func(blockWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 									var blockTimerCh <-chan time.Time
 									if !blockDeadline.IsZero() {
 										blockTimer := timerp.Get()
@@ -432,74 +421,53 @@ func (j *Job) addWorkWhileMaybeBlocking(
 										timerp.Reset(blockTimer, max(0, time.Until(blockDeadline)))
 										blockTimerCh = blockTimer.C
 									}
-									renotifyFns, err = j.gatherSelect(
-										ctx,
-										queueFn,
-										inbox,
-										outboxWaitInbox,
-										workWaitInbox,
-										blockTimerCh,
-										blockWaitInbox,
+									var innerBlockRf rdvq.RenotifyFunc
+									psResult, innerWorkRf, innerBlockRf, err = j.gatherSelect(
+										ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh,
 									)
+									return innerBlockRf
 								},
 							)
 						}
+						return innerWorkRf
 					},
 				)
-				return renotifyFns.Outbox
+				return psResult
 			},
 		)
+		if ok {
+			queueFn(work)
+		}
 	}
-	return renotifyFns.Work, renotifyFns.Block, err
-}
-
-type gatherRenotifyFuncs struct {
-	Outbox rdvq.RenotifyFunc
-	Work   rdvq.RenotifyFunc
-	Block  rdvq.RenotifyFunc
+	return workRf, blockRf, err
 }
 
 func (j *Job) gatherSelect(
 	ctx context.Context,
-	queueFn workq.QueueWorkFunc,
-	inbox *rdvq.Inbox[workq.Work],
-	outboxWaitInbox *rdvq.WaitInbox,
-	workWaitInbox *rdvq.WaitInbox,
+	inboxCh <-chan workq.Work,
+	outboxWaitCh <-chan rdvq.RenotifyFunc,
+	workWaitCh <-chan rdvq.RenotifyFunc,
 	blockTimerCh <-chan time.Time,
-	blockWaitInbox *rdvq.WaitInbox,
-) (gatherRenotifyFuncs, error) {
+	blockWaitCh <-chan rdvq.RenotifyFunc,
+) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.RenotifyFunc, err error) {
 	traceRegion := "Job.gatherSelect"
-
-	inboxCh := inbox.Ch()
-	outboxWaitCh := outboxWaitInbox.Ch()
-	workWaitCh := workWaitInbox.Ch()
-	blockWaitCh := blockWaitInbox.Ch()
-
 	trace.Logf(ctx, traceRegion,
-		"entering select: inbox=%p, inboxCh=%p, outboxWaitInbox=%p, outboxWaitCh=%p, workWaitInbox=%p, workWaitCh=%p, "+
-			"blockWaitInbox=%p, blockWaitCh=%p",
-		inbox, inboxCh, outboxWaitInbox, outboxWaitCh, workWaitInbox, workWaitCh, blockWaitInbox, blockWaitCh)
-	var renotifyFns gatherRenotifyFuncs
-	var err error
+		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, blockWaitCh=%p",
+		inboxCh, outboxWaitCh, workWaitCh, blockWaitCh)
 	select {
 	case work := <-inboxCh:
-		inbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received work from inbox=%p, inboxCh=%p", inbox, inboxCh)
-		queueFn(work)
-	case renotifyFns.Outbox = <-outboxWaitCh:
-		outboxWaitInbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitInbox=%p, outboxWaitCh=%p",
-			outboxWaitInbox, outboxWaitCh)
-	case renotifyFns.Work = <-workWaitCh:
-		workWaitInbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitInbox=%p, workWaitCh=%p", workWaitInbox, workWaitCh)
+		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
+		psResult = rdvq.PopSelectResult[workq.Work]{InboxValue: work, InboxEmptied: true}
+	case rf := <-outboxWaitCh:
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
+		psResult = rdvq.PopSelectResult[workq.Work]{OutboxRenotifyFn: rf}
+	case workRf = <-workWaitCh:
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitCh=%p", workWaitCh)
 	case <-blockTimerCh:
 		trace.Logf(ctx, traceRegion, "received block deadline timer signal")
 		err = errBlockWaitSignaled
-	case renotifyFns.Block = <-blockWaitCh:
-		blockWaitInbox.Emptied()
-		trace.Logf(ctx, traceRegion,
-			"received renotifyFn from blockWaitInbox=%p, blockWaitCh=%p", blockWaitInbox, blockWaitCh)
+	case blockRf = <-blockWaitCh:
+		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
 		err = errBlockWaitSignaled
 	case <-j.state.Done():
 		trace.Logf(ctx, traceRegion, "received job done signal")
@@ -508,7 +476,7 @@ func (j *Job) gatherSelect(
 		trace.Logf(ctx, traceRegion, "received context done signal")
 		err = ctx.Err()
 	}
-	return renotifyFns, err
+	return
 }
 
 type gatherPostWork struct {
@@ -568,7 +536,7 @@ func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.gatherQueue.PushBackFunc(meta.Sender(), w.work, nil, func(outbox *rdvq.Outbox[workq.Work]) {
+			w.job.gatherQueue.PushBackFunc(meta.Sender(), w.work, nil, func(outboxCh chan<- workq.Work) bool {
 				posted = false
 
 				// Slow path, really going to block now
@@ -576,10 +544,12 @@ func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 
 				waiting()
 
-				err = rdvq.BasicPushSelect[workq.Work](ctx, outbox, w.work)
-				if err == nil {
+				var sent bool
+				sent, err = rdvq.BasicPushSelect[workq.Work](ctx, outboxCh, w.work)
+				if sent {
 					posted = true
 				}
+				return sent
 			})
 			trace.Logf(ctx, traceRegion, "meta.ShouldBlock(), posted=%v, err=%v", posted, err)
 			if posted || err != nil {
@@ -748,102 +718,6 @@ func (j *Job) trySpawnTaskWorker() bool {
 	return true
 }
 
-type orphanedTaskWork struct {
-	mu   sync.Mutex
-	id   orphanedTaskID
-	job  *Job
-	work *taskWork
-}
-
-func newOrphanedTaskWork(j *Job, tw *taskWork) *orphanedTaskWork {
-	w := orphanedTaskWorkPool.Get()
-	w.id = orphanedTaskID(orphanedTaskIDCounter.Add(1))
-	w.job = j
-	w.work = tw
-	return w
-}
-
-func (w *orphanedTaskWork) Reset() {
-	// No-op. All is done while the mutex is still held in Unwrap()
-}
-
-func (w *orphanedTaskWork) registerDemand(id orphanedTaskID) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.id == id {
-		if w.work.demandRegistered.CompareAndSwap(false, true) {
-			w.job.taskWorkerDemand.Increment()
-			if trace.IsEnabled() {
-				trace.Logf(context.Background(), "orphanedTaskWork.registerDemand",
-					"DEMAND_INC_ORPHAN task=%p orphan_id=%d counter=%p",
-					w.work, id, &w.job.taskWorkerDemand)
-			}
-		}
-		w.job.trySpawnTaskWorker()
-	}
-}
-
-func (w *orphanedTaskWork) Unwrap() *taskWork {
-	var work *taskWork
-	func() {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-
-		work = w.work
-		w.id = 0
-		w.job = nil
-		w.work = nil
-	}()
-	orphanedTaskWorkPool.Put(w)
-	return work
-}
-
-var orphanedTaskWorkPool = omnipool.For[orphanedTaskWork]()
-
-type orphanedTaskID int64
-
-var orphanedTaskIDCounter atomic.Int64
-
-type orphanedTaskRenotify struct {
-	id         orphanedTaskID
-	work       *orphanedTaskWork
-	RenotifyFn rdvq.RenotifyFunc
-}
-
-func newOrphanedTaskRenotify(work *orphanedTaskWork) *orphanedTaskRenotify {
-	r := orphanedTaskRenotifyPool.Get()
-	r.id = work.id
-	r.work = work
-	return r
-}
-
-func (r *orphanedTaskRenotify) Init() {
-	r.RenotifyFn = r.renotify
-}
-
-func (r *orphanedTaskRenotify) Reset() {
-	r.work = nil
-	r.id = 0
-}
-
-func (r *orphanedTaskRenotify) renotify() {
-	r.work.registerDemand(r.id)
-	r.Free()
-}
-
-func (r *orphanedTaskRenotify) Free() {
-	orphanedTaskRenotifyPool.Put(r)
-}
-
-var orphanedTaskRenotifyPool = omnipool.For[orphanedTaskRenotify]()
-
-func (j *Job) tryGetOrphanedTask() *taskWork {
-	if orphan, ok := j.orphanedTasks.TryPopFront(); ok {
-		return orphan.Unwrap()
-	}
-	return nil
-}
-
 //nolint:contextcheck // task worker goroutine will use job context
 func (j *Job) runTasks() {
 	defer j.wg.Done()
@@ -879,7 +753,6 @@ func (j *Job) runTasks() {
 	)
 
 	var receiver rdvq.Receiver
-	var waiter rdvq.Waiter
 
 	var idleTimer *time.Timer
 	defer func() {
@@ -889,10 +762,7 @@ func (j *Job) runTasks() {
 	}()
 
 	for {
-		// Fast-path: check both queues before expensive waiter registration
-		if task == nil {
-			task = j.tryGetOrphanedTask()
-		}
+		// Fast-path: check the queue before expensive waiter registration
 		if task == nil {
 			if t, ok := j.taskQueue.TryPopFront(); ok {
 				task = t
@@ -947,61 +817,32 @@ func (j *Job) runTasks() {
 		}
 
 		exit := false
-		j.taskQueue.PopFrontFunc(
+		t, ok := j.taskQueue.PopFrontFunc(
 			&receiver,
-			func(orphanedTask *taskWork) {
-				if task == nil {
-					task = orphanedTask
-					exit = false // Orphans are detected after selectFn returns
-				} else {
-					orphan := newOrphanedTaskWork(j, orphanedTask)
-					orphanRenotify := newOrphanedTaskRenotify(orphan)
-					j.orphanedTasks.PushBack(orphan)
-					j.orphanWaiters.Notify(orphanRenotify.RenotifyFn)
+			func(inboxCh <-chan *taskWork, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[*taskWork] {
+				trace.Logf(ctx, traceRegion,
+					"entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
+				select {
+				case received := <-inboxCh:
+					trace.Logf(ctx, traceRegion, "received task from inboxCh=%p", inboxCh)
+					return rdvq.PopSelectResult[*taskWork]{InboxValue: received, InboxEmptied: true}
+				case rf := <-outboxWaitCh:
+					trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
+					return rdvq.PopSelectResult[*taskWork]{OutboxRenotifyFn: rf}
+				case <-idleTimerCh:
+					trace.Logf(ctx, traceRegion, "received signal from idle timer")
+					exit = j.tryTaskWorkerIdleExit()
+				case <-ctx.Done():
+					trace.Logf(ctx, traceRegion, "received context done signal")
+					exit = true
 				}
-			},
-			func(inbox *rdvq.Inbox[*taskWork], outboxWaitInbox *rdvq.WaitInbox) rdvq.RenotifyFunc {
-				var renotifyFn rdvq.RenotifyFunc
-				j.orphanWaiters.WaitFunc(&waiter,
-					func() bool {
-						// Check orphan queue after registration to avoid race
-						task = j.tryGetOrphanedTask()
-						if task != nil {
-							return false // Don't wait, we found an orphan
-						}
-						return true // Wait for notification
-					},
-					func(orphanWaitInbox *rdvq.WaitInbox) {
-						inboxCh := inbox.Ch()
-						outboxWaitCh := outboxWaitInbox.Ch()
-						orphanWaitCh := orphanWaitInbox.Ch()
-						//nolint:lll // trace message readability
-						trace.Logf(ctx, traceRegion,
-							"entering select: inbox=%p, inboxCh=%p, outboxWaitInbox=%p, outboxWaitCh=%p, orphanWaitInbox=%p, orphanWaitCh=%p",
-							inbox, inboxCh, outboxWaitInbox, outboxWaitCh, orphanWaitInbox, orphanWaitCh)
-						select {
-						case task = <-inboxCh:
-							inbox.Emptied()
-							trace.Logf(ctx, traceRegion, "received task from inbox=%p, inboxCh=%p", inbox, inboxCh)
-						case renotifyFn = <-outboxWaitCh:
-							outboxWaitInbox.Emptied()
-						case <-orphanWaitCh:
-							orphanWaitInbox.Emptied()
-							trace.Logf(ctx, traceRegion, "received orphan notification from orphanWaitInbox=%p, orphanWaitCh=%p",
-								orphanWaitInbox, orphanWaitCh)
-							// Check orphan queue again after notification
-							task = j.tryGetOrphanedTask()
-						case <-idleTimerCh:
-							trace.Logf(ctx, traceRegion, "received signal from idle timer")
-							exit = j.tryTaskWorkerIdleExit()
-						case <-ctx.Done():
-							trace.Logf(ctx, traceRegion, "received context done signal")
-							exit = true
-						}
-					})
-				return renotifyFn
+				return rdvq.PopSelectResult[*taskWork]{}
 			},
 		)
+		if ok {
+			task = t
+			exit = false // Got a task; ignore any concurrent exit signal — process it first
+		}
 		if exit {
 			if task != nil {
 				panic("exiting with non-nil task")
@@ -1077,16 +918,18 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.taskQueue.PushBackFunc(meta.Sender(), w.task, bufferedFn, func(outbox *rdvq.Outbox[*taskWork]) {
+			w.job.taskQueue.PushBackFunc(meta.Sender(), w.task, bufferedFn, func(outboxCh chan<- *taskWork) bool {
 				posted = false
 
 				// Slow path, really going to block now
 				ex.Blocking()
 
-				err = rdvq.BasicPushSelect[*taskWork](ctx, outbox, w.task)
-				if err == nil {
+				var sent bool
+				sent, err = rdvq.BasicPushSelect[*taskWork](ctx, outboxCh, w.task)
+				if sent {
 					posted = true
 				}
+				return sent
 			})
 			if trace.IsEnabled() {
 				trace.Logf(ctx, traceRegion, "meta.ShouldBlock() == true, posted=%v, err=%v", posted, err)

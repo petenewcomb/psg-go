@@ -100,12 +100,16 @@ func (cw *cpWorker) AddWork(
 
 	// Primary goroutine, no need for idle detection
 	workWaiters.WaitFunc(cw.Waiter(), confirmWorkWaitFn,
-		func(workWaitInbox *rdvq.WaitInbox) {
-			cw.cp.combineQueue.PopFrontFunc(cw.Receiver(), cw.QueueFunc(),
-				func(inbox *rdvq.Inbox[workq.Work], outboxWaitInbox *rdvq.WaitInbox) rdvq.RenotifyFunc {
-					return cw.popSelect(ctx, inbox, outboxWaitInbox, workWaitInbox)
+		func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			work, ok := cw.cp.combineQueue.PopFrontFunc(cw.Receiver(),
+				func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
+					return cw.popSelect(ctx, inboxCh, outboxWaitCh, workWaitCh)
 				},
 			)
+			if ok {
+				cw.newWork = work
+			}
+			return cw.workRenotifyFn
 		},
 	)
 
@@ -128,16 +132,16 @@ func (cw *cpWorker) queue(work workq.Work) {
 
 func (cw *cpWorker) popSelect(
 	ctx context.Context,
-	inbox *rdvq.Inbox[workq.Work],
-	outboxWaitInbox *rdvq.WaitInbox,
-	workWaitInbox *rdvq.WaitInbox,
-) rdvq.RenotifyFunc {
+	inboxCh <-chan workq.Work,
+	outboxWaitCh <-chan rdvq.RenotifyFunc,
+	workWaitCh <-chan rdvq.RenotifyFunc,
+) rdvq.PopSelectResult[workq.Work] {
 	traceRegion := "cpWorker.popSelect"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	queuedFlush, timeUntilNextFlushDeadline := cw.flushToNextDeadline(ctx)
 	if queuedFlush {
-		return nil
+		return rdvq.PopSelectResult[workq.Work]{}
 	}
 	if timeUntilNextFlushDeadline > 0 {
 		// Set up flush deadline timer
@@ -150,28 +154,18 @@ func (cw *cpWorker) popSelect(
 		}()
 	}
 
-	inboxCh := inbox.Ch()
-	outboxWaitCh := outboxWaitInbox.Ch()
-	workWaitCh := workWaitInbox.Ch()
 	trace.Logf(ctx, traceRegion,
-		"entering select: inbox=%p inboxCh=%p, outboxWaitInbox=%p, outboxWaitCh=%p, workWaiter=%p, workWaiterCh=%p, "+
-			"flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
-		inbox, inboxCh, outboxWaitInbox, outboxWaitCh, workWaitInbox, workWaitCh,
-		cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
+		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, flushDeadlineTimerCh=%p, nextJobFlushCh=%p",
+		inboxCh, outboxWaitCh, workWaitCh, cw.flushDeadlineTimerCh, cw.nextJobFlushCh)
 	select {
 	case work := <-inboxCh:
-		inbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received work from inbox=%p, inboxCh=%p", inbox, inboxCh)
-		cw.newWork = work
+		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
+		return rdvq.PopSelectResult[workq.Work]{InboxValue: work, InboxEmptied: true}
 	case renotifyFn := <-outboxWaitCh:
-		outboxWaitInbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitInbox=%p, outboxWaitCh=%p",
-			outboxWaitInbox, outboxWaitCh)
-		return renotifyFn
+		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
+		return rdvq.PopSelectResult[workq.Work]{OutboxRenotifyFn: renotifyFn}
 	case cw.workRenotifyFn = <-workWaitCh:
-		workWaitInbox.Emptied()
-		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitInbox=%p, workWaitCh=%p",
-			workWaitInbox, workWaitCh)
+		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitCh=%p", workWaitCh)
 	case <-cw.flushDeadlineTimerCh:
 		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.idleTimerCh:
@@ -191,7 +185,7 @@ func (cw *cpWorker) popSelect(
 		trace.Logf(ctx, traceRegion, "received combiner goroutine done signal")
 		cw.err = cw.doneErr()
 	}
-	return nil
+	return rdvq.PopSelectResult[workq.Work]{}
 }
 
 func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duration) {

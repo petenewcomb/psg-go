@@ -311,10 +311,9 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 			shouldWait := func() bool {
 				return !tryPost()
 			}
-			// Can ignore the returned renotifyFn since it will always be nil
-			spawnWaiters.WaitFunc(meta.Waiter(), shouldWait, func(spawnWaitInbox *rdvq.WaitInbox) {
-
-				w.pool.combineQueue.PushBackFunc(meta.Sender(), w.work, maybeSpawn, func(outbox *rdvq.Outbox[workq.Work]) {
+			spawnWaiters.WaitFunc(meta.Waiter(), shouldWait, func(spawnWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				var renotifyFn rdvq.RenotifyFunc
+				w.pool.combineQueue.PushBackFunc(meta.Sender(), w.work, maybeSpawn, func(outboxCh chan<- workq.Work) bool {
 					// Slow path, posting no longer implicit
 					posted = false
 
@@ -323,29 +322,28 @@ func (w *combinePostWork) Execute(ctx context.Context, ex workq.Execution) error
 
 					waiting()
 
-					outboxCh := outbox.Ch()
-					spawnWaitCh := spawnWaitInbox.Ch()
 					trace.Logf(ctx, traceRegion,
-						"entering select: outbox=%p, outboxCh=%p, spawnWaitInbox=%p, spawnWaitCh=%p",
-						outbox, outboxCh, spawnWaitInbox, spawnWaitCh)
+						"entering select: outboxCh=%p, spawnWaitCh=%p",
+						outboxCh, spawnWaitCh)
 					select {
 					case outboxCh <- w.work:
-						outbox.Filled()
 						posted = true
-						trace.Logf(ctx, traceRegion, "delivered value into outbox=%p, outboxCh=%p", outbox, outboxCh)
-					case <-spawnWaitCh:
-						// Didn't need to capture the renotifyFn because we always check ShouldSpawnGoroutine
-						spawnWaitInbox.Emptied()
-						trace.Logf(ctx, traceRegion,
-							"received signal from spawnWaitInbox=%p, spawnWaitCh=%p", spawnWaitInbox, spawnWaitCh)
+						trace.Logf(ctx, traceRegion, "delivered value into outboxCh=%p", outboxCh)
+						return true
+					case rf := <-spawnWaitCh:
+						renotifyFn = rf
+						trace.Logf(ctx, traceRegion, "received signal from spawnWaitCh=%p", spawnWaitCh)
 						if w.pool.state.ShouldSpawnGoroutine() {
 							w.pool.spawnNewGoroutine()
 						}
+						return false
 					case <-ctx.Done():
 						trace.Logf(ctx, traceRegion, "received context done signal")
 						err = ctx.Err()
+						return false
 					}
 				})
+				return renotifyFn
 			})
 			trace.Logf(ctx, traceRegion, "meta.ShouldBlock(), posted=%v, err=%v", posted, err)
 			if posted || err != nil {

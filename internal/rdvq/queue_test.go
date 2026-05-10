@@ -34,7 +34,7 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 
 	// Start producer that will push 3 values
 	var sender rdvq.Sender
-	defer sender.Reset() // Free after all values are consumed
+	defer sender.Release() // Free after all values are consumed
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -128,7 +128,7 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var sender rdvq.Sender
-		defer sender.Reset()
+		defer sender.Release()
 		err := q.PushBack(ctx, &sender, 42, nil)
 		assert.NoError(t, err)
 	}()
@@ -170,7 +170,7 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var sender rdvq.Sender
-		defer sender.Reset()
+		defer sender.Release()
 		err := q.PushBack(ctx, &sender, 99, nil)
 		assert.NoError(t, err)
 	}()
@@ -240,7 +240,7 @@ func TestQueue_Concurrency(t *testing.T) {
 			<-startCh
 
 			var sender rdvq.Sender
-			defer sender.Reset()
+			defer sender.Release()
 			rangeStart := writerID * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
@@ -419,7 +419,7 @@ func TestQueue_Stress(t *testing.T) {
 			defer cancel()
 
 			var sender rdvq.Sender
-			defer sender.Reset()
+			defer sender.Release()
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
 				pushOps[rand.IntN(len(pushOps))](ctx, &sender)
@@ -472,7 +472,7 @@ func TestQueue_TryPushBack(t *testing.T) {
 
 	// TryPushBack should succeed when outbox is empty
 	var sender rdvq.Sender
-	defer sender.Reset()
+	defer sender.Release()
 	success := q.TryPushBack(&sender, 42, nil)
 	assert.True(t, success, "TryPushBack should succeed with empty outbox")
 	success = q.TryPushBack(&sender, 24, nil)
@@ -512,7 +512,7 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 		q.Init()
 
 		var sender rdvq.Sender
-		defer sender.Reset()
+		defer sender.Release()
 
 		var sawValueDuringBufferedFn bool
 		bufferedFn := func() {
@@ -536,7 +536,7 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 		q.Init()
 
 		var sender rdvq.Sender
-		defer sender.Reset()
+		defer sender.Release()
 
 		// Fill the outbox so the next send takes the slow path.
 		ok := q.TryPushBack(&sender, 1, nil)
@@ -586,7 +586,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	var sender rdvq.Sender
-	defer sender.Reset()
+	defer sender.Release()
 	err := q.PushBack(ctx, &sender, 100, nil)
 	assert.NoError(t, err)
 
@@ -676,7 +676,7 @@ func TestQueue_OutboxNotification(t *testing.T) {
 
 	// Send item to outbox - this should notify the waiting receiver
 	var sender rdvq.Sender
-	defer sender.Reset()
+	defer sender.Release()
 	err := q.PushBack(ctx, &sender, 42, nil)
 	assert.NoError(t, err)
 
@@ -717,7 +717,7 @@ func TestQueue_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			var sender rdvq.Sender
-			defer sender.Reset()
+			defer sender.Release()
 			for i := 0; i < itemsPerSender; i++ {
 				value := id*1000 + i // Unique value per sender
 				err := q.PushBack(ctx, &sender, value, nil)
@@ -760,7 +760,7 @@ func TestQueue_TryPopFrontWithOutboxes(t *testing.T) {
 
 	// Add item to outbox
 	var sender rdvq.Sender
-	defer sender.Reset()
+	defer sender.Release()
 	success := q.TryPushBack(&sender, 42, nil)
 	assert.True(t, success) // Should go to outbox
 

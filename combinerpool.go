@@ -127,6 +127,7 @@ func (cp *CombinerPool) goroutine() {
 		},
 		activeCombiners: &activeCombinerMap{},
 	}
+	defer worker.Release()
 
 	traceRegion := "CombinerPool.goroutine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()

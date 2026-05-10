@@ -166,6 +166,14 @@ func (ee *baseExEnv) Waiter() *rdvq.Waiter {
 	return &ee.waiter
 }
 
+// Release returns the exEnv's pooled rdvq resources (sender, waiter) to
+// their shared pools. Should be called via defer when the goroutine that
+// owns this exEnv is exiting.
+func (ee *baseExEnv) Release() {
+	ee.sender.Release()
+	ee.waiter.Release()
+}
+
 type taskExEnv struct {
 	baseExEnv
 }
@@ -223,6 +231,14 @@ type integrationExEnv struct {
 	groupStack   []workq.GroupID
 	queueFnStack []workq.QueueWorkFunc
 	receiver     rdvq.Receiver
+}
+
+// Release returns the integrationExEnv's pooled rdvq resources (sender,
+// waiter, receiver) to their shared pools. Should be called via defer when
+// the goroutine that owns this exEnv is exiting.
+func (ee *integrationExEnv) Release() {
+	ee.receiver.Release()
+	ee.baseExEnv.Release()
 }
 
 func (ee *integrationExEnv) Group() workq.GroupID {

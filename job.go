@@ -742,6 +742,7 @@ func (j *Job) runTasks() {
 	}()
 
 	var exEnv taskExEnv
+	defer exEnv.Release()
 
 	ctx, _ := j.ensureCtxMeta(goroutineCtx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
@@ -753,6 +754,7 @@ func (j *Job) runTasks() {
 	)
 
 	var receiver rdvq.Receiver
+	defer receiver.Release()
 
 	var idleTimer *time.Timer
 	defer func() {

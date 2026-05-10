@@ -331,7 +331,6 @@ func (q *Queue[T]) PopFrontFunc(
 
 		if renotifyFn != nil {
 			renotifyFn()
-			renotifyFn = nil
 		}
 
 		// Register as outbox waiter first; only register ib in the inbox stack
@@ -341,19 +340,23 @@ func (q *Queue[T]) PopFrontFunc(
 		// direct-delivers to ib (which would otherwise produce a second
 		// orphan value via post-cleanup that the (T, bool) return cannot
 		// carry).
-		renotifyFn = q.outboxWaiters.WaitFunc(&receiver.outboxWaiter, confirmFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
-			var rf RenotifyFunc
-			q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
-				result := selectFn(ib.channel(), waitCh)
-				if result.inboxEmptied {
-					ib.emptied()
-					value = result.inboxValue
-					ok = true
-				}
-				rf = result.outboxRenotifyFn
-			})
-			return rf
-		})
+		renotifyFn = q.outboxWaiters.WaitFunc(
+			&receiver.outboxWaiter,
+			confirmFn,
+			func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+				var rf RenotifyFunc
+				q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
+					result := selectFn(ib.channel(), waitCh)
+					if result.inboxEmptied {
+						ib.emptied()
+						value = result.inboxValue
+						ok = true
+					}
+					rf = result.outboxRenotifyFn
+				})
+				return rf
+			},
+		)
 		if ok {
 			// Got a value via confirmFn (outbox grab during waiter registration),
 			// processOrphanFn (post-selectFn inbox drain), or selectFn (direct

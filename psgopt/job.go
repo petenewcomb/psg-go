@@ -12,7 +12,7 @@ import (
 // DefaultTaskWorkerIdleTimeout is the default task worker idle timeout for [github.com/petenewcomb/psg-go.Job]
 // unless overridden with [WithTaskWorkerIdleTimeout]. Controls how long task workers
 // wait for new work before exiting. Empirically determined; subject to change.
-const DefaultTaskWorkerIdleTimeout = 100 * time.Millisecond
+const DefaultTaskWorkerIdleTimeout = 1 * time.Second
 
 // DefaultTaskWorkerIdleJitter is the default jitter added to task worker idle timeouts to spread
 // mutex contention when multiple workers timeout. Empirically determined; subject to change.

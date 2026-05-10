@@ -12,7 +12,7 @@ import (
 // DefaultCombinerPoolIdleTimeout is the default goroutine idle timeout for
 // [github.com/petenewcomb/psg-go.CombinerPool] unless overridden with
 // [WithIdleTimeout]. Empirically determined; subject to change.
-const DefaultCombinerPoolIdleTimeout = 100 * time.Millisecond
+const DefaultCombinerPoolIdleTimeout = 1 * time.Second
 
 // DefaultCombinerPoolIdleJitter is the default jitter added to combiner goroutine idle timeouts
 // to spread mutex contention when multiple workers timeout. Empirically determined; subject to change.

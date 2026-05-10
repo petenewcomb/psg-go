@@ -160,10 +160,10 @@ func (cw *cpWorker) popSelect(
 	select {
 	case work := <-inboxCh:
 		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
-		return rdvq.PopSelectResult[workq.Work]{InboxValue: work, InboxEmptied: true}
+		return rdvq.InboxEmptied(work)
 	case renotifyFn := <-outboxWaitCh:
 		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
-		return rdvq.PopSelectResult[workq.Work]{OutboxRenotifyFn: renotifyFn}
+		return rdvq.OutboxReady[workq.Work](renotifyFn)
 	case cw.workRenotifyFn = <-workWaitCh:
 		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitCh=%p", workWaitCh)
 	case <-cw.flushDeadlineTimerCh:

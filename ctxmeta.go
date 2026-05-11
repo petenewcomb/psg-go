@@ -64,6 +64,22 @@ func (cm *ctxMeta) Unlock() {
 	}
 }
 
+var waitMu sync.Mutex
+
+// Wait for the scheduler to be mostly idle
+func wait() {
+	for {
+		waitMu.Lock()
+		start := time.Now()
+		runtime.Gosched()
+		elapsed := time.Since(start)
+		waitMu.Unlock()
+		if elapsed < 100*time.Microsecond {
+			break
+		}
+	}
+}
+
 func (cm *ctxMeta) TryExecuteNow(
 	ctx context.Context,
 	deadline time.Time,
@@ -78,7 +94,7 @@ func (cm *ctxMeta) TryExecuteNow(
 
 	if cm.IsTopLevel() {
 		// Make sure existing work has a chance to run before we add more.
-		runtime.Gosched()
+		wait()
 
 		// Apply backpressure at top level by processing some outstanding work first
 		err := cm.job.yield(ctx, deadline)
@@ -113,7 +129,7 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 	if cm.ShouldBlock() {
 		if cm.IsTopLevel() {
 			// Make sure existing work has a chance to run before we add more.
-			runtime.Gosched()
+			wait()
 
 			// Apply backpressure at top level by processing some outstanding work first
 			err := cm.job.yield(ctx, time.Time{})

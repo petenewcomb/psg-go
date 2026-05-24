@@ -27,7 +27,6 @@ type PoolOption interface {
 //
 // For CombinerPool: Sets the maximum number of combiner goroutines. Use -1 to
 // indicate unlimited (subject to other backpressure constraints and scaling decisions).
-// See also [WithConcurrencyBounds] and [WithMinConcurrency] for CombinerPool-specific options.
 //
 // The default for both types of pool is unlimited.
 func WithMaxConcurrency(maxConcurrency int) PoolOption {

@@ -48,31 +48,154 @@ These guided every naming and shape decision below.
 
 ---
 
+## The three-type model
+
+Three orthogonal concerns, three types. Conflating any two of them produces
+the kind of API friction this design exists to remove.
+
+1. **Pool** — the worker pool. Goroutines, idle policy, max-budget.
+   Fungible. A package-level default Pool exists implicitly; users
+   only construct a custom Pool when they need a non-default ctx
+   (for cancellation) or non-default tuning. Pool's lifecycle is
+   refcount-driven: workers spin up when the first referencing Wave
+   begins work and exit synchronously when the last Wave referencing
+   the Pool completes its drain. A Pool whose refcount has returned
+   to zero is fully reusable — the next Wave that references it
+   spins workers up again.
+
+2. **Wave** — a batch of work to be completed together. The
+   user-facing primary type. Ops are constructed against a Wave; the
+   Wave's `Gather` / `GatherAll` await the completion of its work.
+   Waves nest: a parent Wave's drain waits for its child Waves.
+   Multiple Waves run concurrently on the same Pool routinely.
+
+3. **Flow** — one logical thread of related work. Refcount-driven,
+   carried in context, lives independently of any Wave. A Flow can
+   submit values into multiple Waves over its lifetime; its
+   lifecycle is bounded by when the work it spans completes, not by
+   any single Wave's drain. Flow is optional — needed when you want
+   to attach metadata (trace context, audit data) to a unit of work
+   that may cross Wave boundaries, run a cleanup hook when its work
+   completes, or have a cancellation domain narrower than the
+   enclosing Pool ctx.
+
+The streampool tagline lands literally: a **Pool** of workers serves
+**Waves** of work; each Wave hosts **Flows** of related processing.
+
+(The name "Stream" is reserved for a future observability concept — a
+stream of Flow lifecycle events for monitoring/aggregation. It's not
+used for any of the three types above precisely because "stream" in
+common usage denotes a flow of multiple items, which would mismatch
+the singular-instance semantics of Flow.)
+
 ## The final API surface
 
 ```go
 package streampool
 
-// ===== Top-level container =====
+// ===== Pool: worker pool (often implicit) =====
 
-// Pool is the streampool — a bounded context that adaptively manages a
-// set of worker goroutines for the ops constructed against it. Every
-// op-construction call takes a *Pool as its first arg.
+// Pool hosts the goroutines that execute work for the Waves referencing
+// it. Fungible — a package-level default Pool exists implicitly; users
+// only call NewPool to get a custom ctx or non-default tuning.
+//
+// Lifecycle is refcount-driven: each referencing Wave bumps the count
+// on construction and drops it when its drain completes. When the
+// count returns to zero, the Pool's workers exit synchronously before
+// the last Wave's drain method returns — so when GatherAll returns on
+// the final Wave, the Pool has zero live goroutines. The Pool object
+// itself is fully reusable; the next Wave that references it spins
+// workers up again.
+//
+// During active use (refcount > 0), individual workers between work
+// items exit via the configured IdleTimeout — that's the transient
+// idle case, distinct from the refcount=0 termination above.
+//
+// Hard abort: cancel the ctx given to NewPool. Cascades to all
+// referencing Waves, all in-flight work, all workers.
 type Pool struct { /* ... */ }
 
-func New(ctx context.Context, opts ...PoolOption) *Pool
+func NewPool(ctx context.Context, opts ...PoolOption) *Pool
 
-func (*Pool) Gather(ctx context.Context) error
-func (*Pool) GatherAll(ctx context.Context) error
-func (*Pool) Close()
-func (*Pool) CancelAndWait()
+// (No Shutdown / Wait / Close method. Pool lifecycle is implicit.)
 
 // Pool options
 type PoolOption interface { /* ... */ }
 
 func WithMaxGoroutines(n int) PoolOption
 func WithIdleTimeout(d time.Duration) PoolOption
-// ... additional adaptive-tuning options as they're stabilized
+// Advanced (rarely user-relevant):
+func WithIdleJitter(d time.Duration) PoolOption
+func WithSpawnConcurrencyLimit(n int) PoolOption
+
+// ===== Wave: batch of work the user awaits =====
+
+// Wave is a collection of work to be completed together. Ops are
+// constructed against a Wave; the Wave's drain methods await its
+// work. Multiple Waves run concurrently on the same Pool. Waves nest
+// via NewChild.
+type Wave struct { /* ... */ }
+
+// NewWave creates a top-level Wave. Uses the package default Pool
+// unless WithPool is supplied.
+func NewWave(ctx context.Context, opts ...WaveOption) *Wave
+
+// NewChild creates a Wave whose drain rolls up into the receiver's
+// drain. Inherits the receiver's Pool unless WithPool is supplied —
+// child Waves on a different Pool are valid (the library-isolation
+// case) but uncommon. Parent's GatherAll waits for all child Waves
+// to complete. Sub-work spawned inside the parent's task bodies
+// belongs to the parent unless explicitly created as a child Wave.
+func (*Wave) NewChild(ctx context.Context, opts ...WaveOption) *Wave
+
+func (*Wave) Gather(ctx context.Context) error      // pull one ready result through Gatherers
+func (*Wave) GatherAll(ctx context.Context) error   // drain to completion
+func (*Wave) Close()                                 // signal no more top-level entries to this Wave
+func (*Wave) CancelAndWait()                         // cancel Wave ctx, wait for drain
+
+type WaveOption interface { /* ... */ }
+
+// WithPool routes a Wave's work to a specific Pool instead of the
+// inherited or default one.
+func WithPool(p *Pool) WaveOption
+
+// ===== Flow: one logical thread of work =====
+
+// Flow is a refcounted, ctx-borne lifecycle entity representing a
+// single workflow instance. Its lifetime is determined by reference
+// counting across all work items that capture it — possibly spanning
+// multiple Waves. Use a Flow to attach metadata (trace context,
+// audit data) to related work, run a cleanup hook when all the
+// work completes, or scope a cancellation domain narrower than the
+// enclosing Pool ctx.
+type Flow struct { /* ... */ }
+
+// NewFlow creates a Flow rooted in parent. The returned ctx carries
+// the Flow; pass that ctx into op dispatches (Start, Submit) so the
+// framework can ref/unref the Flow across the work item's lifecycle.
+// The Flow starts with refcount 1 (the caller's reference) — call
+// Close to release it. afterFn fires when refcount reaches 0.
+// Cancellation: cancel parent (or use context.WithCancel before
+// calling NewFlow) to cancel the Flow's work.
+func NewFlow(parent context.Context, opts ...FlowOption) (context.Context, *Flow)
+
+// FlowFromContext retrieves the Flow attached to ctx, or nil if none.
+// Useful inside task bodies that need to extend or inspect the Flow.
+func FlowFromContext(ctx context.Context) *Flow
+
+// Dup returns a new reference to the same Flow, incrementing the
+// refcount. Use when handing the Flow to another goroutine that
+// will manage its own lifecycle.
+func (*Flow) Dup() *Flow
+
+// Close releases the caller's reference. After all references
+// (caller's plus framework's per-work-item) are released, afterFn
+// fires.
+func (*Flow) Close()
+
+type FlowOption interface { /* ... */ }
+
+func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
 
 // ===== Limiters =====
 
@@ -158,7 +281,7 @@ func (f FuncAccumulator[T]) Flush(ctx context.Context) error {
 }
 
 // Handler — the interface a Gatherer dispatches to when the user calls
-// Pool.Gather / Pool.GatherAll. Receives upstream values paired with
+// Wave.Gather / Wave.GatherAll. Receives upstream values paired with
 // any upstream errors.
 type Handler[T any] interface {
     Handle(ctx context.Context, value T, err error) error
@@ -172,8 +295,9 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 
 // ===== Op constructors =====
 //
-// All constructors take the user-supplied interface as canonical input.
-// For raw closures, wrap in the corresponding *Func type (TaskFunc[T],
+// All constructors bind ops to a *Wave (their lifecycle owner) and
+// take the user-supplied interface as canonical input. For raw
+// closures, wrap in the corresponding *Func type (TaskFunc[T],
 // HandlerFunc[T], FuncAccumulator[T]) at the call site.
 
 // Per-op options (functional)
@@ -182,17 +306,17 @@ type OpOption interface { /* ... */ }
 func WithLimits(limiters ...Limiter) OpOption
 // ... future: WithPriority, WithDeadline, WithRetry, etc.
 
-func NewTaskRunner0(pool *Pool, task Task0, opts ...OpOption) TaskRunner0
-func NewTaskRunner[T any](pool *Pool, task Task[T], opts ...OpOption) TaskRunner[T]
-func NewTaskRunner2[T1, T2 any](pool *Pool, task Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2]
-func NewCombiner[T any](pool *Pool, factory CombinerFactory[T], opts ...OpOption) Combiner[T]
-func NewGatherer[T any](pool *Pool, handler Handler[T], opts ...OpOption) Gatherer[T]
+func NewTaskRunner0(wave *Wave, task Task0, opts ...OpOption) TaskRunner0
+func NewTaskRunner[T any](wave *Wave, task Task[T], opts ...OpOption) TaskRunner[T]
+func NewTaskRunner2[T1, T2 any](wave *Wave, task Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2]
+func NewCombiner[T any](wave *Wave, factory CombinerFactory[T], opts ...OpOption) Combiner[T]
+func NewGatherer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Gatherer[T]
 
 // For "reducer" behavior — strictly serial accumulation, only one
 // instance active at a time — construct a Combiner with a 1-permit
 // limiter:
 //
-//   ordered := streampool.NewCombiner(pool, factory,
+//   ordered := streampool.NewCombiner(wave, factory,
 //       streampool.WithLimits(streampool.NewSemaphore(1)),
 //   )
 
@@ -219,7 +343,7 @@ func (Combiner[T]) SubmitErr(ctx context.Context, value T, err error) error
 func (Combiner[T]) Close()                                                    // signals no more input; triggers Flush on each instance
 func (Combiner[T]) Dup() Combiner[T]                                          // refcounted sharing across handlers
 
-// Gatherer — terminal sink; Handler is dispatched on Pool.Gather pull.
+// Gatherer — terminal sink; Handler is dispatched on Wave.Gather pull.
 type Gatherer[T any] struct { /* ... */ }
 func (Gatherer[T]) Submit(ctx context.Context, value T) error                 // sugar for SubmitErr(ctx, value, nil)
 func (Gatherer[T]) SubmitErr(ctx context.Context, value T, err error) error
@@ -231,10 +355,13 @@ func (Gatherer[T]) Dup() Gatherer[T]                                          //
 
 ```go
 ctx := context.Background()
-pool := streampool.New(ctx)
-defer pool.CancelAndWait()
 
-results := streampool.NewGatherer(pool, streampool.HandlerFunc[*User](
+// Wave: the batch of work this function awaits. Uses the package
+// default Pool implicitly; no Pool construction needed.
+wave := streampool.NewWave(ctx)
+defer wave.Close()
+
+results := streampool.NewGatherer(wave, streampool.HandlerFunc[*User](
     func(ctx context.Context, user *User, err error) error {
         if err != nil { return err }
         fmt.Println(user.Name)
@@ -242,7 +369,7 @@ results := streampool.NewGatherer(pool, streampool.HandlerFunc[*User](
     },
 ))
 
-fetch := streampool.NewTaskRunner(pool, streampool.TaskFunc[UserID](
+fetch := streampool.NewTaskRunner(wave, streampool.TaskFunc[UserID](
     func(ctx context.Context, id UserID) error {
         user, err := userClient.Fetch(ctx, id)
         return results.SubmitErr(ctx, user, err)
@@ -254,13 +381,41 @@ for _, id := range userIDs {
 }
 
 results.Close()
-pool.GatherAll(ctx)
+wave.GatherAll(ctx)
+// When this Wave's drain returns, the default Pool's workers have
+// exited synchronously (refcount → 0). If you then create another
+// Wave, workers spin back up on demand.
+```
+
+## With a custom Pool
+
+When you need a non-default ctx (cancellation domain narrower than
+process-wide) or non-default tuning:
+
+```go
+pool := streampool.NewPool(ctx, streampool.WithMaxGoroutines(100))
+// No defer needed — Pool's workers exit when refcount returns to 0.
+
+wave := streampool.NewWave(ctx, streampool.WithPool(pool))
+defer wave.Close()
+// ... ops against wave ...
+wave.GatherAll(ctx)
+```
+
+Flow is omitted from the hello world because it's optional. Add a Flow
+when you want logical-thread metadata or cleanup hooks:
+
+```go
+ctx, flow := streampool.NewFlow(ctx, streampool.WithAfterFunc(func() {
+    // fires when refcount reaches 0 — all work attributed to this Flow done
+}))
+defer flow.Close()  // releases the user's reference; framework refs come from work items
 ```
 
 ## With a combiner
 
 ```go
-totals := streampool.NewCombiner(pool, func() streampool.Accumulator[int] {
+totals := streampool.NewCombiner(wave, func() streampool.Accumulator[int] {
     var sum int
     return streampool.FuncAccumulator[int]{
         AccumulateFn: func(ctx context.Context, x int, err error) (time.Time, error) {
@@ -283,7 +438,7 @@ totals := streampool.NewCombiner(pool, func() streampool.Accumulator[int] {
     }
 })
 
-score := streampool.NewTaskRunner(pool, streampool.TaskFunc[UserID](
+score := streampool.NewTaskRunner(wave, streampool.TaskFunc[UserID](
     func(ctx context.Context, id UserID) error {
         user, err := userClient.Fetch(ctx, id)
         if err != nil { return err }
@@ -314,7 +469,7 @@ func (f *fetcher) Run(ctx context.Context, id UserID) error {
     return f.sink.SubmitErr(ctx, user, err)
 }
 
-fetch := streampool.NewTaskRunner(pool, &fetcher{db: db, sink: results})
+fetch := streampool.NewTaskRunner(wave, &fetcher{db: db, sink: results})
 
 for _, id := range userIDs {
     fetch.Start(ctx, id)  // no closure allocation per call
@@ -330,7 +485,7 @@ zero allocations per call.
 slowAPI := streampool.NewSemaphore(5)
 apiRate := streampool.NewRateLimit(100, time.Second)
 
-fetch := streampool.NewTaskRunner(pool, fetchFn,
+fetch := streampool.NewTaskRunner(wave, fetchFn,
     streampool.WithLimits(slowAPI, apiRate),
 )
 ```
@@ -346,12 +501,14 @@ operations."
 
 | Decision | Choice | Reasoning |
 |---|---|---|
-| Package name | `streampool` | Matches user-vocabulary search terms (worker pool / streaming results); distinct on pkg.go.dev; encodes the differentiator without being cute. |
-| Top-level type | `Pool` (in package `streampool`) | Stdlib convention allows package=type pairing (`container/list.List`, `sync.Pool`). The `streampool.New` idiom means the type name is rarely uttered. |
-| Top-level type **not** Job | The streams positioning makes the spool a "pool of streams" bounded context; Job is task-centric vocabulary that fights the framing. |
-| Worker pool | Implicit; no public `WorkerPool` type | The spool *is* the worker pool. Adaptive goroutine management is a property of the spool, configurable via `PoolOption`. No second pool type to construct. |
+| Package name | `streampool` | Matches user-vocabulary search terms (worker pool / streaming results); distinct on pkg.go.dev; encodes the differentiator without being cute. The tagline lands literally: a Pool of workers runs Waves of work hosting Flows of related processing. |
+| Three concerns, three types | `Pool` (workers), `Wave` (batch), `Flow` (workflow instance) | The conflated single-type model produced confusing "what does Pool actually do?" questions. Separating: Pool manages goroutines (singleton-ish, process-level); Wave is the user-facing batch primitive that hosts ops and exposes drain verbs; Flow is the ctx-borne refcounted lifecycle entity for a single workflow instance, independent of any Wave. |
+| Role-3 name: `Wave` (not `Job` / `Group` / `Batch`) | "A wave of processing" carries the right metaphor: waves can overlap (multiple in flight in the same Pool), vary in size (small ripples to large processing bursts), and contain smaller waves (nested sub-batches). Coheres with the streampool nautical theme. `Job` is acceptable but reads as a discrete K8s/SLURM-style unit; `Group` clashes with errgroup. `Wave` is fresh and metaphorically apt. |
+| Role-2 name: `Flow` (not `Stream` / `Workflow`) | `Stream` denotes "a flow of items" in standard usage — Java/Akka/Kafka/Node streams. Our role-2 type holds no payload; it's a refcounted lifecycle marker. Stream would mislead. `Flow` reads concretely (one specific flow of work) without the abstract-vs-concrete ambiguity of `Workflow`, has no Argo/BPM/Temporal baggage, is short, and coheres with the nautical theme. `Stream` is reserved for a future observability concept (a stream of Flow events). |
+| Worker pool | `Pool` — fungible, often implicit | Pool's job is just goroutines, idle policy, max budget. No `Gather`, no `Shutdown`, no `Wait` — refcount-driven lifecycle handles termination implicitly. A package-level default Pool exists; users only call `NewPool` for a non-default ctx (cancellation domain) or non-default tuning. Matches `sync.Pool` convention as a fungible resource container. |
+| Op constructor first arg | `wave *Wave` | Ops bind to a Wave (their lifecycle owner). Pool comes via the Wave (which references a Pool through default or `WithPool`). Flow comes in dynamically via ctx, not at construction — because a Flow can span Waves but ops can't. |
+| Pool lifecycle | Refcount-driven; workers exit synchronously on last Wave drain | No `Shutdown` / `Wait` API. Each referencing Wave bumps refcount; drain completion drops it. When count → 0, workers terminate synchronously before the last Wave's drain returns — strong guarantee that no Pool goroutines outlive the user's drain calls. Pool reuse after this is automatic; the next Wave that references the Pool spins workers up again. |
 | Op constructor verb | `NewTaskRunner`, `NewCombiner`, `NewGatherer` | Agent nouns (`-er` suffix). The type names describe roles, not the function-call verb. Matches `http.Handler`, `io.Reader`, `sync.Mutex`. |
-| Op constructor first arg | `pool *Pool` | Positional and required across all three op constructors. No `.In(pool)` chain. Mirrors how `ctx` is conventionally first; `pool` is the next-most-central reference. |
 | TaskRunner dispatch verb | `Start` | Active async dispatch ("start a task with this arg"). Matches `os/exec.Cmd.Start()` precedent — fire-it-off-async-don't-wait. Works across arities including the no-arg case (`runner0.Start(ctx)`). |
 | Sink dispatch verb | `Submit` / `SubmitErr` | Committed-delivery semantics: "submit this value to the sink." Avoids the Java `BlockingQueue.offer` baggage that would mislead users to expect try-semantics from `Offer`. No collision with TaskRunner verb since TaskRunner uses Start. |
 | Interface method verbs | `Run` (Task), `Accumulate`/`Flush` (Accumulator), `Handle` (Handler) | Sync execution verbs on user-implemented interfaces, mirroring the http.Handler.ServeHTTP / exec.Cmd inner-process pattern: async dispatch on the op (Start, Submit), sync invocation on the implementation (Run, Accumulate, Handle). |
@@ -373,20 +530,22 @@ operations."
 
 | Old (psg-go) | New (streampool) | Notes |
 |---|---|---|
-| `psg.NewJob(ctx)` | `streampool.New(ctx, opts...)` | Top-level constructor unchanged in spirit. |
-| `*Job` | `*Pool` | The bounded context. |
-| `psg.NewPool` / `psg.NewTaskPool` | (removed) | Spool IS the worker pool. Adaptive management built in. |
-| `psg.NewCombinerPool` | (removed) | Same — combiner workloads run in the spool's goroutine pool. |
-| `psg.NewGatherOp(handler)` | `streampool.NewGatherer(pool, handler)` | Spool now required at construction; handler signature simplified. |
-| `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewCombiner(pool, factory)` | Output type parameter gone; downstream sink wired via factory's closure. |
-| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewTaskRunner(pool, taskFn)` + `task.Offer(ctx, arg)` | Two-step: construct the runner once; dispatch with arg. |
+| `psg.NewJob(ctx)` (the post-rename `psg.New(ctx)`) | **Splits** into `streampool.NewWave(ctx)` (user-primary; uses default Pool) + optionally `streampool.NewPool(ctx, opts...)` (only for non-default ctx or tuning) | The conflated Pool-as-bounded-context becomes two types. Wave is the user-facing handle for a batch of work; Pool is the fungible worker container, mostly implicit. |
+| `*Job` / `*Pool` (conflated) | `*Pool` (workers, fungible) + `*Wave` (batch, user-primary) | See three-type model above. |
+| `psg.NewPool` / `psg.NewTaskPool` | (removed) | Per-op concurrency limits move to Limiters; workers are managed by the Pool. |
+| `psg.NewCombinerPool` | (removed) | Same — combiner workloads run in the Pool's goroutine pool, bounded by Limiters. |
+| `psg.NewGatherOp(handler)` | `streampool.NewGatherer(wave, handler)` | Wave required at construction; handler signature unchanged. |
+| `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewCombiner(wave, factory)` | Output type parameter gone; downstream sink wired via factory's closure. |
+| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewTaskRunner(wave, taskFn)` + `runner.Start(ctx, arg)` | Two-step: construct the runner once; dispatch with arg. |
+| `Pool.CloseAndGatherAll(ctx)` | `wave.GatherAll(ctx)` | Single call. Pool worker termination is automatic (refcount → 0 → synchronous worker exit before drain returns). |
 | `*GatherOp[T]` | `Gatherer[T]` | Op-suffix dropped; agent noun. |
 | `*CombineOp[I, O]` | `Combiner[T]` | Output type parameter eliminated. |
 | (n/a) | `TaskRunner[T]` / `TaskRunner2[T1, T2]` | Stateless dispatch op surfaced as a first-class type. |
 | `psgfn.Task[T]` | `TaskFunc[T]` | Naming convention: function-signature types end in `Func`. |
 | `psgfn.CombinerFactory[I, O]` | `CombinerFactory[T]` | Output type removed. |
-| `psgwf` package | TBD | Workflow utilities adapt to new API; ops still refcounted via Dup/Close. |
-| `otpsg` package | `otstreampool`? | OpenTelemetry integration; rename TBD. |
+| `psgwf.Workflow` | `streampool.Flow` | Renamed and folded into main package. Same refcounted-ctx-borne lifecycle semantics. |
+| `psgwf` package | (folded into main package; Flow type) | Workflow consolidates into Flow. No separate sub-package. |
+| `otpsg` package | (deleted; replaced by doc page) | OpenTelemetry integration becomes a doc page demonstrating the `Flow` + `trace.ContextWithSpan` pattern. No separate package. |
 | `psgopt` package | (folded into main package) | Option types live with the package they configure. |
 
 ---
@@ -459,8 +618,49 @@ workers vs combiner workers.
 **Reason**: the historical reason was state-per-goroutine coupling in
 combiners. That coupling no longer exists — state is pooled separately
 via omnipool, goroutines are fungible. Two pool types for one
-underlying behavior is API noise. The spool itself is the single
+underlying behavior is API noise. The Pool itself is the single
 worker pool; per-op concurrency control is expressed via Limiters.
+
+### `Job` as the role-3 (batch-of-work) name
+
+**Rejected**: naming the batch primitive `Job`.
+
+**Reason**: `Job` reads as a discrete K8s/SLURM-style unit with a
+clear single start and end. The streampool model has many of these
+running concurrently in the same Pool, overlapping and nesting —
+`Job` resists that mental model. `Wave` carries the metaphor better:
+waves overlap (multiple in flight), vary in size (small ripples to
+large bursts), and contain smaller waves (nested sub-batches).
+`Job` also fights the nautical theme that Pool / Wave / Flow / future
+Stream all share. (`Group` was a runner-up; rejected due to errgroup
+clash and lighter-than-warranted feel for what's actually a
+substantial batch primitive.)
+
+### `Workflow` as the role-2 (workflow-instance) name
+
+**Rejected**: naming the ctx-borne refcounted lifecycle entity
+`Workflow` (the psgwf legacy name).
+
+**Reason**: `Workflow` is used in both abstract ("the user onboarding
+workflow" — the process/template) and concrete ("this workflow
+instance is in progress") senses. As a Go type name, that ambiguity
+forces readers to spend a beat figuring out which sense is meant.
+`Flow` reads concretely by default — "a flow of work" is almost
+always a specific thing. `Flow` is also shorter, has no
+Argo/BPM/Temporal baggage, and coheres with the nautical theme.
+
+### `Stream` as the role-2 name
+
+**Rejected**: naming the workflow-instance type `Stream`.
+
+**Reason**: in standard usage — Java Stream\<T\>, Akka Streams,
+Kafka, Node.js streams, RxJS — "stream" denotes a flow of multiple
+items over time. Our role-2 type carries no payload; it's a
+refcounted lifecycle marker. Calling it Stream would prime users to
+expect methods like `.send()` / `.write()` / `.next()` that don't
+exist. `Stream` is instead **reserved** for a future observability
+concept: a stream of Flow lifecycle events for monitoring and
+aggregation. That meaning matches "stream" semantically.
 
 ### TaskRunner.Close
 
@@ -507,51 +707,27 @@ These are real and need answers before implementation locks in.
    body. Opening the interface later is non-breaking; closing it
    later would be — conservative now, expansive later.
 
-3. **Sub-package naming — partially resolved, partially needs deeper
-   work.** Updated 2026-05-24 after auditing psgwf and otpsg:
-   - `psgfn` → folded into main package. **Resolved.**
-   - `psgopt` → folded into main package. **Resolved.**
-   - `psgwf` and `otpsg` turn out to be **alternate complete API
-     surfaces**, not sub-domains. psgwf injects a `Workflow` parameter
-     across task/combine/gather signatures via result-type wrapping;
-     otpsg does the same for OpenTelemetry trace context via
-     `PropagatedResult[T]`. Users import one or the other, not both
-     alongside plain psg. And per the user, otpsg was already slated
-     to refactor on top of psgwf — meaning they consolidate into one
-     concept.
-
-   The new API design enables consolidation:
-
-   - **No result-type wrapping needed.** Explicit `Submit(ctx, value)`
-     from function bodies replaces the `.To(sink)` auto-routing
-     mechanism that required result-type tricks. Side-band data rides
-     `ctx` instead.
-
-   - **Rename Workflow → Stream.** Aligns with the streampool
-     positioning ("pool of streams"). A Stream is one logical thread
-     of related work — refcounted lifecycle, hierarchical (parent-child),
-     optional typed context via generics, default cancellation domain.
-     Avoids the "Workflow" baggage (Argo, BPM, Temporal-style state
-     machines).
-
-   - **Stream is a first-class concept in main `streampool` package.**
-     Not a sub-package. With the rename and the streampool framing,
-     it's load-bearing for the metaphor, not optional add-on.
-
-   - **OpenTelemetry integration becomes a doc page.** Trace context
-     rides on Stream's ctx. otpsg as a separate package is unnecessary;
-     a 1–2 page doc shows the `streampool.Stream` + `trace.ContextWithSpan`
-     pattern with optional thin helpers. **Provisional: drop the otpsg
-     package entirely.**
-
-   - **Stream optional, not required.** Users who don't need lifecycle
-     tracking just don't create one. Users who do create one and put
-     it in ctx (e.g., `streampool.WithStream(ctx, stream)`); framework
-     auto-refs/unrefs around work it dispatches.
-
-   **Decision substantially settled, with one substantive design
-   requirement still open** — see open question 9 (Submit ctx
-   propagation) below.
+3. ~~**Sub-package naming and psgwf/otpsg consolidation.**~~
+   **Resolved (2026-05-25)** after the three-type-model design session:
+   - `psgfn` → folded into main package. ✓
+   - `psgopt` → folded into main package. ✓
+   - `psgwf.Workflow` → `streampool.Flow`, folded into main package. The
+     Workflow concept (one logical thread of related work, refcounted,
+     ctx-borne) becomes the Flow type. Named "Flow" rather than
+     "Workflow" because Flow reads concretely as one specific instance,
+     where Workflow tilts abstract (a process/template). Named "Flow"
+     rather than "Stream" because Stream in standard usage denotes a
+     flow of multiple items, mismatching the singular-instance
+     semantics. Stream is reserved for a future observability concept
+     (a stream of Flow lifecycle events).
+   - `otpsg` → deleted; replaced by a doc page demonstrating
+     `streampool.Flow` + `trace.ContextWithSpan`. No result-type
+     wrapping needed; trace context rides on Flow's ctx through the
+     standard `ctx.Value` / `trace.SpanFromContext` idioms.
+   - Flow is **optional** — users who don't need lifecycle tracking
+     just don't create one. Users who do create one via
+     `streampool.NewFlow(parent)` (returns updated ctx); framework
+     auto-refs/unrefs around work items dispatched with that ctx.
 
 4. ~~**Combiner factory invocation strategy.**~~ **Resolved (2026-05-24).**
    Documented contract for users:
@@ -627,9 +803,10 @@ These are real and need answers before implementation locks in.
    `psg-go` for archival and develop the new `streampool` module
    freely.
 
-9. ~~**Submit ctx propagation.**~~ **Resolved (2026-05-24).**
+9. ~~**Submit ctx propagation.**~~ **Resolved (2026-05-24, updated
+   2026-05-25 for Flow naming and Wave-boundary model).**
 
-   For Stream lifecycle and OpenTelemetry trace context to ride `ctx`
+   For Flow lifecycle and OpenTelemetry trace context to ride `ctx`
    (replacing the result-type wrapping in psgwf/otpsg), the framework
    treats Submit ctx as load-bearing. Three boundary cases:
 
@@ -640,18 +817,18 @@ These are real and need answers before implementation locks in.
    - **Combiner.Accumulate invocation.** Framework captures the
      Submit ctx with each work item and uses it directly for the
      Accumulate call (layered via `ensureCtxMeta` to add combine-meta).
-     Submit ctx is rooted in the user's Stream ctx, which is rooted
-     in the pool ctx, so cancellation cascade works through the
-     standard `context` hierarchy. Submit ctx values (trace span,
-     Stream handle, audit metadata) are accessible via standard
-     `ctx.Value` / `trace.SpanFromContext` idioms inside Accumulate.
+     Submit ctx is rooted in the user's Flow ctx (if any), which is
+     rooted in the Wave ctx, which is rooted in the Pool ctx — so
+     cancellation cascade works through the standard `context`
+     hierarchy. Submit ctx values (trace span, Flow handle, audit
+     metadata) are accessible via standard `ctx.Value` /
+     `trace.SpanFromContext` idioms inside Accumulate.
 
    - **Gatherer Handler invocation.** Handler's ctx is rooted in the
-     Submit ctx so that stream and pool cancellation propagate via
-     the standard parent chain. The puller's ctx (from
-     `pool.Gather(pullCtx)`) is an independent cancellation source
-     that needs to be wired in as an additional source. Conceptually
-     equivalent to:
+     Submit ctx so that Flow, Wave, and Pool cancellation propagate
+     via the standard parent chain. The puller's ctx (from
+     `wave.Gather(pullCtx)`) is an independent cancellation source
+     wired in as an additional source. Conceptually equivalent to:
 
      ```go
      ctx, cancel := context.WithCancel(submitCtx)      // rooted in submit
@@ -660,27 +837,27 @@ These are real and need answers before implementation locks in.
      return handler.Handle(ctx, value, err)
      ```
 
-     Result: Handler's `ctx.Done()` fires on stream cancel, pool
-     cancel, or puller cancel; `ctx.Value(key)` walks from Submit ctx
-     upward. Implementation may use the literal stdlib pattern above
-     OR a pooled-goroutine `mergedCtx` (with idle eviction and
-     done-channel reuse to avoid per-call allocations on the hot
-     path). Choice is a profiling decision; user contract is the
-     same.
+     Result: Handler's `ctx.Done()` fires on Flow cancel, Wave
+     cancel, Pool cancel, or puller cancel; `ctx.Value(key)` walks
+     from Submit ctx upward. Implementation may use the literal
+     stdlib pattern above OR a pooled-goroutine `mergedCtx` (with
+     idle eviction and done-channel reuse to avoid per-call
+     allocations on the hot path). Choice is a profiling decision;
+     user contract is the same.
 
-   **Stream lifecycle**: framework inspects Submit ctx for a Stream
-   (via `streampool.StreamFromContext(ctx)`) at Submit time;
-   `Ref()`s the Stream before queueing the work item; `Unref()`s
-   when the work item is `Free()`'d. Stream's `afterFn` fires when
-   refcount hits zero. Stream ctxs are user-created via
-   `streampool.NewStream(parent, ...)` where parent must be rooted
-   in the pool ctx; framework verifies at NewStream time and panics
-   on misuse.
+   **Flow lifecycle**: framework inspects Submit ctx for a Flow
+   (via `streampool.FlowFromContext(ctx)`) at Submit time; `Dup()`s
+   the Flow (incrementing refcount) before queueing the work item;
+   `Close()`s it when the work item is `Free()`'d. Flow's `afterFn`
+   fires when refcount hits zero. Flows are user-created via
+   `streampool.NewFlow(parent, ...)` and may span multiple Waves —
+   their lifecycle is determined by refcount across all work items
+   that captured them, not by any one Wave's drain.
 
    **What this lets us delete**:
-   - `psgwf` entirely (Stream replaces it in main package)
+   - `psgwf` entirely (Flow replaces Workflow in main package)
    - `otpsg` entirely (replaced by a doc page on the standard
-     `streampool.Stream` + `trace.ContextWithSpan` pattern)
+     `streampool.Flow` + `trace.ContextWithSpan` pattern)
    - All result-type wrapping plumbing in both
 
    **Machinery additions**:
@@ -689,7 +866,7 @@ These are real and need answers before implementation locks in.
    - Gather-boundary ctx construction: stdlib `WithCancel` + `AfterFunc`,
      or pooled-goroutine `mergedCtx`. Implementation choice deferred
      to profiling.
-   - Stream Ref/Unref bracketing around work-item lifecycle.
+   - Flow Dup/Close bracketing around work-item lifecycle.
 
    **Open implementation sub-choice (deferred to implementation
    phase)**: how to implement the Gather-boundary ctx. Two options:
@@ -704,6 +881,68 @@ These are real and need answers before implementation locks in.
      Handler invocation up to the steady-state cap. Choose if
      profiling shows the stdlib path is a bottleneck.
 
+10. ~~**The three-type model (Pool / Wave / Flow).**~~
+    **Resolved (2026-05-25).** The earlier "Pool as bounded context"
+    framing conflated three distinct concerns: a process-level worker
+    pool, a user-facing batch of work to await, and a single workflow
+    instance. Splitting into Pool (workers, singleton-ish), Wave
+    (batch, nestable, hosts ops), and Flow (workflow instance,
+    ctx-borne, refcounted, can span Waves) gives each role a clean
+    home. Multi-Pool usage shrinks to library-boundary resource
+    isolation; multi-Wave is the typical pattern; Flow remains
+    optional for cross-cutting metadata + lifecycle hooks. See the
+    three-type model section at the top of this doc for details.
+
+11. ~~**Pool lifecycle semantics.**~~ **Resolved (2026-05-25, refined
+    2026-05-25 to refcount-driven model).** Pool has no `Shutdown` or
+    `Wait` methods. Lifecycle is implicit:
+
+    - **Construction**: `NewPool(ctx, opts...)` creates a custom Pool.
+      A package-level default Pool exists implicitly for users who
+      don't need a custom ctx or tuning.
+    - **Refcount tracking**: each referencing Wave bumps the Pool's
+      refcount on construction and drops it when its drain
+      (`GatherAll`, terminal `Close+Gather`, or `CancelAndWait`)
+      completes.
+    - **Worker spin-up**: workers are created on demand as the first
+      Wave starts dispatching work to them.
+    - **Idle worker exit during active use** (`refcount > 0`):
+      individual workers between work items exit per `IdleTimeout`.
+      The transient-idle case in a busy Pool.
+    - **Refcount → 0**: synchronous worker termination. The last
+      Wave's drain method signals all workers to exit, blocks until
+      they have, then returns. Guarantee: when the final drain
+      returns, the Pool has zero live goroutines.
+    - **Reuse**: a new Wave referencing the Pool after the refcount=0
+      transition spins workers up again from scratch. Pool object
+      itself unchanged; only the worker set cycles.
+    - **Hard abort**: cancel the ctx given to `NewPool` (or, for the
+      default Pool, the program's parent ctx if the user wired one
+      in). Cascades to all referencing Waves, all in-flight work,
+      all workers ASAP.
+
+    Misbehaved tasks that ignore ctx degrade shutdown semantics
+    (workers can't exit until they return from user code). Documented
+    constraint, not framework-enforceable.
+
+12. ~~**Cross-Wave Submit.**~~ **Resolved (2026-05-25).** Submit
+    routinely crosses Wave boundaries — a worker running in Wave A
+    can call `gatherer.Submit(ctx, value)` on an op constructed
+    against Wave B. The submitted work item belongs to Wave B
+    (counted in Wave B's drain). Flow rides on ctx and tracks the
+    cross-Wave hop naturally; Flow's refcount holds across the
+    transition.
+
+    Sub-Wave Submit (parent ↔ child Waves) is the typical pattern
+    for nested workflows. Cross-Pool Submit (between Waves in
+    different Pools) is available but exotic — the library-isolation
+    case.
+
+    Stale-handle errors (Submit to a closed/cancelled Wave's op)
+    return defined error sentinels: `ErrWaveClosed`, ctx error from
+    Pool/Wave cancellation. Use-after-final-Unref is a programming
+    error and may panic.
+
 ---
 
 ## Impact on the rest of the project
@@ -711,16 +950,31 @@ These are real and need answers before implementation locks in.
 ### README
 
 `README-proposed.md` needs updates reflecting:
-- The simplified "no pool to construct" framing.
+- The three-type model (Pool / Wave / Flow) — Pool typically
+  constructed once at startup; Waves per batch of work; Flows
+  optional for cross-cutting metadata.
 - The Limiter-based concurrency model (replacing per-pool limits).
-- The Offer-from-body model (replacing `.To(sink)` wiring).
-- Updated hello world using `NewTaskRunner` + `Offer`.
+- The Submit-from-body model (replacing `.To(sink)` wiring).
+- Updated hello world using `NewWave` + `NewTaskRunner(wave, ...)`
+  + `Submit`.
+- Candidate tagline: "streampool enables frictionless execution of
+  recursive streams of work in hierarchical waves with granular
+  visibility and control of individual flows." Captures all four
+  pillars of the metaphor (Pool implicit in the package name; Waves;
+  Flows; future Streams) in one sentence. "Frictionless" earns its
+  place as a one-word claim covering three concrete technical
+  properties: low developer ceremony (bound-op pattern,
+  Submit-from-body), allocation-free hot path (interface-on-struct,
+  pooled state), and zero hot-path contention (nbcq/rdvq/omnipool
+  infrastructure). The metaphor is carried by the nouns
+  (streams/waves/flows), so the adjective slot doesn't need to do
+  fluid-themed work — it's freed up for a technical claim instead.
 
 The comparison table rows mostly stand, but some footnotes need
 adjustment (the "per-pool concurrency limits" row becomes "limiters
 compose across pools"; the "end-to-end backpressure" footnote already
 matches the new model; the "adaptive pool sizing" row gets simpler
-since the user doesn't construct pools).
+since the user doesn't construct pools per batch).
 
 ### ARCHITECTURE_COMPARISON.md
 
@@ -737,14 +991,21 @@ naming and tagline choices; this design doc applies them.
 ### Implementation cost
 
 Bigger than just a rename. Notable refactors:
+- **Split today's conflated `Pool` into three types: Pool (workers),
+  Wave (batch), Flow (workflow instance).** Pool's unit-of-work
+  verbs migrate to Wave; psgwf.Workflow consolidates into Flow.
 - Remove `.To`-style wiring from Combine/Task; route values via
-  user-explicit `Offer` calls in op bodies.
+  user-explicit `Submit` calls in op bodies.
 - Eliminate the output type parameter from Combiner.
 - Add `Limiter` interface and implementations; refactor pool-internal
   concurrency limits to accept Limiters per-op.
 - Merge `TaskPool` and `CombinerPool` machinery into one internal
   worker pool with Limiter-based per-op control.
 - Rename and re-shape examples, tests, sub-packages.
+- Replace Pool's CloseAndGatherAll with Wave's GatherAll. Pool
+  lifecycle becomes refcount-driven with synchronous worker
+  termination on the last referencing Wave's drain. Establish a
+  package-level default Pool for the common case.
 
 Estimated as a major-version rewrite. Worth doing as a single coherent
 landing rather than piecemeal — incremental migration would force

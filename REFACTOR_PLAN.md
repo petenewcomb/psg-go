@@ -84,16 +84,54 @@ alongside) the reshape waves:
 - Plans are constructed via `rapid` property-based generators.
 - The framework drives the runtime through every scenario its planner
   can construct and asserts behavioral invariants.
-- **Design questions for the reshape:** What does a Plan look like
-  when:
-  - Combiners no longer have an output type (just input)?
-  - Tasks return errors rather than (T, error)?
-  - TaskRunner exists as a distinct dispatch primitive?
-  - Streams (the new Workflow replacement) are first-class lifecycle
-    entities?
-  - Limiters compose across ops?
-- **Requirements session needed** before reshaping anything that the
-  sim covers.
+- **Design session complete (2026-05-25).** Decisions:
+  - New vocabulary, anchored to destination API (Pool/Wave/Flow/
+    Limiter/TaskRunner/Combiner/Gatherer with no FlushHandler field),
+    implemented against current API via a small adapter layer.
+  - Sim terminology: **Plan** is the static (rapid-generated)
+    description of a unit of work; **Wave** is the runtime entity
+    that executes it. One Plan corresponds to one Wave at execution
+    time. The Plan tree (top-level + nested Subjobs) describes the
+    sim's structure; the Wave tree (top-level + child Waves)
+    represents the runtime instantiation. Sim files keep the
+    `Plan` name — it's the static-description concept distinct from
+    the runtime Wave.
+  - Adapter uses `struct{}` as combiner output type + a singleton
+    dummy `Gatherer[struct{}]` to satisfy current API; real data
+    routes via `Submit`/`TrySubmit` from within bodies.
+  - Plan generators produce the full destination-API expressive
+    range (multi-sink, multi-StartTask, zero-output paths) from day 1
+    via the dummy-sink trick. Two narrow gates: cross-kind shared
+    Limiters and RateLimit-style Limiters deferred to post-Wave-4.
+  - Steps carry `Prob float64` for probabilistic execution;
+    SelfTime carries a `BiasedDurationConfig` for per-invocation
+    duration draws; Func carries `ReturnErrorProb`. A
+    `Deterministic` config mode forces all to 1.0/fixed for
+    exact-bound assertions.
+  - **Subjob model — phased.** In v1 (against current API): Subjob
+    creates its own `psg.Pool` (current behavior; maps cleanly onto
+    the no-Wave-type-yet current API), with bidirectional Submit via
+    `ParentExposedOps` registration. This exercises cross-Pool
+    boundary code (race-heavy coverage). After Wave 5 (Pool/Wave
+    split) lands, the adapter switches the default to "Subjob =
+    child Wave sharing parent Pool" (typical user pattern), keeping
+    cross-Pool as a per-Subjob config knob for exotic coverage.
+    Generator code is unchanged; only the adapter's runtime
+    interpretation evolves.
+  - **Flow not exercised in sim v1.** Flow lifecycle (refcount,
+    afterFn, cross-Wave span) is covered by dedicated tests at Wave
+    7 landing time, not by the sim's plan generator. Keeps the sim
+    focused on op composition / concurrency / error propagation;
+    avoids coupling sim assertions to Flow refcount machinery.
+  - Per-Limiter pool mapping in the adapter; generator never shares
+    Limiters across op kinds (TaskRunner vs Combiner) or uses
+    non-Semaphore kinds in v1.
+  - **Assertion contract.** In Deterministic mode (all probs 1.0,
+    SelfTime distributions fixed, ReturnErrorProb ∈ {0,1}): exact
+    Min=Max sink-invocation bounds and exact concurrency-limit
+    assertions, matching today's behavior. In probabilistic mode:
+    Max-only sink-invocation bounds (≤ theoretical max), best-effort
+    concurrency assertions. TestBySimulation runs both modes.
 
 ### `combiner_test.go` and combiner-specific benchmarks
 
@@ -119,7 +157,11 @@ alongside) the reshape waves:
 
 - Currently demonstrate the workflow-context-propagation pattern via
   the alternate API surface.
-- When psgwf consolidates into `Stream`, all these need migration.
+- When psgwf consolidates into `Flow` (Wave 7), all these need
+  migration. The new ctx-propagation contract (Wave 6) covers the
+  bulk of psgwf's value-add automatically; remaining tests focus on
+  Flow lifecycle (refcount, parent-child, afterFn) and Flow ctx
+  cancellation across Wave boundaries.
 - **Design questions:** Which scenarios *are* psgwf's value-add vs.
   ones that fall out of ctx-propagation automatically?
 
@@ -237,11 +279,53 @@ through `WithLimits(...)`.
 
 **Estimated effort:** Large. Touches internals deeply.
 
-### Wave 5 candidate: ctx propagation enhancement
+### Wave 5 candidate: Split Pool into Pool + Wave (three-type model)
+
+Per API_DESIGN.md (2026-05-25 update, refined same day): the current
+`Pool` conflates two roles — fungible worker container and
+user-facing batch-of-work. Split into `Pool` (workers only, fungible,
+typically implicit via package default) and `Wave` (batch lifecycle
++ op ownership, user-primary type). Sets up Flow consolidation in
+Wave 7.
+
+**Shape change:**
+- `Pool` becomes purely a worker container. No drain methods, no
+  Shutdown, no Wait. Refcount-driven lifecycle: workers exit
+  synchronously when the last Wave referencing the Pool completes
+  its drain.
+- Package-level default Pool exists implicitly; `NewPool` only
+  needed for custom ctx or tuning.
+- `Wave` is new: hosts ops (op constructors take `*Wave`), exposes
+  Gather/GatherAll/Close/CancelAndWait. Nestable via `Wave.NewChild`.
+  References a Pool (default or via `WithPool` option).
+- `WithPool` option on both `NewWave` and `Wave.NewChild`. Child
+  Wave inherits parent's Pool unless overridden.
+
+**Scope:**
+- Add `Wave` type. Migrate op-ownership semantics (op-registry,
+  drain machinery) from Pool to Wave.
+- Reshape op constructors: `NewTaskRunner(wave, ...)`,
+  `NewCombiner(wave, ...)`, `NewGatherer(wave, ...)`.
+- Strip Pool to just worker management + ctx. Add refcount tracking.
+- Implement synchronous worker termination on refcount=0 (signal
+  workers, wait for exit, return).
+- Establish package-level default Pool (lazy init, background ctx).
+- Add `Wave.NewChild`, `WithPool` option.
+- Implement cross-Wave Submit (an op's Submit accepts values from
+  any Wave's worker; the work item belongs to the target op's Wave).
+- Update sim, tests, benchmarks to use Wave-based construction.
+
+**Gating design sessions:**
+- (None remaining — the three-type model is resolved in API_DESIGN.md.)
+
+**Estimated effort:** Large. Significant internal refactor of
+Pool's responsibilities, plus new Wave type.
+
+### Wave 6 candidate: ctx propagation enhancement
 
 Submit ctx becomes load-bearing across cross-op boundaries (per
-API_DESIGN.md #9 resolution). Foundation for the Stream consolidation
-in Wave 6.
+API_DESIGN.md #9 resolution). Foundation for Flow consolidation in
+Wave 7.
 
 **Scope:**
 - Add Submit-ctx field on work items.
@@ -258,17 +342,26 @@ in Wave 6.
 
 **Estimated effort:** Medium.
 
-### Wave 6 candidate: Stream replaces psgwf
+### Wave 7 candidate: Flow replaces psgwf
 
-With ctx propagation in place, psgwf's workflow concept consolidates
-into a `Stream` type in the main package.
+With ctx propagation in place, psgwf's Workflow concept consolidates
+into a `Flow` type in the main package.
+
+**Shape change:** `psgwf.Workflow` → `streampool.Flow`. Naming: Flow
+rather than Workflow (concrete instance reading; avoids abstract/
+concrete ambiguity) and Flow rather than Stream (Stream's
+multiple-items connotation mismatches Flow's singular-instance
+semantics; Stream reserved for future observability concept).
 
 **Scope:**
-- Add `streampool.Stream` type with refcounted lifecycle, parent-child
+- Add `streampool.Flow` type with refcounted lifecycle, parent-child
   hierarchy, afterFn.
-- Add `streampool.ContextWithStream` / `StreamFromContext` helpers.
-- Framework auto-Ref/Unref around work item lifecycle via ctx
+- Add `streampool.NewFlow(parent context.Context, ...)` returning
+  `(context.Context, *Flow)`. Add `FlowFromContext(ctx)` helper.
+- Framework auto-Dup/Close around work item lifecycle via ctx
   inspection.
+- Flow can span Waves: lifecycle is determined by refcount across
+  all work items, not by any single Wave's drain.
 - Migrate psgwf's tests and examples.
 - Delete psgwf package.
 
@@ -277,18 +370,18 @@ into a `Stream` type in the main package.
 
 **Estimated effort:** Medium.
 
-### Wave 7 candidate: Drop otpsg
+### Wave 8 candidate: Drop otpsg
 
 OpenTelemetry integration becomes a doc page.
 
 **Scope:**
-- Write doc page demonstrating Stream + `trace.ContextWithSpan` pattern.
+- Write doc page demonstrating Flow + `trace.ContextWithSpan` pattern.
 - Migrate otpsg's tests/examples to use the standard pattern.
 - Delete otpsg package and module.
 
 **Estimated effort:** Small.
 
-### Wave 8 candidate: Module rename
+### Wave 9 candidate: Module rename
 
 `github.com/petenewcomb/psg-go` → `github.com/petenewcomb/streampool`.
 
@@ -301,7 +394,7 @@ OpenTelemetry integration becomes a doc page.
 
 **Estimated effort:** Small but invasive (touches every file).
 
-### Wave 9 candidate (optional): Naming cleanup pass
+### Wave 10 candidate (optional): Naming cleanup pass
 
 Sweep up the intentional gaps from earlier waves:
 - Lowercase `job` → `pool`, `combineOp` → `combiner`,
@@ -352,11 +445,37 @@ relevant waves proceed:
 
 ## Next concrete step
 
-Per the user observation that the test/benchmark redesign is the
-dominant constraint: the next concrete step is **a design session on
-the sim framework's requirements and approach** for the post-reshape
-world. That session's output will inform whether Wave 2 (combiner
-reshape) can proceed, and what its sim-coverage commitments are.
+The sim design session is complete (2026-05-25). Decisions captured
+in the sim section above and in API_DESIGN.md's three-type model:
+
+- New sim vocabulary anchored to the destination API (Pool / Wave /
+  Flow / Limiter / TaskRunner / Combiner / Gatherer).
+- Adapter against current API uses `struct{}` as a dummy output type
+  for Combiner and a singleton dummy `Gatherer[struct{}]` to satisfy
+  current API's structural requirements; all real data propagation
+  routes through `Submit`/`TrySubmit`.
+- Per-Limiter pool mapping; generator restricts to single-kind
+  Limiter sharing and Semaphore-only Limiters for now.
+- Probabilistic Steps (Prob field on Submit/StartTask/Subjob),
+  per-invocation SelfTime distribution draw, probabilistic
+  ReturnErrorProb on Func — gated by a `Deterministic` config mode
+  for exact-bound assertions.
+- Subjob keeps its own Pool by default (exercises cross-Pool
+  boundary code), supports bidirectional Submit via
+  ParentExposedOps registration.
+
+**Next concrete step**: implement the new sim vocabulary in
+`internal/sim/` against the current API via the adapter. This
+provides the regression-coverage substrate that subsequent reshape
+waves (Wave 2 onward) ride on top of without needing further sim
+design sessions.
+
+Following the sim implementation, the reshape waves can proceed in
+their numbered order: Wave 2 (combiner reshape) → Wave 3 (task
+reshape) → Wave 4 (limiter consolidation) → Wave 5 (Pool/Wave
+split) → Wave 6 (ctx propagation) → Wave 7 (Flow consolidation) →
+Wave 8 (drop otpsg) → Wave 9 (module rename) → Wave 10 (naming
+cleanup).
 
 Other test suites (combiner-specific, gather-specific) likely follow
 similar design-then-implement patterns, but the sim is the heaviest

@@ -1,6 +1,6 @@
 <!--
 Proposed README rewrite for the streampool repositioning. Reflects the
-API design captured in API_DESIGN.md (2026-05-24).
+API design captured in API_DESIGN.md (2026-05-25).
 
 Name placeholder: "streampool" — still provisional. Module import path is
 shown as `github.com/petenewcomb/streampool`.
@@ -12,7 +12,10 @@ Key positioning shifts vs. the current README:
   - Direct comparison to errgroup / conc / ants / pond / workerpool-go.
 
 API shifts vs. the current code:
-  - One pool, not three (no TaskPool / CombinerPool / WorkerPool).
+  - Three-type model: Pool (fungible workers, often implicit via
+    package default), Wave (batch of work, hosts ops, user-primary
+    type, nests freely), Flow (optional ctx-borne workflow instance,
+    refcounted, can span Waves).
   - Per-op concurrency control via composable Limiters, not pool membership.
   - Tasks/Combiners/Gatherers route values via explicit Submit from
     their function bodies — no .To(sink) wiring. TaskRunners are
@@ -54,11 +57,12 @@ one of these walls:
 
 ``` go
 ctx := context.Background()
-pool := streampool.New(ctx)
-defer pool.CancelAndWait()
+
+wave := streampool.NewWave(ctx)   // a batch of work to await; uses the default Pool
+defer wave.Close()
 
 var results []string
-collect := streampool.NewGatherer(pool, streampool.HandlerFunc[string](
+collect := streampool.NewGatherer(wave, streampool.HandlerFunc[string](
     func(ctx context.Context, s string, err error) error {
         if err != nil { return err }
         results = append(results, s)
@@ -66,7 +70,7 @@ collect := streampool.NewGatherer(pool, streampool.HandlerFunc[string](
     },
 ))
 
-greet := streampool.NewTaskRunner(pool, streampool.TaskFunc[string](
+greet := streampool.NewTaskRunner(wave, streampool.TaskFunc[string](
     func(ctx context.Context, s string) error {
         time.Sleep(1 * time.Millisecond)
         return collect.Submit(ctx, s)
@@ -77,38 +81,56 @@ greet.Start(ctx, "Hello")
 greet.Start(ctx, "world!")
 
 collect.Close()
-pool.GatherAll(ctx)
+wave.GatherAll(ctx)
 fmt.Println(strings.Join(results, " "))
 ```
+
+(For a non-default cancellation domain or custom tuning, construct a
+Pool with `streampool.NewPool(ctx, opts...)` and pass it via
+`streampool.WithPool(pool)` to `NewWave`. The default Pool covers the
+common case.)
 
 For a richer walkthrough see the [Observable example][observable-source]
 and the rest of the [reference documentation][godev].
 
 ## The model
 
-Tasks form a coordinated flow whose pace tracks the actual workflow
-bottleneck — less a worker pool than a *pool of streams*. Results stream
-back as they complete; recursive tasks form eddies that loop back into the
-same flow; the pool right-sizes itself to whatever stage is slowest. You
-configure concurrency by binding composable `Limiter`s to individual ops
-rather than by constructing multiple worker pools.
+streampool enables frictionless execution of recursive streams of work
+in hierarchical waves with granular visibility and control of individual
+flows. Three types compose:
 
-Three op types compose pipelines:
+- **`Pool`** — the workers. Fungible. A package-level default exists
+  implicitly; you only call `NewPool` when you need a custom
+  cancellation context or tuning. Adaptive goroutine sizing under a
+  configurable ceiling; lifecycle is refcount-driven (workers exit
+  synchronously when the last referencing Wave drains).
+- **`Wave`** — a batch of work to be completed together. The
+  user-primary type. Ops are constructed against a Wave;
+  `wave.Gather` / `wave.GatherAll` drain it. Waves nest
+  (`wave.NewChild`) and may overlap freely on the same Pool.
+- **`Flow`** — optional, ctx-borne lifecycle entity for a single
+  workflow instance. Refcounted, can span multiple Waves. Use a Flow
+  to attach trace context, audit metadata, or cleanup hooks to a
+  logical unit of work that may cross batch boundaries.
+
+Inside a Wave, three op types compose pipelines:
 
 - **`TaskRunner[T]`** — stateless dispatch. Each `Start` runs the task
-  function on the pool's workers, in parallel. Also `TaskRunner0` (no
+  function on the Pool's workers, in parallel. Also `TaskRunner0` (no
   arg) and `TaskRunner2[T1, T2]` (two args).
 - **`Combiner[T]`** — stateful aggregation. A factory returns per-instance
   closures (each with private state) that combine inputs and emit on
   flush. Parallel by default; cap concurrency to 1 with a limiter for
   strict-serial ("reducer") behavior.
 - **`Gatherer[T]`** — terminal sink. Handler runs on the caller's
-  goroutine when you `pool.Gather(ctx)` or `pool.GatherAll(ctx)`.
+  goroutine when you `wave.Gather(ctx)` or `wave.GatherAll(ctx)`.
 
 Function bodies route values explicitly by calling `sink.Submit(ctx, v)`
 (or `sink.SubmitErr(ctx, v, err)` for value+error pairs) on any
 downstream op they have in scope. No declarative wiring step; the
-dataflow lives in the code that produces values.
+dataflow lives in the code that produces values. Submit can cross Wave
+boundaries — a task running in one Wave can submit into another Wave's
+sinks.
 
 ## What you get
 
@@ -128,17 +150,20 @@ dataflow lives in the code that produces values.
   op via `WithLimits(...)`. Limiters compose: a Task can be subject to a
   per-API semaphore *and* a global rate limit simultaneously. Multiple
   Tasks can share a Limiter to express a collective cap.
-- **Adaptive pool sizing.** The pool scales its worker goroutines up to
-  a configurable ceiling under demand and retires them when idle. The
-  ceiling, idle behavior, and (eventually) GC-aware tuning all live as
-  `PoolOption`s on `streampool.New`.
+- **Adaptive pool sizing.** The pool scales its worker goroutines
+  between zero and a configurable ceiling under demand and retires them
+  when idle. The ceiling and idle behavior live as `PoolOption`s on
+  `streampool.New`. GC-aware and load-aware backpressure are planned as
+  Limiter types (`NewAdaptive`), letting users opt in per-op or share
+  one Adaptive Limiter across multiple ops for process-wide
+  coordination.
 - **End-to-end backpressure.** Workers don't just scale to local queue
   depth — the pool right-sizes to wherever the actual bottleneck is.
-  When a sink can't keep up, scatter calls help drain pending work
-  before submitting new tasks (turning wait time into useful work);
-  combiner queues back-pressure upstream Submits; pool ceilings act as
-  hard caps. Pipelines stay paced to the slowest downstream stage with
-  no manual buffer-sizing.
+  When a sink can't keep up, `TaskRunner.Start` calls help drain
+  pending work before dispatching new tasks (turning wait time into
+  useful work); combiner queues back-pressure upstream Submits; pool
+  ceilings act as hard caps. Pipelines stay paced to the slowest
+  downstream stage with no manual buffer-sizing.
 - **Allocation-free hot path.** Task bindings, combiner state, queue
   nodes, and gather-callback wrappers are all recycled through pooled
   storage. With a typed argument (or a pooled argument struct), the
@@ -185,18 +210,20 @@ dataflow lives in the code that produces values.
 [^a]: Ceiling-only: workers spawn on demand up to a configurable maximum
   and retire when idle. No configurable floor (`pond` removed `MinWorkers`
   in v2). Ceiling is tunable at runtime (`ants.Tune`, `pond.Resize`).
-[^b]: Spool-wide adaptive worker count between zero and a configurable
-  ceiling. No separate task/combine pool types to manage.
+[^b]: Pool-wide adaptive worker count between zero and a configurable
+  ceiling. No separate task/combine pool types to manage; per-op
+  concurrency control lives in composable Limiters instead.
 [^c]: Local queue-depth scaling; no awareness of downstream consumption.
   Queues can fill while consumers fall behind.
 [^d]: Detects when its own `Results` channel is blocked and reduces worker
   count to `0.9 × current`; pipelines back-pressure between pools via
   bounded blocking channels (`jobsNew` capacity 2). No coordination beyond
   sequential pipelines.
-[^e]: The pool right-sizes to the workflow bottleneck. Scatter calls
-  back-pressure by helping drain completed work before submitting new
-  tasks (turning wait time into useful work); combiner queues back-pressure
-  their upstream Submits; the pool ceiling acts as a hard cap.
+[^e]: The pool right-sizes to the workflow bottleneck. `TaskRunner.Start`
+  calls back-pressure by helping drain completed work before dispatching
+  new tasks (turning wait time into useful work); combiner queues
+  back-pressure their upstream Submits; the pool ceiling acts as a hard
+  cap.
 [^f]: `ants` takes a spin lock on every submit *and* every completion;
   `pond` takes a `sync.Mutex` on every submit and every `readTask`. Both
   serialize dispatch through a single shared lock.

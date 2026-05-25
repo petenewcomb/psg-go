@@ -42,7 +42,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Create the scatter-gather job, setting up a deferred call to Cancel to
 	// terminate outstanding tasks in case of error.
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
 	// Run digesting tasks in a Pool limited to the number of cores available to

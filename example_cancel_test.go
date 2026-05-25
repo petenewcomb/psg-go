@@ -15,14 +15,14 @@ import (
 )
 
 // Demonstrates job cancellation from the outer layer.
-func ExampleJob_Cancel() {
+func ExamplePool_Cancel() {
 
 	ctx := context.Background()
 
-	job := psg.NewJob(ctx)
-	// This is the standard deferred call to Job.CancelAndWait that should
-	// almost always follow creation of a new Job to ensure cleanup. It is not
-	// the call to Job.Cancel that is the subject of this example.
+	job := psg.New(ctx)
+	// This is the standard deferred call to Pool.CancelAndWait that should
+	// almost always follow creation of a new Pool to ensure cleanup. It is not
+	// the call to Pool.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
@@ -85,14 +85,14 @@ func ExampleJob_Cancel() {
 }
 
 // Demonstrates job cancellation from inside a task.
-func ExampleJob_Cancel_task() {
+func ExamplePool_Cancel_task() {
 
 	ctx := context.Background()
 
-	job := psg.NewJob(ctx)
-	// This is the standard deferred call to Job.CancelAndWait that should
-	// almost always follow creation of a new Job to ensure cleanup. It is not
-	// the call to Job.Cancel that is the subject of this example.
+	job := psg.New(ctx)
+	// This is the standard deferred call to Pool.CancelAndWait that should
+	// almost always follow creation of a new Pool to ensure cleanup. It is not
+	// the call to Pool.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))

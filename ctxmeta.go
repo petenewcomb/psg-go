@@ -29,14 +29,14 @@ const (
 )
 
 type ctxMeta struct {
-	job        *Job
-	parentJobs map[*Job]struct{}
+	job        *Pool
+	parentJobs map[*Pool]struct{}
 	ctxType    contextType
 	executionEnvironment
 }
 
 func (cm *ctxMeta) String() string {
-	return fmt.Sprintf("{%v Job=%p exEnv=%p}", cm.ctxType, cm.job, cm.executionEnvironment)
+	return fmt.Sprintf("{%v Pool=%p exEnv=%p}", cm.ctxType, cm.job, cm.executionEnvironment)
 }
 
 func (cm *ctxMeta) IsTopLevel() bool {
@@ -320,8 +320,8 @@ func (ee *topLevelExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Executi
 
 type ctxMetaValueKey struct{}
 
-func (j *Job) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
-	traceRegion := "Job.ctxMeta"
+func (j *Pool) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+	traceRegion := "Pool.ctxMeta"
 
 	ctx, meta := j.ctxMetaMap.WithValue(ctx,
 		func(sourceMeta *ctxMeta, _ bool) (context.Context, *ctxMeta) {
@@ -347,16 +347,16 @@ func (j *Job) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	return ctx, meta
 }
 
-func (j *Job) ensureCtxMeta(
+func (j *Pool) ensureCtxMeta(
 	ctx context.Context,
 	updateFn func(context.Context, *ctxMeta) context.Context,
 ) (context.Context, *ctxMeta) {
-	traceRegion := "Job.ensureCtxMeta"
+	traceRegion := "Pool.ensureCtxMeta"
 
 	ctx, meta := j.ctxMetaMap.WithValue(ctx,
 		func(sourceMeta *ctxMeta, _ bool) (context.Context, *ctxMeta) {
 			ctxType := topLevelContext
-			var parentJobs map[*Job]struct{}
+			var parentJobs map[*Pool]struct{}
 			var exEnv executionEnvironment
 			if sourceMeta != nil {
 				if sourceMeta.job == j {
@@ -367,7 +367,7 @@ func (j *Job) ensureCtxMeta(
 					if _, isParentJob := sourceMeta.parentJobs[j]; isParentJob {
 						panic("Context belongs to a child job")
 					}
-					parentJobs = make(map[*Job]struct{}, len(sourceMeta.parentJobs)+1)
+					parentJobs = make(map[*Pool]struct{}, len(sourceMeta.parentJobs)+1)
 					maps.Copy(parentJobs, sourceMeta.parentJobs)
 					parentJobs[sourceMeta.job] = struct{}{}
 				}
@@ -408,8 +408,10 @@ func (j *Job) ensureCtxMeta(
 type gatherCtxMetaValueKey struct{}
 
 // checkCtxType should panic if the type is not allowed
-func (j *Job) topLevelCtxMeta(ctx context.Context, checkCtxType func(ctxType contextType)) (context.Context, *ctxMeta) {
-	traceRegion := "Job.topLevelCtxMeta"
+func (j *Pool) topLevelCtxMeta(
+	ctx context.Context, checkCtxType func(ctxType contextType),
+) (context.Context, *ctxMeta) {
+	traceRegion := "Pool.topLevelCtxMeta"
 
 	ctx, meta := j.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
@@ -428,8 +430,8 @@ func (j *Job) topLevelCtxMeta(ctx context.Context, checkCtxType func(ctxType con
 	return ctx, meta
 }
 
-func (j *Job) gatherCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
-	traceRegion := "Job.gatherCtxMeta"
+func (j *Pool) gatherCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+	traceRegion := "Pool.gatherCtxMeta"
 
 	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		if ctxType != topLevelContext && ctxType != gatherContext {
@@ -441,7 +443,7 @@ func (j *Job) gatherCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	}
 
 	ctx, _ = j.gatherCtxMetaMap.WithValue(ctx,
-		func(*Job, bool) (context.Context, *Job) {
+		func(*Pool, bool) (context.Context, *Pool) {
 			trace.Logf(ctx, traceRegion, "creating new gather context")
 			return ctx, j
 		},

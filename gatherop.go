@@ -43,14 +43,14 @@ func NewGatherOp[T any](
 // Scatter initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
 // passed to the GatherOp within a subsequent call to Scatter or any of the
-// gathering methods of [Job] (i.e., [Job.Gather], [Job.TryGather],
-// [Job.GatherAll], or [Job.TryGatherAll]).
+// gathering methods of [Pool] (i.e., [Pool.Gather], [Pool.TryGather],
+// [Pool.GatherAll], or [Pool.TryGatherAll]).
 //
 // Before launching a task, Scatter applies backpressure by gathering some
 // already-completed tasks. This happens regardless of concurrency limits and
 // helps maintain smooth execution flow. If a TaskPool is used, Scatter may also
 // block to ensure compliance with the concurrency limit, gathering additional
-// tasks until a slot becomes available. When scattering directly to a Job,
+// tasks until a slot becomes available. When scattering directly to a Pool,
 // tasks are not subject to any concurrency limit. The context passed to Scatter
 // may be used to cancel (e.g., with a timeout) both gathering and launch, but
 // only the context associated with the task's job will be passed to the task.
@@ -128,7 +128,7 @@ func (g GatherOp[T]) TryScatter(
 // of launching tasks.
 func (g GatherOp[T]) Integrate(
 	ctx context.Context,
-	target *Job,
+	target *Pool,
 	value T,
 	err error,
 ) error {
@@ -152,7 +152,7 @@ func (g GatherOp[T]) Integrate(
 func (g GatherOp[T]) TryIntegrate(
 	ctx context.Context,
 	deadline time.Time,
-	target *Job,
+	target *Pool,
 	value T,
 	err error,
 ) (bool, error) {
@@ -172,7 +172,7 @@ func (g GatherOp[T]) TryIntegrate(
 }
 
 // newTask creates a new gather task that will execute the task and integrate results
-func (g GatherOp[T]) newTask(group workq.GroupID, job *Job, taskFn psgfn.Task[T]) boundTask {
+func (g GatherOp[T]) newTask(group workq.GroupID, job *Pool, taskFn psgfn.Task[T]) boundTask {
 	pt := g.taskPool.Get()
 	pt.pool = g.taskPool
 	pt.group = group
@@ -189,9 +189,9 @@ type boundGatherWork interface {
 }
 
 type gatherWork[T any] struct {
-	jobWork
+	poolWork
 	workq.DownstreamWork
-	job      *Job
+	job      *Pool
 	pool     *omnipool.Pool[gatherWork[T]]
 	gatherFn psgfn.Gather[T]
 	value    T
@@ -199,7 +199,7 @@ type gatherWork[T any] struct {
 }
 
 // newGatherWork creates a new gather work item with the provided values
-func (g GatherOp[T]) newGatherWork(group workq.GroupID, job *Job, value T, err error) *gatherWork[T] {
+func (g GatherOp[T]) newGatherWork(group workq.GroupID, job *Pool, value T, err error) *gatherWork[T] {
 	w := g.workPool.Get()
 	w.Init(g.workPool, group, job, g.gatherFn, value, err)
 	return w
@@ -208,12 +208,12 @@ func (g GatherOp[T]) newGatherWork(group workq.GroupID, job *Job, value T, err e
 func (w *gatherWork[T]) Init(
 	pool *omnipool.Pool[gatherWork[T]],
 	group workq.GroupID,
-	job *Job,
+	job *Pool,
 	gatherFn psgfn.Gather[T],
 	value T,
 	err error,
 ) {
-	w.jobWork.Init(group, job)
+	w.poolWork.Init(group, job)
 	w.job = job
 	w.pool = pool
 	w.gatherFn = gatherFn
@@ -242,7 +242,7 @@ func (w *gatherWork[T]) Free() {
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
 	w.DownstreamWork.Close()
-	w.jobWork.Close(w.job)
+	w.poolWork.Close(w.job)
 	w.pool.Put(w)
 }
 
@@ -250,7 +250,7 @@ func (w *gatherWork[T]) Free() {
 func (g GatherOp[T]) integrate(
 	ctx context.Context,
 	meta *ctxMeta,
-	job *Job,
+	job *Pool,
 	group workq.GroupID,
 	value T,
 	err error,
@@ -264,7 +264,7 @@ func (g GatherOp[T]) integrate(
 func (g GatherOp[T]) tryIntegrate(
 	ctx context.Context,
 	meta *ctxMeta,
-	job *Job,
+	job *Pool,
 	group workq.GroupID,
 	value T,
 	err error,
@@ -296,12 +296,12 @@ func (g GatherOp[T]) newScatterWork(
 
 type gatherScatterWork struct {
 	workq.Work
-	job      *Job
+	job      *Pool
 	deadline time.Time
 }
 
 func newGatherScatterWork(
-	job *Job,
+	job *Pool,
 	group workq.GroupID,
 	deadline time.Time,
 	targetScatterWork workq.Work,

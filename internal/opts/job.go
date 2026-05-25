@@ -8,28 +8,28 @@ import (
 	"time"
 )
 
-// JobOption is a configuration option that can be applied to Job.
-type JobOption interface {
-	applyToJob(c *JobConfigChanges)
+// PoolOption is a configuration option that can be applied to Pool.
+type PoolOption interface {
+	applyToPool(c *PoolConfigChanges)
 }
 
-// JobConfigChanges holds configuration changes for a Job.
+// PoolConfigChanges holds configuration changes for a Pool.
 // Fields use pointers to distinguish between "not set" (nil) and "set to zero value" (non-nil).
-type JobConfigChanges struct {
+type PoolConfigChanges struct {
 	TaskWorkerIdleTimeout           *time.Duration
 	TaskWorkerIdleJitter            *time.Duration
 	FlushListener                   *func()
 	TaskWorkerSpawnConcurrencyLimit *int
 }
 
-type jobConfig interface {
-	Update(changes JobConfigChanges)
+type poolConfig interface {
+	Update(changes PoolConfigChanges)
 }
 
-func ApplyToJob(c jobConfig, options ...JobOption) {
-	var changes JobConfigChanges
+func ApplyToPool(c poolConfig, options ...PoolOption) {
+	var changes PoolConfigChanges
 	for _, opt := range options {
-		opt.applyToJob(&changes)
+		opt.applyToPool(&changes)
 	}
 	c.Update(changes)
 }
@@ -37,7 +37,7 @@ func ApplyToJob(c jobConfig, options ...JobOption) {
 // taskWorkerIdleTimeout sets the idle timeout for task workers.
 type taskWorkerIdleTimeout time.Duration
 
-func (o taskWorkerIdleTimeout) applyToJob(c *JobConfigChanges) {
+func (o taskWorkerIdleTimeout) applyToPool(c *PoolConfigChanges) {
 	c.TaskWorkerIdleTimeout = (*time.Duration)(&o)
 }
 
@@ -53,7 +53,7 @@ func TaskWorkerIdleTimeout(timeout time.Duration) taskWorkerIdleTimeout {
 // taskWorkerIdleJitter sets the idle jitter for task workers.
 type taskWorkerIdleJitter time.Duration
 
-func (o taskWorkerIdleJitter) applyToJob(c *JobConfigChanges) {
+func (o taskWorkerIdleJitter) applyToPool(c *PoolConfigChanges) {
 	c.TaskWorkerIdleJitter = (*time.Duration)(&o)
 }
 
@@ -71,14 +71,14 @@ type FlushListener struct {
 	Callback func()
 }
 
-func (o FlushListener) applyToJob(c *JobConfigChanges) {
+func (o FlushListener) applyToPool(c *PoolConfigChanges) {
 	c.FlushListener = &o.Callback
 }
 
 // taskWorkerSpawnConcurrencyLimit sets the maximum number of task workers that can be spawning concurrently.
 type taskWorkerSpawnConcurrencyLimit int
 
-func (o taskWorkerSpawnConcurrencyLimit) applyToJob(c *JobConfigChanges) {
+func (o taskWorkerSpawnConcurrencyLimit) applyToPool(c *PoolConfigChanges) {
 	c.TaskWorkerSpawnConcurrencyLimit = (*int)(&o)
 }
 

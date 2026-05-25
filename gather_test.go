@@ -15,7 +15,7 @@ import (
 func TestGatherScatterNilTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job)
 
@@ -43,7 +43,7 @@ func TestGatherScatterNilGatherPanic(t *testing.T) {
 func TestGatherTryScatterNilTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job)
 
@@ -65,7 +65,7 @@ func TestGatherTryScatterNilTaskPanic(t *testing.T) {
 func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job)
 
@@ -111,7 +111,7 @@ func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with pool
-	parentJob := psg.NewJob(ctx)
+	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentPool := psg.NewTaskPool(parentJob)
 
@@ -130,7 +130,7 @@ func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 		parentPool,
 		func(ctx context.Context) (bool, error) {
 			// Create a sub-job inside the task
-			subJob := psg.NewJob(ctx)
+			subJob := psg.New(ctx)
 			defer subJob.CancelAndWait()
 			subPool := psg.NewTaskPool(subJob)
 
@@ -171,7 +171,7 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with pool
-	parentJob := psg.NewJob(ctx)
+	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentPool := psg.NewTaskPool(parentJob)
 
@@ -221,7 +221,7 @@ func TestGatherScatterTaskCannotGather(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with pool
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job)
 
@@ -252,7 +252,7 @@ func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with pool
-	parentJob := psg.NewJob(ctx)
+	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentPool := psg.NewTaskPool(parentJob)
 
@@ -268,7 +268,7 @@ func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 		parentPool,
 		func(ctx context.Context) (bool, error) {
 			// Create a sub-job inside the task
-			subJob := psg.NewJob(ctx)
+			subJob := psg.New(ctx)
 			defer subJob.CancelAndWait()
 			subPool := psg.NewTaskPool(subJob)
 

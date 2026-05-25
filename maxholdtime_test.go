@@ -20,7 +20,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
 	var flushCount atomic.Int32

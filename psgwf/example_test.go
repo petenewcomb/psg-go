@@ -21,7 +21,7 @@ import (
 // client disconnection cancels only that request's operations.
 func Example() {
 	// Create a long-running job for the API server
-	job := psg.NewJob(context.Background())
+	job := psg.New(context.Background())
 	defer job.CancelAndWait()
 
 	// Create a task pool

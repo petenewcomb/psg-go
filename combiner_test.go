@@ -48,7 +48,7 @@ func newPassthroughTestCombinerFactory[T any](t *testing.T) func() psgfn.Combine
 func TestCombinerScatterNilTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	taskPool := psg.NewTaskPool(job)
 
@@ -81,7 +81,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 
 func TestCombinerScatterNilGatherPanic(t *testing.T) {
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
 	assert.PanicsWithValue(t, "gather function must be non-nil", func() {
@@ -91,7 +91,7 @@ func TestCombinerScatterNilGatherPanic(t *testing.T) {
 
 func TestCombinerTryScatterNilTaskPanic(t *testing.T) {
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	taskPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
@@ -113,7 +113,7 @@ func TestCombinerTryScatterNilTaskPanic(t *testing.T) {
 func TestCombinerScatterFromTask(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	taskPool := psg.NewTaskPool(job)
 
@@ -166,7 +166,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with task pool
-	parentJob := psg.NewJob(ctx)
+	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentTaskPool := psg.NewTaskPool(parentJob)
 
@@ -192,7 +192,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
 			// Create a sub-job inside the task
-			subJob := psg.NewJob(ctx)
+			subJob := psg.New(ctx)
 			defer subJob.CancelAndWait()
 			subTaskPool := psg.NewTaskPool(subJob)
 
@@ -233,7 +233,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent job with task pool
-	parentJob := psg.NewJob(ctx)
+	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentTaskPool := psg.NewTaskPool(parentJob)
 
@@ -681,7 +681,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						ctx, cancel := context.WithCancelCause(context.Background())
 						defer cancel(nil)
 
-						job := psg.NewJob(ctx)
+						job := psg.New(ctx)
 						defer func() {
 							job.CancelAndWait()
 						}()

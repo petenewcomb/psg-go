@@ -21,7 +21,7 @@ import (
 //nolint:errcheck,gosec // concise example code for readme
 func Example_hello() {
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait() // hygiene
 
 	// Binds a string to a task function that returns the string after a short delay.

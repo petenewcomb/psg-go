@@ -16,7 +16,7 @@ import (
 
 // TestWorkflowAfterFunc verifies that AfterFuncs are called after workflow completion
 func TestWorkflowAfterFunc(t *testing.T) {
-	job := psg.NewJob(context.Background())
+	job := psg.New(context.Background())
 	defer job.CancelAndWait()
 
 	// Track which AfterFuncs were called
@@ -89,7 +89,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 // TestWorkflowAfterFuncWithNewTasks verifies AfterFuncs can scatter new tasks
 func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
-	job := psg.NewJob(context.Background())
+	job := psg.New(context.Background())
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
 

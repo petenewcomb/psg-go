@@ -16,11 +16,11 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// TaskPoolOrJob represents either a TaskPool or a Job.
-// When scattering directly to a Job, tasks are not subject to any concurrency limit.
+// TaskPoolOrJob represents either a TaskPool or a Pool.
+// When scattering directly to a Pool, tasks are not subject to any concurrency limit.
 type TaskPoolOrJob interface {
-	// getJob returns the Job associated with this target
-	getJob() *Job
+	// getJob returns the Pool associated with this target
+	getJob() *Pool
 	// newScatterWork creates work for scattering a task
 	newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work
 }
@@ -62,7 +62,7 @@ func vetScatter[T any](
 
 type gatherTask[T any] struct {
 	group    workq.GroupID
-	job      *Job
+	job      *Pool
 	taskFn   psgfn.Task[T]
 	gatherOp GatherOp[T]
 

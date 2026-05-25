@@ -26,7 +26,7 @@ import (
 )
 
 //nolint:contextcheck // background context used only for tracing
-type Job struct {
+type Pool struct {
 	ctx      context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
@@ -53,7 +53,7 @@ type Job struct {
 	latestTaskWorkerIdleExit time.Time // protected by taskWorkerMu
 
 	ctxMetaMap       ctxmap.Map[ctxMetaValueKey, *ctxMeta]
-	gatherCtxMetaMap ctxmap.Map[gatherCtxMetaValueKey, *Job]
+	gatherCtxMetaMap ctxmap.Map[gatherCtxMetaValueKey, *Pool]
 
 	protoBB      workq.BlockBehavior  // avoid closure reallocation
 	blockFn      workq.BlockFunc      // avoid closure reallocation
@@ -62,20 +62,20 @@ type Job struct {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) newTaskWork(group workq.GroupID, task boundTask, completedFn func()) *taskWork {
-	traceRegion := "Job.newTaskWork"
+func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, completedFn func()) *taskWork {
+	traceRegion := "Pool.newTaskWork"
 
 	w := taskWorkPool.Get()
 	w.Init(group, j)
 	w.task = task
 	w.completedFn = completedFn
 
-	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
+	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
 	return w
 }
 
 type taskWork struct {
-	jobWork
+	poolWork
 	task             boundTask
 	completedFn      func()
 	demandRegistered atomic.Bool
@@ -86,7 +86,7 @@ func (w *taskWork) Reset() {
 		trace.Logf(context.Background(), "taskWork.Reset",
 			"DEMAND_RESET task=%p demandRegistered=%v", w, w.demandRegistered.Load())
 	}
-	w.jobWork = jobWork{}
+	w.poolWork = poolWork{}
 	w.task = nil
 	w.completedFn = nil
 	if w.demandRegistered.Load() {
@@ -102,7 +102,7 @@ func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *taskWork) Free(job *Job) {
+func (w *taskWork) Free(job *Pool) {
 	traceRegion := "taskWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
@@ -121,26 +121,26 @@ func (w *taskWork) Free(job *Job) {
 
 var taskWorkPool = omnipool.For[taskWork]()
 
-func (j *Job) getJob() *Job {
+func (j *Pool) getJob() *Pool {
 	return j
 }
 
-// NewJob creates an independent scatter-gather execution environment with the
-// specified context. The context passed to NewJob is used as the root of the
+// New creates an independent scatter-gather execution environment with the
+// specified context. The context passed to New is used as the root of the
 // context that will be passed to all task functions. (See [Task] and
-// [Job.Cancel] for more detail.)
+// [Pool.Cancel] for more detail.)
 //
 // Use [NewTaskPool] to create task pools bound to this job.
 //
-// Each call to NewJob should typically be followed by a deferred call to
-// [Job.CancelAndWait] to ensure that an early exit from the calling function
+// Each call to New should typically be followed by a deferred call to
+// [Pool.CancelAndWait] to ensure that an early exit from the calling function
 // does not leave any outstanding goroutines.
-func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
-	traceRegion := "NewJob"
+func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
+	traceRegion := "New"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, cancelFn := context.WithCancel(ctx)
-	j := &Job{
+	j := &Pool{
 		ctx:      ctx,
 		cancelFn: cancelFn,
 	}
@@ -151,7 +151,7 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 	j.addWorkFn = j.addWork
 
 	trace.Logf(ctx, traceRegion,
-		"Job=%p, state=%p, gatherQueue=%p, governor=%p, workQueue=%p, taskQueue=%p",
+		"Pool=%p, state=%p, gatherQueue=%p, governor=%p, workQueue=%p, taskQueue=%p",
 		j, &j.state, &j.gatherQueue, &j.governor, &j.workQueue, &j.taskQueue)
 
 	j.state.Init()
@@ -171,16 +171,16 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
-// Outstanding calls to [Scatter], [Job.Gather], [Job.TryGather],
-// [Job.GatherAll], or [Job.TryGatherAll] using the job or any of its task pools will
+// Outstanding calls to [Scatter], [Pool.Gather], [Pool.TryGather],
+// [Pool.GatherAll], or [Pool.TryGatherAll] using the job or any of its task pools will
 // fail with [context.Canceled] or other error returned by a [Gather].
 //
 // While Cancel always returns immediately, any running [Task] or
 // [Gather] will delay termination of their independent goroutine or caller
 // until it returns. This method cancels the context passed to each [Task],
 // but not the context passed to each [Gather]. Gather functions instead
-// receive the context passed to the calling [Scatter], [Job.Gather],
-// [Job.TryGather], [Job.GatherAll], or [Job.TryGatherAll] function. If it is
+// receive the context passed to the calling [Scatter], [Pool.Gather],
+// [Pool.TryGather], [Pool.GatherAll], or [Pool.TryGatherAll] function. If it is
 // desirable to transmit a cancelation signal to a running [Gather], one
 // must also cancel any contexts being passed to those callers.
 //
@@ -188,19 +188,19 @@ func NewJob(ctx context.Context, options ...psgopt.JobOption) *Job {
 // effect.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) Cancel() {
-	traceRegion := "Job.Cancel"
+func (j *Pool) Cancel() {
+	traceRegion := "Pool.Cancel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Job=%p", j)
+	trace.Logf(context.Background(), traceRegion, "Pool=%p", j)
 	j.cancelFn()
 }
 
-// CancelAndWait cancels like [Job.Cancel], but then blocks until any
+// CancelAndWait cancels like [Pool.Cancel], but then blocks until any
 // outstanding task goroutines exit.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) CancelAndWait() {
-	traceRegion := "Job.CancelAndWait"
+func (j *Pool) CancelAndWait() {
+	traceRegion := "Pool.CancelAndWait"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	j.Cancel()
@@ -214,7 +214,7 @@ func (j *Job) CancelAndWait() {
 // a completed task is available, the provided context or job is canceled, or
 // another event causes a wake-up (e.g. a call to [TaskPool.SetOptions]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
-// See [Job.TryGather] for a non-blocking alternative.
+// See [Pool.TryGather] for a non-blocking alternative.
 //
 // Returns an error if one occurred:
 //
@@ -234,8 +234,8 @@ func (j *Job) CancelAndWait() {
 //
 // NOTE: If a task result is gathered, this method will call the task's
 // [Gather] and wait until it returns.
-func (j *Job) Gather(ctx context.Context) error {
-	traceRegion := "Job.Gather"
+func (j *Pool) Gather(ctx context.Context) error {
+	traceRegion := "Pool.Gather"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetGather(ctx)
@@ -243,25 +243,25 @@ func (j *Job) Gather(ctx context.Context) error {
 	return err
 }
 
-func (j *Job) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
-	traceRegion := "Job.tryAddWork"
+func (j *Pool) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
+	traceRegion := "Pool.tryAddWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Job=%p", j)
+	trace.Logf(ctx, traceRegion, "Pool=%p", j)
 	if workFn, ok := j.gatherQueue.TryPopFront(); ok {
 		queueFn(workFn)
 	}
 	return nil
 }
 
-func (j *Job) vetGather(ctx context.Context) (context.Context, *ctxMeta) {
+func (j *Pool) vetGather(ctx context.Context) (context.Context, *ctxMeta) {
 	return j.gatherCtxMeta(ctx)
 }
 
-func (j *Job) tryGather(ctx context.Context, _ *ctxMeta) (bool, error) {
+func (j *Pool) tryGather(ctx context.Context, _ *ctxMeta) (bool, error) {
 	return j.workQueue.TryExecuteOne(ctx, j.tryAddWorkFn)
 }
 
-func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
+func (j *Pool) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
 	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn, nil)
 }
 
@@ -269,8 +269,8 @@ func (j *Job) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
 // preemptively gather or gather results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
-func (j *Job) yield(ctx context.Context, deadline time.Time) error {
-	traceRegion := "Job.yield"
+func (j *Pool) yield(ctx context.Context, deadline time.Time) error {
+	traceRegion := "Pool.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetGather(ctx)
@@ -289,7 +289,7 @@ func (j *Job) yield(ctx context.Context, deadline time.Time) error {
 
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
 
-func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
+func (j *Pool) shouldBlock(ctx context.Context) workq.BlockFunc {
 	_, meta := j.ctxMeta(ctx)
 	if meta.IsTopLevel() {
 		return j.blockFn
@@ -297,15 +297,15 @@ func (j *Job) shouldBlock(ctx context.Context) workq.BlockFunc {
 	return nil
 }
 
-func (j *Job) block(
+func (j *Pool) block(
 	ctx context.Context,
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
 ) (workq.RenotifyFunc, error) {
-	traceRegion := "Job.block"
+	traceRegion := "Pool.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Job=%p", j)
+	trace.Logf(ctx, traceRegion, "Pool=%p", j)
 	ctx, meta := j.vetGather(ctx)
 	adder := blockingWorkAdderPool.Get()
 	defer blockingWorkAdderPool.Put(adder)
@@ -325,7 +325,7 @@ func (j *Job) block(
 var blockingWorkAdderPool = omnipool.For[blockingWorkAdder]()
 
 type blockingWorkAdder struct {
-	job                 *Job
+	job                 *Pool
 	meta                *ctxMeta
 	blockDeadline       time.Time
 	blockWaiters        *workq.Waiters
@@ -358,22 +358,22 @@ func (a *blockingWorkAdder) addWork(
 	return workReadyRenotifyFn, err
 }
 
-func (j *Job) addWork(
+func (j *Pool) addWork(
 	ctx context.Context,
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
 ) (workq.RenotifyFunc, error) {
-	traceRegion := "Job.addWork"
+	traceRegion := "Pool.addWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Job=%p", j)
+	trace.Logf(ctx, traceRegion, "Pool=%p", j)
 	ctx, meta := j.ctxMeta(ctx)
 	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
 		confirmWaitFn, time.Time{}, nil, nil)
 	return workReadyRenotifyFn, err
 }
 
-func (j *Job) addWorkWhileMaybeBlocking(
+func (j *Pool) addWorkWhileMaybeBlocking(
 	ctx context.Context,
 	meta *ctxMeta,
 	queueFn workq.QueueWorkFunc,
@@ -442,7 +442,7 @@ func (j *Job) addWorkWhileMaybeBlocking(
 	return workRf, blockRf, err
 }
 
-func (j *Job) gatherSelect(
+func (j *Pool) gatherSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
 	outboxWaitCh <-chan rdvq.RenotifyFunc,
@@ -450,7 +450,7 @@ func (j *Job) gatherSelect(
 	blockTimerCh <-chan time.Time,
 	blockWaitCh <-chan rdvq.RenotifyFunc,
 ) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.RenotifyFunc, err error) {
-	traceRegion := "Job.gatherSelect"
+	traceRegion := "Pool.gatherSelect"
 	trace.Logf(ctx, traceRegion,
 		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, blockWaitCh=%p",
 		inboxCh, outboxWaitCh, workWaitCh, blockWaitCh)
@@ -480,13 +480,13 @@ func (j *Job) gatherSelect(
 }
 
 type gatherPostWork struct {
-	jobWork
-	job  *Job
+	poolWork
+	job  *Pool
 	work boundGatherWork
 }
 
-func (w *gatherPostWork) Init(group workq.GroupID, job *Job, work boundGatherWork) {
-	w.jobWork.Init(group, job)
+func (w *gatherPostWork) Init(group workq.GroupID, job *Pool, work boundGatherWork) {
+	w.poolWork.Init(group, job)
 	w.job = job
 	w.work = work
 }
@@ -585,19 +585,19 @@ func (w *gatherPostWork) Free() {
 var gatherPostWorkPool = omnipool.For[gatherPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) newGatherPostWork(group workq.GroupID, gatherWork boundGatherWork) *gatherPostWork {
-	traceRegion := "Job.newGatherPostWork"
+func (j *Pool) newGatherPostWork(group workq.GroupID, gatherWork boundGatherWork) *gatherPostWork {
+	traceRegion := "Pool.newGatherPostWork"
 
 	w := gatherPostWorkPool.Get()
 	w.Init(group, j, gatherWork)
 
-	trace.Logf(context.Background(), traceRegion, "Job=%p created %v", j, w)
+	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
 	return w
 }
 
 // TryGather processes outstanding task results and then attempts to process
 // the next task result from a task previously launched via [Scatter]. Unlike
-// [Job.Gather], it will not block if a completed task is not immediately available.
+// [Pool.Gather], it will not block if a completed task is not immediately available.
 //
 // Returns a boolean flag indicating whether there might be more task results
 // immediately available to process and an error if one occurred.
@@ -612,8 +612,8 @@ func (j *Job) newGatherPostWork(group workq.GroupID, gatherWork boundGatherWork)
 // receive ErrJobDone.
 //
 // See Gather for additional details.
-func (j *Job) TryGather(ctx context.Context) (bool, error) {
-	traceRegion := "Job.TryGather"
+func (j *Pool) TryGather(ctx context.Context) (bool, error) {
+	traceRegion := "Pool.TryGather"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetGather(ctx)
@@ -640,8 +640,8 @@ func (j *Job) TryGather(ctx context.Context) (bool, error) {
 //
 // NOTE: This method will serially call each gathered task's [Gather] and
 // wait until it returns.
-func (j *Job) GatherAll(ctx context.Context) error {
-	traceRegion := "Job.GatherAll"
+func (j *Pool) GatherAll(ctx context.Context) error {
+	traceRegion := "Pool.GatherAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	err := j.gatherAll(ctx, j.gather)
@@ -652,7 +652,7 @@ func (j *Job) GatherAll(ctx context.Context) error {
 }
 
 // TryGatherAll processes all currently available task results without blocking.
-// Unlike [Job.GatherAll], TryGatherAll will return immediately if there are no
+// Unlike [Pool.GatherAll], TryGatherAll will return immediately if there are no
 // completed tasks ready to process, regardless of whether the job is closed or
 // whether there are still tasks in flight.
 //
@@ -666,14 +666,14 @@ func (j *Job) GatherAll(ctx context.Context) error {
 //
 // NOTE: If completed tasks are available, this method must still call each
 // task's [Gather] and wait until it finishes processing.
-func (j *Job) TryGatherAll(ctx context.Context) error {
-	traceRegion := "Job.TryGatherAll"
+func (j *Pool) TryGatherAll(ctx context.Context) error {
+	traceRegion := "Pool.TryGatherAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	return j.gatherAll(ctx, j.tryGather)
 }
 
-func (j *Job) gatherAll(ctx context.Context, gatherFn func(context.Context, *ctxMeta) (bool, error)) error {
+func (j *Pool) gatherAll(ctx context.Context, gatherFn func(context.Context, *ctxMeta) (bool, error)) error {
 	ctx, meta := j.vetGather(ctx)
 	for {
 		ok, err := gatherFn(ctx, meta)
@@ -690,8 +690,8 @@ func (j *Job) gatherAll(ctx context.Context, gatherFn func(context.Context, *ctx
 // Caller must have already incremented taskWorkersSpawning.
 //
 //nolint:contextcheck // goroutine will use job context
-func (j *Job) spawnTaskWorker() {
-	traceRegion := "Job.spawnTaskWorker"
+func (j *Pool) spawnTaskWorker() {
+	traceRegion := "Pool.spawnTaskWorker"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	j.wg.Add(1)
 	go j.runTasks()
@@ -700,8 +700,8 @@ func (j *Job) spawnTaskWorker() {
 // Attempts to spawn a worker if we're under the spawn concurrency limit.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) trySpawnTaskWorker() bool {
-	traceRegion := "Job.trySpawnTaskWorker"
+func (j *Pool) trySpawnTaskWorker() bool {
+	traceRegion := "Pool.trySpawnTaskWorker"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	// Try to spawn within concurrency limit
@@ -719,7 +719,7 @@ func (j *Job) trySpawnTaskWorker() bool {
 }
 
 //nolint:contextcheck // task worker goroutine will use job context
-func (j *Job) runTasks() {
+func (j *Pool) runTasks() {
 	defer j.wg.Done()
 
 	var task *taskWork
@@ -733,7 +733,7 @@ func (j *Job) runTasks() {
 
 	traceRegion := "taskWorker.Run"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Job=%p, spawning=%v", j, spawning)
+	trace.Logf(context.Background(), traceRegion, "Pool=%p, spawning=%v", j, spawning)
 
 	goroutineCtx, cancelGoroutineCtx := context.WithCancel(j.ctx)
 	defer func() {
@@ -855,8 +855,8 @@ func (j *Job) runTasks() {
 }
 
 type taskPostWork struct {
-	jobWork
-	job  *Job
+	poolWork
+	job  *Pool
 	task *taskWork
 }
 
@@ -967,33 +967,33 @@ func (w *taskPostWork) Free() {
 
 var taskPostWorkPool = omnipool.For[taskPostWork]()
 
-type jobWork struct {
+type poolWork struct {
 	workq.WorkItem
 }
 
-func (w *jobWork) Init(group workq.GroupID, job *Job) {
+func (w *poolWork) Init(group workq.GroupID, job *Pool) {
 	w.WorkItem.Init(group)
-	trace.Logf(context.Background(), "jobWork.Init", "%v", &w.WorkItem)
+	trace.Logf(context.Background(), "poolWork.Init", "%v", &w.WorkItem)
 	job.state.IncrementWork()
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *jobWork) Close(job *Job) {
+func (w *poolWork) Close(job *Pool) {
 	if w.ID() == 0 {
 		// This check and panic is best-effort only as it may also be a race if
 		// Close() is called from multiple goroutines -- which it should not be.
 		panic("already closed")
 	}
-	trace.Logf(context.Background(), "jobWork.Close", "%v", &w.WorkItem)
+	trace.Logf(context.Background(), "poolWork.Close", "%v", &w.WorkItem)
 	job.state.DecrementWork()
 }
 
-func (j *Job) newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work {
+func (j *Pool) newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work {
 	taskWork := j.newTaskWork(group, task, nil)
 	return j.newTaskPostWork(group, deadline, taskWork)
 }
 
-func (j *Job) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
+func (j *Pool) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
 	w := taskPostWorkPool.Get()
 	w.Init(group, j)
 	w.job = j
@@ -1002,13 +1002,13 @@ func (j *Job) newTaskPostWork(group workq.GroupID, deadline time.Time, task *tas
 }
 
 // panicIfDone panics if the job is in the done state
-func (j *Job) panicIfDone() {
+func (j *Pool) panicIfDone() {
 	j.state.PanicIfDone()
 }
 
 // Close changes the job's state from open to closed, which allows it to eventually
 // progress to the done state once all tasks complete. When a job is closed,
-// [Job.GatherAll] will return after processing all existing tasks and any tasks
+// [Pool.GatherAll] will return after processing all existing tasks and any tasks
 // they spawn, rather than blocking indefinitely.
 //
 // After a job is closed and all tasks have completed, launching new tasks will panic.
@@ -1021,29 +1021,29 @@ func (j *Job) panicIfDone() {
 // Close may be called from any goroutine and may safely be called more than once.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) Close() {
-	traceRegion := "Job.Close"
+func (j *Pool) Close() {
+	traceRegion := "Pool.Close"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	j.state.Close()
 }
 
-// CloseAndGatherAll closes the job via [Job.Close] and then waits for and
-// gathers the results of all in-flight tasks via [Job.GatherAll].
-func (j *Job) CloseAndGatherAll(ctx context.Context) error {
-	traceRegion := "Job.CloseAndGatherAll"
+// CloseAndGatherAll closes the job via [Pool.Close] and then waits for and
+// gathers the results of all in-flight tasks via [Pool.GatherAll].
+func (j *Pool) CloseAndGatherAll(ctx context.Context) error {
+	traceRegion := "Pool.CloseAndGatherAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	j.Close()
 	return j.GatherAll(ctx)
 }
 
-// jobConfigWrapper wraps a Job to implement the jobConfig interface for options
-type jobConfigWrapper struct {
-	job *Job
+// poolConfigWrapper wraps a Pool to implement the poolConfig interface for options
+type poolConfigWrapper struct {
+	job *Pool
 }
 
-func (w jobConfigWrapper) Update(changes opts.JobConfigChanges) {
+func (w poolConfigWrapper) Update(changes opts.PoolConfigChanges) {
 	if changes.TaskWorkerIdleTimeout != nil {
 		w.job.taskWorkerIdleTimeout.Store(int64(*changes.TaskWorkerIdleTimeout))
 	}
@@ -1061,7 +1061,7 @@ func (w jobConfigWrapper) Update(changes opts.JobConfigChanges) {
 // tryTaskWorkerIdleExit attempts to record an idle task worker exit. Returns true if this worker
 // is allowed to exit (enough time has passed since latest exit), false if
 // another worker exited too recently and this worker should retry later.
-func (j *Job) tryTaskWorkerIdleExit() bool {
+func (j *Pool) tryTaskWorkerIdleExit() bool {
 	j.taskWorkerMu.Lock()
 	defer j.taskWorkerMu.Unlock()
 
@@ -1078,9 +1078,9 @@ func (j *Job) tryTaskWorkerIdleExit() bool {
 // This method is safe to call at any time and changes take effect immediately.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Job) SetOptions(options ...psgopt.JobOption) {
-	traceRegion := "Job.SetOptions"
+func (j *Pool) SetOptions(options ...psgopt.PoolOption) {
+	traceRegion := "Pool.SetOptions"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	opts.ApplyToJob(jobConfigWrapper{job: j}, options...)
+	opts.ApplyToPool(poolConfigWrapper{job: j}, options...)
 }

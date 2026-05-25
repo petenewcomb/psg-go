@@ -32,7 +32,7 @@ import (
 // panic, but this detection works only if the context passed to Scatter is
 // the one passed to the Task or is a subcontext thereof.
 //
-// A Task may however, create its own sub-Job within which to run
+// A Task may however, create its own sub-Pool within which to run
 // concurrent tasks. This serves a different use case: tasks created in such a
 // sub-job should complete or be canceled before the outer Task returns,
 // while tasks spawned from a Gather function on behalf of a Task necessarily

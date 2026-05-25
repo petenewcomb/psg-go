@@ -573,10 +573,10 @@ func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) er
 	workFn := w.Work.Execute
 	bb := w.pool.job.protoBB
 	if bb.ShouldBlock(ctx) != nil {
-		jobGovernedWorkFn := func(ctx context.Context, ex workq.Execution) error {
+		poolGovernedWorkFn := func(ctx context.Context, ex workq.Execution) error {
 			return w.pool.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
 		}
-		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, jobGovernedWorkFn)
+		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, poolGovernedWorkFn)
 	}
 	return workFn(ctx, ex)
 }
@@ -687,7 +687,7 @@ type boundCombineWork interface {
 }
 
 type combineWork[I, O any] struct {
-	jobWork
+	poolWork
 	workq.DownstreamWork
 	op       *combineOp[I, O]
 	input    I
@@ -701,7 +701,7 @@ func (c *combineOp[I, O]) newCombineWork(group workq.GroupID, value I, err error
 }
 
 func (w *combineWork[I, O]) Init(group workq.GroupID, op *combineOp[I, O], input I, inputErr error) {
-	w.jobWork.Init(group, op.combinerPool.job)
+	w.poolWork.Init(group, op.combinerPool.job)
 	w.op = op
 	w.input = input
 	w.inputErr = inputErr
@@ -776,7 +776,7 @@ func (w *combineWork[I, O]) Free() {
 	w.op.combinerPool.inFlight.Decrement()
 
 	w.DownstreamWork.Close()
-	w.jobWork.Close(w.op.combinerPool.job)
+	w.poolWork.Close(w.op.combinerPool.job)
 
 	pool := w.op.combineWorkPool
 	w.op.unref()

@@ -32,7 +32,7 @@ func Example_tracing() {
 	defer rootSpan.End()
 
 	// Create a PSG job
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
 	// Define a traced task for data loading
@@ -103,7 +103,7 @@ func Example_instrumentedTask() {
 
 	// Create a PSG job
 	ctx := context.Background()
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
 	// Create fully instrumented task and gather

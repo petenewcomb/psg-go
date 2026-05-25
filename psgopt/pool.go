@@ -7,11 +7,13 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 )
 
-// PoolOption is a configuration option that can be applied to any pool type.
+// AnyPoolOption is a configuration option that can be applied to any pool type
+// (TaskPool or CombinerPool). Distinct from PoolOption, which applies to the
+// top-level Pool (formerly Job).
 //
 // Available options that work for both TaskPool and CombinerPool:
 //   - [WithMaxConcurrency] - Sets maximum concurrency limit
-type PoolOption interface {
+type AnyPoolOption interface {
 	CombinerPoolOption
 	TaskPoolOption
 }
@@ -29,7 +31,7 @@ type PoolOption interface {
 // indicate unlimited (subject to other backpressure constraints and scaling decisions).
 //
 // The default for both types of pool is unlimited.
-func WithMaxConcurrency(maxConcurrency int) PoolOption {
+func WithMaxConcurrency(maxConcurrency int) AnyPoolOption {
 	return opts.MaxConcurrency{Max: maxConcurrency}
 }
 

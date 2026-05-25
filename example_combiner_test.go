@@ -76,7 +76,7 @@ func ExampleCombine() {
 	ctx := context.Background()
 
 	// Create a scatter-gather job with flush listener to observe when all tasks have completed
-	job := psg.NewJob(ctx, psgopt.WithFlushListener(func() {
+	job := psg.New(ctx, psgopt.WithFlushListener(func() {
 		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
 	}))
 	defer job.CancelAndWait()

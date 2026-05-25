@@ -24,7 +24,7 @@ import (
 //
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
-	job            *Job
+	job            *Pool
 	maxConcurrency atomic.Int32
 	inFlight       jobstate.InFlightCounter
 	notifier       workq.Notifier
@@ -39,7 +39,7 @@ type TaskPool struct {
 // Panics if the job is nil or in the done state.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
+func NewTaskPool(job *Pool, options ...psgopt.TaskPoolOption) *TaskPool {
 	traceRegion := "NewTaskPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
@@ -71,7 +71,7 @@ func NewTaskPool(job *Job, options ...psgopt.TaskPoolOption) *TaskPool {
 	return p
 }
 
-func (p *TaskPool) getJob() *Job {
+func (p *TaskPool) getJob() *Pool {
 	if p.job == nil {
 		panic("task pool not bound to a job")
 	}
@@ -121,9 +121,9 @@ type taskPoolScatterWork struct {
 	inFlightIncremented bool
 }
 
-func newTaskPoolScatterWork(pool *TaskPool, deadline time.Time, jobScatterWork workq.Work) *taskPoolScatterWork {
+func newTaskPoolScatterWork(pool *TaskPool, deadline time.Time, poolScatterWork workq.Work) *taskPoolScatterWork {
 	w := taskPoolScatterWorkPool.Get()
-	w.Work = jobScatterWork
+	w.Work = poolScatterWork
 	w.pool = pool
 	w.deadline = deadline
 	return w

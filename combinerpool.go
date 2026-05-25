@@ -24,7 +24,7 @@ import (
 // CombinerPool manages a pool of goroutines that execute combiners.
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
 type CombinerPool struct {
-	job *Job
+	job *Pool
 
 	// CombinerPoolState hosts the data and core logic for managing the pool of
 	// goroutines to maximize throughput with the minimum number of goroutines
@@ -53,7 +53,7 @@ type CombinerPool struct {
 // Panics if the job is nil or in the done state.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewCombinerPool(job *Job, options ...psgopt.CombinerPoolOption) *CombinerPool {
+func NewCombinerPool(job *Pool, options ...psgopt.CombinerPoolOption) *CombinerPool {
 	traceRegion := "NewCombinerPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
@@ -229,7 +229,7 @@ func (cp *CombinerPool) goroutine() {
 			}
 		case errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded):
 			trace.Logf(ctx, traceRegion, "exiting with err=%v", err)
-			// Do NOT call GoroutineExiting() here. The Job is shutting down, so
+			// Do NOT call GoroutineExiting() here. The Pool is shutting down, so
 			// goroutine accounting no longer matters. Additionally, this goroutine
 			// may have already called GoroutineExiting() then GoroutineRestarted()
 			// on the ErrEndOfWork path above, and calling it again would cause
@@ -242,13 +242,13 @@ func (cp *CombinerPool) goroutine() {
 }
 
 type combinePostWork struct {
-	jobWork
+	poolWork
 	pool *CombinerPool
 	work boundCombineWork
 }
 
 func (w *combinePostWork) Init(group workq.GroupID, pool *CombinerPool, work boundCombineWork) {
-	w.jobWork.Init(group, pool.job)
+	w.poolWork.Init(group, pool.job)
 	w.pool = pool
 	w.work = work
 }

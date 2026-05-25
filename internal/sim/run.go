@@ -36,7 +36,7 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
 
-	job := psg.NewJob(ctx)
+	job := psg.New(ctx)
 	defer func() {
 		traceRegion := "sim.run.cleanup"
 		defer trace.StartRegion(ctx, traceRegion).End()
@@ -45,7 +45,7 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 
 	c := &controller{
 		Plan:                         plan,
-		Job:                          job,
+		Pool:                         job,
 		TaskPools:                    make([]*psg.TaskPool, len(plan.TaskPools)),
 		ConcurrencyByTaskPool:        make([]atomic.Int64, len(plan.TaskPools)),
 		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(plan.TaskPools)),
@@ -60,7 +60,7 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 
 type controller struct {
 	Plan                         *Plan
-	Job                          *psg.Job
+	Pool                         *psg.Pool
 	TaskPoolsLock                sync.Mutex
 	TaskPools                    []*psg.TaskPool
 	ConcurrencyByTaskPool        []atomic.Int64
@@ -93,7 +93,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	chk := assert.New(t)
 	// Loop to handle expected errors from gathers
 	for {
-		err := c.Job.CloseAndGatherAll(ctx)
+		err := c.Pool.CloseAndGatherAll(ctx)
 		if err == nil {
 			break
 		}
@@ -124,7 +124,7 @@ func (c *controller) getTaskPool(index int) *psg.TaskPool {
 	defer c.TaskPoolsLock.Unlock()
 	pool := c.TaskPools[index]
 	if pool == nil {
-		pool = psg.NewTaskPool(c.Job, psgopt.WithMaxConcurrency(c.Plan.TaskPools[index].ConcurrencyLimit))
+		pool = psg.NewTaskPool(c.Pool, psgopt.WithMaxConcurrency(c.Plan.TaskPools[index].ConcurrencyLimit))
 		c.TaskPools[index] = pool
 	}
 	return pool
@@ -174,7 +174,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 				combinerPool := c.CombinerPools[combinerPoolIndex]
 				if combinerPool == nil {
 					// Create a combiner pool with the concurrency limit
-					combinerPool = psg.NewCombinerPool(c.Job,
+					combinerPool = psg.NewCombinerPool(c.Pool,
 						psgopt.WithMaxConcurrency(c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit))
 					c.CombinerPools[combinerPoolIndex] = combinerPool
 				}

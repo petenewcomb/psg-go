@@ -9,7 +9,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 )
 
-// DefaultTaskWorkerIdleTimeout is the default task worker idle timeout for [github.com/petenewcomb/psg-go.Job]
+// DefaultTaskWorkerIdleTimeout is the default task worker idle timeout for [github.com/petenewcomb/psg-go.Pool]
 // unless overridden with [WithTaskWorkerIdleTimeout]. Controls how long task workers
 // wait for new work before exiting. Empirically determined; subject to change.
 const DefaultTaskWorkerIdleTimeout = 1 * time.Second
@@ -22,16 +22,16 @@ const DefaultTaskWorkerIdleJitter = 10 * time.Millisecond
 // be spawning concurrently. Empirically determined; subject to change.
 const DefaultTaskWorkerSpawnConcurrencyLimit = 1
 
-// JobOption is a configuration option that can be applied to Job.
+// PoolOption is a configuration option that can be applied to Pool.
 //
-// Available Job configuration options:
+// Available Pool configuration options:
 //   - [WithTaskWorkerIdleTimeout] - Sets task worker idle timeout
 //   - [WithTaskWorkerIdleJitter] - Sets task worker idle jitter
 //   - [WithTaskWorkerSpawnConcurrencyLimit] - Sets max concurrent task worker spawns
 //   - [WithFlushListener] - Registers callback for when all tasks complete
-type JobOption = opts.JobOption
+type PoolOption = opts.PoolOption
 
-// WithTaskWorkerIdleTimeout sets the duration that idle task workers in [github.com/petenewcomb/psg-go.Job] wait for
+// WithTaskWorkerIdleTimeout sets the duration that idle task workers in [github.com/petenewcomb/psg-go.Pool] wait for
 // new work before exiting. This controls how aggressively workers scale down
 // when load decreases.
 //
@@ -50,7 +50,7 @@ func WithTaskWorkerIdleTimeout(timeout time.Duration) TaskWorkerIdleTimeoutOptio
 }
 
 type TaskWorkerIdleTimeoutOption interface {
-	JobOption
+	PoolOption
 }
 
 // WithTaskWorkerIdleJitter sets the random jitter added to task worker idle timeouts.
@@ -66,11 +66,11 @@ func WithTaskWorkerIdleJitter(jitter time.Duration) TaskWorkerIdleJitterOption {
 }
 
 type TaskWorkerIdleJitterOption interface {
-	JobOption
+	PoolOption
 }
 
 // WithFlushListener registers a callback function that will be called each time
-// all tasks have completed and [github.com/petenewcomb/psg-go.Job] is waiting
+// all tasks have completed and [github.com/petenewcomb/psg-go.Pool] is waiting
 // for combiners to emit their results. After the callback returns, the job
 // signals any Combiner that has received inputs but hasn't yet emitted its
 // combined results to do so immediately. The callback may be invoked multiple
@@ -78,8 +78,8 @@ type TaskWorkerIdleJitterOption interface {
 // new tasks while processing the flushed results.
 //
 // The callback function is called synchronously from a goroutine calling a
-// gather method (Job.Gather, Job.TryGather, Job.GatherAll, Job.TryGatherAll,
-// Job.CloseAndGatherAll), Gather.Scatter, or Job.Close if no tasks are in
+// gather method (Pool.Gather, Pool.TryGather, Pool.GatherAll, Pool.TryGatherAll,
+// Pool.CloseAndGatherAll), Gather.Scatter, or Pool.Close if no tasks are in
 // flight at the time of closing.
 //
 // No default callback is registered.
@@ -91,7 +91,7 @@ func WithFlushListener(callback func()) FlushListenerOption {
 }
 
 type FlushListenerOption interface {
-	JobOption
+	PoolOption
 }
 
 // WithTaskWorkerSpawnConcurrencyLimit sets the maximum number of task workers
@@ -114,5 +114,5 @@ func WithTaskWorkerSpawnConcurrencyLimit(limit int) TaskWorkerSpawnConcurrencyLi
 }
 
 type TaskWorkerSpawnConcurrencyLimitOption interface {
-	JobOption
+	PoolOption
 }

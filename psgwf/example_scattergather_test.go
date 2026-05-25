@@ -21,7 +21,7 @@ import (
 // related operations when one fails.
 func Example_scatterGather() {
 	// Create a job
-	job := psg.NewJob(context.Background())
+	job := psg.New(context.Background())
 	defer job.CancelAndWait()
 
 	// Create a task pool with limited concurrency to control timing

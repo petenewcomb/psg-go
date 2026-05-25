@@ -18,7 +18,7 @@ import (
 // Example demonstrates basic workflow context usage.
 func Example_simple() {
 	// Create a job
-	job := psg.NewJob(context.Background())
+	job := psg.New(context.Background())
 	defer job.CancelAndWait()
 
 	// Create a task pool

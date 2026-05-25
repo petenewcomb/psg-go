@@ -60,6 +60,73 @@ The orphan-elimination plan (a long-standing TODO) became feasible during this c
 
 Companion fix: in `Queue.PopFrontFunc`, when post-selectFn cleanup drains a value as orphan AND `selectFn` had also picked up an outbox-wait notification, the renotifyFn is now forwarded (previously dropped — a "lost notification" bug, separate from but exposed during the orphan work).
 
+## Sender shutdown notifies pending listeners (2026-05-25)
+
+### The symptom
+
+A CombinerPool worker goroutine on its exit path (the `defer worker.Release()` at `combinerpool.go:130` of `CombinerPool.goroutine`) cascades through `integrationExEnv.Release` → `baseExEnv.Release` → `Sender.Release` → `outbox.free` → `omnipool.PutCustom` → `outboxTrait.Reset` → `Listeners.Reset`. The Reset panicked if `Listeners.q` was non-empty.
+
+Reliably exposed (~25% of test runs) by the new sim's submit-via-start pattern, which creates higher scatter pressure on CombinerPool outboxes than the old sim did.
+
+### What the leftover listeners actually mean
+
+The listeners on a Sender's outbox are work items that wanted to send a value *through this Sender* but couldn't (outbox was full). They subscribed for a "your outbox drained, try again" notification.
+
+When the Sender shuts down, those work items still want to send — they just can't via this Sender anymore. The correct response is to notify them so they retry on a different Sender (i.e., another goroutine's worker). Leaving them subscribed to a dead Sender would silently abandon their work (or, worse, attach those subscriptions to the *next* user of the recycled outbox).
+
+The `Listeners.Reset` panic correctly enforces an invariant for putting an outbox back into the pool: the listeners queue must be empty, because a recycled outbox carrying stale subscriptions would leak notifications into a context that doesn't own them. The panic did its job — it surfaced abandoned subscriptions that needed handling before recycle. The fix isn't to relax the invariant; it's to satisfy it by draining the subscriptions appropriately before Reset runs.
+
+`outbox.free()` now calls `ob.listeners.NotifyAll()` when refcount reaches 0, before returning the outbox to the omnipool. Each listener wrapper's `notify` fires with `NoopRenotify`, the workq re-execute path picks the work up on the next available worker, the wrapper is returned to its pool, and the listeners queue is empty by the time `omnipool.PutCustom` invokes `outboxTrait.Reset`. The invariant holds; no panic.
+
+### How the leftover got there in the first place
+
+The work registers the listener at `combinerpool.go:294-307`:
+```go
+if !meta.ShouldBlock() {
+    ex.AddToListeners(w.pool.combineQueue.ListenersFor(meta.Sender()))
+    ex.AddToListeners(&w.pool.state.SpawnNotifier().Listeners)
+
+    posted := tryPost()
+    if !posted {
+        waiting()
+    }
+    return posted, nil
+}
+```
+
+The subscribe-then-retry is intentionally optimistic: subscribe first (so we don't miss a drain that happens between attempts), then retry. Either branch can leave the listener queued:
+
+- `posted=true`: the retry succeeded. The work is done, but the listener subscription stays in the queue as a deliberate leftover.
+- `posted=false`: the work is parked. The listener stays, waiting for a future emptied() to fire it.
+
+Couldn't we just remove the listener when the retry succeeds? No — `outbox.listeners` is backed by `nbcq.Queue` (Michael-Scott lock-free queue), which supports only enqueue/dequeue. There's no mechanism to remove an arbitrary entry. So the leftover-on-success is structural, not a missing cleanup.
+
+In normal operation the leftover is harmless: a future `emptied()` calls `Notify(nil)` which pops the wrapper and invokes its `notify`; the workq sees the work has either already completed (no-op) or is ready to retry (it retries); the wrapper goes back to its pool. The Reset panic fires only when `outbox.free()` decrements refcount to 0 *before* any subsequent `emptied()` consumed the leftover. The new sim's higher scatter pressure makes outboxes fill-and-release more quickly, widening the timing window where leftovers survive until free.
+
+### How the retry actually lands on another Sender (verified)
+
+The wiring is end-to-end asynchronous and lands correctly:
+
+1. **`accepted.go:47`**: `q.listener.Notify = q.waiters.Notify`. The workq queue's Listener, when fired, just calls `q.waiters.Notify`.
+
+2. **`waiters.go:125-134`**: `Waiters.Notify` is `w.q.TryPushBack(renotifyFn)` — atomic enqueue to the waiters' nbcq queue. No synchronous callbacks, no use-after-free risk during the call chain inside `outbox.free()`.
+
+3. **`accepted.go:344-369` `WaitForNew`**: a blocked worker is waiting on the workq's `waiters`. When the renotifyFn lands in the waiters queue, that worker wakes up, returns from WaitForNew, and re-enters the work-execution loop.
+
+4. **`accepted.go:407-417` `execute`**: a `combinePostWork.Execute` that returned `posted=false` (didn't call `ex.Starting()`) is marked postponed and kept in `c.q.postponed`. The next worker to pull from postponed re-runs `Execute` with **its own** ctx and `meta.Sender()` — a different Sender whose outbox may not be full.
+
+So when a Sender shuts down with pending listener subscriptions, NotifyAll drains them; each wrapper signals the workq's waiters; some other worker picks up the postponed work and retries on its own Sender. Work isn't lost.
+
+For the `posted=true` leftover case (the work already completed), the notification still fires, but the workq has nothing to do — the postponed queue doesn't contain that work item anymore, so the woken worker re-checks, finds nothing extra to run, and returns to waiting. Harmless.
+
+### Files involved
+
+- `internal/rdvq/outbox.go` — the fix (NotifyAll on refcount=0)
+- `internal/rdvq/listeners.go` — Reset's strictness vs. Sender-shutdown semantics
+- `combinerpool.go:294-307` — the subscribe-then-retry pattern that produces leftovers
+- `internal/workq/accepted.go:47, 426-428, 344-369, 407-417` — the listener-to-waiters wiring and the postponed-work retry path
+- `internal/rdvq/waiters.go:125-134` — Notify is just an atomic enqueue
+
 ## Open issues
 
 ### Deadline propagation in taskPostWork

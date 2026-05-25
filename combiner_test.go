@@ -63,7 +63,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 		combinerPool := psg.NewCombinerPool(job)
 
 		// Create a combine operation
-		combineOp := psg.NewCombineOp(
+		combineOp := psg.NewCombiner(
 			gatherer,
 			combinerPool,
 			newPassthroughTestCombinerFactory[int](t),
@@ -124,7 +124,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 		},
 	)
 	combinerPool := psg.NewCombinerPool(job)
-	combineOp := psg.NewCombineOp(
+	combineOp := psg.NewCombiner(
 		gatherer,
 		combinerPool,
 		newPassthroughTestCombinerFactory[int](t),
@@ -181,7 +181,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		},
 	)
 	combinerPool := psg.NewCombinerPool(parentJob)
-	combineOp := psg.NewCombineOp(
+	combineOp := psg.NewCombiner(
 		gatherer,
 		combinerPool,
 		newPassthroughTestCombinerFactory[bool](t),
@@ -245,7 +245,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 		},
 	)
 	combinerPool := psg.NewCombinerPool(parentJob)
-	combineOp := psg.NewCombineOp(
+	combineOp := psg.NewCombiner(
 		gatherer,
 		combinerPool,
 		newPassthroughTestCombinerFactory[bool](t),
@@ -858,15 +858,15 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 
 							gatherer := psg.NewGatherer(gatherFn)
-							combineOp := psg.NewCombineOp(gatherer, combinerPool, combinerFactory)
+							combineOp := psg.NewCombiner(gatherer, combinerPool, combinerFactory)
 							defer combineOp.Close()
 
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
 								localCombineOp := combineOp
 								if idealCombinesPerGather == 1 {
-									// Tests to make sure that NewCombineOp does not incur allocation overhead
-									localCombineOp = psg.NewCombineOp(gatherer, combinerPool, combinerFactory)
+									// Tests to make sure that NewCombiner does not incur allocation overhead
+									localCombineOp = psg.NewCombiner(gatherer, combinerPool, combinerFactory)
 									defer localCombineOp.Close()
 								}
 								if deadline.IsZero() {

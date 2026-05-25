@@ -35,41 +35,41 @@ func (combineOpHandleTrait[I, O]) Dup(c *combineOp[I, O]) (*combineOp[I, O], err
 }
 
 func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
-	return fmt.Sprintf("CombineOp(%p)", c)
+	return fmt.Sprintf("Combiner(%p)", c)
 }
 
-// CombineOp represents an operation that combines inputs and produces outputs.
+// Combiner represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
-// CombineOp extends the capabilities of Gatherer by aggregating task results
+// Combiner extends the capabilities of Gatherer by aggregating task results
 // through combiners before gathering.
 //
-// Thread-safety and copying: Like Gatherer, a CombineOp value is designed to be
-// copied. While a single CombineOp value does not support concurrent calls to
-// Scatter or TryScatter, copies of a CombineOp can be used concurrently. All
+// Thread-safety and copying: Like Gatherer, a Combiner value is designed to be
+// copied. While a single Combiner value does not support concurrent calls to
+// Scatter or TryScatter, copies of a Combiner can be used concurrently. All
 // copies share the same combiner identity and will route work to the same
-// combiner instances. This allows CombineOp values to be safely passed by value
+// combiner instances. This allows Combiner values to be safely passed by value
 // to goroutines or stored in structures without losing their binding to the
 // underlying combiner pool and operation identity.
 //
-// Resource management: CombineOp uses leakguard for safe handle management.
-// Each CombineOp must be explicitly closed via Close(). Dup() creates independent
+// Resource management: Combiner uses leakguard for safe handle management.
+// Each Combiner must be explicitly closed via Close(). Dup() creates independent
 // handles that share the same underlying state. The combineOp resource is
 // cleaned up when the last handle is closed and all internal references
 // (from tasks and work items) are released.
-type CombineOp[I, O any] struct {
+type Combiner[I, O any] struct {
 	h leakguard.Handle[combineOp[I, O], combineOpHandleTrait[I, O]]
 }
 
-// NewCombineOp creates a new CombineOp operation that uses the specified gather function,
+// NewCombiner creates a new Combiner operation that uses the specified gather function,
 // combiner pool, and combiner factory.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewCombineOp[I any, O any](
+func NewCombiner[I any, O any](
 	gatherer Gatherer[O],
 	combinerPool *CombinerPool,
 	combinerFactory psgfn.CombinerFactory[I, O],
-) CombineOp[I, O] {
-	traceRegion := "NewCombineOp"
+) Combiner[I, O] {
+	traceRegion := "NewCombiner"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	if gatherer.gatherFn == nil {
@@ -110,11 +110,11 @@ func NewCombineOp[I any, O any](
 	h := leakguard.New[combineOp[I, O], combineOpHandleTrait[I, O]](inner)
 
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "CombineOp(%p), handleID=%d, pool=%p",
+		trace.Logf(context.Background(), traceRegion, "Combiner(%p), handleID=%d, pool=%p",
 			inner, h.HandleID(), combinerPool)
 	}
 
-	return CombineOp[I, O]{h: h}
+	return Combiner[I, O]{h: h}
 }
 
 // Scatter initiates asynchronous execution of the provided task function in a
@@ -124,19 +124,19 @@ func NewCombineOp[I any, O any](
 //
 // See [Gatherer.Scatter] for details about backpressure, concurrency limits,
 // context handling, and error behavior.
-func (c *CombineOp[I, O]) Scatter(
+func (c *Combiner[I, O]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) error {
-	traceRegion := "CombineOp.Scatter"
+	traceRegion := "Combiner.Scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.h.Get()
 	if inner == nil {
-		panic("CombineOp has been closed")
+		panic("Combiner has been closed")
 	}
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
+		trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -151,24 +151,24 @@ func (c *CombineOp[I, O]) Scatter(
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
+// TryScatter is like [Combiner.Scatter] but returns instead of blocking if
 // the given target is at its concurrency limit.
 //
 // See [Gatherer.TryScatter] for details about behavior and return values.
-func (c *CombineOp[I, O]) TryScatter(
+func (c *Combiner[I, O]) TryScatter(
 	ctx context.Context,
 	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) (bool, error) {
-	traceRegion := "CombineOp.TryScatter"
+	traceRegion := "Combiner.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.h.Get()
 	if inner == nil {
-		panic("CombineOp has been closed")
+		panic("Combiner has been closed")
 	}
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
+		trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
 	}
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -190,16 +190,16 @@ func (c *CombineOp[I, O]) TryScatter(
 // Integrate posts values to be combined by the combine queue.
 // This follows the same pattern as Scatter but for posting combine work instead
 // of launching tasks.
-func (c *CombineOp[I, O]) Integrate(
+func (c *Combiner[I, O]) Integrate(
 	ctx context.Context,
 	value I,
 	err error,
 ) error {
-	traceRegion := "CombineOp.Integrate"
+	traceRegion := "Combiner.Integrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
-	trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
+	trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
 
 	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
 	meta.Lock()
@@ -214,17 +214,17 @@ func (c *CombineOp[I, O]) Integrate(
 
 // TryIntegrate attempts to post values to be combined by the combine queue.
 // Like Integrate, but returns instead of blocking if queuing would be required.
-func (c *CombineOp[I, O]) TryIntegrate(
+func (c *Combiner[I, O]) TryIntegrate(
 	ctx context.Context,
 	deadline time.Time,
 	value I,
 	err error,
 ) (bool, error) {
-	traceRegion := "CombineOp.TryIntegrate"
+	traceRegion := "Combiner.TryIntegrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
-	trace.Logf(ctx, traceRegion, "CombineOp(%p)", inner)
+	trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
 
 	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
 	meta.Lock()
@@ -237,13 +237,13 @@ func (c *CombineOp[I, O]) TryIntegrate(
 	return inner.tryIntegrate(ctx, meta, group, value, err, deadline)
 }
 
-func (c *CombineOp[I, O]) newScatterWork(
+func (c *Combiner[I, O]) newScatterWork(
 	group workq.GroupID,
 	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) *combineScatterWork {
-	traceRegion := "CombineOp.newScatterWork"
+	traceRegion := "Combiner.newScatterWork"
 
 	inner := c.refInner()
 	defer inner.unref()
@@ -258,39 +258,39 @@ func (c *CombineOp[I, O]) newScatterWork(
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion,
-			"CombineOp(%p) created %v, instanceQueue=%p",
+			"Combiner(%p) created %v, instanceQueue=%p",
 			inner, w, &inner.instanceQueue)
 	}
 	return w
 }
 
-// Dup creates a duplicate handle to the same underlying CombineOp.
+// Dup creates a duplicate handle to the same underlying Combiner.
 // Like file descriptor duplication, this creates a new handle that shares
 // the same underlying combiner state but requires its own Close() call.
-// This is useful for passing CombineOp handles to different goroutines
+// This is useful for passing Combiner handles to different goroutines
 // or async operations that need their own lifecycle management.
-func (c *CombineOp[I, O]) Dup() CombineOp[I, O] {
+func (c *Combiner[I, O]) Dup() Combiner[I, O] {
 	h, err := leakguard.Dup(c.h)
 	if err != nil {
 		panic(fmt.Sprintf("Dup() failed: %v", err))
 	}
-	return CombineOp[I, O]{h: h}
+	return Combiner[I, O]{h: h}
 }
 
-// Close releases this handle to the CombineOp. Each handle (including dups)
+// Close releases this handle to the Combiner. Each handle (including dups)
 // must be closed exactly once. The underlying combiner state is cleaned up
 // when the last handle is closed.
-func (c *CombineOp[I, O]) Close() {
+func (c *Combiner[I, O]) Close() {
 	c.h.Close()
 }
 
 // refInner gets the inner combineOp, checks if closed, and adds a reference.
-// Panics if the CombineOp has been closed.
+// Panics if the Combiner has been closed.
 // The caller must ensure a matching unref() is called.
-func (c *CombineOp[I, O]) refInner() *combineOp[I, O] {
+func (c *Combiner[I, O]) refInner() *combineOp[I, O] {
 	inner := c.h.Get()
 	if inner == nil {
-		panic("CombineOp has been closed")
+		panic("Combiner has been closed")
 	}
 	inner.ref()
 	return inner
@@ -452,7 +452,7 @@ func (c *halfBoundCombiner[I, O]) allocate(
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "CombineOp(%p) returning new combiner=%v", c.op, c.combiner)
+		trace.Logf(ctx, traceRegion, "Combiner(%p) returning new combiner=%v", c.op, c.combiner)
 	}
 }
 

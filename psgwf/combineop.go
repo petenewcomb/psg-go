@@ -11,17 +11,21 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-type GenericCombineOp[I, O, C any] psg.CombineOp[result[I, C], result[O, C]]
+type GenericCombineOp[I, O, C any] psg.Combiner[result[I, C], result[O, C]]
 type CombineOp[I, O any] = GenericCombineOp[I, O, context.Context]
 
-// NewCombineOp creates a psg.CombineOp that propagates workflow contexts through the combine chain.
+// NewCombineOp creates a psg.Combiner that propagates workflow contexts through the combine chain.
 // This ensures workflow context values and cancellation flow from inputs to outputs.
+//
+// Named NewCombineOp (not NewCombiner) within psgwf to avoid clashing with the
+// distinct Combiner interface alias in psgwf/combiner.go. Both psgwf names will
+// be revisited when the broader Combiner/Accumulator renames land.
 func NewCombineOp[I, O, C any](
 	gatherer GenericGatherOp[O, C],
 	combinerPool *psg.CombinerPool,
 	combinerFactory GenericCombinerFactory[I, O, C],
 ) GenericCombineOp[I, O, C] {
-	return GenericCombineOp[I, O, C](psg.NewCombineOp(
+	return GenericCombineOp[I, O, C](psg.NewCombiner(
 		psg.Gatherer[result[O, C]](gatherer),
 		combinerPool,
 		wrapCombinerFactory(combinerFactory),
@@ -53,6 +57,6 @@ func (c GenericCombineOp[I, O, C]) TryScatter(
 	)
 }
 
-func (c GenericCombineOp[I, O, C]) inner() *psg.CombineOp[result[I, C], result[O, C]] {
-	return (*psg.CombineOp[result[I, C], result[O, C]])(&c)
+func (c GenericCombineOp[I, O, C]) inner() *psg.Combiner[result[I, C], result[O, C]] {
+	return (*psg.Combiner[result[I, C], result[O, C]])(&c)
 }

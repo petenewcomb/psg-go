@@ -35,7 +35,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
-	combineOp := psg.NewCombineOp(gatherer, combinerPool, func() psgfn.Combiner[int, int] {
+	combineOp := psg.NewCombiner(gatherer, combinerPool, func() psgfn.Combiner[int, int] {
 		return psgfn.FuncCombiner[int, int]{
 			CombineFn: func(ctx context.Context, value int, err error) (time.Time, error) {
 				// Don't emit immediately - let the deadline trigger flushing

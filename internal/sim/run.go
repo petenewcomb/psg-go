@@ -50,7 +50,7 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 		ConcurrencyByTaskPool:        make([]atomic.Int64, len(plan.TaskPools)),
 		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(plan.TaskPools)),
 		Gathers:                      make([]*psg.Gatherer[*taskResult], plan.GatherCount),
-		Combines:                     make([]*psg.CombineOp[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
+		Combines:                     make([]*psg.Combiner[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
 		CombinerPools:                make([]*psg.CombinerPool, len(plan.CombinerPools)),
 		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
 		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
@@ -68,7 +68,7 @@ type controller struct {
 	GathersLock                  sync.Mutex
 	Gathers                      []*psg.Gatherer[*taskResult]
 	CombinesLock                 sync.Mutex
-	Combines                     []*psg.CombineOp[*taskResult, *combineResult]
+	Combines                     []*psg.Combiner[*taskResult, *combineResult]
 	CombinerPools                []*psg.CombinerPool
 	ConcurrencyByCombinerPool    []atomic.Int64
 	MaxConcurrencyByCombinerPool []atomicMinMaxInt64
@@ -162,7 +162,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 			}
 		}
 	case *Combine:
-		combineOp := func() psg.CombineOp[*taskResult, *combineResult] {
+		combineOp := func() psg.Combiner[*taskResult, *combineResult] {
 			c.CombinesLock.Lock()
 			defer c.CombinesLock.Unlock()
 			combineOp := c.Combines[rh.Index]
@@ -180,7 +180,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 				}
 
 				// Create a combine operation that uses the gather and factory
-				op := psg.NewCombineOp(
+				op := psg.NewCombiner(
 					gatherer,
 					combinerPool,
 					c.newCombinerFactory(t, rh.Index),

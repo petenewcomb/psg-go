@@ -91,7 +91,7 @@ func ExampleCombine() {
 	gatherer := psg.NewGatherer(gatherFn)
 
 	// Create a Combine operation with the gather function and inline combiner factory
-	combineOp := psg.NewCombineOp(gatherer, combinerPool, newCombiner)
+	combineOp := psg.NewCombiner(gatherer, combinerPool, newCombiner)
 	defer combineOp.Close()
 
 	// Launch some tasks

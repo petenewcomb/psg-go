@@ -5,6 +5,7 @@ package sim
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"pgregory.net/rapid"
@@ -15,12 +16,24 @@ import (
 // Plan against the current psg API; as reshape waves land, only the
 // adapter changes.
 //
-// Plan is intentionally minimal in v1: each path is a linear chain
-// TaskRunner → (Combiner →)* Gatherer with one Submit per body. Fan-in,
-// fan-out, multi-Submit, multi-StartTask, conditional routing, and
-// cross-Subjob Submit are vocabulary-supported and will enrich the
-// generator in follow-up work; the static types and runtime adapter
-// are sized for the full expressive range.
+// The generator produces a layered DAG:
+//
+//   - Gatherers (terminal sinks) at depth 0
+//   - Combiners at depths 1..MaxCombinerDepth, each Accumulate.Submit
+//     wired to a shallower sink. Multiple paths may share a Combiner
+//     (fan-in).
+//   - Origin TaskRunners (one per path), Body.Submit wired to a sink
+//     at depth = path-length - 1. StartTask entries for these go into
+//     Plan.Steps.
+//   - Fan-out TaskRunners dispatched from inside Gatherer.Handle and
+//     Combiner.Accumulate bodies via StartTask steps
+//     (scatter-from-gather/combine, the recursive-spawn pattern).
+//     Each fan-out runner Submits to a Gatherer; cycle prevention is
+//     enforced by ordering (Gatherer #i's StartTasks only target
+//     Gatherers with index > i).
+//
+// Sink-invocation bounds and path durations are computed by walking
+// the DAG forward from each top-level StartTask, memoized per op.
 type Plan struct {
 	ID               int
 	PathCount        int
@@ -34,8 +47,10 @@ type Plan struct {
 	SubjobCount      int
 	SubjobTaskCount  int
 	// Sink-invocation bounds computed at plan time. In Deterministic
-	// mode, MinSinkInvocations[i] == MaxSinkInvocations[i] for each
-	// Gatherer i; in probabilistic mode the bounds may differ.
+	// mode and the current v1 generator (all Probs = 1.0),
+	// MinGathererInvocations[i] == MaxGathererInvocations[i]. When
+	// probabilistic-mode generation lands, Min may drop to 0 for
+	// non-unit probabilities.
 	MinGathererInvocations []int
 	MaxGathererInvocations []int
 }
@@ -67,7 +82,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 
 	nextIDsOrigin := *nextIDs
 
-	// Limiters
+	// === Limiters ===
 	taskLimiterCount := config.TaskLimiter.Count.Draw(t, planName+".TaskLimiterCount")
 	plan.TaskLimiters = make([]Limiter, taskLimiterCount)
 	for i := range plan.TaskLimiters {
@@ -89,7 +104,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		}
 	}
 
-	// Gatherers (terminal sinks) — generate up front; paths will Submit into them.
+	// === Gatherers (depth 0, terminal sinks) ===
 	gathererCount := config.Gatherer.Count.Draw(t, planName+".GathererCount")
 	plan.Gatherers = make([]*Gatherer, gathererCount)
 	for i := range plan.Gatherers {
@@ -97,55 +112,168 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		nextIDs.Gatherer++
 		plan.Gatherers[i] = &Gatherer{
 			ID:     id,
-			Depth:  0, // gatherers are terminal (depth 0 = deepest); placeholder, set during path build
+			Depth:  0,
 			Handle: newFunc(t, plan, config, &config.Gatherer.Handle, nextIDs, fmt.Sprintf("Gatherer#%d.Handle", id)),
 		}
 	}
-	plan.MinGathererInvocations = make([]int, gathererCount)
-	plan.MaxGathererInvocations = make([]int, gathererCount)
 
-	// PathCount paths, each a linear chain TaskRunner → (Combiner →)* Gatherer.
-	plan.PathCount = config.Path.Count.Draw(t, planName+".PathCount")
-
-	for i := range plan.PathCount {
-		pathName := fmt.Sprintf("%s.Path[%d]", planName, i)
-		length := config.Path.Length.Draw(t, pathName+".Length")
-		// Build the chain. Pick a terminal Gatherer.
-		gathererIdx := rapid.IntRange(0, gathererCount-1).Draw(t, pathName+".TerminalGatherer")
-		// Current Submit target as we build backward from terminal.
-		currentSinkKind := SinkGatherer
-		currentSinkIndex := gathererIdx
-		// Intermediate Combiners: length - 1 of them (length 1 = direct task→gatherer).
-		// length == 0 isn't allowed (config Min is at least 1).
-		for j := length - 1; j > 0; j-- {
-			id := nextIDs.Combiner
-			nextIDs.Combiner++
-			combiner := &Combiner{
-				ID:    id,
-				Depth: j, // deeper = closer to terminal
-				Accumulate: newFunc(t, plan, config, &config.Combiner.Accumulate, nextIDs,
-					fmt.Sprintf("Combiner#%d.Accumulate", id)),
-				Flush: newFunc(t, plan, config, &config.Combiner.Flush, nextIDs,
-					fmt.Sprintf("Combiner#%d.Flush", id)),
-			}
-			if combLimiterCount > 0 {
-				limIdx := rapid.IntRange(0, combLimiterCount-1).Draw(t, fmt.Sprintf("Combiner#%d.LimiterIndex", id))
-				combiner.LimiterIndexes = []int{limIdx}
-			}
-			// Accumulate submits to current sink.
-			combiner.Accumulate.Steps = append(combiner.Accumulate.Steps, Submit{
-				Prob: probValue(config, 1.0), SinkKind: currentSinkKind, SinkIndex: currentSinkIndex,
-			})
-			plan.Combiners = append(plan.Combiners, combiner)
-			currentSinkKind = SinkCombiner
-			currentSinkIndex = len(plan.Combiners) - 1
+	// === Combiners (depth 1..maxCombinerDepth, shared across paths for fan-in) ===
+	maxCombinerDepth := config.Path.Length.Max - 1
+	if maxCombinerDepth < 1 {
+		maxCombinerDepth = 1
+	}
+	combinerCount := config.Combiner.Count.Draw(t, planName+".CombinerCount")
+	plan.Combiners = make([]*Combiner, combinerCount)
+	for i := range plan.Combiners {
+		id := nextIDs.Combiner
+		nextIDs.Combiner++
+		depth := rapid.IntRange(1, maxCombinerDepth).Draw(t, fmt.Sprintf("Combiner#%d.Depth", id))
+		plan.Combiners[i] = &Combiner{
+			ID:    id,
+			Depth: depth,
+			Accumulate: newFunc(t, plan, config, &config.Combiner.Accumulate, nextIDs,
+				fmt.Sprintf("Combiner#%d.Accumulate", id)),
+			Flush: newFunc(t, plan, config, &config.Combiner.Flush, nextIDs,
+				fmt.Sprintf("Combiner#%d.Flush", id)),
 		}
-		// Origin TaskRunner: body submits to current sink.
+		if combLimiterCount > 0 {
+			limIdx := rapid.IntRange(0, combLimiterCount-1).Draw(t, fmt.Sprintf("Combiner#%d.LimiterIndex", id))
+			plan.Combiners[i].LimiterIndexes = []int{limIdx}
+		}
+	}
+	// Sort by depth ascending so earlier-indexed Combiners are shallower —
+	// enables the wiring loop below to pick downstream candidates by index.
+	sort.SliceStable(plan.Combiners, func(i, j int) bool {
+		return plan.Combiners[i].Depth < plan.Combiners[j].Depth
+	})
+
+	// Wire each Combiner.Accumulate.Submit to a shallower sink
+	// (Gatherer or Combiner with strictly smaller Depth).
+	type sinkRef struct {
+		kind SinkKind
+		idx  int
+	}
+	for i, c := range plan.Combiners {
+		var sinks []sinkRef
+		for gi := range plan.Gatherers {
+			sinks = append(sinks, sinkRef{SinkGatherer, gi})
+		}
+		for ci := 0; ci < i; ci++ {
+			if plan.Combiners[ci].Depth < c.Depth {
+				sinks = append(sinks, sinkRef{SinkCombiner, ci})
+			}
+		}
+		pick := rapid.IntRange(0, len(sinks)-1).Draw(t,
+			fmt.Sprintf("Combiner#%d.Accumulate.SubmitTarget", c.ID))
+		c.Accumulate.Steps = append(c.Accumulate.Steps, Submit{
+			Prob:      probValue(config, 1.0),
+			SinkKind:  sinks[pick].kind,
+			SinkIndex: sinks[pick].idx,
+		})
+	}
+
+	// === Scatter-from-gather and scatter-from-combine: bodies dispatch
+	// fan-out runners that all Submit to the "terminal" Gatherer
+	// (Gatherers[len-1]). The terminal Gatherer has no StartTasks of its
+	// own — this breaks the otherwise-multiplicative cascade that would
+	// otherwise blow up when Gatherer chains compound. The terminal
+	// can still be a path destination; it just doesn't propagate.
+	terminalGathererIdx := len(plan.Gatherers) - 1
+	addFanoutRunner := func(name string) int {
 		id := nextIDs.TaskRunner
 		nextIDs.TaskRunner++
 		runner := &TaskRunner{
 			ID:    id,
-			Depth: length, // origin is at depth = path length
+			Depth: 1,
+			Body:  newFunc(t, plan, config, &config.TaskRunner.Body, nextIDs, name),
+		}
+		if taskLimiterCount > 0 {
+			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, name+".LimiterIndex")
+			runner.LimiterIndexes = []int{limIdx}
+		}
+		runner.Body.Steps = append(runner.Body.Steps, Submit{
+			Prob:      probValue(config, 1.0),
+			SinkKind:  SinkGatherer,
+			SinkIndex: terminalGathererIdx,
+		})
+		plan.TaskRunners = append(plan.TaskRunners, runner)
+		return len(plan.TaskRunners) - 1
+	}
+	// Only non-terminal Gatherers get StartTasks. The terminal IS the
+	// last Gatherer; for the degenerate case of only one Gatherer there
+	// is nowhere safe to scatter to without re-introducing a cycle, so
+	// skip scatter-from-gather entirely.
+	const minGatherersForScatter = 2
+	if len(plan.Gatherers) >= minGatherersForScatter {
+		for gIdx, g := range plan.Gatherers {
+			if gIdx == terminalGathererIdx {
+				continue
+			}
+			sc := config.Gatherer.ScatterCount.Draw(t, fmt.Sprintf("Gatherer#%d.ScatterCount", g.ID))
+			for s := 0; s < sc; s++ {
+				runnerIdx := addFanoutRunner(fmt.Sprintf("FanoutRunner.from-Gatherer#%d[%d]", g.ID, s))
+				g.Handle.Steps = append(g.Handle.Steps, StartTask{
+					Prob:        probValue(config, 1.0),
+					RunnerIndex: runnerIdx,
+				})
+			}
+		}
+	}
+	for _, c := range plan.Combiners {
+		if len(plan.Gatherers) == 0 {
+			continue
+		}
+		sc := config.Combiner.ScatterCount.Draw(t, fmt.Sprintf("Combiner#%d.ScatterCount", c.ID))
+		for s := 0; s < sc; s++ {
+			runnerIdx := addFanoutRunner(fmt.Sprintf("FanoutRunner.from-Combiner#%d[%d]", c.ID, s))
+			c.Accumulate.Steps = append(c.Accumulate.Steps, StartTask{
+				Prob:        probValue(config, 1.0),
+				RunnerIndex: runnerIdx,
+			})
+		}
+	}
+
+	// === Origin TaskRunners (one per path). Each path's Body.Submit
+	// targets a sink at depth = pathLength - 1. Multiple paths may
+	// share the same target — that's fan-in. ===
+	plan.PathCount = config.Path.Count.Draw(t, planName+".PathCount")
+	for i := 0; i < plan.PathCount; i++ {
+		pathName := fmt.Sprintf("%s.Path[%d]", planName, i)
+		length := config.Path.Length.Draw(t, pathName+".Length")
+
+		var pickedSinkKind SinkKind
+		var pickedSinkIdx int
+		if length == 1 {
+			pickedSinkKind = SinkGatherer
+			pickedSinkIdx = rapid.IntRange(0, len(plan.Gatherers)-1).Draw(t, pathName+".TerminalGatherer")
+		} else {
+			// Try to find a Combiner exactly at depth length-1
+			var candidates []int
+			for ci, c := range plan.Combiners {
+				if c.Depth == length-1 {
+					candidates = append(candidates, ci)
+				}
+			}
+			switch {
+			case len(candidates) > 0:
+				pickedSinkKind = SinkCombiner
+				pickedSinkIdx = candidates[rapid.IntRange(0, len(candidates)-1).Draw(t, pathName+".SinkPick")]
+			case len(plan.Combiners) > 0:
+				// Fallback: any Combiner
+				pickedSinkKind = SinkCombiner
+				pickedSinkIdx = rapid.IntRange(0, len(plan.Combiners)-1).Draw(t, pathName+".SinkPick")
+			default:
+				// No Combiners — target a Gatherer
+				pickedSinkKind = SinkGatherer
+				pickedSinkIdx = rapid.IntRange(0, len(plan.Gatherers)-1).Draw(t, pathName+".SinkPick")
+			}
+		}
+
+		id := nextIDs.TaskRunner
+		nextIDs.TaskRunner++
+		runner := &TaskRunner{
+			ID:    id,
+			Depth: length,
 			Body:  newFunc(t, plan, config, &config.TaskRunner.Body, nextIDs, fmt.Sprintf("TaskRunner#%d.Body", id)),
 		}
 		if taskLimiterCount > 0 {
@@ -153,34 +281,86 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			runner.LimiterIndexes = []int{limIdx}
 		}
 		runner.Body.Steps = append(runner.Body.Steps, Submit{
-			Prob: probValue(config, 1.0), SinkKind: currentSinkKind, SinkIndex: currentSinkIndex,
+			Prob:      probValue(config, 1.0),
+			SinkKind:  pickedSinkKind,
+			SinkIndex: pickedSinkIdx,
 		})
 		plan.TaskRunners = append(plan.TaskRunners, runner)
-
-		// Top-level StartTask for this path's origin.
 		plan.Steps = append(plan.Steps, StartTask{
-			Prob: probValue(config, 1.0), RunnerIndex: len(plan.TaskRunners) - 1,
+			Prob:        probValue(config, 1.0),
+			RunnerIndex: len(plan.TaskRunners) - 1,
 		})
-
-		// Sink-invocation accounting for the terminal Gatherer.
-		// In Deterministic mode, exactly one invocation per path that ends here.
-		// In probabilistic mode, multiplied by cumulative path probabilities (all 1 in v1).
-		plan.MinGathererInvocations[gathererIdx]++
-		plan.MaxGathererInvocations[gathererIdx]++
 	}
-
 	plan.Steps = rapid.Permutation(plan.Steps).Draw(t, planName+".StepsPermutation")
+
+	// === Compute sink-invocation bounds and path durations via DAG walk. ===
+	plan.MinGathererInvocations = make([]int, len(plan.Gatherers))
+	plan.MaxGathererInvocations = make([]int, len(plan.Gatherers))
+	contribCache := map[any]map[int]int{}
+	gathererIdx := map[*Gatherer]int{}
+	for gi, g := range plan.Gatherers {
+		gathererIdx[g] = gi
+	}
+	var contribOf func(op any) map[int]int
+	contribOf = func(op any) map[int]int {
+		if c, ok := contribCache[op]; ok {
+			return c
+		}
+		contrib := map[int]int{}
+		var body *Func
+		switch o := op.(type) {
+		case *TaskRunner:
+			body = o.Body
+		case *Combiner:
+			body = o.Accumulate
+		case *Gatherer:
+			body = o.Handle
+			contrib[gathererIdx[o]] = 1
+		}
+		if body != nil {
+			for _, step := range body.Steps {
+				switch s := step.(type) {
+				case Submit:
+					var target any
+					switch s.SinkKind {
+					case SinkGatherer:
+						target = plan.Gatherers[s.SinkIndex]
+					case SinkCombiner:
+						target = plan.Combiners[s.SinkIndex]
+					}
+					for gi, cnt := range contribOf(target) {
+						contrib[gi] += cnt
+					}
+				case StartTask:
+					for gi, cnt := range contribOf(plan.TaskRunners[s.RunnerIndex]) {
+						contrib[gi] += cnt
+					}
+				}
+			}
+		}
+		contribCache[op] = contrib
+		return contrib
+	}
+	for _, step := range plan.Steps {
+		st, ok := step.(StartTask)
+		if !ok {
+			continue
+		}
+		for gi, cnt := range contribOf(plan.TaskRunners[st.RunnerIndex]) {
+			plan.MinGathererInvocations[gi] += cnt
+			plan.MaxGathererInvocations[gi] += cnt
+		}
+	}
 
 	plan.MaxPathDuration = computeMaxPathDuration(plan)
 	plan.SubjobCount = nextIDs.Plan - nextIDsOrigin.Plan
-	// SubjobTaskCount accounting omitted in minimal v1 (no Subjobs generated by this minimal generator).
 
 	return plan
 }
 
 // probValue returns 1.0 in Deterministic mode, else the given prob.
-// (v1 generator emits only Prob=1.0 steps; this hook is here so the
-// future probabilistic generator can flow Prob values through here.)
+// v1 generator emits only Prob=1.0; this hook is here so a future
+// probabilistic generator can flow Prob values through here.
 func probValue(config *Config, p float64) float64 {
 	if config.Deterministic {
 		return 1.0
@@ -198,27 +378,21 @@ func newFunc(
 	t *rapid.T, plan *Plan, config *Config, funcConfig *FuncConfig, nextIDs *idCounters, name string,
 ) *Func {
 	fn := &Func{}
-	// ReturnErrorProb: roll at plan time to a definite 0 or 1.
 	errCfg := BiasedBoolConfig{Probability: funcConfig.ReturnErrorProb}
 	if errCfg.Draw(t, name+".ReturnError") {
 		fn.ReturnErrorProb = 1
 	} else {
 		fn.ReturnErrorProb = 0
 	}
-	// SelfTime: in Deterministic mode collapse to a fixed Med; otherwise
-	// pass the full distribution through for per-invocation draws.
 	dist := funcConfig.SelfTime
 	if config.Deterministic {
 		dist = BiasedDurationConfig{Min: funcConfig.SelfTime.Med, Med: funcConfig.SelfTime.Med, Max: funcConfig.SelfTime.Med}
 	}
 	fn.Steps = append(fn.Steps, SelfTime{Dist: dist})
 
-	// Subjob step — probabilistic add, gated by config.Subjob.MaxDepth
-	// to prevent unbounded recursion.
 	if config.Subjob.MaxDepth > 0 && funcConfig.Subjob.Add.Draw(t, name+".Subjob.Add") {
 		subConfig := *config
 		subConfig.Subjob.MaxDepth--
-		// Shrink path lengths in the subjob to keep total cost manageable.
 		const subjobPathShrinkDivisor = 2
 		subConfig.Path.Length.Med = max(subConfig.Path.Length.Min, subConfig.Path.Length.Med/subjobPathShrinkDivisor)
 		subPlan := newPlan(t, &subConfig, nextIDs)
@@ -228,66 +402,73 @@ func newFunc(
 	return fn
 }
 
-// computeMaxPathDuration walks the Plan's DAG to determine the longest
-// causal-time chain. In v1 (linear paths only) this is simpler than
-// the full DAG case but uses the same structure for future enrichment.
+// computeMaxPathDuration returns the longest causal-time chain through
+// the plan's DAG starting from any top-level StartTask. Bodies execute
+// sequentially within their own scope; downstream sinks process in
+// parallel (so max across downstream chains, not sum).
 func computeMaxPathDuration(plan *Plan) time.Duration {
+	cache := map[any]time.Duration{}
+	var durationFromOp func(op any) time.Duration
+	durationFromOp = func(op any) time.Duration {
+		if d, ok := cache[op]; ok {
+			return d
+		}
+		var body *Func
+		switch o := op.(type) {
+		case *TaskRunner:
+			body = o.Body
+		case *Combiner:
+			body = o.Accumulate
+		case *Gatherer:
+			body = o.Handle
+		}
+		var bodyDur time.Duration
+		var maxDownstream time.Duration
+		if body != nil {
+			for _, step := range body.Steps {
+				bodyDur += step.Duration()
+				switch s := step.(type) {
+				case Submit:
+					var target any
+					switch s.SinkKind {
+					case SinkGatherer:
+						target = plan.Gatherers[s.SinkIndex]
+					case SinkCombiner:
+						target = plan.Combiners[s.SinkIndex]
+					}
+					if d := durationFromOp(target); d > maxDownstream {
+						maxDownstream = d
+					}
+				case StartTask:
+					if d := durationFromOp(plan.TaskRunners[s.RunnerIndex]); d > maxDownstream {
+						maxDownstream = d
+					}
+				}
+			}
+		}
+		total := bodyDur + maxDownstream
+		cache[op] = total
+		// Memoize on the op struct's pathDuration field for Dump output.
+		switch o := op.(type) {
+		case *TaskRunner:
+			o.pathDuration = total
+		case *Combiner:
+			o.pathDuration = total
+		case *Gatherer:
+			o.pathDuration = total
+		}
+		return total
+	}
+
 	var maxPath time.Duration
 	for _, step := range plan.Steps {
-		st, ok := step.(StartTask)
-		if !ok {
-			continue
-		}
-		d := pathDurationFromRunner(plan, plan.TaskRunners[st.RunnerIndex])
-		if d > maxPath {
-			maxPath = d
+		if st, ok := step.(StartTask); ok {
+			if d := durationFromOp(plan.TaskRunners[st.RunnerIndex]); d > maxPath {
+				maxPath = d
+			}
 		}
 	}
 	return maxPath
-}
-
-func pathDurationFromRunner(plan *Plan, runner *TaskRunner) time.Duration {
-	d := funcDuration(runner.Body)
-	for _, step := range runner.Body.Steps {
-		s, ok := step.(Submit)
-		if !ok {
-			continue
-		}
-		switch s.SinkKind {
-		case SinkCombiner:
-			d += pathDurationFromCombiner(plan, plan.Combiners[s.SinkIndex])
-		case SinkGatherer:
-			d += funcDuration(plan.Gatherers[s.SinkIndex].Handle)
-		}
-	}
-	runner.pathDuration = d
-	return d
-}
-
-func pathDurationFromCombiner(plan *Plan, c *Combiner) time.Duration {
-	d := funcDuration(c.Accumulate)
-	for _, step := range c.Accumulate.Steps {
-		s, ok := step.(Submit)
-		if !ok {
-			continue
-		}
-		switch s.SinkKind {
-		case SinkCombiner:
-			d += pathDurationFromCombiner(plan, plan.Combiners[s.SinkIndex])
-		case SinkGatherer:
-			d += funcDuration(plan.Gatherers[s.SinkIndex].Handle)
-		}
-	}
-	c.pathDuration = d
-	return d
-}
-
-func funcDuration(f *Func) time.Duration {
-	var total time.Duration
-	for _, s := range f.Steps {
-		total += s.Duration()
-	}
-	return total
 }
 
 // Format implements fmt.Formatter for pretty-printing a plan.

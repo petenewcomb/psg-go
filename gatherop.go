@@ -123,16 +123,16 @@ func (g Gatherer[T]) TryStart(
 	return ok, err
 }
 
-// Integrate posts values to be gathered by the gather queue.
+// Submit posts values to be gathered by the gather queue.
 // This follows the same pattern as Start but for posting gather work instead
 // of launching tasks.
-func (g Gatherer[T]) Integrate(
+func (g Gatherer[T]) Submit(
 	ctx context.Context,
 	target *Pool,
 	value T,
 	err error,
 ) error {
-	traceRegion := "Gatherer.Integrate"
+	traceRegion := "Gatherer.Submit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := target.ctxMeta(ctx)
@@ -144,19 +144,19 @@ func (g Gatherer[T]) Integrate(
 		group = workq.NewGroupID()
 	}
 
-	return g.integrate(ctx, meta, target, group, value, err)
+	return g.submit(ctx, meta, target, group, value, err)
 }
 
-// TryIntegrate attempts to post values to be gathered by the gather queue.
-// Like Integrate, but returns instead of blocking if queuing would be required.
-func (g Gatherer[T]) TryIntegrate(
+// TrySubmit attempts to post values to be gathered by the gather queue.
+// Like Submit, but returns instead of blocking if queuing would be required.
+func (g Gatherer[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	target *Pool,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "Gatherer.TryIntegrate"
+	traceRegion := "Gatherer.TrySubmit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := target.ctxMeta(ctx)
@@ -168,10 +168,10 @@ func (g Gatherer[T]) TryIntegrate(
 		group = workq.NewGroupID()
 	}
 
-	return g.tryIntegrate(ctx, meta, target, group, value, err, deadline)
+	return g.trySubmit(ctx, meta, target, group, value, err, deadline)
 }
 
-// newTask creates a new gather task that will execute the task and integrate results
+// newTask creates a new gather task that will execute the task and submit results
 func (g Gatherer[T]) newTask(group workq.GroupID, job *Pool, taskFn psgfn.Task[T]) boundTask {
 	pt := g.taskPool.Get()
 	pt.pool = g.taskPool
@@ -246,8 +246,8 @@ func (w *gatherWork[T]) Free() {
 	w.pool.Put(w)
 }
 
-// integrate creates gather work and posts it to the gather queue
-func (g Gatherer[T]) integrate(
+// submit creates gather work and posts it to the gather queue
+func (g Gatherer[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
 	job *Pool,
@@ -260,8 +260,8 @@ func (g Gatherer[T]) integrate(
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-// integrate creates gather work and posts it to the gather queue
-func (g Gatherer[T]) tryIntegrate(
+// submit creates gather work and posts it to the gather queue
+func (g Gatherer[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
 	job *Pool,

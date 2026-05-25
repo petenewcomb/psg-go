@@ -187,15 +187,15 @@ func (c *Combiner[I, O]) TryStart(
 	return ok, err
 }
 
-// Integrate posts values to be combined by the combine queue.
+// Submit posts values to be combined by the combine queue.
 // This follows the same pattern as Start but for posting combine work instead
 // of launching tasks.
-func (c *Combiner[I, O]) Integrate(
+func (c *Combiner[I, O]) Submit(
 	ctx context.Context,
 	value I,
 	err error,
 ) error {
-	traceRegion := "Combiner.Integrate"
+	traceRegion := "Combiner.Submit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
@@ -209,18 +209,18 @@ func (c *Combiner[I, O]) Integrate(
 		group = workq.NewGroupID()
 	}
 
-	return inner.integrate(ctx, meta, group, value, err)
+	return inner.submit(ctx, meta, group, value, err)
 }
 
-// TryIntegrate attempts to post values to be combined by the combine queue.
-// Like Integrate, but returns instead of blocking if queuing would be required.
-func (c *Combiner[I, O]) TryIntegrate(
+// TrySubmit attempts to post values to be combined by the combine queue.
+// Like Submit, but returns instead of blocking if queuing would be required.
+func (c *Combiner[I, O]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	value I,
 	err error,
 ) (bool, error) {
-	traceRegion := "Combiner.TryIntegrate"
+	traceRegion := "Combiner.TrySubmit"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
@@ -234,7 +234,7 @@ func (c *Combiner[I, O]) TryIntegrate(
 		group = workq.NewGroupID()
 	}
 
-	return inner.tryIntegrate(ctx, meta, group, value, err, deadline)
+	return inner.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
 func (c *Combiner[I, O]) newScatterWork(
@@ -461,7 +461,7 @@ func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, sender *rdvq.Sender,
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := c.op.combinerPool.job.ctxMeta(ctx)
-	err := c.op.gatherer.integrate(
+	err := c.op.gatherer.submit(
 		ctx, meta, c.op.combinerPool.job, c.earliestGroup, output, outputErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
@@ -631,7 +631,7 @@ func (ct *combineTask[I, O]) Execute(
 			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
 		}
 		ctx, meta := ct.op.combinerPool.job.ctxMeta(ctx)
-		intErr := ct.op.integrate(ctx, meta, ct.group, value, err)
+		intErr := ct.op.submit(ctx, meta, ct.group, value, err)
 		if intErr != nil && ctx.Err() == nil {
 			panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
 		}
@@ -649,7 +649,7 @@ func (ct *combineTask[I, O]) Free() {
 	ct.pool.Put(ct)
 }
 
-func (c *combineOp[I, O]) integrate(
+func (c *combineOp[I, O]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
@@ -661,7 +661,7 @@ func (c *combineOp[I, O]) integrate(
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-func (c *combineOp[I, O]) tryIntegrate(
+func (c *combineOp[I, O]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,

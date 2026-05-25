@@ -92,7 +92,7 @@ func (pt *gatherTask[T]) Execute(
 			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
 		}
 		ctx, meta := pt.job.ctxMeta(ctx)
-		intErr := pt.gatherer.integrate(ctx, meta, pt.job, pt.group, value, err)
+		intErr := pt.gatherer.submit(ctx, meta, pt.job, pt.group, value, err)
 		if intErr != nil && ctx.Err() == nil {
 			panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
 		}

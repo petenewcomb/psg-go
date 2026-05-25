@@ -104,17 +104,39 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		}
 	}
 
-	// === Gatherers (depth 0, terminal sinks) ===
+	// === Gatherers, layered by depth across [0, MaxDepth]. Gatherers
+	// at depth == MaxDepth are terminal (no StartTasks); shallower ones
+	// can scatter to strictly-deeper Gatherers. Multiple Gatherers may
+	// share a depth (including multiple terminals). ===
+	maxGathererDepth := config.Gatherer.MaxDepth
+	if maxGathererDepth < 0 {
+		maxGathererDepth = 0
+	}
 	gathererCount := config.Gatherer.Count.Draw(t, planName+".GathererCount")
 	plan.Gatherers = make([]*Gatherer, gathererCount)
 	for i := range plan.Gatherers {
 		id := nextIDs.Gatherer
 		nextIDs.Gatherer++
+		depth := 0
+		if maxGathererDepth > 0 {
+			depth = rapid.IntRange(0, maxGathererDepth).Draw(t, fmt.Sprintf("Gatherer#%d.Depth", id))
+		}
 		plan.Gatherers[i] = &Gatherer{
 			ID:     id,
-			Depth:  0,
+			Depth:  depth,
 			Handle: newFunc(t, plan, config, &config.Gatherer.Handle, nextIDs, fmt.Sprintf("Gatherer#%d.Handle", id)),
 		}
+	}
+	// Sort Gatherers by depth ascending — needed so cascade-target
+	// lookups can iterate forward when wiring StartTasks below.
+	sort.SliceStable(plan.Gatherers, func(i, j int) bool {
+		return plan.Gatherers[i].Depth < plan.Gatherers[j].Depth
+	})
+	// Ensure at least one Gatherer is at MaxDepth (terminal). If the
+	// random draw didn't produce one, snap the last Gatherer to MaxDepth.
+	if maxGathererDepth > 0 && len(plan.Gatherers) > 0 &&
+		plan.Gatherers[len(plan.Gatherers)-1].Depth < maxGathererDepth {
+		plan.Gatherers[len(plan.Gatherers)-1].Depth = maxGathererDepth
 	}
 
 	// === Combiners (depth 1..maxCombinerDepth, shared across paths for fan-in) ===
@@ -172,52 +194,79 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		})
 	}
 
-	// === Scatter-from-gather and scatter-from-combine: bodies dispatch
-	// fan-out runners that all Submit to the "terminal" Gatherer
-	// (Gatherers[len-1]). The terminal Gatherer has no StartTasks of its
-	// own — this breaks the otherwise-multiplicative cascade that would
-	// otherwise blow up when Gatherer chains compound. The terminal
-	// can still be a path destination; it just doesn't propagate.
-	terminalGathererIdx := len(plan.Gatherers) - 1
-	addFanoutRunner := func(name string) int {
+	// === Scatter-from-gather and scatter-from-combine. ===
+	//
+	// Non-terminal Gatherers (depth < MaxDepth) dispatch fan-out
+	// runners targeting Gatherers at strictly greater depth — this
+	// gives multi-hop Gatherer chains while keeping the cascade
+	// bounded by MaxDepth. Combiners dispatch fan-out runners
+	// targeting any Gatherer.
+	// Fan-out runners have intentionally simple bodies: SelfTime
+	// drawn from TaskRunner.Body config, plus the destination Submit.
+	// No Subjob — Subjobs in fan-outs compound the cascade
+	// catastrophically (each Gatherer-cascade level multiplies, and
+	// adding Subjob recursion on top is too much). Origin TaskRunners
+	// (paths) still get Subjob via newFunc.
+	addFanoutRunner := func(targetGathererIdx int, name string) int {
 		id := nextIDs.TaskRunner
 		nextIDs.TaskRunner++
+		body := &Func{}
+		errCfg := BiasedBoolConfig{Probability: config.TaskRunner.Body.ReturnErrorProb}
+		if errCfg.Draw(t, name+".ReturnError") {
+			body.ReturnErrorProb = 1
+		}
+		dist := config.TaskRunner.Body.SelfTime
+		if config.Deterministic {
+			dist = BiasedDurationConfig{
+				Min: dist.Med, Med: dist.Med, Max: dist.Med,
+			}
+		}
+		body.Steps = append(body.Steps,
+			SelfTime{Dist: dist},
+			Submit{
+				Prob:      probValue(config, 1.0),
+				SinkKind:  SinkGatherer,
+				SinkIndex: targetGathererIdx,
+			},
+		)
 		runner := &TaskRunner{
 			ID:    id,
 			Depth: 1,
-			Body:  newFunc(t, plan, config, &config.TaskRunner.Body, nextIDs, name),
+			Body:  body,
 		}
 		if taskLimiterCount > 0 {
 			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, name+".LimiterIndex")
 			runner.LimiterIndexes = []int{limIdx}
 		}
-		runner.Body.Steps = append(runner.Body.Steps, Submit{
-			Prob:      probValue(config, 1.0),
-			SinkKind:  SinkGatherer,
-			SinkIndex: terminalGathererIdx,
-		})
 		plan.TaskRunners = append(plan.TaskRunners, runner)
 		return len(plan.TaskRunners) - 1
 	}
-	// Only non-terminal Gatherers get StartTasks. The terminal IS the
-	// last Gatherer; for the degenerate case of only one Gatherer there
-	// is nowhere safe to scatter to without re-introducing a cycle, so
-	// skip scatter-from-gather entirely.
-	const minGatherersForScatter = 2
-	if len(plan.Gatherers) >= minGatherersForScatter {
-		for gIdx, g := range plan.Gatherers {
-			if gIdx == terminalGathererIdx {
-				continue
-			}
-			sc := config.Gatherer.ScatterCount.Draw(t, fmt.Sprintf("Gatherer#%d.ScatterCount", g.ID))
-			for s := 0; s < sc; s++ {
-				runnerIdx := addFanoutRunner(fmt.Sprintf("FanoutRunner.from-Gatherer#%d[%d]", g.ID, s))
-				g.Handle.Steps = append(g.Handle.Steps, StartTask{
-					Prob:        probValue(config, 1.0),
-					RunnerIndex: runnerIdx,
-				})
+	for gIdx, g := range plan.Gatherers {
+		if g.Depth >= maxGathererDepth {
+			continue // terminal — no StartTasks
+		}
+		// Candidate targets: Gatherers at strictly greater depth.
+		var candidates []int
+		for tIdx, t := range plan.Gatherers {
+			if t.Depth > g.Depth {
+				candidates = append(candidates, tIdx)
 			}
 		}
+		if len(candidates) == 0 {
+			continue
+		}
+		sc := config.Gatherer.ScatterCount.Draw(t, fmt.Sprintf("Gatherer#%d.ScatterCount", g.ID))
+		for s := 0; s < sc; s++ {
+			pick := rapid.IntRange(0, len(candidates)-1).Draw(t,
+				fmt.Sprintf("Gatherer#%d.Scatter[%d].TargetGatherer", g.ID, s))
+			runnerIdx := addFanoutRunner(candidates[pick],
+				fmt.Sprintf("FanoutRunner.from-Gatherer#%d[%d]", g.ID, s))
+			g.Handle.Steps = append(g.Handle.Steps, StartTask{
+				Prob:        probValue(config, 1.0),
+				RunnerIndex: runnerIdx,
+			})
+		}
+		_ = gIdx
 	}
 	for _, c := range plan.Combiners {
 		if len(plan.Gatherers) == 0 {
@@ -225,7 +274,10 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		}
 		sc := config.Combiner.ScatterCount.Draw(t, fmt.Sprintf("Combiner#%d.ScatterCount", c.ID))
 		for s := 0; s < sc; s++ {
-			runnerIdx := addFanoutRunner(fmt.Sprintf("FanoutRunner.from-Combiner#%d[%d]", c.ID, s))
+			targetIdx := rapid.IntRange(0, len(plan.Gatherers)-1).Draw(t,
+				fmt.Sprintf("Combiner#%d.Scatter[%d].TargetGatherer", c.ID, s))
+			runnerIdx := addFanoutRunner(targetIdx,
+				fmt.Sprintf("FanoutRunner.from-Combiner#%d[%d]", c.ID, s))
 			c.Accumulate.Steps = append(c.Accumulate.Steps, StartTask{
 				Prob:        probValue(config, 1.0),
 				RunnerIndex: runnerIdx,

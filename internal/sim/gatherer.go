@@ -18,13 +18,21 @@ var defaultGathererConfig = GathererConfig{
 		},
 		ReturnErrorProb: 0.05,
 	},
-	ScatterCount: BiasedIntConfig{Min: 1, Med: 2, Max: 10},
+	ScatterCount: BiasedIntConfig{Min: 0, Med: 1, Max: 3},
+	MaxDepth:     2,
 }
 
+// GathererConfig controls Gatherer generation. MaxDepth bounds the
+// Gatherer-cascade chain length: a non-terminal Gatherer's StartTasks
+// dispatch fan-out runners targeting Gatherers at strictly greater
+// depth, so a value can pass through up to MaxDepth Gatherers before
+// terminating. Gatherers at depth == MaxDepth are terminal (no
+// StartTasks). MaxDepth=0 disables scatter-from-gather entirely.
 type GathererConfig struct {
 	Count        BiasedIntConfig
 	Handle       FuncConfig
 	ScatterCount BiasedIntConfig
+	MaxDepth     int
 }
 
 // Gatherer represents a simulated terminal-sink op. The Handle body is

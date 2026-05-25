@@ -25,7 +25,7 @@ var defaultCombinerConfig = CombinerConfig{
 		},
 		ReturnErrorProb: 0.05,
 	},
-	ScatterCount: BiasedIntConfig{Min: 1, Med: 2, Max: 10},
+	ScatterCount: BiasedIntConfig{Min: 0, Med: 1, Max: 3},
 }
 
 type CombinerConfig struct {

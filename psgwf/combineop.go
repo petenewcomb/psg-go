@@ -17,12 +17,12 @@ type CombineOp[I, O any] = GenericCombineOp[I, O, context.Context]
 // NewCombineOp creates a psg.CombineOp that propagates workflow contexts through the combine chain.
 // This ensures workflow context values and cancellation flow from inputs to outputs.
 func NewCombineOp[I, O, C any](
-	gatherOp GenericGatherOp[O, C],
+	gatherer GenericGatherOp[O, C],
 	combinerPool *psg.CombinerPool,
 	combinerFactory GenericCombinerFactory[I, O, C],
 ) GenericCombineOp[I, O, C] {
 	return GenericCombineOp[I, O, C](psg.NewCombineOp(
-		psg.GatherOp[result[O, C]](gatherOp),
+		psg.Gatherer[result[O, C]](gatherer),
 		combinerPool,
 		wrapCombinerFactory(combinerFactory),
 	))

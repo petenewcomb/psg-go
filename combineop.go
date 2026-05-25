@@ -40,10 +40,10 @@ func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
 
 // CombineOp represents an operation that combines inputs and produces outputs.
 // It binds a gather function with a combiner factory and a combiner pool.
-// CombineOp extends the capabilities of GatherOp by aggregating task results
+// CombineOp extends the capabilities of Gatherer by aggregating task results
 // through combiners before gathering.
 //
-// Thread-safety and copying: Like GatherOp, a CombineOp value is designed to be
+// Thread-safety and copying: Like Gatherer, a CombineOp value is designed to be
 // copied. While a single CombineOp value does not support concurrent calls to
 // Scatter or TryScatter, copies of a CombineOp can be used concurrently. All
 // copies share the same combiner identity and will route work to the same
@@ -65,15 +65,15 @@ type CombineOp[I, O any] struct {
 //
 //nolint:contextcheck // background context used only for tracing
 func NewCombineOp[I any, O any](
-	gatherOp GatherOp[O],
+	gatherer Gatherer[O],
 	combinerPool *CombinerPool,
 	combinerFactory psgfn.CombinerFactory[I, O],
 ) CombineOp[I, O] {
 	traceRegion := "NewCombineOp"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	if gatherOp.gatherFn == nil {
-		panic("gatherOp is uninitialized")
+	if gatherer.gatherFn == nil {
+		panic("gatherer is uninitialized")
 	}
 	if combinerPool == nil {
 		panic("combinerPool must be non-nil")
@@ -88,8 +88,8 @@ func NewCombineOp[I any, O any](
 	if inner.refCount.Load() != 0 {
 		panic("unexpected nonzero inner.refCount")
 	}
-	if inner.gatherOp.gatherFn != nil {
-		panic("unexpected non-nil inner.gatherOp.gatherFn")
+	if inner.gatherer.gatherFn != nil {
+		panic("unexpected non-nil inner.gatherer.gatherFn")
 	}
 	if inner.combinerPool != nil {
 		panic("unexpected non-nil inner.combinerPool")
@@ -102,7 +102,7 @@ func NewCombineOp[I any, O any](
 	}
 
 	inner.refCount.Store(1)
-	inner.gatherOp = gatherOp
+	inner.gatherer = gatherer
 	inner.combinerPool = combinerPool
 	inner.combinerFactory = combinerFactory
 	inner.innerPool = innerPool
@@ -122,7 +122,7 @@ func NewCombineOp[I any, O any](
 // combined using this Combine's combiner and eventually passed to the associated
 // Gather.
 //
-// See [GatherOp.Scatter] for details about backpressure, concurrency limits,
+// See [Gatherer.Scatter] for details about backpressure, concurrency limits,
 // context handling, and error behavior.
 func (c *CombineOp[I, O]) Scatter(
 	ctx context.Context,
@@ -154,7 +154,7 @@ func (c *CombineOp[I, O]) Scatter(
 // TryScatter is like [CombineOp.Scatter] but returns instead of blocking if
 // the given target is at its concurrency limit.
 //
-// See [GatherOp.TryScatter] for details about behavior and return values.
+// See [Gatherer.TryScatter] for details about behavior and return values.
 func (c *CombineOp[I, O]) TryScatter(
 	ctx context.Context,
 	deadline time.Time,
@@ -303,7 +303,7 @@ var combinerInstanceCounter atomic.Int64
 type combineOp[I, O any] struct {
 	refCount atomic.Int64
 
-	gatherOp        GatherOp[O]
+	gatherer        Gatherer[O]
 	combinerPool    *CombinerPool
 	combinerFactory psgfn.CombinerFactory[I, O]
 
@@ -365,7 +365,7 @@ func (c *combineOp[I, O]) unref() {
 	innerPool := c.innerPool
 
 	// Clear all fields
-	c.gatherOp = GatherOp[O]{}
+	c.gatherer = Gatherer[O]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
 	// Keep c.innerPool - it's metadata about where to return this object
@@ -461,7 +461,7 @@ func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, sender *rdvq.Sender,
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := c.op.combinerPool.job.ctxMeta(ctx)
-	err := c.op.gatherOp.integrate(
+	err := c.op.gatherer.integrate(
 		ctx, meta, c.op.combinerPool.job, c.earliestGroup, output, outputErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))

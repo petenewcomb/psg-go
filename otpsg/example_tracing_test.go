@@ -116,14 +116,14 @@ func Example_instrumentedTask() {
 			return sum, nil
 		})
 
-	gatherOp := otpsg.InstrumentedGather("handle-sum",
+	gatherer := otpsg.InstrumentedGather("handle-sum",
 		func(ctx context.Context, sum int, err error) error {
 			fmt.Println("Sum:", sum)
 			return nil
 		})
 
 	// Use convenience scatter function
-	err := otpsg.InstrumentedScatter(ctx, job, task, gatherOp)
+	err := otpsg.InstrumentedScatter(ctx, job, task, gatherer)
 	if err != nil {
 		fmt.Println("Error:", err)
 	}

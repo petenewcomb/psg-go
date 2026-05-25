@@ -34,7 +34,7 @@ func Example_scatterGather() {
 	}
 
 	// Create a gather for collecting results
-	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("%3dms Error: %v\n", msSinceStart(), err)
 		} else {
@@ -50,7 +50,7 @@ func Example_scatterGather() {
 	fmt.Printf("%3dms Starting tasks\n", msSinceStart())
 
 	// First task completes quickly
-	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		fmt.Printf("%3dms Quick task started\n", msSinceStart())
 		clock.Sleep(10 * time.Millisecond)
 		fmt.Printf("%3dms Quick task completed\n", msSinceStart())
@@ -64,7 +64,7 @@ func Example_scatterGather() {
 	clock.Sleep(20 * time.Millisecond)
 
 	// Second task fails and cancels workflow
-	err = gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err = gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		fmt.Printf("%3dms Failing task started\n", msSinceStart())
 		clock.Sleep(30 * time.Millisecond)
 		fmt.Printf("%3dms Failing task failed - cancelling workflow\n", msSinceStart())
@@ -79,7 +79,7 @@ func Example_scatterGather() {
 	clock.Sleep(10 * time.Millisecond)
 
 	// Third task should be cancelled
-	err = gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err = gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		fmt.Printf("%3dms Slow task started\n", msSinceStart())
 		select {
 		case <-time.After(100 * time.Millisecond):

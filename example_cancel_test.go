@@ -27,7 +27,7 @@ func ExamplePool_Cancel() {
 
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
-	printResult := psg.NewGatherOp(
+	printResult := psg.NewGatherer(
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
@@ -97,7 +97,7 @@ func ExamplePool_Cancel_task() {
 
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
-	printResult := psg.NewGatherOp(
+	printResult := psg.NewGatherer(
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil

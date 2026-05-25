@@ -33,15 +33,15 @@ func Example_hello() {
 	}
 
 	var results []string
-	gatherOp := psg.NewGatherOp(
+	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
 		},
 	)
 
-	gatherOp.Scatter(ctx, job, newTaskFn("Hello"))
-	gatherOp.Scatter(ctx, job, newTaskFn("world!"))
+	gatherer.Scatter(ctx, job, newTaskFn("Hello"))
+	gatherer.Scatter(ctx, job, newTaskFn("world!"))
 
 	job.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))

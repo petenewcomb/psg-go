@@ -32,7 +32,7 @@ func Example() {
 	completed := []string{}
 
 	// Create a gather for collecting results
-	resultGather := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	resultGather := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {

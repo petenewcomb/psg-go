@@ -48,11 +48,11 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 	// Create a simple task to ensure workflow is used
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
-	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "test", nil
 	})
 	assert.NoError(t, err)
@@ -109,7 +109,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		// Create new workflow for new tasks
 		newWf := psgwf.New(ctx)
 
-		gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+		gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 			mu.Lock()
 			newTaskRan = true
 			mu.Unlock()
@@ -117,18 +117,18 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Scatter a new task from within the AfterFunc
-		err := gatherOp.Scatter(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+		err := gatherer.Scatter(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "new task", nil
 		})
 		assert.NoError(t, err)
 	})
 
 	// Run a simple task to use the workflow
-	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	err := gatherOp.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "original task", nil
 	})
 	assert.NoError(t, err)

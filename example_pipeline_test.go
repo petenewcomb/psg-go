@@ -57,8 +57,8 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestGatherOp := func(path string) psg.GatherOp[[md5.Size]byte] {
-		return psg.NewGatherOp(
+	newDigestGatherOp := func(path string) psg.Gatherer[[md5.Size]byte] {
+		return psg.NewGatherer(
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
@@ -77,8 +77,8 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	}
 
 	// Creates gathers for reading tasks that launch digesting tasks.
-	newReadGatherOp := func(path string) psg.GatherOp[[]byte] {
-		return psg.NewGatherOp(
+	newReadGatherOp := func(path string) psg.Gatherer[[]byte] {
+		return psg.NewGatherer(
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestGatherOp(path).
 					Scatter(ctx, digesterPool, newDigestingTaskFn(data))

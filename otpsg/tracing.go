@@ -43,7 +43,7 @@ func TracedTask[T any](
 func TracedGather[T any](
 	operationName string,
 	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.GatherOp[PropagatedResult[T]] {
+) psg.Gatherer[PropagatedResult[T]] {
 	// Create a gather function that adds tracing
 	tracedGatherFn := func(ctx context.Context, result T, err error) error {
 		// Create span with meaningful name

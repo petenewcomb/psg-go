@@ -14,26 +14,26 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// GatherOp represents an operation that executes tasks and collects their results.
+// Gatherer represents an operation that executes tasks and collects their results.
 //
-// Thread-safety and copying: A GatherOp value is designed to be copied. While
-// a single GatherOp value does not support concurrent calls to Scatter or
-// TryScatter, copies of a GatherOp can be used concurrently. All copies share
-// the same gather function binding. This allows GatherOp values to be safely
+// Thread-safety and copying: A Gatherer value is designed to be copied. While
+// a single Gatherer value does not support concurrent calls to Scatter or
+// TryScatter, copies of a Gatherer can be used concurrently. All copies share
+// the same gather function binding. This allows Gatherer values to be safely
 // passed by value to goroutines or stored in structures.
-type GatherOp[T any] struct {
+type Gatherer[T any] struct {
 	gatherFn psgfn.Gather[T]
 	workPool *omnipool.Pool[gatherWork[T]]
 	taskPool *omnipool.Pool[gatherTask[T]]
 }
 
-func NewGatherOp[T any](
+func NewGatherer[T any](
 	gatherFn psgfn.Gather[T],
-) GatherOp[T] {
+) Gatherer[T] {
 	if gatherFn == nil {
 		panic("gather function must be non-nil")
 	}
-	return GatherOp[T]{
+	return Gatherer[T]{
 		gatherFn: gatherFn,
 		workPool: omnipool.For[gatherWork[T]](),
 		taskPool: omnipool.For[gatherTask[T]](),
@@ -42,7 +42,7 @@ func NewGatherOp[T any](
 
 // Scatter initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
-// passed to the GatherOp within a subsequent call to Scatter or any of the
+// passed to the Gatherer within a subsequent call to Scatter or any of the
 // gathering methods of [Pool] (i.e., [Pool.Gather], [Pool.TryGather],
 // [Pool.GatherAll], or [Pool.TryGatherAll]).
 //
@@ -64,15 +64,15 @@ func NewGatherOp[T any](
 // Scatter returns a non-nil error if the context is canceled or if a non-nil
 // error is returned by a gather function. If the returned error is non-nil, the
 // task function supplied to the call will not have been launched will therefore
-// also not result in a call to the GatherOp's gather function.
+// also not result in a call to the Gatherer's gather function.
 //
 // See [Task] and [Gather] for important caveats and additional detail.
-func (g GatherOp[T]) Scatter(
+func (g Gatherer[T]) Scatter(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) error {
-	traceRegion := "GatherOp.Scatter"
+	traceRegion := "Gatherer.Scatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -98,13 +98,13 @@ func (g GatherOp[T]) Scatter(
 // launched for any other reason.
 //
 // See Scatter for more detail about how scattering works.
-func (g GatherOp[T]) TryScatter(
+func (g Gatherer[T]) TryScatter(
 	ctx context.Context,
 	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) (bool, error) {
-	traceRegion := "GatherOp.TryScatter"
+	traceRegion := "Gatherer.TryScatter"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := vetScatter(ctx, target, taskFn)
@@ -126,13 +126,13 @@ func (g GatherOp[T]) TryScatter(
 // Integrate posts values to be gathered by the gather queue.
 // This follows the same pattern as Scatter but for posting gather work instead
 // of launching tasks.
-func (g GatherOp[T]) Integrate(
+func (g Gatherer[T]) Integrate(
 	ctx context.Context,
 	target *Pool,
 	value T,
 	err error,
 ) error {
-	traceRegion := "GatherOp.Integrate"
+	traceRegion := "Gatherer.Integrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := target.ctxMeta(ctx)
@@ -149,14 +149,14 @@ func (g GatherOp[T]) Integrate(
 
 // TryIntegrate attempts to post values to be gathered by the gather queue.
 // Like Integrate, but returns instead of blocking if queuing would be required.
-func (g GatherOp[T]) TryIntegrate(
+func (g Gatherer[T]) TryIntegrate(
 	ctx context.Context,
 	deadline time.Time,
 	target *Pool,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "GatherOp.TryIntegrate"
+	traceRegion := "Gatherer.TryIntegrate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := target.ctxMeta(ctx)
@@ -172,13 +172,13 @@ func (g GatherOp[T]) TryIntegrate(
 }
 
 // newTask creates a new gather task that will execute the task and integrate results
-func (g GatherOp[T]) newTask(group workq.GroupID, job *Pool, taskFn psgfn.Task[T]) boundTask {
+func (g Gatherer[T]) newTask(group workq.GroupID, job *Pool, taskFn psgfn.Task[T]) boundTask {
 	pt := g.taskPool.Get()
 	pt.pool = g.taskPool
 	pt.group = group
 	pt.job = job
 	pt.taskFn = taskFn
-	pt.gatherOp = g
+	pt.gatherer = g
 	return pt
 }
 
@@ -199,7 +199,7 @@ type gatherWork[T any] struct {
 }
 
 // newGatherWork creates a new gather work item with the provided values
-func (g GatherOp[T]) newGatherWork(group workq.GroupID, job *Pool, value T, err error) *gatherWork[T] {
+func (g Gatherer[T]) newGatherWork(group workq.GroupID, job *Pool, value T, err error) *gatherWork[T] {
 	w := g.workPool.Get()
 	w.Init(g.workPool, group, job, g.gatherFn, value, err)
 	return w
@@ -247,7 +247,7 @@ func (w *gatherWork[T]) Free() {
 }
 
 // integrate creates gather work and posts it to the gather queue
-func (g GatherOp[T]) integrate(
+func (g Gatherer[T]) integrate(
 	ctx context.Context,
 	meta *ctxMeta,
 	job *Pool,
@@ -261,7 +261,7 @@ func (g GatherOp[T]) integrate(
 }
 
 // integrate creates gather work and posts it to the gather queue
-func (g GatherOp[T]) tryIntegrate(
+func (g Gatherer[T]) tryIntegrate(
 	ctx context.Context,
 	meta *ctxMeta,
 	job *Pool,
@@ -279,18 +279,18 @@ func (g GatherOp[T]) tryIntegrate(
 	return ok, err
 }
 
-func (g GatherOp[T]) newScatterWork(
+func (g Gatherer[T]) newScatterWork(
 	group workq.GroupID,
 	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[T],
 ) *gatherScatterWork {
-	traceRegion := "GatherOp.newScatterWork"
+	traceRegion := "Gatherer.newScatterWork"
 
 	targetScatterWork := target.newScatterWork(group, deadline, g.newTask(group, target.getJob(), taskFn))
 	w := newGatherScatterWork(target.getJob(), group, deadline, targetScatterWork)
 
-	trace.Logf(context.Background(), traceRegion, "GatherOp created %v", w)
+	trace.Logf(context.Background(), traceRegion, "Gatherer created %v", w)
 	return w
 }
 

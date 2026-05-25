@@ -14,13 +14,13 @@ import (
 type GenericGatherFunc[T, C any] func(context.Context, *GenericWorkflow[C], T, error) error
 type GatherFunc[T any] = GenericGatherFunc[T, context.Context]
 
-type GenericGatherOp[T, C any] psg.GatherOp[result[T, C]]
-type GatherOp[T any] = GenericGatherOp[T, context.Context]
+type GenericGatherOp[T, C any] psg.Gatherer[result[T, C]]
+type Gatherer[T any] = GenericGatherOp[T, context.Context]
 
-// NewGatherOp creates a [psg.GatherOp] workalike set up to receive and propagate
+// NewGatherer creates a [psg.Gatherer] workalike set up to receive and propagate
 // workflow context from tasks or combines.
-func NewGatherOp[T, C any](gatherFn GenericGatherFunc[T, C]) GenericGatherOp[T, C] {
-	return GenericGatherOp[T, C](psg.NewGatherOp(wrapGatherFunc(gatherFn)))
+func NewGatherer[T, C any](gatherFn GenericGatherFunc[T, C]) GenericGatherOp[T, C] {
+	return GenericGatherOp[T, C](psg.NewGatherer(wrapGatherFunc(gatherFn)))
 }
 
 func (g GenericGatherOp[T, C]) Scatter(ctx context.Context, pool *psg.TaskPool,
@@ -43,8 +43,8 @@ func (g GenericGatherOp[T, C]) TryScatter(ctx context.Context, deadline time.Tim
 	)
 }
 
-func (g GenericGatherOp[T, C]) inner() psg.GatherOp[result[T, C]] {
-	return psg.GatherOp[result[T, C]](g)
+func (g GenericGatherOp[T, C]) inner() psg.Gatherer[result[T, C]] {
+	return psg.Gatherer[result[T, C]](g)
 }
 
 func wrapGatherFunc[T, C any](gatherFn GenericGatherFunc[T, C]) psgfn.Gather[result[T, C]] {

@@ -54,7 +54,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 
 	chk.PanicsWithValue("task function must be non-nil", func() {
 		// Create a gather
-		gatherOp := psg.NewGatherOp(func(ctx context.Context, result int, err error) error {
+		gatherer := psg.NewGatherer(func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		})
@@ -64,7 +64,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 
 		// Create a combine operation
 		combineOp := psg.NewCombineOp(
-			gatherOp,
+			gatherer,
 			combinerPool,
 			newPassthroughTestCombinerFactory[int](t),
 		)
@@ -85,7 +85,7 @@ func TestCombinerScatterNilGatherPanic(t *testing.T) {
 	defer job.CancelAndWait()
 
 	assert.PanicsWithValue(t, "gather function must be non-nil", func() {
-		psg.NewGatherOp[int](nil)
+		psg.NewGatherer[int](nil)
 	})
 }
 
@@ -96,12 +96,12 @@ func TestCombinerTryScatterNilTaskPanic(t *testing.T) {
 	taskPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
 
 	assert.PanicsWithValue(t, "task function must be non-nil", func() {
-		gatherOp := psg.NewGatherOp(
+		gatherer := psg.NewGatherer(
 			func(ctx context.Context, result int, err error) error {
 				return nil
 			},
 		)
-		_, _ = gatherOp.TryScatter(
+		_, _ = gatherer.TryScatter(
 			ctx,
 			time.Time{},
 			taskPool,
@@ -117,7 +117,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	defer job.CancelAndWait()
 	taskPool := psg.NewTaskPool(job)
 
-	gatherOp := psg.NewGatherOp(
+	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
@@ -125,7 +125,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	)
 	combinerPool := psg.NewCombinerPool(job)
 	combineOp := psg.NewCombineOp(
-		gatherOp,
+		gatherer,
 		combinerPool,
 		newPassthroughTestCombinerFactory[int](t),
 	)
@@ -137,7 +137,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 			chk.PanicsWithValue(
 				"Scatter called from task context but allowed only by top-level, gather, or combine context",
 				func() {
-					innerGatherOp := psg.NewGatherOp(
+					innerGatherOp := psg.NewGatherer(
 						func(ctx context.Context, result int, err error) error {
 							chk.NoError(err)
 							chk.Fail("should not get here")
@@ -173,7 +173,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	gatherOp := psg.NewGatherOp(
+	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -182,7 +182,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	)
 	combinerPool := psg.NewCombinerPool(parentJob)
 	combineOp := psg.NewCombineOp(
-		gatherOp,
+		gatherer,
 		combinerPool,
 		newPassthroughTestCombinerFactory[bool](t),
 	)
@@ -197,14 +197,14 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 			subTaskPool := psg.NewTaskPool(subJob)
 
 			// This should succeed - scattering a task to the sub-job's task pool
-			gatherOp := psg.NewGatherOp(
+			gatherer := psg.NewGatherer(
 				func(ctx context.Context, result bool, err error) error {
 					chk.NoError(err)
 					chk.True(result)
 					return nil
 				},
 			)
-			err := gatherOp.Scatter(
+			err := gatherer.Scatter(
 				ctx,
 				subTaskPool,
 				func(ctx context.Context) (bool, error) {
@@ -237,7 +237,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	defer parentJob.CancelAndWait()
 	parentTaskPool := psg.NewTaskPool(parentJob)
 
-	gatherOp := psg.NewGatherOp(
+	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -246,7 +246,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	)
 	combinerPool := psg.NewCombinerPool(parentJob)
 	combineOp := psg.NewCombineOp(
-		gatherOp,
+		gatherer,
 		combinerPool,
 		newPassthroughTestCombinerFactory[bool](t),
 	)
@@ -257,7 +257,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 		func(ctx context.Context) (bool, error) {
 			// This should panic - attempting to scatter to the parent job's task pool
 			// while inside a task of that same job
-			innerGatherOp := psg.NewGatherOp(
+			innerGatherOp := psg.NewGatherer(
 				func(ctx context.Context, result bool, err error) error {
 					chk.Fail("Should not get here - parent task pool gather should not run")
 					return nil
@@ -832,12 +832,12 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						if combinerLimit == 0 {
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
-								// Tests to make sure that NewGatherOp does not incur allocation overhead
-								gatherOp := psg.NewGatherOp(gatherFnAdapter)
+								// Tests to make sure that NewGatherer does not incur allocation overhead
+								gatherer := psg.NewGatherer(gatherFnAdapter)
 								if deadline.IsZero() {
-									return true, gatherOp.Scatter(ctx, target, task)
+									return true, gatherer.Scatter(ctx, target, task)
 								}
-								return gatherOp.TryScatter(ctx, deadline, target, task)
+								return gatherer.TryScatter(ctx, deadline, target, task)
 							}
 						} else {
 							combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(combinerLimit))
@@ -857,8 +857,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								)
 							}
 
-							gatherOp := psg.NewGatherOp(gatherFn)
-							combineOp := psg.NewCombineOp(gatherOp, combinerPool, combinerFactory)
+							gatherer := psg.NewGatherer(gatherFn)
+							combineOp := psg.NewCombineOp(gatherer, combinerPool, combinerFactory)
 							defer combineOp.Close()
 
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
@@ -866,7 +866,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								localCombineOp := combineOp
 								if idealCombinesPerGather == 1 {
 									// Tests to make sure that NewCombineOp does not incur allocation overhead
-									localCombineOp = psg.NewCombineOp(gatherOp, combinerPool, combinerFactory)
+									localCombineOp = psg.NewCombineOp(gatherer, combinerPool, combinerFactory)
 									defer localCombineOp.Close()
 								}
 								if deadline.IsZero() {

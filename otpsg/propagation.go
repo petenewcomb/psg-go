@@ -51,8 +51,8 @@ func PropagateTask[T any](
 // set, allowing spans created in the gather function to be properly parented.
 func PropagateGather[T any](
 	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.GatherOp[PropagatedResult[T]] {
-	return psg.NewGatherOp(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
+) psg.Gatherer[PropagatedResult[T]] {
+	return psg.NewGatherer(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 		// Create context with propagated trace data
 		propagatedCtx := ctx
 		if wrapped.TraceContext.IsValid() {

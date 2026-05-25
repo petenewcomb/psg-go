@@ -88,10 +88,10 @@ func ExampleCombine() {
 	combinerPool := psg.NewCombinerPool(job, psgopt.WithIdleTimeout(-1))
 
 	// Define a result aggregation function and create a combined gather/combine operation
-	gatherOp := psg.NewGatherOp(gatherFn)
+	gatherer := psg.NewGatherer(gatherFn)
 
 	// Create a Combine operation with the gather function and inline combiner factory
-	combineOp := psg.NewCombineOp(gatherOp, combinerPool, newCombiner)
+	combineOp := psg.NewCombineOp(gatherer, combinerPool, newCombiner)
 	defer combineOp.Close()
 
 	// Launch some tasks

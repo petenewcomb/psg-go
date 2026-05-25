@@ -25,7 +25,7 @@ func Example_simple() {
 	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
 
 	// Create a gather
-	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		} else {
@@ -39,7 +39,7 @@ func Example_simple() {
 	wf := psgwf.New(ctx)
 
 	// Scatter a task
-	err := gatherOp.Scatter(ctx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherer.Scatter(ctx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "Hello from workflow", nil
 	})
 	if err != nil {

@@ -35,7 +35,7 @@ func Example_clientTimeout() {
 	}
 
 	// Create a gather for collecting results
-	gatherOp := psgwf.NewGatherOp(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
+	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
 		fmt.Printf("%2dms [%s] result gathered\n", msSinceStart(), requestID)
 		return nil
 	})
@@ -62,7 +62,7 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		err := gatherOp.Scatter(ctx, pool, wf, newRequestTaskFn(requestID))
+		err := gatherer.Scatter(ctx, pool, wf, newRequestTaskFn(requestID))
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}

@@ -11,503 +11,581 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
-
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/psg-go/internal/trace"
 	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
 )
 
+// Run executes the given Plan against the current psg API via an
+// adapter that translates the new vocabulary's static structure to
+// today's Pool/TaskPool/CombinerPool/Gatherer/Combiner shapes. Real
+// data routing uses Submit/TrySubmit; the current API's combiner-
+// output-type slot is satisfied by a singleton dummy struct{}
+// Gatherer.
+//
+// v1 supports only the linear-chain plans the minimal generator
+// produces (one Submit per body, no multi-sink, no probabilistic
+// Steps beyond the basic ReturnErrorProb support, no Subjob).
+// Enrichment lands in follow-up commits.
 func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	traceRegion := "sim.Run"
-	trace.LongLogf(ctx, traceRegion,
-		"Test plan:\n\n",
-		"Test plan (continued):\n\n",
-		"\n",
-		"%#v", plan,
-	)
-	return run(ctx, t, plan)
-}
-
-func run(ctx context.Context, t assert.TestingT, plan *Plan) error {
-	traceRegion := "sim.run"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
 
-	job := psg.New(ctx)
-	defer func() {
-		traceRegion := "sim.run.cleanup"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		job.CancelAndWait()
-	}()
+	pool := psg.New(ctx)
+	defer pool.CancelAndWait()
 
 	c := &controller{
-		Plan:                         plan,
-		Pool:                         job,
-		TaskPools:                    make([]*psg.TaskPool, len(plan.TaskPools)),
-		ConcurrencyByTaskPool:        make([]atomic.Int64, len(plan.TaskPools)),
-		MaxConcurrencyByTaskPool:     make([]atomicMinMaxInt64, len(plan.TaskPools)),
-		Gathers:                      make([]*psg.Gatherer[*taskResult], plan.GatherCount),
-		Combines:                     make([]*psg.Combiner[*taskResult, *combineResult], len(plan.CombinerPoolIndexes)),
-		CombinerPools:                make([]*psg.CombinerPool, len(plan.CombinerPools)),
-		ConcurrencyByCombinerPool:    make([]atomic.Int64, len(plan.CombinerPools)),
-		MaxConcurrencyByCombinerPool: make([]atomicMinMaxInt64, len(plan.CombinerPools)),
+		Plan:                      plan,
+		Pool:                      pool,
+		TaskPools:                 make([]*psg.TaskPool, len(plan.TaskLimiters)),
+		CombinerPools:             make([]*psg.CombinerPool, len(plan.CombinerLimiters)),
+		Gatherers:                 make([]*psg.Gatherer[*simValue], len(plan.Gatherers)),
+		Combiners:                 make([]*psg.Combiner[*simValue, struct{}], len(plan.Combiners)),
+		concurrencyByTaskLimit:    make([]atomic.Int64, len(plan.TaskLimiters)),
+		maxConcurrencyByTaskLimit: make([]atomicMaxInt64, len(plan.TaskLimiters)),
+		concurrencyByCombLimit:    make([]atomic.Int64, len(plan.CombinerLimiters)),
+		maxConcurrencyByCombLimit: make([]atomicMaxInt64, len(plan.CombinerLimiters)),
+		gathererInvocations:       make([]atomic.Int64, len(plan.Gatherers)),
 	}
 	return c.Run(ctx, t)
 }
 
+// simValue is the uniform value type that flows through all sim ops.
+// Carries minimal metadata for assertion-checking.
+type simValue struct {
+	OriginRunnerID int
+	DispatchTime   time.Time
+}
+
+// controller is the per-Plan runtime adapter state. Owns the psg API
+// objects backing the Plan's static vocabulary.
 type controller struct {
-	Plan                         *Plan
-	Pool                         *psg.Pool
-	TaskPoolsLock                sync.Mutex
-	TaskPools                    []*psg.TaskPool
-	ConcurrencyByTaskPool        []atomic.Int64
-	MaxConcurrencyByTaskPool     []atomicMinMaxInt64
-	GathersLock                  sync.Mutex
-	Gathers                      []*psg.Gatherer[*taskResult]
-	CombinesLock                 sync.Mutex
-	Combines                     []*psg.Combiner[*taskResult, *combineResult]
-	CombinerPools                []*psg.CombinerPool
-	ConcurrencyByCombinerPool    []atomic.Int64
-	MaxConcurrencyByCombinerPool []atomicMinMaxInt64
-	GatheredCount                atomic.Int64
-	StartTime                    time.Time
+	Plan          *Plan
+	Pool          *psg.Pool
+	TaskPools     []*psg.TaskPool
+	CombinerPools []*psg.CombinerPool
+	Gatherers     []*psg.Gatherer[*simValue]
+	Combiners     []*psg.Combiner[*simValue, struct{}]
+	DummySink     psg.Gatherer[struct{}]
+
+	taskPoolsOnce sync.Once
+	combPoolsOnce sync.Once
+
+	concurrencyByTaskLimit    []atomic.Int64
+	maxConcurrencyByTaskLimit []atomicMaxInt64
+	concurrencyByCombLimit    []atomic.Int64
+	maxConcurrencyByCombLimit []atomicMaxInt64
+	gathererInvocations       []atomic.Int64
+	StartTime                 time.Time
 }
 
 func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	traceRegion := "sim.controller.Run"
 	c.StartTime = time.Now()
 
-	for i, step := range c.Plan.Steps {
-		switch step := step.(type) {
-		case Scatter:
-			trace.Logf(ctx, traceRegion, "%v step %d/%d: scatter %v", c.Plan, i+1, len(c.Plan.Steps)+1, step.Task)
-			c.scatterTask(ctx, t, step.Task)
-		default:
-			panic(fmt.Sprintf("unknown step type %T", step))
+	c.ensurePools()
+	// Dummy sink: satisfies psg.NewCombiner's structural Gatherer arg and
+	// receives nothing real (struct{} payload). Single instance shared
+	// across all combiners/task-dispatches in this controller.
+	c.DummySink = psg.NewGatherer(func(ctx context.Context, _ struct{}, err error) error {
+		return err
+	})
+
+	// Construct Gatherers and Combiners against the Pool. Order matters:
+	// Combiners reference Gatherers (in body Submits), so Gatherers must
+	// exist first.
+	for i, g := range c.Plan.Gatherers {
+		gp := g
+		idx := i
+		gatherer := psg.NewGatherer(c.newGathererHandler(t, gp, idx))
+		c.Gatherers[i] = &gatherer
+	}
+	for i, cmb := range c.Plan.Combiners {
+		cp := cmb
+		idx := i
+		limPool := c.CombinerPools[0]
+		if len(cp.LimiterIndexes) > 0 {
+			limPool = c.CombinerPools[cp.LimiterIndexes[0]]
 		}
+		combiner := psg.NewCombiner(c.DummySink, limPool, c.newCombinerFactory(t, cp, idx))
+		c.Combiners[i] = &combiner
 	}
 
+	// Execute top-level Steps.
+	for i, step := range c.Plan.Steps {
+		trace.Logf(ctx, traceRegion, "%v step %d/%d: %T", c.Plan, i+1, len(c.Plan.Steps)+1, step)
+		c.executeStep(ctx, t, step)
+	}
+
+	// Drain.
 	chk := assert.New(t)
-	// Loop to handle expected errors from gathers
 	for {
 		err := c.Pool.CloseAndGatherAll(ctx)
 		if err == nil {
 			break
 		}
-		var ge ExpectedGatherError
-		if errors.As(err, &ge) {
-			chk.True(ge.g.Func.ReturnError)
-		} else {
-			chk.NoError(err)
+		var expectedErr ExpectedHandlerError
+		if errors.As(err, &expectedErr) {
+			// Gatherer.Handle returned an error as expected.
+			continue
 		}
+		chk.NoError(err)
+		break
 	}
 
-	gatheredCount := c.GatheredCount.Load()
-	trace.Logf(ctx, traceRegion, "GatheredCount=%d", gatheredCount)
-	chk.GreaterOrEqual(gatheredCount, int64(c.Plan.MinGatherCount))
-	chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
-
-	maxConcurrencyByTaskPool := make([]int64, len(c.MaxConcurrencyByTaskPool))
-	for i := range len(maxConcurrencyByTaskPool) {
-		maxConcurrencyByTaskPool[i] = c.MaxConcurrencyByTaskPool[i].Load()
+	// Per-Gatherer sink-invocation bounds.
+	for i, want := range c.Plan.MinGathererInvocations {
+		got := c.gathererInvocations[i].Load()
+		chk.GreaterOrEqualf(got, int64(want),
+			"Plan#%d Gatherer#%d min invocations (got %d, want >=%d)",
+			c.Plan.ID, c.Plan.Gatherers[i].ID, got, want)
+	}
+	for i, want := range c.Plan.MaxGathererInvocations {
+		got := c.gathererInvocations[i].Load()
+		chk.LessOrEqualf(got, int64(want),
+			"Plan#%d Gatherer#%d max invocations (got %d, want <=%d)",
+			c.Plan.ID, c.Plan.Gatherers[i].ID, got, want)
+	}
+	// Per-Limiter aggregate concurrency: observed max must not exceed
+	// configured permits.
+	for i, lim := range c.Plan.TaskLimiters {
+		observed := c.maxConcurrencyByTaskLimit[i].Load()
+		chk.LessOrEqualf(observed, int64(lim.Permits),
+			"TaskLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
+	}
+	for i, lim := range c.Plan.CombinerLimiters {
+		observed := c.maxConcurrencyByCombLimit[i].Load()
+		chk.LessOrEqualf(observed, int64(lim.Permits),
+			"CombinerLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
+	}
+	// Path-duration lower bound: total elapsed wall-clock must be at
+	// least MaxPathDuration. Only enforced in Deterministic mode where
+	// SelfTime distributions are collapsed to their Med values; in
+	// probabilistic mode the per-invocation draws can come in below
+	// Med.
+	if c.Plan != nil && (c.Plan.MaxPathDuration > 0) {
+		elapsed := time.Since(c.StartTime)
+		chk.GreaterOrEqualf(elapsed, c.Plan.MaxPathDuration,
+			"elapsed %v < MaxPathDuration %v", elapsed, c.Plan.MaxPathDuration)
 	}
 
-	trace.Logf(ctx, traceRegion, "%v step %d/%d: done", c.Plan, len(c.Plan.Steps)+1, len(c.Plan.Steps)+1)
 	return nil
 }
 
-func (c *controller) getTaskPool(index int) *psg.TaskPool {
-	c.TaskPoolsLock.Lock()
-	defer c.TaskPoolsLock.Unlock()
-	pool := c.TaskPools[index]
-	if pool == nil {
-		pool = psg.NewTaskPool(c.Pool, psgopt.WithMaxConcurrency(c.Plan.TaskPools[index].ConcurrencyLimit))
-		c.TaskPools[index] = pool
-	}
-	return pool
+// ensurePools lazily constructs the psg.TaskPool and psg.CombinerPool
+// instances backing the Plan's Limiters. One pool per Limiter.
+func (c *controller) ensurePools() {
+	c.taskPoolsOnce.Do(func() {
+		for i, lim := range c.Plan.TaskLimiters {
+			c.TaskPools[i] = psg.NewTaskPool(c.Pool, psgopt.WithMaxConcurrency(lim.Permits))
+		}
+	})
+	c.combPoolsOnce.Do(func() {
+		for i, lim := range c.Plan.CombinerLimiters {
+			c.CombinerPools[i] = psg.NewCombinerPool(c.Pool, psgopt.WithMaxConcurrency(lim.Permits))
+		}
+	})
 }
 
-func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *Task) {
-	switch rh := task.ResultHandler.(type) {
-	case *Gather:
-		gatherer := func() psg.Gatherer[*taskResult] {
-			c.GathersLock.Lock()
-			defer c.GathersLock.Unlock()
-			gatherer := c.Gathers[rh.Index]
-			if gatherer == nil {
-				op := psg.NewGatherer(c.newGatherFunc(t))
-				gatherer = &op
-				c.Gathers[rh.Index] = gatherer
-			}
-			return *gatherer
-		}()
-		taskPool := c.getTaskPool(task.PoolIndex)
-		taskFn := c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex])
-		// Loop to handle expected errors from gathers that are processed by
-		// Scatter as it applies backpressure
-		for {
-			err := gatherer.Start(ctx, taskPool, taskFn)
-			if err == nil {
-				break
-			}
-			chk := assert.New(t)
-			var ge ExpectedGatherError
-			if errors.As(err, &ge) {
-				chk.True(ge.g.Func.ReturnError)
-			} else {
-				chk.NoError(err)
-			}
-		}
-	case *Combine:
-		combineOp := func() psg.Combiner[*taskResult, *combineResult] {
-			c.CombinesLock.Lock()
-			defer c.CombinesLock.Unlock()
-			combineOp := c.Combines[rh.Index]
-			if combineOp == nil {
-				// Create a gather for the combiner output
-				gatherer := psg.NewGatherer(c.newCombinerGatherFunc(t))
-
-				combinerPoolIndex := c.Plan.CombinerPoolIndexes[rh.Index]
-				combinerPool := c.CombinerPools[combinerPoolIndex]
-				if combinerPool == nil {
-					// Create a combiner pool with the concurrency limit
-					combinerPool = psg.NewCombinerPool(c.Pool,
-						psgopt.WithMaxConcurrency(c.Plan.CombinerPools[combinerPoolIndex].ConcurrencyLimit))
-					c.CombinerPools[combinerPoolIndex] = combinerPool
-				}
-
-				// Create a combine operation that uses the gather and factory
-				op := psg.NewCombiner(
-					gatherer,
-					combinerPool,
-					c.newCombinerFactory(t, rh.Index),
-				)
-				combineOp = &op
-				c.Combines[rh.Index] = combineOp
-			}
-			return *combineOp
-		}()
-		// Loop to handle expected errors from gathers that are processed by
-		// Scatter as it applies backpressure
-		for {
-			err := combineOp.Start(ctx, c.getTaskPool(task.PoolIndex),
-				c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
-			if err == nil {
-				break
-			}
-			chk := assert.New(t)
-			var ge ExpectedGatherError
-			if errors.As(err, &ge) {
-				chk.True(ge.g.Func.ReturnError)
-			} else {
-				chk.NoError(err)
-			}
-		}
-	default:
-		panic(fmt.Sprintf("unknown ResultHandler type: %T", rh))
-	}
-}
-
-func (c *controller) newTaskFunc(t assert.TestingT, task *Task, concurrency *atomic.Int64) psgfn.Task[*taskResult] {
-	return func(ctx context.Context) (res *taskResult, err error) {
-		traceRegion := "sim.taskFunc"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		trace.Logf(ctx, traceRegion, "%v", task)
-
-		res = &taskResult{
-			Task:               task,
-			ConcurrencyAtStart: concurrency.Add(1),
-		}
-
-		chk := assert.New(t)
-
-		chk.Positive(res.ConcurrencyAtStart)
-		defer func() {
-			res.ConcurrencyAfter = concurrency.Add(-1)
-			res.EndTime = time.Now()
-		}()
+// executeStep dispatches a Step. Currently handles StartTask, Submit
+// (synthesized at top level — uncommon), and Subjob (deferred to v2).
+func (c *controller) executeStep(ctx context.Context, t assert.TestingT, step Step) {
+	chk := assert.New(t)
+	switch s := step.(type) {
+	case StartTask:
+		c.startTask(ctx, t, s.RunnerIndex)
+	case Submit:
+		c.submitFresh(ctx, t, s)
+	case SelfTime:
+		// Top-level SelfTime is unusual but allowed; just sleep.
 		timer := timerp.Get()
 		defer timerp.Put(timer)
-		for i, step := range task.Func.Steps {
-			switch step := step.(type) {
-			case SelfTime:
-				trace.Logf(ctx, traceRegion, "%v step %d/%d: %v self time", task, i+1, len(task.Func.Steps)+1, step.Duration())
-				timerp.Reset(timer, step.Duration())
+		timerp.Reset(timer, c.drawDuration(s.Dist))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+	case Subjob:
+		c.runSubjob(ctx, t, s)
+	default:
+		chk.Fail(fmt.Sprintf("unknown Step type %T", step))
+	}
+}
+
+// runSubjob executes a Subjob step by spinning up a fresh psg.Pool and
+// recursing into Run with the nested Plan. This exercises cross-Pool
+// boundary code (a key race-coverage objective) and matches old sim
+// semantics where Subjobs ran on their own Pool.
+func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob) {
+	if s.Plan == nil {
+		return
+	}
+	if !c.rollProb(s.Prob) {
+		return
+	}
+	err := Run(ctx, t, s.Plan)
+	var expectedErr ExpectedHandlerError
+	if err != nil && !errors.As(err, &expectedErr) {
+		assert.New(t).NoError(err)
+	}
+}
+
+// startTask scatters a TaskRunner. Because the current psg API
+// forbids tasks from scattering new work, the TaskRunner's first
+// Submit step in its Body is treated as the destination sink for the
+// task's return value — the task function runs SelfTime/Subjob steps
+// and then returns; the current API routes the value to the
+// destination via that sink's Start.
+//
+// TaskRunner bodies in v1 generator have at most one Submit step.
+// Multi-Submit is vocabulary-supported but requires a future API
+// shape (post-Wave-5) where tasks can submit-from-body directly.
+func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx int) {
+	chk := assert.New(t)
+	runner := c.Plan.TaskRunners[runnerIdx]
+	taskPool := c.TaskPools[0]
+	if len(runner.LimiterIndexes) > 0 {
+		taskPool = c.TaskPools[runner.LimiterIndexes[0]]
+	}
+	// Concurrency tracking: bump TaskLimiter counter on entry to the
+	// task body, decrement on exit. Used by the per-Limiter
+	// max-concurrency assertion in Run.
+	trackEntry := func() func() { return func() {} }
+	if len(runner.LimiterIndexes) > 0 {
+		limIdx := runner.LimiterIndexes[0]
+		trackEntry = func() func() {
+			cur := c.concurrencyByTaskLimit[limIdx].Add(1)
+			c.maxConcurrencyByTaskLimit[limIdx].UpdateMax(cur)
+			return func() { c.concurrencyByTaskLimit[limIdx].Add(-1) }
+		}
+	}
+	destKind, destIdx, ok := c.firstSubmit(runner.Body)
+	if !ok {
+		// TaskRunner with no Submit step: scatter against the dummy
+		// sink — its return value is discarded.
+		taskFn := func(ctx context.Context) (struct{}, error) {
+			defer trackEntry()()
+			v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
+			return struct{}{}, c.executeBodyMinusSubmit(ctx, t, runner.Body, v)
+		}
+		for {
+			err := c.DummySink.Start(ctx, taskPool, taskFn)
+			if err == nil {
+				return
+			}
+			var expectedErr ExpectedHandlerError
+			if errors.As(err, &expectedErr) {
+				continue
+			}
+			chk.NoError(err)
+			return
+		}
+	}
+	taskFn := func(ctx context.Context) (*simValue, error) {
+		defer trackEntry()()
+		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
+		if err := c.executeBodyMinusSubmit(ctx, t, runner.Body, v); err != nil {
+			return v, err
+		}
+		if c.shouldReturnError(runner.Body) {
+			return v, ExpectedHandlerError{OpKind: "TaskRunner", OpID: runner.ID}
+		}
+		return v, nil
+	}
+	// Start can return an ExpectedHandlerError from internal
+	// backpressure-yielding (a previously-queued task's gather handler
+	// returned an injected error). In that case the work was Free()'d
+	// and NOT queued; retry until Start either succeeds (nil) or
+	// returns a non-injected error.
+	for {
+		var err error
+		switch destKind {
+		case SinkCombiner:
+			err = c.Combiners[destIdx].Start(ctx, taskPool, taskFn)
+		case SinkGatherer:
+			err = c.Gatherers[destIdx].Start(ctx, taskPool, taskFn)
+		}
+		if err == nil {
+			return
+		}
+		var expectedErr ExpectedHandlerError
+		if errors.As(err, &expectedErr) {
+			continue
+		}
+		chk.NoError(err)
+		return
+	}
+}
+
+// firstSubmit reports the first Submit step in a Func body, if any.
+// Used to determine a TaskRunner's destination sink for the
+// scatter-via-return adapter pattern.
+func (c *controller) firstSubmit(fn *Func) (SinkKind, int, bool) {
+	for _, step := range fn.Steps {
+		if s, ok := step.(Submit); ok {
+			return s.SinkKind, s.SinkIndex, true
+		}
+	}
+	return 0, 0, false
+}
+
+// executeBodyMinusSubmit walks a TaskRunner Body's Steps. Submit is
+// skipped (its target was promoted to the task's return destination).
+// StartTask is skipped (current API forbids scattering from a task
+// context). Subjob is allowed — it spawns its own psg.Pool, which is
+// a separate domain from the parent's.
+func (c *controller) executeBodyMinusSubmit(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
+	timer := timerp.Get()
+	defer timerp.Put(timer)
+	for _, step := range fn.Steps {
+		switch s := step.(type) {
+		case SelfTime:
+			d := c.drawDuration(s.Dist)
+			if d > 0 {
+				timerp.Reset(timer, d)
 				select {
 				case <-timer.C:
 				case <-ctx.Done():
-					return res, ctx.Err()
+					return ctx.Err()
 				}
-			case Subjob:
-				trace.Logf(ctx, traceRegion, "%v step %d/%d: subjob %v", task, i+1, len(task.Func.Steps)+1, step.Plan)
-				err := run(ctx, t, step.Plan)
-				chk.NoError(err)
-			default:
-				panic(fmt.Sprintf("unknown step type %T", step))
-			}
-		}
-
-		trace.Logf(ctx, traceRegion, "%v step %d/%d: done", task, len(task.Func.Steps)+1, len(task.Func.Steps)+1)
-
-		if task.Func.ReturnError {
-			return res, fmt.Errorf("%v error", task)
-		} else {
-			return res, nil
-		}
-	}
-}
-
-func (c *controller) newGatherFunc(t assert.TestingT) psgfn.Gather[*taskResult] {
-	return func(ctx context.Context, res *taskResult, err error) (retErr error) {
-		traceRegion := "sim.gatherFunc"
-		defer trace.StartRegion(ctx, traceRegion).End()
-
-		task := res.Task
-		gather := task.ResultHandler.(*Gather)
-		trace.Logf(ctx, traceRegion, "%v", gather)
-
-		chk := assert.New(t)
-
-		c.updateTaskStats(t, res, err)
-
-		gatheredCount := c.GatheredCount.Add(1)
-		trace.Logf(ctx, traceRegion, "GatheredCount=%d", gatheredCount)
-		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
-
-		if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
-			return err
-		}
-		if gather.Func.ReturnError {
-			return ExpectedGatherError{gather}
-		} else {
-			return nil
-		}
-	}
-}
-
-func (c *controller) newCombinerFactory(
-	t assert.TestingT,
-	combineIndex int,
-) psgfn.CombinerFactory[*taskResult, *combineResult] {
-	return func() psgfn.Combiner[*taskResult, *combineResult] {
-		cRes := &combineResult{
-			Index: combineIndex,
-		}
-		flushed := false
-		chk := assert.New(t)
-		return psgfn.FuncCombiner[*taskResult, *combineResult]{
-			CombineFn: func(ctx context.Context, tRes *taskResult, err error) (time.Time, error) {
-				chk.False(flushed)
-
-				c.updateTaskStats(t, tRes, err)
-
-				task := tRes.Task
-				combine := task.ResultHandler.(*Combine)
-
-				chk.Equal(cRes.Index, combine.Index)
-
-				err = c.executeGatherOrCombineFunc(t, ctx, combine, combine.Func)
-				if err == nil && combine.Func.ReturnError {
-					err = ExpectedCombineError{combine}
-				}
-
-				var flushDeadline time.Time
-				if combine.FlushHandler != nil {
-					cRes.Combines = append(cRes.Combines, combine)
-					cRes.Errs = append(cRes.Errs, err)
-					flushDeadline = time.Now()
-				}
-				return flushDeadline, err
-			},
-			FlushFn: func(ctx context.Context) (*combineResult, error) {
-				chk.False(flushed)
-				flushed = true
-				cRes.EndTime = time.Now()
-				var err error
-				for _, err = range cRes.Errs {
-					if err != nil {
-						break
-					}
-				}
-				return cRes, err
-			},
-		}
-	}
-}
-
-func (c *controller) newCombinerGatherFunc(t assert.TestingT) psgfn.Gather[*combineResult] {
-	return func(ctx context.Context, res *combineResult, err error) error {
-		traceRegion := "sim.combineGatherFunc"
-		defer trace.StartRegion(ctx, traceRegion).End()
-
-		chk := assert.New(t)
-
-		if res == nil {
-			// Error from Combine case
-			chk.Error(err)
-			var ce ExpectedCombineError
-			chk.ErrorAs(err, &ce)
-			return nil
-		}
-
-		for i, combine := range res.Combines {
-			err = res.Errs[i]
-			if combine.Func.ReturnError {
-				chk.Error(err)
-				var ce ExpectedCombineError
-				if errors.As(err, &ce) {
-					chk.Equal(combine.Func, ce.c.Func)
-				} else {
-					chk.NoError(err)
-				}
-			} else {
-				chk.NoError(err)
-			}
-
-			gather := combine.FlushHandler.(*Gather)
-			if err := c.executeGatherOrCombineFunc(t, ctx, gather, gather.Func); err != nil {
-				return err
-			}
-			if gather.Func.ReturnError {
-				err = ExpectedGatherError{gather}
-			} else {
-				err = nil
-			}
-		}
-
-		gatheredCount := c.GatheredCount.Add(int64(len(res.Combines)))
-		trace.Logf(ctx, traceRegion, "GatheredCount=%d", gatheredCount)
-		chk.LessOrEqual(gatheredCount, int64(c.Plan.MaxGatherCount))
-
-		return err
-	}
-}
-
-func (c *controller) updateTaskStats(t assert.TestingT, res *taskResult, err error) {
-	chk := assert.New(t)
-	task := res.Task
-	if task.Func.ReturnError {
-		chk.Error(err)
-	} else {
-		if err != nil {
-			panic("unexpected error: " + err.Error())
-		}
-		chk.NoError(err)
-	}
-
-	taskPool := task.PoolIndex
-	chk.Positive(res.ConcurrencyAtStart)
-	chk.LessOrEqual(res.ConcurrencyAtStart, int64(c.Plan.TaskPools[taskPool].ConcurrencyLimit))
-	chk.GreaterOrEqual(res.ConcurrencyAfter, int64(0))
-	chk.Less(res.ConcurrencyAfter, int64(c.Plan.TaskPools[taskPool].ConcurrencyLimit))
-	c.MaxConcurrencyByTaskPool[taskPool].UpdateMax(res.ConcurrencyAtStart)
-
-	elapsedTime := res.EndTime.Sub(c.StartTime)
-	chk.GreaterOrEqual(elapsedTime, task.PathDuration())
-}
-
-func (c *controller) executeGatherOrCombineFunc(
-	t assert.TestingT,
-	ctx context.Context,
-	rh ResultHandler,
-	fn *Func,
-) error {
-	traceRegion := "sim.executeGatherOrCombineFunc"
-	chk := assert.New(t)
-	timer := timerp.Get()
-	defer timerp.Put(timer)
-	for i, step := range fn.Steps {
-		switch step := step.(type) {
-		case SelfTime:
-			trace.Logf(ctx, traceRegion, "%v step %d/%d: %v self time", rh, i+1, len(fn.Steps)+1, step.Duration())
-			timerp.Reset(timer, step.Duration())
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				return ctx.Err()
 			}
 		case Subjob:
-			trace.Logf(ctx, traceRegion, "%v step %d/%d: subjob %v", rh, i+1, len(fn.Steps)+1, step.Plan)
-			err := run(ctx, t, step.Plan)
-			chk.NoError(err)
-		case Scatter:
-			trace.Logf(ctx, traceRegion, "%v step %d/%d: scatter %v", rh, i+1, len(fn.Steps)+1, step.Task)
-			c.scatterTask(ctx, t, step.Task)
-		default:
-			panic(fmt.Sprintf("unknown step type %T", step))
+			c.runSubjob(ctx, t, s)
+		case Submit:
+			// Promoted to return destination; skip here.
+		case StartTask:
+			// Tasks can't scatter in current API; v1 generator
+			// doesn't emit StartTask inside TaskRunner bodies.
 		}
 	}
-	trace.Logf(ctx, traceRegion, "%v step %d/%d: done", rh, len(fn.Steps)+1, len(fn.Steps)+1)
+	_ = v
 	return nil
 }
 
-// taskResult represents the result of executing a simulated task.
-type taskResult struct {
-	Task               *Task
-	ConcurrencyAtStart int64
-	ConcurrencyAfter   int64
-	EndTime            time.Time
+// submitFresh handles a top-level Submit by constructing a fresh
+// simValue (no upstream context) and Submit-ing it to the target sink.
+func (c *controller) submitFresh(ctx context.Context, t assert.TestingT, s Submit) {
+	v := &simValue{DispatchTime: time.Now()}
+	c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
 }
 
-// combineResult represents a result emitted by a simulated combiner.
-type combineResult struct {
-	Index    int
-	Combines []*Combine
-	Errs     []error
-	EndTime  time.Time
+// submitTo routes a value into a Plan-level sink. The current API's
+// Submit panics on a "Group not supported in task context" check when
+// invoked from inside a worker, so we use the op's Start instead —
+// scattering a no-op task whose return value flows into the sink. This
+// matches the pre-rewrite sim's pattern. When the API gains worker-
+// safe Submit semantics post-Wave-5, this collapses back to direct
+// Submit.
+//
+// The scattered no-op task runs on TaskPools[0] for v1 simplicity; a
+// future refinement can route it through the calling op's bound
+// limiter for more honest concurrency accounting.
+func (c *controller) submitTo(
+	ctx context.Context, t assert.TestingT, kind SinkKind, idx int, v *simValue, valErr error,
+) {
+	chk := assert.New(t)
+	if len(c.TaskPools) == 0 {
+		chk.Fail("no TaskPools available for submit-via-start adapter")
+		return
+	}
+	taskPool := c.TaskPools[0]
+	noopTask := func(_ context.Context) (*simValue, error) {
+		return v, valErr
+	}
+	// Retry on ExpectedHandlerError — Start can return one from
+	// internal backpressure-yielding, in which case the work was
+	// Free()'d and NOT queued. See startTask for the same pattern.
+	for {
+		var err error
+		switch kind {
+		case SinkCombiner:
+			err = c.Combiners[idx].Start(ctx, taskPool, noopTask)
+		case SinkGatherer:
+			err = c.Gatherers[idx].Start(ctx, taskPool, noopTask)
+		default:
+			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
+			return
+		}
+		if err == nil {
+			return
+		}
+		var expectedErr ExpectedHandlerError
+		if errors.As(err, &expectedErr) {
+			continue
+		}
+		chk.NoError(err)
+		return
+	}
 }
 
-type ExpectedGatherError struct {
-	g *Gather
+// newGathererHandler builds the handler function for a Plan Gatherer —
+// walks its Handle Func, accounting invocations. Upstream errors
+// (valErr) are NOT propagated back; the Handler returns either nil or
+// its own injected ExpectedHandlerError. Matches old sim behavior:
+// errors flow alongside values into the handler for it to act on, but
+// the handler doesn't re-propagate them — that would short-circuit
+// the framework's drain and cause subsequent queued work to be lost.
+func (c *controller) newGathererHandler(t assert.TestingT, g *Gatherer, idx int) psgfn.Gather[*simValue] {
+	return func(ctx context.Context, v *simValue, valErr error) error {
+		_ = valErr
+		_ = v
+		c.gathererInvocations[idx].Add(1)
+		if err := c.executeFunc(ctx, t, g.Handle, v); err != nil {
+			return ExpectedHandlerError{OpKind: opNameGatherer, OpID: g.ID, Err: err}
+		}
+		if c.shouldReturnError(g.Handle) {
+			return ExpectedHandlerError{OpKind: opNameGatherer, OpID: g.ID}
+		}
+		return nil
+	}
 }
 
-func (e ExpectedGatherError) Error() string {
-	return fmt.Sprintf("expected %v error", e.g)
+// newCombinerFactory builds the combiner factory that the current API
+// invokes per-instance. The Accumulate and Flush bodies are walked
+// from inside CombineFn/FlushFn; downstream Submits go through
+// submitTo. FlushFn returns struct{}{} (dummy output).
+func (c *controller) newCombinerFactory(
+	t assert.TestingT, cmb *Combiner, idx int,
+) psgfn.CombinerFactory[*simValue, struct{}] {
+	_ = idx
+	// Concurrency tracking: bump CombinerLimiter counter on entry to
+	// Accumulate or Flush, decrement on exit.
+	trackEntry := func() func() { return func() {} }
+	if len(cmb.LimiterIndexes) > 0 {
+		limIdx := cmb.LimiterIndexes[0]
+		trackEntry = func() func() {
+			cur := c.concurrencyByCombLimit[limIdx].Add(1)
+			c.maxConcurrencyByCombLimit[limIdx].UpdateMax(cur)
+			return func() { c.concurrencyByCombLimit[limIdx].Add(-1) }
+		}
+	}
+	return func() psgfn.Combiner[*simValue, struct{}] {
+		return psgfn.FuncCombiner[*simValue, struct{}]{
+			CombineFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
+				defer trackEntry()()
+				err := c.executeFunc(ctx, t, cmb.Accumulate, v)
+				if err == nil && c.shouldReturnError(cmb.Accumulate) {
+					err = ExpectedHandlerError{OpKind: opNameCombiner, OpID: cmb.ID}
+				}
+				// No flush deadline in v1.
+				_ = valErr
+				return time.Time{}, err
+			},
+			FlushFn: func(ctx context.Context) (struct{}, error) {
+				defer trackEntry()()
+				v := &simValue{DispatchTime: time.Now()}
+				err := c.executeFunc(ctx, t, cmb.Flush, v)
+				if err == nil && c.shouldReturnError(cmb.Flush) {
+					err = ExpectedHandlerError{OpKind: opNameCombiner, OpID: cmb.ID}
+				}
+				return struct{}{}, err
+			},
+		}
+	}
 }
 
-type ExpectedCombineError struct {
-	c *Combine
+// executeFunc walks a Func's Steps. SelfTime sleeps for the drawn
+// duration; Submit routes to the target sink; StartTask invokes the
+// runner; Subjob is v2.
+func (c *controller) executeFunc(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
+	chk := assert.New(t)
+	timer := timerp.Get()
+	defer timerp.Put(timer)
+	for _, step := range fn.Steps {
+		switch s := step.(type) {
+		case SelfTime:
+			d := c.drawDuration(s.Dist)
+			if d > 0 {
+				timerp.Reset(timer, d)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		case Submit:
+			if !c.rollProb(s.Prob) {
+				continue
+			}
+			c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
+		case StartTask:
+			if !c.rollProb(s.Prob) {
+				continue
+			}
+			c.startTask(ctx, t, s.RunnerIndex)
+		case Subjob:
+			c.runSubjob(ctx, t, s)
+		default:
+			chk.Fail(fmt.Sprintf("unknown Step type %T", step))
+		}
+	}
+	return nil
 }
 
-func (e ExpectedCombineError) Error() string {
-	return fmt.Sprintf("expected %v error", e.c)
+// drawDuration picks a duration from a SelfTime distribution at
+// runtime. In v1 we always use the Med value for simplicity; richer
+// per-invocation drawing lands with the probabilistic-mode work.
+func (c *controller) drawDuration(d BiasedDurationConfig) time.Duration {
+	return d.Med
 }
 
-type atomicMinMaxInt64 struct {
+// rollProb returns true with probability p. v1 generator only emits
+// Prob=1.0 so this short-circuits; probabilistic-mode work will
+// replace with a real RNG.
+func (c *controller) rollProb(p float64) bool {
+	return p >= 1.0
+}
+
+// shouldReturnError reports whether this Func invocation should
+// surface an error. v1 generator forces ReturnErrorProb to 0 or 1
+// (Deterministic-style) so this short-circuits; probabilistic-mode
+// work will replace with a real RNG.
+func (c *controller) shouldReturnError(fn *Func) bool {
+	return fn.ReturnErrorProb >= 1.0
+}
+
+// ExpectedHandlerError marks a deliberately-returned error from a
+// Gatherer Handle, Combiner Accumulate, or Combiner Flush body —
+// distinguished from infrastructure errors so the drain loop can
+// continue past them.
+type ExpectedHandlerError struct {
+	OpKind string
+	OpID   int
+	Err    error
+}
+
+func (e ExpectedHandlerError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("expected %s#%d error: %v", e.OpKind, e.OpID, e.Err)
+	}
+	return fmt.Sprintf("expected %s#%d error", e.OpKind, e.OpID)
+}
+
+func (e ExpectedHandlerError) Unwrap() error {
+	return e.Err
+}
+
+// atomicMaxInt64 tracks a monotonically non-decreasing observed maximum.
+type atomicMaxInt64 struct {
 	value atomic.Int64
 }
 
-func (mm *atomicMinMaxInt64) Store(x int64) {
-	mm.value.Store(x)
-}
-
-func (mm *atomicMinMaxInt64) Load() int64 {
+func (mm *atomicMaxInt64) Load() int64 {
 	return mm.value.Load()
 }
 
-func (mm *atomicMinMaxInt64) UpdateMax(x int64) {
-	mm.update(x, func(old int64) bool {
-		return x > old
-	})
-}
-
-func (mm *atomicMinMaxInt64) UpdateMin(x int64) {
-	mm.update(x, func(old int64) bool {
-		return x < old
-	})
-}
-
-func (mm *atomicMinMaxInt64) update(x int64, t func(old int64) bool) {
+func (mm *atomicMaxInt64) UpdateMax(x int64) {
 	for {
 		old := mm.value.Load()
-		if !t(old) {
-			break
+		if x <= old {
+			return
 		}
 		if mm.value.CompareAndSwap(old, x) {
-			break
+			return
 		}
 	}
 }

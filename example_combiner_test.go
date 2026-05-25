@@ -17,9 +17,9 @@ import (
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
-// Example_combine demonstrates how combiners can efficiently aggregate
+// ExampleCombiner demonstrates how combiners can efficiently aggregate
 // results from multiple tasks before emitting a combined result.
-func ExampleCombine() {
+func ExampleCombiner() {
 	var clock exmpclk.ExampleClock
 	clock.Start()
 	msSinceStart := func() int64 {

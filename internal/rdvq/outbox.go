@@ -31,6 +31,13 @@ func (ob *outbox[T]) free() {
 		panic("reference count underflow")
 	}
 	if newValue == 0 {
+		// Drain any pending listener subscriptions before recycling.
+		// A producer-side work item may have registered for "outbox
+		// drained" notification but never received its retry callback
+		// (e.g., its hosting goroutine exited). Without this drain,
+		// the leftover listener trips the Listeners.Reset panic when
+		// the outbox is returned to the pool.
+		ob.listeners.NotifyAll()
 		omnipool.PutCustom(outboxTrait[T]{}, ob)
 	}
 }

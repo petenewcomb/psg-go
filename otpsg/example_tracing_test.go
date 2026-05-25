@@ -68,11 +68,11 @@ func Example_tracing() {
 					return nil
 				})
 
-			return processGather.Scatter(ctx, job, processDataTask)
+			return processGather.Start(ctx, job, processDataTask)
 		})
 
 	// Start the pipeline by loading data
-	if err := dataGather.Scatter(ctx, job, loadDataTask); err != nil {
+	if err := dataGather.Start(ctx, job, loadDataTask); err != nil {
 		fmt.Println("Error:", err)
 	}
 

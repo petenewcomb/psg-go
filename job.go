@@ -171,7 +171,7 @@ func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
 }
 
 // Cancel terminates any in-flight tasks and forfeits any ungathered results.
-// Outstanding calls to [Scatter], [Pool.Gather], [Pool.TryGather],
+// Outstanding calls to [Start], [Pool.Gather], [Pool.TryGather],
 // [Pool.GatherAll], or [Pool.TryGatherAll] using the job or any of its task pools will
 // fail with [context.Canceled] or other error returned by a [Gather].
 //
@@ -179,7 +179,7 @@ func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
 // [Gather] will delay termination of their independent goroutine or caller
 // until it returns. This method cancels the context passed to each [Task],
 // but not the context passed to each [Gather]. Gather functions instead
-// receive the context passed to the calling [Scatter], [Pool.Gather],
+// receive the context passed to the calling [Start], [Pool.Gather],
 // [Pool.TryGather], [Pool.GatherAll], or [Pool.TryGatherAll] function. If it is
 // desirable to transmit a cancelation signal to a running [Gather], one
 // must also cancel any contexts being passed to those callers.
@@ -210,7 +210,7 @@ func (j *Pool) CancelAndWait() {
 }
 
 // Gather processes outstanding task results and then waits for the next
-// task result from a task previously launched via [Scatter]. It will block until
+// task result from a task previously launched via [Start]. It will block until
 // a completed task is available, the provided context or job is canceled, or
 // another event causes a wake-up (e.g. a call to [TaskPool.SetOptions]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
@@ -596,7 +596,7 @@ func (j *Pool) newGatherPostWork(group workq.GroupID, gatherWork boundGatherWork
 }
 
 // TryGather processes outstanding task results and then attempts to process
-// the next task result from a task previously launched via [Scatter]. Unlike
+// the next task result from a task previously launched via [Start]. Unlike
 // [Pool.Gather], it will not block if a completed task is not immediately available.
 //
 // Returns a boolean flag indicating whether there might be more task results

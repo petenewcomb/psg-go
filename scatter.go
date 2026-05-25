@@ -47,7 +47,7 @@ func vetScatter[T any](
 		// These are valid for scattering
 		default:
 			panic(fmt.Sprintf(
-				"Scatter called from %v context but allowed only by top-level, gather, or combine context",
+				"Start called from %v context but allowed only by top-level, gather, or combine context",
 				ctxType))
 		}
 	})

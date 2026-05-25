@@ -23,9 +23,9 @@ type AnyPoolOption interface {
 //
 // For TaskPool: A negative value means no limit (tasks will always be launched,
 // subject to other backpressure constraints). Zero means no new tasks will be
-// launched (i.e., Scatter will block indefinitely) until the limit is changed
+// launched (i.e., Start will block indefinitely) until the limit is changed
 // to a non-zero value. The new limit takes effect immediately for subsequent
-// task launches and may unblock existing blocked Scatter calls.
+// task launches and may unblock existing blocked Start calls.
 //
 // For CombinerPool: Sets the maximum number of combiner goroutines. Use -1 to
 // indicate unlimited (subject to other backpressure constraints and scaling decisions).

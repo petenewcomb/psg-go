@@ -45,7 +45,7 @@ func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
 //
 // Thread-safety and copying: Like Gatherer, a Combiner value is designed to be
 // copied. While a single Combiner value does not support concurrent calls to
-// Scatter or TryScatter, copies of a Combiner can be used concurrently. All
+// Start or TryStart, copies of a Combiner can be used concurrently. All
 // copies share the same combiner identity and will route work to the same
 // combiner instances. This allows Combiner values to be safely passed by value
 // to goroutines or stored in structures without losing their binding to the
@@ -117,19 +117,19 @@ func NewCombiner[I any, O any](
 	return Combiner[I, O]{h: h}
 }
 
-// Scatter initiates asynchronous execution of the provided task function in a
+// Start initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
 // combined using this Combine's combiner and eventually passed to the associated
 // Gather.
 //
-// See [Gatherer.Scatter] for details about backpressure, concurrency limits,
+// See [Gatherer.Start] for details about backpressure, concurrency limits,
 // context handling, and error behavior.
-func (c *Combiner[I, O]) Scatter(
+func (c *Combiner[I, O]) Start(
 	ctx context.Context,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) error {
-	traceRegion := "Combiner.Scatter"
+	traceRegion := "Combiner.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.h.Get()
 	if inner == nil {
@@ -151,17 +151,17 @@ func (c *Combiner[I, O]) Scatter(
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryScatter is like [Combiner.Scatter] but returns instead of blocking if
+// TryStart is like [Combiner.Start] but returns instead of blocking if
 // the given target is at its concurrency limit.
 //
-// See [Gatherer.TryScatter] for details about behavior and return values.
-func (c *Combiner[I, O]) TryScatter(
+// See [Gatherer.TryStart] for details about behavior and return values.
+func (c *Combiner[I, O]) TryStart(
 	ctx context.Context,
 	deadline time.Time,
 	target TaskPoolOrJob,
 	taskFn psgfn.Task[I],
 ) (bool, error) {
-	traceRegion := "Combiner.TryScatter"
+	traceRegion := "Combiner.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.h.Get()
 	if inner == nil {
@@ -188,7 +188,7 @@ func (c *Combiner[I, O]) TryScatter(
 }
 
 // Integrate posts values to be combined by the combine queue.
-// This follows the same pattern as Scatter but for posting combine work instead
+// This follows the same pattern as Start but for posting combine work instead
 // of launching tasks.
 func (c *Combiner[I, O]) Integrate(
 	ctx context.Context,

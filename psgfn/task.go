@@ -14,7 +14,7 @@ import (
 // literal that references and therefore captures local variables via lexical
 // closure.
 //
-// Each Task is executed in a new goroutine spawned by the Scatter
+// Each Task is executed in a new goroutine spawned by the Start
 // function and must therefore be thread-safe. This includes access to any
 // captured variables.
 //
@@ -25,11 +25,11 @@ import (
 // whatever results you want to passed to the associated Gather function to
 // represent the failure.
 //
-// WARNING: If a Task needs to spawn new tasks, it must not call Scatter
+// WARNING: If a Task needs to spawn new tasks, it must not call Start
 // directly as this would lead to deadlock when a concurrency limit is reached.
-// Instead, Scatter should be called from the associated Gather function after
-// the Task completes. Scatter attempts to recognize this situation and
-// panic, but this detection works only if the context passed to Scatter is
+// Instead, Start should be called from the associated Gather function after
+// the Task completes. Start attempts to recognize this situation and
+// panic, but this detection works only if the context passed to Start is
 // the one passed to the Task or is a subcontext thereof.
 //
 // A Task may however, create its own sub-Pool within which to run

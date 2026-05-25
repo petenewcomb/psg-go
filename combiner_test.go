@@ -71,7 +71,7 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 		defer combineOp.Close()
 
 		// Should panic with nil task function
-		_ = combineOp.Scatter(
+		_ = combineOp.Start(
 			ctx,
 			taskPool,
 			nil, // Nil Task should panic
@@ -101,7 +101,7 @@ func TestCombinerTryScatterNilTaskPanic(t *testing.T) {
 				return nil
 			},
 		)
-		_, _ = gatherer.TryScatter(
+		_, _ = gatherer.TryStart(
 			ctx,
 			time.Time{},
 			taskPool,
@@ -130,12 +130,12 @@ func TestCombinerScatterFromTask(t *testing.T) {
 		newPassthroughTestCombinerFactory[int](t),
 	)
 	defer combineOp.Close()
-	err := combineOp.Scatter(
+	err := combineOp.Start(
 		ctx,
 		taskPool,
 		func(ctx context.Context) (int, error) {
 			chk.PanicsWithValue(
-				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				"Start called from task context but allowed only by top-level, gather, or combine context",
 				func() {
 					innerGatherOp := psg.NewGatherer(
 						func(ctx context.Context, result int, err error) error {
@@ -144,7 +144,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 							return nil
 						},
 					)
-					chk.NoError(innerGatherOp.Scatter(
+					chk.NoError(innerGatherOp.Start(
 						ctx,
 						taskPool,
 						func(ctx context.Context) (int, error) {
@@ -187,7 +187,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		newPassthroughTestCombinerFactory[bool](t),
 	)
 	defer combineOp.Close()
-	err := combineOp.Scatter(
+	err := combineOp.Start(
 		ctx,
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
@@ -204,7 +204,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 					return nil
 				},
 			)
-			err := gatherer.Scatter(
+			err := gatherer.Start(
 				ctx,
 				subTaskPool,
 				func(ctx context.Context) (bool, error) {
@@ -251,7 +251,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 		newPassthroughTestCombinerFactory[bool](t),
 	)
 	defer combineOp.Close()
-	err := combineOp.Scatter(
+	err := combineOp.Start(
 		ctx,
 		parentTaskPool,
 		func(ctx context.Context) (bool, error) {
@@ -264,9 +264,9 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 				},
 			)
 			chk.PanicsWithValue(
-				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				"Start called from task context but allowed only by top-level, gather, or combine context",
 				func() {
-					_ = innerGatherOp.Scatter(
+					_ = innerGatherOp.Start(
 						ctx,
 						parentTaskPool,
 						func(ctx context.Context) (bool, error) {
@@ -835,9 +835,9 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								// Tests to make sure that NewGatherer does not incur allocation overhead
 								gatherer := psg.NewGatherer(gatherFnAdapter)
 								if deadline.IsZero() {
-									return true, gatherer.Scatter(ctx, target, task)
+									return true, gatherer.Start(ctx, target, task)
 								}
-								return gatherer.TryScatter(ctx, deadline, target, task)
+								return gatherer.TryStart(ctx, deadline, target, task)
 							}
 						} else {
 							combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(combinerLimit))
@@ -870,9 +870,9 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									defer localCombineOp.Close()
 								}
 								if deadline.IsZero() {
-									return true, localCombineOp.Scatter(ctx, target, task)
+									return true, localCombineOp.Start(ctx, target, task)
 								}
-								return localCombineOp.TryScatter(ctx, deadline, target, task)
+								return localCombineOp.TryStart(ctx, deadline, target, task)
 							}
 						}
 

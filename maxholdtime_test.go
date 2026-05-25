@@ -52,7 +52,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	taskPool := psg.NewTaskPool(job)
 
 	// Send one input
-	err := combineOp.Scatter(ctx, taskPool, func(ctx context.Context) (int, error) {
+	err := combineOp.Start(ctx, taskPool, func(ctx context.Context) (int, error) {
 		return 1, nil
 	})
 	chk.NoError(err)
@@ -61,7 +61,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a second input to potentially trigger timer checking
-	err = combineOp.Scatter(ctx, taskPool, func(ctx context.Context) (int, error) {
+	err = combineOp.Start(ctx, taskPool, func(ctx context.Context) (int, error) {
 		return 2, nil
 	})
 	chk.NoError(err)

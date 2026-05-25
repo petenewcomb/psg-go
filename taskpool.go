@@ -20,7 +20,7 @@ import (
 )
 
 // A TaskPool defines a virtual set of task execution slots and optionally places a
-// limit on its size. Use [Scatter] to launch tasks into a TaskPool.
+// limit on its size. Use [Start] to launch tasks into a TaskPool.
 //
 // TaskPools are created using [NewTaskPool] with a job and concurrency limit.
 type TaskPool struct {
@@ -103,7 +103,7 @@ func (w taskPoolConfigWrapper) SetMaxConcurrency(limit int) {
 
 // SetOptions applies the given configuration options to the pool.
 // This method is safe to call at any time. Changes take effect immediately
-// for subsequent task launches and may unblock existing blocked Scatter calls.
+// for subsequent task launches and may unblock existing blocked Start calls.
 func (p *TaskPool) SetOptions(options ...psgopt.TaskPoolOption) {
 	opts.ApplyToTaskPool(taskPoolConfigWrapper{pool: p}, options...)
 }

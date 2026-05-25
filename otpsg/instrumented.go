@@ -70,7 +70,7 @@ func InstrumentedCombiner[I, O any](
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFn)
 //	gatherer := otpsg.InstrumentedGather("handle-result", myGatherFn)
-//	// Instead of gatherer.Scatter(ctx, pool, task), use:
+//	// Instead of gatherer.Start(ctx, pool, task), use:
 //	err := otpsg.InstrumentedScatter(ctx, pool, task, gatherer)
 func InstrumentedScatter[T any](
 	ctx context.Context,
@@ -78,5 +78,5 @@ func InstrumentedScatter[T any](
 	task psgfn.Task[PropagatedResult[T]],
 	gather psg.Gatherer[PropagatedResult[T]],
 ) error {
-	return gather.Scatter(ctx, target, task)
+	return gather.Start(ctx, target, task)
 }

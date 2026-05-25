@@ -38,8 +38,8 @@
 //     naturally, even after the job has been canceled.
 //
 //  2. Gather Functions: The context passed to Gather is the context from
-//     the calling Scatter or Gather* method, not the job's context. User code
-//     should propagate this context, especially when calling Scatter to create
+//     the calling Start or Gather* method, not the job's context. User code
+//     should propagate this context, especially when calling Start to create
 //     new tasks.
 //
 //  3. Combiner Functions: Both Combine and Flush methods receive contexts that
@@ -62,7 +62,7 @@
 // The library implements safeguards to prevent common errors:
 //
 //  1. Reentrancy Protection: Context values are used to detect and prevent
-//     dangerous calling patterns. For example, calling Scatter from within a
+//     dangerous calling patterns. For example, calling Start from within a
 //     Task of the same job will panic with a helpful error message.
 //
 //  2. Gather Queuing: Gather operations are queued rather than processed
@@ -98,7 +98,7 @@
 //  4. Launch new tasks from Gather or Combiner methods, not from Task.
 //
 //  5. For tasks that need to create internal concurrency, consider creating a
-//     sub-job within the task rather than calling Scatter directly.
+//     sub-job within the task rather than calling Start directly.
 package psg
 
 //go:generate go build -C internal/cmd/benchnorm -o ../../bin/benchnorm

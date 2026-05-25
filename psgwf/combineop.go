@@ -32,18 +32,18 @@ func NewCombineOp[I, O, C any](
 	))
 }
 
-func (c GenericCombineOp[I, O, C]) Scatter(ctx context.Context, pool *psg.TaskPool,
+func (c GenericCombineOp[I, O, C]) Start(ctx context.Context, pool *psg.TaskPool,
 	wf *GenericWorkflow[C], taskFn GenericTaskFunc[I, C]) error {
 	_, err := scatterTask(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I, C]]) (bool, error) {
-			err := c.inner().Scatter(ctx, pool, taskFn)
+			err := c.inner().Start(ctx, pool, taskFn)
 			return err == nil, err
 		},
 	)
 	return err
 }
 
-func (c GenericCombineOp[I, O, C]) TryScatter(
+func (c GenericCombineOp[I, O, C]) TryStart(
 	ctx context.Context,
 	deadline time.Time,
 	pool *psg.TaskPool,
@@ -52,7 +52,7 @@ func (c GenericCombineOp[I, O, C]) TryScatter(
 ) (bool, error) {
 	return scatterTask(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[I, C]]) (bool, error) {
-			return c.inner().TryScatter(ctx, deadline, pool, taskFn)
+			return c.inner().TryStart(ctx, deadline, pool, taskFn)
 		},
 	)
 }

@@ -149,7 +149,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
-			err := gatherer.Scatter(ctx, taskPool, taskFn)
+			err := gatherer.Start(ctx, taskPool, taskFn)
 			if err == nil {
 				break
 			}
@@ -193,7 +193,7 @@ func (c *controller) scatterTask(ctx context.Context, t assert.TestingT, task *T
 		// Loop to handle expected errors from gathers that are processed by
 		// Scatter as it applies backpressure
 		for {
-			err := combineOp.Scatter(ctx, c.getTaskPool(task.PoolIndex),
+			err := combineOp.Start(ctx, c.getTaskPool(task.PoolIndex),
 				c.newTaskFunc(t, task, &c.ConcurrencyByTaskPool[task.PoolIndex]))
 			if err == nil {
 				break

@@ -79,7 +79,7 @@ type TaskWorkerIdleJitterOption interface {
 //
 // The callback function is called synchronously from a goroutine calling a
 // gather method (Pool.Gather, Pool.TryGather, Pool.GatherAll, Pool.TryGatherAll,
-// Pool.CloseAndGatherAll), Gather.Scatter, or Pool.Close if no tasks are in
+// Pool.CloseAndGatherAll), Gather.Start, or Pool.Close if no tasks are in
 // flight at the time of closing.
 //
 // No default callback is registered.

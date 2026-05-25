@@ -23,22 +23,22 @@ func NewGatherer[T, C any](gatherFn GenericGatherFunc[T, C]) GenericGatherOp[T, 
 	return GenericGatherOp[T, C](psg.NewGatherer(wrapGatherFunc(gatherFn)))
 }
 
-func (g GenericGatherOp[T, C]) Scatter(ctx context.Context, pool *psg.TaskPool,
+func (g GenericGatherOp[T, C]) Start(ctx context.Context, pool *psg.TaskPool,
 	wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) error {
 	_, err := scatter(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[T, C]]) (bool, error) {
-			err := g.inner().Scatter(ctx, pool, taskFn)
+			err := g.inner().Start(ctx, pool, taskFn)
 			return err == nil, err
 		},
 	)
 	return err
 }
 
-func (g GenericGatherOp[T, C]) TryScatter(ctx context.Context, deadline time.Time,
+func (g GenericGatherOp[T, C]) TryStart(ctx context.Context, deadline time.Time,
 	pool *psg.TaskPool, wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) (bool, error) {
 	return scatter(ctx, pool, wf, taskFn,
 		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[T, C]]) (bool, error) {
-			return g.inner().TryScatter(ctx, deadline, pool, taskFn)
+			return g.inner().TryStart(ctx, deadline, pool, taskFn)
 		},
 	)
 }

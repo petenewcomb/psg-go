@@ -81,7 +81,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		return psg.NewGatherer(
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestGatherOp(path).
-					Scatter(ctx, digesterPool, newDigestingTaskFn(data))
+					Start(ctx, digesterPool, newDigestingTaskFn(data))
 			},
 		)
 	}
@@ -94,7 +94,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadGatherOp(path).Scatter(ctx, job, newReadingTaskFn(path))
+		return newReadGatherOp(path).Start(ctx, job, newReadingTaskFn(path))
 	})
 	if err != nil {
 		return nil, err

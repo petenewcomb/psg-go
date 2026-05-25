@@ -52,7 +52,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 		return nil
 	})
 
-	err := gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherer.Start(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "test", nil
 	})
 	assert.NoError(t, err)
@@ -116,8 +116,8 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 			return nil
 		})
 
-		// Scatter a new task from within the AfterFunc
-		err := gatherer.Scatter(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+		// Start a new task from within the AfterFunc
+		err := gatherer.Start(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "new task", nil
 		})
 		assert.NoError(t, err)
@@ -128,7 +128,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		return nil
 	})
 
-	err := gatherer.Scatter(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	err := gatherer.Start(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "original task", nil
 	})
 	assert.NoError(t, err)

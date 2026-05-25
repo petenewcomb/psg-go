@@ -68,7 +68,7 @@ func ExampleCombine() {
 	gatherFn := func(ctx context.Context, result map[string]int, err error) error {
 		fmt.Printf("%3dms:   gathering result counts: %v\n", msSinceStart(), result)
 		// Safe because gatherFn will only ever be called from the current
-		// goroutine within calls to Scatter and GatherAll below.
+		// goroutine within calls to Start and GatherAll below.
 		results = append(results, result)
 		return err
 	}
@@ -106,7 +106,7 @@ func ExampleCombine() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, combine at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, combine at 100ms
 	} {
-		err := combineOp.Scatter(ctx, taskPool, newTaskFn(i+1, spec.delay, spec.result))
+		err := combineOp.Start(ctx, taskPool, newTaskFn(i+1, spec.delay, spec.result))
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

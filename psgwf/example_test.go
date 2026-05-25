@@ -48,7 +48,7 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		err := resultGather.Scatter(clientCtx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+		err := resultGather.Start(clientCtx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			select {
 			case <-time.After(sleepTime):
 				return fmt.Sprintf("[%s] completed", requestID), nil

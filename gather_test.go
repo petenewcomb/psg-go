@@ -25,7 +25,7 @@ func TestGatherScatterNilTaskPanic(t *testing.T) {
 				return nil
 			},
 		)
-		_ = gatherer.Scatter(
+		_ = gatherer.Start(
 			ctx,
 			pool,
 			nil, // Nil Task should panic
@@ -53,7 +53,7 @@ func TestGatherTryScatterNilTaskPanic(t *testing.T) {
 				return nil
 			},
 		)
-		_, _ = gatherer.TryScatter(
+		_, _ = gatherer.TryStart(
 			ctx,
 			time.Time{},
 			pool,
@@ -75,12 +75,12 @@ func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Scatter(
+	err := gatherer.Start(
 		ctx,
 		pool,
 		func(ctx context.Context) (int, error) {
 			chk.PanicsWithValue(
-				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				"Start called from task context but allowed only by top-level, gather, or combine context",
 				func() {
 					innerGatherOp := psg.NewGatherer(
 						func(ctx context.Context, result int, err error) error {
@@ -89,7 +89,7 @@ func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 							return nil
 						},
 					)
-					chk.NoError(innerGatherOp.Scatter(
+					chk.NoError(innerGatherOp.Start(
 						ctx,
 						pool,
 						func(ctx context.Context) (int, error) {
@@ -125,7 +125,7 @@ func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Scatter(
+	err := gatherer.Start(
 		ctx,
 		parentPool,
 		func(ctx context.Context) (bool, error) {
@@ -142,7 +142,7 @@ func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 					return nil
 				},
 			)
-			err := gatherer.Scatter(
+			err := gatherer.Start(
 				ctx,
 				subPool,
 				func(ctx context.Context) (bool, error) {
@@ -182,7 +182,7 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Scatter(
+	err := gatherer.Start(
 		ctx,
 		parentPool,
 		func(ctx context.Context) (bool, error) {
@@ -195,9 +195,9 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 				},
 			)
 			chk.PanicsWithValue(
-				"Scatter called from task context but allowed only by top-level, gather, or combine context",
+				"Start called from task context but allowed only by top-level, gather, or combine context",
 				func() {
-					_ = innerGather.Scatter(
+					_ = innerGather.Start(
 						ctx,
 						parentPool,
 						func(ctx context.Context) (bool, error) {
@@ -232,7 +232,7 @@ func TestGatherScatterTaskCannotGather(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Scatter(
+	err := gatherer.Start(
 		ctx,
 		pool,
 		func(ctx context.Context) (bool, error) {
@@ -263,7 +263,7 @@ func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Scatter(
+	err := gatherer.Start(
 		ctx,
 		parentPool,
 		func(ctx context.Context) (bool, error) {
@@ -280,7 +280,7 @@ func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 					return nil
 				},
 			)
-			err := gatherer.Scatter(
+			err := gatherer.Start(
 				ctx,
 				subPool,
 				func(ctx context.Context) (bool, error) {

@@ -38,8 +38,8 @@ func Example_simple() {
 	ctx := context.Background()
 	wf := psgwf.New(ctx)
 
-	// Scatter a task
-	err := gatherer.Scatter(ctx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+	// Start a task
+	err := gatherer.Start(ctx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 		return "Hello from workflow", nil
 	})
 	if err != nil {

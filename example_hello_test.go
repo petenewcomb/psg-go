@@ -40,8 +40,8 @@ func Example_hello() {
 		},
 	)
 
-	gatherer.Scatter(ctx, job, newTaskFn("Hello"))
-	gatherer.Scatter(ctx, job, newTaskFn("world!"))
+	gatherer.Start(ctx, job, newTaskFn("Hello"))
+	gatherer.Start(ctx, job, newTaskFn("world!"))
 
 	job.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))

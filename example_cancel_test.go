@@ -36,7 +36,7 @@ func ExamplePool_Cancel() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	err := printResult.Scatter(
+	err := printResult.Start(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
@@ -52,7 +52,7 @@ func ExamplePool_Cancel() {
 	// Launch second task, which must wait for the first result to be gathered
 	// because the pool's concurrency limit is one.
 	fmt.Println("Launching second task")
-	err = printResult.Scatter(
+	err = printResult.Start(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
@@ -106,7 +106,7 @@ func ExamplePool_Cancel_task() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	err := printResult.Scatter(
+	err := printResult.Start(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {
@@ -123,7 +123,7 @@ func ExamplePool_Cancel_task() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be gathered.
 	fmt.Println("Launching second task")
-	err = printResult.Scatter(
+	err = printResult.Start(
 		ctx,
 		pool,
 		func(context.Context) (string, error) {

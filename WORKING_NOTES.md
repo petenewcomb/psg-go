@@ -127,6 +127,35 @@ For the `posted=true` leftover case (the work already completed), the notificati
 - `internal/workq/accepted.go:47, 426-428, 344-369, 407-417` — the listener-to-waiters wiring and the postponed-work retry path
 - `internal/rdvq/waiters.go:125-134` — Notify is just an atomic enqueue
 
+## Pre-existing race in TestLogLeakStructured (observed 2026-05-26)
+
+`internal/leakguard/structured_log_test.go:50` reads `bytes.Buffer.Len()` from the test goroutine while a GC-triggered finalizer goroutine is still writing to the same buffer via `slog.JSONHandler.Handle`. Reproduces under `go test -race ./internal/leakguard/` on this commit AND on the prior commit (verified by stashing Wave 2 changes and running the test), so it predates Wave 2 — captured here so a future investigator doesn't burn cycles re-confirming.
+
+### Stack of the race
+
+- **Read** (goroutine 9, main test): `bytes.(*Buffer).Len()` from `TestLogLeakStructured` at `structured_log_test.go:50`.
+- **Write** (goroutine 18, finalizer): `bytes.(*Buffer).grow()` → `bytes.(*Buffer).Write()` → `log/slog.(*commonHandler).handle()` → `log/slog.(*JSONHandler).Handle()` → `log/slog.LogAttrs()` → `leakguard.LogLeak()` at `leakguard.go:130` → triggered from the finalizer closure registered in `handle.Init` at `leakguard.go:314`.
+
+The test buffer is shared between the test (which constructs a `slog.Handler` writing into it, then asserts on contents) and the leak-logging finalizer (which fires whenever a `leakguard.Handle` is GC'd without `Close`).
+
+### Why it races
+
+The test deliberately drops a handle to trigger the leak path, then reads the buffer to verify the leak was logged. The test currently has no synchronization that waits for the finalizer's `slog` write to complete before the read — it relies on `runtime.GC()` returning after finalizers, but `runtime.GC()` only guarantees the finalizers have *started*, not that they have finished. The race detector catches the un-synchronized buffer access.
+
+### Plausible fixes
+
+- **Buffer with mutex.** Wrap the buffer in a small `mu sync.Mutex` and have both the slog handler and the test's reader acquire it. Cheap; isolates the test from finalizer timing.
+- **Channel handshake.** Have `LogLeak` send on a channel after the slog write completes, test reads after receiving. More explicit but couples test to LogLeak internals.
+- **Avoid finalizer in the test entirely.** Construct the leak condition via a direct call to whatever LogLeak does at line 130, no finalizer. Removes the race surface but also reduces what the test is verifying.
+
+The mutex approach is the cleanest. Note: this is a test-only race; production `LogLeak` callers don't share a buffer with a reader, so no production fix needed.
+
+### Files involved
+
+- `internal/leakguard/structured_log_test.go:43-50` — the test that races
+- `internal/leakguard/leakguard.go:130` — `LogLeak` (the writer side)
+- `internal/leakguard/leakguard.go:314` — finalizer registration in `Init`
+
 ## Open issues
 
 ### Deadline propagation in taskPostWork

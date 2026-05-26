@@ -31,6 +31,35 @@ Six commits on `combiner`, all green through the pre-commit hook
 | `3e84954` | Rename Scatter to Start |
 | `a5405f7` | Rename Integrate/TryIntegrate to Submit/TrySubmit |
 
+### Sim refactor (complete)
+
+Sim rewritten to the destination-API vocabulary (Pool / Wave / Flow /
+Limiter / TaskRunner / Combiner / Gatherer) against the current API
+via an adapter, so subsequent reshape waves can ride on top without
+further sim design sessions:
+
+| Commit | Subject |
+|---|---|
+| `3b05e1a` | rdvq: drain outbox listeners before recycling |
+| `6ce2f07` | docs: split Pool into Pool+Wave+Flow three-type model |
+| `63a4d57` | sim: rewrite for Pool/Wave/Flow vocabulary against current API |
+| `d931052` | sim: enrich generator with fan-in and scatter-from-gather/combine |
+| `ac0f3ea` | sim: multi-hop Gatherer chains and multiple terminal Gatherers |
+| `3c8aead` | docs: capture Sender-shutdown listener-notify semantics |
+
+### Wave 2: Drop Combiner output type (complete)
+
+`Combiner[I, O]` → `Combiner[T]`, `CombinerFactory[I, O]` →
+`CombinerFactory[T]`, renamed to `Accumulator[T]` internally.
+Accumulator bodies Submit downstream rather than returning a value.
+The sim adapter's `struct{}`-dummy-gatherer trick dissolved cleanly:
+`NewCombiner` now creates an internal `errSink` Gatherer[struct{}]
+that routes Accumulator errors through Pool.GatherAll.
+
+| Commit | Subject |
+|---|---|
+| `0655312` | wave 2: drop Combiner output type, rename to Accumulator |
+
 ### Intentional gaps after Wave 1
 
 Deferred in Wave 1 per the "leave the old name where it clashes"
@@ -204,31 +233,6 @@ These outputs become inputs to the corresponding reshape waves.
 The order below is *not* committed — these are candidates. The actual
 sequencing depends on the test-design sessions and on dependency
 analysis between waves. Some can probably move in parallel.
-
-### Wave 2 candidate: Reshape Combiner to drop the output type
-
-**Shape change**: `Combiner[I, O]` → `Combiner[T]`. Accumulator
-function body explicitly Submits to downstream rather than returning an
-O. `CombinerFactory[I, O]` → `CombinerFactory[T]`. Aligns with
-API_DESIGN.md's resolution.
-
-**Scope:**
-- Update `psgfn.Combiner` interface (rename to `Accumulator`, drop O,
-  change `Combine` signature, drop O from `Flush`).
-- Update `psg.Combiner` and `NewCombiner` to match.
-- Update all combiner factory implementations across the codebase.
-- Update the sim framework's combine domain model.
-- Update combiner_test.go benchmarks and tests.
-- Update otpsg's `InstrumentedCombiner` (likely deletes the
-  PropagatedResult[O] wrapping).
-- Update psgwf's combine path similarly.
-
-**Gating design sessions:**
-- sim framework's combine domain model
-- combiner benchmark intent and structure
-
-**Estimated effort:** Large. The most invasive change in the reshape
-path.
 
 ### Wave 3 candidate: Reshape Task functions
 

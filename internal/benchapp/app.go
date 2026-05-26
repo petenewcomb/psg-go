@@ -7,7 +7,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -50,18 +49,18 @@ func NewFanOutCombiner[T any](
 	simulateCombineWorkFn func(time.Duration),
 	subtaskCount int,
 	scatterFn func(context.Context, T, error) error,
-	fallbackFn func(res CombinerResult[struct{}]),
-) psgwf.GenericCombiner[TaskResult[T], CombinerResult[struct{}], Context] {
+	fallbackFn func(res CombinerResult[T]),
+) psgwf.GenericCombiner[TaskResult[T], Context] {
 	c := &fanOutCombiner[T]{
 		combineDuration:       combineDuration,
 		simulateCombineWorkFn: simulateCombineWorkFn,
 		subtaskCount:          subtaskCount,
 		scatterFn:             scatterFn,
 	}
-	return NewCombiner(nil, c, fallbackFn)
+	return NewCombiner[T, Context](nil, c, fallbackFn)
 }
 
-func (c *fanOutCombiner[T]) Combine(ctx context.Context, wf *Workflow,
+func (c *fanOutCombiner[T]) Accumulate(ctx context.Context, wf *Workflow,
 	inputValue T, inputErr error) (time.Time, error) {
 	c.simulateCombineWorkFn(c.combineDuration)
 	for range c.subtaskCount {
@@ -72,8 +71,10 @@ func (c *fanOutCombiner[T]) Combine(ctx context.Context, wf *Workflow,
 	return time.Time{}, nil
 }
 
-func (c *fanOutCombiner[T]) Flush(ctx context.Context) (wf *Workflow, value struct{}, err error) {
-	return nil, struct{}{}, psgfn.ErrDoNotGather
+func (c *fanOutCombiner[T]) Flush(ctx context.Context) error {
+	// Wave 2: no aggregated output to emit. Per-call subtasks are
+	// already scattered from Accumulate; nothing to do on Flush.
+	return nil
 }
 
 type fanInCombiner[T any] struct {
@@ -87,16 +88,17 @@ func NewFanInCombiner[T any](
 	combineDuration time.Duration,
 	simulateCombineWorkFn func(time.Duration),
 	subtaskCount int,
-) psgwf.GenericCombiner[TaskResult[T], CombinerResult[struct{}], Context] {
+) psgwf.GenericCombiner[TaskResult[T], Context] {
 	c := &fanInCombiner[T]{
 		combineDuration:       combineDuration,
 		simulateCombineWorkFn: simulateCombineWorkFn,
 		subtaskCount:          subtaskCount,
 	}
-	return NewCombiner(nil, c, nil)
+	return NewCombiner[T, Context](nil, c, nil)
 }
 
-func (c *fanInCombiner[T]) Combine(ctx context.Context, wf *Workflow, inputValue T, inputErr error) (time.Time, error) {
+func (c *fanInCombiner[T]) Accumulate(ctx context.Context, wf *Workflow,
+	inputValue T, inputErr error) (time.Time, error) {
 	c.simulateCombineWorkFn(c.combineDuration)
 	for range c.subtaskCount {
 		if err := c.scatterFn(ctx, inputValue, inputErr); err != nil {
@@ -106,6 +108,6 @@ func (c *fanInCombiner[T]) Combine(ctx context.Context, wf *Workflow, inputValue
 	return time.Time{}, nil
 }
 
-func (c *fanInCombiner[T]) Flush(ctx context.Context) (wf *Workflow, value struct{}, err error) {
-	return nil, struct{}{}, psgfn.ErrDoNotGather
+func (c *fanInCombiner[T]) Flush(ctx context.Context) error {
+	return nil
 }

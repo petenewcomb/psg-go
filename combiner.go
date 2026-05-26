@@ -8,14 +8,17 @@ import (
 	"time"
 )
 
-type errCombiner[I, O any] struct {
+// errAccumulator is the framework's substitute Accumulator used when a user
+// CombinerFactory misbehaves (returns nil or panics during construction).
+// Every call simply surfaces the recorded error; nothing accumulates.
+type errAccumulator[T any] struct {
 	err error
 }
 
-func (c errCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error) (time.Time, error) {
+func (c errAccumulator[T]) Accumulate(ctx context.Context, value T, err error) (time.Time, error) {
 	return time.Now(), c.err
 }
 
-func (c errCombiner[I, O]) Flush(ctx context.Context) (O, error) {
-	return *new(O), c.err
+func (c errAccumulator[T]) Flush(ctx context.Context) error {
+	return c.err
 }

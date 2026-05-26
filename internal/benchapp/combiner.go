@@ -5,7 +5,6 @@ package benchapp
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"time"
 
@@ -26,29 +25,30 @@ type CombinerResult[T any] struct {
 	Value                    T
 }
 
-type Combiner[I, O, C any] struct {
-	pool                     *omnipool.Pool[Combiner[I, O, C]]
-	gatherer                 *CombinerGatherer[O]
+type Combiner[T, C any] struct {
+	pool                     *omnipool.Pool[Combiner[T, C]]
+	gatherer                 *CombinerGatherer[T]
 	creationTime             time.Time
-	wrapped                  psgwf.GenericCombiner[I, O, C]
+	wrapped                  psgwf.GenericCombiner[T, C]
 	taskStartLatenciesSec    *tdigest.TDigest
 	taskDurationsSec         *tdigest.TDigest
 	combineStartLatenciesSec *tdigest.TDigest
 	combineDurationsSec      *tdigest.TDigest
-	fallbackFn               func(res CombinerResult[O])
+	fallbackFn               func(res CombinerResult[T])
 }
 
-func NewCombiner[I, O, C any](
-	gatherer *CombinerGatherer[O],
-	wrappedCombiner psgwf.GenericCombiner[I, O, C],
-	fallbackFn func(res CombinerResult[O]),
-) *Combiner[I, O, C] {
-	pool := omnipool.For[Combiner[I, O, C]]()
+func NewCombiner[T, C any](
+	gatherer *CombinerGatherer[T],
+	wrappedCombiner psgwf.GenericCombiner[T, C],
+	fallbackFn func(res CombinerResult[T]),
+) *Combiner[T, C] {
+	pool := omnipool.For[Combiner[T, C]]()
 	c := pool.Get()
 	c.pool = pool
 	c.gatherer = gatherer
 	c.creationTime = time.Now()
 	c.wrapped = wrappedCombiner
+	c.fallbackFn = fallbackFn
 	c.taskStartLatenciesSec = tdigestPool.Get()
 	c.taskDurationsSec = tdigestPool.Get()
 	c.combineStartLatenciesSec = tdigestPool.Get()
@@ -56,8 +56,8 @@ func NewCombiner[I, O, C any](
 	return c
 }
 
-func (c *Combiner[I, O, C]) Combine(ctx context.Context, wf *psgwf.GenericWorkflow[C],
-	res TaskResult[I], err error) (time.Time, error) {
+func (c *Combiner[T, C]) Accumulate(ctx context.Context, wf *psgwf.GenericWorkflow[C],
+	res TaskResult[T], err error) (time.Time, error) {
 	combineStartTime := time.Now()
 	combineStartLatency := combineStartTime.Sub(res.StartTime.Add(res.Duration))
 	c.combineStartLatenciesSec.Add(combineStartLatency.Seconds(), 1.0)
@@ -65,37 +65,39 @@ func (c *Combiner[I, O, C]) Combine(ctx context.Context, wf *psgwf.GenericWorkfl
 	c.taskStartLatenciesSec.Add(res.StartLatency.Seconds(), 1.0)
 	c.taskDurationsSec.Add(res.Duration.Seconds(), 1.0)
 
-	flushDeadline, err := c.wrapped.Combine(ctx, wf, res.Value, err)
+	flushDeadline, err := c.wrapped.Accumulate(ctx, wf, res.Value, err)
 
 	c.combineDurationsSec.Add(time.Since(combineStartTime).Seconds(), 1.0)
 
 	return flushDeadline, err
 }
 
-func (c *Combiner[I, O, C]) Flush(ctx context.Context) (*psgwf.GenericWorkflow[C], CombinerResult[O], error) {
+func (c *Combiner[T, C]) Flush(ctx context.Context) error {
 	flushStartTime := time.Now()
 
-	res := CombinerResult[O]{
+	err := c.wrapped.Flush(ctx)
+
+	flushDuration := time.Since(flushStartTime)
+
+	res := CombinerResult[T]{
 		CombinerAge:              flushStartTime.Sub(c.creationTime),
 		FlushStartTime:           flushStartTime,
+		FlushDuration:            flushDuration,
 		TaskStartLatenciesSec:    c.taskStartLatenciesSec,
 		TaskDurationsSec:         c.taskDurationsSec,
 		CombineStartLatenciesSec: c.combineStartLatenciesSec,
 		CombineDurationsSec:      c.combineDurationsSec,
 	}
 
-	wf, value, err := c.wrapped.Flush(ctx)
-	res.FlushDuration = time.Since(flushStartTime)
-	res.Value = value
-
 	defer c.pool.Put(c)
 	defer c.gatherer.recordCombinerTime(c.creationTime)
 
-	if errors.Is(err, psgfn.ErrDoNotGather) {
-		c.fallbackFn(res)
-		return nil, CombinerResult[O]{}, err
-	}
-	return wf, res, err
+	// In the new shape there is no aggregated "Value" return — the
+	// wrapped accumulator's Flush is responsible for routing data
+	// downstream itself. We still call the fallback to record stats
+	// from this benchapp wrapper.
+	c.fallbackFn(res)
+	return err
 }
 
 type CombinerGatherer[T any] struct {

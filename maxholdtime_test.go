@@ -35,15 +35,15 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
-	combineOp := psg.NewCombiner(gatherer, combinerPool, func() psgfn.Combiner[int, int] {
-		return psgfn.FuncCombiner[int, int]{
-			CombineFn: func(ctx context.Context, value int, err error) (time.Time, error) {
+	combineOp := psg.NewCombiner(combinerPool, func() psgfn.Accumulator[int] {
+		return psgfn.FuncAccumulator[int]{
+			AccumulateFn: func(ctx context.Context, value int, err error) (time.Time, error) {
 				// Don't emit immediately - let the deadline trigger flushing
 				return time.Now().Add(100 * time.Millisecond), nil
 			},
-			FlushFn: func(ctx context.Context) (int, error) {
+			FlushFn: func(ctx context.Context) error {
 				flushCount.Add(1)
-				return 42, nil
+				return gatherer.Submit(ctx, job, 42, nil)
 			},
 		}
 	})

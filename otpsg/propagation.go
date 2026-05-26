@@ -64,18 +64,21 @@ func PropagateGather[T any](
 	})
 }
 
-// PropagateCombiner wraps a combiner factory to create combiners that propagate trace context.
-// Both the Combine and Flush methods will properly handle trace context propagation.
-func PropagateCombiner[I, O any](
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
-	return func() psgfn.Combiner[PropagatedResult[I], PropagatedResult[O]] {
+// PropagateCombiner wraps an accumulator factory to create accumulators that
+// propagate trace context. After Wave 2 the Accumulator has no output type;
+// the wrapper just rehydrates the trace span from the incoming
+// PropagatedResult[T] into ctx so any Submit calls inside the user's
+// Accumulate body carry the right trace context downstream.
+func PropagateCombiner[T any](
+	combinerFactory psgfn.CombinerFactory[T],
+) psgfn.CombinerFactory[PropagatedResult[T]] {
+	return func() psgfn.Accumulator[PropagatedResult[T]] {
 		innerCombiner := combinerFactory()
 
-		return psgfn.FuncCombiner[PropagatedResult[I], PropagatedResult[O]]{
-			CombineFn: func(
+		return psgfn.FuncAccumulator[PropagatedResult[T]]{
+			AccumulateFn: func(
 				ctx context.Context,
-				input PropagatedResult[I],
+				input PropagatedResult[T],
 				inputErr error,
 			) (time.Time, error) {
 				// Create context with propagated trace data
@@ -84,21 +87,9 @@ func PropagateCombiner[I, O any](
 					propagatedCtx = trace.ContextWithRemoteSpanContext(ctx, input.TraceContext)
 				}
 
-				// Process with inner combiner
-				return innerCombiner.Combine(propagatedCtx, input.UserResult, inputErr)
+				return innerCombiner.Accumulate(propagatedCtx, input.UserResult, inputErr)
 			},
-			FlushFn: func(ctx context.Context) (PropagatedResult[O], error) {
-				// Extract current trace context for output propagation
-				currentTrace := trace.SpanFromContext(ctx).SpanContext()
-
-				// Process with inner combiner
-				result, err := innerCombiner.Flush(ctx)
-
-				return PropagatedResult[O]{
-					UserResult:   result,
-					TraceContext: currentTrace,
-				}, err
-			},
+			FlushFn: innerCombiner.Flush,
 		}
 	}
 }

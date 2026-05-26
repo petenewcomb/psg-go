@@ -59,29 +59,29 @@ func TracedGather[T any](
 	return PropagateGather(tracedGatherFn)
 }
 
-// TracedCombiner adds spans with the given operation names to a combiner.
+// TracedCombiner adds spans with the given operation names to an accumulator.
 // This builds on PropagateCombiner, adding explicit span creation for both
-// Combine and Flush operations while maintaining trace context propagation.
-func TracedCombiner[I, O any](
+// Accumulate and Flush operations while maintaining trace context propagation.
+func TracedCombiner[T any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
-	// Create a combiner factory that adds tracing
-	tracedFactory := func() psgfn.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[T],
+) psgfn.CombinerFactory[PropagatedResult[T]] {
+	// Create an accumulator factory that adds tracing
+	tracedFactory := func() psgfn.Accumulator[T] {
 		innerCombiner := combinerFactory()
 
-		return psgfn.FuncCombiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error) (time.Time, error) {
+		return psgfn.FuncAccumulator[T]{
+			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, combineOpName)
 				defer span.End()
 
 				// Call the original combine function
-				return innerCombiner.Combine(ctx, input, inputErr)
+				return innerCombiner.Accumulate(ctx, input, inputErr)
 			},
-			FlushFn: func(ctx context.Context) (O, error) {
+			FlushFn: func(ctx context.Context) error {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
 				ctx, span := tracer.Start(ctx, flushOpName)

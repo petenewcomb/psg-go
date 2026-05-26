@@ -6,55 +6,65 @@ package psgfn
 import (
 	"context"
 	"time"
-
-	"github.com/petenewcomb/psg-go/internal/cerr"
 )
 
-// CombinerFactory is a function that creates a new Combiner instance.
-type CombinerFactory[I, O any] = func() Combiner[I, O]
+// CombinerFactory is a function that creates a new Accumulator instance.
+// The framework calls a CombinerFactory whenever it needs a fresh accumulator
+// state — once at startup of the first instance and again after any prior
+// instance flushes and is discarded.
+type CombinerFactory[T any] = func() Accumulator[T]
 
-// Combiner instances perform partial aggregation of task results before final
-// gathering. They are used by [CombinerPool] to enable scalable concurrent and
-// parallel result aggregation without requiring multiple gathering goroutines
-// or use of thread-safe data structures and algorithms.
-type Combiner[I, O any] interface {
-	// Combine processes a single input task result and optionally emits an
-	// output to be gathered. Returns the time when the combiner's Flush()
-	// method should be called, or a zero time value if Flush() need not be
-	// called until a combiner goroutine exits. If a non-nil error is returned,
-	// it will be emitted immediately for gathering as if Flush called
-	// emit(*new(T), err), but subsequent calls to the Combiner instance's
-	// Combine will continue to be made and Flush will still be called as
-	// directed by the flush deadlines returned by the Combine calls, including
-	// those that returned non-nil errors.
-	Combine(ctx context.Context, input I, inputErr error) (time.Time, error)
+// Accumulator instances perform stateful partial aggregation of values inside
+// a Combiner. Each input is delivered via [Accumulator.Accumulate]; the
+// instance owns its accumulated state across calls. When the framework
+// finalizes the instance (on a user-requested flush deadline or on
+// CombinerPool drain), [Accumulator.Flush] is invoked.
+//
+// Downstream emission is the body's responsibility: an Accumulator that
+// wants to emit aggregated results explicitly calls Submit on whichever
+// downstream sinks (Combiner, Gatherer) it has captured via its factory
+// closure. The framework does not auto-route any value returned by
+// Accumulate or Flush — those methods return only an error.
+//
+// Errors returned from Accumulate or Flush are surfaced through
+// [psg.Pool.GatherAll] (the framework's "unexpected error" channel,
+// matching the GatherAll contract for gather-function errors). Expected
+// errors that the body wants to forward as values should be passed
+// through Submit/SubmitErr on downstream sinks instead.
+type Accumulator[T any] interface {
+	// Accumulate processes a single input value (paired with an upstream
+	// error, which may be nil). Returns the time when the instance's
+	// Flush method should be called, or a zero time value if Flush need
+	// not be called until the framework drains. If a non-nil error is
+	// returned, the framework surfaces it via GatherAll and may then
+	// discard this instance; subsequent inputs are handled by a fresh
+	// instance from the factory.
+	Accumulate(ctx context.Context, value T, err error) (time.Time, error)
 
-	// Flush returns combined results to be gathered. If there are no results to
-	// be gathered, returns [ErrDoNotGather]. No further calls to Combine or Flush
-	// will be made to an instance after Flush has been called, and all
-	// references to the instance held by the psg framework will be dropped.
-	Flush(ctx context.Context) (O, error)
+	// Flush finalizes the accumulated state. No further calls to
+	// Accumulate or Flush are made to this instance after Flush has
+	// been called; the framework drops its references and the next
+	// input creates a fresh instance from the factory.
+	Flush(ctx context.Context) error
 }
 
-const ErrDoNotGather = cerr.Error("flushed results should not be gathered")
-
-// FuncCombiner is a struct that implements the [Combiner] interface
-// using function fields. This allows for simple creation of combiners using
-// closures that share state.
-type FuncCombiner[I, O any] struct {
-	CombineFn func(ctx context.Context, input I, inputErr error) (time.Time, error)
-	FlushFn   func(ctx context.Context) (O, error)
+// FuncAccumulator implements [Accumulator] using function fields. Convenient
+// for the common case where state lives in a closure shared between the
+// two functions. FlushFn is optional; if nil, Flush is a no-op.
+type FuncAccumulator[T any] struct {
+	AccumulateFn func(ctx context.Context, value T, err error) (time.Time, error)
+	FlushFn      func(ctx context.Context) error
 }
 
-// Combine calls the CombineFn field with the provided arguments.
-func (c FuncCombiner[I, O]) Combine(ctx context.Context, input I, inputErr error) (time.Time, error) {
-	return c.CombineFn(ctx, input, inputErr)
+// Accumulate calls the AccumulateFn field with the provided arguments.
+func (a FuncAccumulator[T]) Accumulate(ctx context.Context, value T, err error) (time.Time, error) {
+	return a.AccumulateFn(ctx, value, err)
 }
 
-// Flush calls the FlushFn field with the provided arguments.
-func (c FuncCombiner[I, O]) Flush(ctx context.Context) (O, error) {
-	if c.FlushFn == nil {
-		return *new(O), ErrDoNotGather
+// Flush calls the FlushFn field; nil FlushFn is a no-op.
+func (a FuncAccumulator[T]) Flush(ctx context.Context) error {
+	if a.FlushFn == nil {
+		return nil
 	}
-	return c.FlushFn(ctx)
+	return a.FlushFn(ctx)
 }

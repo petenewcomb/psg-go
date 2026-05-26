@@ -23,25 +23,34 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type passthroughTestCombiner[T any] struct {
-	t     *testing.T
-	value T
+// passthroughTestAccumulator stores the most recently received value and
+// Submits it to the captured downstream Gatherer on Flush. Replaces the
+// pre-Wave-2 passthroughTestCombiner which returned the value as O.
+type passthroughTestAccumulator[T any] struct {
+	t        *testing.T
+	value    T
+	gatherer psg.Gatherer[T]
+	job      *psg.Pool
 }
 
-func (c *passthroughTestCombiner[T]) Combine(ctx context.Context, value T, err error) (time.Time, error) {
+func (c *passthroughTestAccumulator[T]) Accumulate(
+	ctx context.Context, value T, err error,
+) (time.Time, error) {
 	assert.NoError(c.t, err)
 	c.value = value
 	return time.Now(), nil
 }
 
-func (c *passthroughTestCombiner[T]) Flush(ctx context.Context) (T, error) {
-	return c.value, nil
+func (c *passthroughTestAccumulator[T]) Flush(ctx context.Context) error {
+	return c.gatherer.Submit(ctx, c.job, c.value, nil)
 }
 
-//nolint:thelper // not a test helper, but a factory function for creating a test combiner
-func newPassthroughTestCombinerFactory[T any](t *testing.T) func() psgfn.Combiner[T, T] {
-	return func() psgfn.Combiner[T, T] {
-		return &passthroughTestCombiner[T]{t: t}
+//nolint:thelper // not a test helper, but a factory function for creating a test accumulator
+func newPassthroughTestCombinerFactory[T any](
+	t *testing.T, gatherer psg.Gatherer[T], job *psg.Pool,
+) func() psgfn.Accumulator[T] {
+	return func() psgfn.Accumulator[T] {
+		return &passthroughTestAccumulator[T]{t: t, gatherer: gatherer, job: job}
 	}
 }
 
@@ -64,9 +73,8 @@ func TestCombinerScatterNilTaskPanic(t *testing.T) {
 
 		// Create a combine operation
 		combineOp := psg.NewCombiner(
-			gatherer,
 			combinerPool,
-			newPassthroughTestCombinerFactory[int](t),
+			newPassthroughTestCombinerFactory[int](t, gatherer, job),
 		)
 		defer combineOp.Close()
 
@@ -125,9 +133,8 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	)
 	combinerPool := psg.NewCombinerPool(job)
 	combineOp := psg.NewCombiner(
-		gatherer,
 		combinerPool,
-		newPassthroughTestCombinerFactory[int](t),
+		newPassthroughTestCombinerFactory[int](t, gatherer, job),
 	)
 	defer combineOp.Close()
 	err := combineOp.Start(
@@ -182,9 +189,8 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	)
 	combinerPool := psg.NewCombinerPool(parentJob)
 	combineOp := psg.NewCombiner(
-		gatherer,
 		combinerPool,
-		newPassthroughTestCombinerFactory[bool](t),
+		newPassthroughTestCombinerFactory[bool](t, gatherer, parentJob),
 	)
 	defer combineOp.Close()
 	err := combineOp.Start(
@@ -246,9 +252,8 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	)
 	combinerPool := psg.NewCombinerPool(parentJob)
 	combineOp := psg.NewCombiner(
-		gatherer,
 		combinerPool,
-		newPassthroughTestCombinerFactory[bool](t),
+		newPassthroughTestCombinerFactory[bool](t, gatherer, parentJob),
 	)
 	defer combineOp.Close()
 	err := combineOp.Start(
@@ -377,6 +382,10 @@ type benchmarkCombiner struct {
 		cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult]
 	idealCombinesPerGather int
 
+	// Downstream sink captured for Submit-on-Flush (Wave 2 reshape).
+	gatherer psg.Gatherer[benchmarkCombinedResult]
+	job      *psg.Pool
+
 	maxDepth                     int
 	combineSubtaskBudget         int
 	gatherSubtaskBudget          int
@@ -408,6 +417,8 @@ func newBenchmarkCombiner(
 	newTaskFn func(startTime time.Time, depth, combineSubtaskBudget, gatherSubtaskBudget int,
 		cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult],
 	idealCombinesPerGather int,
+	gatherer psg.Gatherer[benchmarkCombinedResult],
+	job *psg.Pool,
 ) *benchmarkCombiner {
 	c := benchmarkCombinerPool.Get()
 	c.firstCombineTime = time.Since(epoch)
@@ -422,10 +433,12 @@ func newBenchmarkCombiner(
 	c.target = target
 	c.newTaskFn = newTaskFn
 	c.idealCombinesPerGather = idealCombinesPerGather
+	c.gatherer = gatherer
+	c.job = job
 	return c
 }
 
-func (c *benchmarkCombiner) Combine(ctx context.Context, taskRes benchmarkTaskResult, err error) (time.Time, error) {
+func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTaskResult, err error) (time.Time, error) {
 	combineStartTime := time.Now()
 	latency := combineStartTime.Sub(taskRes.Time)
 
@@ -527,7 +540,7 @@ func (c *benchmarkCombiner) Combine(ctx context.Context, taskRes benchmarkTaskRe
 	return flushDeadline, err
 }
 
-func (c *benchmarkCombiner) Flush(ctx context.Context) (benchmarkCombinedResult, error) {
+func (c *benchmarkCombiner) Flush(ctx context.Context) error {
 	now := time.Now()
 	res := benchmarkCombinedResult{
 		Time:                         now,
@@ -565,9 +578,11 @@ func (c *benchmarkCombiner) Flush(ctx context.Context) (benchmarkCombinedResult,
 			c.cumulativeCombinerTime.Add(int64(combinerEndTime - combinerStartTime))
 		}
 	}
+	gatherer := c.gatherer
+	job := c.job
 	benchmarkCombinerPool.Put(c)
 
-	return res, nil
+	return gatherer.Submit(ctx, job, res, nil)
 }
 
 var tdigestPool = omnipool.For[tdigest.TDigest]()
@@ -841,7 +856,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						} else {
 							combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(combinerLimit))
-							combinerFactory := func() psgfn.Combiner[benchmarkTaskResult, benchmarkCombinedResult] {
+							gatherer := psg.NewGatherer(gatherFn)
+							combinerFactory := func() psgfn.Accumulator[benchmarkTaskResult] {
 								return newBenchmarkCombiner(
 									&testStartTime,
 									&testEndTime,
@@ -854,11 +870,12 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									job,
 									newTaskFn,
 									idealCombinesPerGather,
+									gatherer,
+									job,
 								)
 							}
 
-							gatherer := psg.NewGatherer(gatherFn)
-							combineOp := psg.NewCombiner(gatherer, combinerPool, combinerFactory)
+							combineOp := psg.NewCombiner(combinerPool, combinerFactory)
 							defer combineOp.Close()
 
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
@@ -866,7 +883,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								localCombineOp := combineOp
 								if idealCombinesPerGather == 1 {
 									// Tests to make sure that NewCombiner does not incur allocation overhead
-									localCombineOp = psg.NewCombiner(gatherer, combinerPool, combinerFactory)
+									localCombineOp = psg.NewCombiner(combinerPool, combinerFactory)
 									defer localCombineOp.Close()
 								}
 								if deadline.IsZero() {

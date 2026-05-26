@@ -79,14 +79,14 @@ func MetricsGather[T any](
 	}
 }
 
-// MetricsCombiner adds metrics collection to combiners.
-// This wrapper records metrics for both Combine and Flush operations.
-func MetricsCombiner[I, O any](
+// MetricsCombiner adds metrics collection to accumulators.
+// This wrapper records metrics for both Accumulate and Flush operations.
+func MetricsCombiner[T any](
 	combineMetricName string,
 	flushMetricName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[I, O] {
-	return func() psgfn.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[T],
+) psgfn.CombinerFactory[T] {
+	return func() psgfn.Accumulator[T] {
 		innerCombiner := combinerFactory()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
@@ -100,8 +100,8 @@ func MetricsCombiner[I, O any](
 		flushDuration, _ := meter.Float64Histogram(flushMetricName + ".duration")
 		flushErrorCounter, _ := meter.Int64Counter(flushMetricName + ".errors")
 
-		return psgfn.FuncCombiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error) (time.Time, error) {
+		return psgfn.FuncAccumulator[T]{
+			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				startTime := time.Now()
 
 				// Track execution
@@ -123,18 +123,18 @@ func MetricsCombiner[I, O any](
 				}()
 
 				// Execute original combine
-				flushTime, err = innerCombiner.Combine(ctx, input, inputErr)
+				flushTime, err = innerCombiner.Accumulate(ctx, input, inputErr)
 				didPanic = false
 				return flushTime, err
 			},
-			FlushFn: func(ctx context.Context) (O, error) {
+			FlushFn: func(ctx context.Context) error {
 				startTime := time.Now()
 
 				// Track execution
 				flushCounter.Add(ctx, 1)
 
 				// Execute flush
-				result, err := innerCombiner.Flush(ctx)
+				err := innerCombiner.Flush(ctx)
 
 				// Record duration and errors
 				duration := time.Since(startTime).Seconds()
@@ -143,7 +143,7 @@ func MetricsCombiner[I, O any](
 					flushErrorCounter.Add(ctx, 1)
 				}
 
-				return result, err
+				return err
 			},
 		}
 	}

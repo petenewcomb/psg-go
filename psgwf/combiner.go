@@ -5,56 +5,44 @@ package psgwf
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// Combiner instances perform partial aggregation of workflow task results
-// before final gathering. They are used by [psg.CombinerPool] to enable
-// scalable concurrent and parallel result aggregation without requiring
-// multiple gathering goroutines or use of thread-safe data structures and
-// algorithms. This interface mirrors [psg.Combiner] but includes a Workflow
-// parameter.
-type GenericCombiner[I, O, C any] interface {
-	// Combine processes a single input task result and optionally emits an
-	// output to be gathered.
-	Combine(ctx context.Context, wf *GenericWorkflow[C], input I, inputErr error) (time.Time, error)
+// GenericCombiner mirrors psgfn.Accumulator but injects the Workflow
+// instance associated with each input. The implementation owns its
+// aggregated state and is responsible for routing results downstream
+// via Submit on whatever sinks it captures.
+type GenericCombiner[T, C any] interface {
+	// Accumulate processes a single input value (paired with its workflow
+	// and an upstream error). Returns the time when this instance's
+	// Flush method should be called, or a zero time value if Flush need
+	// not be called until the framework drains.
+	Accumulate(ctx context.Context, wf *GenericWorkflow[C], value T, err error) (time.Time, error)
 
-	// Flush emits combined results to be gathered unless the returned error is
-	// ErrDoNotGather. Since calls to Flush are independent of any specific
-	// workflow, it does not receive a [Workflow] parameter. It must either
-	// create a new Workflow use one previously retained using [Pin]. A common
-	// pattern is to retain Workflow instances passed to Combine as their
-	// associated results are aggregated and then release them all after the
-	// aggregated result set has been emitted.
-	Flush(ctx context.Context) (*GenericWorkflow[C], O, error)
+	// Flush finalizes the aggregated state. The body is responsible for
+	// constructing any downstream submissions itself; it has access to
+	// whatever workflow handles it retained from Accumulate calls.
+	Flush(ctx context.Context) error
 }
 
-type Combiner[I, O any] = GenericCombiner[I, O, Context]
+type Combiner[T any] = GenericCombiner[T, Context]
 
-type GenericCombinerFactory[I, O, C any] func() GenericCombiner[I, O, C]
-type CombinerFactory[I, O any] = GenericCombinerFactory[I, O, Context]
+type GenericCombinerFactory[T, C any] func() GenericCombiner[T, C]
+type CombinerFactory[T any] = GenericCombinerFactory[T, Context]
 
-func wrapCombinerFactory[I, O, C any](
-	combinerFactory GenericCombinerFactory[I, O, C],
-) psgfn.CombinerFactory[result[I, C], result[O, C]] {
-	return func() psgfn.Combiner[result[I, C], result[O, C]] {
-		innerCombiner := combinerFactory()
-		return psgfn.FuncCombiner[result[I, C], result[O, C]]{
-			CombineFn: func(ctx context.Context, input result[I, C], inputErr error) (time.Time, error) {
+func wrapCombinerFactory[T, C any](
+	combinerFactory GenericCombinerFactory[T, C],
+) psgfn.CombinerFactory[result[T, C]] {
+	return func() psgfn.Accumulator[result[T, C]] {
+		inner := combinerFactory()
+		return psgfn.FuncAccumulator[result[T, C]]{
+			AccumulateFn: func(ctx context.Context, input result[T, C], inputErr error) (time.Time, error) {
 				defer input.Workflow.unref(ctx)
-				return innerCombiner.Combine(ctx, input.Workflow, input.Value, inputErr)
+				return inner.Accumulate(ctx, input.Workflow, input.Value, inputErr)
 			},
-			FlushFn: func(ctx context.Context) (result[O, C], error) {
-				wf, v, err := innerCombiner.Flush(ctx)
-				if errors.Is(err, psgfn.ErrDoNotGather) {
-					return result[O, C]{}, err
-				}
-				wf.ref()
-				return result[O, C]{Workflow: wf, Value: v}, err
-			},
+			FlushFn: inner.Flush,
 		}
 	}
 }

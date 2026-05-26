@@ -91,18 +91,18 @@ func LoggedGather[T any](
 	}
 }
 
-// LoggedCombiner adds structured logging to combiners.
-// This wrapper logs combine and flush operations, including timing information.
-func LoggedCombiner[I, O any](
+// LoggedCombiner adds structured logging to accumulators.
+// This wrapper logs accumulate and flush operations, including timing information.
+func LoggedCombiner[T any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[I, O] {
-	return func() psgfn.Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[T],
+) psgfn.CombinerFactory[T] {
+	return func() psgfn.Accumulator[T] {
 		innerCombiner := combinerFactory()
 
-		return psgfn.FuncCombiner[I, O]{
-			CombineFn: func(ctx context.Context, input I, inputErr error) (time.Time, error) {
+		return psgfn.FuncAccumulator[T]{
+			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Get logger from context or use a default
 				logger := zap.L()
 
@@ -114,7 +114,7 @@ func LoggedCombiner[I, O any](
 
 				// Time the operation
 				startTime := time.Now()
-				flushTime, err := innerCombiner.Combine(ctx, input, inputErr)
+				flushTime, err := innerCombiner.Accumulate(ctx, input, inputErr)
 				duration := time.Since(startTime)
 
 				// Log completion
@@ -126,7 +126,7 @@ func LoggedCombiner[I, O any](
 
 				return flushTime, err
 			},
-			FlushFn: func(ctx context.Context) (O, error) {
+			FlushFn: func(ctx context.Context) error {
 				// Get logger from context or use a default
 				logger := zap.L()
 
@@ -137,7 +137,7 @@ func LoggedCombiner[I, O any](
 
 				// Time the operation
 				startTime := time.Now()
-				result, err := innerCombiner.Flush(ctx)
+				err := innerCombiner.Flush(ctx)
 				duration := time.Since(startTime)
 
 				// Log completion
@@ -147,7 +147,7 @@ func LoggedCombiner[I, O any](
 					zap.Duration("duration", duration),
 					zap.Bool("has_error", err != nil))
 
-				return result, err
+				return err
 			},
 		}
 	}

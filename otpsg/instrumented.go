@@ -46,11 +46,11 @@ func InstrumentedGather[T any](
 
 // InstrumentedCombiner combines tracing, metrics, and logging for combiners into a single wrapper.
 // This provides a convenient way to apply all instrumentation at once.
-func InstrumentedCombiner[I, O any](
+func InstrumentedCombiner[T any](
 	combineOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) psgfn.CombinerFactory[PropagatedResult[I], PropagatedResult[O]] {
+	combinerFactory psgfn.CombinerFactory[T],
+) psgfn.CombinerFactory[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedCombiner := LoggedCombiner(combineOpName, flushOpName, combinerFactory)

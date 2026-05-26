@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -23,58 +22,57 @@ import (
 
 // combineOpHandleTrait implements leakguard.DupTrait for combineOp resources.
 // It manages the lifecycle of combineOp instances through reference counting.
-type combineOpHandleTrait[I, O any] struct{}
+type combineOpHandleTrait[T any] struct{}
 
-func (combineOpHandleTrait[I, O]) Close(c *combineOp[I, O]) {
+func (combineOpHandleTrait[T]) Close(c *combineOp[T]) {
 	c.unref()
 }
 
-func (combineOpHandleTrait[I, O]) Dup(c *combineOp[I, O]) (*combineOp[I, O], error) {
+func (combineOpHandleTrait[T]) Dup(c *combineOp[T]) (*combineOp[T], error) {
 	c.ref()
 	return c, nil
 }
 
-func (combineOpHandleTrait[I, O]) String(c *combineOp[I, O]) string {
+func (combineOpHandleTrait[T]) String(c *combineOp[T]) string {
 	return fmt.Sprintf("Combiner(%p)", c)
 }
 
-// Combiner represents an operation that combines inputs and produces outputs.
-// It binds a gather function with a combiner factory and a combiner pool.
-// Combiner extends the capabilities of Gatherer by aggregating task results
-// through combiners before gathering.
+// Combiner represents a stateful aggregation op. Inputs flow in through
+// [Combiner.Submit] (or via [Combiner.Start] for value-producing tasks);
+// the user-supplied [psgfn.Accumulator] processes them inside a
+// CombinerPool worker. Downstream emission is the Accumulator body's
+// responsibility — it calls Submit on whatever downstream sinks it has
+// captured. There is no framework-mediated output type; Accumulator
+// errors are surfaced via the Pool's GatherAll path.
 //
-// Thread-safety and copying: Like Gatherer, a Combiner value is designed to be
-// copied. While a single Combiner value does not support concurrent calls to
+// Thread-safety and copying: a Combiner value is designed to be copied.
+// While a single Combiner value does not support concurrent calls to
 // Start or TryStart, copies of a Combiner can be used concurrently. All
-// copies share the same combiner identity and will route work to the same
-// combiner instances. This allows Combiner values to be safely passed by value
-// to goroutines or stored in structures without losing their binding to the
-// underlying combiner pool and operation identity.
+// copies share the same combiner identity and will route work to the
+// same Accumulator instances.
 //
-// Resource management: Combiner uses leakguard for safe handle management.
-// Each Combiner must be explicitly closed via Close(). Dup() creates independent
-// handles that share the same underlying state. The combineOp resource is
-// cleaned up when the last handle is closed and all internal references
-// (from tasks and work items) are released.
-type Combiner[I, O any] struct {
-	h leakguard.Handle[combineOp[I, O], combineOpHandleTrait[I, O]]
+// Resource management: each Combiner must be explicitly closed via
+// Close(). Dup() creates independent handles that share the same
+// underlying state. The combineOp resource is cleaned up when the last
+// handle is closed and all internal references (from tasks and work
+// items) are released.
+type Combiner[T any] struct {
+	h leakguard.Handle[combineOp[T], combineOpHandleTrait[T]]
 }
 
-// NewCombiner creates a new Combiner operation that uses the specified gather function,
-// combiner pool, and combiner factory.
+// NewCombiner creates a new Combiner operation. The framework manages an
+// internal error sink that surfaces Accumulator errors through the Pool's
+// GatherAll path; the user's Accumulator body is responsible for routing
+// successful results via Submit on whatever downstream sinks it captures.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewCombiner[I any, O any](
-	gatherer Gatherer[O],
+func NewCombiner[T any](
 	combinerPool *CombinerPool,
-	combinerFactory psgfn.CombinerFactory[I, O],
-) Combiner[I, O] {
+	combinerFactory psgfn.CombinerFactory[T],
+) Combiner[T] {
 	traceRegion := "NewCombiner"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	if gatherer.gatherFn == nil {
-		panic("gatherer is uninitialized")
-	}
 	if combinerPool == nil {
 		panic("combinerPool must be non-nil")
 	}
@@ -82,14 +80,11 @@ func NewCombiner[I any, O any](
 		panic("combinerFactory must be non-nil")
 	}
 
-	innerPool := omnipool.For[combineOp[I, O]]()
+	innerPool := omnipool.For[combineOp[T]]()
 	inner := innerPool.Get()
 
 	if inner.refCount.Load() != 0 {
 		panic("unexpected nonzero inner.refCount")
-	}
-	if inner.gatherer.gatherFn != nil {
-		panic("unexpected non-nil inner.gatherer.gatherFn")
 	}
 	if inner.combinerPool != nil {
 		panic("unexpected non-nil inner.combinerPool")
@@ -102,32 +97,36 @@ func NewCombiner[I any, O any](
 	}
 
 	inner.refCount.Store(1)
-	inner.gatherer = gatherer
+	// Framework-owned error sink: Accumulator errors flow through this
+	// Gatherer[struct{}] whose handler returns err as-is, surfacing via
+	// the Pool's GatherAll path.
+	inner.errSink = NewGatherer(func(ctx context.Context, _ struct{}, err error) error {
+		return err
+	})
 	inner.combinerPool = combinerPool
 	inner.combinerFactory = combinerFactory
 	inner.innerPool = innerPool
 
-	h := leakguard.New[combineOp[I, O], combineOpHandleTrait[I, O]](inner)
+	h := leakguard.New[combineOp[T], combineOpHandleTrait[T]](inner)
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion, "Combiner(%p), handleID=%d, pool=%p",
 			inner, h.HandleID(), combinerPool)
 	}
 
-	return Combiner[I, O]{h: h}
+	return Combiner[T]{h: h}
 }
 
 // Start initiates asynchronous execution of the provided task function in a
 // new goroutine. After the task completes, the task's result and error will be
-// combined using this Combine's combiner and eventually passed to the associated
-// Gather.
+// passed to the user's Accumulator.
 //
 // See [Gatherer.Start] for details about backpressure, concurrency limits,
 // context handling, and error behavior.
-func (c *Combiner[I, O]) Start(
+func (c *Combiner[T]) Start(
 	ctx context.Context,
 	target TaskPoolOrJob,
-	taskFn psgfn.Task[I],
+	taskFn psgfn.Task[T],
 ) error {
 	traceRegion := "Combiner.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -155,11 +154,11 @@ func (c *Combiner[I, O]) Start(
 // the given target is at its concurrency limit.
 //
 // See [Gatherer.TryStart] for details about behavior and return values.
-func (c *Combiner[I, O]) TryStart(
+func (c *Combiner[T]) TryStart(
 	ctx context.Context,
 	deadline time.Time,
 	target TaskPoolOrJob,
-	taskFn psgfn.Task[I],
+	taskFn psgfn.Task[T],
 ) (bool, error) {
 	traceRegion := "Combiner.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -190,9 +189,9 @@ func (c *Combiner[I, O]) TryStart(
 // Submit posts values to be combined by the combine queue.
 // This follows the same pattern as Start but for posting combine work instead
 // of launching tasks.
-func (c *Combiner[I, O]) Submit(
+func (c *Combiner[T]) Submit(
 	ctx context.Context,
-	value I,
+	value T,
 	err error,
 ) error {
 	traceRegion := "Combiner.Submit"
@@ -214,10 +213,10 @@ func (c *Combiner[I, O]) Submit(
 
 // TrySubmit attempts to post values to be combined by the combine queue.
 // Like Submit, but returns instead of blocking if queuing would be required.
-func (c *Combiner[I, O]) TrySubmit(
+func (c *Combiner[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
-	value I,
+	value T,
 	err error,
 ) (bool, error) {
 	traceRegion := "Combiner.TrySubmit"
@@ -237,11 +236,11 @@ func (c *Combiner[I, O]) TrySubmit(
 	return inner.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
-func (c *Combiner[I, O]) newScatterWork(
+func (c *Combiner[T]) newScatterWork(
 	group workq.GroupID,
 	deadline time.Time,
 	target TaskPoolOrJob,
-	taskFn psgfn.Task[I],
+	taskFn psgfn.Task[T],
 ) *combineScatterWork {
 	traceRegion := "Combiner.newScatterWork"
 
@@ -269,25 +268,25 @@ func (c *Combiner[I, O]) newScatterWork(
 // the same underlying combiner state but requires its own Close() call.
 // This is useful for passing Combiner handles to different goroutines
 // or async operations that need their own lifecycle management.
-func (c *Combiner[I, O]) Dup() Combiner[I, O] {
+func (c *Combiner[T]) Dup() Combiner[T] {
 	h, err := leakguard.Dup(c.h)
 	if err != nil {
 		panic(fmt.Sprintf("Dup() failed: %v", err))
 	}
-	return Combiner[I, O]{h: h}
+	return Combiner[T]{h: h}
 }
 
 // Close releases this handle to the Combiner. Each handle (including dups)
 // must be closed exactly once. The underlying combiner state is cleaned up
 // when the last handle is closed.
-func (c *Combiner[I, O]) Close() {
+func (c *Combiner[T]) Close() {
 	c.h.Close()
 }
 
 // refInner gets the inner combineOp, checks if closed, and adds a reference.
 // Panics if the Combiner has been closed.
 // The caller must ensure a matching unref() is called.
-func (c *Combiner[I, O]) refInner() *combineOp[I, O] {
+func (c *Combiner[T]) refInner() *combineOp[T] {
 	inner := c.h.Get()
 	if inner == nil {
 		panic("Combiner has been closed")
@@ -300,30 +299,32 @@ type combinerInstanceID int64
 
 var combinerInstanceCounter atomic.Int64
 
-type combineOp[I, O any] struct {
+type combineOp[T any] struct {
 	refCount atomic.Int64
 
-	gatherer        Gatherer[O]
+	// errSink is framework-owned. Accumulator errors are routed through
+	// it; its handler returns err as-is so it surfaces via GatherAll.
+	errSink         Gatherer[struct{}]
 	combinerPool    *CombinerPool
-	combinerFactory psgfn.CombinerFactory[I, O]
+	combinerFactory psgfn.CombinerFactory[T]
 
-	innerPool             *omnipool.Pool[combineOp[I, O]]
-	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[I, O]]
-	taskPool              *omnipool.Pool[combineTask[I, O]]
-	combineWorkPool       *omnipool.Pool[combineWork[I, O]]
+	innerPool             *omnipool.Pool[combineOp[T]]
+	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[T]]
+	taskPool              *omnipool.Pool[combineTask[T]]
+	combineWorkPool       *omnipool.Pool[combineWork[T]]
 
 	instanceCount atomic.Int32
-	instanceQueue nbcq.Queue[*halfBoundCombiner[I, O]]
+	instanceQueue nbcq.Queue[*halfBoundCombiner[T]]
 }
 
-func (c *combineOp[I, O]) Init() {
-	c.halfBoundCombinerPool = omnipool.For[halfBoundCombiner[I, O]]()
-	c.taskPool = omnipool.For[combineTask[I, O]]()
-	c.combineWorkPool = omnipool.For[combineWork[I, O]]()
+func (c *combineOp[T]) Init() {
+	c.halfBoundCombinerPool = omnipool.For[halfBoundCombiner[T]]()
+	c.taskPool = omnipool.For[combineTask[T]]()
+	c.combineWorkPool = omnipool.For[combineWork[T]]()
 	c.instanceQueue.Init()
 }
 
-func (c *combineOp[I, O]) Reset() {
+func (c *combineOp[T]) Reset() {
 	// Reset logic is now handled in unref() when refCount hits zero.
 	// We keep this empty method to satisfy the Resetter interface - if we didn't,
 	// omnipool would zero the entire struct including pool pointers set by Init().
@@ -332,7 +333,7 @@ func (c *combineOp[I, O]) Reset() {
 // ref increments the refCount to track handle ownership and internal references.
 // It is called by leakguard when a handle is created via Dup(), and also used
 // for internal refs (tasks, work items).
-func (c *combineOp[I, O]) ref() {
+func (c *combineOp[T]) ref() {
 	newCount := c.refCount.Add(1)
 	if newCount <= 1 {
 		panic("ref() called with no existing references")
@@ -341,7 +342,7 @@ func (c *combineOp[I, O]) ref() {
 
 // unref is called by leakguard when a handle is closed.
 // It decrements refCount and cleans up if this was the last reference.
-func (c *combineOp[I, O]) unref() {
+func (c *combineOp[T]) unref() {
 	newCount := c.refCount.Add(-1)
 	if newCount < 0 {
 		panic("reference count underflow")
@@ -365,7 +366,7 @@ func (c *combineOp[I, O]) unref() {
 	innerPool := c.innerPool
 
 	// Clear all fields
-	c.gatherer = Gatherer[O]{}
+	c.errSink = Gatherer[struct{}]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
 	// Keep c.innerPool - it's metadata about where to return this object
@@ -374,26 +375,26 @@ func (c *combineOp[I, O]) unref() {
 	innerPool.Put(c)
 }
 
-type halfBoundCombiner[I, O any] struct {
+type halfBoundCombiner[T any] struct {
 	id combinerInstanceID
-	op *combineOp[I, O]
+	op *combineOp[T]
 
 	mu            sync.Mutex
 	refCount      int
 	earliestGroup workq.GroupID
-	combiner      psgfn.Combiner[I, O]
+	accumulator   psgfn.Accumulator[T]
 }
 
-func (c *halfBoundCombiner[I, O]) InstanceID() combinerInstanceID {
+func (c *halfBoundCombiner[T]) InstanceID() combinerInstanceID {
 	return c.id
 }
 
-func (c *halfBoundCombiner[I, O]) InstanceCount() int {
+func (c *halfBoundCombiner[T]) InstanceCount() int {
 	return int(c.op.instanceCount.Load())
 }
 
 // Must already be holding c.mu lock.
-func (c *halfBoundCombiner[I, O]) Ref() {
+func (c *halfBoundCombiner[T]) Ref() {
 	if c.refCount < 1 {
 		panic("reference count underflow")
 	}
@@ -401,7 +402,7 @@ func (c *halfBoundCombiner[I, O]) Ref() {
 }
 
 // Must not be holding c.mu lock.
-func (c *halfBoundCombiner[I, O]) Unref() {
+func (c *halfBoundCombiner[T]) Unref() {
 	c.mu.Lock()
 	finalRefDropped := c.unref()
 	c.mu.Unlock()
@@ -412,7 +413,7 @@ func (c *halfBoundCombiner[I, O]) Unref() {
 
 // Must already be holding c.mu lock.
 // Returns true if the final reference was dropped.
-func (c *halfBoundCombiner[I, O]) unref() bool {
+func (c *halfBoundCombiner[T]) unref() bool {
 	// Must already be holding c.mu lock
 	if c.refCount < 1 {
 		panic("reference count underflow")
@@ -422,7 +423,7 @@ func (c *halfBoundCombiner[I, O]) unref() bool {
 }
 
 // A call to unref() must already have returned true
-func (c *halfBoundCombiner[I, O]) free() {
+func (c *halfBoundCombiner[T]) free() {
 	pool := c.op.halfBoundCombinerPool
 	op := c.op
 	pool.Put(c)
@@ -430,9 +431,9 @@ func (c *halfBoundCombiner[I, O]) free() {
 	op.unref()
 }
 
-func (c *halfBoundCombiner[I, O]) allocate(
+func (c *halfBoundCombiner[T]) allocate(
 	ctx context.Context,
-	newCombiner psgfn.CombinerFactory[I, O],
+	newAccumulator psgfn.CombinerFactory[T],
 	sender *rdvq.Sender,
 ) {
 	traceRegion := "halfBoundCombiner.allocate"
@@ -441,38 +442,47 @@ func (c *halfBoundCombiner[I, O]) allocate(
 	panicked := true
 	defer func() {
 		if panicked {
-			c.emit(ctx, sender, *new(O), ErrCombinerFactoryPanicked)
+			c.emitErr(ctx, sender, ErrCombinerFactoryPanicked)
 		}
 	}()
-	c.combiner = newCombiner()
+	c.accumulator = newAccumulator()
 	panicked = false
-	if c.combiner == nil {
-		c.emit(ctx, sender, *new(O), ErrCombinerFactoryReturnedNil)
-		c.combiner = &errCombiner[I, O]{err: ErrCombinerFactoryReturnedNil}
+	if c.accumulator == nil {
+		c.emitErr(ctx, sender, ErrCombinerFactoryReturnedNil)
+		c.accumulator = &errAccumulator[T]{err: ErrCombinerFactoryReturnedNil}
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "Combiner(%p) returning new combiner=%v", c.op, c.combiner)
+		trace.Logf(ctx, traceRegion, "Combiner(%p) returning new accumulator=%v", c.op, c.accumulator)
 	}
 }
 
-func (c *halfBoundCombiner[I, O]) emit(ctx context.Context, sender *rdvq.Sender, output O, outputErr error) {
-	traceRegion := "halfBoundCombiner.emit"
+// emitErr surfaces an Accumulator error through the framework-owned error
+// sink. The errSink's handler returns the error to the caller of
+// Pool.GatherAll. Successful results are not surfaced this way — the
+// Accumulator body is expected to Submit those to user-owned downstream
+// sinks directly.
+func (c *halfBoundCombiner[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {
+	traceRegion := "halfBoundCombiner.emitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
+	if accErr == nil {
+		return
+	}
 	ctx, meta := c.op.combinerPool.job.ctxMeta(ctx)
-	err := c.op.gatherer.submit(
-		ctx, meta, c.op.combinerPool.job, c.earliestGroup, output, outputErr)
+	err := c.op.errSink.submit(
+		ctx, meta, c.op.combinerPool.job, c.earliestGroup, struct{}{}, accErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
+	_ = sender
 }
 
-func (c *halfBoundCombiner[I, O]) combine(
+func (c *halfBoundCombiner[T]) combine(
 	ctx context.Context,
 	cm *activeCombinerMap,
 	sender *rdvq.Sender,
-	input I,
+	input T,
 	inputErr error,
 ) {
 
@@ -483,16 +493,16 @@ func (c *halfBoundCombiner[I, O]) combine(
 	defer func() {
 		if !didNotPanic {
 			// Just in case the panic is otherwise suppressed
-			c.emit(ctx, sender, *new(O), ErrCombinePanicked)
+			c.emitErr(ctx, sender, ErrCombinePanicked)
 		}
 	}()
 
-	trace.Logf(ctx, traceRegion, "calling Combine on combiner=%v", c.combiner)
-	newFlushDeadline, err := c.combiner.Combine(ctx, input, inputErr)
+	trace.Logf(ctx, traceRegion, "calling Accumulate on accumulator=%v", c.accumulator)
+	newFlushDeadline, err := c.accumulator.Accumulate(ctx, input, inputErr)
 	didNotPanic = true
 
 	if err != nil {
-		c.emit(ctx, sender, *new(O), err)
+		c.emitErr(ctx, sender, err)
 	}
 
 	if !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0 {
@@ -504,7 +514,7 @@ func (c *halfBoundCombiner[I, O]) combine(
 }
 
 // Must not already hold c.mu
-func (c *halfBoundCombiner[I, O]) Flush(ctx context.Context, sender *rdvq.Sender) {
+func (c *halfBoundCombiner[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
 	traceRegion := "halfBoundCombiner.Flush"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -520,29 +530,29 @@ func (c *halfBoundCombiner[I, O]) Flush(ctx context.Context, sender *rdvq.Sender
 }
 
 // Must already hold c.mu
-func (c *halfBoundCombiner[I, O]) flush(ctx context.Context, sender *rdvq.Sender) {
+func (c *halfBoundCombiner[T]) flush(ctx context.Context, sender *rdvq.Sender) {
 	traceRegion := "halfBoundCombiner.flush"
 
-	combiner := c.combiner
-	if combiner == nil {
+	accumulator := c.accumulator
+	if accumulator == nil {
 		// already flushed, ignore
 		return
 	}
-	c.combiner = nil
+	c.accumulator = nil
 
 	panicked := true // Assume the worst
 	defer func() {
 		if panicked {
 			// Just in case the panic is otherwise suppressed
-			c.emit(ctx, sender, *new(O), ErrCombinerFlushPanicked)
+			c.emitErr(ctx, sender, ErrCombinerFlushPanicked)
 		}
 	}()
 
-	trace.Logf(ctx, traceRegion, "calling Flush on combiner=%v", combiner)
-	v, err := combiner.Flush(ctx)
+	trace.Logf(ctx, traceRegion, "calling Flush on accumulator=%v", accumulator)
+	err := accumulator.Flush(ctx)
 	panicked = false
-	if !errors.Is(err, psgfn.ErrDoNotGather) {
-		c.emit(ctx, sender, v, err)
+	if err != nil {
+		c.emitErr(ctx, sender, err)
 	}
 }
 
@@ -593,14 +603,14 @@ func (w *combineScatterWork) Free() {
 
 var combineScatterWorkPool = omnipool.For[combineScatterWork]()
 
-type combineTask[I, O any] struct {
+type combineTask[T any] struct {
+	op     *combineOp[T]
 	group  workq.GroupID
-	taskFn psgfn.Task[I]
-	op     *combineOp[I, O]
-	pool   *omnipool.Pool[combineTask[I, O]]
+	taskFn psgfn.Task[T]
+	pool   *omnipool.Pool[combineTask[T]]
 }
 
-func (c *combineOp[I, O]) newTask(group workq.GroupID, taskFn psgfn.Task[I]) boundTask {
+func (c *combineOp[T]) newTask(group workq.GroupID, taskFn psgfn.Task[T]) boundTask {
 	ct := c.taskPool.Get()
 	ct.pool = c.taskPool
 	ct.group = group
@@ -610,7 +620,7 @@ func (c *combineOp[I, O]) newTask(group workq.GroupID, taskFn psgfn.Task[I]) bou
 	return ct
 }
 
-func (ct *combineTask[I, O]) Execute(
+func (ct *combineTask[T]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
@@ -619,7 +629,7 @@ func (ct *combineTask[I, O]) Execute(
 	traceRegion := "combineTask.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	var value I
+	var value T
 	var err error = ErrTaskPanicked
 	defer func() {
 		traceRegion := traceRegion + ".defer"
@@ -642,18 +652,18 @@ func (ct *combineTask[I, O]) Execute(
 	})
 }
 
-func (ct *combineTask[I, O]) Free() {
+func (ct *combineTask[T]) Free() {
 	traceRegion := "combineTask.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	ct.op.unref() // Release reference from the task
 	ct.pool.Put(ct)
 }
 
-func (c *combineOp[I, O]) submit(
+func (c *combineOp[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
-	value I,
+	value T,
 	err error,
 ) error {
 	combineWork := c.newCombineWork(group, value, err)
@@ -661,11 +671,11 @@ func (c *combineOp[I, O]) submit(
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-func (c *combineOp[I, O]) trySubmit(
+func (c *combineOp[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
-	value I,
+	value T,
 	err error,
 	deadline time.Time,
 ) (bool, error) {
@@ -686,21 +696,21 @@ type boundCombineWork interface {
 	Waiting(*workq.Governor)
 }
 
-type combineWork[I, O any] struct {
+type combineWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	op       *combineOp[I, O]
-	input    I
+	op       *combineOp[T]
+	input    T
 	inputErr error
 }
 
-func (c *combineOp[I, O]) newCombineWork(group workq.GroupID, value I, err error) *combineWork[I, O] {
+func (c *combineOp[T]) newCombineWork(group workq.GroupID, value T, err error) *combineWork[T] {
 	w := c.combineWorkPool.Get()
 	w.Init(group, c, value, err)
 	return w
 }
 
-func (w *combineWork[I, O]) Init(group workq.GroupID, op *combineOp[I, O], input I, inputErr error) {
+func (w *combineWork[T]) Init(group workq.GroupID, op *combineOp[T], input T, inputErr error) {
 	w.poolWork.Init(group, op.combinerPool.job)
 	w.op = op
 	w.input = input
@@ -709,15 +719,15 @@ func (w *combineWork[I, O]) Init(group workq.GroupID, op *combineOp[I, O], input
 	op.ref() // Add reference for the combine work
 }
 
-func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, sender *rdvq.Sender) {
-	var hbc *halfBoundCombiner[I, O]
+func (w *combineWork[T]) Combine(ctx context.Context, cm *activeCombinerMap, sender *rdvq.Sender) {
+	var hbc *halfBoundCombiner[T]
 	for {
 		hbc, _ = w.op.instanceQueue.TryPopFront()
 		if hbc == nil {
 			break
 		}
 		hbc.mu.Lock()
-		if hbc.combiner != nil {
+		if hbc.accumulator != nil {
 			if w.Group() < hbc.earliestGroup {
 				hbc.earliestGroup = w.Group()
 			}
@@ -742,7 +752,7 @@ func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, 
 		hbc.allocate(ctx, w.op.combinerFactory, sender)
 	}
 	defer func() {
-		flushed := hbc.combiner == nil
+		flushed := hbc.accumulator == nil
 		finalRefDropped := flushed && hbc.unref()
 		hbc.mu.Unlock()
 		if !flushed {
@@ -754,7 +764,7 @@ func (w *combineWork[I, O]) Combine(ctx context.Context, cm *activeCombinerMap, 
 	hbc.combine(ctx, cm, sender, w.input, w.inputErr)
 }
 
-func (w *combineWork[I, O]) Execute(ctx context.Context, ex workq.Execution) error {
+func (w *combineWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "combineWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "combineWork(%p), %v", w, w)
@@ -768,7 +778,7 @@ func (w *combineWork[I, O]) Execute(ctx context.Context, ex workq.Execution) err
 	return nil
 }
 
-func (w *combineWork[I, O]) Free() {
+func (w *combineWork[T]) Free() {
 	traceRegion := "combineWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "combineWork(%p), %v", w, w)

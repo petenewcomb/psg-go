@@ -40,28 +40,6 @@ func ExampleCombiner() {
 		}
 	}
 
-	newCombiner := func() psgfn.Combiner[string, map[string]int] {
-		// Aggregation state variable shared between combine and flush
-		var counts map[string]int
-
-		return psgfn.FuncCombiner[string, map[string]int]{
-			CombineFn: func(ctx context.Context, result string, err error) (time.Time, error) {
-				clock.Sleep(10 * time.Millisecond)
-				if counts == nil {
-					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
-					counts = make(map[string]int)
-				}
-				counts[result]++
-				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
-				return time.Time{}, nil
-			},
-			FlushFn: func(ctx context.Context) (map[string]int, error) {
-				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-				return counts, nil
-			},
-		}
-	}
-
 	// Define the results array
 	var results []map[string]int
 
@@ -90,8 +68,33 @@ func ExampleCombiner() {
 	// Define a result aggregation function and create a combined gather/combine operation
 	gatherer := psg.NewGatherer(gatherFn)
 
-	// Create a Combine operation with the gather function and inline combiner factory
-	combineOp := psg.NewCombiner(gatherer, combinerPool, newCombiner)
+	// After Wave 2, the Accumulator factory captures the downstream
+	// gatherer in its closure and Submits the aggregated map from
+	// inside FlushFn — there is no framework-routed output type.
+	newAccumulator := func() psgfn.Accumulator[string] {
+		var counts map[string]int
+
+		return psgfn.FuncAccumulator[string]{
+			AccumulateFn: func(ctx context.Context, result string, err error) (time.Time, error) {
+				clock.Sleep(10 * time.Millisecond)
+				if counts == nil {
+					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
+					counts = make(map[string]int)
+				}
+				counts[result]++
+				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
+				return time.Time{}, nil
+			},
+			FlushFn: func(ctx context.Context) error {
+				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
+				return gatherer.Submit(ctx, job, counts, nil)
+			},
+		}
+	}
+
+	// Create a Combine operation. No Gatherer arg — the Accumulator
+	// body routes results downstream via Submit.
+	combineOp := psg.NewCombiner(combinerPool, newAccumulator)
 	defer combineOp.Close()
 
 	// Launch some tasks

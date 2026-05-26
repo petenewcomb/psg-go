@@ -44,7 +44,7 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 		TaskPools:                 make([]*psg.TaskPool, len(plan.TaskLimiters)),
 		CombinerPools:             make([]*psg.CombinerPool, len(plan.CombinerLimiters)),
 		Gatherers:                 make([]*psg.Gatherer[*simValue], len(plan.Gatherers)),
-		Combiners:                 make([]*psg.Combiner[*simValue, struct{}], len(plan.Combiners)),
+		Combiners:                 make([]*psg.Combiner[*simValue], len(plan.Combiners)),
 		concurrencyByTaskLimit:    make([]atomic.Int64, len(plan.TaskLimiters)),
 		maxConcurrencyByTaskLimit: make([]atomicMaxInt64, len(plan.TaskLimiters)),
 		concurrencyByCombLimit:    make([]atomic.Int64, len(plan.CombinerLimiters)),
@@ -69,8 +69,13 @@ type controller struct {
 	TaskPools     []*psg.TaskPool
 	CombinerPools []*psg.CombinerPool
 	Gatherers     []*psg.Gatherer[*simValue]
-	Combiners     []*psg.Combiner[*simValue, struct{}]
-	DummySink     psg.Gatherer[struct{}]
+	Combiners     []*psg.Combiner[*simValue]
+	// DummySink is still needed for the TaskRunner promote-Submit-to-return
+	// adapter pattern (the task is scattered against a no-op sink whose
+	// return value gets discarded if no destination Submit was found).
+	// It is NOT used as a downstream of Combiners anymore — post Wave 2,
+	// NewCombiner has no Gatherer arg.
+	DummySink psg.Gatherer[struct{}]
 
 	taskPoolsOnce sync.Once
 	combPoolsOnce sync.Once
@@ -111,7 +116,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		if len(cp.LimiterIndexes) > 0 {
 			limPool = c.CombinerPools[cp.LimiterIndexes[0]]
 		}
-		combiner := psg.NewCombiner(c.DummySink, limPool, c.newCombinerFactory(t, cp, idx))
+		combiner := psg.NewCombiner(limPool, c.newCombinerFactory(t, cp, idx))
 		c.Combiners[i] = &combiner
 	}
 
@@ -444,13 +449,13 @@ func (c *controller) newGathererHandler(t assert.TestingT, g *Gatherer, idx int)
 	}
 }
 
-// newCombinerFactory builds the combiner factory that the current API
-// invokes per-instance. The Accumulate and Flush bodies are walked
-// from inside CombineFn/FlushFn; downstream Submits go through
-// submitTo. FlushFn returns struct{}{} (dummy output).
+// newCombinerFactory builds the combiner factory that the framework
+// invokes per-instance. Accumulate and Flush bodies are walked from
+// inside AccumulateFn/FlushFn; downstream Submits go through submitTo.
+// FlushFn returns just error after Wave 2 — no output type.
 func (c *controller) newCombinerFactory(
 	t assert.TestingT, cmb *Combiner, idx int,
-) psgfn.CombinerFactory[*simValue, struct{}] {
+) psgfn.CombinerFactory[*simValue] {
 	_ = idx
 	// Concurrency tracking: bump CombinerLimiter counter on entry to
 	// Accumulate or Flush, decrement on exit.
@@ -463,9 +468,9 @@ func (c *controller) newCombinerFactory(
 			return func() { c.concurrencyByCombLimit[limIdx].Add(-1) }
 		}
 	}
-	return func() psgfn.Combiner[*simValue, struct{}] {
-		return psgfn.FuncCombiner[*simValue, struct{}]{
-			CombineFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
+	return func() psgfn.Accumulator[*simValue] {
+		return psgfn.FuncAccumulator[*simValue]{
+			AccumulateFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
 				defer trackEntry()()
 				err := c.executeFunc(ctx, t, cmb.Accumulate, v)
 				if err == nil && c.shouldReturnError(cmb.Accumulate) {
@@ -475,14 +480,14 @@ func (c *controller) newCombinerFactory(
 				_ = valErr
 				return time.Time{}, err
 			},
-			FlushFn: func(ctx context.Context) (struct{}, error) {
+			FlushFn: func(ctx context.Context) error {
 				defer trackEntry()()
 				v := &simValue{DispatchTime: time.Now()}
 				err := c.executeFunc(ctx, t, cmb.Flush, v)
 				if err == nil && c.shouldReturnError(cmb.Flush) {
 					err = ExpectedHandlerError{OpKind: opNameCombiner, OpID: cmb.ID}
 				}
-				return struct{}{}, err
+				return err
 			},
 		}
 	}

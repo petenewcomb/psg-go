@@ -52,9 +52,11 @@ func TestWorkflowAfterFunc(t *testing.T) {
 		return nil
 	})
 
-	err := gatherer.Start(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
-		return "test", nil
-	})
+	runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+			return "test", nil
+		})
+	err := runner.Start(context.Background())
 	assert.NoError(t, err)
 
 	// Close job and gather all results
@@ -117,9 +119,11 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Start a new task from within the AfterFunc
-		err := gatherer.Start(ctx, pool, newWf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
-			return "new task", nil
-		})
+		runner := psgwf.NewGenericTaskRunner(pool, gatherer, newWf,
+			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+				return "new task", nil
+			})
+		err := runner.Start(ctx)
 		assert.NoError(t, err)
 	})
 
@@ -128,9 +132,11 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		return nil
 	})
 
-	err := gatherer.Start(context.Background(), pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
-		return "original task", nil
-	})
+	outerRunner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+			return "original task", nil
+		})
+	err := outerRunner.Start(context.Background())
 	assert.NoError(t, err)
 
 	// Close job and gather all results

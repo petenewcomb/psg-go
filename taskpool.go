@@ -78,6 +78,12 @@ func (p *TaskPool) getJob() *Pool {
 	return p.job
 }
 
+// Pool returns the [Pool] this TaskPool is bound to. Panics if the
+// TaskPool was constructed without an associated Pool.
+func (p *TaskPool) Pool() *Pool {
+	return p.getJob()
+}
+
 // taskPoolConfigWrapper wraps a TaskPool to implement the taskPoolConfig interface for options
 type taskPoolConfigWrapper struct {
 	pool *TaskPool

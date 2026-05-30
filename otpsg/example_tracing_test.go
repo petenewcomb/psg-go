@@ -68,11 +68,11 @@ func Example_tracing() {
 					return nil
 				})
 
-			return processGather.Start(ctx, job, processDataTask)
+			return otpsg.Scatter(ctx, job, processGather, processDataTask)
 		})
 
 	// Start the pipeline by loading data
-	if err := dataGather.Start(ctx, job, loadDataTask); err != nil {
+	if err := otpsg.Scatter(ctx, job, dataGather, loadDataTask); err != nil {
 		fmt.Println("Error:", err)
 	}
 
@@ -123,7 +123,7 @@ func Example_instrumentedTask() {
 		})
 
 	// Use convenience scatter function
-	err := otpsg.InstrumentedScatter(ctx, job, task, gatherer)
+	err := otpsg.Scatter(ctx, job, gatherer, task)
 	if err != nil {
 		fmt.Println("Error:", err)
 	}

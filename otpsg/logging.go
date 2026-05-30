@@ -17,7 +17,7 @@ import (
 func LoggedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psgfn.Task[T] {
+) func(ctx context.Context) (T, error) {
 	return func(ctx context.Context) (T, error) {
 		// Get logger from context or use a default
 		// This implementation uses zap, but could be adapted for any logger

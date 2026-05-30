@@ -234,7 +234,7 @@ The order below is *not* committed — these are candidates. The actual
 sequencing depends on the test-design sessions and on dependency
 analysis between waves. Some can probably move in parallel.
 
-### Wave 3 candidate: Reshape Task functions
+### Wave 3 candidate: Reshape Task functions (implementation in progress)
 
 **Shape change**: `func(ctx) (T, error)` → `func(ctx, T) error` where
 T is the task's input arg. Body explicitly Submits its result(s) to

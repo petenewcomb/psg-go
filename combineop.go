@@ -117,75 +117,6 @@ func NewCombiner[T any](
 	return Combiner[T]{h: h}
 }
 
-// Start initiates asynchronous execution of the provided task function in a
-// new goroutine. After the task completes, the task's result and error will be
-// passed to the user's Accumulator.
-//
-// See [Gatherer.Start] for details about backpressure, concurrency limits,
-// context handling, and error behavior.
-func (c *Combiner[T]) Start(
-	ctx context.Context,
-	target TaskPoolOrJob,
-	taskFn psgfn.Task[T],
-) error {
-	traceRegion := "Combiner.Start"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	inner := c.h.Get()
-	if inner == nil {
-		panic("Combiner has been closed")
-	}
-	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
-	}
-
-	ctx, meta := vetScatter(ctx, target, taskFn)
-	meta.Lock()
-	defer meta.Unlock()
-	group := meta.Group()
-	if group == workq.InvalidGroupID {
-		group = workq.NewGroupID()
-	}
-
-	work := c.newScatterWork(group, time.Time{}, target, taskFn)
-	return meta.ExecuteNowOrQueue(ctx, work)
-}
-
-// TryStart is like [Combiner.Start] but returns instead of blocking if
-// the given target is at its concurrency limit.
-//
-// See [Gatherer.TryStart] for details about behavior and return values.
-func (c *Combiner[T]) TryStart(
-	ctx context.Context,
-	deadline time.Time,
-	target TaskPoolOrJob,
-	taskFn psgfn.Task[T],
-) (bool, error) {
-	traceRegion := "Combiner.TryStart"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	inner := c.h.Get()
-	if inner == nil {
-		panic("Combiner has been closed")
-	}
-	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
-	}
-
-	ctx, meta := vetScatter(ctx, target, taskFn)
-	meta.Lock()
-	defer meta.Unlock()
-	group := meta.Group()
-	if group == workq.InvalidGroupID {
-		group = workq.NewGroupID()
-	}
-
-	work := c.newScatterWork(group, deadline, target, taskFn)
-	ok, err := meta.TryExecuteNow(ctx, deadline, work)
-	if !ok {
-		work.Free()
-	}
-	return ok, err
-}
-
 // Submit posts values to be combined by the combine queue.
 // This follows the same pattern as Start but for posting combine work instead
 // of launching tasks.
@@ -236,33 +167,6 @@ func (c *Combiner[T]) TrySubmit(
 	return inner.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
-func (c *Combiner[T]) newScatterWork(
-	group workq.GroupID,
-	deadline time.Time,
-	target TaskPoolOrJob,
-	taskFn psgfn.Task[T],
-) *combineScatterWork {
-	traceRegion := "Combiner.newScatterWork"
-
-	inner := c.refInner()
-	defer inner.unref()
-
-	j := target.getJob()
-	if j != inner.combinerPool.job {
-		panic("target and combiner pools are associated with different jobs")
-	}
-
-	targetScatterWork := target.newScatterWork(group, deadline, inner.newTask(group, taskFn))
-	w := newCombineScatterWork(inner.combinerPool, group, deadline, targetScatterWork)
-
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion,
-			"Combiner(%p) created %v, instanceQueue=%p",
-			inner, w, &inner.instanceQueue)
-	}
-	return w
-}
-
 // Dup creates a duplicate handle to the same underlying Combiner.
 // Like file descriptor duplication, this creates a new handle that shares
 // the same underlying combiner state but requires its own Close() call.
@@ -310,7 +214,6 @@ type combineOp[T any] struct {
 
 	innerPool             *omnipool.Pool[combineOp[T]]
 	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[T]]
-	taskPool              *omnipool.Pool[combineTask[T]]
 	combineWorkPool       *omnipool.Pool[combineWork[T]]
 
 	instanceCount atomic.Int32
@@ -319,7 +222,6 @@ type combineOp[T any] struct {
 
 func (c *combineOp[T]) Init() {
 	c.halfBoundCombinerPool = omnipool.For[halfBoundCombiner[T]]()
-	c.taskPool = omnipool.For[combineTask[T]]()
 	c.combineWorkPool = omnipool.For[combineWork[T]]()
 	c.instanceQueue.Init()
 }
@@ -554,109 +456,6 @@ func (c *halfBoundCombiner[T]) flush(ctx context.Context, sender *rdvq.Sender) {
 	if err != nil {
 		c.emitErr(ctx, sender, err)
 	}
-}
-
-type combineScatterWork struct {
-	workq.Work
-	pool     *CombinerPool
-	deadline time.Time
-}
-
-func newCombineScatterWork(
-	pool *CombinerPool,
-	group workq.GroupID,
-	deadline time.Time,
-	targetScatterWork workq.Work,
-) *combineScatterWork {
-	w := combineScatterWorkPool.Get()
-	w.Work = targetScatterWork
-	w.pool = pool
-	w.deadline = deadline
-	return w
-}
-
-func (w *combineScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "combineScatterWork.Execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
-
-	workFn := w.Work.Execute
-	bb := w.pool.job.protoBB
-	if bb.ShouldBlock(ctx) != nil {
-		poolGovernedWorkFn := func(ctx context.Context, ex workq.Execution) error {
-			return w.pool.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
-		}
-		return w.pool.governor.Execute(ctx, ex, w.deadline, bb, poolGovernedWorkFn)
-	}
-	return workFn(ctx, ex)
-}
-
-//nolint:contextcheck // background context used only for tracing
-func (w *combineScatterWork) Free() {
-	traceRegion := "combineScatterWork.Free"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
-
-	w.Work.Free()
-	combineScatterWorkPool.Put(w)
-}
-
-var combineScatterWorkPool = omnipool.For[combineScatterWork]()
-
-type combineTask[T any] struct {
-	op     *combineOp[T]
-	group  workq.GroupID
-	taskFn psgfn.Task[T]
-	pool   *omnipool.Pool[combineTask[T]]
-}
-
-func (c *combineOp[T]) newTask(group workq.GroupID, taskFn psgfn.Task[T]) boundTask {
-	ct := c.taskPool.Get()
-	ct.pool = c.taskPool
-	ct.group = group
-	ct.taskFn = taskFn
-	ct.op = c
-	c.ref() // Add reference for the task
-	return ct
-}
-
-func (ct *combineTask[T]) Execute(
-	ctx context.Context,
-	group workq.GroupID,
-	completedFn func(),
-	taskWorkerSender *rdvq.Sender,
-) {
-	traceRegion := "combineTask.Execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	var value T
-	var err error = ErrTaskPanicked
-	defer func() {
-		traceRegion := traceRegion + ".defer"
-		defer trace.StartRegion(ctx, traceRegion).End()
-		if completedFn != nil {
-			completedFn()
-		}
-		if err != nil {
-			trace.Logf(ctx, traceRegion, "posting task err=%v", err)
-		}
-		ctx, meta := ct.op.combinerPool.job.ctxMeta(ctx)
-		intErr := ct.op.submit(ctx, meta, ct.group, value, err)
-		if intErr != nil && ctx.Err() == nil {
-			panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
-		}
-	}()
-
-	trace.WithRegion(ctx, traceRegion+".taskFn", func() {
-		value, err = ct.taskFn(ctx)
-	})
-}
-
-func (ct *combineTask[T]) Free() {
-	traceRegion := "combineTask.Free"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	ct.op.unref() // Release reference from the task
-	ct.pool.Put(ct)
 }
 
 func (c *combineOp[T]) submit(

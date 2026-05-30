@@ -70,12 +70,10 @@ type controller struct {
 	CombinerPools []*psg.CombinerPool
 	Gatherers     []*psg.Gatherer[*simValue]
 	Combiners     []*psg.Combiner[*simValue]
-	// DummySink is still needed for the TaskRunner promote-Submit-to-return
-	// adapter pattern (the task is scattered against a no-op sink whose
-	// return value gets discarded if no destination Submit was found).
-	// It is NOT used as a downstream of Combiners anymore — post Wave 2,
-	// NewCombiner has no Gatherer arg.
-	DummySink psg.Gatherer[struct{}]
+	// TaskRunners holds one psg.TaskRunner0 per Plan TaskRunner. The
+	// closure inside each runs the runner's Body Func, which Submits
+	// directly to downstream Gatherers/Combiners.
+	TaskRunners []psg.TaskRunner0
 
 	taskPoolsOnce sync.Once
 	combPoolsOnce sync.Once
@@ -93,12 +91,6 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	c.StartTime = time.Now()
 
 	c.ensurePools()
-	// Dummy sink: satisfies psg.NewCombiner's structural Gatherer arg and
-	// receives nothing real (struct{} payload). Single instance shared
-	// across all combiners/task-dispatches in this controller.
-	c.DummySink = psg.NewGatherer(func(ctx context.Context, _ struct{}, err error) error {
-		return err
-	})
 
 	// Construct Gatherers and Combiners against the Pool. Order matters:
 	// Combiners reference Gatherers (in body Submits), so Gatherers must
@@ -118,6 +110,14 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		}
 		combiner := psg.NewCombiner(limPool, c.newCombinerFactory(t, cp, idx))
 		c.Combiners[i] = &combiner
+	}
+	// Construct TaskRunners after Combiners/Gatherers so the bodies can
+	// reference them via Submit. TaskRunner Bodies may StartTask other
+	// runners, but only after the entire array is populated (a runner's
+	// Body never runs during construction).
+	c.TaskRunners = make([]psg.TaskRunner0, len(c.Plan.TaskRunners))
+	for i, runner := range c.Plan.TaskRunners {
+		c.TaskRunners[i] = c.newTaskRunner(t, runner)
 	}
 
 	// Execute top-level Steps.
@@ -239,19 +239,12 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 	}
 }
 
-// startTask scatters a TaskRunner. Because the current psg API
-// forbids tasks from scattering new work, the TaskRunner's first
-// Submit step in its Body is treated as the destination sink for the
-// task's return value — the task function runs SelfTime/Subjob steps
-// and then returns; the current API routes the value to the
-// destination via that sink's Start.
-//
-// TaskRunner bodies in v1 generator have at most one Submit step.
-// Multi-Submit is vocabulary-supported but requires a future API
-// shape (post-Wave-5) where tasks can submit-from-body directly.
-func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx int) {
-	chk := assert.New(t)
-	runner := c.Plan.TaskRunners[runnerIdx]
+// newTaskRunner constructs the psg.TaskRunner0 that backs a Plan
+// TaskRunner. The task body walks the Plan's Body Func; Submits go
+// directly to downstream sinks (Combiners/Gatherers) via Submit, and
+// StartTask is skipped because the current API forbids dispatching new
+// work from a task body.
+func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.TaskRunner0 {
 	taskPool := c.TaskPools[0]
 	if len(runner.LimiterIndexes) > 0 {
 		taskPool = c.TaskPools[runner.LimiterIndexes[0]]
@@ -268,52 +261,30 @@ func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx
 			return func() { c.concurrencyByTaskLimit[limIdx].Add(-1) }
 		}
 	}
-	destKind, destIdx, ok := c.firstSubmit(runner.Body)
-	if !ok {
-		// TaskRunner with no Submit step: scatter against the dummy
-		// sink — its return value is discarded.
-		taskFn := func(ctx context.Context) (struct{}, error) {
-			defer trackEntry()()
-			v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
-			return struct{}{}, c.executeBodyMinusSubmit(ctx, t, runner.Body, v)
-		}
-		for {
-			err := c.DummySink.Start(ctx, taskPool, taskFn)
-			if err == nil {
-				return
-			}
-			var expectedErr ExpectedHandlerError
-			if errors.As(err, &expectedErr) {
-				continue
-			}
-			chk.NoError(err)
-			return
-		}
-	}
-	taskFn := func(ctx context.Context) (*simValue, error) {
+	body := psgfn.TaskFunc0(func(ctx context.Context) error {
 		defer trackEntry()()
 		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
-		if err := c.executeBodyMinusSubmit(ctx, t, runner.Body, v); err != nil {
-			return v, err
+		if err := c.executeFuncInTask(ctx, t, runner.Body, v); err != nil {
+			return err
 		}
 		if c.shouldReturnError(runner.Body) {
-			return v, ExpectedHandlerError{OpKind: "TaskRunner", OpID: runner.ID}
+			return ExpectedHandlerError{OpKind: "TaskRunner", OpID: runner.ID}
 		}
-		return v, nil
-	}
-	// Start can return an ExpectedHandlerError from internal
-	// backpressure-yielding (a previously-queued task's gather handler
-	// returned an injected error). In that case the work was Free()'d
-	// and NOT queued; retry until Start either succeeds (nil) or
-	// returns a non-injected error.
+		return nil
+	})
+	return psg.NewTaskRunner0(taskPool, body)
+}
+
+// startTask dispatches a Plan TaskRunner. The TaskRunner was pre-built
+// in Run(); Start can return an ExpectedHandlerError from internal
+// backpressure-yielding (a previously-queued sink handler returned an
+// injected error). In that case the work was Free()'d and NOT queued;
+// retry until Start either succeeds or returns a non-injected error.
+func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx int) {
+	chk := assert.New(t)
+	runner := &c.TaskRunners[runnerIdx]
 	for {
-		var err error
-		switch destKind {
-		case SinkCombiner:
-			err = c.Combiners[destIdx].Start(ctx, taskPool, taskFn)
-		case SinkGatherer:
-			err = c.Gatherers[destIdx].Start(ctx, taskPool, taskFn)
-		}
+		err := runner.Start(ctx)
 		if err == nil {
 			return
 		}
@@ -326,51 +297,6 @@ func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx
 	}
 }
 
-// firstSubmit reports the first Submit step in a Func body, if any.
-// Used to determine a TaskRunner's destination sink for the
-// scatter-via-return adapter pattern.
-func (c *controller) firstSubmit(fn *Func) (SinkKind, int, bool) {
-	for _, step := range fn.Steps {
-		if s, ok := step.(Submit); ok {
-			return s.SinkKind, s.SinkIndex, true
-		}
-	}
-	return 0, 0, false
-}
-
-// executeBodyMinusSubmit walks a TaskRunner Body's Steps. Submit is
-// skipped (its target was promoted to the task's return destination).
-// StartTask is skipped (current API forbids scattering from a task
-// context). Subjob is allowed — it spawns its own psg.Pool, which is
-// a separate domain from the parent's.
-func (c *controller) executeBodyMinusSubmit(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
-	timer := timerp.Get()
-	defer timerp.Put(timer)
-	for _, step := range fn.Steps {
-		switch s := step.(type) {
-		case SelfTime:
-			d := c.drawDuration(s.Dist)
-			if d > 0 {
-				timerp.Reset(timer, d)
-				select {
-				case <-timer.C:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-		case Subjob:
-			c.runSubjob(ctx, t, s)
-		case Submit:
-			// Promoted to return destination; skip here.
-		case StartTask:
-			// Tasks can't scatter in current API; v1 generator
-			// doesn't emit StartTask inside TaskRunner bodies.
-		}
-	}
-	_ = v
-	return nil
-}
-
 // submitFresh handles a top-level Submit by constructing a fresh
 // simValue (no upstream context) and Submit-ing it to the target sink.
 func (c *controller) submitFresh(ctx context.Context, t assert.TestingT, s Submit) {
@@ -378,39 +304,22 @@ func (c *controller) submitFresh(ctx context.Context, t assert.TestingT, s Submi
 	c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
 }
 
-// submitTo routes a value into a Plan-level sink. The current API's
-// Submit panics on a "Group not supported in task context" check when
-// invoked from inside a worker, so we use the op's Start instead —
-// scattering a no-op task whose return value flows into the sink. This
-// matches the pre-rewrite sim's pattern. When the API gains worker-
-// safe Submit semantics post-Wave-5, this collapses back to direct
-// Submit.
-//
-// The scattered no-op task runs on TaskPools[0] for v1 simplicity; a
-// future refinement can route it through the calling op's bound
-// limiter for more honest concurrency accounting.
+// submitTo routes a value into a Plan-level sink. With Wave 3's task-
+// context-safe Submit, this is a thin wrapper around the op's Submit.
+// Retry on ExpectedHandlerError covers the case where Submit yields
+// for backpressure and a previously-queued sink handler returns an
+// injected error.
 func (c *controller) submitTo(
 	ctx context.Context, t assert.TestingT, kind SinkKind, idx int, v *simValue, valErr error,
 ) {
 	chk := assert.New(t)
-	if len(c.TaskPools) == 0 {
-		chk.Fail("no TaskPools available for submit-via-start adapter")
-		return
-	}
-	taskPool := c.TaskPools[0]
-	noopTask := func(_ context.Context) (*simValue, error) {
-		return v, valErr
-	}
-	// Retry on ExpectedHandlerError — Start can return one from
-	// internal backpressure-yielding, in which case the work was
-	// Free()'d and NOT queued. See startTask for the same pattern.
 	for {
 		var err error
 		switch kind {
 		case SinkCombiner:
-			err = c.Combiners[idx].Start(ctx, taskPool, noopTask)
+			err = c.Combiners[idx].Submit(ctx, v, valErr)
 		case SinkGatherer:
-			err = c.Gatherers[idx].Start(ctx, taskPool, noopTask)
+			err = c.Gatherers[idx].Submit(ctx, c.Pool, v, valErr)
 		default:
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
 			return
@@ -493,10 +402,24 @@ func (c *controller) newCombinerFactory(
 	}
 }
 
-// executeFunc walks a Func's Steps. SelfTime sleeps for the drawn
-// duration; Submit routes to the target sink; StartTask invokes the
-// runner; Subjob is v2.
+// executeFunc walks a Func's Steps from a context where new tasks may
+// be started (gather/combine handler bodies, top-level dispatch).
+// SelfTime sleeps for the drawn duration; Submit routes to the target
+// sink; StartTask dispatches a runner; Subjob spawns a nested Pool.
 func (c *controller) executeFunc(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
+	return c.executeFuncBody(ctx, t, fn, v, true)
+}
+
+// executeFuncInTask walks a Func's Steps from a task body. StartTask
+// is skipped because the current psg API forbids dispatching new work
+// from a task context (post-Wave-5 will relax this).
+func (c *controller) executeFuncInTask(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
+	return c.executeFuncBody(ctx, t, fn, v, false)
+}
+
+func (c *controller) executeFuncBody(
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, allowStartTask bool,
+) error {
 	chk := assert.New(t)
 	timer := timerp.Get()
 	defer timerp.Put(timer)
@@ -518,6 +441,9 @@ func (c *controller) executeFunc(ctx context.Context, t assert.TestingT, fn *Fun
 			}
 			c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
 		case StartTask:
+			if !allowStartTask {
+				continue
+			}
 			if !c.rollProb(s.Prob) {
 				continue
 			}

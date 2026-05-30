@@ -25,12 +25,13 @@ type PropagatedResult[T any] struct {
 	TraceContext trace.SpanContext
 }
 
-// PropagateTask wraps a Task to ensure trace context flows through task results.
-// The returned task function will extract any existing trace context from the incoming
-// context and attach it to the result for propagation.
+// PropagateTask wraps a value-returning task body so its result carries
+// the trace context from the calling ctx. The returned function is the
+// raw value-producing body — pair it with [Scatter] (or build your own
+// [psg.TaskRunner]) to dispatch.
 func PropagateTask[T any](
 	taskFn func(ctx context.Context) (T, error),
-) psgfn.Task[PropagatedResult[T]] {
+) func(ctx context.Context) (PropagatedResult[T], error) {
 	return func(ctx context.Context) (PropagatedResult[T], error) {
 		// Extract any existing trace context from incoming context
 		existingTraceCtx := trace.SpanFromContext(ctx).SpanContext()

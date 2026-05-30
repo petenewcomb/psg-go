@@ -14,17 +14,17 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// Gatherer represents an operation that executes tasks and collects their results.
+// Gatherer is a terminal sink: values arrive via Submit and are delivered
+// to the user-supplied gather function during Pool.Gather / Pool.GatherAll.
+// Task dispatch lives separately on [TaskRunner] — a Gatherer never runs
+// tasks of its own.
 //
-// Thread-safety and copying: A Gatherer value is designed to be copied. While
-// a single Gatherer value does not support concurrent calls to Start or
-// TryStart, copies of a Gatherer can be used concurrently. All copies share
-// the same gather function binding. This allows Gatherer values to be safely
-// passed by value to goroutines or stored in structures.
+// Thread-safety and copying: a Gatherer value is designed to be copied.
+// All copies share the same gather function binding, so they can be passed
+// by value to goroutines or stored in structures and used concurrently.
 type Gatherer[T any] struct {
 	gatherFn psgfn.Gather[T]
 	workPool *omnipool.Pool[gatherWork[T]]
-	taskPool *omnipool.Pool[gatherTask[T]]
 }
 
 func NewGatherer[T any](
@@ -36,96 +36,11 @@ func NewGatherer[T any](
 	return Gatherer[T]{
 		gatherFn: gatherFn,
 		workPool: omnipool.For[gatherWork[T]](),
-		taskPool: omnipool.For[gatherTask[T]](),
 	}
 }
 
-// Start initiates asynchronous execution of the provided task function in a
-// new goroutine. After the task completes, the task's result and error will be
-// passed to the Gatherer within a subsequent call to Start or any of the
-// gathering methods of [Pool] (i.e., [Pool.Gather], [Pool.TryGather],
-// [Pool.GatherAll], or [Pool.TryGatherAll]).
-//
-// Before launching a task, Start applies backpressure by gathering some
-// already-completed tasks. This happens regardless of concurrency limits and
-// helps maintain smooth execution flow. If a TaskPool is used, Start may also
-// block to ensure compliance with the concurrency limit, gathering additional
-// tasks until a slot becomes available. When scattering directly to a Pool,
-// tasks are not subject to any concurrency limit. The context passed to Start
-// may be used to cancel (e.g., with a timeout) both gathering and launch, but
-// only the context associated with the task's job will be passed to the task.
-//
-// WARNING: Start must not be called from within a Task launched the same
-// job as this may lead to deadlock when a concurrency limit is reached.
-// Instead, call Start from the associated Gather after the Task
-// completes.
-//
-// Start will panic if the given task pool is not yet associated with a job.
-// Start returns a non-nil error if the context is canceled or if a non-nil
-// error is returned by a gather function. If the returned error is non-nil, the
-// task function supplied to the call will not have been launched will therefore
-// also not result in a call to the Gatherer's gather function.
-//
-// See [Task] and [Gather] for important caveats and additional detail.
-func (g Gatherer[T]) Start(
-	ctx context.Context,
-	target TaskPoolOrJob,
-	taskFn psgfn.Task[T],
-) error {
-	traceRegion := "Gatherer.Start"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	ctx, meta := vetScatter(ctx, target, taskFn)
-	meta.Lock()
-	defer meta.Unlock()
-	group := meta.Group()
-	if group == workq.InvalidGroupID {
-		group = workq.NewGroupID()
-	}
-
-	work := g.newScatterWork(group, time.Time{}, target, taskFn)
-	return meta.ExecuteNowOrQueue(ctx, work)
-}
-
-// TryStart attempts to initiate asynchronous execution of the provided task
-// function in a new goroutine like [Start]. Like Start, it applies initial
-// backpressure by gathering some already-completed tasks. Unlike Start,
-// TryStart will return instead of blocking if the given target is a TaskPool
-// that is already at its concurrency limit.
-//
-// Returns (true, nil) if the task was successfully launched, (false, nil) if
-// a TaskPool was at its limit, and (false, non-nil) if the task could not be
-// launched for any other reason.
-//
-// See Start for more detail about how scattering works.
-func (g Gatherer[T]) TryStart(
-	ctx context.Context,
-	deadline time.Time,
-	target TaskPoolOrJob,
-	taskFn psgfn.Task[T],
-) (bool, error) {
-	traceRegion := "Gatherer.TryStart"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	ctx, meta := vetScatter(ctx, target, taskFn)
-	meta.Lock()
-	defer meta.Unlock()
-	group := meta.Group()
-	if group == workq.InvalidGroupID {
-		group = workq.NewGroupID()
-	}
-
-	work := g.newScatterWork(group, deadline, target, taskFn)
-	ok, err := meta.TryExecuteNow(ctx, deadline, work)
-	if !ok {
-		work.Free()
-	}
-	return ok, err
-}
-
-// Submit posts values to be gathered by the gather queue.
-// This follows the same pattern as Start but for posting gather work instead
-// of launching tasks.
+// Submit posts a value to the Gatherer's queue for later dispatch via
+// Pool.Gather / Pool.GatherAll.
 func (g Gatherer[T]) Submit(
 	ctx context.Context,
 	target *Pool,
@@ -169,17 +84,6 @@ func (g Gatherer[T]) TrySubmit(
 	}
 
 	return g.trySubmit(ctx, meta, target, group, value, err, deadline)
-}
-
-// newTask creates a new gather task that will execute the task and submit results
-func (g Gatherer[T]) newTask(group workq.GroupID, job *Pool, taskFn psgfn.Task[T]) boundTask {
-	pt := g.taskPool.Get()
-	pt.pool = g.taskPool
-	pt.group = group
-	pt.job = job
-	pt.taskFn = taskFn
-	pt.gatherer = g
-	return pt
 }
 
 // boundGatherWork interface allows type erasure for gatherWork instances
@@ -278,62 +182,3 @@ func (g Gatherer[T]) trySubmit(
 	}
 	return ok, err
 }
-
-func (g Gatherer[T]) newScatterWork(
-	group workq.GroupID,
-	deadline time.Time,
-	target TaskPoolOrJob,
-	taskFn psgfn.Task[T],
-) *gatherScatterWork {
-	traceRegion := "Gatherer.newScatterWork"
-
-	targetScatterWork := target.newScatterWork(group, deadline, g.newTask(group, target.getJob(), taskFn))
-	w := newGatherScatterWork(target.getJob(), group, deadline, targetScatterWork)
-
-	trace.Logf(context.Background(), traceRegion, "Gatherer created %v", w)
-	return w
-}
-
-type gatherScatterWork struct {
-	workq.Work
-	job      *Pool
-	deadline time.Time
-}
-
-func newGatherScatterWork(
-	job *Pool,
-	group workq.GroupID,
-	deadline time.Time,
-	targetScatterWork workq.Work,
-) *gatherScatterWork {
-	w := gatherScatterWorkPool.Get()
-	w.Work = targetScatterWork
-	w.job = job
-	w.deadline = deadline
-	return w
-}
-
-func (w *gatherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "gatherScatterWork.Execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
-
-	workFn := w.Work.Execute
-	bb := w.job.protoBB
-	if bb.ShouldBlock(ctx) != nil {
-		return w.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
-	}
-	return workFn(ctx, ex)
-}
-
-//nolint:contextcheck // background context used only for tracing
-func (w *gatherScatterWork) Free() {
-	traceRegion := "gatherScatterWork.Free"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
-
-	w.Work.Free()
-	gatherScatterWorkPool.Put(w)
-}
-
-var gatherScatterWorkPool = omnipool.For[gatherScatterWork]()

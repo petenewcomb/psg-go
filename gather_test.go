@@ -6,30 +6,22 @@ package psg_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGatherScatterNilTaskPanic(t *testing.T) {
+func TestNewTaskRunnerNilTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job)
 
-	chk.PanicsWithValue("task function must be non-nil", func() {
-		gatherer := psg.NewGatherer(
-			func(ctx context.Context, result int, err error) error {
-				return nil
-			},
-		)
-		_ = gatherer.Start(
-			ctx,
-			pool,
-			nil, // Nil Task should panic
-		)
+	chk.PanicsWithValue("task must be non-nil", func() {
+		// Nil Task should panic at construction.
+		psg.NewTaskRunner0(pool, nil)
 	})
 }
 
@@ -40,29 +32,7 @@ func TestGatherScatterNilGatherPanic(t *testing.T) {
 	})
 }
 
-func TestGatherTryScatterNilTaskPanic(t *testing.T) {
-	chk := assert.New(t)
-	ctx := context.Background()
-	job := psg.New(ctx)
-	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job)
-
-	chk.PanicsWithValue("task function must be non-nil", func() {
-		gatherer := psg.NewGatherer(
-			func(ctx context.Context, result int, err error) error {
-				return nil
-			},
-		)
-		_, _ = gatherer.TryStart(
-			ctx,
-			time.Time{},
-			pool,
-			nil, // Nil Task should panic
-		)
-	})
-}
-
-func TestGatherScatterGatherScatterFromTask(t *testing.T) {
+func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 	job := psg.New(ctx)
@@ -75,38 +45,24 @@ func TestGatherScatterGatherScatterFromTask(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Start(
-		ctx,
-		pool,
-		func(ctx context.Context) (int, error) {
-			chk.PanicsWithValue(
-				"Start called from task context but allowed only by top-level, gather, or combine context",
-				func() {
-					innerGatherOp := psg.NewGatherer(
-						func(ctx context.Context, result int, err error) error {
-							chk.NoError(err)
-							chk.Fail("should not get here")
-							return nil
-						},
-					)
-					chk.NoError(innerGatherOp.Start(
-						ctx,
-						pool,
-						func(ctx context.Context) (int, error) {
-							chk.Fail("should not get here")
-							return 0, nil
-						},
-					))
-				},
-			)
-			return 0, nil
-		},
-	)
-	chk.NoError(err)
+	innerRunner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		chk.Fail("should not get here")
+		return nil
+	}))
+	outerRunner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		chk.PanicsWithValue(
+			"Start called from task context but allowed only by top-level, gather, or combine context",
+			func() {
+				_ = innerRunner.Start(ctx)
+			},
+		)
+		return gatherer.Submit(ctx, job, 0, nil)
+	}))
+	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(job.CloseAndGatherAll(ctx))
 }
 
-func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
+func TestTaskCanStartTaskInSubJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 
@@ -125,52 +81,43 @@ func TestGatherScatterTaskCanGatherScatterToSubJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Start(
-		ctx,
-		parentPool,
-		func(ctx context.Context) (bool, error) {
-			// Create a sub-job inside the task
-			subJob := psg.New(ctx)
-			defer subJob.CancelAndWait()
-			subPool := psg.NewTaskPool(subJob)
+	outerRunner := psg.NewTaskRunner0(parentPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		// Create a sub-job inside the task
+		subJob := psg.New(ctx)
+		defer subJob.CancelAndWait()
+		subPool := psg.NewTaskPool(subJob)
 
-			// This should succeed - scattering a task to the sub-job's pool
-			gatherer := psg.NewGatherer(
-				func(ctx context.Context, result bool, err error) error {
-					chk.NoError(err)
-					chk.True(result)
-					return nil
-				},
-			)
-			err := gatherer.Start(
-				ctx,
-				subPool,
-				func(ctx context.Context) (bool, error) {
-					subJobTaskRan = true
-					return true, nil
-				},
-			)
-			chk.NoError(err)
+		// This should succeed - dispatching a task to the sub-job's pool
+		subGatherer := psg.NewGatherer(
+			func(ctx context.Context, result bool, err error) error {
+				chk.NoError(err)
+				chk.True(result)
+				return nil
+			},
+		)
+		subRunner := psg.NewTaskRunner0(subPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+			subJobTaskRan = true
+			return subGatherer.Submit(ctx, subJob, true, nil)
+		}))
+		chk.NoError(subRunner.Start(ctx))
 
-			// Gather all results in the sub-job
-			chk.NoError(subJob.CloseAndGatherAll(ctx))
+		// Gather all results in the sub-job
+		chk.NoError(subJob.CloseAndGatherAll(ctx))
 
-			return true, nil
-		},
-	)
+		return gatherer.Submit(ctx, parentJob, true, nil)
+	}))
 
-	chk.NoError(err)
+	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 
 	// Verify the sub-job task executed successfully
 	chk.True(subJobTaskRan, "The task in the sub-job should have run")
 }
 
-func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
+func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 
-	// Create parent job with pool
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentPool := psg.NewTaskPool(parentJob)
@@ -182,45 +129,28 @@ func TestGatherScatterTaskCannotGatherScatterToParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Start(
-		ctx,
-		parentPool,
-		func(ctx context.Context) (bool, error) {
-			// This should panic - attempting to scatter to the parent job's pool
-			// while inside a task of that same job
-			innerGather := psg.NewGatherer(
-				func(ctx context.Context, result bool, err error) error {
-					chk.Fail("Should not get here - parent pool gather should not run")
-					return nil
-				},
-			)
-			chk.PanicsWithValue(
-				"Start called from task context but allowed only by top-level, gather, or combine context",
-				func() {
-					_ = innerGather.Start(
-						ctx,
-						parentPool,
-						func(ctx context.Context) (bool, error) {
-							chk.Fail("Should not get here - parent pool task should not run")
-							return false, nil
-						},
-					)
-				},
-			)
+	innerRunner := psg.NewTaskRunner0(parentPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		chk.Fail("should not get here - parent pool task should not run")
+		return nil
+	}))
+	outerRunner := psg.NewTaskRunner0(parentPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		chk.PanicsWithValue(
+			"Start called from task context but allowed only by top-level, gather, or combine context",
+			func() {
+				_ = innerRunner.Start(ctx)
+			},
+		)
+		return gatherer.Submit(ctx, parentJob, true, nil)
+	}))
 
-			return true, nil
-		},
-	)
-
-	chk.NoError(err)
+	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }
 
-func TestGatherScatterTaskCannotGather(t *testing.T) {
+func TestTaskCannotGather(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 
-	// Create parent job with pool
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
 	pool := psg.NewTaskPool(job)
@@ -232,26 +162,21 @@ func TestGatherScatterTaskCannotGather(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Start(
-		ctx,
-		pool,
-		func(ctx context.Context) (bool, error) {
-			chk.PanicsWithValue("Gather called from task context but allowed only by top-level or gather context", func() {
-				_, _ = job.TryGather(ctx)
-			})
-			return true, nil
-		},
-	)
+	runner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		chk.PanicsWithValue("Gather called from task context but allowed only by top-level or gather context", func() {
+			_, _ = job.TryGather(ctx)
+		})
+		return gatherer.Submit(ctx, job, true, nil)
+	}))
 
-	chk.NoError(err)
+	chk.NoError(runner.Start(ctx))
 	chk.NoError(job.CloseAndGatherAll(ctx))
 }
 
-func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
+func TestTaskCannotGatherParentJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 
-	// Create parent job with pool
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
 	parentPool := psg.NewTaskPool(parentJob)
@@ -263,42 +188,29 @@ func TestGatherScatterTaskCannotGatherParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	err := gatherer.Start(
-		ctx,
-		parentPool,
-		func(ctx context.Context) (bool, error) {
-			// Create a sub-job inside the task
-			subJob := psg.New(ctx)
-			defer subJob.CancelAndWait()
-			subPool := psg.NewTaskPool(subJob)
+	outerRunner := psg.NewTaskRunner0(parentPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		subJob := psg.New(ctx)
+		defer subJob.CancelAndWait()
+		subPool := psg.NewTaskPool(subJob)
 
-			// This should succeed - scattering a task to the sub-job's pool
-			gatherer := psg.NewGatherer(
-				func(ctx context.Context, result bool, err error) error {
-					chk.NoError(err)
-					chk.True(result)
-					return nil
-				},
-			)
-			err := gatherer.Start(
-				ctx,
-				subPool,
-				func(ctx context.Context) (bool, error) {
-					chk.PanicsWithValue("Context belongs to a child job", func() {
-						_, _ = parentJob.TryGather(ctx)
-					})
-					return true, nil
-				},
-			)
-			chk.NoError(err)
+		subGatherer := psg.NewGatherer(
+			func(ctx context.Context, result bool, err error) error {
+				chk.NoError(err)
+				chk.True(result)
+				return nil
+			},
+		)
+		subRunner := psg.NewTaskRunner0(subPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+			chk.PanicsWithValue("Context belongs to a child job", func() {
+				_, _ = parentJob.TryGather(ctx)
+			})
+			return subGatherer.Submit(ctx, subJob, true, nil)
+		}))
+		chk.NoError(subRunner.Start(ctx))
+		chk.NoError(subJob.CloseAndGatherAll(ctx))
+		return gatherer.Submit(ctx, parentJob, true, nil)
+	}))
 
-			// Gather all results in the sub-job
-			chk.NoError(subJob.CloseAndGatherAll(ctx))
-
-			return true, nil
-		},
-	)
-
-	chk.NoError(err)
+	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentJob.CloseAndGatherAll(ctx))
 }

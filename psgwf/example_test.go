@@ -48,14 +48,16 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		err := resultGather.Start(clientCtx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
-			select {
-			case <-time.After(sleepTime):
-				return fmt.Sprintf("[%s] completed", requestID), nil
-			case <-wf.Ctx().Done():
-				return "", fmt.Errorf("[%s] cancelled", requestID)
-			}
-		})
+		runner := psgwf.NewGenericTaskRunner(pool, resultGather, wf,
+			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+				select {
+				case <-time.After(sleepTime):
+					return fmt.Sprintf("[%s] completed", requestID), nil
+				case <-wf.Ctx().Done():
+					return "", fmt.Errorf("[%s] cancelled", requestID)
+				}
+			})
+		err := runner.Start(clientCtx)
 
 		if err != nil {
 			mu.Lock()

@@ -5,7 +5,6 @@ package psgwf
 
 import (
 	"context"
-	"time"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
@@ -23,33 +22,13 @@ func NewGatherer[T, C any](gatherFn GenericGatherFunc[T, C]) GenericGatherOp[T, 
 	return GenericGatherOp[T, C](psg.NewGatherer(wrapGatherFunc(gatherFn)))
 }
 
-func (g GenericGatherOp[T, C]) Start(ctx context.Context, pool *psg.TaskPool,
-	wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) error {
-	_, err := scatter(ctx, pool, wf, taskFn,
-		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[T, C]]) (bool, error) {
-			err := g.inner().Start(ctx, pool, taskFn)
-			return err == nil, err
-		},
-	)
-	return err
-}
-
-func (g GenericGatherOp[T, C]) TryStart(ctx context.Context, deadline time.Time,
-	pool *psg.TaskPool, wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) (bool, error) {
-	return scatter(ctx, pool, wf, taskFn,
-		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[T, C]]) (bool, error) {
-			return g.inner().TryStart(ctx, deadline, pool, taskFn)
-		},
-	)
-}
-
 func (g GenericGatherOp[T, C]) inner() psg.Gatherer[result[T, C]] {
 	return psg.Gatherer[result[T, C]](g)
 }
 
 func wrapGatherFunc[T, C any](gatherFn GenericGatherFunc[T, C]) psgfn.Gather[result[T, C]] {
 	return func(ctx context.Context, res result[T, C], err error) error {
-		// Reference happened in scatter (in scatter.go)
+		// Reference happened in GenericTaskRunner.Start (in scatter.go).
 		defer res.Workflow.unref(ctx)
 		return gatherFn(ctx, res.Workflow, res.Value, err)
 	}

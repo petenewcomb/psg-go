@@ -39,9 +39,11 @@ func Example_simple() {
 	wf := psgwf.New(ctx)
 
 	// Start a task
-	err := gatherer.Start(ctx, pool, wf, func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
-		return "Hello from workflow", nil
-	})
+	runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
+			return "Hello from workflow", nil
+		})
+	err := runner.Start(ctx)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}

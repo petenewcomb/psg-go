@@ -16,7 +16,7 @@ import (
 func MetricsTask[T any](
 	metricName string,
 	taskFn func(ctx context.Context) (T, error),
-) psgfn.Task[T] {
+) func(ctx context.Context) (T, error) {
 	return func(ctx context.Context) (T, error) {
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")

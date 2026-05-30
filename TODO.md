@@ -17,6 +17,15 @@ Items to complete before merging to main branch.
 - Maybe remove psg prefixes from psg-go subfolders, but leave the prefixes in the package names?
 - should combiner concurrency limits be specified per-combineop instead of or in addition to the combiner pool?
 
+### Wave 3 follow-ups
+- **Migrate the combiner throughput benchmark to the Wave 3 API.** The
+  pre-Wave-3 benchmark in `combiner_test.go` was lifted out to
+  `combiner_legacy_bench_test.go` behind the `psg_wave3_legacy_bench`
+  build tag because the value-returning Task shape is gone. Per
+  REFACTOR_PLAN.md (combiner-benchmark requirements session), this
+  needs a dedicated design pass — what metrics we still want to track
+  in the new model — before being brought back online.
+
 ### 6. Implementation improvements
 - **Change `rdvq.RenotifyFunc` to a `Renotifier` interface** so the infrastructure can free pooled renotifier objects in all cases (not just when invoked). The remaining workaround is in `wrappedRenotify` (rdvq/notifier.go) which self-frees inside its renotify callback — works on invocation, leaks on replacement/discard. Less urgent now that the orphan task queue and `orphanedTaskRenotify` are gone. See WORKING_NOTES "Renotifier lifecycle". Files: `internal/rdvq/notifier.go`, `internal/rdvq/waiters.go`, all `Notify()` callsites.
 - **Add deadline field to `taskPostWork`** and use it in the blocking post path. Currently `newTaskPostWork()` receives the parameter but doesn't store or use it; sibling scatter work types do. See WORKING_NOTES "Deadline propagation in taskPostWork".
@@ -51,6 +60,7 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - fix addWork ugliness
 - fix inconsistencies between refcounting (and pooling) implementations: semantics re locking, naming, etc.
 - consider whether any atomic.Int64s should instead be atomic.Int32 (e.g. InFlightCounter, concurrency tracking in sim/run.go)
+- consider whether to use hierarchical timing wheels to avoid O(log n) heap overhead of go-native Timers, esp. for Flush.
 
 ### Performance Optimizations
 - Promote affinity between combiner goroutines and specific combiner instances to improve cache locality.

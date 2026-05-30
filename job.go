@@ -790,9 +790,13 @@ func (j *Pool) runTasks() {
 				}
 			}
 
-			// Execute the task
+			// Execute the task. Publish the task's group on the exEnv so
+			// user-facing Submit calls from inside the task body inherit
+			// that group instead of allocating a fresh one.
 			func() {
 				defer task.Free(j)
+				exEnv.group = task.Group()
+				defer func() { exEnv.group = workq.InvalidGroupID }()
 				task.Execute(ctx, exEnv.Sender())
 			}()
 			task = nil

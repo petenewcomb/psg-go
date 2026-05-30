@@ -51,19 +51,21 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	taskPool := psg.NewTaskPool(job)
 
+	newRunner := func(value int) psg.TaskRunner0 {
+		return psg.NewTaskRunner0(taskPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+			return combineOp.Submit(ctx, value, nil)
+		}))
+	}
+
 	// Send one input
-	err := combineOp.Start(ctx, taskPool, func(ctx context.Context) (int, error) {
-		return 1, nil
-	})
+	err := newRunner(1).Start(ctx)
 	chk.NoError(err)
 
 	// Wait a bit to let the first task be processed
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a second input to potentially trigger timer checking
-	err = combineOp.Start(ctx, taskPool, func(ctx context.Context) (int, error) {
-		return 2, nil
-	})
+	err = newRunner(2).Start(ctx)
 	chk.NoError(err)
 
 	// Wait for flush to happen due to maxHoldTime

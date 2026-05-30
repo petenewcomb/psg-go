@@ -62,7 +62,8 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		err := gatherer.Start(ctx, pool, wf, newRequestTaskFn(requestID))
+		runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf, newRequestTaskFn(requestID))
+		err := runner.Start(ctx)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}

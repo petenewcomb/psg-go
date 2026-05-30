@@ -12,13 +12,12 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// TracedTask adds spans with the given operation name to a task function.
-// This builds on PropagateTask, adding explicit span creation while maintaining
-// trace context propagation.
+// TracedTask adds a span with the given operation name to a task body
+// and propagates trace context through the result.
 func TracedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psgfn.Task[PropagatedResult[T]] {
+) func(ctx context.Context) (PropagatedResult[T], error) {
 	// Use the base propagator first
 	propagatedTask := PropagateTask(taskFn)
 
@@ -103,7 +102,7 @@ func TracedCombiner[T any](
 func WithTaskTracing[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psgfn.Task[T] {
+) func(ctx context.Context) (T, error) {
 	return func(ctx context.Context) (T, error) {
 		// Create span with meaningful name
 		tracer := otel.Tracer("otpsg")

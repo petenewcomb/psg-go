@@ -10,12 +10,13 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// InstrumentedTask combines tracing, metrics, and logging for tasks into a single wrapper.
-// This provides a convenient way to apply all instrumentation at once.
+// InstrumentedTask combines tracing, metrics, and logging for tasks into a
+// single wrapper. Returns a value-producing task body; pair it with a sink
+// Gatherer via [Scatter] (or build your own [psg.TaskRunner]) to dispatch.
 func InstrumentedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
-) psgfn.Task[PropagatedResult[T]] {
+) func(ctx context.Context) (PropagatedResult[T], error) {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedTask := LoggedTask(operationName, taskFn)
@@ -62,21 +63,38 @@ func InstrumentedCombiner[T any](
 	return TracedCombiner(combineOpName, flushOpName, metricsCombiner)
 }
 
-// InstrumentedScatter is a convenience method that takes instrumented components
-// and performs a scatter operation. This avoids the need for the user to manage
-// the propagated result types manually.
+// Scatter wraps the value-producing task in a one-shot [psg.TaskRunner0]
+// that submits the result to gather, and dispatches it. This replaces
+// the pre-Wave-3 pattern of [psg.Gatherer].Start on an
+// instrumented-task value.
 //
 // Example:
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFn)
 //	gatherer := otpsg.InstrumentedGather("handle-result", myGatherFn)
-//	// Instead of gatherer.Start(ctx, pool, task), use:
-//	err := otpsg.InstrumentedScatter(ctx, pool, task, gatherer)
-func InstrumentedScatter[T any](
+//	err := otpsg.Scatter(ctx, job, gatherer, task)
+func Scatter[T any](
 	ctx context.Context,
 	target psg.TaskPoolOrJob,
-	task psgfn.Task[PropagatedResult[T]],
 	gather psg.Gatherer[PropagatedResult[T]],
+	task func(context.Context) (PropagatedResult[T], error),
 ) error {
-	return gather.Start(ctx, target, task)
+	pool := poolOf(target)
+	runner := psg.NewTaskRunner0(target, psgfn.TaskFunc0(func(ctx context.Context) error {
+		result, err := task(ctx)
+		return gather.Submit(ctx, pool, result, err)
+	}))
+	return runner.Start(ctx)
+}
+
+// poolOf returns the *psg.Pool backing a [psg.TaskPoolOrJob].
+func poolOf(target psg.TaskPoolOrJob) *psg.Pool {
+	switch p := target.(type) {
+	case *psg.Pool:
+		return p
+	case *psg.TaskPool:
+		return p.Pool()
+	default:
+		panic("unsupported psg.TaskPoolOrJob implementation")
+	}
 }

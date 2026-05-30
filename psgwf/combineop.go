@@ -5,10 +5,8 @@ package psgwf
 
 import (
 	"context"
-	"time"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 type GenericCombineOp[T, C any] psg.Combiner[result[T, C]]
@@ -31,31 +29,6 @@ func NewCombineOp[T, C any](
 		combinerPool,
 		wrapCombinerFactory(combinerFactory),
 	))
-}
-
-func (c GenericCombineOp[T, C]) Start(ctx context.Context, pool *psg.TaskPool,
-	wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) error {
-	_, err := scatterTask(ctx, pool, wf, taskFn,
-		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[T, C]]) (bool, error) {
-			err := c.inner().Start(ctx, pool, taskFn)
-			return err == nil, err
-		},
-	)
-	return err
-}
-
-func (c GenericCombineOp[T, C]) TryStart(
-	ctx context.Context,
-	deadline time.Time,
-	pool *psg.TaskPool,
-	wf *GenericWorkflow[C],
-	taskFn GenericTaskFunc[T, C],
-) (bool, error) {
-	return scatterTask(ctx, pool, wf, taskFn,
-		func(ctx context.Context, pool *psg.TaskPool, taskFn psgfn.Task[result[T, C]]) (bool, error) {
-			return c.inner().TryStart(ctx, deadline, pool, taskFn)
-		},
-	)
 }
 
 func (c GenericCombineOp[T, C]) inner() *psg.Combiner[result[T, C]] {

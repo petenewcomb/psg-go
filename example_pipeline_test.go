@@ -48,16 +48,10 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Run digesting tasks in a Pool limited to the number of cores available to
 	// the program, since it should be CPU-bound.
 	digesterPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(runtime.GOMAXPROCS(-1)))
-	newDigestingTaskFn := func(data []byte) psgfn.Task[[md5.Size]byte] {
-		return func(ctx context.Context) ([md5.Size]byte, error) {
-			//nolint:gosec // non-cryptographic use case
-			return md5.Sum(data), nil
-		}
-	}
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestGatherOp := func(path string) psg.Gatherer[[md5.Size]byte] {
+	newDigestGatherer := func(path string) psg.Gatherer[[md5.Size]byte] {
 		return psg.NewGatherer(
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
@@ -66,24 +60,34 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		)
 	}
 
+	newDigestingRunner := func(path string, data []byte) psg.TaskRunner0 {
+		gatherer := newDigestGatherer(path)
+		return psg.NewTaskRunner0(digesterPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+			//nolint:gosec // non-cryptographic use case
+			return gatherer.Submit(ctx, job, md5.Sum(data), nil)
+		}))
+	}
+
+	// Creates a gatherer for a reading task whose handler dispatches a
+	// digesting task with the bytes that were read.
+	newReadGatherer := func(path string) psg.Gatherer[[]byte] {
+		return psg.NewGatherer(
+			func(ctx context.Context, data []byte, err error) error {
+				return newDigestingRunner(path, data).Start(ctx)
+			},
+		)
+	}
+
 	// No need for a pool to limit how many file reading tasks run concurrently
 	// since they should be I/O-bound and will be subject to backpressure from
 	// the digesters.
-	newReadingTaskFn := func(path string) psgfn.Task[[]byte] {
-		return func(ctx context.Context) ([]byte, error) {
+	newReadingRunner := func(path string) psg.TaskRunner0 {
+		gatherer := newReadGatherer(path)
+		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
-			return os.ReadFile(path)
-		}
-	}
-
-	// Creates gathers for reading tasks that launch digesting tasks.
-	newReadGatherOp := func(path string) psg.Gatherer[[]byte] {
-		return psg.NewGatherer(
-			func(ctx context.Context, data []byte, err error) error {
-				return newDigestGatherOp(path).
-					Start(ctx, digesterPool, newDigestingTaskFn(data))
-			},
-		)
+			data, err := os.ReadFile(path)
+			return gatherer.Submit(ctx, job, data, err)
+		}))
 	}
 
 	// Walk the tree and launch a reading task for each regular file.
@@ -94,7 +98,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadGatherOp(path).Start(ctx, job, newReadingTaskFn(path))
+		return newReadingRunner(path).Start(ctx)
 	})
 	if err != nil {
 		return nil, err

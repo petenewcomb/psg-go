@@ -192,18 +192,22 @@ func (ee *baseExEnv) Release() {
 
 type taskExEnv struct {
 	baseExEnv
+	// group is the GroupID of the task currently executing on the worker
+	// that owns this exEnv. Set by the worker loop before invoking the
+	// task body and cleared after; user-facing Submit calls from inside
+	// the task pick it up via Group() so submissions ride on the task's
+	// group rather than always allocating a fresh one.
+	group workq.GroupID
 }
 
-func (ee *taskExEnv) Lock() {
-	panic("Lock not supported in task context")
-}
-
-func (ee *taskExEnv) Unlock() {
-	panic("Unlock not supported in task context")
-}
+// Lock/Unlock are no-ops in task context: the exEnv is per-worker and
+// the worker runs one task body at a time, so cross-goroutine
+// serialization isn't needed (matching integrationExEnv).
+func (ee *taskExEnv) Lock()   {}
+func (ee *taskExEnv) Unlock() {}
 
 func (ee *taskExEnv) Group() workq.GroupID {
-	panic("Group not supported in task context")
+	return ee.group
 }
 
 func (ee *taskExEnv) PushGroup(workq.GroupID) {

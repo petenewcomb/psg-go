@@ -28,18 +28,6 @@ func ExampleCombiner() {
 
 	var inFlight atomic.Int32
 
-	// Define a factory to bind task-specific inputs and resources into a
-	// generic task function
-	newTaskFn := func(number int, delay time.Duration, result string) psgfn.Task[string] {
-		return func(context.Context) (string, error) {
-			// Simulate a long-running task
-			clock.Sleep(delay)
-			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
-				msSinceStart(), number, delay, result, inFlight.Add(-1))
-			return result, nil
-		}
-	}
-
 	// Define the results array
 	var results []map[string]int
 
@@ -97,6 +85,18 @@ func ExampleCombiner() {
 	combineOp := psg.NewCombiner(combinerPool, newAccumulator)
 	defer combineOp.Close()
 
+	// Build a TaskRunner factory: the task body submits its result to
+	// combineOp from inside the task context.
+	newRunner := func(number int, delay time.Duration, result string) psg.TaskRunner0 {
+		return psg.NewTaskRunner0(taskPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+			// Simulate a long-running task
+			clock.Sleep(delay)
+			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
+				msSinceStart(), number, delay, result, inFlight.Add(-1))
+			return combineOp.Submit(ctx, result, nil)
+		}))
+	}
+
 	// Launch some tasks
 	fmt.Println("starting job")
 	for i, spec := range []struct {
@@ -109,7 +109,7 @@ func ExampleCombiner() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, combine at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, combine at 100ms
 	} {
-		err := combineOp.Start(ctx, taskPool, newTaskFn(i+1, spec.delay, spec.result))
+		err := newRunner(i+1, spec.delay, spec.result).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

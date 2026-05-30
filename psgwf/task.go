@@ -5,20 +5,14 @@ package psgwf
 
 import (
 	"context"
-
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
+// GenericTaskFunc is the user-supplied body of a workflow-aware task.
+// Each invocation receives the workflow it was dispatched from; results
+// are returned by value and routed downstream by the framework wrapper
+// that owns the task ([GenericTaskRunner] etc.).
 type GenericTaskFunc[T, C any] func(context.Context, *GenericWorkflow[C]) (T, error)
 type TaskFunc[T any] = GenericTaskFunc[T, Context]
-
-func wrapTaskFunc[T, C any](wf *GenericWorkflow[C], taskFn GenericTaskFunc[T, C]) psgfn.Task[result[T, C]] {
-	return func(ctx context.Context) (res result[T, C], err error) {
-		res.Workflow = wf
-		res.Value, err = taskFn(ctx, wf)
-		return
-	}
-}
 
 type result[T, C any] struct {
 	Workflow *GenericWorkflow[C]

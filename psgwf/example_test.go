@@ -13,7 +13,6 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -25,7 +24,8 @@ func Example() {
 	defer job.CancelAndWait()
 
 	// Create a task pool
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
+	pool := job
+	poolLimit := psg.NewSemaphore(10)
 
 	// Track completed operations for ordered output
 	var mu sync.Mutex
@@ -56,7 +56,7 @@ func Example() {
 				case <-wf.Ctx().Done():
 					return "", fmt.Errorf("[%s] cancelled", requestID)
 				}
-			})
+			}, psg.WithLimits(poolLimit))
 		err := runner.Start(clientCtx)
 
 		if err != nil {

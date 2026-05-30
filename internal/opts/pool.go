@@ -11,7 +11,3 @@ type MaxConcurrency struct {
 func (o MaxConcurrency) applyToCombinerPool(c *CombinerPoolConfigChanges) {
 	c.MaxConcurrency = &o.Max
 }
-
-func (o MaxConcurrency) applyToTaskPool(c taskPoolConfig) {
-	c.SetMaxConcurrency(o.Max)
-}

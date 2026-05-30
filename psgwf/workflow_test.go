@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	psg "github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 	"github.com/stretchr/testify/assert"
 )
@@ -47,7 +46,8 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	}
 
 	// Create a simple task to ensure workflow is used
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
+	pool := job
+	poolLimit := psg.NewSemaphore(1)
 	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
@@ -55,7 +55,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
-		})
+		}, psg.WithLimits(poolLimit))
 	err := runner.Start(context.Background())
 	assert.NoError(t, err)
 
@@ -93,7 +93,8 @@ func TestWorkflowAfterFunc(t *testing.T) {
 func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	job := psg.New(context.Background())
 	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
+	pool := job
+	poolLimit := psg.NewSemaphore(2)
 
 	// Track execution
 	var afterFuncRan, newTaskRan bool
@@ -122,7 +123,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		runner := psgwf.NewGenericTaskRunner(pool, gatherer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
-			})
+			}, psg.WithLimits(poolLimit))
 		err := runner.Start(ctx)
 		assert.NoError(t, err)
 	})
@@ -135,7 +136,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	outerRunner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
-		})
+		}, psg.WithLimits(poolLimit))
 	err := outerRunner.Start(context.Background())
 	assert.NoError(t, err)
 

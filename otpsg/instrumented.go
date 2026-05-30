@@ -64,8 +64,9 @@ func InstrumentedCombiner[T any](
 }
 
 // Scatter wraps the value-producing task in a one-shot [psg.TaskRunner0]
-// that submits the result to gather, and dispatches it. This replaces
-// the pre-Wave-3 pattern of [psg.Gatherer].Start on an
+// that submits the result to gather, and dispatches it. Pass psg op
+// options (e.g. [psg.WithLimits]) via opts to throttle dispatch. This
+// replaces the pre-Wave-3 pattern of [psg.Gatherer].Start on an
 // instrumented-task value.
 //
 // Example:
@@ -75,26 +76,14 @@ func InstrumentedCombiner[T any](
 //	err := otpsg.Scatter(ctx, job, gatherer, task)
 func Scatter[T any](
 	ctx context.Context,
-	target psg.TaskPoolOrJob,
+	pool *psg.Pool,
 	gather psg.Gatherer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
+	opts ...psg.OpOption,
 ) error {
-	pool := poolOf(target)
-	runner := psg.NewTaskRunner0(target, psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return gather.Submit(ctx, pool, result, err)
-	}))
+	}), opts...)
 	return runner.Start(ctx)
-}
-
-// poolOf returns the *psg.Pool backing a [psg.TaskPoolOrJob].
-func poolOf(target psg.TaskPoolOrJob) *psg.Pool {
-	switch p := target.(type) {
-	case *psg.Pool:
-		return p
-	case *psg.TaskPool:
-		return p.Pool()
-	default:
-		panic("unsupported psg.TaskPoolOrJob implementation")
-	}
 }

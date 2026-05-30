@@ -10,9 +10,9 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// GenericTaskRunner dispatches a workflow-aware task onto a [psg.TaskPool].
-// The runner owns the workflow ref/unref lifecycle: each [Start] takes one
-// reference to the workflow; the matching unref happens when the
+// GenericTaskRunner dispatches a workflow-aware task onto a [psg.Pool].
+// The runner owns the workflow ref/unref lifecycle: each [Start] takes
+// one reference to the workflow; the matching unref happens when the
 // downstream Gatherer (or Combiner) sink processes the result that the
 // task produces.
 //
@@ -33,37 +33,42 @@ type TaskRunner[T any] = GenericTaskRunner[T, Context]
 
 // NewGenericTaskRunner constructs a [GenericTaskRunner] that dispatches
 // taskFn against pool, wrapping the workflow context propagation and
-// downstream submission to the supplied Gatherer sink.
+// downstream submission to the supplied Gatherer sink. Pass psg op
+// options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 func NewGenericTaskRunner[T, C any](
-	pool *psg.TaskPool,
+	pool *psg.Pool,
 	sink GenericGatherOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
+	opts ...psg.OpOption,
 ) GenericTaskRunner[T, C] {
-	return newGenericTaskRunner(pool, wf, taskFn, func(ctx context.Context, value T, err error) error {
-		return sink.inner().Submit(ctx, pool.Pool(), result[T, C]{Workflow: wf, Value: value}, err)
+	return newGenericTaskRunner(pool, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
+		return sink.inner().Submit(ctx, pool, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
 // NewGenericTaskRunnerForCombiner constructs a [GenericTaskRunner] that
 // dispatches taskFn against pool, wrapping workflow context propagation
-// and forwarding the result to the supplied Combiner sink.
+// and forwarding the result to the supplied Combiner sink. Pass psg op
+// options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 func NewGenericTaskRunnerForCombiner[T, C any](
-	pool *psg.TaskPool,
+	pool *psg.Pool,
 	sink GenericCombineOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
+	opts ...psg.OpOption,
 ) GenericTaskRunner[T, C] {
 	combiner := sink.inner()
-	return newGenericTaskRunner(pool, wf, taskFn, func(ctx context.Context, value T, err error) error {
+	return newGenericTaskRunner(pool, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
 		return combiner.Submit(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
 func newGenericTaskRunner[T, C any](
-	pool *psg.TaskPool,
+	pool *psg.Pool,
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
+	opts []psg.OpOption,
 	submitFn func(context.Context, T, error) error,
 ) GenericTaskRunner[T, C] {
 	body := psgfn.TaskFunc0(func(ctx context.Context) error {
@@ -71,7 +76,7 @@ func newGenericTaskRunner[T, C any](
 		return submitFn(ctx, value, taskErr)
 	})
 	return GenericTaskRunner[T, C]{
-		inner: psg.NewTaskRunner0(pool, body),
+		inner: psg.NewTaskRunner0(pool, body, opts...),
 		wf:    wf,
 	}
 }

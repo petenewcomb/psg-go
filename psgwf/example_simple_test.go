@@ -11,7 +11,6 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -22,7 +21,8 @@ func Example_simple() {
 	defer job.CancelAndWait()
 
 	// Create a task pool
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
+	pool := job
+	poolLimit := psg.NewSemaphore(10)
 
 	// Create a gather
 	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
@@ -42,7 +42,7 @@ func Example_simple() {
 	runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
-		})
+		}, psg.WithLimits(poolLimit))
 	err := runner.Start(ctx)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

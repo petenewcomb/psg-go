@@ -15,7 +15,7 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// TaskRunner0 dispatches a no-argument [psgfn.Task0] onto its target's
+// TaskRunner0 dispatches a no-argument [psgfn.Task0] onto its Pool's
 // worker pool. Each call to [TaskRunner0.Start] (or
 // [TaskRunner0.TryStart]) launches one Run invocation. Result delivery
 // is the task body's responsibility — Run calls Submit on whatever
@@ -23,33 +23,39 @@ import (
 // framework routes it through an internal sink so it surfaces via the
 // owning Pool's [Pool.GatherAll].
 //
+// Concurrency limiting: pass [WithLimits] at construction time to bind
+// a [Limiter] (e.g. via [NewSemaphore]) that caps the number of
+// in-flight dispatches.
+//
 // Thread-safety and copying: a TaskRunner value is designed to be
-// copied. All copies share the same binding to target, task, and
-// internal error sink, so they can be passed by value or stored in
-// structures and used concurrently.
+// copied. All copies share the same binding to Pool, task, limiter
+// (if any), and internal error sink, so they can be passed by value or
+// stored in structures and used concurrently.
 type TaskRunner0 struct {
-	target   TaskPoolOrJob
-	job      *Pool
+	pool     *Pool
 	task     psgfn.Task0
+	limiter  Limiter
 	errSink  Gatherer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork0]
 }
 
-// NewTaskRunner0 binds a [psgfn.Task0] to a target (a [TaskPool] or a
-// [Pool]) and returns a [TaskRunner0]. The framework manages an
-// internal error sink that surfaces unexpected errors returned by
-// Task.Run through the Pool's GatherAll path.
-func NewTaskRunner0(target TaskPoolOrJob, task psgfn.Task0) TaskRunner0 {
-	if target == nil {
-		panic("target must be non-nil")
+// NewTaskRunner0 binds a [psgfn.Task0] to a [Pool] and returns a
+// [TaskRunner0]. Pass [WithLimits] in opts to bind one or more
+// [Limiter]s that throttle dispatch. The framework manages an internal
+// error sink that surfaces unexpected errors returned by Task.Run
+// through the Pool's GatherAll path.
+func NewTaskRunner0(pool *Pool, task psgfn.Task0, opts ...OpOption) TaskRunner0 {
+	if pool == nil {
+		panic("pool must be non-nil")
 	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
+	cfg := resolveOpConfig(opts)
 	return TaskRunner0{
-		target:   target,
-		job:      target.getJob(),
+		pool:     pool,
 		task:     task,
+		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
 		workPool: omnipool.For[taskRunnerWork0](),
 	}
@@ -72,11 +78,13 @@ func NewTaskRunner0(target TaskPoolOrJob, task psgfn.Task0) TaskRunner0 {
 // instead. Start attempts to detect this and panics, but the detection
 // works only when the ctx passed to Start descends from the ctx passed
 // to Run.
+//
+//nolint:contextcheck // background context used only for tracing
 func (r TaskRunner0) Start(ctx context.Context) error {
 	traceRegion := "TaskRunner0.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.target)
+	ctx, meta := vetStart(ctx, r.pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -88,15 +96,17 @@ func (r TaskRunner0) Start(ctx context.Context) error {
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch the task without blocking. Returns
-// (true, nil) on success, (false, nil) if a [TaskPool] was at its limit
-// (and the wait would have exceeded the deadline), or (false, non-nil)
-// for any other failure.
+// TryStart attempts to launch the task without blocking past deadline.
+// Returns (true, nil) on success, (false, nil) if a [Limiter] held the
+// dispatch back and the deadline expired before a permit became
+// available, or (false, non-nil) for any other failure.
+//
+//nolint:contextcheck // background context used only for tracing
 func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, error) {
 	traceRegion := "TaskRunner0.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.target)
+	ctx, meta := vetStart(ctx, r.pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -114,14 +124,19 @@ func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, er
 
 func (r TaskRunner0) newScatterWork(group workq.GroupID, deadline time.Time) *taskRunnerScatterWork {
 	inner := r.newTask(group)
-	targetWork := r.target.newScatterWork(group, deadline, inner)
-	return newTaskRunnerScatterWork(r.job, deadline, targetWork)
+	taskWork := r.pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	postWork := r.pool.newTaskPostWork(group, deadline, taskWork)
+	gated := postWork
+	if r.limiter.impl != nil {
+		gated = newLimiterScatterWork(r.pool, deadline, gated, r.limiter)
+	}
+	return newTaskRunnerScatterWork(r.pool, deadline, gated)
 }
 
 func (r TaskRunner0) newTask(group workq.GroupID) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
-	w.job = r.job
+	w.job = r.pool
 	w.group = group
 	w.task = r.task
 	w.errSink = r.errSink
@@ -173,28 +188,29 @@ func (w *taskRunnerWork0) Free() {
 }
 
 // TaskRunner[T] dispatches a single-argument [psgfn.Task[T]] onto its
-// target's worker pool. See [TaskRunner0] for shared semantics.
+// Pool's worker pool. See [TaskRunner0] for shared semantics.
 type TaskRunner[T any] struct {
-	target   TaskPoolOrJob
-	job      *Pool
+	pool     *Pool
 	task     psgfn.Task[T]
+	limiter  Limiter
 	errSink  Gatherer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork[T]]
 }
 
-// NewTaskRunner binds a [psgfn.Task[T]] to a target and returns a
+// NewTaskRunner binds a [psgfn.Task[T]] to a [Pool] and returns a
 // [TaskRunner[T]]. See [NewTaskRunner0].
-func NewTaskRunner[T any](target TaskPoolOrJob, task psgfn.Task[T]) TaskRunner[T] {
-	if target == nil {
-		panic("target must be non-nil")
+func NewTaskRunner[T any](pool *Pool, task psgfn.Task[T], opts ...OpOption) TaskRunner[T] {
+	if pool == nil {
+		panic("pool must be non-nil")
 	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
+	cfg := resolveOpConfig(opts)
 	return TaskRunner[T]{
-		target:   target,
-		job:      target.getJob(),
+		pool:     pool,
 		task:     task,
+		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
 		workPool: omnipool.For[taskRunnerWork[T]](),
 	}
@@ -206,7 +222,7 @@ func (r TaskRunner[T]) Start(ctx context.Context, arg T) error {
 	traceRegion := "TaskRunner.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.target)
+	ctx, meta := vetStart(ctx, r.pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -224,7 +240,7 @@ func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) 
 	traceRegion := "TaskRunner.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.target)
+	ctx, meta := vetStart(ctx, r.pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -242,14 +258,19 @@ func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) 
 
 func (r TaskRunner[T]) newScatterWork(group workq.GroupID, deadline time.Time, arg T) *taskRunnerScatterWork {
 	inner := r.newTask(group, arg)
-	targetWork := r.target.newScatterWork(group, deadline, inner)
-	return newTaskRunnerScatterWork(r.job, deadline, targetWork)
+	taskWork := r.pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	postWork := r.pool.newTaskPostWork(group, deadline, taskWork)
+	gated := postWork
+	if r.limiter.impl != nil {
+		gated = newLimiterScatterWork(r.pool, deadline, gated, r.limiter)
+	}
+	return newTaskRunnerScatterWork(r.pool, deadline, gated)
 }
 
 func (r TaskRunner[T]) newTask(group workq.GroupID, arg T) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
-	w.job = r.job
+	w.job = r.pool
 	w.group = group
 	w.task = r.task
 	w.arg = arg
@@ -305,29 +326,29 @@ func (w *taskRunnerWork[T]) Free() {
 }
 
 // TaskRunner2[T1, T2] dispatches a two-argument [psgfn.Task2[T1, T2]]
-// onto its target's worker pool. See [TaskRunner0] for shared
-// semantics.
+// onto its Pool's worker pool. See [TaskRunner0] for shared semantics.
 type TaskRunner2[T1, T2 any] struct {
-	target   TaskPoolOrJob
-	job      *Pool
+	pool     *Pool
 	task     psgfn.Task2[T1, T2]
+	limiter  Limiter
 	errSink  Gatherer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork2[T1, T2]]
 }
 
-// NewTaskRunner2 binds a [psgfn.Task2[T1, T2]] to a target and returns
+// NewTaskRunner2 binds a [psgfn.Task2[T1, T2]] to a [Pool] and returns
 // a [TaskRunner2[T1, T2]]. See [NewTaskRunner0].
-func NewTaskRunner2[T1, T2 any](target TaskPoolOrJob, task psgfn.Task2[T1, T2]) TaskRunner2[T1, T2] {
-	if target == nil {
-		panic("target must be non-nil")
+func NewTaskRunner2[T1, T2 any](pool *Pool, task psgfn.Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2] {
+	if pool == nil {
+		panic("pool must be non-nil")
 	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
+	cfg := resolveOpConfig(opts)
 	return TaskRunner2[T1, T2]{
-		target:   target,
-		job:      target.getJob(),
+		pool:     pool,
 		task:     task,
+		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
 		workPool: omnipool.For[taskRunnerWork2[T1, T2]](),
 	}
@@ -339,7 +360,7 @@ func (r TaskRunner2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error 
 	traceRegion := "TaskRunner2.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.target)
+	ctx, meta := vetStart(ctx, r.pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -357,7 +378,7 @@ func (r TaskRunner2[T1, T2]) TryStart(ctx context.Context, deadline time.Time, a
 	traceRegion := "TaskRunner2.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.target)
+	ctx, meta := vetStart(ctx, r.pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -377,14 +398,19 @@ func (r TaskRunner2[T1, T2]) newScatterWork(
 	group workq.GroupID, deadline time.Time, arg1 T1, arg2 T2,
 ) *taskRunnerScatterWork {
 	inner := r.newTask(group, arg1, arg2)
-	targetWork := r.target.newScatterWork(group, deadline, inner)
-	return newTaskRunnerScatterWork(r.job, deadline, targetWork)
+	taskWork := r.pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	postWork := r.pool.newTaskPostWork(group, deadline, taskWork)
+	gated := postWork
+	if r.limiter.impl != nil {
+		gated = newLimiterScatterWork(r.pool, deadline, gated, r.limiter)
+	}
+	return newTaskRunnerScatterWork(r.pool, deadline, gated)
 }
 
 func (r TaskRunner2[T1, T2]) newTask(group workq.GroupID, arg1 T1, arg2 T2) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
-	w.job = r.job
+	w.job = r.pool
 	w.group = group
 	w.task = r.task
 	w.arg1 = arg1
@@ -452,17 +478,15 @@ func newTaskErrSink() Gatherer[struct{}] {
 	})
 }
 
-// vetStart validates that the given target and ctx are suitable for
+// vetStart validates that the given pool and ctx are suitable for
 // launching a task. It checks that the calling ctx is one of the
-// allowed types (top-level, gather, or combine) and that the target's
-// Pool is not yet done. Panics on misuse.
+// allowed types (top-level, gather, or combine) and that the pool is
+// not yet done. Panics on misuse.
 func vetStart(
 	ctx context.Context,
-	target TaskPoolOrJob,
+	pool *Pool,
 ) (context.Context, *ctxMeta) {
-	j := target.getJob()
-
-	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
+	ctx, meta := pool.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
 		case topLevelContext, gatherContext, combineContext:
 			// These are valid for starting a task
@@ -473,7 +497,7 @@ func vetStart(
 		}
 	})
 
-	j.panicIfDone()
+	pool.panicIfDone()
 
 	return ctx, meta
 }

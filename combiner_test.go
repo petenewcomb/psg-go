@@ -59,7 +59,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	ctx := context.Background()
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
-	taskPool := psg.NewTaskPool(job)
+	taskPool := job
 
 	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result int, err error) error {
@@ -97,7 +97,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	// Create parent job with task pool
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
-	parentTaskPool := psg.NewTaskPool(parentJob)
+	parentTaskPool := parentJob
 
 	// Variable to track execution flow
 	subJobTaskRan := false
@@ -119,7 +119,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		// Create a sub-job inside the task
 		subJob := psg.New(ctx)
 		defer subJob.CancelAndWait()
-		subTaskPool := psg.NewTaskPool(subJob)
+		subTaskPool := subJob
 
 		// This should succeed - dispatching a task to the sub-job's task pool
 		subGatherer := psg.NewGatherer(
@@ -155,7 +155,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	// Create parent job with task pool
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
-	parentTaskPool := psg.NewTaskPool(parentJob)
+	parentTaskPool := parentJob
 
 	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result bool, err error) error {

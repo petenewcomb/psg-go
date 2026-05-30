@@ -12,7 +12,6 @@ import (
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
-	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Demonstrates job cancellation from the outer layer.
@@ -26,7 +25,7 @@ func ExamplePool_Cancel() {
 	// the call to Pool.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
+	limit := psg.NewSemaphore(1)
 
 	printResult := psg.NewGatherer(
 		func(ctx context.Context, result string, err error) error {
@@ -37,23 +36,23 @@ func ExamplePool_Cancel() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+	firstRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Simulate a long-running task
 		time.Sleep(20 * time.Millisecond)
 		return printResult.Submit(ctx, job, "first task result", nil)
-	}))
+	}), psg.WithLimits(limit))
 	if err := firstRunner.Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
 	// Launch second task, which must wait for the first result to be gathered
-	// because the pool's concurrency limit is one.
+	// because the Limiter only grants one permit at a time.
 	fmt.Println("Launching second task")
-	secondRunner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+	secondRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Simulate a longer-running task
 		time.Sleep(100 * time.Millisecond)
 		return printResult.Submit(ctx, job, "second task result", nil)
-	}))
+	}), psg.WithLimits(limit))
 	if err := secondRunner.Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
@@ -88,7 +87,7 @@ func ExamplePool_Cancel_task() {
 	// the call to Pool.Cancel that is the subject of this example.
 	defer job.CancelAndWait()
 
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(1))
+	limit := psg.NewSemaphore(1)
 
 	printResult := psg.NewGatherer(
 		func(ctx context.Context, result string, err error) error {
@@ -99,9 +98,9 @@ func ExamplePool_Cancel_task() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+	firstRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 		return printResult.Submit(ctx, job, "first task result", nil)
-	}))
+	}), psg.WithLimits(limit))
 	if err := firstRunner.Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
@@ -112,14 +111,14 @@ func ExamplePool_Cancel_task() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be gathered.
 	fmt.Println("Launching second task")
-	secondRunner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+	secondRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Force cancellation from inside the task. This is a way to cut
 		// short the overall job due to a fatal error within a task without
 		// even waiting for the task result to be gathered.
 		job.Cancel()
 		time.Sleep(10 * time.Millisecond)
 		return printResult.Submit(ctx, job, "second task result", nil)
-	}))
+	}), psg.WithLimits(limit))
 	if err := secondRunner.Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}

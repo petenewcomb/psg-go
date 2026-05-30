@@ -13,7 +13,6 @@ import (
 	psg "github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/internal/exmpclk"
 	"github.com/petenewcomb/psg-go/psgfn"
-	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Observable uses psg to run a few tasks and produce logging that demonstrate
@@ -45,13 +44,13 @@ func Example_observable() {
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
-	// Create a task pool with concurrency limit 2
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
+	// Limit dispatch concurrency to 2.
+	limit := psg.NewSemaphore(2)
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// TaskRunner. The task body Submits its result to the gatherer.
 	newRunner := func(taskName string) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":
@@ -64,7 +63,7 @@ func Example_observable() {
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
 			return gatherer.Submit(ctx, job, "result for task "+taskName, nil)
-		}))
+		}), psg.WithLimits(limit))
 	}
 
 	// Launch some tasks

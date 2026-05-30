@@ -41,7 +41,7 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	c := &controller{
 		Plan:                      plan,
 		Pool:                      pool,
-		TaskPools:                 make([]*psg.TaskPool, len(plan.TaskLimiters)),
+		TaskLimiters:              make([]psg.Limiter, len(plan.TaskLimiters)),
 		CombinerPools:             make([]*psg.CombinerPool, len(plan.CombinerLimiters)),
 		Gatherers:                 make([]*psg.Gatherer[*simValue], len(plan.Gatherers)),
 		Combiners:                 make([]*psg.Combiner[*simValue], len(plan.Combiners)),
@@ -66,7 +66,7 @@ type simValue struct {
 type controller struct {
 	Plan          *Plan
 	Pool          *psg.Pool
-	TaskPools     []*psg.TaskPool
+	TaskLimiters  []psg.Limiter
 	CombinerPools []*psg.CombinerPool
 	Gatherers     []*psg.Gatherer[*simValue]
 	Combiners     []*psg.Combiner[*simValue]
@@ -75,7 +75,7 @@ type controller struct {
 	// directly to downstream Gatherers/Combiners.
 	TaskRunners []psg.TaskRunner0
 
-	taskPoolsOnce sync.Once
+	limitersOnce  sync.Once
 	combPoolsOnce sync.Once
 
 	concurrencyByTaskLimit    []atomic.Int64
@@ -181,12 +181,13 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	return nil
 }
 
-// ensurePools lazily constructs the psg.TaskPool and psg.CombinerPool
-// instances backing the Plan's Limiters. One pool per Limiter.
+// ensurePools lazily constructs the psg.Limiter and psg.CombinerPool
+// instances backing the Plan's Limiters. One Limiter per
+// Plan.TaskLimiters entry; one CombinerPool per Plan.CombinerLimiters.
 func (c *controller) ensurePools() {
-	c.taskPoolsOnce.Do(func() {
+	c.limitersOnce.Do(func() {
 		for i, lim := range c.Plan.TaskLimiters {
-			c.TaskPools[i] = psg.NewTaskPool(c.Pool, psgopt.WithMaxConcurrency(lim.Permits))
+			c.TaskLimiters[i] = psg.NewSemaphore(lim.Permits)
 		}
 	})
 	c.combPoolsOnce.Do(func() {
@@ -245,16 +246,14 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
 func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.TaskRunner0 {
-	taskPool := c.TaskPools[0]
-	if len(runner.LimiterIndexes) > 0 {
-		taskPool = c.TaskPools[runner.LimiterIndexes[0]]
-	}
 	// Concurrency tracking: bump TaskLimiter counter on entry to the
 	// task body, decrement on exit. Used by the per-Limiter
 	// max-concurrency assertion in Run.
 	trackEntry := func() func() { return func() {} }
+	var opts []psg.OpOption
 	if len(runner.LimiterIndexes) > 0 {
 		limIdx := runner.LimiterIndexes[0]
+		opts = append(opts, psg.WithLimits(c.TaskLimiters[limIdx]))
 		trackEntry = func() func() {
 			cur := c.concurrencyByTaskLimit[limIdx].Add(1)
 			c.maxConcurrencyByTaskLimit[limIdx].UpdateMax(cur)
@@ -272,7 +271,7 @@ func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.Ta
 		}
 		return nil
 	})
-	return psg.NewTaskRunner0(taskPool, body)
+	return psg.NewTaskRunner0(c.Pool, body, opts...)
 }
 
 // startTask dispatches a Plan TaskRunner. The TaskRunner was pre-built

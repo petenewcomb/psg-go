@@ -121,10 +121,6 @@ func (w *taskWork) Free(job *Pool) {
 
 var taskWorkPool = omnipool.For[taskWork]()
 
-func (j *Pool) getJob() *Pool {
-	return j
-}
-
 // New creates an independent scatter-gather execution environment with the
 // specified context. The context passed to New is used as the root of the
 // context that will be passed to all task functions. (See [Task] and
@@ -990,11 +986,6 @@ func (w *poolWork) Close(job *Pool) {
 	}
 	trace.Logf(context.Background(), "poolWork.Close", "%v", &w.WorkItem)
 	job.state.DecrementWork()
-}
-
-func (j *Pool) newScatterWork(group workq.GroupID, deadline time.Time, task boundTask) workq.Work {
-	taskWork := j.newTaskWork(group, task, nil)
-	return j.newTaskPostWork(group, deadline, taskWork)
 }
 
 func (j *Pool) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {

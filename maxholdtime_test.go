@@ -49,7 +49,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	})
 	defer combineOp.Close()
 
-	taskPool := psg.NewTaskPool(job)
+	taskPool := job
 
 	newRunner := func(value int) psg.TaskRunner0 {
 		return psg.NewTaskRunner0(taskPool, psgfn.TaskFunc0(func(ctx context.Context) error {

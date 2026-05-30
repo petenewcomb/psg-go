@@ -13,7 +13,6 @@ import (
 	psg "github.com/petenewcomb/psg-go"
 
 	"github.com/petenewcomb/psg-go/internal/exmpclk"
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -26,7 +25,8 @@ func Example_clientTimeout() {
 	defer job.CancelAndWait()
 
 	// Create a task pool
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(10))
+	pool := job
+	poolLimit := psg.NewSemaphore(10)
 
 	var clock exmpclk.ExampleClock
 	clock.Start()
@@ -62,7 +62,8 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf, newRequestTaskFn(requestID))
+		runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf, newRequestTaskFn(requestID),
+			psg.WithLimits(poolLimit))
 		err := runner.Start(ctx)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)

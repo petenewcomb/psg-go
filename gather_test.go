@@ -17,7 +17,7 @@ func TestNewTaskRunnerNilTaskPanic(t *testing.T) {
 	ctx := context.Background()
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job)
+	pool := job
 
 	chk.PanicsWithValue("task must be non-nil", func() {
 		// Nil Task should panic at construction.
@@ -37,7 +37,7 @@ func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 	ctx := context.Background()
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job)
+	pool := job
 
 	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result int, err error) error {
@@ -69,7 +69,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 	// Create parent job with pool
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
-	parentPool := psg.NewTaskPool(parentJob)
+	parentPool := parentJob
 
 	// Variable to track execution flow
 	subJobTaskRan := false
@@ -85,7 +85,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 		// Create a sub-job inside the task
 		subJob := psg.New(ctx)
 		defer subJob.CancelAndWait()
-		subPool := psg.NewTaskPool(subJob)
+		subPool := subJob
 
 		// This should succeed - dispatching a task to the sub-job's pool
 		subGatherer := psg.NewGatherer(
@@ -120,7 +120,7 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
-	parentPool := psg.NewTaskPool(parentJob)
+	parentPool := parentJob
 
 	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result bool, err error) error {
@@ -153,7 +153,7 @@ func TestTaskCannotGather(t *testing.T) {
 
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
-	pool := psg.NewTaskPool(job)
+	pool := job
 
 	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result bool, err error) error {
@@ -179,7 +179,7 @@ func TestTaskCannotGatherParentJob(t *testing.T) {
 
 	parentJob := psg.New(ctx)
 	defer parentJob.CancelAndWait()
-	parentPool := psg.NewTaskPool(parentJob)
+	parentPool := parentJob
 
 	gatherer := psg.NewGatherer(
 		func(ctx context.Context, result bool, err error) error {
@@ -191,7 +191,7 @@ func TestTaskCannotGatherParentJob(t *testing.T) {
 	outerRunner := psg.NewTaskRunner0(parentPool, psgfn.TaskFunc0(func(ctx context.Context) error {
 		subJob := psg.New(ctx)
 		defer subJob.CancelAndWait()
-		subPool := psg.NewTaskPool(subJob)
+		subPool := subJob
 
 		subGatherer := psg.NewGatherer(
 			func(ctx context.Context, result bool, err error) error {

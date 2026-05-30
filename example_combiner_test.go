@@ -47,8 +47,8 @@ func ExampleCombiner() {
 	}))
 	defer job.CancelAndWait()
 
-	// Create a task pool with concurrency limit 2
-	taskPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(2))
+	// Limit concurrent tasks to 2.
+	taskLimit := psg.NewSemaphore(2)
 
 	// Create a combiner pool and disable the idle timeout
 	combinerPool := psg.NewCombinerPool(job, psgopt.WithIdleTimeout(-1))
@@ -88,13 +88,13 @@ func ExampleCombiner() {
 	// Build a TaskRunner factory: the task body submits its result to
 	// combineOp from inside the task context.
 	newRunner := func(number int, delay time.Duration, result string) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(taskPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
 			return combineOp.Submit(ctx, result, nil)
-		}))
+		}), psg.WithLimits(taskLimit))
 	}
 
 	// Launch some tasks

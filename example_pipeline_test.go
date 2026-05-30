@@ -14,7 +14,6 @@ import (
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
-	"github.com/petenewcomb/psg-go/psgopt"
 )
 
 // Pipeline demonstrates the use of multiple psg pools to re-implement the
@@ -45,9 +44,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	job := psg.New(ctx)
 	defer job.CancelAndWait()
 
-	// Run digesting tasks in a Pool limited to the number of cores available to
-	// the program, since it should be CPU-bound.
-	digesterPool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(runtime.GOMAXPROCS(-1)))
+	// Cap concurrent digesting tasks at the number of cores available
+	// to the program, since they should be CPU-bound.
+	digestLimit := psg.NewSemaphore(runtime.GOMAXPROCS(-1))
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
@@ -62,10 +61,10 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	newDigestingRunner := func(path string, data []byte) psg.TaskRunner0 {
 		gatherer := newDigestGatherer(path)
-		return psg.NewTaskRunner0(digesterPool, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return gatherer.Submit(ctx, job, md5.Sum(data), nil)
-		}))
+		}), psg.WithLimits(digestLimit))
 	}
 
 	// Creates a gatherer for a reading task whose handler dispatches a

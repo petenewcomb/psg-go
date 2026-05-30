@@ -13,7 +13,6 @@ import (
 	psg "github.com/petenewcomb/psg-go"
 
 	"github.com/petenewcomb/psg-go/internal/exmpclk"
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/petenewcomb/psg-go/psgwf"
 )
 
@@ -25,7 +24,8 @@ func Example_scatterGather() {
 	defer job.CancelAndWait()
 
 	// Create a task pool with limited concurrency to control timing
-	pool := psg.NewTaskPool(job, psgopt.WithMaxConcurrency(3))
+	pool := job
+	poolLimit := psg.NewSemaphore(3)
 
 	var clock exmpclk.ExampleClock
 	clock.Start()
@@ -56,7 +56,7 @@ func Example_scatterGather() {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms Quick task completed\n", msSinceStart())
 			return "Quick result", nil
-		})
+		}, psg.WithLimits(poolLimit))
 	err := quickRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting quick task: %v\n", msSinceStart(), err)
@@ -73,7 +73,7 @@ func Example_scatterGather() {
 			fmt.Printf("%3dms Failing task failed - cancelling workflow\n", msSinceStart())
 			wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 			return "", fmt.Errorf("task failed")
-		})
+		}, psg.WithLimits(poolLimit))
 	err = failingRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting failing task: %v\n", msSinceStart(), err)
@@ -96,7 +96,7 @@ func Example_scatterGather() {
 				fmt.Printf("%3dms Slow task cancelled\n", msSinceStart())
 				return "", context.Canceled
 			}
-		})
+		}, psg.WithLimits(poolLimit))
 	err = slowRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting slow task: %v\n", msSinceStart(), err)

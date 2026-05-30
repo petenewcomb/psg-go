@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/petenewcomb/psg-go/internal/delayq"
 	"github.com/petenewcomb/psg-go/internal/leakguard"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
@@ -285,6 +286,16 @@ type halfBoundCombiner[T any] struct {
 	refCount      int
 	earliestGroup workq.GroupID
 	accumulator   psgfn.Accumulator[T]
+
+	// queued reports whether this instance currently has a Ref held on
+	// behalf of an in-flight Schedule on the CombinerPool's flushQ.
+	// Mutated only under c.mu.
+	queued bool
+
+	// flushHeapPos is the 1-based position of this instance in the
+	// CombinerPool's flush deadline queue (0 means not in the queue).
+	// Mutated only by the queue.
+	flushHeapPos int
 }
 
 func (c *halfBoundCombiner[T]) InstanceID() combinerInstanceID {
@@ -293,6 +304,32 @@ func (c *halfBoundCombiner[T]) InstanceID() combinerInstanceID {
 
 func (c *halfBoundCombiner[T]) InstanceCount() int {
 	return int(c.op.instanceCount.Load())
+}
+
+// Position implements [delayq.Item]. The heap reads positions under
+// delayq.mu so the read is consistent with the heap's own ordering;
+// concurrent writers come exclusively through SetPosition, which
+// synchronizes with combine via c.mu.
+func (c *halfBoundCombiner[T]) Position() int { return c.flushHeapPos }
+
+// SetPosition implements [delayq.Item]. It is called by the delayq
+// heap under delayq.mu when an item is inserted, swapped, or removed.
+// We take c.mu so combine's read of c.queued and c.flushHeapPos
+// stays consistent with the heap's view: when delayq's Drain pops c
+// (p == 0), the queued flag flips false here, ensuring a concurrent
+// combine that subsequently acquires c.mu correctly observes "no Ref
+// outstanding" and Refs for its new Schedule.
+//
+// Lock ordering: delayq.mu first (held by the heap operation), then
+// c.mu (taken here). combine never takes delayq.mu while holding
+// c.mu, so no deadlock.
+func (c *halfBoundCombiner[T]) SetPosition(p int) {
+	c.mu.Lock()
+	c.flushHeapPos = p
+	if p == 0 {
+		c.queued = false
+	}
+	c.mu.Unlock()
 }
 
 // Must already be holding c.mu lock.
@@ -382,7 +419,7 @@ func (c *halfBoundCombiner[T]) emitErr(ctx context.Context, sender *rdvq.Sender,
 
 func (c *halfBoundCombiner[T]) combine(
 	ctx context.Context,
-	cm *activeCombinerMap,
+	flushQ *delayq.Queue[combinerFlusher],
 	sender *rdvq.Sender,
 	input T,
 	inputErr error,
@@ -407,11 +444,29 @@ func (c *halfBoundCombiner[T]) combine(
 		c.emitErr(ctx, sender, err)
 	}
 
-	if !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0 {
-		cm.Remove(c)
+	switch {
+	case !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0:
+		// Already-past deadline — flush inline.
+		if c.queued {
+			flushQ.Remove(c)
+			c.queued = false
+		}
 		c.flush(ctx, sender)
-	} else {
-		cm.Push(c, newFlushDeadline)
+	default:
+		// Either a future deadline or no deadline (zero). In the
+		// no-deadline case the accumulator stays alive until the
+		// CombinerPool's job-end flush sweep picks it up; we still
+		// place the instance in the flushQ — with a far-future
+		// placeholder deadline — so that sweep finds it.
+		deadline := newFlushDeadline
+		if deadline.IsZero() {
+			deadline = time.Now().Add(maxFlushAllSkew)
+		}
+		if !c.queued {
+			c.Ref()
+			c.queued = true
+		}
+		flushQ.Schedule(c, deadline)
 	}
 }
 
@@ -491,7 +546,7 @@ func (c *combineOp[T]) trySubmit(
 // boundCombineWork interface allows type erasure for combineWork instances
 type boundCombineWork interface {
 	workq.Work
-	Combine(ctx context.Context, cm *activeCombinerMap, sender *rdvq.Sender)
+	Combine(ctx context.Context, flushQ *delayq.Queue[combinerFlusher], sender *rdvq.Sender)
 	Waiting(*workq.Governor)
 }
 
@@ -518,7 +573,7 @@ func (w *combineWork[T]) Init(group workq.GroupID, op *combineOp[T], input T, in
 	op.ref() // Add reference for the combine work
 }
 
-func (w *combineWork[T]) Combine(ctx context.Context, cm *activeCombinerMap, sender *rdvq.Sender) {
+func (w *combineWork[T]) Combine(ctx context.Context, flushQ *delayq.Queue[combinerFlusher], sender *rdvq.Sender) {
 	var hbc *halfBoundCombiner[T]
 	for {
 		hbc, _ = w.op.instanceQueue.TryPopFront()
@@ -560,7 +615,7 @@ func (w *combineWork[T]) Combine(ctx context.Context, cm *activeCombinerMap, sen
 			hbc.free()
 		}
 	}()
-	hbc.combine(ctx, cm, sender, w.input, w.inputErr)
+	hbc.combine(ctx, flushQ, sender, w.input, w.inputErr)
 }
 
 func (w *combineWork[T]) Execute(ctx context.Context, ex workq.Execution) error {

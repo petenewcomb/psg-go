@@ -19,10 +19,13 @@ type cpWorker struct {
 	integrationExEnv
 	cp *CombinerPool
 
-	activeCombiners *activeCombinerMap
-	idleTimer       *time.Timer
-	doneCh          <-chan struct{}
-	doneErr         func() error
+	idleTimer *time.Timer
+	doneCh    <-chan struct{}
+	doneErr   func() error
+
+	// readyBuf is the worker's reusable scratch slice for delayq.Drain
+	// returns. Lives on the worker to avoid allocating on every drain.
+	readyBuf []combinerFlusher
 
 	idleTimerCh            <-chan time.Time
 	flushDeadlineTimerCh   <-chan time.Time
@@ -188,38 +191,56 @@ func (cw *cpWorker) popSelect(
 	return
 }
 
+// flushToNextDeadline drains the pool's shared flush queue of every
+// item whose deadline has expired, flushes each, and returns
+// (queuedFlush, timeLeft). queuedFlush reports whether any items were
+// flushed; timeLeft is the duration until the next pending deadline
+// (zero when the queue is empty). The caller uses timeLeft to arm its
+// per-worker flush deadline timer.
 func (cw *cpWorker) flushToNextDeadline(ctx context.Context) (bool, time.Duration) {
-	queuedFlush := false
-	for {
-		next, deadline := cw.activeCombiners.NextToFlush()
-		if next == nil {
-			break
-		}
+	ready, next := cw.cp.flushQ.Drain(time.Now(), cw.readyBuf[:0])
+	cw.readyBuf = ready
 
-		timeLeft := time.Until(deadline)
-		if timeLeft > 0 {
-			return queuedFlush, timeLeft
-		}
-
-		// Remove from map immediately to prevent infinite loop
-		cw.activeCombiners.Remove(next)
-		next.Flush(ctx, cw.Sender())
-		queuedFlush = true
+	for _, c := range ready {
+		c.Flush(ctx, cw.Sender())
 	}
-	return queuedFlush, 0
+
+	queuedFlush := len(ready) > 0
+	if next.IsZero() {
+		return queuedFlush, 0
+	}
+	timeLeft := time.Until(next)
+	if timeLeft < 0 {
+		timeLeft = 0
+	}
+	return queuedFlush, timeLeft
 }
 
+// flushAll drains every still-pending entry from the flushQ and flushes
+// each. Used at job-end when the pool needs to deliver final flushes
+// before exiting.
 func (cw *cpWorker) flushAll(ctx context.Context) bool {
 	traceRegion := "cpWorker.flushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	if cw.nextJobFlushCh == nil {
 		return false
 	}
-	cw.activeCombiners.FlushAll(ctx, cw.Sender())
+	// Use a far-future "now" so every queued item is treated as expired.
+	farFuture := time.Now().Add(maxFlushAllSkew)
+	ready, _ := cw.cp.flushQ.Drain(farFuture, cw.readyBuf[:0])
+	cw.readyBuf = ready
+	for _, c := range ready {
+		c.Flush(ctx, cw.Sender())
+	}
 	cw.nextJobFlushCh = nil
 	cw.unregisterAsJobFlusher()
 	return true
 }
+
+// maxFlushAllSkew is the offset added to time.Now() when draining the
+// flushQ wholesale at job end. Large enough to subsume any reasonable
+// future deadline.
+const maxFlushAllSkew = 24 * time.Hour
 
 func (cw *cpWorker) executeCombine(ctx context.Context, bc boundCombineWork) {
 	traceRegion := "cpWorker.executeCombine"
@@ -229,6 +250,6 @@ func (cw *cpWorker) executeCombine(ctx context.Context, bc boundCombineWork) {
 		// Make sure the job won't terminate before the combiner is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
-	bc.Combine(ctx, cw.activeCombiners, cw.Sender())
+	bc.Combine(ctx, &cw.cp.flushQ, cw.Sender())
 	cw.cp.state.IncrementCompleted()
 }

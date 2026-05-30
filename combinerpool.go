@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/petenewcomb/psg-go/internal/delayq"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
-	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -34,7 +34,11 @@ type CombinerPool struct {
 
 	combineQueue workq.Pending
 
-	abandonedCombiners nbcq.Queue[*activeCombinerMap]
+	// flushQ holds halfBoundCombiner instances that have a pending flush
+	// deadline. Any cpWorker can drive the timer + drain; the per-
+	// instance mu on each halfBoundCombiner makes parallel Flush calls
+	// safe.
+	flushQ delayq.Queue[combinerFlusher]
 
 	// If there are tasks waiting to post work to combineQueue, the governor
 	// will block new top-level scatters, thereby applying backpressure to
@@ -71,7 +75,7 @@ func NewCombinerPool(job *Pool, options ...psgopt.CombinerPoolOption) *CombinerP
 		cp, job, &cp.state, &cp.combineQueue, &cp.governor, &cp.workQueue)
 
 	cp.combineQueue.Init()
-	cp.abandonedCombiners.Init()
+	cp.flushQ.Init(nil)
 	cp.governor.Init()
 	cp.workQueue.Init()
 	cp.state.Init()
@@ -125,7 +129,6 @@ func (cp *CombinerPool) goroutine() {
 		doneErr: func() error {
 			return doneErr
 		},
-		activeCombiners: &activeCombinerMap{},
 	}
 	defer worker.Release()
 
@@ -165,8 +168,7 @@ func (cp *CombinerPool) goroutine() {
 		close(doneCh)
 	}()
 
-	trace.Logf(ctx, traceRegion, "cpWorker=%p, combinerMap=%p",
-		worker, &worker.activeCombiners)
+	trace.Logf(ctx, traceRegion, "cpWorker=%p, flushQ=%p", worker, &cp.flushQ)
 
 	worker.idleTimer = timerp.Get()
 	defer timerp.Put(worker.idleTimer)
@@ -175,27 +177,10 @@ func (cp *CombinerPool) goroutine() {
 
 	addWorkFn := worker.AddWork
 
-	mergeAbandonedCombiners := func() {
-		for {
-			abandonedCombiners, _ := cp.abandonedCombiners.TryPopFront()
-			if abandonedCombiners == nil {
-				break
-			}
-			worker.activeCombiners.Merge(abandonedCombiners)
-			worker.activeCombiners.FlushExcess(ctx, worker.Sender(), cp.state.LiveGoroutineCount())
-			if worker.nextJobFlushCh == nil {
-				// Make sure the job won't terminate before the combiner is flushed
-				worker.nextJobFlushCh, worker.unregisterAsJobFlusher = worker.cp.job.state.RegisterFlusher()
-			}
-		}
-	}
-
 	confirmEndOfWork := false
 	for {
 		confirmingEndOfWork := confirmEndOfWork
 		confirmEndOfWork = false
-
-		mergeAbandonedCombiners()
 
 		err := cp.workQueue.ExecuteOne(ctx, addWorkFn, cp.unmetDemandFn)
 		switch {
@@ -219,8 +204,9 @@ func (cp *CombinerPool) goroutine() {
 				confirmEndOfWork = cp.inFlight.IsZero()
 			} else {
 				trace.Logf(ctx, traceRegion, "goroutine exiting")
-				// Stash active combiners for the next spare goroutine to pick up.
-				cp.abandonedCombiners.PushBack(worker.activeCombiners)
+				// Yield the timer-holder role: the flushQ wakes another
+				// worker (if any) so the pending deadlines keep moving.
+				cp.flushQ.Yield()
 				if worker.nextJobFlushCh != nil {
 					worker.nextJobFlushCh = nil
 					worker.unregisterAsJobFlusher()

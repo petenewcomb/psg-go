@@ -35,7 +35,13 @@ func (h *Heap[T]) Len() int {
 	return len(h.impl.items)
 }
 
-// Push adds an item to the heap.
+// Push adds item to the heap, or — if item is already in the heap
+// (Position > 0) — replaces the existing entry at that position with
+// item and Fixes the heap. Re-Push is the supported way to update an
+// in-heap entry's ordering state: callers either mutate fields on a
+// pointer entry and re-Push the same pointer, or build a new value
+// entry and re-Push it; either way, the slice slot ends up holding
+// the new value before Fix re-evaluates Less.
 func (h *Heap[T]) Push(item T) {
 	p := item.Position()
 	if p < 0 {
@@ -44,6 +50,7 @@ func (h *Heap[T]) Push(item T) {
 	if p == 0 {
 		heap.Push(&h.impl, item)
 	} else {
+		h.impl.items[p-1] = item
 		heap.Fix(&h.impl, p-1)
 	}
 }

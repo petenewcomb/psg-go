@@ -61,15 +61,20 @@ type Combiner[T any] struct {
 	h leakguard.Handle[combineOp[T], combineOpHandleTrait[T]]
 }
 
-// NewCombiner creates a new Combiner operation. The framework manages an
-// internal error sink that surfaces Accumulator errors through the Pool's
-// GatherAll path; the user's Accumulator body is responsible for routing
-// successful results via Submit on whatever downstream sinks it captures.
+// NewCombiner creates a new Combiner operation. Pass [WithLimits] in
+// opts to bind a [Limiter] (e.g. via [NewSemaphore]) that caps the
+// number of concurrent combine-work executions for this Combiner.
+//
+// The framework manages an internal error sink that surfaces
+// Accumulator errors through the Pool's GatherAll path; the user's
+// Accumulator body is responsible for routing successful results via
+// Submit on whatever downstream sinks it captures.
 //
 //nolint:contextcheck // background context used only for tracing
 func NewCombiner[T any](
 	combinerPool *CombinerPool,
 	combinerFactory psgfn.CombinerFactory[T],
+	opts ...OpOption,
 ) Combiner[T] {
 	traceRegion := "NewCombiner"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -80,6 +85,8 @@ func NewCombiner[T any](
 	if combinerFactory == nil {
 		panic("combinerFactory must be non-nil")
 	}
+
+	cfg := resolveOpConfig(opts)
 
 	innerPool := omnipool.For[combineOp[T]]()
 	inner := innerPool.Get()
@@ -106,6 +113,7 @@ func NewCombiner[T any](
 	})
 	inner.combinerPool = combinerPool
 	inner.combinerFactory = combinerFactory
+	inner.limiter = cfg.singleLimiter()
 	inner.innerPool = innerPool
 
 	h := leakguard.New[combineOp[T], combineOpHandleTrait[T]](inner)
@@ -213,6 +221,12 @@ type combineOp[T any] struct {
 	combinerPool    *CombinerPool
 	combinerFactory psgfn.CombinerFactory[T]
 
+	// limiter caps how many combineWorks this Combiner processes
+	// concurrently. The zero Limiter (impl == nil) means unlimited.
+	// Acquired in combineWork.Execute and released when Execute
+	// completes.
+	limiter Limiter
+
 	innerPool             *omnipool.Pool[combineOp[T]]
 	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[T]]
 	combineWorkPool       *omnipool.Pool[combineWork[T]]
@@ -272,6 +286,7 @@ func (c *combineOp[T]) unref() {
 	c.errSink = Gatherer[struct{}]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
+	c.limiter = Limiter{}
 	// Keep c.innerPool - it's metadata about where to return this object
 
 	// Return to pool
@@ -623,6 +638,32 @@ func (w *combineWork[T]) Execute(ctx context.Context, ex workq.Execution) error 
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "combineWork(%p), %v", w, w)
 
+	if w.op.limiter.impl == nil {
+		return w.executeInner(ctx, ex)
+	}
+
+	limiter := w.op.limiter
+	acquired := false
+	defer func() {
+		if acquired {
+			limiter.impl.release()
+		}
+	}()
+	wb := workq.WaitBehavior{
+		BlockBehavior: w.op.combinerPool.job.protoBB,
+		ShouldWait: func() bool {
+			if acquired {
+				return false
+			}
+			acquired = limiter.impl.tryAcquire()
+			return !acquired
+		},
+	}
+	return workq.ExecuteOrWait(ctx, ex, time.Time{}, limiter.impl.notifier(), wb,
+		w.executeInner)
+}
+
+func (w *combineWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	workerCtx, meta := w.op.combinerPool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)

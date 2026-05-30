@@ -7,17 +7,25 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 )
 
-// WithMaxConcurrency sets the maximum concurrency limit for
-// [github.com/petenewcomb/psg-go.CombinerPool] — the maximum number of
-// combiner goroutines. Use -1 to indicate unlimited (subject to other
-// backpressure constraints and scaling decisions). The default is
+// WithMaxConcurrency is an advanced-tuning knob that caps the number
+// of combiner goroutines a [github.com/petenewcomb/psg-go.CombinerPool]
+// will run. Use -1 to indicate unlimited (subject to other
+// backpressure constraints and scaling decisions); the default is
 // unlimited.
 //
+// For per-Combiner concurrency control — the more common case — pass
+// [github.com/petenewcomb/psg-go.WithLimits] with a
+// [github.com/petenewcomb/psg-go.NewSemaphore]-backed Limiter to
+// [github.com/petenewcomb/psg-go.NewCombiner]. That caps how many
+// combine work items execute concurrently for one Combiner, which is
+// usually the bound users actually want to express. The CombinerPool-
+// wide cap survives as a way to bound the goroutine count when
+// several Combiners share a pool.
+//
 // As of Wave 4 the equivalent TaskPool concurrency limit has been
-// replaced by the framework's [github.com/petenewcomb/psg-go.Limiter]
-// system: pass [github.com/petenewcomb/psg-go.WithLimits] with a
-// [github.com/petenewcomb/psg-go.NewSemaphore]-backed Limiter when
-// constructing a TaskRunner.
+// replaced entirely by the framework's
+// [github.com/petenewcomb/psg-go.Limiter] system on [TaskRunner];
+// TaskPool is no longer a user-facing type.
 func WithMaxConcurrency(maxConcurrency int) CombinerPoolOption {
 	return opts.MaxConcurrency{Max: maxConcurrency}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/trace"
 	"github.com/petenewcomb/psg-go/psgfn"
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -42,7 +41,8 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 		Plan:                      plan,
 		Pool:                      pool,
 		TaskLimiters:              make([]psg.Limiter, len(plan.TaskLimiters)),
-		CombinerPools:             make([]*psg.CombinerPool, len(plan.CombinerLimiters)),
+		CombinerPool:              nil, // lazily constructed in ensurePools
+		CombinerLimiters:          make([]psg.Limiter, len(plan.CombinerLimiters)),
 		Gatherers:                 make([]*psg.Gatherer[*simValue], len(plan.Gatherers)),
 		Combiners:                 make([]*psg.Combiner[*simValue], len(plan.Combiners)),
 		concurrencyByTaskLimit:    make([]atomic.Int64, len(plan.TaskLimiters)),
@@ -64,19 +64,20 @@ type simValue struct {
 // controller is the per-Plan runtime adapter state. Owns the psg API
 // objects backing the Plan's static vocabulary.
 type controller struct {
-	Plan          *Plan
-	Pool          *psg.Pool
-	TaskLimiters  []psg.Limiter
-	CombinerPools []*psg.CombinerPool
-	Gatherers     []*psg.Gatherer[*simValue]
-	Combiners     []*psg.Combiner[*simValue]
+	Plan             *Plan
+	Pool             *psg.Pool
+	TaskLimiters     []psg.Limiter
+	CombinerPool     *psg.CombinerPool
+	CombinerLimiters []psg.Limiter
+	Gatherers        []*psg.Gatherer[*simValue]
+	Combiners        []*psg.Combiner[*simValue]
 	// TaskRunners holds one psg.TaskRunner0 per Plan TaskRunner. The
 	// closure inside each runs the runner's Body Func, which Submits
 	// directly to downstream Gatherers/Combiners.
 	TaskRunners []psg.TaskRunner0
 
-	limitersOnce  sync.Once
-	combPoolsOnce sync.Once
+	limitersOnce sync.Once
+	combPoolOnce sync.Once
 
 	concurrencyByTaskLimit    []atomic.Int64
 	maxConcurrencyByTaskLimit []atomicMaxInt64
@@ -104,11 +105,11 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	for i, cmb := range c.Plan.Combiners {
 		cp := cmb
 		idx := i
-		limPool := c.CombinerPools[0]
+		var opts []psg.OpOption
 		if len(cp.LimiterIndexes) > 0 {
-			limPool = c.CombinerPools[cp.LimiterIndexes[0]]
+			opts = append(opts, psg.WithLimits(c.CombinerLimiters[cp.LimiterIndexes[0]]))
 		}
-		combiner := psg.NewCombiner(limPool, c.newCombinerFactory(t, cp, idx))
+		combiner := psg.NewCombiner(c.CombinerPool, c.newCombinerFactory(t, cp, idx), opts...)
 		c.Combiners[i] = &combiner
 	}
 	// Construct TaskRunners after Combiners/Gatherers so the bodies can
@@ -183,17 +184,21 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 
 // ensurePools lazily constructs the psg.Limiter and psg.CombinerPool
 // instances backing the Plan's Limiters. One Limiter per
-// Plan.TaskLimiters entry; one CombinerPool per Plan.CombinerLimiters.
+// Plan.TaskLimiters and Plan.CombinerLimiters entry. A single
+// CombinerPool hosts all Combiners — per-Combiner concurrency is
+// enforced via the CombinerLimiters bound to each Combiner via
+// psg.WithLimits.
 func (c *controller) ensurePools() {
 	c.limitersOnce.Do(func() {
 		for i, lim := range c.Plan.TaskLimiters {
 			c.TaskLimiters[i] = psg.NewSemaphore(lim.Permits)
 		}
-	})
-	c.combPoolsOnce.Do(func() {
 		for i, lim := range c.Plan.CombinerLimiters {
-			c.CombinerPools[i] = psg.NewCombinerPool(c.Pool, psgopt.WithMaxConcurrency(lim.Permits))
+			c.CombinerLimiters[i] = psg.NewSemaphore(lim.Permits)
 		}
+	})
+	c.combPoolOnce.Do(func() {
+		c.CombinerPool = psg.NewCombinerPool(c.Pool)
 	})
 }
 

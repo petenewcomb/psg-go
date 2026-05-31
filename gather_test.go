@@ -23,7 +23,7 @@ func TestNewTaskRunnerNilTaskPanic(t *testing.T) {
 
 func TestGatherScatterNilGatherPanic(t *testing.T) {
 	chk := assert.New(t)
-	chk.PanicsWithValue("gather function must be non-nil", func() {
+	chk.PanicsWithValue("handler must be non-nil", func() {
 		psg.NewGatherer[int](nil)
 	})
 }
@@ -33,12 +33,12 @@ func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[int](
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
-	)
+	))
 	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
@@ -64,26 +64,26 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subGatherer := psg.NewGatherer(
+		subGatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
-		)
+		))
 		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subGatherer.Submit(ctx, subWave, true)
@@ -108,13 +108,13 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	))
 	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.Fail("should not get here - parent pool task should not run")
 		return nil
@@ -138,13 +138,13 @@ func TestTaskCannotGather(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	))
 	runner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue("Gather called from task context but allowed only by top-level or gather context", func() {
 			_, _ = wave.TryGather(ctx)
@@ -161,24 +161,24 @@ func TestTaskCannotGatherParentJob(t *testing.T) {
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
-		subGatherer := psg.NewGatherer(
+		subGatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
-		)
+		))
 		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			chk.PanicsWithValue("Context belongs to a child job", func() {
 				_, _ = parentWave.TryGather(ctx)

@@ -24,12 +24,12 @@ func Example_hello() {
 	defer wave.CancelAndWait() // hygiene
 
 	var results []string
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
 		},
-	)
+	))
 
 	// Bind a string to a task that submits it to the gatherer after a short delay.
 	newRunner := func(s string) psg.TaskRunner0 {

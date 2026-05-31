@@ -29,7 +29,7 @@ func Example_observable() {
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Start and GatherAll.
 	var results []string
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   gathered result %q\n", msSinceStart(), result)
@@ -38,7 +38,7 @@ func Example_observable() {
 			results = append(results, result)
 			return err
 		},
-	)
+	))
 
 	// Create a scatter-gather wave
 	ctx, wave := psg.NewWave(ctx)

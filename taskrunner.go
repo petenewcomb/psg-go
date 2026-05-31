@@ -487,9 +487,9 @@ func (w *taskRunnerWork2[T1, T2]) Free() {
 // the input error as-is, surfacing unexpected Task.Run errors via the
 // Wave's GatherAll path.
 func newTaskErrSink() Gatherer[struct{}] {
-	return NewGatherer(func(ctx context.Context, _ struct{}, err error) error {
+	return NewGatherer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
-	})
+	}))
 }
 
 // vetStart validates that the given pool and ctx are suitable for

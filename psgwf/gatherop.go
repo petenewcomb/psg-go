@@ -26,7 +26,7 @@ func (g GenericGatherOp[T, C]) inner() psg.Gatherer[result[T, C]] {
 	return psg.Gatherer[result[T, C]](g)
 }
 
-func wrapGatherFunc[T, C any](gatherFn GenericGatherFunc[T, C]) psgfn.Gather[result[T, C]] {
+func wrapGatherFunc[T, C any](gatherFn GenericGatherFunc[T, C]) psgfn.HandlerFunc[result[T, C]] {
 	return func(ctx context.Context, res result[T, C], err error) error {
 		// Reference happened in GenericTaskRunner.Start (in scatter.go).
 		defer res.Workflow.unref(ctx)

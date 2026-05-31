@@ -347,7 +347,7 @@ func (c *controller) submitTo(
 // errors flow alongside values into the handler for it to act on, but
 // the handler doesn't re-propagate them — that would short-circuit
 // the framework's drain and cause subsequent queued work to be lost.
-func (c *controller) newGathererHandler(t assert.TestingT, g *Gatherer, idx int) psgfn.Gather[*simValue] {
+func (c *controller) newGathererHandler(t assert.TestingT, g *Gatherer, idx int) psgfn.HandlerFunc[*simValue] {
 	return func(ctx context.Context, v *simValue, valErr error) error {
 		_ = valErr
 		_ = v

@@ -53,16 +53,18 @@ func PropagateTask[T any](
 func PropagateGather[T any](
 	gatherFn func(ctx context.Context, result T, err error) error,
 ) psg.Gatherer[PropagatedResult[T]] {
-	return psg.NewGatherer(func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
-		// Create context with propagated trace data
-		propagatedCtx := ctx
-		if wrapped.TraceContext.IsValid() {
-			propagatedCtx = trace.ContextWithRemoteSpanContext(ctx, wrapped.TraceContext)
-		}
+	return psg.NewGatherer(psgfn.HandlerFunc[PropagatedResult[T]](
+		func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
+			// Create context with propagated trace data
+			propagatedCtx := ctx
+			if wrapped.TraceContext.IsValid() {
+				propagatedCtx = trace.ContextWithRemoteSpanContext(ctx, wrapped.TraceContext)
+			}
 
-		// Call original gather with enhanced context
-		return gatherFn(propagatedCtx, wrapped.UserResult, err)
-	})
+			// Call original gather with enhanced context
+			return gatherFn(propagatedCtx, wrapped.UserResult, err)
+		},
+	))
 }
 
 // PropagateCombiner wraps an accumulator factory to create accumulators that

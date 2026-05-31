@@ -27,12 +27,12 @@ func ExamplePool_Cancel() {
 
 	limit := psg.NewSemaphore(1)
 
-	printResult := psg.NewGatherer(
+	printResult := psg.NewGatherer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
 		},
-	)
+	))
 
 	// Launch first task
 	fmt.Println("Launching first task")
@@ -89,12 +89,12 @@ func ExamplePool_Cancel_task() {
 
 	limit := psg.NewSemaphore(1)
 
-	printResult := psg.NewGatherer(
+	printResult := psg.NewGatherer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
 		},
-	)
+	))
 
 	// Launch first task
 	fmt.Println("Launching first task")

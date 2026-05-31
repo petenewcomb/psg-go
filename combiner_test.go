@@ -48,7 +48,7 @@ func TestCombinerScatterNilGatherPanic(t *testing.T) {
 	_, wave := psg.NewWave(ctx)
 	defer wave.CancelAndWait()
 
-	assert.PanicsWithValue(t, "gather function must be non-nil", func() {
+	assert.PanicsWithValue(t, "handler must be non-nil", func() {
 		psg.NewGatherer[int](nil)
 	})
 }
@@ -58,12 +58,12 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[int](
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
-	)
+	))
 	combinerPool := psg.NewCombinerPool(wave.Pool())
 	combineOp := psg.NewCombiner(
 		combinerPool,
@@ -95,13 +95,13 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	))
 	combinerPool := psg.NewCombinerPool(parentWave.Pool())
 	combineOp := psg.NewCombiner(
 		combinerPool,
@@ -114,13 +114,13 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subGatherer := psg.NewGatherer(
+		subGatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
-		)
+		))
 		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subGatherer.Submit(ctx, subWave, true)
@@ -145,13 +145,13 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	))
 	combinerPool := psg.NewCombinerPool(parentWave.Pool())
 	combineOp := psg.NewCombiner(
 		combinerPool,

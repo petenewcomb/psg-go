@@ -592,7 +592,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
 								// Tests to make sure that NewGatherer does not incur allocation overhead
-								gatherer := psg.NewGatherer(gatherFnAdapter)
+								gatherer := psg.NewGatherer(psgfn.HandlerFunc[benchmarkTaskResult](gatherFnAdapter))
 								if deadline.IsZero() {
 									return true, gatherer.Start(ctx, target, task)
 								}
@@ -600,7 +600,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							}
 						} else {
 							combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(combinerLimit))
-							gatherer := psg.NewGatherer(gatherFn)
+							gatherer := psg.NewGatherer(psgfn.HandlerFunc[benchmarkCombinedResult](gatherFn))
 							combinerFactory := func() psgfn.Accumulator[benchmarkTaskResult] {
 								return newBenchmarkCombiner(
 									&testStartTime,

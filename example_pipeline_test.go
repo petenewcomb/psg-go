@@ -51,12 +51,12 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
 	newDigestGatherer := func(path string) psg.Gatherer[[md5.Size]byte] {
-		return psg.NewGatherer(
+		return psg.NewGatherer(psgfn.HandlerFunc[[md5.Size]byte](
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
 			},
-		)
+		))
 	}
 
 	newDigestingRunner := func(path string, data []byte) psg.TaskRunner0 {
@@ -70,11 +70,11 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Creates a gatherer for a reading task whose handler dispatches a
 	// digesting task with the bytes that were read.
 	newReadGatherer := func(path string) psg.Gatherer[[]byte] {
-		return psg.NewGatherer(
+		return psg.NewGatherer(psgfn.HandlerFunc[[]byte](
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestingRunner(path, data).Start(ctx, wave)
 			},
-		)
+		))
 	}
 
 	// No need for a pool to limit how many file reading tasks run concurrently

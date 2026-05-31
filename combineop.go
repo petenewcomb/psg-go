@@ -108,9 +108,9 @@ func NewCombiner[T any](
 	// Framework-owned error sink: Accumulator errors flow through this
 	// Gatherer[struct{}] whose handler returns err as-is, surfacing via
 	// the Pool's GatherAll path.
-	inner.errSink = NewGatherer(func(ctx context.Context, _ struct{}, err error) error {
+	inner.errSink = NewGatherer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
-	})
+	}))
 	inner.combinerPool = combinerPool
 	inner.combinerFactory = combinerFactory
 	inner.limiter = cfg.singleLimiter()

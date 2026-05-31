@@ -54,7 +54,7 @@ func ExampleCombiner() {
 	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
 
 	// Define a result aggregation function and create a combined gather/combine operation
-	gatherer := psg.NewGatherer(gatherFn)
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[map[string]int](gatherFn))
 
 	// After Wave 2, the Accumulator factory captures the downstream
 	// gatherer in its closure and Submits the aggregated map from

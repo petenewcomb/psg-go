@@ -26,12 +26,12 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var flushCount atomic.Int32
 	var gatherCount atomic.Int32
 
-	gatherer := psg.NewGatherer(func(ctx context.Context, result int, err error) error {
+	gatherer := psg.NewGatherer(psgfn.HandlerFunc[int](func(ctx context.Context, result int, err error) error {
 		t.Logf("Gather called with result %d", result)
 		gatherCount.Add(1)
 		chk.NoError(err)
 		return nil
-	})
+	}))
 
 	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 

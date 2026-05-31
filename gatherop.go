@@ -25,21 +25,24 @@ import (
 // can be passed by value to goroutines or stored in structures and
 // used concurrently.
 type Gatherer[T any] struct {
-	gatherFn psgfn.Gather[T]
+	handler  psgfn.Handler[T]
 	workPool *omnipool.Pool[gatherWork[T]]
 }
 
-// NewGatherer binds a Gather handler. The Gatherer is Wave-
-// independent: callers supply a [Wave] at each [Gatherer.Submit] /
-// [Gatherer.SubmitErr] call.
+// NewGatherer binds a [psgfn.Handler] for value+err dispatch during
+// the bound Wave's drain. The Gatherer is Wave-independent: callers
+// supply a [Wave] at each [Gatherer.Submit] / [Gatherer.SubmitErr]
+// call. For closure-based handlers, wrap in [psgfn.HandlerFunc][T]
+// at the call site; struct implementations of Handler[T] support
+// the alloc-free hot path.
 func NewGatherer[T any](
-	gatherFn psgfn.Gather[T],
+	handler psgfn.Handler[T],
 ) Gatherer[T] {
-	if gatherFn == nil {
-		panic("gather function must be non-nil")
+	if handler == nil {
+		panic("handler must be non-nil")
 	}
 	return Gatherer[T]{
-		gatherFn: gatherFn,
+		handler:  handler,
 		workPool: omnipool.For[gatherWork[T]](),
 	}
 }
@@ -132,17 +135,17 @@ type boundGatherWork interface {
 type gatherWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	job      *Pool
-	pool     *omnipool.Pool[gatherWork[T]]
-	gatherFn psgfn.Gather[T]
-	value    T
-	err      error
+	job     *Pool
+	pool    *omnipool.Pool[gatherWork[T]]
+	handler psgfn.Handler[T]
+	value   T
+	err     error
 }
 
 // newGatherWork creates a new gather work item with the provided values
 func (g Gatherer[T]) newGatherWork(group workq.GroupID, job *Pool, value T, err error) *gatherWork[T] {
 	w := g.workPool.Get()
-	w.Init(g.workPool, group, job, g.gatherFn, value, err)
+	w.Init(g.workPool, group, job, g.handler, value, err)
 	return w
 }
 
@@ -150,14 +153,14 @@ func (w *gatherWork[T]) Init(
 	pool *omnipool.Pool[gatherWork[T]],
 	group workq.GroupID,
 	job *Pool,
-	gatherFn psgfn.Gather[T],
+	handler psgfn.Handler[T],
 	value T,
 	err error,
 ) {
 	w.poolWork.Init(group, job)
 	w.job = job
 	w.pool = pool
-	w.gatherFn = gatherFn
+	w.handler = handler
 	w.value = value
 	w.err = err
 }
@@ -173,7 +176,7 @@ func (w *gatherWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	meta.PushGroup(w.Group())
 	defer meta.PopGroup()
 
-	return w.gatherFn(ctx, w.value, w.err)
+	return w.handler.Handle(ctx, w.value, w.err)
 }
 
 //nolint:contextcheck // background context used only for tracing

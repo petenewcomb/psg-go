@@ -176,8 +176,7 @@ API_DESIGN.md updated with the trio rationale and a `considered & rejected` entr
 
 - **Step 3 (collapse Launcher arities)**: drop `Launcher0` / `Launcher2[T1, T2]`; collapse to single `Launcher[T]` taking `Handler[T]`. Update `Task[T]` interface to take `err` param (matching `Handler[T]`). Zero-arg uses `T = struct{}` with `Start` sugar; two-arg packs into a struct.
 - **Step 4 (Submit family on Launcher)**: add `Submit` / `SubmitErr` / `TrySubmit` / `TrySubmitErr`; `Start` / `TryStart` become sugars for `Submit(*new(T))` / `TrySubmit(deadline, *new(T))`.
-- **Deferred adapter**: add `Task` named func adapter (`func(ctx) error` satisfying `Handler[struct{}]`) — currently can't because `psgfn.Task[T]` interface still occupies the name. After Step 3 retires the per-arity Task interfaces, this can land. Note in `psgfn/handler.go` flags it.
-- **Short-circuit semantics on `Task` adapter**: per design discussion, `Task.Handle(ctx, _, err)` should return `err` directly when non-nil (skip the wrapped closure). The escape hatch for users who want to run on err is `ErrHandler` or a direct `Handler[struct{}]` implementation. Document on the `Task` adapter when it lands.
+- **Deferred adapter**: add `Task` named func adapter (`func(ctx) error` satisfying `Handler[struct{}]`) — currently can't because `psgfn.Task[T]` interface still occupies the name. After Step 3 retires the per-arity Task interfaces, this can land. Note in `psgfn/handler.go` flags it. Short-circuit-on-non-nil-err semantics are now nailed down in API_DESIGN.md; the implementation just needs to match the spec.
 
 ### Threads B and C (queued)
 

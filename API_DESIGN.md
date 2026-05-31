@@ -252,20 +252,45 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 // Task is the named func adapter for the no-input case: a piece of
 // work that runs without a value or upstream err. Satisfies
 // Handler[struct{}], so it plugs into NewLauncher (the common case)
-// and into NewSkimmer (rare; a value-less sink). No paired Task
-// interface — no-arg bodies almost always close over state from the
-// surrounding scope, so the struct-implementation pattern that
-// justifies exposing Handler[T] as an interface doesn't pay off
-// strongly for T = struct{}. Users who do want to implement the
-// no-arg case on a struct write Handler[struct{}] directly with
-// Handle(ctx, _ struct{}, _ error) error.
+// and into NewSkimmer (rare; a value-less sink).
+//
+// Short-circuit semantics: Handle returns the upstream err
+// immediately when it is non-nil, without invoking the wrapped
+// closure. This matches the convenience-adapter contract: a Task
+// closure that declined to accept an err arg almost certainly didn't
+// plan to run when one was already in flight. The two escape
+// hatches:
+//
+//   - To run on err and handle it, use [ErrHandler].
+//   - To run regardless of err (cleanup, always-fire side effects),
+//     write a [HandlerFunc][struct{}] that ignores err, or implement
+//     Handler[struct{}] directly on a struct.
+//
+// No paired Task interface — no-arg bodies almost always close over
+// state from the surrounding scope, so the struct-implementation
+// pattern that justifies exposing Handler[T] as an interface doesn't
+// pay off strongly for T = struct{}. Users who do want to implement
+// the no-arg case on a struct write Handler[struct{}] directly with
+// Handle(ctx, _ struct{}, err error) error and choose their own
+// err-handling policy.
 type Task func(context.Context) error
-func (f Task) Handle(ctx context.Context, _ struct{}, _ error) error { return f(ctx) }
+func (f Task) Handle(ctx context.Context, _ struct{}, err error) error {
+    if err != nil {
+        return err
+    }
+    return f(ctx)
+}
 
 // ErrHandler is Task's err-receiving sibling — a no-value handler
-// that receives an upstream err. Named descriptively (handling an
+// that receives the upstream err and decides what to do with it
+// (rewrite, suppress, log, etc.). Named descriptively (handling an
 // err) rather than tied to either op type's vocabulary, since it
 // reads naturally in both Launcher and Skimmer contexts.
+//
+// Unlike [Task], ErrHandler does not short-circuit — it always
+// invokes the wrapped closure, passing err through. That's the whole
+// point: the user opted into the err-receiving signature precisely
+// because they want the err to reach their code.
 type ErrHandler func(context.Context, error) error
 func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error { return f(ctx, err) }
 
@@ -689,8 +714,9 @@ body running in a wave.
 | No `For(duration)` family | Dropped | Two reasons: `For` reads ambiguously next to a time-typed value, and it silently picks `time.Now()` as the base time — but the base often isn't dispatch-instant in real code (request `receivedAt`, retry `firstAttemptAt`, etc.). Forcing `baseTime.Add(d)` at the call site is trivial and makes the base-time choice explicit. |
 | Interface method verb | `Handle` (Handler), `Accumulate`/`Flush` (Accumulator) | Sync execution verb on the user-implemented interface, parallel to `http.Handler.ServeHTTP`. The user-facing async dispatch verbs (Submit, Start) live on the op types; the body invokes the synchronous method. |
 | Single `Handler[T]` interface across Launcher + Skimmer | Both take `Handler[T]` | The two op types' bodies have identical signatures — `(ctx, T, err) error`. Defining separate `Task[T]` and `Handler[T]` interfaces with the same shape and different method names (`Run` vs `Handle`) would force users to write the same closure twice if they want the same body in both contexts. Unifying under `Handler[T]` lets adapters and struct implementations work for both ops without rewrap; the runtime context (worker vs drain goroutine) is the op type's job, not the interface's. |
-| `Task` as named func adapter, not a separate interface | `type Task func(context.Context) error`, satisfies `Handler[struct{}]` | No-arg task bodies almost always close over state from the surrounding scope (they're closures by necessity), so the struct-implementation pattern that justifies exposing `Handler[T]` as an interface doesn't earn its keep for `T = struct{}`. Users who do want alloc-free no-arg work implement `Handler[struct{}]` directly with `Handle(ctx, _ struct{}, _ error)`. The named `Task` adapter provides the closure shorthand; no paired `Task` interface, hence no `Func` suffix. |
-| `ErrHandler` as the no-value with-err adapter | `type ErrHandler func(ctx, error) error`, satisfies `Handler[struct{}]` | Sibling of `Task`. Named descriptively (handles an err) rather than `ErrTask` because "handle" reads naturally in both Launcher and Skimmer contexts, while "task" carries Launcher-specific vocabulary. The asymmetric pair `Task` / `ErrHandler` lives with this: each name fits its primary use case. |
+| `Task` as named func adapter, not a separate interface | `type Task func(context.Context) error`, satisfies `Handler[struct{}]` | No-arg task bodies almost always close over state from the surrounding scope (they're closures by necessity), so the struct-implementation pattern that justifies exposing `Handler[T]` as an interface doesn't earn its keep for `T = struct{}`. Users who do want alloc-free no-arg work implement `Handler[struct{}]` directly with `Handle(ctx, _ struct{}, err error)` and choose their own err policy. The named `Task` adapter provides the closure shorthand; no paired `Task` interface, hence no `Func` suffix. |
+| `Task.Handle` short-circuits on non-nil err | Returns `err` immediately without invoking the wrapped closure | A `Task` closure has signature `func(ctx) error` — the user explicitly opted out of receiving an err arg. Running the closure anyway when an upstream err is already in flight would either silently swallow the err (lost diagnostic) or require the user to re-handle one they declined to receive. Short-circuiting matches the convenience-adapter contract: "I didn't ask for err, so don't run me on err." Escape hatches: `ErrHandler` for run-on-err with the err visible; `HandlerFunc[struct{}]` that ignores err for always-run side effects. The behavior is asymmetric with `HandlerFunc[T]` and `ErrHandler`, both of which always invoke the closure — and that's correct, because those signatures put err in the user's hands. |
+| `ErrHandler` as the no-value with-err adapter | `type ErrHandler func(ctx, error) error`, satisfies `Handler[struct{}]` | Sibling of `Task`. Named descriptively (handles an err) rather than `ErrTask` because "handle" reads naturally in both Launcher and Skimmer contexts, while "task" carries Launcher-specific vocabulary. The asymmetric pair `Task` / `ErrHandler` lives with this: each name fits its primary use case. Does *not* short-circuit on non-nil err (unlike Task) — the err-receiving signature was the whole point of choosing this adapter. |
 | Single `Launcher[T]` type (no `Launcher0` / `Launcher2`) | One parameterized type | Per-arity types proliferate without earning their keep: zero-arg uses `T = struct{}` (with `Start` sugar), two-arg packs into a struct (named-field call sites). The type-parameter inference makes the single-type signature concise at use sites. |
 | User inputs as interfaces | `Handler[T]`, `Accumulator[T]` | Function signatures forced closure allocations for any stateful body. Interfaces let users implement on structs with state as fields (alloc-free hot path). Function-type adapters — canonical `HandlerFunc[T]` plus named `Task` / `ErrHandler` for the void cases, and `FuncAccumulator[T]` — provide closure convenience. Same pattern as `http.Handler` / `http.HandlerFunc`. |
 | No `.To(sink)` wiring | Function bodies call `sink.Submit(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Funnel. |

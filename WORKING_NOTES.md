@@ -156,6 +156,47 @@ The mutex approach is the cleanest. Note: this is a test-only race; production `
 - `internal/leakguard/leakguard.go:130` — `LogLeak` (the writer side)
 - `internal/leakguard/leakguard.go:314` — finalizer registration in `Init`
 
+## Thread A: Handler[T] unification + op trio rename (2026-05-31)
+
+Substantial reshape in flight on the `combiner` branch. **Status: paused at a clean checkpoint.** All committed work is on origin; tests green; build green.
+
+### What landed
+
+In commit order on origin:
+
+1. `0509241` **psgfn**: add `Handler[T]` interface, `HandlerFunc[T]` and `ErrHandler` adapters, `NewAccumulator` constructor — additive.
+2. `9ebc5cd` **psg**: migrate `Gatherer` to take `psgfn.Handler[T]` instead of `psgfn.Gather[T]`. All call sites wrap function literals in `psgfn.HandlerFunc[T]`.
+3. `24553ee` **Op trio rename step 1**: `Gather`/`Gatherer` → `Skim`/`Skimmer`. Wave methods, internal types, files all renamed. `psgfn.Gather` aliased to `psgfn.Skim` (transitional).
+4. `942620f` **Op trio rename step 2**: `Combiner`/`Combine` → `Funnel`. `CombinerPool` → `FunnelPool` (transitional; will retire on Pool consolidation). File renames throughout.
+5. `91872d0` **Op trio rename step 3**: `TaskRunner` → `Launcher`. Per-arity types (`Launcher0` / `Launcher[T]` / `Launcher2[T1, T2]`) retained for this commit; collapse to single `Launcher[T]` is the next step.
+
+API_DESIGN.md updated with the trio rationale and a `considered & rejected` entry covering the alternatives evaluated (`Drain`, `Mix`, `Caster`, `Pitcher`, `Sluice`, etc.).
+
+### What's left in Thread A
+
+- **Step 3 (collapse Launcher arities)**: drop `Launcher0` / `Launcher2[T1, T2]`; collapse to single `Launcher[T]` taking `Handler[T]`. Update `Task[T]` interface to take `err` param (matching `Handler[T]`). Zero-arg uses `T = struct{}` with `Start` sugar; two-arg packs into a struct.
+- **Step 4 (Submit family on Launcher)**: add `Submit` / `SubmitErr` / `TrySubmit` / `TrySubmitErr`; `Start` / `TryStart` become sugars for `Submit(*new(T))` / `TrySubmit(deadline, *new(T))`.
+- **Deferred adapter**: add `Task` named func adapter (`func(ctx) error` satisfying `Handler[struct{}]`) — currently can't because `psgfn.Task[T]` interface still occupies the name. After Step 3 retires the per-arity Task interfaces, this can land. Note in `psgfn/handler.go` flags it.
+- **Short-circuit semantics on `Task` adapter**: per design discussion, `Task.Handle(ctx, _, err)` should return `err` directly when non-nil (skip the wrapped closure). The escape hatch for users who want to run on err is `ErrHandler` or a direct `Handler[struct{}]` implementation. Document on the `Task` adapter when it lands.
+
+### Threads B and C (queued)
+
+- **Thread B**: wave-at-construction with nil-sentinel resolution in ctxMeta dispatch path. Internal plumbing change so ops constructed with `nil` Wave resolve their target via the dispatching ctx's wave at Submit time.
+- **Thread C**: introduce `Forever` sentinel; flip zero-deadline semantic from "block forever" to "attempt once". Atomic across all dispatch sites. Risky single-shot change per the impl survey.
+
+### Naming-pass deferred items
+
+- `psgfn.Skim` is the renamed `psgfn.Gather` function-type alias; legacy compatibility name. Retire entirely when the broader `psgfn` cleanup lands.
+- `CombinerPool` → `FunnelPool` retained for now; goes away when Pool consolidates per the destination doc.
+- `psgwf.GenericTaskRunner` (and related psgwf wrappers) still use legacy names; rename or retire with the broader psgwf migration.
+- chartgen's bench-data parser still reads the historical metric name `combinerLimit`; the legacy benchmark file emits `funnelLimit` after the rename. Will need re-aligning when `bench.txt` is regenerated post-rename.
+
+### Next session pickup
+
+If continuing Thread A: start with Step 3 (Launcher arity collapse). The 1/2-arity types are dead weight given the unified `Handler[T]` interface, and collapsing unlocks the deferred `Task` adapter naming.
+
+If switching threads: B or C are both small, focused, and well-scoped per the docs.
+
 ## Open issues
 
 ### Deadline propagation in taskPostWork

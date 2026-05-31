@@ -235,8 +235,8 @@ func NewRateLimit(n int, d time.Duration) Limiter   // wraps x/time/rate; signal
 // user-supplied work that Launcher runs on a worker or Skimmer
 // invokes during drain. The method is named Handle; sync execution
 // verb on the interface, parallel to http.Handler.ServeHTTP. The
-// user-facing async dispatch verbs (Submit / SubmitErr / Start) live
-// on the op types.
+// user-facing async dispatch verbs (Submit / SubmitErr /
+// SubmitResult / Start) live on the op types.
 type Handler[T any] interface {
     Handle(ctx context.Context, value T, err error) error
 }
@@ -370,7 +370,7 @@ func NewSkimmer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Skimmer
 // ===== Wave binding =====
 //
 // Every op holds an optional *Wave bound at construction. At dispatch
-// (Start / Submit / SubmitErr), the framework resolves the target
+// (Start / Submit / SubmitErr / SubmitResult), the framework resolves the target
 // wave as follows:
 //
 //   1. If the op was constructed with a non-nil *Wave, use it.
@@ -389,18 +389,30 @@ func NewSkimmer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Skimmer
 // ===== Op types =====
 //
 // All three ops share the same dispatch family, layered as sugars
-// over a single primitive (TrySubmitErr taking a deadline parameter).
-// Launcher additionally has Start / TryStart as sugar for the void
-// case (T = struct{}). None of the dispatch methods take a *Wave —
-// the wave was bound at construction (or deferred via nil; see
-// "Wave binding").
+// over a single primitive (TrySubmitResult taking a deadline
+// parameter). Launcher additionally has Start / TryStart as sugar
+// for the void case (T = struct{}). None of the dispatch methods
+// take a *Wave — the wave was bound at construction (or deferred
+// via nil; see "Wave binding").
 //
-// Four methods per sink, all layered sugars over the single
-// primitive TrySubmitErr(ctx, deadline, v, err) (bool, error):
-//   - Submit(ctx, v)              = TrySubmitErr(ctx, Forever, v, nil), bool dropped
-//   - SubmitErr(ctx, v, err)      = TrySubmitErr(ctx, Forever, v, err), bool dropped
-//   - TrySubmit(ctx, t, v)        = TrySubmitErr(ctx, t, v, nil)
-//   - TrySubmitErr(ctx, t, v, err) = primitive
+// Naming pattern: each method's name describes exactly what's being
+// submitted. Submit takes a value. SubmitErr takes an err.
+// SubmitResult takes the full (value, err) result tuple. The
+// frequency ordering is value-only > err-only > both — callers in
+// Go-idiomatic code reflexively decompose (v, err) at the dispatch
+// site, branching to a value sink on success and an err sink on
+// failure. The both-case exists for sinks that genuinely want the
+// pair (logged outcomes, status-aware accumulators) but is the
+// least common shape — hence the longest name.
+//
+// Six methods per sink, all layered sugars over the single
+// primitive TrySubmitResult(ctx, deadline, v, err) (bool, error):
+//   - Submit(ctx, v)              = TrySubmitResult(ctx, Forever, v, nil),   bool dropped
+//   - SubmitErr(ctx, err)         = TrySubmitResult(ctx, Forever, zero, err), bool dropped
+//   - SubmitResult(ctx, v, err)   = TrySubmitResult(ctx, Forever, v, err),    bool dropped
+//   - TrySubmit(ctx, t, v)        = TrySubmitResult(ctx, t, v, nil)
+//   - TrySubmitErr(ctx, t, err)   = TrySubmitResult(ctx, t, zero, err)
+//   - TrySubmitResult(ctx, t, v, err) = primitive
 //
 // The deadline parameter is a time.Time interpreted as:
 //   - time.Time{} (zero) → attempt once (safer default than block-forever)
@@ -408,42 +420,49 @@ func NewSkimmer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Skimmer
 //   - past time          → fail fast; no attempt
 //   - future time        → bounded wait
 //
-// Submit / SubmitErr are convenience names for the "block forever"
-// case; they drop the bool return because the deadline is suppressed.
-// See "Forever sentinel and dispatch model" below for the full
-// deadline value semantics.
+// Submit / SubmitErr / SubmitResult are convenience names for the
+// "block forever" case; they drop the bool return because the
+// deadline is suppressed. See "Forever sentinel and dispatch model"
+// below for the full deadline value semantics.
 
 // Forever is the deadline-sentinel value for "block until success."
-// Pass to TrySubmit / TrySubmitErr to express the same behavior as
-// Submit / SubmitErr (without the bool drop).
+// Pass to TrySubmit / TrySubmitErr / TrySubmitResult to express the
+// same behavior as Submit / SubmitErr / SubmitResult (without the
+// bool drop).
 var Forever time.Time = /* implementation-chosen specific instant; opaque */
 
 type Launcher[T any] struct { /* ... */ }
-// Dispatch surface. All sinks share this shape (TrySubmitErr is the primitive).
-func (Launcher[T]) Submit(ctx context.Context, arg T) error                                                // sugar — block forever
-func (Launcher[T]) SubmitErr(ctx context.Context, arg T, err error) error                                  // sugar — block forever, carry err
-func (Launcher[T]) TrySubmit(ctx context.Context, deadline time.Time, arg T) (bool, error)                 // sugar — drops err
-func (Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, arg T, err error) (bool, error)   // primitive
+// Dispatch surface. All sinks share this shape (TrySubmitResult is the primitive).
+func (Launcher[T]) Submit(ctx context.Context, v T) error                                                       // sugar — value only, block forever
+func (Launcher[T]) SubmitErr(ctx context.Context, err error) error                                              // sugar — err only, block forever
+func (Launcher[T]) SubmitResult(ctx context.Context, v T, err error) error                                      // sugar — both, block forever
+func (Launcher[T]) TrySubmit(ctx context.Context, deadline time.Time, v T) (bool, error)                        // sugar — value only
+func (Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error)               // sugar — err only
+func (Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, v T, err error) (bool, error)       // primitive
 // Start sugars for the void case (T = struct{}).
-func (Launcher[T]) Start(ctx context.Context) error                                                        // sugar for Submit(ctx, *new(T))
-func (Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error)                         // sugar for TrySubmit(ctx, deadline, *new(T))
+func (Launcher[T]) Start(ctx context.Context) error                                                             // sugar for Submit(ctx, *new(T))
+func (Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error)                              // sugar for TrySubmit(ctx, deadline, *new(T))
 
 // Funnel — stateful aggregation via factory-created Accumulator
 // instances. Parallel by default; cap parallelism via WithLimits.
 type Funnel[T any] struct { /* ... */ }
-func (Funnel[T]) Submit(ctx context.Context, value T) error                                                // sugar — block forever
-func (Funnel[T]) SubmitErr(ctx context.Context, value T, err error) error                                  // sugar — block forever, carry err
-func (Funnel[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)                 // sugar — drops err
-func (Funnel[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)   // primitive
-func (Funnel[T]) Close()                                                                                   // signals no more input; triggers Flush on each instance
-func (Funnel[T]) Dup() Funnel[T]                                                                         // refcounted sharing across handlers
+func (Funnel[T]) Submit(ctx context.Context, v T) error                                                         // sugar — value only, block forever
+func (Funnel[T]) SubmitErr(ctx context.Context, err error) error                                                // sugar — err only, block forever
+func (Funnel[T]) SubmitResult(ctx context.Context, v T, err error) error                                        // sugar — both, block forever
+func (Funnel[T]) TrySubmit(ctx context.Context, deadline time.Time, v T) (bool, error)                          // sugar — value only
+func (Funnel[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error)                 // sugar — err only
+func (Funnel[T]) TrySubmitResult(ctx context.Context, deadline time.Time, v T, err error) (bool, error)         // primitive
+func (Funnel[T]) Close()                                                                                        // signals no more input; triggers Flush on each instance
+func (Funnel[T]) Dup() Funnel[T]                                                                                // refcounted sharing across handlers
 
 // Skimmer — terminal sink; the Handler is dispatched on Wave.Skim pull.
 type Skimmer[T any] struct { /* ... */ }
-func (Skimmer[T]) Submit(ctx context.Context, value T) error                                                // sugar — block forever
-func (Skimmer[T]) SubmitErr(ctx context.Context, value T, err error) error                                  // sugar — block forever, carry err
-func (Skimmer[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)                 // sugar — drops err
-func (Skimmer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)   // primitive
+func (Skimmer[T]) Submit(ctx context.Context, v T) error                                                        // sugar — value only, block forever
+func (Skimmer[T]) SubmitErr(ctx context.Context, err error) error                                               // sugar — err only, block forever
+func (Skimmer[T]) SubmitResult(ctx context.Context, v T, err error) error                                       // sugar — both, block forever
+func (Skimmer[T]) TrySubmit(ctx context.Context, deadline time.Time, v T) (bool, error)                         // sugar — value only
+func (Skimmer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error)                // sugar — err only
+func (Skimmer[T]) TrySubmitResult(ctx context.Context, deadline time.Time, v T, err error) (bool, error)        // primitive
 // (No Close / Dup on Skimmer — handler is stateless from the
 // framework's perspective; SkimAll completion is driven by
 // in-flight tracking, not by an explicit end-of-input signal.)
@@ -451,10 +470,10 @@ func (Skimmer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T,
 
 ### Forever sentinel and dispatch model
 
-All dispatch verbs reduce to one primitive — `TrySubmitErr(ctx,
+All dispatch verbs reduce to one primitive — `TrySubmitResult(ctx,
 deadline, v, err) (bool, error)` — with the deadline value
-controlling the wait behavior. Submit / SubmitErr / TrySubmit are
-layered sugars over it.
+controlling the wait behavior. Submit / SubmitErr / SubmitResult /
+TrySubmit / TrySubmitErr are layered sugars over it.
 
 **Deadline value semantics:**
 
@@ -474,14 +493,15 @@ zero value naturally answers "not at all." That gives the safest
 default for programmers who don't have a specific deadline to set
 and pass the zero value: one attempt that fails fast, rather than a
 silent indefinite block. Block-forever stays available via the
-named `Submit` / `SubmitErr` sugars or via the explicit `Forever`
-sentinel.
+named `Submit` / `SubmitErr` / `SubmitResult` sugars or via the
+explicit `Forever` sentinel.
 
 **Implementation notes:**
 
-- The blocking sugars (`Submit` / `SubmitErr`) call the primitive
-  with `Forever` and drop the returned bool. The bool is meaningless
-  when the deadline is suppressed (you either dispatch or you error).
+- The blocking sugars (`Submit` / `SubmitErr` / `SubmitResult`) call
+  the primitive with `Forever` and drop the returned bool. The bool
+  is meaningless when the deadline is suppressed (you either
+  dispatch or you error).
 - An already-expired deadline (`time.Now().After(deadline)`) returns
   false-with-nil-error without attempting. This matches the
   ecosystem convention for operations that take a deadline —
@@ -491,9 +511,9 @@ sentinel.
   parameter says "I will not wait past this time," so already-past
   means no attempt.
 - Generic dispatch over an arbitrary deadline value composes
-  cleanly: pass any time value through `TrySubmit` or `TrySubmitErr`
-  and the deadline value alone determines behavior. No method
-  branching required at the call site.
+  cleanly: pass any time value through TrySubmit / TrySubmitErr /
+  TrySubmitResult and the deadline value alone determines behavior.
+  No method branching required at the call site.
 
 The `For(duration)` variant was considered and dropped (see What we
 chose not to do): aside from the naming reading ambiguously next to
@@ -525,7 +545,10 @@ results := streampool.NewSkimmer(wave, streampool.HandlerFunc[*User](
 fetch := streampool.NewLauncher(wave, streampool.HandlerFunc[UserID](
     func(ctx context.Context, id UserID, err error) error {
         user, ferr := userClient.Fetch(ctx, id)
-        return results.SubmitErr(ctx, user, ferr)
+        if ferr != nil {
+            return errSink.SubmitErr(ctx, ferr)
+        }
+        return results.Submit(ctx, user)
     },
 ))
 
@@ -620,7 +643,10 @@ type fetcher struct {
 
 func (f *fetcher) Handle(ctx context.Context, id UserID, err error) error {
     user, ferr := f.db.Fetch(ctx, id)
-    return f.sink.SubmitErr(ctx, user, ferr)
+    if ferr != nil {
+        return f.errs.SubmitErr(ctx, ferr)
+    }
+    return f.sink.Submit(ctx, user)
 }
 
 fetch := streampool.NewLauncher(wave, &fetcher{db: db, sink: results})
@@ -709,7 +735,8 @@ body running in a wave.
 | Op constructor verb | `NewLauncher`, `NewFunnel`, `NewSkimmer` | Agent nouns (`-er` suffix where it pays; Funnel is a noun directly). The type names describe roles, not the function-call verb. Matches `http.Handler`, `io.Reader`, `sync.Mutex`. |
 | Sink dispatch verb | `Submit` / `SubmitErr` | Committed-delivery semantics: "submit this value to the sink." Avoids the Java `BlockingQueue.offer` baggage that would mislead users to expect try-semantics from `Offer`. Used uniformly across Launcher, Funnel, and Skimmer — submitting a value to a Launcher dispatches a task with that value as its arg, exactly mirroring how Submit works for Funnel and Skimmer. |
 | `Start` as sugar for void Launcher dispatch | `Start(ctx)` == `Submit(ctx, *new(T))` | When `T = struct{}` (the no-input task case), `Submit(ctx, struct{}{})` is the explicit form and reads awkwardly. `Start(ctx)` is the sugar — matches the conventional "start a fire-and-forget task" intent and the `os/exec.Cmd.Start()` precedent. Available on all `Launcher[T]` instantiations; meaningful primarily when T's zero value is conventional (`struct{}` or similar). |
-| Layered sugar over one TrySubmitErr primitive | `TrySubmitErr(ctx, deadline time.Time, v, err) (bool, error)` is the only primitive. `TrySubmit` drops the err arg (passes nil); `Submit` / `SubmitErr` use the `Forever` sentinel and drop the bool return. Four methods per sink. | Collapses what would otherwise be a sprawling Try-family into one method whose deadline parameter does all the work. Each named sugar lights up a common case (block-forever via Submit; one-attempt by passing zero deadline; bounded wait by passing future time). Generic dispatch over a deadline value works through a single funnel — no method branching needed. |
+| Layered sugar over one TrySubmitResult primitive | `TrySubmitResult(ctx, deadline time.Time, v, err) (bool, error)` is the only primitive. Six methods per sink: `Submit(v)`, `SubmitErr(err)`, `SubmitResult(v, err)` use `Forever` and drop the bool; the three Try variants take an explicit deadline and return the bool. | Each method's name describes exactly what's being submitted — value only, err only, or the full (v, err) pair. Generic dispatch over a deadline value works through a single funnel; no method branching needed at any call site. |
+| Three submission shapes per sink: Submit / SubmitErr / SubmitResult | Named by what they take, not by err presence/absence | The dispatch frequency in practice is value-only > err-only > both. Go programmers reflexively decompose `(v, err)` at the call site, branching to a value sink on success and an err sink on failure — both-case sinks (logged outcomes, status-aware accumulators) exist but are the least common. The naming matches the frequency: shortest name on the most common case (`Submit(v)`), short marked name on the second (`SubmitErr(err)`), longest on the rare both-case (`SubmitResult(v, err)`). The pattern "each name describes its args literally" beats the alternative "Submit is the primitive, others are sugars" — readers don't need to learn which method is canonical vs sugared; the args list and the name agree. |
 | Zero deadline = "attempt once" (defensive default) | `time.Time{}` (zero) → one immediate attempt; `streampool.Forever` → block until success | The deadline parameter on TrySubmit answers "how long am I willing to wait if it doesn't dispatch immediately?" — a zero value naturally answers "not at all." That gives the safest default for programmers who don't have a deadline to set and pass the zero value: one attempt that fails fast, rather than a silent indefinite block. Block-forever is available via the `Forever` sentinel or via the `Submit` / `SubmitErr` named sugars. |
 | No `For(duration)` family | Dropped | Two reasons: `For` reads ambiguously next to a time-typed value, and it silently picks `time.Now()` as the base time — but the base often isn't dispatch-instant in real code (request `receivedAt`, retry `firstAttemptAt`, etc.). Forcing `baseTime.Add(d)` at the call site is trivial and makes the base-time choice explicit. |
 | Interface method verb | `Handle` (Handler), `Accumulate`/`Flush` (Accumulator) | Sync execution verb on the user-implemented interface, parallel to `http.Handler.ServeHTTP`. The user-facing async dispatch verbs (Submit, Start) live on the op types; the body invokes the synchronous method. |
@@ -744,7 +771,7 @@ body running in a wave.
 | `psg.NewGatherOp(handler)` | `streampool.NewSkimmer(wave, handler)` | Wave bound at construction (or nil to defer to dispatch-ctx). Handler is `Handler[T]` (renamed from psgfn.Gather). |
 | `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewFunnel(wave, factory)` | Output type parameter gone; downstream sink wired via factory's closure. Wave bindable like Skimmer. |
 | `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewLauncher(wave, handler)` + `runner.Submit(ctx, arg)` | Two-step: construct once (with wave or nil), dispatch with arg. Dispatch verb is `Submit` (matches Funnel / Skimmer); `Start` is sugar for `Submit(*new(T))`. The dispatch takes no *Wave; the wave was locked in at construction. |
-| `gatherer.Submit(ctx, job, value)` | `skimmer.Submit(ctx, value)` / `skimmer.SubmitErr(ctx, value, err)` | Job/Wave arg drops out of dispatch — was bound at construction. SubmitErr is the explicit form; Submit is the sugar for nil-err. |
+| `gatherer.Submit(ctx, job, value, err)` | `skimmer.Submit(ctx, v)` / `skimmer.SubmitErr(ctx, err)` / `skimmer.SubmitResult(ctx, v, err)` | Job/Wave arg drops out of dispatch — was bound at construction. The three submission shapes name what's being submitted: value, err, or the full (v, err) result tuple. Callers typically branch — `if err != nil { errSink.SubmitErr(...) } else { sink.Submit(...) }` — so the value-only and err-only forms cover the dominant patterns; SubmitResult covers the rare both-case where one sink wants the pair. |
 | `runner.Start(ctx)` (post-Wave-3 shape with positional pool) | `runner.Submit(ctx, arg)` / `runner.Start(ctx)` | Pool/Wave arg drops out of dispatch. Start exists as sugar for void Submit (`T = struct{}`). |
 | `psg.TaskRunner0`, `psg.TaskRunner[T]`, `psg.TaskRunner2[T1, T2]` | `Launcher[T]` (single) | Per-arity types collapse: void = `T = struct{}`, two-arg packs into a struct with named fields. |
 | `Pool.CloseAndGatherAll(ctx)` | `wave.SkimAll(ctx)` | Single call. Pool worker termination is automatic (refcount → 0 → synchronous worker exit before drain returns). |

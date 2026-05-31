@@ -68,3 +68,18 @@ func (a FuncAccumulator[T]) Flush(ctx context.Context) error {
 	}
 	return a.FlushFn(ctx)
 }
+
+// NewAccumulator is the type-inference-friendly constructor for a
+// closure-based Accumulator. T is inferred from the accumulate
+// closure's signature, sparing the user the [T] annotation. Pass nil
+// for flush if the accumulator doesn't need a final flush. Returns
+// the concrete FuncAccumulator[T] (which satisfies Accumulator[T]);
+// callers who want struct-level access keep it, and callers who
+// treat the result as an Accumulator interface get that
+// automatically via structural typing.
+func NewAccumulator[T any](
+	accumulate func(ctx context.Context, value T, err error) (time.Time, error),
+	flush func(ctx context.Context) error,
+) FuncAccumulator[T] {
+	return FuncAccumulator[T]{AccumulateFn: accumulate, FlushFn: flush}
+}

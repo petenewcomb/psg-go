@@ -1,0 +1,66 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+package psgfn
+
+import (
+	"context"
+)
+
+// Handler[T] is the universal user-supplied body interface — invoked
+// by TaskRunner on a worker goroutine, by Gatherer during a Wave's
+// drain, and by anywhere else the framework needs to dispatch a
+// (value, err) pair to user code. Handle is called synchronously in
+// the framework's chosen goroutine; the surrounding op type
+// determines the runtime context.
+//
+// The (value, err) pair carries an upstream value and any error
+// associated with producing it. Submit-without-err sites pass nil
+// err; sites that explicitly forward an upstream error (e.g.,
+// SubmitErr) pass the actual error. A handler decides what to do
+// with each — log, transform, short-circuit, or propagate further
+// downstream via its own Submit.
+//
+// If Handle panics, the whole program will terminate as per
+// "Handling panics" in The Go Programming Language Specification.
+// Recover within Handle and translate the panic into either a
+// returned error or a downstream Submit of an error-flavored value.
+//
+// Handle and any state it touches must be safe for concurrent use,
+// because the framework may invoke it from multiple goroutines.
+type Handler[T any] interface {
+	Handle(ctx context.Context, value T, err error) error
+}
+
+// HandlerFunc[T] is the canonical function adapter for Handler[T] —
+// matches Handler.Handle exactly. Use this when you want a closure-
+// based handler with both a value and an upstream err. For stateful
+// handlers, implement Handler[T] directly on a struct so per-call
+// state lives in fields and avoids closure allocations on the hot
+// path.
+type HandlerFunc[T any] func(ctx context.Context, value T, err error) error
+
+// Handle satisfies [Handler[T]].
+func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
+	return f(ctx, value, err)
+}
+
+// ErrHandler is the named func adapter for the no-value, with-err
+// case: a body that receives only an upstream err. Satisfies
+// Handler[struct{}]. Named descriptively rather than "ErrTask"
+// because "handle" reads naturally in both TaskRunner and Gatherer
+// contexts, while "task" carries TaskRunner-specific vocabulary.
+type ErrHandler func(ctx context.Context, err error) error
+
+// Handle satisfies [Handler[struct{}]].
+func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error {
+	return f(ctx, err)
+}
+
+// NOTE: The destination API also provides a `Task` named func
+// adapter (`func(ctx) error` satisfying Handler[struct{}]) for the
+// no-input, no-err case. It can't be added here yet because the
+// existing psgfn.Task[T] interface (used by TaskRunner during the
+// arity-split phase) occupies that name. After TaskRunner collapses
+// to the single-type Handler-based shape (Step 3 of Thread A),
+// psgfn.Task[T] retires and the named Task adapter takes its place.

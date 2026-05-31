@@ -131,9 +131,9 @@ func WithSpawnConcurrencyLimit(n int) PoolOption
 // ===== Wave: batch of work the user awaits =====
 
 // Wave is a collection of work to be completed together. Ops are
-// constructed against a Wave; the Wave's drain methods await its
-// work. Multiple Waves run concurrently on the same Pool. Waves nest
-// via NewChild.
+// constructed bound to a Wave (or with nil to defer binding — see Op
+// constructors); the Wave's drain methods await its work. Multiple
+// Waves run concurrently on the same Pool. Waves nest via NewChild.
 type Wave struct { /* ... */ }
 
 // NewWave creates a top-level Wave. Uses the package default Pool
@@ -295,9 +295,13 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 
 // ===== Op constructors =====
 //
-// All constructors bind ops to a *Wave (their lifecycle owner) and
-// take the user-supplied interface as canonical input. For raw
-// closures, wrap in the corresponding *Func type (TaskFunc[T],
+// All constructors bind ops to a *Wave at construction and take the
+// user-supplied interface as canonical input. The *Wave parameter
+// accepts nil as an explicit sentinel meaning "defer binding to
+// dispatch time, use the wave attached to the dispatch ctx." See
+// "Wave binding" below for the resolution rule.
+//
+// For raw closures, wrap in the corresponding *Func type (TaskFunc[T],
 // HandlerFunc[T], FuncAccumulator[T]) at the call site.
 
 // Per-op options (functional)
@@ -320,35 +324,63 @@ func NewGatherer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Gather
 //       streampool.WithLimits(streampool.NewSemaphore(1)),
 //   )
 
+// ===== Wave binding =====
+//
+// Every op holds an optional *Wave bound at construction. At dispatch
+// (Start / Submit / SubmitErr), the framework resolves the target
+// wave as follows:
+//
+//   1. If the op was constructed with a non-nil *Wave, use it.
+//   2. Otherwise, use the *Wave attached to the dispatch ctx (the wave
+//      whose Task/Accumulator/Gather body the caller is running in).
+//   3. If neither is available, the dispatch panics with a message
+//      naming both options.
+//
+// The split lets top-level callers bind explicitly at construction
+// (the common case) and lets ops constructed without a wave —
+// typically by reusable library helpers, or inside a body that
+// doesn't carry the wave in scope — resolve to the in-flight wave
+// at dispatch time. The wave handle itself never leaks to body code;
+// only the op does.
+
 // ===== Op types =====
 //
 // TaskRunners use Start (active dispatch). Combiner and Gatherer use
-// Offer/OfferErr (passive sink reception). The verb split tracks the
-// op's role: dispatchers run; sinks accept offered values.
+// Submit / SubmitErr (sink reception). The verb split tracks the op's
+// role: dispatchers start work; sinks accept submitted values. None
+// of the dispatch methods take a *Wave — the wave was bound at
+// construction (or deferred via nil; see "Wave binding").
 
 type TaskRunner0 struct { /* ... */ }
 func (TaskRunner0) Start(ctx context.Context) error
+func (TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, error)
 
 type TaskRunner[T any] struct { /* ... */ }
 func (TaskRunner[T]) Start(ctx context.Context, arg T) error
+func (TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (bool, error)
 
 type TaskRunner2[T1, T2 any] struct { /* ... */ }
 func (TaskRunner2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error
+func (TaskRunner2[T1, T2]) TryStart(ctx context.Context, deadline time.Time, arg1 T1, arg2 T2) (bool, error)
 
 // Combiner — stateful aggregation via factory-created Accumulator
 // instances. Parallel by default; cap parallelism via WithLimits.
 type Combiner[T any] struct { /* ... */ }
-func (Combiner[T]) Submit(ctx context.Context, value T) error                 // sugar for SubmitErr(ctx, value, nil)
+func (Combiner[T]) Submit(ctx context.Context, value T) error                                  // sugar for SubmitErr(ctx, value, nil)
 func (Combiner[T]) SubmitErr(ctx context.Context, value T, err error) error
-func (Combiner[T]) Close()                                                    // signals no more input; triggers Flush on each instance
-func (Combiner[T]) Dup() Combiner[T]                                          // refcounted sharing across handlers
+func (Combiner[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)
+func (Combiner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)
+func (Combiner[T]) Close()                                                                     // signals no more input; triggers Flush on each instance
+func (Combiner[T]) Dup() Combiner[T]                                                           // refcounted sharing across handlers
 
 // Gatherer — terminal sink; Handler is dispatched on Wave.Gather pull.
 type Gatherer[T any] struct { /* ... */ }
-func (Gatherer[T]) Submit(ctx context.Context, value T) error                 // sugar for SubmitErr(ctx, value, nil)
+func (Gatherer[T]) Submit(ctx context.Context, value T) error                                  // sugar for SubmitErr(ctx, value, nil)
 func (Gatherer[T]) SubmitErr(ctx context.Context, value T, err error) error
-func (Gatherer[T]) Close()                                                    // signals no more input; GatherAll branch completes
-func (Gatherer[T]) Dup() Gatherer[T]                                          // refcounted sharing across handlers
+func (Gatherer[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)
+func (Gatherer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)
+func (Gatherer[T]) Close()                                                                     // signals no more input; GatherAll branch completes
+func (Gatherer[T]) Dup() Gatherer[T]                                                           // refcounted sharing across handlers
 ```
 
 ## Hello world
@@ -495,6 +527,45 @@ attached limiters permit. The same `Limiter` instance can be shared
 across multiple ops, expressing "these collectively cap at N concurrent
 operations."
 
+## Deferred wave binding (nil at construction)
+
+Some ops want to be reusable across waves — a helper that returns a
+TaskRunner without knowing which wave the caller will dispatch from,
+for instance. Pass `nil` as the wave at construction; the op resolves
+its target wave at each dispatch from the ctx the caller passes
+(specifically, from the wave whose Task/Accumulator/Gather body the
+caller is running in).
+
+```go
+// Library-style helper: returns a wave-agnostic Gatherer.
+func NewLogGatherer(logger *slog.Logger) streampool.Gatherer[Event] {
+    return streampool.NewGatherer(nil, streampool.HandlerFunc[Event](
+        func(ctx context.Context, e Event, err error) error {
+            logger.Info("event", "name", e.Name, "err", err)
+            return nil
+        },
+    ))
+}
+
+// Caller binds the helper's gatherer to its own wave by dispatching
+// from a body that's running in that wave. The Gatherer was
+// constructed with nil, so each Submit resolves to the dispatching
+// ctx's wave.
+sink := NewLogGatherer(slog.Default())
+
+runner := streampool.NewTaskRunner(wave, streampool.TaskFunc[ID](
+    func(ctx context.Context, id ID) error {
+        evt := process(id)
+        return sink.Submit(ctx, evt)  // dispatches to `wave` via ctx
+    },
+))
+```
+
+Top-level callers calling `Submit`/`Start` directly on a nil-bound op
+panic — there is no ctx-attached wave at top level. The panic message
+names both options: pass a wave at construction, or dispatch from a
+body running in a wave.
+
 ---
 
 ## Naming decisions
@@ -506,18 +577,19 @@ operations."
 | Role-3 name: `Wave` (not `Job` / `Group` / `Batch`) | "A wave of processing" carries the right metaphor: waves can overlap (multiple in flight in the same Pool), vary in size (small ripples to large processing bursts), and contain smaller waves (nested sub-batches). Coheres with the streampool nautical theme. `Job` is acceptable but reads as a discrete K8s/SLURM-style unit; `Group` clashes with errgroup. `Wave` is fresh and metaphorically apt. |
 | Role-2 name: `Flow` (not `Stream` / `Workflow`) | `Stream` denotes "a flow of items" in standard usage — Java/Akka/Kafka/Node streams. Our role-2 type holds no payload; it's a refcounted lifecycle marker. Stream would mislead. `Flow` reads concretely (one specific flow of work) without the abstract-vs-concrete ambiguity of `Workflow`, has no Argo/BPM/Temporal baggage, is short, and coheres with the nautical theme. `Stream` is reserved for a future observability concept (a stream of Flow events). |
 | Worker pool | `Pool` — fungible, often implicit | Pool's job is just goroutines, idle policy, max budget. No `Gather`, no `Shutdown`, no `Wait` — refcount-driven lifecycle handles termination implicitly. A package-level default Pool exists; users only call `NewPool` for a non-default ctx (cancellation domain) or non-default tuning. Matches `sync.Pool` convention as a fungible resource container. |
-| Op constructor first arg | `wave *Wave` | Ops bind to a Wave (their lifecycle owner). Pool comes via the Wave (which references a Pool through default or `WithPool`). Flow comes in dynamically via ctx, not at construction — because a Flow can span Waves but ops can't. |
+| Op constructor first arg | `wave *Wave` (nil OK) | Ops bind to a Wave at construction (their lifecycle owner). Pool comes via the Wave (which references a Pool through default or `WithPool`). Flow comes in dynamically via ctx, not at construction — because a Flow can span Waves but ops can't. Passing `nil` defers wave-binding to dispatch time, resolving from the dispatching ctx; the same op can then be reused inside any wave's body. The dispatch methods never take a *Wave — the wave is locked in at construction (explicitly or as the deferred-to-ctx sentinel). |
+| Dispatch methods take no *Wave | `Start(ctx, ...)` / `Submit(ctx, v)` / `SubmitErr(ctx, v, err)` | Considered three alternatives and rejected each: (a) explicit *Wave on every dispatch — verbose in the common case where one wave handles many dispatches; (b) `Submit` / `SubmitIn` method split — doubles surface for every dispatch verb; (c) `op.In(wave)` bind-chain — breaks the lifecycle model for ops with Close (Combiner, Gatherer), since the unassigned intermediate handle has no way to be closed. Wave-at-construction with a nil sentinel preserves single-verb dispatch, single lifecycle, and explicit binding when desired. |
 | Pool lifecycle | Refcount-driven; workers exit synchronously on last Wave drain | No `Shutdown` / `Wait` API. Each referencing Wave bumps refcount; drain completion drops it. When count → 0, workers terminate synchronously before the last Wave's drain returns — strong guarantee that no Pool goroutines outlive the user's drain calls. Pool reuse after this is automatic; the next Wave that references the Pool spins workers up again. |
 | Op constructor verb | `NewTaskRunner`, `NewCombiner`, `NewGatherer` | Agent nouns (`-er` suffix). The type names describe roles, not the function-call verb. Matches `http.Handler`, `io.Reader`, `sync.Mutex`. |
 | TaskRunner dispatch verb | `Start` | Active async dispatch ("start a task with this arg"). Matches `os/exec.Cmd.Start()` precedent — fire-it-off-async-don't-wait. Works across arities including the no-arg case (`runner0.Start(ctx)`). |
 | Sink dispatch verb | `Submit` / `SubmitErr` | Committed-delivery semantics: "submit this value to the sink." Avoids the Java `BlockingQueue.offer` baggage that would mislead users to expect try-semantics from `Offer`. No collision with TaskRunner verb since TaskRunner uses Start. |
 | Interface method verbs | `Run` (Task), `Accumulate`/`Flush` (Accumulator), `Handle` (Handler) | Sync execution verbs on user-implemented interfaces, mirroring the http.Handler.ServeHTTP / exec.Cmd inner-process pattern: async dispatch on the op (Start, Submit), sync invocation on the implementation (Run, Accumulate, Handle). |
 | User inputs as interfaces | `Task[T]`, `Task0`, `Task2[T1,T2]`, `Accumulator[T]`, `Handler[T]` | Function signatures forced closure allocations for any stateful task. Interfaces let users implement on structs with state as fields (alloc-free hot path). Function-type wrappers (`TaskFunc[T]`, `HandlerFunc[T]`, `FuncAccumulator[T]`) provide the closure-based convenience for simple cases. Same pattern as http.Handler / http.HandlerFunc. |
-| No `.To(sink)` wiring | Function bodies call `sink.Offer(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Combiner. |
-| No `Sink[T]` in public API | Not exported | Nothing in the framework's own API consumes a Sink type. User code that wants polymorphism over "things you can Offer to" defines a one-method interface locally; Go's structural typing makes that work without a published contract. |
+| No `.To(sink)` wiring | Function bodies call `sink.Submit(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Combiner. |
+| No `Sink[T]` in public API | Not exported | Nothing in the framework's own API consumes a Sink type. User code that wants polymorphism over "things you can Submit to" defines a one-method interface locally; Go's structural typing makes that work without a published contract. |
 | Combiner state | Via `CombinerFactory[T]` returning `Accumulator[T]` | Factory creates per-instance Accumulators (each with closure state); framework calls each instance's `Combine` per input and `Flush` on Close. Same shape as the existing `psgfn.Combiner` interface. |
 | Serial accumulation ("reducer") | Combiner with `WithLimits(NewSemaphore(1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
-| TaskRunner.Close | Not present | The framework can't deduce what sinks a task body will Offer to, so closing the TaskRunner tells the framework nothing useful. Resources release via leakguard finalizer when the value falls out of scope. |
+| TaskRunner.Close | Not present | The framework can't deduce what sinks a task body will Submit to, so closing the TaskRunner tells the framework nothing useful. Resources release via leakguard finalizer when the value falls out of scope. |
 | Combiner.Close / Gatherer.Close | Present, type-specific behavior | Combiner.Close triggers final accumulator flush. Gatherer.Close signals end-of-input to GatherAll. Both are semantically meaningful because the op has its own state to finalize. |
 | Dup() on Combiner / Gatherer | Present | Refcounted-handle pattern earns its place in psgwf-style scenarios where ops cross handler boundaries with independent lifecycles. Single-scope usage doesn't require Dup; advanced shared usage does. |
 | Per-op configuration | Functional options on constructor (`opts ...OpOption`) | Standard Go idiom for multiple optional parameters. Composable, extensible without breaking existing call sites. |
@@ -534,9 +606,11 @@ operations."
 | `*Job` / `*Pool` (conflated) | `*Pool` (workers, fungible) + `*Wave` (batch, user-primary) | See three-type model above. |
 | `psg.NewPool` / `psg.NewTaskPool` | (removed) | Per-op concurrency limits move to Limiters; workers are managed by the Pool. |
 | `psg.NewCombinerPool` | (removed) | Same — combiner workloads run in the Pool's goroutine pool, bounded by Limiters. |
-| `psg.NewGatherOp(handler)` | `streampool.NewGatherer(wave, handler)` | Wave required at construction; handler signature unchanged. |
-| `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewCombiner(wave, factory)` | Output type parameter gone; downstream sink wired via factory's closure. |
-| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewTaskRunner(wave, taskFn)` + `runner.Start(ctx, arg)` | Two-step: construct the runner once; dispatch with arg. |
+| `psg.NewGatherOp(handler)` | `streampool.NewGatherer(wave, handler)` | Wave bound at construction (or nil to defer to dispatch-ctx). Handler signature unchanged. |
+| `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewCombiner(wave, factory)` | Output type parameter gone; downstream sink wired via factory's closure. Wave bindable like Gatherer. |
+| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewTaskRunner(wave, taskFn)` + `runner.Start(ctx, arg)` | Two-step: construct once (with wave or nil), dispatch with arg. The dispatch takes no *Wave; the wave was locked in at construction. |
+| `gatherer.Submit(ctx, job, value)` | `gatherer.Submit(ctx, value)` / `gatherer.SubmitErr(ctx, value, err)` | Job/Wave arg drops out of dispatch — was bound at construction. SubmitErr is the explicit form; Submit is the sugar for nil-err. |
+| `runner.Start(ctx)` (post-Wave-3 shape with positional pool) | `runner.Start(ctx, arg...)` | Pool/Wave arg drops out of dispatch. |
 | `Pool.CloseAndGatherAll(ctx)` | `wave.GatherAll(ctx)` | Single call. Pool worker termination is automatic (refcount → 0 → synchronous worker exit before drain returns). |
 | `*GatherOp[T]` | `Gatherer[T]` | Op-suffix dropped; agent noun. |
 | `*CombineOp[I, O]` | `Combiner[T]` | Output type parameter eliminated. |
@@ -562,7 +636,7 @@ considered and rejected, and re-examine if circumstances change.
 a Task/Combine and routes its return value to the destination).
 
 **Reason**: limits ops to a single output type, prevents multi-sink fan-
-out, blocks conditional routing. The explicit-Offer model gives all of
+out, blocks conditional routing. The explicit-Submit model gives all of
 those capabilities at the cost of losing the at-a-glance declarative
 wiring. Worth the trade.
 
@@ -668,7 +742,7 @@ aggregation. That meaning matches "stream" semantically.
 
 **Reason**: closing the TaskRunner can't help the framework with
 completion tracking, because the framework doesn't know what sinks the
-task body will Offer to (the wiring lives in the closure). Without
+task body will Submit to (the wiring lives in the closure). Without
 semantic value, Close is API surface that does nothing useful.
 
 ### Public Dup on TaskRunner
@@ -679,6 +753,79 @@ semantic value, Close is API surface that does nothing useful.
 unmotivated. Sharing a TaskRunner across goroutines via plain Go value
 semantics is sufficient; leakguard finalizers handle cleanup of unowned
 handles.
+
+### Explicit `*Wave` on every dispatch (`Start(ctx, wave, arg)`)
+
+**Rejected**: making the wave a required arg on Start / Submit /
+SubmitErr at every dispatch site.
+
+**Reason**: top-level callers typically construct a handful of ops and
+dispatch each many times to the same wave. Threading the wave through
+every dispatch site is verbose for the common case, with no
+information not already captured at construction. Wave-at-construction
+collapses that repetition to one place. Inside a body, the framework
+already knows which wave the body is running in; a body that needs to
+dispatch via a no-wave-bound op (constructed with `nil`) gets the
+right wave automatically via ctx.
+
+### `op.In(wave)` bind-chain
+
+**Rejected**: leaving constructors wave-free and providing a value-typed
+`runner.In(wave).Start(ctx, arg)` bind step.
+
+**Reason**: Combiner and Gatherer carry refcounted lifecycles (Close,
+Dup). The chain `NewCombiner(...).In(wave).Submit(ctx, v)` produces an
+intermediate Combiner handle that no variable holds, so there is no
+way to Close it; either both handles share the same underlying state
+(closing one closes the other, surprising) or `In` Dups (every chain
+leaks a handle). Wave-at-construction sidesteps both: each op has one
+wave, one handle, one Close. The bind-chain pattern only worked
+cleanly for stateless TaskRunner — making it the universal model
+forces lifecycle-having ops into shape they can't accommodate.
+
+### `Submit` / `SubmitIn` (and `Start` / `StartIn`) method split
+
+**Rejected**: separate verbs for ctx-default dispatch (`Submit(ctx,
+v)`) and explicit-wave dispatch (`SubmitIn(ctx, wave, v)`).
+
+**Reason**: doubles the dispatch surface for every verb in the
+family (Submit/SubmitIn, SubmitErr/SubmitErrIn, TrySubmit/TrySubmitIn,
+TrySubmitErr/TrySubmitErrIn, and the matching Start variants per
+arity). Each new dispatch verb in the future would need an `In`
+partner. Wave-at-construction collapses both behaviors into a single
+verb whose binding was decided at construction (explicitly, or
+explicitly-deferred via nil).
+
+### `CurrentWave(ctx)` package-level helper
+
+**Rejected**: a `CurrentWave(ctx) *Wave` (or `WaveFromContext(ctx)
+(*Wave, bool)`) helper to look up the in-flight wave from inside a
+body.
+
+**Reason**: returning a full `*Wave` from inside the body the wave is
+running gives user code methods it shouldn't call. `CurrentWave(ctx).
+Close()` and `CurrentWave(ctx).Gather(ctx)` from a task body are
+either no-ops at best or destructive at worst (canceling the wave
+that's executing the calling body). Narrowing the return to a
+dispatch-only interface ran into either interface-allocation cost or
+extra type surface. Wave-at-construction with nil-binding gives the
+same ergonomic outcome (body code dispatches without seeing the wave)
+without exposing the handle.
+
+### Generic `Work` unit (build-then-execute pattern)
+
+**Rejected**: `work := runner.With(arg); work.Start(ctx, wave)` —
+exposing the work item as a separable, dispatchable unit.
+
+**Reason**: lifecycle hazard (build-without-dispatch leaks unless a
+finalizer pays the cost we're trying to avoid) and allocation cost
+for the generic case (`Work` as an interface boxes the underlying
+concrete struct on every dispatch, defeating the alloc-free hot
+path). Concrete per-op Work types preserve alloc-free but lose the
+generic composition story that justified the shape. The compositional
+use cases (deferred dispatch, batched enqueue, cross-wave routing)
+are real but rare; when needed, the user can build the equivalent in
+their own code without exposing it in the framework surface.
 
 ---
 
@@ -753,10 +900,10 @@ These are real and need answers before implementation locks in.
 
 5. ~~**GatherFunc error handling.**~~ **Resolved (2026-05-24):** All
    downstream-facing signatures take `(value T, err error)` —
-   `GatherFunc`, `Accumulator.Accumulate`, `OfferErr`. This matches the
+   `GatherFunc`, `Accumulator.Accumulate`, `SubmitErr`. This matches the
    existing psg-go semantics: errors flow alongside their associated
-   values through the pipeline. `Offer(ctx, value)` is sugar for
-   `OfferErr(ctx, value, nil)`; callers reach for `OfferErr` when
+   values through the pipeline. `Submit(ctx, value)` is sugar for
+   `SubmitErr(ctx, value, nil)`; callers reach for `SubmitErr` when
    forwarding an upstream error.
 
 6. ~~**Adaptive-pool-sizing surface.**~~ **Resolved (2026-05-24).** Audit

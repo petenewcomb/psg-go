@@ -11,7 +11,7 @@ import (
 // TaskRunner dispatches on a worker goroutine. Tasks are argument-taking:
 // inputs arrive through Run's parameters, and any results the task wants
 // to deliver downstream are explicitly submitted to a Skimmer or
-// Combiner from within Run.
+// Funnel from within Run.
 //
 // Run is invoked synchronously on a worker. Each invocation runs in its
 // own goroutine, so Run and any state it touches (captured variables on

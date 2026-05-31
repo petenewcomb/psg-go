@@ -35,7 +35,7 @@ func (c *passthroughTestAccumulator[T]) Flush(ctx context.Context) error {
 }
 
 //nolint:thelper // not a test helper, but a factory function for creating a test accumulator
-func newPassthroughTestCombinerFactory[T any](
+func newPassthroughTestFunnelFactory[T any](
 	t *testing.T, skimmer psg.Skimmer[T], wave *psg.Wave,
 ) func() psgfn.Accumulator[T] {
 	return func() psgfn.Accumulator[T] {
@@ -43,7 +43,7 @@ func newPassthroughTestCombinerFactory[T any](
 	}
 }
 
-func TestCombinerScatterNilSkimPanic(t *testing.T) {
+func TestFunnelScatterNilSkimPanic(t *testing.T) {
 	ctx := context.Background()
 	_, wave := psg.NewWave(ctx)
 	defer wave.CancelAndWait()
@@ -53,7 +53,7 @@ func TestCombinerScatterNilSkimPanic(t *testing.T) {
 	})
 }
 
-func TestCombinerScatterFromTask(t *testing.T) {
+func TestFunnelScatterFromTask(t *testing.T) {
 	chk := assert.New(t)
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
@@ -64,30 +64,30 @@ func TestCombinerScatterFromTask(t *testing.T) {
 			return nil
 		},
 	))
-	combinerPool := psg.NewCombinerPool(wave.Pool())
-	combineOp := psg.NewCombiner(
-		combinerPool,
-		newPassthroughTestCombinerFactory[int](t, skimmer, wave),
+	funnelPool := psg.NewFunnelPool(wave.Pool())
+	funnelOp := psg.NewFunnel(
+		funnelPool,
+		newPassthroughTestFunnelFactory[int](t, skimmer, wave),
 	)
-	defer combineOp.Close()
+	defer funnelOp.Close()
 	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, skim, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
 				_ = innerRunner.Start(ctx, wave)
 			},
 		)
-		return combineOp.Submit(ctx, 0)
+		return funnelOp.Submit(ctx, 0)
 	}))
 	chk.NoError(outerRunner.Start(ctx, wave))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
 
-func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
+func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
@@ -102,12 +102,12 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 			return nil
 		},
 	))
-	combinerPool := psg.NewCombinerPool(parentWave.Pool())
-	combineOp := psg.NewCombiner(
-		combinerPool,
-		newPassthroughTestCombinerFactory[bool](t, skimmer, parentWave),
+	funnelPool := psg.NewFunnelPool(parentWave.Pool())
+	funnelOp := psg.NewFunnel(
+		funnelPool,
+		newPassthroughTestFunnelFactory[bool](t, skimmer, parentWave),
 	)
-	defer combineOp.Close()
+	defer funnelOp.Close()
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := psg.NewWave(ctx)
@@ -130,7 +130,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		// Skim all results in the sub-wave
 		chk.NoError(subWave.CloseAndSkimAll(subCtx))
 
-		return combineOp.Submit(ctx, true)
+		return funnelOp.Submit(ctx, true)
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))
@@ -140,7 +140,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	chk.True(subJobTaskRan, "The task in the sub-wave should have run")
 }
 
-func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
+func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
@@ -152,24 +152,24 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 			return nil
 		},
 	))
-	combinerPool := psg.NewCombinerPool(parentWave.Pool())
-	combineOp := psg.NewCombiner(
-		combinerPool,
-		newPassthroughTestCombinerFactory[bool](t, skimmer, parentWave),
+	funnelPool := psg.NewFunnelPool(parentWave.Pool())
+	funnelOp := psg.NewFunnel(
+		funnelPool,
+		newPassthroughTestFunnelFactory[bool](t, skimmer, parentWave),
 	)
-	defer combineOp.Close()
+	defer funnelOp.Close()
 	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.Fail("Should not get here - parent task pool task should not run")
 		return nil
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, skim, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
 				_ = innerRunner.Start(ctx, parentWave)
 			},
 		)
-		return combineOp.Submit(ctx, true)
+		return funnelOp.Submit(ctx, true)
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))

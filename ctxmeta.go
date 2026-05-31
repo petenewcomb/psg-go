@@ -25,7 +25,7 @@ const (
 	topLevelContext contextType = iota // top-level
 	taskContext                        // task
 	skimContext                        // skim
-	combineContext                     // combine
+	funnelContext                      // funnel
 )
 
 type ctxMeta struct {

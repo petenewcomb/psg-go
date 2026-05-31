@@ -110,7 +110,7 @@ func NewWave(parent context.Context, opts ...WaveOption) (context.Context, *Wave
 }
 
 // Pool returns the [Pool] this Wave is bound to. Exposed for advanced
-// uses such as constructing a [CombinerPool] that shares the same
+// uses such as constructing a [FunnelPool] that shares the same
 // Pool; typical callers don't need this.
 func (w *Wave) Pool() *Pool {
 	return w.pool

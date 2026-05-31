@@ -3,7 +3,7 @@
 
 package psg
 
-// OpOption configures an op (TaskRunner, Combiner, Skimmer) at
+// OpOption configures an op (TaskRunner, Funnel, Skimmer) at
 // construction time. Users obtain OpOption values from framework
 // constructors such as [WithLimits]. The interface is closed: future
 // option types will live in this package.
@@ -44,7 +44,7 @@ func (cfg opConfig) singleLimiter() Limiter {
 // WithLimits binds Limiters to an op so each dispatch must acquire a
 // permit from each Limiter before the work runs. In Wave 4a only one
 // Limiter at a time is supported; the variadic shape exists so future
-// Limiter types (NewRateLimit etc.) can be combined without changing
+// Limiter types (NewRateLimit etc.) can be funneld without changing
 // this API.
 func WithLimits(limiters ...Limiter) OpOption {
 	return withLimitsOption{limiters: limiters}

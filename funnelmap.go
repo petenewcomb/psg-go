@@ -10,14 +10,14 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
-// combinerFlusher is the interface CombinerPool's flushQ holds. Each
-// halfBoundCombiner instance satisfies it; the [delayq.Item] embedding
+// funnelFlusher is the interface FunnelPool's flushQ holds. Each
+// halfBoundFunnel instance satisfies it; the [delayq.Item] embedding
 // provides the heap-position bookkeeping the queue needs to dedupe
 // re-Schedules and locate entries for Remove.
-type combinerFlusher interface {
+type funnelFlusher interface {
 	delayq.Item
 
-	InstanceID() combinerInstanceID
+	InstanceID() funnelInstanceID
 	InstanceCount() int
 	Ref()
 	Unref()

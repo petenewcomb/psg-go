@@ -573,7 +573,7 @@ func main() {
 					switch methodName {
 					case "skimOnly":
 						continue
-					case "combine":
+					case "funnel":
 						if concurrencyLimit == -1 {
 							methodDisplayName = "Unlimited"
 						} else {
@@ -667,11 +667,11 @@ func main() {
 			switch methodName {
 			case "skimOnly":
 				methodDisplayName = "Skim Only"
-			case "combine":
+			case "funnel":
 				if concurrencyLimit == -1 {
-					methodDisplayName = "Combine (unlimited)"
+					methodDisplayName = "Funnel (unlimited)"
 				} else {
-					methodDisplayName = fmt.Sprintf("Combine (limit %d)", concurrencyLimit)
+					methodDisplayName = fmt.Sprintf("Funnel (limit %d)", concurrencyLimit)
 				}
 			default:
 				methodDisplayName = fmt.Sprintf("%s (limit %d)", methodName, concurrencyLimit)

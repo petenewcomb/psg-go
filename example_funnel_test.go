@@ -17,9 +17,9 @@ import (
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
-// ExampleCombiner demonstrates how combiners can efficiently aggregate
-// results from multiple tasks before emitting a combined result.
-func ExampleCombiner() {
+// ExampleFunnel demonstrates how funnels can efficiently aggregate
+// results from multiple tasks before emitting a funneld result.
+func ExampleFunnel() {
 	var clock exmpclk.ExampleClock
 	clock.Start()
 	msSinceStart := func() int64 {
@@ -43,17 +43,17 @@ func ExampleCombiner() {
 
 	// Create a scatter-gather wave with flush listener to observe when all tasks have completed
 	ctx, wave := psg.NewWave(ctx, psg.WithPoolOptions(psgopt.WithFlushListener(func() {
-		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
+		fmt.Printf("%3dms: flush: all tasks completed, waiting for funnels\n", msSinceStart())
 	})))
 	defer wave.CancelAndWait()
 
 	// Limit concurrent tasks to 2.
 	taskLimit := psg.NewSemaphore(2)
 
-	// Create a combiner pool and disable the idle timeout
-	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
+	// Create a funnel pool and disable the idle timeout
+	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
 
-	// Define a result aggregation function and create a combined skim/combine operation
+	// Define a result aggregation function and create a funneld skim/funnel operation
 	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[map[string]int](skimFn))
 
 	// After Wave 2, the Accumulator factory captures the downstream
@@ -66,11 +66,11 @@ func ExampleCombiner() {
 			AccumulateFn: func(ctx context.Context, result string, err error) (time.Time, error) {
 				clock.Sleep(10 * time.Millisecond)
 				if counts == nil {
-					fmt.Printf("%3dms:   created new combiner\n", msSinceStart())
+					fmt.Printf("%3dms:   created new funnel\n", msSinceStart())
 					counts = make(map[string]int)
 				}
 				counts[result]++
-				fmt.Printf("%3dms:   combined %q, result counts now: %v\n", msSinceStart(), result, counts)
+				fmt.Printf("%3dms:   funneld %q, result counts now: %v\n", msSinceStart(), result, counts)
 				return time.Time{}, nil
 			},
 			FlushFn: func(ctx context.Context) error {
@@ -80,20 +80,20 @@ func ExampleCombiner() {
 		}
 	}
 
-	// Create a Combine operation. No Skimmer arg — the Accumulator
+	// Create a Funnel operation. No Skimmer arg — the Accumulator
 	// body routes results downstream via Submit.
-	combineOp := psg.NewCombiner(combinerPool, newAccumulator)
-	defer combineOp.Close()
+	funnelOp := psg.NewFunnel(funnelPool, newAccumulator)
+	defer funnelOp.Close()
 
 	// Build a TaskRunner factory: the task body submits its result to
-	// combineOp from inside the task context.
+	// funnelOp from inside the task context.
 	newRunner := func(number int, delay time.Duration, result string) psg.TaskRunner0 {
 		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
-			return combineOp.Submit(ctx, result)
+			return funnelOp.Submit(ctx, result)
 		}), psg.WithLimits(taskLimit))
 	}
 
@@ -103,11 +103,11 @@ func ExampleCombiner() {
 		delay  time.Duration
 		result string
 	}{
-		{10 * time.Millisecond, "A"}, // will launch at 0ms, complete at 10ms, combine at 20ms
-		{50 * time.Millisecond, "B"}, // will launch at 0ms, complete at 50ms, combine at 60ms
-		{20 * time.Millisecond, "C"}, // will launch at 10ms, complete at 30ms, combine at 40ms
-		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, combine at 80ms
-		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, combine at 100ms
+		{10 * time.Millisecond, "A"}, // will launch at 0ms, complete at 10ms, funnel at 20ms
+		{50 * time.Millisecond, "B"}, // will launch at 0ms, complete at 50ms, funnel at 60ms
+		{20 * time.Millisecond, "C"}, // will launch at 10ms, complete at 30ms, funnel at 40ms
+		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, funnel at 80ms
+		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, funnel at 100ms
 	} {
 		err := newRunner(i+1, spec.delay, spec.result).Start(ctx, wave)
 		if err != nil {
@@ -136,20 +136,20 @@ func ExampleCombiner() {
 	//   0ms: launched task 2: (50ms -> "B"), in-flight count now 2
 	//  10ms:   task 1 (10ms -> "A") complete, in-flight count now 1
 	//  10ms: launched task 3: (20ms -> "C"), in-flight count now 2
-	//  20ms:   created new combiner
-	//  20ms:   combined "A", result counts now: map[A:1]
+	//  20ms:   created new funnel
+	//  20ms:   funneld "A", result counts now: map[A:1]
 	//  30ms:   task 3 (20ms -> "C") complete, in-flight count now 1
 	//  30ms: launched task 4: (40ms -> "D"), in-flight count now 2
-	//  40ms:   combined "C", result counts now: map[A:1 C:1]
+	//  40ms:   funneld "C", result counts now: map[A:1 C:1]
 	//  50ms:   task 2 (50ms -> "B") complete, in-flight count now 1
 	//  50ms: launched task 5: (40ms -> "A"), in-flight count now 2
 	//  50ms: skimming remaining tasks
-	//  60ms:   combined "B", result counts now: map[A:1 B:1 C:1]
+	//  60ms:   funneld "B", result counts now: map[A:1 B:1 C:1]
 	//  70ms:   task 4 (40ms -> "D") complete, in-flight count now 1
-	//  80ms:   combined "D", result counts now: map[A:1 B:1 C:1 D:1]
+	//  80ms:   funneld "D", result counts now: map[A:1 B:1 C:1 D:1]
 	//  90ms:   task 5 (40ms -> "A") complete, in-flight count now 0
-	// 100ms:   combined "A", result counts now: map[A:2 B:1 C:1 D:1]
-	// 100ms: flush: all tasks completed, waiting for combiners
+	// 100ms:   funneld "A", result counts now: map[A:2 B:1 C:1 D:1]
+	// 100ms: flush: all tasks completed, waiting for funnels
 	// 100ms:   flushing result counts: map[A:2 B:1 C:1 D:1]
 	// 100ms:   skimming result counts: map[A:2 B:1 C:1 D:1]
 	// 100ms: skimming complete

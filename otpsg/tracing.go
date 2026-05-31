@@ -58,27 +58,27 @@ func TracedSkim[T any](
 	return PropagateSkim(tracedSkimFn)
 }
 
-// TracedCombiner adds spans with the given operation names to an accumulator.
-// This builds on PropagateCombiner, adding explicit span creation for both
+// TracedFunnel adds spans with the given operation names to an accumulator.
+// This builds on PropagateFunnel, adding explicit span creation for both
 // Accumulate and Flush operations while maintaining trace context propagation.
-func TracedCombiner[T any](
-	combineOpName string,
+func TracedFunnel[T any](
+	funnelOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[T],
-) psgfn.CombinerFactory[PropagatedResult[T]] {
+	funnelFactory psgfn.FunnelFactory[T],
+) psgfn.FunnelFactory[PropagatedResult[T]] {
 	// Create an accumulator factory that adds tracing
 	tracedFactory := func() psgfn.Accumulator[T] {
-		innerCombiner := combinerFactory()
+		innerFunnel := funnelFactory()
 
 		return psgfn.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
-				ctx, span := tracer.Start(ctx, combineOpName)
+				ctx, span := tracer.Start(ctx, funnelOpName)
 				defer span.End()
 
-				// Call the original combine function
-				return innerCombiner.Accumulate(ctx, input, inputErr)
+				// Call the original funnel function
+				return innerFunnel.Accumulate(ctx, input, inputErr)
 			},
 			FlushFn: func(ctx context.Context) error {
 				// Create span with meaningful name
@@ -87,13 +87,13 @@ func TracedCombiner[T any](
 				defer span.End()
 
 				// Call the original flush function
-				return innerCombiner.Flush(ctx)
+				return innerFunnel.Flush(ctx)
 			},
 		}
 	}
 
 	// Then use the base propagation
-	return PropagateCombiner(tracedFactory)
+	return PropagateFunnel(tracedFactory)
 }
 
 // WithTaskTracing is a convenience function that applies tracing to a task

@@ -11,12 +11,12 @@ func _() {
 	_ = x[topLevelContext-0]
 	_ = x[taskContext-1]
 	_ = x[skimContext-2]
-	_ = x[combineContext-3]
+	_ = x[funnelContext-3]
 }
 
-const _contextType_name = "top-leveltaskskimcombine"
+const _contextType_name = "top-leveltaskskimfunnel"
 
-var _contextType_index = [...]uint8{0, 9, 13, 17, 24}
+var _contextType_index = [...]uint8{0, 9, 13, 17, 23}
 
 func (i contextType) String() string {
 	if i < 0 || i >= contextType(len(_contextType_index)-1) {

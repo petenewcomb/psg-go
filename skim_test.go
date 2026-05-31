@@ -45,7 +45,7 @@ func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, skim, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
 				_ = innerRunner.Start(ctx, wave)
 			},
@@ -121,7 +121,7 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, skim, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
 				_ = innerRunner.Start(ctx, parentWave)
 			},

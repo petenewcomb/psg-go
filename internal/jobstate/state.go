@@ -21,10 +21,10 @@ const (
 	// existing tasks continue to run
 	stageClosed // Closed
 	// stageFlushing indicates that all tasks have completed and the job
-	// is waiting for combiners to finish
+	// is waiting for funnels to finish
 	stageFlushing // Flushing
 	// stageDone indicates that the job is completely done, all tasks and
-	// combiners have completed
+	// funnels have completed
 	stageDone // Done
 )
 
@@ -32,7 +32,7 @@ const (
 type JobState struct {
 	currentStage    atomic.Int32    // Contains a lifecycleStage value
 	inFlightWork    InFlightCounter // Tracks only executing work
-	totalReferences InFlightCounter // Tracks both work and combiners
+	totalReferences InFlightCounter // Tracks both work and funnels
 	nextFlushChan   atomic.Value    // Stores chan struct{} for flush signals
 	doneChan        chan struct{}
 	flushListener   atomic.Value // Stores func() callback for flush events
@@ -108,7 +108,7 @@ func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister fun
 	return js.nextFlushChan.Load().(chan struct{}), func() {
 		// Check if all references are done for Flushing → Done transition
 		if js.totalReferences.Decrement() {
-			// Last reference just completed (work or combiner)
+			// Last reference just completed (work or funnel)
 			js.noMoreReferences()
 		}
 	}
@@ -140,7 +140,7 @@ func (js *JobState) Done() <-chan struct{} {
 }
 
 // SetFlushListener sets the function to be called when all work has completed
-// and the job is waiting for combiners to emit their results. Pass nil to remove
+// and the job is waiting for funnels to emit their results. Pass nil to remove
 // any existing listener.
 func (js *JobState) SetFlushListener(fn func()) {
 	js.flushListener.Store(fn)

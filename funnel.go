@@ -9,7 +9,7 @@ import (
 )
 
 // errAccumulator is the framework's substitute Accumulator used when a user
-// CombinerFactory misbehaves (returns nil or panics during construction).
+// FunnelFactory misbehaves (returns nil or panics during construction).
 // Every call simply surfaces the recorded error; nothing accumulates.
 type errAccumulator[T any] struct {
 	err error

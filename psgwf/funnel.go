@@ -10,11 +10,11 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// GenericCombiner mirrors psgfn.Accumulator but injects the Workflow
+// GenericFunnel mirrors psgfn.Accumulator but injects the Workflow
 // instance associated with each input. The implementation owns its
 // aggregated state and is responsible for routing results downstream
 // via Submit on whatever sinks it captures.
-type GenericCombiner[T, C any] interface {
+type GenericFunnel[T, C any] interface {
 	// Accumulate processes a single input value (paired with its workflow
 	// and an upstream error). Returns the time when this instance's
 	// Flush method should be called, or a zero time value if Flush need
@@ -27,16 +27,16 @@ type GenericCombiner[T, C any] interface {
 	Flush(ctx context.Context) error
 }
 
-type Combiner[T any] = GenericCombiner[T, Context]
+type Funnel[T any] = GenericFunnel[T, Context]
 
-type GenericCombinerFactory[T, C any] func() GenericCombiner[T, C]
-type CombinerFactory[T any] = GenericCombinerFactory[T, Context]
+type GenericFunnelFactory[T, C any] func() GenericFunnel[T, C]
+type FunnelFactory[T any] = GenericFunnelFactory[T, Context]
 
-func wrapCombinerFactory[T, C any](
-	combinerFactory GenericCombinerFactory[T, C],
-) psgfn.CombinerFactory[result[T, C]] {
+func wrapFunnelFactory[T, C any](
+	funnelFactory GenericFunnelFactory[T, C],
+) psgfn.FunnelFactory[result[T, C]] {
 	return func() psgfn.Accumulator[result[T, C]] {
-		inner := combinerFactory()
+		inner := funnelFactory()
 		return psgfn.FuncAccumulator[result[T, C]]{
 			AccumulateFn: func(ctx context.Context, input result[T, C], inputErr error) (time.Time, error) {
 				defer input.Workflow.unref(ctx)

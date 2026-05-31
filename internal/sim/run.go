@@ -20,8 +20,8 @@ import (
 
 // Run executes the given Plan against the current psg API via an
 // adapter that translates the new vocabulary's static structure to
-// today's Pool/TaskPool/CombinerPool/Skimmer/Combiner shapes. Real
-// data routing uses Submit/TrySubmit; the current API's combiner-
+// today's Pool/TaskPool/FunnelPool/Skimmer/Funnel shapes. Real
+// data routing uses Submit/TrySubmit; the current API's funnel-
 // output-type slot is satisfied by a singleton dummy struct{}
 // Skimmer.
 //
@@ -41,14 +41,14 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 		Plan:                      plan,
 		Wave:                      wave,
 		TaskLimiters:              make([]psg.Limiter, len(plan.TaskLimiters)),
-		CombinerPool:              nil, // lazily constructed in ensurePools
-		CombinerLimiters:          make([]psg.Limiter, len(plan.CombinerLimiters)),
+		FunnelPool:                nil, // lazily constructed in ensurePools
+		FunnelLimiters:            make([]psg.Limiter, len(plan.FunnelLimiters)),
 		Skimmers:                  make([]*psg.Skimmer[*simValue], len(plan.Skimmers)),
-		Combiners:                 make([]*psg.Combiner[*simValue], len(plan.Combiners)),
+		Funnels:                   make([]*psg.Funnel[*simValue], len(plan.Funnels)),
 		concurrencyByTaskLimit:    make([]atomic.Int64, len(plan.TaskLimiters)),
 		maxConcurrencyByTaskLimit: make([]atomicMaxInt64, len(plan.TaskLimiters)),
-		concurrencyByCombLimit:    make([]atomic.Int64, len(plan.CombinerLimiters)),
-		maxConcurrencyByCombLimit: make([]atomicMaxInt64, len(plan.CombinerLimiters)),
+		concurrencyByCombLimit:    make([]atomic.Int64, len(plan.FunnelLimiters)),
+		maxConcurrencyByCombLimit: make([]atomicMaxInt64, len(plan.FunnelLimiters)),
 		skimmerInvocations:        make([]atomic.Int64, len(plan.Skimmers)),
 	}
 	return c.Run(ctx, t)
@@ -64,16 +64,16 @@ type simValue struct {
 // controller is the per-Plan runtime adapter state. Owns the psg API
 // objects backing the Plan's static vocabulary.
 type controller struct {
-	Plan             *Plan
-	Wave             *psg.Wave
-	TaskLimiters     []psg.Limiter
-	CombinerPool     *psg.CombinerPool
-	CombinerLimiters []psg.Limiter
-	Skimmers         []*psg.Skimmer[*simValue]
-	Combiners        []*psg.Combiner[*simValue]
+	Plan           *Plan
+	Wave           *psg.Wave
+	TaskLimiters   []psg.Limiter
+	FunnelPool     *psg.FunnelPool
+	FunnelLimiters []psg.Limiter
+	Skimmers       []*psg.Skimmer[*simValue]
+	Funnels        []*psg.Funnel[*simValue]
 	// TaskRunners holds one psg.TaskRunner0 per Plan TaskRunner. The
 	// closure inside each runs the runner's Body Func, which Submits
-	// directly to downstream Skimmers/Combiners.
+	// directly to downstream Skimmers/Funnels.
 	TaskRunners []psg.TaskRunner0
 
 	limitersOnce sync.Once
@@ -93,8 +93,8 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 
 	c.ensurePools()
 
-	// Construct Skimmers and Combiners against the Pool. Order matters:
-	// Combiners reference Skimmers (in body Submits), so Skimmers must
+	// Construct Skimmers and Funnels against the Pool. Order matters:
+	// Funnels reference Skimmers (in body Submits), so Skimmers must
 	// exist first.
 	for i, g := range c.Plan.Skimmers {
 		gp := g
@@ -102,17 +102,17 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		skimmer := psg.NewSkimmer(c.newSkimmerHandler(t, gp, idx))
 		c.Skimmers[i] = &skimmer
 	}
-	for i, cmb := range c.Plan.Combiners {
+	for i, cmb := range c.Plan.Funnels {
 		cp := cmb
 		idx := i
 		var opts []psg.OpOption
 		if len(cp.LimiterIndexes) > 0 {
-			opts = append(opts, psg.WithLimits(c.CombinerLimiters[cp.LimiterIndexes[0]]))
+			opts = append(opts, psg.WithLimits(c.FunnelLimiters[cp.LimiterIndexes[0]]))
 		}
-		combiner := psg.NewCombiner(c.CombinerPool, c.newCombinerFactory(t, cp, idx), opts...)
-		c.Combiners[i] = &combiner
+		funnel := psg.NewFunnel(c.FunnelPool, c.newFunnelFactory(t, cp, idx), opts...)
+		c.Funnels[i] = &funnel
 	}
-	// Construct TaskRunners after Combiners/Skimmers so the bodies can
+	// Construct TaskRunners after Funnels/Skimmers so the bodies can
 	// reference them via Submit. TaskRunner Bodies may StartTask other
 	// runners, but only after the entire array is populated (a runner's
 	// Body never runs during construction).
@@ -163,10 +163,10 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		chk.LessOrEqualf(observed, int64(lim.Permits),
 			"TaskLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
 	}
-	for i, lim := range c.Plan.CombinerLimiters {
+	for i, lim := range c.Plan.FunnelLimiters {
 		observed := c.maxConcurrencyByCombLimit[i].Load()
 		chk.LessOrEqualf(observed, int64(lim.Permits),
-			"CombinerLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
+			"FunnelLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
 	}
 	// Path-duration lower bound: total elapsed wall-clock must be at
 	// least MaxPathDuration. Only enforced in Deterministic mode where
@@ -182,23 +182,23 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	return nil
 }
 
-// ensurePools lazily constructs the psg.Limiter and psg.CombinerPool
+// ensurePools lazily constructs the psg.Limiter and psg.FunnelPool
 // instances backing the Plan's Limiters. One Limiter per
-// Plan.TaskLimiters and Plan.CombinerLimiters entry. A single
-// CombinerPool hosts all Combiners — per-Combiner concurrency is
-// enforced via the CombinerLimiters bound to each Combiner via
+// Plan.TaskLimiters and Plan.FunnelLimiters entry. A single
+// FunnelPool hosts all Funnels — per-Funnel concurrency is
+// enforced via the FunnelLimiters bound to each Funnel via
 // psg.WithLimits.
 func (c *controller) ensurePools() {
 	c.limitersOnce.Do(func() {
 		for i, lim := range c.Plan.TaskLimiters {
 			c.TaskLimiters[i] = psg.NewSemaphore(lim.Permits)
 		}
-		for i, lim := range c.Plan.CombinerLimiters {
-			c.CombinerLimiters[i] = psg.NewSemaphore(lim.Permits)
+		for i, lim := range c.Plan.FunnelLimiters {
+			c.FunnelLimiters[i] = psg.NewSemaphore(lim.Permits)
 		}
 	})
 	c.combPoolOnce.Do(func() {
-		c.CombinerPool = psg.NewCombinerPool(c.Wave.Pool())
+		c.FunnelPool = psg.NewFunnelPool(c.Wave.Pool())
 	})
 }
 
@@ -247,7 +247,7 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 
 // newTaskRunner constructs the psg.TaskRunner0 that backs a Plan
 // TaskRunner. The task body walks the Plan's Body Func; Submits go
-// directly to downstream sinks (Combiners/Skimmers) via Submit, and
+// directly to downstream sinks (Funnels/Skimmers) via Submit, and
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
 func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.TaskRunner0 {
@@ -320,8 +320,8 @@ func (c *controller) submitTo(
 	for {
 		var err error
 		switch kind {
-		case SinkCombiner:
-			err = c.Combiners[idx].SubmitErr(ctx, v, valErr)
+		case SinkFunnel:
+			err = c.Funnels[idx].SubmitErr(ctx, v, valErr)
 		case SinkSkimmer:
 			err = c.Skimmers[idx].SubmitErr(ctx, c.Wave, v, valErr)
 		default:
@@ -362,15 +362,15 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) p
 	}
 }
 
-// newCombinerFactory builds the combiner factory that the framework
+// newFunnelFactory builds the funnel factory that the framework
 // invokes per-instance. Accumulate and Flush bodies are walked from
 // inside AccumulateFn/FlushFn; downstream Submits go through submitTo.
 // FlushFn returns just error after Wave 2 — no output type.
-func (c *controller) newCombinerFactory(
-	t assert.TestingT, cmb *Combiner, idx int,
-) psgfn.CombinerFactory[*simValue] {
+func (c *controller) newFunnelFactory(
+	t assert.TestingT, cmb *Funnel, idx int,
+) psgfn.FunnelFactory[*simValue] {
 	_ = idx
-	// Concurrency tracking: bump CombinerLimiter counter on entry to
+	// Concurrency tracking: bump FunnelLimiter counter on entry to
 	// Accumulate or Flush, decrement on exit.
 	trackEntry := func() func() { return func() {} }
 	if len(cmb.LimiterIndexes) > 0 {
@@ -387,7 +387,7 @@ func (c *controller) newCombinerFactory(
 				defer trackEntry()()
 				err := c.executeFunc(ctx, t, cmb.Accumulate, v)
 				if err == nil && c.shouldReturnError(cmb.Accumulate) {
-					err = ExpectedHandlerError{OpKind: opNameCombiner, OpID: cmb.ID}
+					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}
 				// No flush deadline in v1.
 				_ = valErr
@@ -398,7 +398,7 @@ func (c *controller) newCombinerFactory(
 				v := &simValue{DispatchTime: time.Now()}
 				err := c.executeFunc(ctx, t, cmb.Flush, v)
 				if err == nil && c.shouldReturnError(cmb.Flush) {
-					err = ExpectedHandlerError{OpKind: opNameCombiner, OpID: cmb.ID}
+					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}
 				return err
 			},
@@ -407,7 +407,7 @@ func (c *controller) newCombinerFactory(
 }
 
 // executeFunc walks a Func's Steps from a context where new tasks may
-// be started (skim/combine handler bodies, top-level dispatch).
+// be started (skim/funnel handler bodies, top-level dispatch).
 // SelfTime sleeps for the drawn duration; Submit routes to the target
 // sink; StartTask dispatches a runner; Subjob spawns a nested Pool.
 func (c *controller) executeFunc(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
@@ -484,7 +484,7 @@ func (c *controller) shouldReturnError(fn *Func) bool {
 }
 
 // ExpectedHandlerError marks a deliberately-returned error from a
-// Skimmer Handle, Combiner Accumulate, or Combiner Flush body —
+// Skimmer Handle, Funnel Accumulate, or Funnel Flush body —
 // distinguished from infrastructure errors so the drain loop can
 // continue past them.
 type ExpectedHandlerError struct {

@@ -23,13 +23,13 @@
 //	Queue[T]     - Rendezvous queue with overflow handling and backpressure
 //	Waiters      - Rendezvous-based notification coordination for waiting goroutines
 //	Listeners    - Queue of notification functions waiting to be signaled
-//	Notifier     - Combines Listeners and Waiters for prioritized notification routing
+//	Notifier     - Funnels Listeners and Waiters for prioritized notification routing
 //
 // Supporting types for queue operations:
 //
 //	Sender       - Manages outboxes across multiple queues for a single goroutine
 //	Waiter       - Coordination primitive for blocking/notification
-//	Receiver     - Combines an inbox and waiter for queue operations
+//	Receiver     - Funnels an inbox and waiter for queue operations
 //	Listener     - Reusable notification subscription for multiple Listeners
 //
 // Note: Sender and Waiter instances are typically managed per-goroutine,

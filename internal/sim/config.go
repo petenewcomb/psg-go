@@ -10,12 +10,12 @@ var DefaultConfig = Config{
 		Count:  BiasedIntConfig{Min: 1, Med: 15, Max: 30},
 		Length: BiasedIntConfig{Min: 1, Med: 3, Max: 5},
 	},
-	TaskLimiter:     defaultLimiterConfig,
-	CombinerLimiter: defaultLimiterConfig,
-	TaskRunner:      defaultTaskRunnerConfig,
-	Skimmer:         defaultSkimmerConfig,
-	Combiner:        defaultCombinerConfig,
-	Subjob:          SubjobConfig{MaxDepth: 3},
+	TaskLimiter:   defaultLimiterConfig,
+	FunnelLimiter: defaultLimiterConfig,
+	TaskRunner:    defaultTaskRunnerConfig,
+	Skimmer:       defaultSkimmerConfig,
+	Funnel:        defaultFunnelConfig,
+	Subjob:        SubjobConfig{MaxDepth: 3},
 }
 
 // Config controls plan generation. The Deterministic flag forces all
@@ -26,14 +26,14 @@ var DefaultConfig = Config{
 // probabilities, giving richer race-exposure but only Max-bounded
 // assertions.
 type Config struct {
-	Deterministic   bool
-	Path            PathConfig
-	TaskLimiter     LimiterConfig
-	CombinerLimiter LimiterConfig
-	TaskRunner      TaskRunnerConfig
-	Skimmer         SkimmerConfig
-	Combiner        CombinerConfig
-	Subjob          SubjobConfig
+	Deterministic bool
+	Path          PathConfig
+	TaskLimiter   LimiterConfig
+	FunnelLimiter LimiterConfig
+	TaskRunner    TaskRunnerConfig
+	Skimmer       SkimmerConfig
+	Funnel        FunnelConfig
+	Subjob        SubjobConfig
 }
 
 type PathConfig struct {

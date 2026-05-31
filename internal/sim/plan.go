@@ -19,15 +19,15 @@ import (
 // The generator produces a layered DAG:
 //
 //   - Skimmers (terminal sinks) at depth 0
-//   - Combiners at depths 1..MaxCombinerDepth, each Accumulate.Submit
-//     wired to a shallower sink. Multiple paths may share a Combiner
+//   - Funnels at depths 1..MaxFunnelDepth, each Accumulate.Submit
+//     wired to a shallower sink. Multiple paths may share a Funnel
 //     (fan-in).
 //   - Origin TaskRunners (one per path), Body.Submit wired to a sink
 //     at depth = path-length - 1. StartTask entries for these go into
 //     Plan.Steps.
 //   - Fan-out TaskRunners dispatched from inside Skimmer.Handle and
-//     Combiner.Accumulate bodies via StartTask steps
-//     (scatter-from-skim/combine, the recursive-spawn pattern).
+//     Funnel.Accumulate bodies via StartTask steps
+//     (scatter-from-skim/funnel, the recursive-spawn pattern).
 //     Each fan-out runner Submits to a Skimmer; cycle prevention is
 //     enforced by ordering (Skimmer #i's StartTasks only target
 //     Skimmers with index > i).
@@ -35,17 +35,17 @@ import (
 // Sink-invocation bounds and path durations are computed by walking
 // the DAG forward from each top-level StartTask, memoized per op.
 type Plan struct {
-	ID               int
-	PathCount        int
-	Steps            []Step // top-level: StartTask, possibly Subjob
-	MaxPathDuration  time.Duration
-	TaskLimiters     []Limiter
-	CombinerLimiters []Limiter
-	TaskRunners      []*TaskRunner
-	Combiners        []*Combiner
-	Skimmers         []*Skimmer
-	SubjobCount      int
-	SubjobTaskCount  int
+	ID              int
+	PathCount       int
+	Steps           []Step // top-level: StartTask, possibly Subjob
+	MaxPathDuration time.Duration
+	TaskLimiters    []Limiter
+	FunnelLimiters  []Limiter
+	TaskRunners     []*TaskRunner
+	Funnels         []*Funnel
+	Skimmers        []*Skimmer
+	SubjobCount     int
+	SubjobTaskCount int
 	// Sink-invocation bounds computed at plan time. In Deterministic
 	// mode and the current v1 generator (all Probs = 1.0),
 	// MinSkimmerInvocations[i] == MaxSkimmerInvocations[i]. When
@@ -66,7 +66,7 @@ type idCounters struct {
 	TaskLimiter int
 	CombLimiter int
 	TaskRunner  int
-	Combiner    int
+	Funnel      int
 	Skimmer     int
 }
 
@@ -93,14 +93,14 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			Permits: config.TaskLimiter.Permits.Draw(t, fmt.Sprintf("TaskLimiter#%d.Permits", id)),
 		}
 	}
-	combLimiterCount := config.CombinerLimiter.Count.Draw(t, planName+".CombinerLimiterCount")
-	plan.CombinerLimiters = make([]Limiter, combLimiterCount)
-	for i := range plan.CombinerLimiters {
+	combLimiterCount := config.FunnelLimiter.Count.Draw(t, planName+".FunnelLimiterCount")
+	plan.FunnelLimiters = make([]Limiter, combLimiterCount)
+	for i := range plan.FunnelLimiters {
 		id := nextIDs.CombLimiter
 		nextIDs.CombLimiter++
-		plan.CombinerLimiters[i] = Limiter{
+		plan.FunnelLimiters[i] = Limiter{
 			ID:      id,
-			Permits: config.CombinerLimiter.Permits.Draw(t, fmt.Sprintf("CombinerLimiter#%d.Permits", id)),
+			Permits: config.FunnelLimiter.Permits.Draw(t, fmt.Sprintf("FunnelLimiter#%d.Permits", id)),
 		}
 	}
 
@@ -139,54 +139,54 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		plan.Skimmers[len(plan.Skimmers)-1].Depth = maxSkimmerDepth
 	}
 
-	// === Combiners (depth 1..maxCombinerDepth, shared across paths for fan-in) ===
-	maxCombinerDepth := config.Path.Length.Max - 1
-	if maxCombinerDepth < 1 {
-		maxCombinerDepth = 1
+	// === Funnels (depth 1..maxFunnelDepth, shared across paths for fan-in) ===
+	maxFunnelDepth := config.Path.Length.Max - 1
+	if maxFunnelDepth < 1 {
+		maxFunnelDepth = 1
 	}
-	combinerCount := config.Combiner.Count.Draw(t, planName+".CombinerCount")
-	plan.Combiners = make([]*Combiner, combinerCount)
-	for i := range plan.Combiners {
-		id := nextIDs.Combiner
-		nextIDs.Combiner++
-		depth := rapid.IntRange(1, maxCombinerDepth).Draw(t, fmt.Sprintf("Combiner#%d.Depth", id))
-		plan.Combiners[i] = &Combiner{
+	funnelCount := config.Funnel.Count.Draw(t, planName+".FunnelCount")
+	plan.Funnels = make([]*Funnel, funnelCount)
+	for i := range plan.Funnels {
+		id := nextIDs.Funnel
+		nextIDs.Funnel++
+		depth := rapid.IntRange(1, maxFunnelDepth).Draw(t, fmt.Sprintf("Funnel#%d.Depth", id))
+		plan.Funnels[i] = &Funnel{
 			ID:    id,
 			Depth: depth,
-			Accumulate: newFunc(t, plan, config, &config.Combiner.Accumulate, nextIDs,
-				fmt.Sprintf("Combiner#%d.Accumulate", id)),
-			Flush: newFunc(t, plan, config, &config.Combiner.Flush, nextIDs,
-				fmt.Sprintf("Combiner#%d.Flush", id)),
+			Accumulate: newFunc(t, plan, config, &config.Funnel.Accumulate, nextIDs,
+				fmt.Sprintf("Funnel#%d.Accumulate", id)),
+			Flush: newFunc(t, plan, config, &config.Funnel.Flush, nextIDs,
+				fmt.Sprintf("Funnel#%d.Flush", id)),
 		}
 		if combLimiterCount > 0 {
-			limIdx := rapid.IntRange(0, combLimiterCount-1).Draw(t, fmt.Sprintf("Combiner#%d.LimiterIndex", id))
-			plan.Combiners[i].LimiterIndexes = []int{limIdx}
+			limIdx := rapid.IntRange(0, combLimiterCount-1).Draw(t, fmt.Sprintf("Funnel#%d.LimiterIndex", id))
+			plan.Funnels[i].LimiterIndexes = []int{limIdx}
 		}
 	}
-	// Sort by depth ascending so earlier-indexed Combiners are shallower —
+	// Sort by depth ascending so earlier-indexed Funnels are shallower —
 	// enables the wiring loop below to pick downstream candidates by index.
-	sort.SliceStable(plan.Combiners, func(i, j int) bool {
-		return plan.Combiners[i].Depth < plan.Combiners[j].Depth
+	sort.SliceStable(plan.Funnels, func(i, j int) bool {
+		return plan.Funnels[i].Depth < plan.Funnels[j].Depth
 	})
 
-	// Wire each Combiner.Accumulate.Submit to a shallower sink
-	// (Skimmer or Combiner with strictly smaller Depth).
+	// Wire each Funnel.Accumulate.Submit to a shallower sink
+	// (Skimmer or Funnel with strictly smaller Depth).
 	type sinkRef struct {
 		kind SinkKind
 		idx  int
 	}
-	for i, c := range plan.Combiners {
+	for i, c := range plan.Funnels {
 		var sinks []sinkRef
 		for gi := range plan.Skimmers {
 			sinks = append(sinks, sinkRef{SinkSkimmer, gi})
 		}
 		for ci := 0; ci < i; ci++ {
-			if plan.Combiners[ci].Depth < c.Depth {
-				sinks = append(sinks, sinkRef{SinkCombiner, ci})
+			if plan.Funnels[ci].Depth < c.Depth {
+				sinks = append(sinks, sinkRef{SinkFunnel, ci})
 			}
 		}
 		pick := rapid.IntRange(0, len(sinks)-1).Draw(t,
-			fmt.Sprintf("Combiner#%d.Accumulate.SubmitTarget", c.ID))
+			fmt.Sprintf("Funnel#%d.Accumulate.SubmitTarget", c.ID))
 		c.Accumulate.Steps = append(c.Accumulate.Steps, Submit{
 			Prob:      probValue(config, 1.0),
 			SinkKind:  sinks[pick].kind,
@@ -194,12 +194,12 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		})
 	}
 
-	// === Scatter-from-skim and scatter-from-combine. ===
+	// === Scatter-from-skim and scatter-from-funnel. ===
 	//
 	// Non-terminal Skimmers (depth < MaxDepth) dispatch fan-out
 	// runners targeting Skimmers at strictly greater depth — this
 	// gives multi-hop Skimmer chains while keeping the cascade
-	// bounded by MaxDepth. Combiners dispatch fan-out runners
+	// bounded by MaxDepth. Funnels dispatch fan-out runners
 	// targeting any Skimmer.
 	// Fan-out runners have intentionally simple bodies: SelfTime
 	// drawn from TaskRunner.Body config, plus the destination Submit.
@@ -268,16 +268,16 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		}
 		_ = gIdx
 	}
-	for _, c := range plan.Combiners {
+	for _, c := range plan.Funnels {
 		if len(plan.Skimmers) == 0 {
 			continue
 		}
-		sc := config.Combiner.ScatterCount.Draw(t, fmt.Sprintf("Combiner#%d.ScatterCount", c.ID))
+		sc := config.Funnel.ScatterCount.Draw(t, fmt.Sprintf("Funnel#%d.ScatterCount", c.ID))
 		for s := 0; s < sc; s++ {
 			targetIdx := rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t,
-				fmt.Sprintf("Combiner#%d.Scatter[%d].TargetSkimmer", c.ID, s))
+				fmt.Sprintf("Funnel#%d.Scatter[%d].TargetSkimmer", c.ID, s))
 			runnerIdx := addFanoutRunner(targetIdx,
-				fmt.Sprintf("FanoutRunner.from-Combiner#%d[%d]", c.ID, s))
+				fmt.Sprintf("FanoutRunner.from-Funnel#%d[%d]", c.ID, s))
 			c.Accumulate.Steps = append(c.Accumulate.Steps, StartTask{
 				Prob:        probValue(config, 1.0),
 				RunnerIndex: runnerIdx,
@@ -299,23 +299,23 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			pickedSinkKind = SinkSkimmer
 			pickedSinkIdx = rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t, pathName+".TerminalSkimmer")
 		} else {
-			// Try to find a Combiner exactly at depth length-1
+			// Try to find a Funnel exactly at depth length-1
 			var candidates []int
-			for ci, c := range plan.Combiners {
+			for ci, c := range plan.Funnels {
 				if c.Depth == length-1 {
 					candidates = append(candidates, ci)
 				}
 			}
 			switch {
 			case len(candidates) > 0:
-				pickedSinkKind = SinkCombiner
+				pickedSinkKind = SinkFunnel
 				pickedSinkIdx = candidates[rapid.IntRange(0, len(candidates)-1).Draw(t, pathName+".SinkPick")]
-			case len(plan.Combiners) > 0:
-				// Fallback: any Combiner
-				pickedSinkKind = SinkCombiner
-				pickedSinkIdx = rapid.IntRange(0, len(plan.Combiners)-1).Draw(t, pathName+".SinkPick")
+			case len(plan.Funnels) > 0:
+				// Fallback: any Funnel
+				pickedSinkKind = SinkFunnel
+				pickedSinkIdx = rapid.IntRange(0, len(plan.Funnels)-1).Draw(t, pathName+".SinkPick")
 			default:
-				// No Combiners — target a Skimmer
+				// No Funnels — target a Skimmer
 				pickedSinkKind = SinkSkimmer
 				pickedSinkIdx = rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t, pathName+".SinkPick")
 			}
@@ -363,7 +363,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		switch o := op.(type) {
 		case *TaskRunner:
 			body = o.Body
-		case *Combiner:
+		case *Funnel:
 			body = o.Accumulate
 		case *Skimmer:
 			body = o.Handle
@@ -377,8 +377,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 					switch s.SinkKind {
 					case SinkSkimmer:
 						target = plan.Skimmers[s.SinkIndex]
-					case SinkCombiner:
-						target = plan.Combiners[s.SinkIndex]
+					case SinkFunnel:
+						target = plan.Funnels[s.SinkIndex]
 					}
 					for gi, cnt := range contribOf(target) {
 						contrib[gi] += cnt
@@ -469,7 +469,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 		switch o := op.(type) {
 		case *TaskRunner:
 			body = o.Body
-		case *Combiner:
+		case *Funnel:
 			body = o.Accumulate
 		case *Skimmer:
 			body = o.Handle
@@ -485,8 +485,8 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 					switch s.SinkKind {
 					case SinkSkimmer:
 						target = plan.Skimmers[s.SinkIndex]
-					case SinkCombiner:
-						target = plan.Combiners[s.SinkIndex]
+					case SinkFunnel:
+						target = plan.Funnels[s.SinkIndex]
 					}
 					if d := durationFromOp(target); d > maxDownstream {
 						maxDownstream = d
@@ -504,7 +504,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 		switch o := op.(type) {
 		case *TaskRunner:
 			o.pathDuration = total
-		case *Combiner:
+		case *Funnel:
 			o.pathDuration = total
 		case *Skimmer:
 			o.pathDuration = total
@@ -542,15 +542,15 @@ func (p *Plan) Dump(fs fmt.State, indent string) {
 	for i := range p.TaskLimiters {
 		_, _ = fmt.Fprintf(fs, "\n%s   TaskLimiters[%d]: %#v", indent, i, &p.TaskLimiters[i])
 	}
-	for i := range p.CombinerLimiters {
-		_, _ = fmt.Fprintf(fs, "\n%s   CombinerLimiters[%d]: %#v", indent, i, &p.CombinerLimiters[i])
+	for i := range p.FunnelLimiters {
+		_, _ = fmt.Fprintf(fs, "\n%s   FunnelLimiters[%d]: %#v", indent, i, &p.FunnelLimiters[i])
 	}
 	for i, r := range p.TaskRunners {
 		_, _ = fmt.Fprintf(fs, "\n%s   TaskRunners[%d]: ", indent, i)
 		r.Dump(fs, indent+"     ")
 	}
-	for i, c := range p.Combiners {
-		_, _ = fmt.Fprintf(fs, "\n%s   Combiners[%d]: ", indent, i)
+	for i, c := range p.Funnels {
+		_, _ = fmt.Fprintf(fs, "\n%s   Funnels[%d]: ", indent, i)
 		c.Dump(fs, indent+"     ")
 	}
 	for i, g := range p.Skimmers {

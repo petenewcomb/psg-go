@@ -71,9 +71,9 @@ type TaskWorkerIdleJitterOption interface {
 
 // WithFlushListener registers a callback function that will be called each time
 // all tasks have completed and [github.com/petenewcomb/psg-go.Pool] is waiting
-// for combiners to emit their results. After the callback returns, the job
-// signals any Combiner that has received inputs but hasn't yet emitted its
-// combined results to do so immediately. The callback may be invoked multiple
+// for funnels to emit their results. After the callback returns, the job
+// signals any Funnel that has received inputs but hasn't yet emitted its
+// funneld results to do so immediately. The callback may be invoked multiple
 // times during a job's lifecycle if a Skim directly or indirectly launches
 // new tasks while processing the flushed results.
 //

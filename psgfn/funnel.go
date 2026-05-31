@@ -8,21 +8,21 @@ import (
 	"time"
 )
 
-// CombinerFactory is a function that creates a new Accumulator instance.
-// The framework calls a CombinerFactory whenever it needs a fresh accumulator
+// FunnelFactory is a function that creates a new Accumulator instance.
+// The framework calls a FunnelFactory whenever it needs a fresh accumulator
 // state — once at startup of the first instance and again after any prior
 // instance flushes and is discarded.
-type CombinerFactory[T any] = func() Accumulator[T]
+type FunnelFactory[T any] = func() Accumulator[T]
 
 // Accumulator instances perform stateful partial aggregation of values inside
-// a Combiner. Each input is delivered via [Accumulator.Accumulate]; the
+// a Funnel. Each input is delivered via [Accumulator.Accumulate]; the
 // instance owns its accumulated state across calls. When the framework
 // finalizes the instance (on a user-requested flush deadline or on
-// CombinerPool drain), [Accumulator.Flush] is invoked.
+// FunnelPool drain), [Accumulator.Flush] is invoked.
 //
 // Downstream emission is the body's responsibility: an Accumulator that
 // wants to emit aggregated results explicitly calls Submit on whichever
-// downstream sinks (Combiner, Skimmer) it has captured via its factory
+// downstream sinks (Funnel, Skimmer) it has captured via its factory
 // closure. The framework does not auto-route any value returned by
 // Accumulate or Flush — those methods return only an error.
 //

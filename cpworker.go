@@ -17,7 +17,7 @@ import (
 
 type cpWorker struct {
 	integrationExEnv
-	cp *CombinerPool
+	cp *FunnelPool
 
 	idleTimer *time.Timer
 	doneCh    <-chan struct{}
@@ -25,7 +25,7 @@ type cpWorker struct {
 
 	// readyBuf is the worker's reusable scratch slice for delayq.Drain
 	// returns. Lives on the worker to avoid allocating on every drain.
-	readyBuf []combinerFlusher
+	readyBuf []funnelFlusher
 
 	idleTimerCh            <-chan time.Time
 	flushDeadlineTimerCh   <-chan time.Time
@@ -49,7 +49,7 @@ func (cw *cpWorker) TryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc)
 	if queuedFlush, _ := cw.flushToNextDeadline(ctx); queuedFlush {
 		return nil
 	}
-	if work, ok := cw.cp.combineQueue.TryPopFront(); ok {
+	if work, ok := cw.cp.funnelQueue.TryPopFront(); ok {
 		queueFn(work)
 		return nil
 	}
@@ -71,7 +71,7 @@ func (cw *cpWorker) AddWork(
 
 	if workWaiters == nil {
 		// Non-blocking mode
-		if work, ok := cw.cp.combineQueue.TryPopFront(); ok {
+		if work, ok := cw.cp.funnelQueue.TryPopFront(); ok {
 			cw.queue(work)
 		}
 		return nil, nil
@@ -104,7 +104,7 @@ func (cw *cpWorker) AddWork(
 	// Primary goroutine, no need for idle detection
 	workWaiters.WaitFunc(cw.Waiter(), confirmWorkWaitFn,
 		func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-			work, ok := cw.cp.combineQueue.PopFrontFunc(cw.Receiver(),
+			work, ok := cw.cp.funnelQueue.PopFrontFunc(cw.Receiver(),
 				func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
 					return cw.popSelect(ctx, inboxCh, outboxWaitCh, workWaitCh)
 				},
@@ -185,7 +185,7 @@ func (cw *cpWorker) popSelect(
 		trace.Logf(ctx, traceRegion, "received context done signal")
 		cw.err = ctx.Err()
 	case <-cw.doneCh:
-		trace.Logf(ctx, traceRegion, "received combiner goroutine done signal")
+		trace.Logf(ctx, traceRegion, "received funnel goroutine done signal")
 		cw.err = cw.doneErr()
 	}
 	return
@@ -242,14 +242,14 @@ func (cw *cpWorker) flushAll(ctx context.Context) bool {
 // future deadline.
 const maxFlushAllSkew = 24 * time.Hour
 
-func (cw *cpWorker) executeCombine(ctx context.Context, bc boundCombineWork) {
-	traceRegion := "cpWorker.executeCombine"
+func (cw *cpWorker) executeFunnel(ctx context.Context, bc boundFunnelWork) {
+	traceRegion := "cpWorker.executeFunnel"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "cpWorker=%p", cw)
 	if cw.nextJobFlushCh == nil {
-		// Make sure the job won't terminate before the combiner is flushed
+		// Make sure the job won't terminate before the funnel is flushed
 		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
 	}
-	bc.Combine(ctx, &cw.cp.flushQ, cw.Sender())
+	bc.Funnel(ctx, &cw.cp.flushQ, cw.Sender())
 	cw.cp.state.IncrementCompleted()
 }

@@ -8,6 +8,6 @@ type MaxConcurrency struct {
 	Max int
 }
 
-func (o MaxConcurrency) applyToCombinerPool(c *CombinerPoolConfigChanges) {
+func (o MaxConcurrency) applyToFunnelPool(c *FunnelPoolConfigChanges) {
 	c.MaxConcurrency = &o.Max
 }

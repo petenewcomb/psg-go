@@ -91,35 +91,35 @@ func LoggedSkim[T any](
 	}
 }
 
-// LoggedCombiner adds structured logging to accumulators.
+// LoggedFunnel adds structured logging to accumulators.
 // This wrapper logs accumulate and flush operations, including timing information.
-func LoggedCombiner[T any](
-	combineOpName string,
+func LoggedFunnel[T any](
+	funnelOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[T],
-) psgfn.CombinerFactory[T] {
+	funnelFactory psgfn.FunnelFactory[T],
+) psgfn.FunnelFactory[T] {
 	return func() psgfn.Accumulator[T] {
-		innerCombiner := combinerFactory()
+		innerFunnel := funnelFactory()
 
 		return psgfn.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Get logger from context or use a default
 				logger := zap.L()
 
-				// Log starting combine operation
+				// Log starting funnel operation
 				logger.Debug("Combining input",
-					zap.String("operation", combineOpName),
+					zap.String("operation", funnelOpName),
 					zap.String("component", "otpsg"),
 					zap.Bool("input_has_error", inputErr != nil))
 
 				// Time the operation
 				startTime := time.Now()
-				flushTime, err := innerCombiner.Accumulate(ctx, input, inputErr)
+				flushTime, err := innerFunnel.Accumulate(ctx, input, inputErr)
 				duration := time.Since(startTime)
 
 				// Log completion
-				logger.Debug("Combine completed",
-					zap.String("operation", combineOpName),
+				logger.Debug("Funnel completed",
+					zap.String("operation", funnelOpName),
 					zap.String("component", "otpsg"),
 					zap.Duration("duration", duration),
 					zap.Bool("has_error", err != nil))
@@ -131,13 +131,13 @@ func LoggedCombiner[T any](
 				logger := zap.L()
 
 				// Log starting flush operation
-				logger.Debug("Flushing combiner",
+				logger.Debug("Flushing funnel",
 					zap.String("operation", flushOpName),
 					zap.String("component", "otpsg"))
 
 				// Time the operation
 				startTime := time.Now()
-				err := innerCombiner.Flush(ctx)
+				err := innerFunnel.Flush(ctx)
 				duration := time.Since(startTime)
 
 				// Log completion

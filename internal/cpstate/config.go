@@ -10,14 +10,14 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 )
 
-// Config holds the complete configuration state for a CombinerPoolState.
+// Config holds the complete configuration state for a FunnelPoolState.
 type Config struct {
 	MaxConcurrency int
 	IdleTimeout    time.Duration
 	IdleJitter     time.Duration
 }
 
-func (c *Config) Update(changes *opts.CombinerPoolConfigChanges) {
+func (c *Config) Update(changes *opts.FunnelPoolConfigChanges) {
 	if changes.MaxConcurrency != nil {
 		c.MaxConcurrency = *changes.MaxConcurrency
 	}

@@ -21,49 +21,49 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// combineOpHandleTrait implements leakguard.DupTrait for combineOp resources.
-// It manages the lifecycle of combineOp instances through reference counting.
-type combineOpHandleTrait[T any] struct{}
+// funnelOpHandleTrait implements leakguard.DupTrait for funnelOp resources.
+// It manages the lifecycle of funnelOp instances through reference counting.
+type funnelOpHandleTrait[T any] struct{}
 
-func (combineOpHandleTrait[T]) Close(c *combineOp[T]) {
+func (funnelOpHandleTrait[T]) Close(c *funnelOp[T]) {
 	c.unref()
 }
 
-func (combineOpHandleTrait[T]) Dup(c *combineOp[T]) (*combineOp[T], error) {
+func (funnelOpHandleTrait[T]) Dup(c *funnelOp[T]) (*funnelOp[T], error) {
 	c.ref()
 	return c, nil
 }
 
-func (combineOpHandleTrait[T]) String(c *combineOp[T]) string {
-	return fmt.Sprintf("Combiner(%p)", c)
+func (funnelOpHandleTrait[T]) String(c *funnelOp[T]) string {
+	return fmt.Sprintf("Funnel(%p)", c)
 }
 
-// Combiner represents a stateful aggregation op. Inputs flow in through
-// [Combiner.Submit] (or via [Combiner.Start] for value-producing tasks);
+// Funnel represents a stateful aggregation op. Inputs flow in through
+// [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks);
 // the user-supplied [psgfn.Accumulator] processes them inside a
-// CombinerPool worker. Downstream emission is the Accumulator body's
+// FunnelPool worker. Downstream emission is the Accumulator body's
 // responsibility — it calls Submit on whatever downstream sinks it has
 // captured. There is no framework-mediated output type; Accumulator
 // errors are surfaced via the Pool's SkimAll path.
 //
-// Thread-safety and copying: a Combiner value is designed to be copied.
-// While a single Combiner value does not support concurrent calls to
-// Start or TryStart, copies of a Combiner can be used concurrently. All
-// copies share the same combiner identity and will route work to the
+// Thread-safety and copying: a Funnel value is designed to be copied.
+// While a single Funnel value does not support concurrent calls to
+// Start or TryStart, copies of a Funnel can be used concurrently. All
+// copies share the same funnel identity and will route work to the
 // same Accumulator instances.
 //
-// Resource management: each Combiner must be explicitly closed via
+// Resource management: each Funnel must be explicitly closed via
 // Close(). Dup() creates independent handles that share the same
-// underlying state. The combineOp resource is cleaned up when the last
+// underlying state. The funnelOp resource is cleaned up when the last
 // handle is closed and all internal references (from tasks and work
 // items) are released.
-type Combiner[T any] struct {
-	h leakguard.Handle[combineOp[T], combineOpHandleTrait[T]]
+type Funnel[T any] struct {
+	h leakguard.Handle[funnelOp[T], funnelOpHandleTrait[T]]
 }
 
-// NewCombiner creates a new Combiner operation. Pass [WithLimits] in
+// NewFunnel creates a new Funnel operation. Pass [WithLimits] in
 // opts to bind a [Limiter] (e.g. via [NewSemaphore]) that caps the
-// number of concurrent combine-work executions for this Combiner.
+// number of concurrent funnel-work executions for this Funnel.
 //
 // The framework manages an internal error sink that surfaces
 // Accumulator errors through the Pool's SkimAll path; the user's
@@ -71,34 +71,34 @@ type Combiner[T any] struct {
 // Submit on whatever downstream sinks it captures.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewCombiner[T any](
-	combinerPool *CombinerPool,
-	combinerFactory psgfn.CombinerFactory[T],
+func NewFunnel[T any](
+	funnelPool *FunnelPool,
+	funnelFactory psgfn.FunnelFactory[T],
 	opts ...OpOption,
-) Combiner[T] {
-	traceRegion := "NewCombiner"
+) Funnel[T] {
+	traceRegion := "NewFunnel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	if combinerPool == nil {
-		panic("combinerPool must be non-nil")
+	if funnelPool == nil {
+		panic("funnelPool must be non-nil")
 	}
-	if combinerFactory == nil {
-		panic("combinerFactory must be non-nil")
+	if funnelFactory == nil {
+		panic("funnelFactory must be non-nil")
 	}
 
 	cfg := resolveOpConfig(opts)
 
-	innerPool := omnipool.For[combineOp[T]]()
+	innerPool := omnipool.For[funnelOp[T]]()
 	inner := innerPool.Get()
 
 	if inner.refCount.Load() != 0 {
 		panic("unexpected nonzero inner.refCount")
 	}
-	if inner.combinerPool != nil {
-		panic("unexpected non-nil inner.combinerPool")
+	if inner.funnelPool != nil {
+		panic("unexpected non-nil inner.funnelPool")
 	}
-	if inner.combinerFactory != nil {
-		panic("unexpected non-nil inner.combinerFactory")
+	if inner.funnelFactory != nil {
+		panic("unexpected non-nil inner.funnelFactory")
 	}
 	if inner.instanceCount.Load() != 0 {
 		panic("unexpected nonzero inner.instanceCount")
@@ -111,45 +111,45 @@ func NewCombiner[T any](
 	inner.errSink = NewSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
 	}))
-	inner.combinerPool = combinerPool
-	inner.combinerFactory = combinerFactory
+	inner.funnelPool = funnelPool
+	inner.funnelFactory = funnelFactory
 	inner.limiter = cfg.singleLimiter()
 	inner.innerPool = innerPool
 
-	h := leakguard.New[combineOp[T], combineOpHandleTrait[T]](inner)
+	h := leakguard.New[funnelOp[T], funnelOpHandleTrait[T]](inner)
 
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "Combiner(%p), handleID=%d, pool=%p",
-			inner, h.HandleID(), combinerPool)
+		trace.Logf(context.Background(), traceRegion, "Funnel(%p), handleID=%d, pool=%p",
+			inner, h.HandleID(), funnelPool)
 	}
 
-	return Combiner[T]{h: h}
+	return Funnel[T]{h: h}
 }
 
-// Submit posts a value to the Combiner. Sugar for SubmitErr with a
+// Submit posts a value to the Funnel. Sugar for SubmitErr with a
 // nil error.
-func (c *Combiner[T]) Submit(
+func (c *Funnel[T]) Submit(
 	ctx context.Context,
 	value T,
 ) error {
 	return c.SubmitErr(ctx, value, nil)
 }
 
-// SubmitErr posts a (value, err) pair to the Combiner. err is
+// SubmitErr posts a (value, err) pair to the Funnel. err is
 // delivered to the Accumulator alongside value; use nil when reporting
 // a successful result.
-func (c *Combiner[T]) SubmitErr(
+func (c *Funnel[T]) SubmitErr(
 	ctx context.Context,
 	value T,
 	err error,
 ) error {
-	traceRegion := "Combiner.SubmitErr"
+	traceRegion := "Funnel.SubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
-	trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
+	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
-	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
+	ctx, meta := inner.funnelPool.job.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -161,8 +161,8 @@ func (c *Combiner[T]) SubmitErr(
 }
 
 // TrySubmit attempts to Submit without blocking past deadline. See
-// [Combiner.Submit].
-func (c *Combiner[T]) TrySubmit(
+// [Funnel.Submit].
+func (c *Funnel[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
@@ -171,20 +171,20 @@ func (c *Combiner[T]) TrySubmit(
 }
 
 // TrySubmitErr attempts to SubmitErr without blocking past deadline.
-// See [Combiner.SubmitErr].
-func (c *Combiner[T]) TrySubmitErr(
+// See [Funnel.SubmitErr].
+func (c *Funnel[T]) TrySubmitErr(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "Combiner.TrySubmitErr"
+	traceRegion := "Funnel.TrySubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
-	trace.Logf(ctx, traceRegion, "Combiner(%p)", inner)
+	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
-	ctx, meta := inner.combinerPool.job.ctxMeta(ctx)
+	ctx, meta := inner.funnelPool.job.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -195,72 +195,72 @@ func (c *Combiner[T]) TrySubmitErr(
 	return inner.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
-// Dup creates a duplicate handle to the same underlying Combiner.
+// Dup creates a duplicate handle to the same underlying Funnel.
 // Like file descriptor duplication, this creates a new handle that shares
-// the same underlying combiner state but requires its own Close() call.
-// This is useful for passing Combiner handles to different goroutines
+// the same underlying funnel state but requires its own Close() call.
+// This is useful for passing Funnel handles to different goroutines
 // or async operations that need their own lifecycle management.
-func (c *Combiner[T]) Dup() Combiner[T] {
+func (c *Funnel[T]) Dup() Funnel[T] {
 	h, err := leakguard.Dup(c.h)
 	if err != nil {
 		panic(fmt.Sprintf("Dup() failed: %v", err))
 	}
-	return Combiner[T]{h: h}
+	return Funnel[T]{h: h}
 }
 
-// Close releases this handle to the Combiner. Each handle (including dups)
-// must be closed exactly once. The underlying combiner state is cleaned up
+// Close releases this handle to the Funnel. Each handle (including dups)
+// must be closed exactly once. The underlying funnel state is cleaned up
 // when the last handle is closed.
-func (c *Combiner[T]) Close() {
+func (c *Funnel[T]) Close() {
 	c.h.Close()
 }
 
-// refInner gets the inner combineOp, checks if closed, and adds a reference.
-// Panics if the Combiner has been closed.
+// refInner gets the inner funnelOp, checks if closed, and adds a reference.
+// Panics if the Funnel has been closed.
 // The caller must ensure a matching unref() is called.
-func (c *Combiner[T]) refInner() *combineOp[T] {
+func (c *Funnel[T]) refInner() *funnelOp[T] {
 	inner := c.h.Get()
 	if inner == nil {
-		panic("Combiner has been closed")
+		panic("Funnel has been closed")
 	}
 	inner.ref()
 	return inner
 }
 
-type combinerInstanceID int64
+type funnelInstanceID int64
 
-var combinerInstanceCounter atomic.Int64
+var funnelInstanceCounter atomic.Int64
 
-type combineOp[T any] struct {
+type funnelOp[T any] struct {
 	refCount atomic.Int64
 
 	// errSink is framework-owned. Accumulator errors are routed through
 	// it; its handler returns err as-is so it surfaces via SkimAll.
-	errSink         Skimmer[struct{}]
-	combinerPool    *CombinerPool
-	combinerFactory psgfn.CombinerFactory[T]
+	errSink       Skimmer[struct{}]
+	funnelPool    *FunnelPool
+	funnelFactory psgfn.FunnelFactory[T]
 
-	// limiter caps how many combineWorks this Combiner processes
+	// limiter caps how many funnelWorks this Funnel processes
 	// concurrently. The zero Limiter (impl == nil) means unlimited.
-	// Acquired in combineWork.Execute and released when Execute
+	// Acquired in funnelWork.Execute and released when Execute
 	// completes.
 	limiter Limiter
 
-	innerPool             *omnipool.Pool[combineOp[T]]
-	halfBoundCombinerPool *omnipool.Pool[halfBoundCombiner[T]]
-	combineWorkPool       *omnipool.Pool[combineWork[T]]
+	innerPool           *omnipool.Pool[funnelOp[T]]
+	halfBoundFunnelPool *omnipool.Pool[halfBoundFunnel[T]]
+	funnelWorkPool      *omnipool.Pool[funnelWork[T]]
 
 	instanceCount atomic.Int32
-	instanceQueue nbcq.Queue[*halfBoundCombiner[T]]
+	instanceQueue nbcq.Queue[*halfBoundFunnel[T]]
 }
 
-func (c *combineOp[T]) Init() {
-	c.halfBoundCombinerPool = omnipool.For[halfBoundCombiner[T]]()
-	c.combineWorkPool = omnipool.For[combineWork[T]]()
+func (c *funnelOp[T]) Init() {
+	c.halfBoundFunnelPool = omnipool.For[halfBoundFunnel[T]]()
+	c.funnelWorkPool = omnipool.For[funnelWork[T]]()
 	c.instanceQueue.Init()
 }
 
-func (c *combineOp[T]) Reset() {
+func (c *funnelOp[T]) Reset() {
 	// Reset logic is now handled in unref() when refCount hits zero.
 	// We keep this empty method to satisfy the Resetter interface - if we didn't,
 	// omnipool would zero the entire struct including pool pointers set by Init().
@@ -269,7 +269,7 @@ func (c *combineOp[T]) Reset() {
 // ref increments the refCount to track handle ownership and internal references.
 // It is called by leakguard when a handle is created via Dup(), and also used
 // for internal refs (tasks, work items).
-func (c *combineOp[T]) ref() {
+func (c *funnelOp[T]) ref() {
 	newCount := c.refCount.Add(1)
 	if newCount <= 1 {
 		panic("ref() called with no existing references")
@@ -278,7 +278,7 @@ func (c *combineOp[T]) ref() {
 
 // unref is called by leakguard when a handle is closed.
 // It decrements refCount and cleans up if this was the last reference.
-func (c *combineOp[T]) unref() {
+func (c *funnelOp[T]) unref() {
 	newCount := c.refCount.Add(-1)
 	if newCount < 0 {
 		panic("reference count underflow")
@@ -303,8 +303,8 @@ func (c *combineOp[T]) unref() {
 
 	// Clear all fields
 	c.errSink = Skimmer[struct{}]{}
-	c.combinerPool = nil
-	c.combinerFactory = nil
+	c.funnelPool = nil
+	c.funnelFactory = nil
 	c.limiter = Limiter{}
 	// Keep c.innerPool - it's metadata about where to return this object
 
@@ -312,9 +312,9 @@ func (c *combineOp[T]) unref() {
 	innerPool.Put(c)
 }
 
-type halfBoundCombiner[T any] struct {
-	id combinerInstanceID
-	op *combineOp[T]
+type halfBoundFunnel[T any] struct {
+	id funnelInstanceID
+	op *funnelOp[T]
 
 	mu            sync.Mutex
 	refCount      int
@@ -322,42 +322,42 @@ type halfBoundCombiner[T any] struct {
 	accumulator   psgfn.Accumulator[T]
 
 	// queued reports whether this instance currently has a Ref held on
-	// behalf of an in-flight Schedule on the CombinerPool's flushQ.
+	// behalf of an in-flight Schedule on the FunnelPool's flushQ.
 	// Mutated only under c.mu.
 	queued bool
 
 	// flushHeapPos is the 1-based position of this instance in the
-	// CombinerPool's flush deadline queue (0 means not in the queue).
+	// FunnelPool's flush deadline queue (0 means not in the queue).
 	// Mutated only by the queue.
 	flushHeapPos int
 }
 
-func (c *halfBoundCombiner[T]) InstanceID() combinerInstanceID {
+func (c *halfBoundFunnel[T]) InstanceID() funnelInstanceID {
 	return c.id
 }
 
-func (c *halfBoundCombiner[T]) InstanceCount() int {
+func (c *halfBoundFunnel[T]) InstanceCount() int {
 	return int(c.op.instanceCount.Load())
 }
 
 // Position implements [delayq.Item]. The heap reads positions under
 // delayq.mu so the read is consistent with the heap's own ordering;
 // concurrent writers come exclusively through SetPosition, which
-// synchronizes with combine via c.mu.
-func (c *halfBoundCombiner[T]) Position() int { return c.flushHeapPos }
+// synchronizes with funnel via c.mu.
+func (c *halfBoundFunnel[T]) Position() int { return c.flushHeapPos }
 
 // SetPosition implements [delayq.Item]. It is called by the delayq
 // heap under delayq.mu when an item is inserted, swapped, or removed.
-// We take c.mu so combine's read of c.queued and c.flushHeapPos
+// We take c.mu so funnel's read of c.queued and c.flushHeapPos
 // stays consistent with the heap's view: when delayq's Drain pops c
 // (p == 0), the queued flag flips false here, ensuring a concurrent
-// combine that subsequently acquires c.mu correctly observes "no Ref
+// funnel that subsequently acquires c.mu correctly observes "no Ref
 // outstanding" and Refs for its new Schedule.
 //
 // Lock ordering: delayq.mu first (held by the heap operation), then
-// c.mu (taken here). combine never takes delayq.mu while holding
+// c.mu (taken here). funnel never takes delayq.mu while holding
 // c.mu, so no deadlock.
-func (c *halfBoundCombiner[T]) SetPosition(p int) {
+func (c *halfBoundFunnel[T]) SetPosition(p int) {
 	c.mu.Lock()
 	c.flushHeapPos = p
 	if p == 0 {
@@ -367,7 +367,7 @@ func (c *halfBoundCombiner[T]) SetPosition(p int) {
 }
 
 // Must already be holding c.mu lock.
-func (c *halfBoundCombiner[T]) Ref() {
+func (c *halfBoundFunnel[T]) Ref() {
 	if c.refCount < 1 {
 		panic("reference count underflow")
 	}
@@ -375,7 +375,7 @@ func (c *halfBoundCombiner[T]) Ref() {
 }
 
 // Must not be holding c.mu lock.
-func (c *halfBoundCombiner[T]) Unref() {
+func (c *halfBoundFunnel[T]) Unref() {
 	c.mu.Lock()
 	finalRefDropped := c.unref()
 	c.mu.Unlock()
@@ -386,7 +386,7 @@ func (c *halfBoundCombiner[T]) Unref() {
 
 // Must already be holding c.mu lock.
 // Returns true if the final reference was dropped.
-func (c *halfBoundCombiner[T]) unref() bool {
+func (c *halfBoundFunnel[T]) unref() bool {
 	// Must already be holding c.mu lock
 	if c.refCount < 1 {
 		panic("reference count underflow")
@@ -396,37 +396,37 @@ func (c *halfBoundCombiner[T]) unref() bool {
 }
 
 // A call to unref() must already have returned true
-func (c *halfBoundCombiner[T]) free() {
-	pool := c.op.halfBoundCombinerPool
+func (c *halfBoundFunnel[T]) free() {
+	pool := c.op.halfBoundFunnelPool
 	op := c.op
 	pool.Put(c)
 	op.instanceCount.Add(-1)
 	op.unref()
 }
 
-func (c *halfBoundCombiner[T]) allocate(
+func (c *halfBoundFunnel[T]) allocate(
 	ctx context.Context,
-	newAccumulator psgfn.CombinerFactory[T],
+	newAccumulator psgfn.FunnelFactory[T],
 	sender *rdvq.Sender,
 ) {
-	traceRegion := "halfBoundCombiner.allocate"
+	traceRegion := "halfBoundFunnel.allocate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	panicked := true
 	defer func() {
 		if panicked {
-			c.emitErr(ctx, sender, ErrCombinerFactoryPanicked)
+			c.emitErr(ctx, sender, ErrFunnelFactoryPanicked)
 		}
 	}()
 	c.accumulator = newAccumulator()
 	panicked = false
 	if c.accumulator == nil {
-		c.emitErr(ctx, sender, ErrCombinerFactoryReturnedNil)
-		c.accumulator = &errAccumulator[T]{err: ErrCombinerFactoryReturnedNil}
+		c.emitErr(ctx, sender, ErrFunnelFactoryReturnedNil)
+		c.accumulator = &errAccumulator[T]{err: ErrFunnelFactoryReturnedNil}
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "Combiner(%p) returning new accumulator=%v", c.op, c.accumulator)
+		trace.Logf(ctx, traceRegion, "Funnel(%p) returning new accumulator=%v", c.op, c.accumulator)
 	}
 }
 
@@ -435,38 +435,38 @@ func (c *halfBoundCombiner[T]) allocate(
 // Pool.SkimAll. Successful results are not surfaced this way — the
 // Accumulator body is expected to Submit those to user-owned downstream
 // sinks directly.
-func (c *halfBoundCombiner[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {
-	traceRegion := "halfBoundCombiner.emitErr"
+func (c *halfBoundFunnel[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {
+	traceRegion := "halfBoundFunnel.emitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	if accErr == nil {
 		return
 	}
-	ctx, meta := c.op.combinerPool.job.ctxMeta(ctx)
+	ctx, meta := c.op.funnelPool.job.ctxMeta(ctx)
 	err := c.op.errSink.submit(
-		ctx, meta, c.op.combinerPool.job, c.earliestGroup, struct{}{}, accErr)
+		ctx, meta, c.op.funnelPool.job, c.earliestGroup, struct{}{}, accErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
 	_ = sender
 }
 
-func (c *halfBoundCombiner[T]) combine(
+func (c *halfBoundFunnel[T]) funnel(
 	ctx context.Context,
-	flushQ *delayq.Queue[combinerFlusher],
+	flushQ *delayq.Queue[funnelFlusher],
 	sender *rdvq.Sender,
 	input T,
 	inputErr error,
 ) {
 
-	traceRegion := "halfBoundCombiner.combine"
+	traceRegion := "halfBoundFunnel.funnel"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	didNotPanic := false
 	defer func() {
 		if !didNotPanic {
 			// Just in case the panic is otherwise suppressed
-			c.emitErr(ctx, sender, ErrCombinePanicked)
+			c.emitErr(ctx, sender, ErrFunnelPanicked)
 		}
 	}()
 
@@ -489,7 +489,7 @@ func (c *halfBoundCombiner[T]) combine(
 	default:
 		// Either a future deadline or no deadline (zero). In the
 		// no-deadline case the accumulator stays alive until the
-		// CombinerPool's job-end flush sweep picks it up; we still
+		// FunnelPool's job-end flush sweep picks it up; we still
 		// place the instance in the flushQ — with a far-future
 		// placeholder deadline — so that sweep finds it.
 		deadline := newFlushDeadline
@@ -505,8 +505,8 @@ func (c *halfBoundCombiner[T]) combine(
 }
 
 // Must not already hold c.mu
-func (c *halfBoundCombiner[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
-	traceRegion := "halfBoundCombiner.Flush"
+func (c *halfBoundFunnel[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
+	traceRegion := "halfBoundFunnel.Flush"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	c.mu.Lock()
@@ -521,8 +521,8 @@ func (c *halfBoundCombiner[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
 }
 
 // Must already hold c.mu
-func (c *halfBoundCombiner[T]) flush(ctx context.Context, sender *rdvq.Sender) {
-	traceRegion := "halfBoundCombiner.flush"
+func (c *halfBoundFunnel[T]) flush(ctx context.Context, sender *rdvq.Sender) {
+	traceRegion := "halfBoundFunnel.flush"
 
 	accumulator := c.accumulator
 	if accumulator == nil {
@@ -535,7 +535,7 @@ func (c *halfBoundCombiner[T]) flush(ctx context.Context, sender *rdvq.Sender) {
 	defer func() {
 		if panicked {
 			// Just in case the panic is otherwise suppressed
-			c.emitErr(ctx, sender, ErrCombinerFlushPanicked)
+			c.emitErr(ctx, sender, ErrFunnelFlushPanicked)
 		}
 	}()
 
@@ -547,19 +547,19 @@ func (c *halfBoundCombiner[T]) flush(ctx context.Context, sender *rdvq.Sender) {
 	}
 }
 
-func (c *combineOp[T]) submit(
+func (c *funnelOp[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
 	value T,
 	err error,
 ) error {
-	combineWork := c.newCombineWork(group, value, err)
-	postWork := c.combinerPool.newCombinePostWork(group, combineWork)
+	funnelWork := c.newFunnelWork(group, value, err)
+	postWork := c.funnelPool.newFunnelPostWork(group, funnelWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-func (c *combineOp[T]) trySubmit(
+func (c *funnelOp[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
@@ -567,9 +567,9 @@ func (c *combineOp[T]) trySubmit(
 	err error,
 	deadline time.Time,
 ) (bool, error) {
-	// Create combine work directly with values
-	combineWork := c.newCombineWork(group, value, err)
-	postWork := c.combinerPool.newCombinePostWork(group, combineWork)
+	// Create funnel work directly with values
+	funnelWork := c.newFunnelWork(group, value, err)
+	postWork := c.funnelPool.newFunnelPostWork(group, funnelWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()
@@ -577,38 +577,38 @@ func (c *combineOp[T]) trySubmit(
 	return ok, err
 }
 
-// boundCombineWork interface allows type erasure for combineWork instances
-type boundCombineWork interface {
+// boundFunnelWork interface allows type erasure for funnelWork instances
+type boundFunnelWork interface {
 	workq.Work
-	Combine(ctx context.Context, flushQ *delayq.Queue[combinerFlusher], sender *rdvq.Sender)
+	Funnel(ctx context.Context, flushQ *delayq.Queue[funnelFlusher], sender *rdvq.Sender)
 	Waiting(*workq.Governor)
 }
 
-type combineWork[T any] struct {
+type funnelWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	op       *combineOp[T]
+	op       *funnelOp[T]
 	input    T
 	inputErr error
 }
 
-func (c *combineOp[T]) newCombineWork(group workq.GroupID, value T, err error) *combineWork[T] {
-	w := c.combineWorkPool.Get()
+func (c *funnelOp[T]) newFunnelWork(group workq.GroupID, value T, err error) *funnelWork[T] {
+	w := c.funnelWorkPool.Get()
 	w.Init(group, c, value, err)
 	return w
 }
 
-func (w *combineWork[T]) Init(group workq.GroupID, op *combineOp[T], input T, inputErr error) {
-	w.poolWork.Init(group, op.combinerPool.job)
+func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inputErr error) {
+	w.poolWork.Init(group, op.funnelPool.job)
 	w.op = op
 	w.input = input
 	w.inputErr = inputErr
-	op.combinerPool.inFlight.Increment()
-	op.ref() // Add reference for the combine work
+	op.funnelPool.inFlight.Increment()
+	op.ref() // Add reference for the funnel work
 }
 
-func (w *combineWork[T]) Combine(ctx context.Context, flushQ *delayq.Queue[combinerFlusher], sender *rdvq.Sender) {
-	var hbc *halfBoundCombiner[T]
+func (w *funnelWork[T]) Funnel(ctx context.Context, flushQ *delayq.Queue[funnelFlusher], sender *rdvq.Sender) {
+	var hbc *halfBoundFunnel[T]
 	for {
 		hbc, _ = w.op.instanceQueue.TryPopFront()
 		if hbc == nil {
@@ -629,15 +629,15 @@ func (w *combineWork[T]) Combine(ctx context.Context, flushQ *delayq.Queue[combi
 		}
 	}
 	if hbc == nil {
-		hbc = w.op.halfBoundCombinerPool.Get()
+		hbc = w.op.halfBoundFunnelPool.Get()
 		hbc.mu.Lock()
 		hbc.refCount = 1
 		w.op.ref()
 		w.op.instanceCount.Add(1)
 		hbc.op = w.op
-		hbc.id = combinerInstanceID(combinerInstanceCounter.Add(1))
+		hbc.id = funnelInstanceID(funnelInstanceCounter.Add(1))
 		hbc.earliestGroup = w.Group()
-		hbc.allocate(ctx, w.op.combinerFactory, sender)
+		hbc.allocate(ctx, w.op.funnelFactory, sender)
 	}
 	defer func() {
 		flushed := hbc.accumulator == nil
@@ -649,13 +649,13 @@ func (w *combineWork[T]) Combine(ctx context.Context, flushQ *delayq.Queue[combi
 			hbc.free()
 		}
 	}()
-	hbc.combine(ctx, flushQ, sender, w.input, w.inputErr)
+	hbc.funnel(ctx, flushQ, sender, w.input, w.inputErr)
 }
 
-func (w *combineWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "combineWork.Execute"
+func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "funnelWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "combineWork(%p), %v", w, w)
+	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", w, w)
 
 	if w.op.limiter.impl == nil {
 		return w.executeInner(ctx, ex)
@@ -669,7 +669,7 @@ func (w *combineWork[T]) Execute(ctx context.Context, ex workq.Execution) error 
 		}
 	}()
 	wb := workq.WaitBehavior{
-		BlockBehavior: w.op.combinerPool.job.protoBB,
+		BlockBehavior: w.op.funnelPool.job.protoBB,
 		ShouldWait: func() bool {
 			if acquired {
 				return false
@@ -682,27 +682,27 @@ func (w *combineWork[T]) Execute(ctx context.Context, ex workq.Execution) error 
 		w.executeInner)
 }
 
-func (w *combineWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
+func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	workerCtx, meta := w.op.combinerPool.job.ctxMeta(ctx)
+	workerCtx, meta := w.op.funnelPool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)
 	cw.PushGroup(w.Group())
 	defer cw.PopGroup()
-	cw.executeCombine(workerCtx, w)
+	cw.executeFunnel(workerCtx, w)
 	return nil
 }
 
-func (w *combineWork[T]) Free() {
-	traceRegion := "combineWork.Free"
+func (w *funnelWork[T]) Free() {
+	traceRegion := "funnelWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "combineWork(%p), %v", w, w)
+	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", w, w)
 
-	w.op.combinerPool.inFlight.Decrement()
+	w.op.funnelPool.inFlight.Decrement()
 
 	w.DownstreamWork.Close()
-	w.poolWork.Close(w.op.combinerPool.job)
+	w.poolWork.Close(w.op.funnelPool.job)
 
-	pool := w.op.combineWorkPool
+	pool := w.op.funnelWorkPool
 	w.op.unref()
 	pool.Put(w)
 }

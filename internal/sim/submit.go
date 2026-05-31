@@ -9,26 +9,26 @@ import (
 )
 
 // SinkKind tells the runtime adapter which Plan-level op a Submit step
-// targets — a Combiner or a Skimmer.
+// targets — a Funnel or a Skimmer.
 type SinkKind int
 
 const (
-	SinkCombiner SinkKind = iota
+	SinkFunnel SinkKind = iota
 	SinkSkimmer
 )
 
-// opNameCombiner and opNameSkimmer are shared op-kind label constants
+// opNameFunnel and opNameSkimmer are shared op-kind label constants
 // used by SinkKind.String, SubjobOpKind.String, and run.go's
 // ExpectedHandlerError plumbing.
 const (
-	opNameCombiner = "Combiner"
-	opNameSkimmer  = "Skimmer"
+	opNameFunnel  = "Funnel"
+	opNameSkimmer = "Skimmer"
 )
 
 func (k SinkKind) String() string {
 	switch k {
-	case SinkCombiner:
-		return opNameCombiner
+	case SinkFunnel:
+		return opNameFunnel
 	case SinkSkimmer:
 		return opNameSkimmer
 	default:
@@ -38,7 +38,7 @@ func (k SinkKind) String() string {
 
 // Submit represents the act of pushing a value (possibly paired with an
 // error) into a downstream sink. The sink is identified by SinkKind +
-// SinkIndex into the corresponding Plan.Combiners or Plan.Skimmers
+// SinkIndex into the corresponding Plan.Funnels or Plan.Skimmers
 // slice. Prob is the probability of firing per body invocation; in
 // Deterministic mode it is 1.0.
 type Submit struct {

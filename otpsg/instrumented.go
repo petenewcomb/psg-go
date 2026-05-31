@@ -10,7 +10,7 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// InstrumentedTask combines tracing, metrics, and logging for tasks into a
+// InstrumentedTask funnels tracing, metrics, and logging for tasks into a
 // single wrapper. Returns a value-producing task body; pair it with a sink
 // Skimmer via [Scatter] (or build your own [psg.TaskRunner]) to dispatch.
 func InstrumentedTask[T any](
@@ -28,7 +28,7 @@ func InstrumentedTask[T any](
 	return TracedTask(operationName, metricsTask)
 }
 
-// InstrumentedSkim combines tracing, metrics, and logging for skim functions into a single wrapper.
+// InstrumentedSkim funnels tracing, metrics, and logging for skim functions into a single wrapper.
 // This provides a convenient way to apply all instrumentation at once.
 func InstrumentedSkim[T any](
 	operationName string,
@@ -45,22 +45,22 @@ func InstrumentedSkim[T any](
 	return TracedSkim(operationName, metricsSkim)
 }
 
-// InstrumentedCombiner combines tracing, metrics, and logging for combiners into a single wrapper.
+// InstrumentedFunnel funnels tracing, metrics, and logging for funnels into a single wrapper.
 // This provides a convenient way to apply all instrumentation at once.
-func InstrumentedCombiner[T any](
-	combineOpName string,
+func InstrumentedFunnel[T any](
+	funnelOpName string,
 	flushOpName string,
-	combinerFactory psgfn.CombinerFactory[T],
-) psgfn.CombinerFactory[PropagatedResult[T]] {
+	funnelFactory psgfn.FunnelFactory[T],
+) psgfn.FunnelFactory[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
-	loggedCombiner := LoggedCombiner(combineOpName, flushOpName, combinerFactory)
+	loggedFunnel := LoggedFunnel(funnelOpName, flushOpName, funnelFactory)
 
 	// 2. Then add metrics
-	metricsCombiner := MetricsCombiner(combineOpName, flushOpName, loggedCombiner)
+	metricsFunnel := MetricsFunnel(funnelOpName, flushOpName, loggedFunnel)
 
 	// 3. Finally add tracing (which includes propagation)
-	return TracedCombiner(combineOpName, flushOpName, metricsCombiner)
+	return TracedFunnel(funnelOpName, flushOpName, metricsFunnel)
 }
 
 // Scatter wraps the value-producing task in a one-shot [psg.TaskRunner0]

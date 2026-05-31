@@ -5,7 +5,7 @@ package rdvq
 
 import "sync"
 
-// Receiver combines inbox and waiter functionality for receiving from queues.
+// Receiver funnels inbox and waiter functionality for receiving from queues.
 // Each goroutine should have its own Receiver instance to avoid races.
 // The Receiver automatically creates and manages inboxes as needed when
 // receiving from different Queue instances.

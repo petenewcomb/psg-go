@@ -20,8 +20,8 @@ type FuncSubjobConfig struct {
 	Add BiasedBoolConfig
 }
 
-// Func represents the body of a simulated TaskRunner, Combiner
-// Accumulate, Combiner Flush, or Skimmer Handle. ReturnErrorProb is
+// Func represents the body of a simulated TaskRunner, Funnel
+// Accumulate, Funnel Flush, or Skimmer Handle. ReturnErrorProb is
 // the probability that the body returns a non-nil error on each
 // invocation; in Deterministic mode it is forced to 0.0 or 1.0.
 type Func struct {

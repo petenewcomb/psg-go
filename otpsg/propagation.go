@@ -3,7 +3,7 @@
 
 // Package otpsg provides OpenTelemetry integration for the psg scatter-gather library.
 // It enables transparent propagation of trace context through psg tasks, skims, and
-// combiners without requiring users to manually handle context propagation.
+// funnels without requiring users to manually handle context propagation.
 package otpsg
 
 import (
@@ -67,16 +67,16 @@ func PropagateSkim[T any](
 	))
 }
 
-// PropagateCombiner wraps an accumulator factory to create accumulators that
+// PropagateFunnel wraps an accumulator factory to create accumulators that
 // propagate trace context. After Wave 2 the Accumulator has no output type;
 // the wrapper just rehydrates the trace span from the incoming
 // PropagatedResult[T] into ctx so any Submit calls inside the user's
 // Accumulate body carry the right trace context downstream.
-func PropagateCombiner[T any](
-	combinerFactory psgfn.CombinerFactory[T],
-) psgfn.CombinerFactory[PropagatedResult[T]] {
+func PropagateFunnel[T any](
+	funnelFactory psgfn.FunnelFactory[T],
+) psgfn.FunnelFactory[PropagatedResult[T]] {
 	return func() psgfn.Accumulator[PropagatedResult[T]] {
-		innerCombiner := combinerFactory()
+		innerFunnel := funnelFactory()
 
 		return psgfn.FuncAccumulator[PropagatedResult[T]]{
 			AccumulateFn: func(
@@ -90,9 +90,9 @@ func PropagateCombiner[T any](
 					propagatedCtx = trace.ContextWithRemoteSpanContext(ctx, input.TraceContext)
 				}
 
-				return innerCombiner.Accumulate(propagatedCtx, input.UserResult, inputErr)
+				return innerFunnel.Accumulate(propagatedCtx, input.UserResult, inputErr)
 			},
-			FlushFn: innerCombiner.Flush,
+			FlushFn: innerFunnel.Flush,
 		}
 	}
 }

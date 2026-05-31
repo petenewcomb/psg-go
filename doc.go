@@ -42,7 +42,7 @@
 //     should propagate this context, especially when calling Start to create
 //     new tasks.
 //
-//  3. Combiner Functions: Both Combine and Flush methods receive contexts that
+//  3. Funnel Functions: Both Funnel and Flush methods receive contexts that
 //     should be respected for cancellation and passed to the emit function.
 //
 // # Cancellation Behavior
@@ -52,7 +52,7 @@
 //  1. All running Tasks receive context cancellation but will run until
 //     they return. The library will correctly clean up once they complete.
 //
-//  2. Combiners will be flushed to ensure no data is lost.
+//  2. Funnels will be flushed to ensure no data is lost.
 //
 //  3. Pool.CancelAndWait guarantees that all task goroutines exit before
 //     returning.
@@ -87,7 +87,7 @@
 //
 // # Best Practices
 //
-//  1. Always use the provided context in Task, Skim, and Combiner
+//  1. Always use the provided context in Task, Skim, and Funnel
 //     methods.
 //
 //  2. Follow the pattern of checking ctx.Done() regularly in long-running tasks.
@@ -95,7 +95,7 @@
 //  3. Don't create new root contexts (e.g., context.Background()) within
 //     functions that receive a context from the library.
 //
-//  4. Launch new tasks from Skim or Combiner methods, not from Task.
+//  4. Launch new tasks from Skim or Funnel methods, not from Task.
 //
 //  5. For tasks that need to create internal concurrency, consider creating a
 //     sub-job within the task rather than calling Start directly.

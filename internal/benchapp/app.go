@@ -37,32 +37,32 @@ func (t *topLevelTask[T]) execute(context.Context, *Workflow) (T, error) {
 	return t.value, nil
 }
 
-type fanOutCombiner[T any] struct {
-	combineDuration       time.Duration
-	simulateCombineWorkFn func(time.Duration)
-	subtaskCount          int
-	scatterFn             func(context.Context, T, error) error
+type fanOutFunnel[T any] struct {
+	funnelDuration       time.Duration
+	simulateFunnelWorkFn func(time.Duration)
+	subtaskCount         int
+	scatterFn            func(context.Context, T, error) error
 }
 
-func NewFanOutCombiner[T any](
-	combineDuration time.Duration,
-	simulateCombineWorkFn func(time.Duration),
+func NewFanOutFunnel[T any](
+	funnelDuration time.Duration,
+	simulateFunnelWorkFn func(time.Duration),
 	subtaskCount int,
 	scatterFn func(context.Context, T, error) error,
-	fallbackFn func(res CombinerResult[T]),
-) psgwf.GenericCombiner[TaskResult[T], Context] {
-	c := &fanOutCombiner[T]{
-		combineDuration:       combineDuration,
-		simulateCombineWorkFn: simulateCombineWorkFn,
-		subtaskCount:          subtaskCount,
-		scatterFn:             scatterFn,
+	fallbackFn func(res FunnelResult[T]),
+) psgwf.GenericFunnel[TaskResult[T], Context] {
+	c := &fanOutFunnel[T]{
+		funnelDuration:       funnelDuration,
+		simulateFunnelWorkFn: simulateFunnelWorkFn,
+		subtaskCount:         subtaskCount,
+		scatterFn:            scatterFn,
 	}
-	return NewCombiner[T, Context](nil, c, fallbackFn)
+	return NewFunnel[T, Context](nil, c, fallbackFn)
 }
 
-func (c *fanOutCombiner[T]) Accumulate(ctx context.Context, wf *Workflow,
+func (c *fanOutFunnel[T]) Accumulate(ctx context.Context, wf *Workflow,
 	inputValue T, inputErr error) (time.Time, error) {
-	c.simulateCombineWorkFn(c.combineDuration)
+	c.simulateFunnelWorkFn(c.funnelDuration)
 	for range c.subtaskCount {
 		if err := c.scatterFn(ctx, inputValue, inputErr); err != nil {
 			return time.Time{}, err
@@ -71,35 +71,35 @@ func (c *fanOutCombiner[T]) Accumulate(ctx context.Context, wf *Workflow,
 	return time.Time{}, nil
 }
 
-func (c *fanOutCombiner[T]) Flush(ctx context.Context) error {
+func (c *fanOutFunnel[T]) Flush(ctx context.Context) error {
 	// Wave 2: no aggregated output to emit. Per-call subtasks are
 	// already scattered from Accumulate; nothing to do on Flush.
 	return nil
 }
 
-type fanInCombiner[T any] struct {
-	combineDuration       time.Duration
-	simulateCombineWorkFn func(time.Duration)
-	subtaskCount          int
-	scatterFn             func(context.Context, T, error) error
+type fanInFunnel[T any] struct {
+	funnelDuration       time.Duration
+	simulateFunnelWorkFn func(time.Duration)
+	subtaskCount         int
+	scatterFn            func(context.Context, T, error) error
 }
 
-func NewFanInCombiner[T any](
-	combineDuration time.Duration,
-	simulateCombineWorkFn func(time.Duration),
+func NewFanInFunnel[T any](
+	funnelDuration time.Duration,
+	simulateFunnelWorkFn func(time.Duration),
 	subtaskCount int,
-) psgwf.GenericCombiner[TaskResult[T], Context] {
-	c := &fanInCombiner[T]{
-		combineDuration:       combineDuration,
-		simulateCombineWorkFn: simulateCombineWorkFn,
-		subtaskCount:          subtaskCount,
+) psgwf.GenericFunnel[TaskResult[T], Context] {
+	c := &fanInFunnel[T]{
+		funnelDuration:       funnelDuration,
+		simulateFunnelWorkFn: simulateFunnelWorkFn,
+		subtaskCount:         subtaskCount,
 	}
-	return NewCombiner[T, Context](nil, c, nil)
+	return NewFunnel[T, Context](nil, c, nil)
 }
 
-func (c *fanInCombiner[T]) Accumulate(ctx context.Context, wf *Workflow,
+func (c *fanInFunnel[T]) Accumulate(ctx context.Context, wf *Workflow,
 	inputValue T, inputErr error) (time.Time, error) {
-	c.simulateCombineWorkFn(c.combineDuration)
+	c.simulateFunnelWorkFn(c.funnelDuration)
 	for range c.subtaskCount {
 		if err := c.scatterFn(ctx, inputValue, inputErr); err != nil {
 			return time.Time{}, err
@@ -108,6 +108,6 @@ func (c *fanInCombiner[T]) Accumulate(ctx context.Context, wf *Workflow,
 	return time.Time{}, nil
 }
 
-func (c *fanInCombiner[T]) Flush(ctx context.Context) error {
+func (c *fanInFunnel[T]) Flush(ctx context.Context) error {
 	return nil
 }

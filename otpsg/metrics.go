@@ -79,21 +79,21 @@ func MetricsSkim[T any](
 	}
 }
 
-// MetricsCombiner adds metrics collection to accumulators.
+// MetricsFunnel adds metrics collection to accumulators.
 // This wrapper records metrics for both Accumulate and Flush operations.
-func MetricsCombiner[T any](
-	combineMetricName string,
+func MetricsFunnel[T any](
+	funnelMetricName string,
 	flushMetricName string,
-	combinerFactory psgfn.CombinerFactory[T],
-) psgfn.CombinerFactory[T] {
+	funnelFactory psgfn.FunnelFactory[T],
+) psgfn.FunnelFactory[T] {
 	return func() psgfn.Accumulator[T] {
-		innerCombiner := combinerFactory()
+		innerFunnel := funnelFactory()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
-		// Create metrics for combine operations
-		combineCounter, _ := meter.Int64Counter(combineMetricName + ".count")
-		combineDuration, _ := meter.Float64Histogram(combineMetricName + ".duration")
-		combineErrorCounter, _ := meter.Int64Counter(combineMetricName + ".errors")
+		// Create metrics for funnel operations
+		funnelCounter, _ := meter.Int64Counter(funnelMetricName + ".count")
+		funnelDuration, _ := meter.Float64Histogram(funnelMetricName + ".duration")
+		funnelErrorCounter, _ := meter.Int64Counter(funnelMetricName + ".errors")
 
 		// Create metrics for flush operations
 		flushCounter, _ := meter.Int64Counter(flushMetricName + ".count")
@@ -105,25 +105,25 @@ func MetricsCombiner[T any](
 				startTime := time.Now()
 
 				// Track execution
-				combineCounter.Add(ctx, 1)
+				funnelCounter.Add(ctx, 1)
 
-				// Execute combine with error tracking
+				// Execute funnel with error tracking
 				var flushTime time.Time
 				var err error
 				didPanic := true
 				defer func() {
 					// Record duration
 					duration := time.Since(startTime).Seconds()
-					combineDuration.Record(ctx, duration)
+					funnelDuration.Record(ctx, duration)
 
 					// Record error or panic
 					if didPanic || inputErr != nil || err != nil {
-						combineErrorCounter.Add(ctx, 1)
+						funnelErrorCounter.Add(ctx, 1)
 					}
 				}()
 
-				// Execute original combine
-				flushTime, err = innerCombiner.Accumulate(ctx, input, inputErr)
+				// Execute original funnel
+				flushTime, err = innerFunnel.Accumulate(ctx, input, inputErr)
 				didPanic = false
 				return flushTime, err
 			},
@@ -134,7 +134,7 @@ func MetricsCombiner[T any](
 				flushCounter.Add(ctx, 1)
 
 				// Execute flush
-				err := innerCombiner.Flush(ctx)
+				err := innerFunnel.Flush(ctx)
 
 				// Record duration and errors
 				duration := time.Since(startTime).Seconds()

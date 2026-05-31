@@ -48,13 +48,13 @@ func main() {
 	printSkimOnlyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printBestLimitedCombinerConcurrencyComparison(baseline, current)
+	printBestLimitedFunnelConcurrencyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printUnlimitedCombinerConcurrencyComparison(baseline, current)
+	printUnlimitedFunnelConcurrencyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
-	printBestLimitedVsUnlimitedCombinerConcurrencyComparison(current)
+	printBestLimitedVsUnlimitedFunnelConcurrencyComparison(current)
 	fmt.Println()
 }
 
@@ -82,7 +82,7 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 	if err != nil {
 		return nil, err
 	}
-	combinerLimitP, err := pp.Parse("/combinerLimit", nil)
+	funnelLimitP, err := pp.Parse("/funnelLimit", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 	workloadField := workloadP.FlattenedFields()[0]
 	durationField := durationP.FlattenedFields()[0]
 	flushPeriodField := flushPeriodP.FlattenedFields()[0]
-	combinerLimitField := combinerLimitP.FlattenedFields()[0]
+	funnelLimitField := funnelLimitP.FlattenedFields()[0]
 
 	data := make(map[Config]map[int]*BenchData)
 
@@ -102,13 +102,13 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 	for benchFiles.Scan() {
 		switch rec := benchFiles.Result(); rec := rec.(type) {
 		case *benchfmt.Result:
-			// Process all benchmarks - combinerLimit=0 is skimOnly, positive values are combine
+			// Process all benchmarks - funnelLimit=0 is skimOnly, positive values are funnel
 
 			// Extract configuration
 			workloadKey := workloadP.Project(rec)
 			durationKey := durationP.Project(rec)
 			flushPeriodKey := flushPeriodP.Project(rec)
-			combinerLimitKey := combinerLimitP.Project(rec)
+			funnelLimitKey := funnelLimitP.Project(rec)
 
 			config, err := parseConfig(
 				workloadKey.Get(workloadField),
@@ -120,9 +120,9 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 				continue
 			}
 
-			limit, err := strconv.Atoi(combinerLimitKey.Get(combinerLimitField))
+			limit, err := strconv.Atoi(funnelLimitKey.Get(funnelLimitField))
 			if err != nil {
-				log.Printf("Skipping benchmark with invalid combiner limit: %v", err)
+				log.Printf("Skipping benchmark with invalid funnel limit: %v", err)
 				continue
 			}
 
@@ -135,8 +135,8 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 			benchData := configData[limit]
 			if benchData == nil {
 				benchData = &BenchData{
-					Config:        config,
-					CombinerLimit: limit,
+					Config:      config,
+					FunnelLimit: limit,
 				}
 				configData[limit] = benchData
 			}
@@ -220,11 +220,11 @@ func (m *Measurement) ComputeStats() {
 }
 
 type BenchData struct {
-	Config        Config
-	CombinerLimit int
-	Throughput    Measurement
-	P50Latency    Measurement
-	P99Latency    Measurement
+	Config      Config
+	FunnelLimit int
+	Throughput  Measurement
+	P50Latency  Measurement
+	P99Latency  Measurement
 }
 
 func (d *BenchData) ComputeStats() {
@@ -236,7 +236,7 @@ func (d *BenchData) ComputeStats() {
 func findBestLimitedLimit(configData map[int]*BenchData) *BenchData {
 	var best *BenchData
 
-	// Find lowest p99 latency limited combiner limit
+	// Find lowest p99 latency limited funnel limit
 	for limit, data := range configData {
 		if limit <= 0 {
 			continue
@@ -296,10 +296,10 @@ func findBestLimitedLimit(configData map[int]*BenchData) *BenchData {
 		return candidates[0]
 	}
 
-	// Finally, use lowest combiner limit as tiebreaker
+	// Finally, use lowest funnel limit as tiebreaker
 	best = nil
 	for _, data := range candidates {
-		if best == nil || data.CombinerLimit < best.CombinerLimit {
+		if best == nil || data.FunnelLimit < best.FunnelLimit {
 			best = data
 		}
 	}
@@ -354,10 +354,10 @@ func printSkimOnlyComparison(baseline, current map[Config]map[int]*BenchData) {
 	t.Render()
 }
 
-func printBestLimitedCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
+func printBestLimitedFunnelConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Best Limited Combiner Concurrency Benchmark Comparison")
+	t.SetTitle("Best Limited Funnel Concurrency Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
@@ -395,9 +395,9 @@ func printBestLimitedCombinerConcurrencyComparison(baseline, current map[Config]
 		// Build row
 		row := table.Row{
 			config,
-			fmt.Sprintf("%5d", baseline.CombinerLimit),
+			fmt.Sprintf("%5d", baseline.FunnelLimit),
 			"→",
-			fmt.Sprintf("%-5d", current.CombinerLimit),
+			fmt.Sprintf("%-5d", current.FunnelLimit),
 		}
 		row = appendPerformanceChanges(row, config, baseline, current, current)
 		t.AppendRow(row)
@@ -406,10 +406,10 @@ func printBestLimitedCombinerConcurrencyComparison(baseline, current map[Config]
 	t.Render()
 }
 
-func printUnlimitedCombinerConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
+func printUnlimitedFunnelConcurrencyComparison(baseline, current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Unlimited Combiner Concurrency Benchmark Comparison")
+	t.SetTitle("Unlimited Funnel Concurrency Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 
@@ -443,10 +443,10 @@ func printUnlimitedCombinerConcurrencyComparison(baseline, current map[Config]ma
 	t.Render()
 }
 
-func printBestLimitedVsUnlimitedCombinerConcurrencyComparison(current map[Config]map[int]*BenchData) {
+func printBestLimitedVsUnlimitedFunnelConcurrencyComparison(current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Best Limited Vs. Unlimited Combiner Concurrency")
+	t.SetTitle("Best Limited Vs. Unlimited Funnel Concurrency")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 

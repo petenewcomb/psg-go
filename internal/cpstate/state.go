@@ -16,7 +16,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/opts"
 )
 
-type CombinerPoolState struct {
+type FunnelPoolState struct {
 	// High-frequency atomic counters updated lock-free from multiple goroutines
 	cumulativeCompletedCount atomic.Int64 // monotonic
 
@@ -35,13 +35,13 @@ type CombinerPoolState struct {
 	latestIdleExit        time.Time // protected by mu
 }
 
-func (cps *CombinerPoolState) Init() {
+func (cps *FunnelPoolState) Init() {
 	cps.spawnNotifier.Init()
 }
 
 // SetOptions atomically applies the given set of configuration options (later options override earlier ones).
 // If validation fails, the method panics and no changes are applied.
-func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
+func (cps *FunnelPoolState) SetOptions(options ...opts.FunnelPoolOption) {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 
@@ -55,7 +55,7 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	}
 
 	// Apply changes to the copy
-	opts.ApplyToCombinerPool(&newConfig, options...)
+	opts.ApplyToFunnelPool(&newConfig, options...)
 
 	// Validate the new configuration (panics if invalid)
 	newConfig.validate()
@@ -73,26 +73,26 @@ func (cps *CombinerPoolState) SetOptions(options ...opts.CombinerPoolOption) {
 	}
 }
 
-func (cps *CombinerPoolState) IdleTimeout() time.Duration {
+func (cps *FunnelPoolState) IdleTimeout() time.Duration {
 	return time.Duration(cps.idleTimeout.Load())
 }
 
-func (cps *CombinerPoolState) IdleJitter() time.Duration {
+func (cps *FunnelPoolState) IdleJitter() time.Duration {
 	return time.Duration(cps.idleJitter.Load())
 }
 
-func (cps *CombinerPoolState) IncrementCompleted() {
+func (cps *FunnelPoolState) IncrementCompleted() {
 	cps.cumulativeCompletedCount.Add(1)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (cps *CombinerPoolState) ShouldSpawnFirstGoroutine() bool {
-	traceRegion := "CombinerPoolState.ShouldSpawnFirstGoroutine"
+func (cps *FunnelPoolState) ShouldSpawnFirstGoroutine() bool {
+	traceRegion := "FunnelPoolState.ShouldSpawnFirstGoroutine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	for {
 		newCount := cps.spawnedGoroutineCount.Add(1)
 		if trace.IsEnabled() {
-			trace.Logf(context.Background(), traceRegion, "CombinerPoolState=%p, newCount=%d", cps, newCount)
+			trace.Logf(context.Background(), traceRegion, "FunnelPoolState=%p, newCount=%d", cps, newCount)
 		}
 		if newCount == 1 {
 			trace.Logf(context.Background(), traceRegion, "returning true")
@@ -113,14 +113,14 @@ func (cps *CombinerPoolState) ShouldSpawnFirstGoroutine() bool {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (cps *CombinerPoolState) ShouldSpawnGoroutine() bool {
-	traceRegion := "CombinerPoolState.ShouldSpawnGoroutine"
+func (cps *FunnelPoolState) ShouldSpawnGoroutine() bool {
+	traceRegion := "FunnelPoolState.ShouldSpawnGoroutine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	for {
 		newCount := cps.spawnedGoroutineCount.Add(1)
 		maxConcurrency := cps.maxConcurrency.Load()
 		trace.Logf(context.Background(), traceRegion,
-			"CombinerPoolState=%p, newCount=%d, maxConcurrency=%d", cps, newCount, maxConcurrency)
+			"FunnelPoolState=%p, newCount=%d, maxConcurrency=%d", cps, newCount, maxConcurrency)
 		if maxConcurrency == -1 || newCount <= maxConcurrency {
 			trace.Logf(context.Background(), traceRegion, "returning true")
 			return true
@@ -137,35 +137,35 @@ func (cps *CombinerPoolState) ShouldSpawnGoroutine() bool {
 	}
 }
 
-func (cps *CombinerPoolState) LiveGoroutineCount() int {
+func (cps *FunnelPoolState) LiveGoroutineCount() int {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	return cps.liveGoroutineCount
 }
 
-func (cps *CombinerPoolState) GoroutineStarted() {
-	traceRegion := "CombinerPoolState.GoroutineStarted"
+func (cps *FunnelPoolState) GoroutineStarted() {
+	traceRegion := "FunnelPoolState.GoroutineStarted"
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	cps.liveGoroutineCount++
 
 	trace.Logf(context.Background(), traceRegion,
-		"CombinerPoolState=%p, spawnedCount=%d, liveCount=%d",
+		"FunnelPoolState=%p, spawnedCount=%d, liveCount=%d",
 		cps, cps.spawnedGoroutineCount.Load(), cps.liveGoroutineCount)
 }
 
-func (cps *CombinerPoolState) GoroutineRestarted() {
-	traceRegion := "CombinerPoolState.GoroutineStarted"
+func (cps *FunnelPoolState) GoroutineRestarted() {
+	traceRegion := "FunnelPoolState.GoroutineStarted"
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	cps.liveGoroutineCount++
 	spawnedCount := cps.spawnedGoroutineCount.Add(1)
 	trace.Logf(context.Background(), traceRegion,
-		"CombinerPoolState=%p, spawnedCount=%d, liveCount=%d", cps, spawnedCount, cps.liveGoroutineCount)
+		"FunnelPoolState=%p, spawnedCount=%d, liveCount=%d", cps, spawnedCount, cps.liveGoroutineCount)
 }
 
-func (cps *CombinerPoolState) GoroutineExiting() bool {
-	traceRegion := "CombinerPoolState.GoroutineExiting"
+func (cps *FunnelPoolState) GoroutineExiting() bool {
+	traceRegion := "FunnelPoolState.GoroutineExiting"
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 	if cps.liveGoroutineCount <= 0 {
@@ -177,7 +177,7 @@ func (cps *CombinerPoolState) GoroutineExiting() bool {
 	// This ensures the atomic counter stays in sync with reality
 	spawnedCount := cps.spawnedGoroutineCount.Add(-1)
 	trace.Logf(context.Background(), traceRegion,
-		"CombinerPoolState=%p, spawnedCount=%d, liveCount=%d", cps, spawnedCount, cps.liveGoroutineCount)
+		"FunnelPoolState=%p, spawnedCount=%d, liveCount=%d", cps, spawnedCount, cps.liveGoroutineCount)
 	if spawnedCount < 0 {
 		panic("spawnedCount < 0")
 	}
@@ -185,14 +185,14 @@ func (cps *CombinerPoolState) GoroutineExiting() bool {
 	return cps.liveGoroutineCount == 0
 }
 
-func (cps *CombinerPoolState) SpawnNotifier() *rdvq.Notifier {
+func (cps *FunnelPoolState) SpawnNotifier() *rdvq.Notifier {
 	return &cps.spawnNotifier
 }
 
 // TryIdleExit attempts to record an idle exit. Returns true if this worker
 // is allowed to exit (enough time has passed since latest exit), false if
 // another worker exited too recently and this worker should retry later.
-func (cps *CombinerPoolState) TryIdleExit() bool {
+func (cps *FunnelPoolState) TryIdleExit() bool {
 	cps.mu.Lock()
 	defer cps.mu.Unlock()
 

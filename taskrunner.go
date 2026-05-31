@@ -494,7 +494,7 @@ func newTaskErrSink() Skimmer[struct{}] {
 
 // vetStart validates that the given pool and ctx are suitable for
 // launching a task. It checks that the calling ctx is one of the
-// allowed types (top-level, skim, or combine) and that the pool is
+// allowed types (top-level, skim, or funnel) and that the pool is
 // not yet done. Panics on misuse.
 func vetStart(
 	ctx context.Context,
@@ -502,11 +502,11 @@ func vetStart(
 ) (context.Context, *ctxMeta) {
 	ctx, meta := pool.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
-		case topLevelContext, skimContext, combineContext:
+		case topLevelContext, skimContext, funnelContext:
 			// These are valid for starting a task
 		default:
 			panic(fmt.Sprintf(
-				"Start called from %v context but allowed only by top-level, skim, or combine context",
+				"Start called from %v context but allowed only by top-level, skim, or funnel context",
 				ctxType))
 		}
 	})

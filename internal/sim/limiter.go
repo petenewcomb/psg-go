@@ -14,10 +14,10 @@ var defaultLimiterConfig = LimiterConfig{
 }
 
 // LimiterConfig controls generation of a kind of Limiter (task-bound or
-// combiner-bound). Limiters are semaphore-only in v1 — a Limiter has a
+// funnel-bound). Limiters are semaphore-only in v1 — a Limiter has a
 // fixed permit count drawn from Permits, and the generator never shares
 // a Limiter across op kinds (a TaskLimiter binds only to TaskRunners; a
-// CombinerLimiter binds only to Combiners). Both restrictions lift
+// FunnelLimiter binds only to Funnels). Both restrictions lift
 // post-Wave-4.
 type LimiterConfig struct {
 	Count   BiasedIntConfig

@@ -33,9 +33,9 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		return nil
 	}))
 
-	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
+	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
-	combineOp := psg.NewCombiner(combinerPool, func() psgfn.Accumulator[int] {
+	funnelOp := psg.NewFunnel(funnelPool, func() psgfn.Accumulator[int] {
 		return psgfn.FuncAccumulator[int]{
 			AccumulateFn: func(ctx context.Context, value int, err error) (time.Time, error) {
 				// Don't emit immediately - let the deadline trigger flushing
@@ -47,11 +47,11 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 			},
 		}
 	})
-	defer combineOp.Close()
+	defer funnelOp.Close()
 
 	newRunner := func(value int) psg.TaskRunner0 {
 		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
-			return combineOp.Submit(ctx, value)
+			return funnelOp.Submit(ctx, value)
 		}))
 	}
 

@@ -16,9 +16,9 @@ import (
 
 func TestPlanFormatting(t *testing.T) {
 	// TODO: regenerate expected output against the new Plan vocabulary
-	// (Pool/Wave/Flow + Limiter + TaskRunner/Combiner/Skimmer). The
+	// (Pool/Wave/Flow + Limiter + TaskRunner/Funnel/Skimmer). The
 	// 11k-line expected string below was captured against the old
-	// Task/Skim/Combine/TaskPool/CombinerPool plan shape and no
+	// Task/Skim/Funnel/TaskPool/FunnelPool plan shape and no
 	// longer matches. Skip until the new format stabilizes; then
 	// regenerate via -rapid.checks=1 -rapid.seed=123 and paste the
 	// new output here.
@@ -52,41 +52,41 @@ func TestPlanFormatting(t *testing.T) {
 	expected := `Plan#0: pathCount=9 taskCount=16 maxPathDuration=35.186905ms minSkimCount=10 maxSkimCount=34
    TaskPools[0]: TaskPool#0: limit=5
    TaskPools[1]: TaskPool#1: limit=1
-   CombinerPools[0]: CombinerPool#0: limit=4
-   Combiners[0]: pool=0
-   Combiners[1]: pool=0
-   Combiners[2]: pool=0
-   Combiners[3]: pool=0
-   Combiners[4]: pool=0
-   Combiners[5]: pool=0
-   Combiners[6]: pool=0
-   Combiners[7]: pool=0
-   Combiners[8]: pool=0
-   Combiners[9]: pool=0
-   Combiners[10]: pool=0
-   Combiners[11]: pool=0
-   Combiners[12]: pool=0
-   Combiners[13]: pool=0
-   Combiners[14]: pool=0
+   FunnelPools[0]: FunnelPool#0: limit=4
+   Funnels[0]: pool=0
+   Funnels[1]: pool=0
+   Funnels[2]: pool=0
+   Funnels[3]: pool=0
+   Funnels[4]: pool=0
+   Funnels[5]: pool=0
+   Funnels[6]: pool=0
+   Funnels[7]: pool=0
+   Funnels[8]: pool=0
+   Funnels[9]: pool=0
+   Funnels[10]: pool=0
+   Funnels[11]: pool=0
+   Funnels[12]: pool=0
+   Funnels[13]: pool=0
+   Funnels[14]: pool=0
 Plan#0 step 1/5 (+0s): scatter:
   Task#132: pool=1
   Task#132 step 1/4 (+0s): 3.373µs self time
   Task#132 step 2/4 (+3.373µs): subjob:
     Plan#6: pathCount=11 taskCount=20 maxPathDuration=17.581331ms minSkimCount=15 maxSkimCount=37
        TaskPools[0]: TaskPool#26: limit=8
-       CombinerPools[0]: CombinerPool#20: limit=1
-       CombinerPools[1]: CombinerPool#21: limit=7
-       CombinerPools[2]: CombinerPool#22: limit=2
-       CombinerPools[3]: CombinerPool#23: limit=3
-       CombinerPools[4]: CombinerPool#24: limit=2
-       CombinerPools[5]: CombinerPool#25: limit=2
-       CombinerPools[6]: CombinerPool#26: limit=1
-       CombinerPools[7]: CombinerPool#27: limit=8
-       Combiners[0]: pool=7
-       Combiners[1]: pool=4
-       Combiners[2]: pool=2
-       Combiners[3]: pool=7
-       Combiners[4]: pool=7
+       FunnelPools[0]: FunnelPool#20: limit=1
+       FunnelPools[1]: FunnelPool#21: limit=7
+       FunnelPools[2]: FunnelPool#22: limit=2
+       FunnelPools[3]: FunnelPool#23: limit=3
+       FunnelPools[4]: FunnelPool#24: limit=2
+       FunnelPools[5]: FunnelPool#25: limit=2
+       FunnelPools[6]: FunnelPool#26: limit=1
+       FunnelPools[7]: FunnelPool#27: limit=8
+       Funnels[0]: pool=7
+       Funnels[1]: pool=4
+       Funnels[2]: pool=2
+       Funnels[3]: pool=7
+       Funnels[4]: pool=7
     Plan#6 step 1/7 (+0s): scatter:
       Task#134: pool=0
       Task#134 step 1/2 (+0s): 9.996µs self time
@@ -103,17 +103,17 @@ Plan#0 step 1/5 (+0s): scatter:
         Plan#10: pathCount=7 taskCount=12 maxPathDuration=10.35142ms minSkimCount=11 maxSkimCount=13
            TaskPools[0]: TaskPool#36: limit=4
            TaskPools[1]: TaskPool#37: limit=1
-           CombinerPools[0]: CombinerPool#47: limit=2
-           CombinerPools[1]: CombinerPool#48: limit=1
-           Combiners[0]: pool=1
-           Combiners[1]: pool=0
-           Combiners[2]: pool=0
-           Combiners[3]: pool=0
-           Combiners[4]: pool=1
-           Combiners[5]: pool=0
-           Combiners[6]: pool=0
-           Combiners[7]: pool=1
-           Combiners[8]: pool=0
+           FunnelPools[0]: FunnelPool#47: limit=2
+           FunnelPools[1]: FunnelPool#48: limit=1
+           Funnels[0]: pool=1
+           Funnels[1]: pool=0
+           Funnels[2]: pool=0
+           Funnels[3]: pool=0
+           Funnels[4]: pool=1
+           Funnels[5]: pool=0
+           Funnels[6]: pool=0
+           Funnels[7]: pool=1
+           Funnels[8]: pool=0
         Plan#10 step 1/4 (+0s): scatter:
           Task#211: pool=1
           Task#211 step 1/2 (+0s): 5.12518ms self time
@@ -129,11 +129,11 @@ Plan#0 step 1/5 (+0s): scatter:
           Task#217 step 2/4 (+34.047µs): subjob:
             Plan#11: pathCount=22 taskCount=36 maxPathDuration=10.011782ms minSkimCount=24 maxSkimCount=42
                TaskPools[0]: TaskPool#38: limit=3
-               CombinerPools[0]: CombinerPool#49: limit=2
-               CombinerPools[1]: CombinerPool#50: limit=5
-               CombinerPools[2]: CombinerPool#51: limit=1
-               Combiners[0]: pool=0
-               Combiners[1]: pool=2
+               FunnelPools[0]: FunnelPool#49: limit=2
+               FunnelPools[1]: FunnelPool#50: limit=5
+               FunnelPools[2]: FunnelPool#51: limit=1
+               Funnels[0]: pool=0
+               Funnels[1]: pool=2
             Plan#11 step 1/7 (+0s): scatter:
               Task#252: pool=0
               Task#252 step 1/2 (+0s): 10.003µs self time
@@ -163,9 +163,9 @@ Plan#0 step 1/5 (+0s): scatter:
                       Task#246 step 1/2 (+0s): 10.007µs self time
                       Task#246 step 2/2 (+10.007µs): return nil
                       Task#246 ends at 222.327µs
-                        Combine#246: index=1 flush=<nil>
-                        Combine#246 step 1/6 (+0s): 943ns self time
-                        Combine#246 step 2/6 (+943ns): scatter:
+                        Funnel#246: index=1 flush=<nil>
+                        Funnel#246 step 1/6 (+0s): 943ns self time
+                        Funnel#246 step 2/6 (+943ns): scatter:
                           Task#242: pool=0
                           Task#242 step 1/2 (+0s): 9.375µs self time
                           Task#242 step 2/2 (+9.375µs): return nil
@@ -177,10 +177,10 @@ Plan#0 step 1/5 (+0s): scatter:
                               Task#236 step 1/2 (+0s): 10.003µs self time
                               Task#236 step 2/2 (+10.003µs): return nil
                               Task#236 ends at 242.85µs
-                                Combine#236: index=0 flush=<nil>
-                                Combine#236 step 1/2 (+0s): 997ns self time
-                                Combine#236 step 2/2 (+997ns): return nil
-                                Combine#236 ends at 243.847µs
+                                Funnel#236: index=0 flush=<nil>
+                                Funnel#236 step 1/2 (+0s): 997ns self time
+                                Funnel#236 step 2/2 (+997ns): return nil
+                                Funnel#236 ends at 243.847µs
                             Skim#242 step 3/10 (+202ns): 225ns self time
                             Skim#242 step 4/10 (+427ns): scatter:
                               Task#228: pool=0
@@ -214,8 +214,8 @@ Plan#0 step 1/5 (+0s): scatter:
                             Skim#242 step 9/10 (+724ns): 244ns self time
                             Skim#242 step 10/10 (+968ns): return nil
                             Skim#242 ends at 233.613µs
-                        Combine#246 step 3/6 (+943ns): 23ns self time
-                        Combine#246 step 4/6 (+966ns): scatter:
+                        Funnel#246 step 3/6 (+943ns): 23ns self time
+                        Funnel#246 step 4/6 (+966ns): scatter:
                           Task#230: pool=0
                           Task#230 step 1/2 (+0s): 9.605µs self time
                           Task#230 step 2/2 (+9.605µs): return nil
@@ -224,9 +224,9 @@ Plan#0 step 1/5 (+0s): scatter:
                             Skim#230 step 1/2 (+0s): 1.705µs self time
                             Skim#230 step 2/2 (+1.705µs): return nil
                             Skim#230 ends at 234.603µs
-                        Combine#246 step 5/6 (+966ns): 29ns self time
-                        Combine#246 step 6/6 (+995ns): return nil
-                        Combine#246 ends at 223.322µs
+                        Funnel#246 step 5/6 (+966ns): 29ns self time
+                        Funnel#246 step 6/6 (+995ns): return nil
+                        Funnel#246 ends at 223.322µs
                     Skim#249 step 3/12 (+286ns): 475ns self time
                     Skim#249 step 4/12 (+761ns): scatter:
                       Task#232: pool=0
@@ -253,19 +253,19 @@ Plan#0 step 1/5 (+0s): scatter:
                       Task#231 step 1/2 (+0s): 10.463µs self time
                       Task#231 step 2/2 (+10.463µs): return nil
                       Task#231 ends at 223.409µs
-                        Combine#231: index=1 flush=<nil>
-                        Combine#231 step 1/2 (+0s): 114.283µs self time
-                        Combine#231 step 2/2 (+114.283µs): return nil
-                        Combine#231 ends at 337.692µs
+                        Funnel#231: index=1 flush=<nil>
+                        Funnel#231 step 1/2 (+0s): 114.283µs self time
+                        Funnel#231 step 2/2 (+114.283µs): return nil
+                        Funnel#231 ends at 337.692µs
                     Skim#249 step 9/12 (+912ns): 13ns self time
                     Skim#249 step 10/12 (+925ns): scatter:
                       Task#245: pool=0
                       Task#245 step 1/2 (+0s): 10.057µs self time
                       Task#245 step 2/2 (+10.057µs): return nil
                       Task#245 ends at 223.016µs
-                        Combine#245: index=0 flush=<nil>
-                        Combine#245 step 1/4 (+0s): 778ns self time
-                        Combine#245 step 2/4 (+778ns): scatter:
+                        Funnel#245: index=0 flush=<nil>
+                        Funnel#245 step 1/4 (+0s): 778ns self time
+                        Funnel#245 step 2/4 (+778ns): scatter:
                           Task#241: pool=0
                           Task#241 step 1/2 (+0s): 10.977µs self time
                           Task#241 step 2/2 (+10.977µs): return nil
@@ -284,9 +284,9 @@ Plan#0 step 1/5 (+0s): scatter:
                             Skim#241 step 3/4 (+414ns): 169ns self time
                             Skim#241 step 4/4 (+583ns): return nil
                             Skim#241 ends at 235.354µs
-                        Combine#245 step 3/4 (+778ns): 1.459µs self time
-                        Combine#245 step 4/4 (+2.237µs): return nil
-                        Combine#245 ends at 225.253µs
+                        Funnel#245 step 3/4 (+778ns): 1.459µs self time
+                        Funnel#245 step 4/4 (+2.237µs): return nil
+                        Funnel#245 ends at 225.253µs
                     Skim#249 step 11/12 (+925ns): 44ns self time
                     Skim#249 step 12/12 (+969ns): return nil
                     Skim#249 ends at 213.003µs
@@ -296,10 +296,10 @@ Plan#0 step 1/5 (+0s): scatter:
                   Task#233 step 1/2 (+0s): 10ms self time
                   Task#233 step 2/2 (+10ms): return nil
                   Task#233 ends at 10.010704ms
-                    Combine#233: index=0 flush=<nil>
-                    Combine#233 step 1/2 (+0s): 1.078µs self time
-                    Combine#233 step 2/2 (+1.078µs): return nil
-                    Combine#233 ends at 10.011782ms
+                    Funnel#233: index=0 flush=<nil>
+                    Funnel#233 step 1/2 (+0s): 1.078µs self time
+                    Funnel#233 step 2/2 (+1.078µs): return nil
+                    Funnel#233 ends at 10.011782ms
                 Skim#252 step 7/8 (+701ns): 39ns self time
                 Skim#252 step 8/8 (+740ns): return nil
                 Skim#252 ends at 10.743µs
@@ -308,9 +308,9 @@ Plan#0 step 1/5 (+0s): scatter:
               Task#250 step 1/2 (+0s): 10.029µs self time
               Task#250 step 2/2 (+10.029µs): return nil
               Task#250 ends at 10.029µs
-                Combine#250: index=0 flush=<nil>
-                Combine#250 step 1/4 (+0s): 530ns self time
-                Combine#250 step 2/4 (+530ns): scatter:
+                Funnel#250: index=0 flush=<nil>
+                Funnel#250 step 1/4 (+0s): 530ns self time
+                Funnel#250 step 2/4 (+530ns): scatter:
                   Task#220: pool=0
                   Task#220 step 1/2 (+0s): 10.519µs self time
                   Task#220 step 2/2 (+10.519µs): return nil
@@ -319,9 +319,9 @@ Plan#0 step 1/5 (+0s): scatter:
                     Skim#220 step 1/2 (+0s): 979ns self time
                     Skim#220 step 2/2 (+979ns): return nil
                     Skim#220 ends at 22.057µs
-                Combine#250 step 3/4 (+530ns): 468ns self time
-                Combine#250 step 4/4 (+998ns): return nil
-                Combine#250 ends at 11.027µs
+                Funnel#250 step 3/4 (+530ns): 468ns self time
+                Funnel#250 step 4/4 (+998ns): return nil
+                Funnel#250 ends at 11.027µs
             Plan#11 step 3/7 (+0s): scatter:
               Task#239: pool=0
               Task#239 step 1/2 (+0s): 10.003µs self time
@@ -355,9 +355,9 @@ Plan#0 step 1/5 (+0s): scatter:
               Task#251 step 1/2 (+0s): 10.087µs self time
               Task#251 step 2/2 (+10.087µs): return nil
               Task#251 ends at 10.087µs
-                Combine#251: index=0 flush=<nil>
-                Combine#251 step 1/10 (+0s): 108ns self time
-                Combine#251 step 2/10 (+108ns): scatter:
+                Funnel#251: index=0 flush=<nil>
+                Funnel#251 step 1/10 (+0s): 108ns self time
+                Funnel#251 step 2/10 (+108ns): scatter:
                   Task#225: pool=0
                   Task#225 step 1/2 (+0s): 46.568µs self time
                   Task#225 step 2/2 (+46.568µs): return nil
@@ -366,15 +366,15 @@ Plan#0 step 1/5 (+0s): scatter:
                     Skim#225 step 1/2 (+0s): 1.001µs self time
                     Skim#225 step 2/2 (+1.001µs): return nil
                     Skim#225 ends at 57.764µs
-                Combine#251 step 3/10 (+108ns): 115ns self time
-                Combine#251 step 4/10 (+223ns): scatter:
+                Funnel#251 step 3/10 (+108ns): 115ns self time
+                Funnel#251 step 4/10 (+223ns): scatter:
                   Task#247: pool=0
                   Task#247 step 1/2 (+0s): 10.006µs self time
                   Task#247 step 2/2 (+10.006µs): return nil
                   Task#247 ends at 20.316µs
-                    Combine#247: index=1 flush=<nil>
-                    Combine#247 step 1/6 (+0s): 61ns self time
-                    Combine#247 step 2/6 (+61ns): scatter:
+                    Funnel#247: index=1 flush=<nil>
+                    Funnel#247 step 1/6 (+0s): 61ns self time
+                    Funnel#247 step 2/6 (+61ns): scatter:
                       Task#244: pool=0
                       Task#244 step 1/2 (+0s): 9.984µs self time
                       Task#244 step 2/2 (+9.984µs): return nil
@@ -386,9 +386,9 @@ Plan#0 step 1/5 (+0s): scatter:
                           Task#240 step 1/2 (+0s): 9.505µs self time
                           Task#240 step 2/2 (+9.505µs): return nil
                           Task#240 ends at 40.368µs
-                            Combine#240: index=1 flush=<nil>
-                            Combine#240 step 1/8 (+0s): 237ns self time
-                            Combine#240 step 2/8 (+237ns): scatter:
+                            Funnel#240: index=1 flush=<nil>
+                            Funnel#240 step 1/8 (+0s): 237ns self time
+                            Funnel#240 step 2/8 (+237ns): scatter:
                               Task#218: pool=0
                               Task#218 step 1/2 (+0s): 10.126µs self time
                               Task#218 step 2/2 (+10.126µs): return nil
@@ -397,8 +397,8 @@ Plan#0 step 1/5 (+0s): scatter:
                                 Skim#218 step 1/2 (+0s): 1.002µs self time
                                 Skim#218 step 2/2 (+1.002µs): return nil
                                 Skim#218 ends at 51.733µs
-                            Combine#240 step 3/8 (+237ns): 239ns self time
-                            Combine#240 step 4/8 (+476ns): scatter:
+                            Funnel#240 step 3/8 (+237ns): 239ns self time
+                            Funnel#240 step 4/8 (+476ns): scatter:
                               Task#224: pool=0
                               Task#224 step 1/2 (+0s): 10.024µs self time
                               Task#224 step 2/2 (+10.024µs): return nil
@@ -407,8 +407,8 @@ Plan#0 step 1/5 (+0s): scatter:
                                 Skim#224 step 1/2 (+0s): 995ns self time
                                 Skim#224 step 2/2 (+995ns): return nil
                                 Skim#224 ends at 51.863µs
-                            Combine#240 step 5/8 (+476ns): 234ns self time
-                            Combine#240 step 6/8 (+710ns): scatter:
+                            Funnel#240 step 5/8 (+476ns): 234ns self time
+                            Funnel#240 step 6/8 (+710ns): scatter:
                               Task#238: pool=0
                               Task#238 step 1/2 (+0s): 7.04µs self time
                               Task#238 step 2/2 (+7.04µs): return nil
@@ -417,21 +417,21 @@ Plan#0 step 1/5 (+0s): scatter:
                                 Skim#238 step 1/2 (+0s): 1.027µs self time
                                 Skim#238 step 2/2 (+1.027µs): return nil
                                 Skim#238 ends at 49.145µs
-                            Combine#240 step 7/8 (+710ns): 236ns self time
-                            Combine#240 step 8/8 (+946ns): return nil
-                            Combine#240 ends at 41.314µs
+                            Funnel#240 step 7/8 (+710ns): 236ns self time
+                            Funnel#240 step 8/8 (+946ns): return nil
+                            Funnel#240 ends at 41.314µs
                         Skim#244 step 3/4 (+502ns): 498ns self time
                         Skim#244 step 4/4 (+1µs): return nil
                         Skim#244 ends at 31.361µs
-                    Combine#247 step 3/6 (+61ns): 50ns self time
-                    Combine#247 step 4/6 (+111ns): scatter:
+                    Funnel#247 step 3/6 (+61ns): 50ns self time
+                    Funnel#247 step 4/6 (+111ns): scatter:
                       Task#243: pool=0
                       Task#243 step 1/2 (+0s): 770.625µs self time
                       Task#243 step 2/2 (+770.625µs): return nil
                       Task#243 ends at 791.052µs
-                        Combine#243: index=1 flush=<nil>
-                        Combine#243 step 1/4 (+0s): 510ns self time
-                        Combine#243 step 2/4 (+510ns): scatter:
+                        Funnel#243: index=1 flush=<nil>
+                        Funnel#243 step 1/4 (+0s): 510ns self time
+                        Funnel#243 step 2/4 (+510ns): scatter:
                           Task#223: pool=0
                           Task#223 step 1/2 (+0s): 9.381µs self time
                           Task#223 step 2/2 (+9.381µs): return nil
@@ -440,14 +440,14 @@ Plan#0 step 1/5 (+0s): scatter:
                             Skim#223 step 1/2 (+0s): 1.014µs self time
                             Skim#223 step 2/2 (+1.014µs): return nil
                             Skim#223 ends at 801.957µs
-                        Combine#243 step 3/4 (+510ns): 513ns self time
-                        Combine#243 step 4/4 (+1.023µs): return error
-                        Combine#243 ends at 792.075µs
-                    Combine#247 step 5/6 (+111ns): 77ns self time
-                    Combine#247 step 6/6 (+188ns): return nil
-                    Combine#247 ends at 20.504µs
-                Combine#251 step 5/10 (+223ns): 6ns self time
-                Combine#251 step 6/10 (+229ns): scatter:
+                        Funnel#243 step 3/4 (+510ns): 513ns self time
+                        Funnel#243 step 4/4 (+1.023µs): return error
+                        Funnel#243 ends at 792.075µs
+                    Funnel#247 step 5/6 (+111ns): 77ns self time
+                    Funnel#247 step 6/6 (+188ns): return nil
+                    Funnel#247 ends at 20.504µs
+                Funnel#251 step 5/10 (+223ns): 6ns self time
+                Funnel#251 step 6/10 (+229ns): scatter:
                   Task#248: pool=0
                   Task#248 step 1/2 (+0s): 10.003µs self time
                   Task#248 step 2/2 (+10.003µs): return nil
@@ -466,28 +466,28 @@ Plan#0 step 1/5 (+0s): scatter:
                     Skim#248 step 3/4 (+173ns): 367ns self time
                     Skim#248 step 4/4 (+540ns): return nil
                     Skim#248 ends at 20.859µs
-                Combine#251 step 7/10 (+229ns): 190ns self time
-                Combine#251 step 8/10 (+419ns): scatter:
+                Funnel#251 step 7/10 (+229ns): 190ns self time
+                Funnel#251 step 8/10 (+419ns): scatter:
                   Task#229: pool=0
                   Task#229 step 1/2 (+0s): 13.715µs self time
                   Task#229 step 2/2 (+13.715µs): return nil
                   Task#229 ends at 24.221µs
-                    Combine#229: index=0 flush=<nil>
-                    Combine#229 step 1/2 (+0s): 589.965µs self time
-                    Combine#229 step 2/2 (+589.965µs): return nil
-                    Combine#229 ends at 614.186µs
-                Combine#251 step 9/10 (+419ns): 189ns self time
-                Combine#251 step 10/10 (+608ns): return nil
-                Combine#251 ends at 10.695µs
+                    Funnel#229: index=0 flush=<nil>
+                    Funnel#229 step 1/2 (+0s): 589.965µs self time
+                    Funnel#229 step 2/2 (+589.965µs): return nil
+                    Funnel#229 ends at 614.186µs
+                Funnel#251 step 9/10 (+419ns): 189ns self time
+                Funnel#251 step 10/10 (+608ns): return nil
+                Funnel#251 ends at 10.695µs
             Plan#11 step 6/7 (+0s): scatter:
               Task#226: pool=0
               Task#226 step 1/2 (+0s): 5.352146ms self time
               Task#226 step 2/2 (+5.352146ms): return nil
               Task#226 ends at 5.352146ms
-                Combine#226: index=1 flush=<nil>
-                Combine#226 step 1/2 (+0s): 212ns self time
-                Combine#226 step 2/2 (+212ns): return nil
-                Combine#226 ends at 5.352358ms
+                Funnel#226: index=1 flush=<nil>
+                Funnel#226 step 1/2 (+0s): 212ns self time
+                Funnel#226 step 2/2 (+212ns): return nil
+                Funnel#226 ends at 5.352358ms
             Plan#11 step 7/7 (+0s): ends at 10.011782ms
           Task#217 step 3/4 (+10.045829ms): 33.17µs self time
           Task#217 step 4/4 (+10.078999ms): return nil
@@ -506,10 +506,10 @@ Plan#0 step 1/5 (+0s): scatter:
                   Task#208 step 1/2 (+0s): 17.454µs self time
                   Task#208 step 2/2 (+17.454µs): return nil
                   Task#208 ends at 10.107505ms
-                    Combine#208: index=8 flush=<nil>
-                    Combine#208 step 1/2 (+0s): 1.002µs self time
-                    Combine#208 step 2/2 (+1.002µs): return nil
-                    Combine#208 ends at 10.108507ms
+                    Funnel#208: index=8 flush=<nil>
+                    Funnel#208 step 1/2 (+0s): 1.002µs self time
+                    Funnel#208 step 2/2 (+1.002µs): return nil
+                    Funnel#208 ends at 10.108507ms
                 Skim#216 step 3/8 (+57ns): 233ns self time
                 Skim#216 step 4/8 (+290ns): scatter:
                   Task#215: pool=0
@@ -543,10 +543,10 @@ Plan#0 step 1/5 (+0s): scatter:
                       Task#206 step 1/2 (+0s): 10.089µs self time
                       Task#206 step 2/2 (+10.089µs): return nil
                       Task#206 ends at 10.110941ms
-                        Combine#206: index=8 flush=Skim#206
-                        Combine#206 step 1/2 (+0s): 1.388µs self time
-                        Combine#206 step 2/2 (+1.388µs): return nil
-                        Combine#206 ends at 10.112329ms
+                        Funnel#206: index=8 flush=Skim#206
+                        Funnel#206 step 1/2 (+0s): 1.388µs self time
+                        Funnel#206 step 2/2 (+1.388µs): return nil
+                        Funnel#206 ends at 10.112329ms
                           Skim#206: index=8
                           Skim#206 step 1/2 (+0s): 998ns self time
                           Skim#206 step 2/2 (+998ns): return nil
@@ -603,10 +603,10 @@ Plan#0 step 1/5 (+0s): scatter:
       Task#205 step 3/4 (+10.356425ms): 5.004µs self time
       Task#205 step 4/4 (+10.361429ms): return nil
       Task#205 ends at 10.361429ms
-        Combine#205: index=2 flush=<nil>
-        Combine#205 step 1/2 (+0s): 1.006µs self time
-        Combine#205 step 2/2 (+1.006µs): return nil
-        Combine#205 ends at 10.362435ms
+        Funnel#205: index=2 flush=<nil>
+        Funnel#205 step 1/2 (+0s): 1.006µs self time
+        Funnel#205 step 2/2 (+1.006µs): return nil
+        Funnel#205 ends at 10.362435ms
     Plan#6 step 3/7 (+0s): scatter:
       Task#133: pool=0
       Task#133 step 1/2 (+0s): 9.984µs self time
@@ -621,18 +621,18 @@ Plan#0 step 1/5 (+0s): scatter:
       Task#256 step 1/2 (+0s): 238.669µs self time
       Task#256 step 2/2 (+238.669µs): return nil
       Task#256 ends at 238.669µs
-        Combine#256: index=0 flush=<nil>
-        Combine#256 step 1/2 (+0s): 982ns self time
-        Combine#256 step 2/2 (+982ns): return nil
-        Combine#256 ends at 239.651µs
+        Funnel#256: index=0 flush=<nil>
+        Funnel#256 step 1/2 (+0s): 982ns self time
+        Funnel#256 step 2/2 (+982ns): return nil
+        Funnel#256 ends at 239.651µs
     Plan#6 step 5/7 (+0s): scatter:
       Task#264: pool=0
       Task#264 step 1/2 (+0s): 9.996µs self time
       Task#264 step 2/2 (+9.996µs): return nil
       Task#264 ends at 9.996µs
-        Combine#264: index=0 flush=<nil>
-        Combine#264 step 1/4 (+0s): 544ns self time
-        Combine#264 step 2/4 (+544ns): scatter:
+        Funnel#264: index=0 flush=<nil>
+        Funnel#264 step 1/4 (+0s): 544ns self time
+        Funnel#264 step 2/4 (+544ns): scatter:
           Task#261: pool=0
           Task#261 step 1/2 (+0s): 9.998µs self time
           Task#261 step 2/2 (+9.998µs): return nil
@@ -691,17 +691,17 @@ Plan#0 step 1/5 (+0s): scatter:
             Skim#261 step 3/4 (+504ns): 509ns self time
             Skim#261 step 4/4 (+1.013µs): return nil
             Skim#261 ends at 21.551µs
-        Combine#264 step 3/4 (+544ns): 518ns self time
-        Combine#264 step 4/4 (+1.062µs): return nil
-        Combine#264 ends at 11.058µs
+        Funnel#264 step 3/4 (+544ns): 518ns self time
+        Funnel#264 step 4/4 (+1.062µs): return nil
+        Funnel#264 ends at 11.058µs
     Plan#6 step 6/7 (+0s): scatter:
       Task#265: pool=0
       Task#265 step 1/2 (+0s): 6.780539ms self time
       Task#265 step 2/2 (+6.780539ms): return nil
       Task#265 ends at 6.780539ms
-        Combine#265: index=1 flush=<nil>
-        Combine#265 step 1/10 (+0s): 227ns self time
-        Combine#265 step 2/10 (+227ns): scatter:
+        Funnel#265: index=1 flush=<nil>
+        Funnel#265 step 1/10 (+0s): 227ns self time
+        Funnel#265 step 2/10 (+227ns): scatter:
           Task#262: pool=0
           Task#262 step 1/2 (+0s): 9.998µs self time
           Task#262 step 2/2 (+9.998µs): return nil
@@ -720,15 +720,15 @@ Plan#0 step 1/5 (+0s): scatter:
             Skim#262 step 3/4 (+316.347µs): 0s self time
             Skim#262 step 4/4 (+316.347µs): return nil
             Skim#262 ends at 7.107111ms
-        Combine#265 step 3/10 (+227ns): 80ns self time
-        Combine#265 step 4/10 (+307ns): scatter:
+        Funnel#265 step 3/10 (+227ns): 80ns self time
+        Funnel#265 step 4/10 (+307ns): scatter:
           Task#260: pool=0
           Task#260 step 1/2 (+0s): 9.98µs self time
           Task#260 step 2/2 (+9.98µs): return nil
           Task#260 ends at 6.790826ms
-            Combine#260: index=2 flush=<nil>
-            Combine#260 step 1/4 (+0s): 497ns self time
-            Combine#260 step 2/4 (+497ns): scatter:
+            Funnel#260: index=2 flush=<nil>
+            Funnel#260 step 1/4 (+0s): 497ns self time
+            Funnel#260 step 2/4 (+497ns): scatter:
               Task#136: pool=0
               Task#136 step 1/2 (+0s): 15.38µs self time
               Task#136 step 2/2 (+15.38µs): return nil
@@ -737,11 +737,11 @@ Plan#0 step 1/5 (+0s): scatter:
                 Skim#136 step 1/2 (+0s): 881ns self time
                 Skim#136 step 2/2 (+881ns): return nil
                 Skim#136 ends at 6.807584ms
-            Combine#260 step 3/4 (+497ns): 499ns self time
-            Combine#260 step 4/4 (+996ns): return nil
-            Combine#260 ends at 6.791822ms
-        Combine#265 step 5/10 (+307ns): 246ns self time
-        Combine#265 step 6/10 (+553ns): scatter:
+            Funnel#260 step 3/4 (+497ns): 499ns self time
+            Funnel#260 step 4/4 (+996ns): return nil
+            Funnel#260 ends at 6.791822ms
+        Funnel#265 step 5/10 (+307ns): 246ns self time
+        Funnel#265 step 6/10 (+553ns): scatter:
           Task#263: pool=0
           Task#263 step 1/2 (+0s): 10.003µs self time
           Task#263 step 2/2 (+10.003µs): return nil
@@ -770,19 +770,19 @@ Plan#0 step 1/5 (+0s): scatter:
             Skim#263 step 3/4 (+179ns): 11ns self time
             Skim#263 step 4/4 (+190ns): return nil
             Skim#263 ends at 6.791285ms
-        Combine#265 step 7/10 (+553ns): 227ns self time
-        Combine#265 step 8/10 (+780ns): scatter:
+        Funnel#265 step 7/10 (+553ns): 227ns self time
+        Funnel#265 step 8/10 (+780ns): scatter:
           Task#139: pool=0
           Task#139 step 1/4 (+0s): 4.992µs self time
           Task#139 step 2/4 (+4.992µs): subjob:
             Plan#7: pathCount=14 taskCount=24 maxPathDuration=10.071336ms minSkimCount=20 maxSkimCount=28
                TaskPools[0]: TaskPool#27: limit=2
                TaskPools[1]: TaskPool#28: limit=3
-               CombinerPools[0]: CombinerPool#28: limit=2
-               Combiners[0]: pool=0
-               Combiners[1]: pool=0
-               Combiners[2]: pool=0
-               Combiners[3]: pool=0
+               FunnelPools[0]: FunnelPool#28: limit=2
+               Funnels[0]: pool=0
+               Funnels[1]: pool=0
+               Funnels[2]: pool=0
+               Funnels[3]: pool=0
             Plan#7 step 1/2 (+0s): scatter:
               Task#204: pool=0
               Task#204 step 1/2 (+0s): 9.766µs self time
@@ -805,10 +805,10 @@ Plan#0 step 1/5 (+0s): scatter:
                   Task#142 step 1/2 (+0s): 9.997µs self time
                   Task#142 step 2/2 (+9.997µs): return nil
                   Task#142 ends at 20.055µs
-                    Combine#142: index=0 flush=<nil>
-                    Combine#142 step 1/2 (+0s): 1.082µs self time
-                    Combine#142 step 2/2 (+1.082µs): return nil
-                    Combine#142 ends at 21.137µs
+                    Funnel#142: index=0 flush=<nil>
+                    Funnel#142 step 1/2 (+0s): 1.082µs self time
+                    Funnel#142 step 2/2 (+1.082µs): return nil
+                    Funnel#142 ends at 21.137µs
                 Skim#204 step 5/18 (+292ns): 228ns self time
                 Skim#204 step 6/18 (+520ns): scatter:
                   Task#172: pool=0
@@ -864,36 +864,36 @@ Plan#0 step 1/5 (+0s): scatter:
                                      TaskPools[1]: TaskPool#30: limit=5
                                      TaskPools[2]: TaskPool#31: limit=2
                                      TaskPools[3]: TaskPool#32: limit=2
-                                     CombinerPools[0]: CombinerPool#29: limit=2
-                                     CombinerPools[1]: CombinerPool#30: limit=3
-                                     CombinerPools[2]: CombinerPool#31: limit=1
-                                     CombinerPools[3]: CombinerPool#32: limit=6
-                                     CombinerPools[4]: CombinerPool#33: limit=3
-                                     CombinerPools[5]: CombinerPool#34: limit=1
-                                     CombinerPools[6]: CombinerPool#35: limit=4
-                                     CombinerPools[7]: CombinerPool#36: limit=1
-                                     CombinerPools[8]: CombinerPool#37: limit=1
-                                     CombinerPools[9]: CombinerPool#38: limit=7
-                                     Combiners[0]: pool=2
-                                     Combiners[1]: pool=6
-                                     Combiners[2]: pool=0
-                                     Combiners[3]: pool=8
-                                     Combiners[4]: pool=1
-                                     Combiners[5]: pool=3
-                                     Combiners[6]: pool=1
-                                     Combiners[7]: pool=0
-                                     Combiners[8]: pool=7
-                                     Combiners[9]: pool=7
-                                     Combiners[10]: pool=7
-                                     Combiners[11]: pool=2
+                                     FunnelPools[0]: FunnelPool#29: limit=2
+                                     FunnelPools[1]: FunnelPool#30: limit=3
+                                     FunnelPools[2]: FunnelPool#31: limit=1
+                                     FunnelPools[3]: FunnelPool#32: limit=6
+                                     FunnelPools[4]: FunnelPool#33: limit=3
+                                     FunnelPools[5]: FunnelPool#34: limit=1
+                                     FunnelPools[6]: FunnelPool#35: limit=4
+                                     FunnelPools[7]: FunnelPool#36: limit=1
+                                     FunnelPools[8]: FunnelPool#37: limit=1
+                                     FunnelPools[9]: FunnelPool#38: limit=7
+                                     Funnels[0]: pool=2
+                                     Funnels[1]: pool=6
+                                     Funnels[2]: pool=0
+                                     Funnels[3]: pool=8
+                                     Funnels[4]: pool=1
+                                     Funnels[5]: pool=3
+                                     Funnels[6]: pool=1
+                                     Funnels[7]: pool=0
+                                     Funnels[8]: pool=7
+                                     Funnels[9]: pool=7
+                                     Funnels[10]: pool=7
+                                     Funnels[11]: pool=2
                                   Plan#8 step 1/7 (+0s): scatter:
                                     Task#166: pool=0
                                     Task#166 step 1/2 (+0s): 10.126µs self time
                                     Task#166 step 2/2 (+10.126µs): return nil
                                     Task#166 ends at 10.126µs
-                                      Combine#166: index=11 flush=<nil>
-                                      Combine#166 step 1/4 (+0s): 530ns self time
-                                      Combine#166 step 2/4 (+530ns): scatter:
+                                      Funnel#166: index=11 flush=<nil>
+                                      Funnel#166 step 1/4 (+0s): 530ns self time
+                                      Funnel#166 step 2/4 (+530ns): scatter:
                                         Task#153: pool=1
                                         Task#153 step 1/2 (+0s): 1.203694ms self time
                                         Task#153 step 2/2 (+1.203694ms): return nil
@@ -902,9 +902,9 @@ Plan#0 step 1/5 (+0s): scatter:
                                           Skim#153 step 1/2 (+0s): 990ns self time
                                           Skim#153 step 2/2 (+990ns): return nil
                                           Skim#153 ends at 1.21534ms
-                                      Combine#166 step 3/4 (+530ns): 546ns self time
-                                      Combine#166 step 4/4 (+1.076µs): return nil
-                                      Combine#166 ends at 11.202µs
+                                      Funnel#166 step 3/4 (+530ns): 546ns self time
+                                      Funnel#166 step 4/4 (+1.076µs): return nil
+                                      Funnel#166 ends at 11.202µs
                                   Plan#8 step 2/7 (+0s): scatter:
                                     Task#167: pool=3
                                     Task#167 step 1/2 (+0s): 10.136µs self time
@@ -927,10 +927,10 @@ Plan#0 step 1/5 (+0s): scatter:
                                         Task#154 step 1/2 (+0s): 9.875µs self time
                                         Task#154 step 2/2 (+9.875µs): return nil
                                         Task#154 ends at 20.662µs
-                                          Combine#154: index=10 flush=Skim#154
-                                          Combine#154 step 1/2 (+0s): 999ns self time
-                                          Combine#154 step 2/2 (+999ns): return nil
-                                          Combine#154 ends at 21.661µs
+                                          Funnel#154: index=10 flush=Skim#154
+                                          Funnel#154 step 1/2 (+0s): 999ns self time
+                                          Funnel#154 step 2/2 (+999ns): return nil
+                                          Funnel#154 ends at 21.661µs
                                             Skim#154: index=8
                                             Skim#154 step 1/2 (+0s): 1.002µs self time
                                             Skim#154 step 2/2 (+1.002µs): return nil
@@ -990,9 +990,9 @@ Plan#0 step 1/5 (+0s): scatter:
                                     Task#168 step 1/2 (+0s): 9.965µs self time
                                     Task#168 step 2/2 (+9.965µs): return nil
                                     Task#168 ends at 9.965µs
-                                      Combine#168: index=11 flush=<nil>
-                                      Combine#168 step 1/6 (+0s): 485ns self time
-                                      Combine#168 step 2/6 (+485ns): scatter:
+                                      Funnel#168: index=11 flush=<nil>
+                                      Funnel#168 step 1/6 (+0s): 485ns self time
+                                      Funnel#168 step 2/6 (+485ns): scatter:
                                         Task#163: pool=0
                                         Task#163 step 1/2 (+0s): 10ms self time
                                         Task#163 step 2/2 (+10ms): return nil
@@ -1011,22 +1011,22 @@ Plan#0 step 1/5 (+0s): scatter:
                                           Skim#163 step 3/4 (+3ns): 21ns self time
                                           Skim#163 step 4/4 (+24ns): return nil
                                           Skim#163 ends at 10.010474ms
-                                      Combine#168 step 3/6 (+485ns): 0s self time
-                                      Combine#168 step 4/6 (+485ns): scatter:
+                                      Funnel#168 step 3/6 (+485ns): 0s self time
+                                      Funnel#168 step 4/6 (+485ns): scatter:
                                         Task#164: pool=2
                                         Task#164 step 1/2 (+0s): 9.999µs self time
                                         Task#164 step 2/2 (+9.999µs): return nil
                                         Task#164 ends at 20.449µs
-                                          Combine#164: index=3 flush=Skim#164
-                                          Combine#164 step 1/8 (+0s): 161ns self time
-                                          Combine#164 step 2/8 (+161ns): scatter:
+                                          Funnel#164: index=3 flush=Skim#164
+                                          Funnel#164 step 1/8 (+0s): 161ns self time
+                                          Funnel#164 step 2/8 (+161ns): scatter:
                                             Task#162: pool=3
                                             Task#162 step 1/2 (+0s): 185.775µs self time
                                             Task#162 step 2/2 (+185.775µs): return nil
                                             Task#162 ends at 206.385µs
-                                              Combine#162: index=11 flush=<nil>
-                                              Combine#162 step 1/6 (+0s): 295ns self time
-                                              Combine#162 step 2/6 (+295ns): scatter:
+                                              Funnel#162: index=11 flush=<nil>
+                                              Funnel#162 step 1/6 (+0s): 295ns self time
+                                              Funnel#162 step 2/6 (+295ns): scatter:
                                                 Task#159: pool=2
                                                 Task#159 step 1/2 (+0s): 37.921µs self time
                                                 Task#159 step 2/2 (+37.921µs): return nil
@@ -1045,21 +1045,21 @@ Plan#0 step 1/5 (+0s): scatter:
                                                   Skim#159 step 3/4 (+1.433µs): 1.458µs self time
                                                   Skim#159 step 4/4 (+2.891µs): return nil
                                                   Skim#159 ends at 247.492µs
-                                              Combine#162 step 3/6 (+295ns): 245ns self time
-                                              Combine#162 step 4/6 (+540ns): scatter:
+                                              Funnel#162 step 3/6 (+295ns): 245ns self time
+                                              Funnel#162 step 4/6 (+540ns): scatter:
                                                 Task#158: pool=2
                                                 Task#158 step 1/2 (+0s): 9.996µs self time
                                                 Task#158 step 2/2 (+9.996µs): return nil
                                                 Task#158 ends at 216.921µs
-                                                  Combine#158: index=5 flush=<nil>
-                                                  Combine#158 step 1/2 (+0s): 870.273µs self time
-                                                  Combine#158 step 2/2 (+870.273µs): return nil
-                                                  Combine#158 ends at 1.087194ms
-                                              Combine#162 step 5/6 (+540ns): 115ns self time
-                                              Combine#162 step 6/6 (+655ns): return nil
-                                              Combine#162 ends at 207.04µs
-                                          Combine#164 step 3/8 (+161ns): 319ns self time
-                                          Combine#164 step 4/8 (+480ns): scatter:
+                                                  Funnel#158: index=5 flush=<nil>
+                                                  Funnel#158 step 1/2 (+0s): 870.273µs self time
+                                                  Funnel#158 step 2/2 (+870.273µs): return nil
+                                                  Funnel#158 ends at 1.087194ms
+                                              Funnel#162 step 5/6 (+540ns): 115ns self time
+                                              Funnel#162 step 6/6 (+655ns): return nil
+                                              Funnel#162 ends at 207.04µs
+                                          Funnel#164 step 3/8 (+161ns): 319ns self time
+                                          Funnel#164 step 4/8 (+480ns): scatter:
                                             Task#161: pool=0
                                             Task#161 step 1/2 (+0s): 9.752µs self time
                                             Task#161 step 2/2 (+9.752µs): return nil
@@ -1098,18 +1098,18 @@ Plan#0 step 1/5 (+0s): scatter:
                                                     Task#156 step 1/2 (+0s): 991ns self time
                                                     Task#156 step 2/2 (+991ns): return nil
                                                     Task#156 ends at 102.158µs
-                                                      Combine#156: index=6 flush=<nil>
-                                                      Combine#156 step 1/2 (+0s): 217ns self time
-                                                      Combine#156 step 2/2 (+217ns): return nil
-                                                      Combine#156 ends at 102.375µs
+                                                      Funnel#156: index=6 flush=<nil>
+                                                      Funnel#156 step 1/2 (+0s): 217ns self time
+                                                      Funnel#156 step 2/2 (+217ns): return nil
+                                                      Funnel#156 ends at 102.375µs
                                                   Skim#160 step 3/4 (+315ns): 315ns self time
                                                   Skim#160 step 4/4 (+630ns): return nil
                                                   Skim#160 ends at 101.482µs
                                               Skim#161 step 7/8 (+69.524µs): 23.04µs self time
                                               Skim#161 step 8/8 (+92.564µs): return nil
                                               Skim#161 ends at 123.245µs
-                                          Combine#164 step 5/8 (+480ns): 310ns self time
-                                          Combine#164 step 6/8 (+790ns): scatter:
+                                          Funnel#164 step 5/8 (+480ns): 310ns self time
+                                          Funnel#164 step 6/8 (+790ns): scatter:
                                             Task#150: pool=2
                                             Task#150 step 1/2 (+0s): 10.033µs self time
                                             Task#150 step 2/2 (+10.033µs): return nil
@@ -1118,16 +1118,16 @@ Plan#0 step 1/5 (+0s): scatter:
                                               Skim#150 step 1/2 (+0s): 994ns self time
                                               Skim#150 step 2/2 (+994ns): return nil
                                               Skim#150 ends at 32.266µs
-                                          Combine#164 step 7/8 (+790ns): 314ns self time
-                                          Combine#164 step 8/8 (+1.104µs): return nil
-                                          Combine#164 ends at 21.553µs
+                                          Funnel#164 step 7/8 (+790ns): 314ns self time
+                                          Funnel#164 step 8/8 (+1.104µs): return nil
+                                          Funnel#164 ends at 21.553µs
                                             Skim#164: index=3
                                             Skim#164 step 1/2 (+0s): 1.448µs self time
                                             Skim#164 step 2/2 (+1.448µs): return nil
                                             Skim#164 ends at 0s
-                                      Combine#168 step 5/6 (+485ns): 981ns self time
-                                      Combine#168 step 6/6 (+1.466µs): return error
-                                      Combine#168 ends at 11.431µs
+                                      Funnel#168 step 5/6 (+485ns): 981ns self time
+                                      Funnel#168 step 6/6 (+1.466µs): return error
+                                      Funnel#168 ends at 11.431µs
                                   Plan#8 step 7/7 (+0s): ends at 10.011453ms
                                 Skim#144 step 3/4 (+10.012303ms): 153ns self time
                                 Skim#144 step 4/4 (+10.012456ms): return nil
@@ -1191,9 +1191,9 @@ Plan#0 step 1/5 (+0s): scatter:
                           Task#178 step 1/2 (+0s): 9.845µs self time
                           Task#178 step 2/2 (+9.845µs): return nil
                           Task#178 ends at 39.496µs
-                            Combine#178: index=3 flush=Skim#178
-                            Combine#178 step 1/4 (+0s): 498ns self time
-                            Combine#178 step 2/4 (+498ns): scatter:
+                            Funnel#178: index=3 flush=Skim#178
+                            Funnel#178 step 1/4 (+0s): 498ns self time
+                            Funnel#178 step 2/4 (+498ns): scatter:
                               Task#174: pool=1
                               Task#174 step 1/2 (+0s): 10µs self time
                               Task#174 step 2/2 (+10µs): return nil
@@ -1202,9 +1202,9 @@ Plan#0 step 1/5 (+0s): scatter:
                                 Skim#174 step 1/2 (+0s): 1.002µs self time
                                 Skim#174 step 2/2 (+1.002µs): return nil
                                 Skim#174 ends at 50.996µs
-                            Combine#178 step 3/4 (+498ns): 503ns self time
-                            Combine#178 step 4/4 (+1.001µs): return nil
-                            Combine#178 ends at 40.497µs
+                            Funnel#178 step 3/4 (+498ns): 503ns self time
+                            Funnel#178 step 4/4 (+1.001µs): return nil
+                            Funnel#178 ends at 40.497µs
                               Skim#178: index=0
                               Skim#178 step 1/2 (+0s): 999ns self time
                               Skim#178 step 2/2 (+999ns): return nil
@@ -1215,9 +1215,9 @@ Plan#0 step 1/5 (+0s): scatter:
                           Task#181 step 1/2 (+0s): 9.992µs self time
                           Task#181 step 2/2 (+9.992µs): return nil
                           Task#181 ends at 39.841µs
-                            Combine#181: index=1 flush=<nil>
-                            Combine#181 step 1/6 (+0s): 329ns self time
-                            Combine#181 step 2/6 (+329ns): scatter:
+                            Funnel#181: index=1 flush=<nil>
+                            Funnel#181 step 1/6 (+0s): 329ns self time
+                            Funnel#181 step 2/6 (+329ns): scatter:
                               Task#173: pool=0
                               Task#173 step 1/2 (+0s): 7.142µs self time
                               Task#173 step 2/2 (+7.142µs): return nil
@@ -1226,36 +1226,36 @@ Plan#0 step 1/5 (+0s): scatter:
                                 Skim#173 step 1/2 (+0s): 973ns self time
                                 Skim#173 step 2/2 (+973ns): return nil
                                 Skim#173 ends at 48.285µs
-                            Combine#181 step 3/6 (+329ns): 195ns self time
-                            Combine#181 step 4/6 (+524ns): subjob:
+                            Funnel#181 step 3/6 (+329ns): 195ns self time
+                            Funnel#181 step 4/6 (+524ns): subjob:
                               Plan#9: pathCount=7 taskCount=17 maxPathDuration=3.28595ms minSkimCount=10 maxSkimCount=24
                                  TaskPools[0]: TaskPool#33: limit=2
                                  TaskPools[1]: TaskPool#34: limit=3
                                  TaskPools[2]: TaskPool#35: limit=5
-                                 CombinerPools[0]: CombinerPool#39: limit=3
-                                 CombinerPools[1]: CombinerPool#40: limit=2
-                                 CombinerPools[2]: CombinerPool#41: limit=3
-                                 CombinerPools[3]: CombinerPool#42: limit=1
-                                 CombinerPools[4]: CombinerPool#43: limit=2
-                                 CombinerPools[5]: CombinerPool#44: limit=2
-                                 CombinerPools[6]: CombinerPool#45: limit=7
-                                 CombinerPools[7]: CombinerPool#46: limit=2
-                                 Combiners[0]: pool=1
+                                 FunnelPools[0]: FunnelPool#39: limit=3
+                                 FunnelPools[1]: FunnelPool#40: limit=2
+                                 FunnelPools[2]: FunnelPool#41: limit=3
+                                 FunnelPools[3]: FunnelPool#42: limit=1
+                                 FunnelPools[4]: FunnelPool#43: limit=2
+                                 FunnelPools[5]: FunnelPool#44: limit=2
+                                 FunnelPools[6]: FunnelPool#45: limit=7
+                                 FunnelPools[7]: FunnelPool#46: limit=2
+                                 Funnels[0]: pool=1
                               Plan#9 step 1/6 (+0s): scatter:
                                 Task#195: pool=2
                                 Task#195 step 1/2 (+0s): 6.478µs self time
                                 Task#195 step 2/2 (+6.478µs): return nil
                                 Task#195 ends at 6.478µs
-                                  Combine#195: index=0 flush=<nil>
-                                  Combine#195 step 1/4 (+0s): 197.495µs self time
-                                  Combine#195 step 2/4 (+197.495µs): scatter:
+                                  Funnel#195: index=0 flush=<nil>
+                                  Funnel#195 step 1/4 (+0s): 197.495µs self time
+                                  Funnel#195 step 2/4 (+197.495µs): scatter:
                                     Task#192: pool=2
                                     Task#192 step 1/2 (+0s): 9.562µs self time
                                     Task#192 step 2/2 (+9.562µs): return nil
                                     Task#192 ends at 213.535µs
-                                      Combine#192: index=0 flush=<nil>
-                                      Combine#192 step 1/6 (+0s): 30ns self time
-                                      Combine#192 step 2/6 (+30ns): scatter:
+                                      Funnel#192: index=0 flush=<nil>
+                                      Funnel#192 step 1/6 (+0s): 30ns self time
+                                      Funnel#192 step 2/6 (+30ns): scatter:
                                         Task#182: pool=2
                                         Task#182 step 1/2 (+0s): 9.982µs self time
                                         Task#182 step 2/2 (+9.982µs): return nil
@@ -1264,8 +1264,8 @@ Plan#0 step 1/5 (+0s): scatter:
                                           Skim#182 step 1/2 (+0s): 111ns self time
                                           Skim#182 step 2/2 (+111ns): return nil
                                           Skim#182 ends at 223.658µs
-                                      Combine#192 step 3/6 (+30ns): 323ns self time
-                                      Combine#192 step 4/6 (+353ns): scatter:
+                                      Funnel#192 step 3/6 (+30ns): 323ns self time
+                                      Funnel#192 step 4/6 (+353ns): scatter:
                                         Task#190: pool=0
                                         Task#190 step 1/2 (+0s): 11.582µs self time
                                         Task#190 step 2/2 (+11.582µs): return nil
@@ -1284,30 +1284,30 @@ Plan#0 step 1/5 (+0s): scatter:
                                                 Task#186 step 1/2 (+0s): 9.609µs self time
                                                 Task#186 step 2/2 (+9.609µs): return nil
                                                 Task#186 ends at 246.405µs
-                                                  Combine#186: index=0 flush=<nil>
-                                                  Combine#186 step 1/2 (+0s): 1.003µs self time
-                                                  Combine#186 step 2/2 (+1.003µs): return nil
-                                                  Combine#186 ends at 247.408µs
+                                                  Funnel#186: index=0 flush=<nil>
+                                                  Funnel#186 step 1/2 (+0s): 1.003µs self time
+                                                  Funnel#186 step 2/2 (+1.003µs): return nil
+                                                  Funnel#186 ends at 247.408µs
                                               Skim#189 step 3/4 (+507ns): 312ns self time
                                               Skim#189 step 4/4 (+819ns): return nil
                                               Skim#189 ends at 237.108µs
                                           Skim#190 step 3/4 (+474ns): 475ns self time
                                           Skim#190 step 4/4 (+949ns): return error
                                           Skim#190 ends at 226.419µs
-                                      Combine#192 step 5/6 (+353ns): 126ns self time
-                                      Combine#192 step 6/6 (+479ns): return nil
-                                      Combine#192 ends at 214.014µs
-                                  Combine#195 step 3/4 (+197.495µs): 234.477µs self time
-                                  Combine#195 step 4/4 (+431.972µs): return nil
-                                  Combine#195 ends at 438.45µs
+                                      Funnel#192 step 5/6 (+353ns): 126ns self time
+                                      Funnel#192 step 6/6 (+479ns): return nil
+                                      Funnel#192 ends at 214.014µs
+                                  Funnel#195 step 3/4 (+197.495µs): 234.477µs self time
+                                  Funnel#195 step 4/4 (+431.972µs): return nil
+                                  Funnel#195 ends at 438.45µs
                               Plan#9 step 2/6 (+0s): scatter:
                                 Task#196: pool=0
                                 Task#196 step 1/2 (+0s): 9.993µs self time
                                 Task#196 step 2/2 (+9.993µs): return nil
                                 Task#196 ends at 9.993µs
-                                  Combine#196: index=0 flush=<nil>
-                                  Combine#196 step 1/4 (+0s): 272ns self time
-                                  Combine#196 step 2/4 (+272ns): scatter:
+                                  Funnel#196: index=0 flush=<nil>
+                                  Funnel#196 step 1/4 (+0s): 272ns self time
+                                  Funnel#196 step 2/4 (+272ns): scatter:
                                     Task#188: pool=0
                                     Task#188 step 1/2 (+0s): 13.028µs self time
                                     Task#188 step 2/2 (+13.028µs): return nil
@@ -1316,9 +1316,9 @@ Plan#0 step 1/5 (+0s): scatter:
                                       Skim#188 step 1/2 (+0s): 823.283µs self time
                                       Skim#188 step 2/2 (+823.283µs): return nil
                                       Skim#188 ends at 846.576µs
-                                  Combine#196 step 3/4 (+272ns): 653ns self time
-                                  Combine#196 step 4/4 (+925ns): return nil
-                                  Combine#196 ends at 10.918µs
+                                  Funnel#196 step 3/4 (+272ns): 653ns self time
+                                  Funnel#196 step 4/4 (+925ns): return nil
+                                  Funnel#196 ends at 10.918µs
                               Plan#9 step 3/6 (+0s): scatter:
                                 Task#197: pool=0
                                 Task#197 step 1/2 (+0s): 3.252558ms self time
@@ -1341,9 +1341,9 @@ Plan#0 step 1/5 (+0s): scatter:
                                     Task#194 step 1/2 (+0s): 10.034µs self time
                                     Task#194 step 2/2 (+10.034µs): return nil
                                     Task#194 ends at 3.263168ms
-                                      Combine#194: index=0 flush=<nil>
-                                      Combine#194 step 1/4 (+0s): 810ns self time
-                                      Combine#194 step 2/4 (+810ns): scatter:
+                                      Funnel#194: index=0 flush=<nil>
+                                      Funnel#194 step 1/4 (+0s): 810ns self time
+                                      Funnel#194 step 2/4 (+810ns): scatter:
                                         Task#191: pool=0
                                         Task#191 step 1/2 (+0s): 9.999µs self time
                                         Task#191 step 2/2 (+9.999µs): return error
@@ -1362,9 +1362,9 @@ Plan#0 step 1/5 (+0s): scatter:
                                           Skim#191 step 3/4 (+800ns): 199ns self time
                                           Skim#191 step 4/4 (+999ns): return error
                                           Skim#191 ends at 3.274976ms
-                                      Combine#194 step 3/4 (+810ns): 14ns self time
-                                      Combine#194 step 4/4 (+824ns): return nil
-                                      Combine#194 ends at 3.263992ms
+                                      Funnel#194 step 3/4 (+810ns): 14ns self time
+                                      Funnel#194 step 4/4 (+824ns): return nil
+                                      Funnel#194 ends at 3.263992ms
                                   Skim#197 step 5/6 (+576ns): 412ns self time
                                   Skim#197 step 6/6 (+988ns): return nil
                                   Skim#197 ends at 3.253546ms
@@ -1373,18 +1373,18 @@ Plan#0 step 1/5 (+0s): scatter:
                                 Task#184 step 1/2 (+0s): 9.937µs self time
                                 Task#184 step 2/2 (+9.937µs): return nil
                                 Task#184 ends at 9.937µs
-                                  Combine#184: index=0 flush=<nil>
-                                  Combine#184 step 1/2 (+0s): 494.901µs self time
-                                  Combine#184 step 2/2 (+494.901µs): return error
-                                  Combine#184 ends at 504.838µs
+                                  Funnel#184: index=0 flush=<nil>
+                                  Funnel#184 step 1/2 (+0s): 494.901µs self time
+                                  Funnel#184 step 2/2 (+494.901µs): return error
+                                  Funnel#184 ends at 504.838µs
                               Plan#9 step 5/6 (+0s): scatter:
                                 Task#198: pool=1
                                 Task#198 step 1/2 (+0s): 16.193µs self time
                                 Task#198 step 2/2 (+16.193µs): return nil
                                 Task#198 ends at 16.193µs
-                                  Combine#198: index=0 flush=<nil>
-                                  Combine#198 step 1/4 (+0s): 983ns self time
-                                  Combine#198 step 2/4 (+983ns): scatter:
+                                  Funnel#198: index=0 flush=<nil>
+                                  Funnel#198 step 1/4 (+0s): 983ns self time
+                                  Funnel#198 step 2/4 (+983ns): scatter:
                                     Task#193: pool=1
                                     Task#193 step 1/2 (+0s): 9.998µs self time
                                     Task#193 step 2/2 (+9.998µs): return nil
@@ -1403,13 +1403,13 @@ Plan#0 step 1/5 (+0s): scatter:
                                       Skim#193 step 3/4 (+499.973µs): 500.027µs self time
                                       Skim#193 step 4/4 (+1ms): return nil
                                       Skim#193 ends at 1.027174ms
-                                  Combine#198 step 3/4 (+983ns): 21ns self time
-                                  Combine#198 step 4/4 (+1.004µs): return nil
-                                  Combine#198 ends at 17.197µs
+                                  Funnel#198 step 3/4 (+983ns): 21ns self time
+                                  Funnel#198 step 4/4 (+1.004µs): return nil
+                                  Funnel#198 ends at 17.197µs
                               Plan#9 step 6/6 (+0s): ends at 3.28595ms
-                            Combine#181 step 5/6 (+3.286474ms): 471ns self time
-                            Combine#181 step 6/6 (+3.286945ms): return nil
-                            Combine#181 ends at 3.326786ms
+                            Funnel#181 step 5/6 (+3.286474ms): 471ns self time
+                            Funnel#181 step 6/6 (+3.286945ms): return nil
+                            Funnel#181 ends at 3.326786ms
                         Skim#199 step 7/8 (+455ns): 196ns self time
                         Skim#199 step 8/8 (+651ns): return nil
                         Skim#199 ends at 30.045µs
@@ -1419,9 +1419,9 @@ Plan#0 step 1/5 (+0s): scatter:
                       Task#200 step 1/2 (+0s): 10.03µs self time
                       Task#200 step 2/2 (+10.03µs): return nil
                       Task#200 ends at 31.089µs
-                        Combine#200: index=0 flush=<nil>
-                        Combine#200 step 1/4 (+0s): 646ns self time
-                        Combine#200 step 2/4 (+646ns): scatter:
+                        Funnel#200: index=0 flush=<nil>
+                        Funnel#200 step 1/4 (+0s): 646ns self time
+                        Funnel#200 step 2/4 (+646ns): scatter:
                           Task#170: pool=0
                           Task#170 step 1/2 (+0s): 10.024µs self time
                           Task#170 step 2/2 (+10.024µs): return nil
@@ -1430,9 +1430,9 @@ Plan#0 step 1/5 (+0s): scatter:
                             Skim#170 step 1/2 (+0s): 807ns self time
                             Skim#170 step 2/2 (+807ns): return nil
                             Skim#170 ends at 42.566µs
-                        Combine#200 step 3/4 (+646ns): 354ns self time
-                        Combine#200 step 4/4 (+1µs): return nil
-                        Combine#200 ends at 32.089µs
+                        Funnel#200 step 3/4 (+646ns): 354ns self time
+                        Funnel#200 step 4/4 (+1µs): return nil
+                        Funnel#200 ends at 32.089µs
                     Skim#202 step 5/10 (+407ns): 177ns self time
                     Skim#202 step 6/10 (+584ns): scatter:
                       Task#141: pool=0
@@ -1462,10 +1462,10 @@ Plan#0 step 1/5 (+0s): scatter:
                   Task#175 step 1/2 (+0s): 9.209µs self time
                   Task#175 step 2/2 (+9.209µs): return nil
                   Task#175 ends at 19.898µs
-                    Combine#175: index=0 flush=<nil>
-                    Combine#175 step 1/2 (+0s): 1.008µs self time
-                    Combine#175 step 2/2 (+1.008µs): return nil
-                    Combine#175 ends at 20.906µs
+                    Funnel#175: index=0 flush=<nil>
+                    Funnel#175 step 1/2 (+0s): 1.008µs self time
+                    Funnel#175 step 2/2 (+1.008µs): return nil
+                    Funnel#175 ends at 20.906µs
                 Skim#204 step 15/18 (+923ns): 0s self time
                 Skim#204 step 16/18 (+923ns): scatter:
                   Task#169: pool=1
@@ -1487,9 +1487,9 @@ Plan#0 step 1/5 (+0s): scatter:
             Skim#139 step 1/2 (+0s): 718.683µs self time
             Skim#139 step 2/2 (+718.683µs): return nil
             Skim#139 ends at 17.581331ms
-        Combine#265 step 9/10 (+780ns): 236ns self time
-        Combine#265 step 10/10 (+1.016µs): return nil
-        Combine#265 ends at 6.781555ms
+        Funnel#265 step 9/10 (+780ns): 236ns self time
+        Funnel#265 step 10/10 (+1.016µs): return nil
+        Funnel#265 ends at 6.781555ms
     Plan#6 step 7/7 (+0s): ends at 17.581331ms
   Task#132 step 3/4 (+17.584704ms): 3.394µs self time
   Task#132 step 4/4 (+17.588098ms): return nil
@@ -1522,9 +1522,9 @@ Plan#0 step 3/5 (+0s): scatter:
   Task#1057 step 1/2 (+0s): 10.005µs self time
   Task#1057 step 2/2 (+10.005µs): return nil
   Task#1057 ends at 10.005µs
-    Combine#1057: index=14 flush=<nil>
-    Combine#1057 step 1/4 (+0s): 358ns self time
-    Combine#1057 step 2/4 (+358ns): scatter:
+    Funnel#1057: index=14 flush=<nil>
+    Funnel#1057 step 1/4 (+0s): 358ns self time
+    Funnel#1057 step 2/4 (+358ns): scatter:
       Task#1056: pool=1
       Task#1056 step 1/2 (+0s): 6.754µs self time
       Task#1056 step 2/2 (+6.754µs): return nil
@@ -1536,29 +1536,29 @@ Plan#0 step 3/5 (+0s): scatter:
           Task#268 step 1/2 (+0s): 9.998µs self time
           Task#268 step 2/2 (+9.998µs): return nil
           Task#268 ends at 27.398µs
-            Combine#268: index=12 flush=<nil>
-            Combine#268 step 1/6 (+0s): 318ns self time
-            Combine#268 step 2/6 (+318ns): scatter:
+            Funnel#268: index=12 flush=<nil>
+            Funnel#268 step 1/6 (+0s): 318ns self time
+            Funnel#268 step 2/6 (+318ns): scatter:
               Task#129: pool=0
               Task#129 step 1/2 (+0s): 10.873µs self time
               Task#129 step 2/2 (+10.873µs): return nil
               Task#129 ends at 38.589µs
-                Combine#129: index=2 flush=<nil>
-                Combine#129 step 1/2 (+0s): 1.035µs self time
-                Combine#129 step 2/2 (+1.035µs): return nil
-                Combine#129 ends at 39.624µs
-            Combine#268 step 3/6 (+318ns): 323ns self time
-            Combine#268 step 4/6 (+641ns): subjob:
+                Funnel#129: index=2 flush=<nil>
+                Funnel#129 step 1/2 (+0s): 1.035µs self time
+                Funnel#129 step 2/2 (+1.035µs): return nil
+                Funnel#129 ends at 39.624µs
+            Funnel#268 step 3/6 (+318ns): 323ns self time
+            Funnel#268 step 4/6 (+641ns): subjob:
               Plan#12: pathCount=18 taskCount=35 maxPathDuration=35.158538ms minSkimCount=30 maxSkimCount=43
                  TaskPools[0]: TaskPool#39: limit=10
-                 CombinerPools[0]: CombinerPool#52: limit=2
-                 CombinerPools[1]: CombinerPool#53: limit=6
-                 CombinerPools[2]: CombinerPool#54: limit=5
-                 CombinerPools[3]: CombinerPool#55: limit=2
-                 CombinerPools[4]: CombinerPool#56: limit=1
-                 CombinerPools[5]: CombinerPool#57: limit=2
-                 Combiners[0]: pool=4
-                 Combiners[1]: pool=2
+                 FunnelPools[0]: FunnelPool#52: limit=2
+                 FunnelPools[1]: FunnelPool#53: limit=6
+                 FunnelPools[2]: FunnelPool#54: limit=5
+                 FunnelPools[3]: FunnelPool#55: limit=2
+                 FunnelPools[4]: FunnelPool#56: limit=1
+                 FunnelPools[5]: FunnelPool#57: limit=2
+                 Funnels[0]: pool=4
+                 Funnels[1]: pool=2
               Plan#12 step 1/10 (+0s): scatter:
                 Task#1054: pool=0
                 Task#1054 step 1/2 (+0s): 12.285µs self time
@@ -1649,10 +1649,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Task#271 step 1/2 (+0s): 10.001µs self time
                                 Task#271 step 2/2 (+10.001µs): return nil
                                 Task#271 ends at 107.047µs
-                                  Combine#271: index=0 flush=<nil>
-                                  Combine#271 step 1/2 (+0s): 338.09µs self time
-                                  Combine#271 step 2/2 (+338.09µs): return nil
-                                  Combine#271 ends at 445.137µs
+                                  Funnel#271: index=0 flush=<nil>
+                                  Funnel#271 step 1/2 (+0s): 338.09µs self time
+                                  Funnel#271 step 2/2 (+338.09µs): return nil
+                                  Funnel#271 ends at 445.137µs
                               Skim#545 step 3/4 (+177ns): 181ns self time
                               Skim#545 step 4/4 (+358ns): return nil
                               Skim#545 ends at 97.227µs
@@ -1669,34 +1669,34 @@ Plan#0 step 3/5 (+0s): scatter:
                                    TaskPools[0]: TaskPool#40: limit=3
                                    TaskPools[1]: TaskPool#41: limit=3
                                    TaskPools[2]: TaskPool#42: limit=6
-                                   CombinerPools[0]: CombinerPool#58: limit=8
-                                   CombinerPools[1]: CombinerPool#59: limit=3
-                                   CombinerPools[2]: CombinerPool#60: limit=2
-                                   CombinerPools[3]: CombinerPool#61: limit=2
-                                   CombinerPools[4]: CombinerPool#62: limit=10
-                                   CombinerPools[5]: CombinerPool#63: limit=7
-                                   CombinerPools[6]: CombinerPool#64: limit=1
-                                   CombinerPools[7]: CombinerPool#65: limit=2
-                                   CombinerPools[8]: CombinerPool#66: limit=2
-                                   Combiners[0]: pool=0
-                                   Combiners[1]: pool=7
-                                   Combiners[2]: pool=6
-                                   Combiners[3]: pool=0
-                                   Combiners[4]: pool=6
-                                   Combiners[5]: pool=0
-                                   Combiners[6]: pool=1
-                                   Combiners[7]: pool=2
-                                   Combiners[8]: pool=8
-                                   Combiners[9]: pool=7
-                                   Combiners[10]: pool=3
+                                   FunnelPools[0]: FunnelPool#58: limit=8
+                                   FunnelPools[1]: FunnelPool#59: limit=3
+                                   FunnelPools[2]: FunnelPool#60: limit=2
+                                   FunnelPools[3]: FunnelPool#61: limit=2
+                                   FunnelPools[4]: FunnelPool#62: limit=10
+                                   FunnelPools[5]: FunnelPool#63: limit=7
+                                   FunnelPools[6]: FunnelPool#64: limit=1
+                                   FunnelPools[7]: FunnelPool#65: limit=2
+                                   FunnelPools[8]: FunnelPool#66: limit=2
+                                   Funnels[0]: pool=0
+                                   Funnels[1]: pool=7
+                                   Funnels[2]: pool=6
+                                   Funnels[3]: pool=0
+                                   Funnels[4]: pool=6
+                                   Funnels[5]: pool=0
+                                   Funnels[6]: pool=1
+                                   Funnels[7]: pool=2
+                                   Funnels[8]: pool=8
+                                   Funnels[9]: pool=7
+                                   Funnels[10]: pool=3
                                 Plan#13 step 1/12 (+0s): scatter:
                                   Task#542: pool=0
                                   Task#542 step 1/2 (+0s): 8.939193ms self time
                                   Task#542 step 2/2 (+8.939193ms): return nil
                                   Task#542 ends at 8.939193ms
-                                    Combine#542: index=8 flush=<nil>
-                                    Combine#542 step 1/4 (+0s): 866ns self time
-                                    Combine#542 step 2/4 (+866ns): scatter:
+                                    Funnel#542: index=8 flush=<nil>
+                                    Funnel#542 step 1/4 (+0s): 866ns self time
+                                    Funnel#542 step 2/4 (+866ns): scatter:
                                       Task#296: pool=2
                                       Task#296 step 1/2 (+0s): 387.41µs self time
                                       Task#296 step 2/2 (+387.41µs): return error
@@ -1705,50 +1705,50 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#296 step 1/2 (+0s): 32.991µs self time
                                         Skim#296 step 2/2 (+32.991µs): return nil
                                         Skim#296 ends at 9.36046ms
-                                    Combine#542 step 3/4 (+866ns): 668ns self time
-                                    Combine#542 step 4/4 (+1.534µs): return nil
-                                    Combine#542 ends at 8.940727ms
+                                    Funnel#542 step 3/4 (+866ns): 668ns self time
+                                    Funnel#542 step 4/4 (+1.534µs): return nil
+                                    Funnel#542 ends at 8.940727ms
                                 Plan#13 step 2/12 (+0s): scatter:
                                   Task#541: pool=2
                                   Task#541 step 1/2 (+0s): 9.998µs self time
                                   Task#541 step 2/2 (+9.998µs): return nil
                                   Task#541 ends at 9.998µs
-                                    Combine#541: index=2 flush=<nil>
-                                    Combine#541 step 1/14 (+0s): 728ns self time
-                                    Combine#541 step 2/14 (+728ns): scatter:
+                                    Funnel#541: index=2 flush=<nil>
+                                    Funnel#541 step 1/14 (+0s): 728ns self time
+                                    Funnel#541 step 2/14 (+728ns): scatter:
                                       Task#402: pool=2
                                       Task#402 step 1/2 (+0s): 10.02µs self time
                                       Task#402 step 2/2 (+10.02µs): return nil
                                       Task#402 ends at 20.746µs
-                                        Combine#402: index=7 flush=<nil>
-                                        Combine#402 step 1/4 (+0s): 943ns self time
-                                        Combine#402 step 2/4 (+943ns): subjob:
+                                        Funnel#402: index=7 flush=<nil>
+                                        Funnel#402 step 1/4 (+0s): 943ns self time
+                                        Funnel#402 step 2/4 (+943ns): subjob:
                                           Plan#18: pathCount=17 taskCount=41 maxPathDuration=8.618889ms minSkimCount=28 maxSkimCount=51
                                              TaskPools[0]: TaskPool#56: limit=8
-                                             CombinerPools[0]: CombinerPool#93: limit=1
-                                             CombinerPools[1]: CombinerPool#94: limit=8
-                                             CombinerPools[2]: CombinerPool#95: limit=10
-                                             CombinerPools[3]: CombinerPool#96: limit=7
-                                             CombinerPools[4]: CombinerPool#97: limit=1
-                                             CombinerPools[5]: CombinerPool#98: limit=1
-                                             CombinerPools[6]: CombinerPool#99: limit=2
-                                             CombinerPools[7]: CombinerPool#100: limit=2
-                                             CombinerPools[8]: CombinerPool#101: limit=3
-                                             Combiners[0]: pool=4
-                                             Combiners[1]: pool=7
-                                             Combiners[2]: pool=1
-                                             Combiners[3]: pool=6
-                                             Combiners[4]: pool=0
-                                             Combiners[5]: pool=7
-                                             Combiners[6]: pool=0
-                                             Combiners[7]: pool=2
-                                             Combiners[8]: pool=3
-                                             Combiners[9]: pool=2
-                                             Combiners[10]: pool=1
-                                             Combiners[11]: pool=0
-                                             Combiners[12]: pool=6
-                                             Combiners[13]: pool=5
-                                             Combiners[14]: pool=0
+                                             FunnelPools[0]: FunnelPool#93: limit=1
+                                             FunnelPools[1]: FunnelPool#94: limit=8
+                                             FunnelPools[2]: FunnelPool#95: limit=10
+                                             FunnelPools[3]: FunnelPool#96: limit=7
+                                             FunnelPools[4]: FunnelPool#97: limit=1
+                                             FunnelPools[5]: FunnelPool#98: limit=1
+                                             FunnelPools[6]: FunnelPool#99: limit=2
+                                             FunnelPools[7]: FunnelPool#100: limit=2
+                                             FunnelPools[8]: FunnelPool#101: limit=3
+                                             Funnels[0]: pool=4
+                                             Funnels[1]: pool=7
+                                             Funnels[2]: pool=1
+                                             Funnels[3]: pool=6
+                                             Funnels[4]: pool=0
+                                             Funnels[5]: pool=7
+                                             Funnels[6]: pool=0
+                                             Funnels[7]: pool=2
+                                             Funnels[8]: pool=3
+                                             Funnels[9]: pool=2
+                                             Funnels[10]: pool=1
+                                             Funnels[11]: pool=0
+                                             Funnels[12]: pool=6
+                                             Funnels[13]: pool=5
+                                             Funnels[14]: pool=0
                                           Plan#18 step 1/8 (+0s): scatter:
                                             Task#441: pool=0
                                             Task#441 step 1/2 (+0s): 10.005µs self time
@@ -1761,9 +1761,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#437 step 1/2 (+0s): 10.006µs self time
                                                 Task#437 step 2/2 (+10.006µs): return nil
                                                 Task#437 ends at 213.249µs
-                                                  Combine#437: index=6 flush=<nil>
-                                                  Combine#437 step 1/12 (+0s): 109ns self time
-                                                  Combine#437 step 2/12 (+109ns): scatter:
+                                                  Funnel#437: index=6 flush=<nil>
+                                                  Funnel#437 step 1/12 (+0s): 109ns self time
+                                                  Funnel#437 step 2/12 (+109ns): scatter:
                                                     Task#418: pool=0
                                                     Task#418 step 1/2 (+0s): 9.998µs self time
                                                     Task#418 step 2/2 (+9.998µs): return nil
@@ -1772,15 +1772,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#418 step 1/2 (+0s): 0s self time
                                                       Skim#418 step 2/2 (+0s): return nil
                                                       Skim#418 ends at 223.356µs
-                                                  Combine#437 step 3/12 (+109ns): 738ns self time
-                                                  Combine#437 step 4/12 (+847ns): scatter:
+                                                  Funnel#437 step 3/12 (+109ns): 738ns self time
+                                                  Funnel#437 step 4/12 (+847ns): scatter:
                                                     Task#426: pool=0
                                                     Task#426 step 1/2 (+0s): 9.997µs self time
                                                     Task#426 step 2/2 (+9.997µs): return nil
                                                     Task#426 ends at 224.093µs
-                                                      Combine#426: index=13 flush=<nil>
-                                                      Combine#426 step 1/4 (+0s): 493ns self time
-                                                      Combine#426 step 2/4 (+493ns): scatter:
+                                                      Funnel#426: index=13 flush=<nil>
+                                                      Funnel#426 step 1/4 (+0s): 493ns self time
+                                                      Funnel#426 step 2/4 (+493ns): scatter:
                                                         Task#420: pool=0
                                                         Task#420 step 1/2 (+0s): 9.988µs self time
                                                         Task#420 step 2/2 (+9.988µs): return nil
@@ -1799,11 +1799,11 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Skim#420 step 3/4 (+61ns): 70ns self time
                                                           Skim#420 step 4/4 (+131ns): return nil
                                                           Skim#420 ends at 234.705µs
-                                                      Combine#426 step 3/4 (+493ns): 510ns self time
-                                                      Combine#426 step 4/4 (+1.003µs): return nil
-                                                      Combine#426 ends at 225.096µs
-                                                  Combine#437 step 5/12 (+847ns): 5ns self time
-                                                  Combine#437 step 6/12 (+852ns): scatter:
+                                                      Funnel#426 step 3/4 (+493ns): 510ns self time
+                                                      Funnel#426 step 4/4 (+1.003µs): return nil
+                                                      Funnel#426 ends at 225.096µs
+                                                  Funnel#437 step 5/12 (+847ns): 5ns self time
+                                                  Funnel#437 step 6/12 (+852ns): scatter:
                                                     Task#427: pool=0
                                                     Task#427 step 1/2 (+0s): 8.275µs self time
                                                     Task#427 step 2/2 (+8.275µs): return nil
@@ -1815,22 +1815,22 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#419 step 1/2 (+0s): 10.002µs self time
                                                         Task#419 step 2/2 (+10.002µs): return nil
                                                         Task#419 ends at 233.05µs
-                                                          Combine#419: index=0 flush=<nil>
-                                                          Combine#419 step 1/2 (+0s): 1.001µs self time
-                                                          Combine#419 step 2/2 (+1.001µs): return nil
-                                                          Combine#419 ends at 234.051µs
+                                                          Funnel#419: index=0 flush=<nil>
+                                                          Funnel#419 step 1/2 (+0s): 1.001µs self time
+                                                          Funnel#419 step 2/2 (+1.001µs): return nil
+                                                          Funnel#419 ends at 234.051µs
                                                       Skim#427 step 3/4 (+672ns): 710ns self time
                                                       Skim#427 step 4/4 (+1.382µs): return nil
                                                       Skim#427 ends at 223.758µs
-                                                  Combine#437 step 7/12 (+852ns): 9ns self time
-                                                  Combine#437 step 8/12 (+861ns): scatter:
+                                                  Funnel#437 step 7/12 (+852ns): 9ns self time
+                                                  Funnel#437 step 8/12 (+861ns): scatter:
                                                     Task#430: pool=0
                                                     Task#430 step 1/2 (+0s): 10.037µs self time
                                                     Task#430 step 2/2 (+10.037µs): return nil
                                                     Task#430 ends at 224.147µs
-                                                      Combine#430: index=3 flush=<nil>
-                                                      Combine#430 step 1/4 (+0s): 878ns self time
-                                                      Combine#430 step 2/4 (+878ns): scatter:
+                                                      Funnel#430: index=3 flush=<nil>
+                                                      Funnel#430 step 1/4 (+0s): 878ns self time
+                                                      Funnel#430 step 2/4 (+878ns): scatter:
                                                         Task#422: pool=0
                                                         Task#422 step 1/2 (+0s): 29.285µs self time
                                                         Task#422 step 2/2 (+29.285µs): return nil
@@ -1842,18 +1842,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                                             Task#410 step 1/2 (+0s): 9.997µs self time
                                                             Task#410 step 2/2 (+9.997µs): return nil
                                                             Task#410 ends at 264.307µs
-                                                              Combine#410: index=0 flush=<nil>
-                                                              Combine#410 step 1/2 (+0s): 2.975µs self time
-                                                              Combine#410 step 2/2 (+2.975µs): return nil
-                                                              Combine#410 ends at 267.282µs
+                                                              Funnel#410: index=0 flush=<nil>
+                                                              Funnel#410 step 1/2 (+0s): 2.975µs self time
+                                                              Funnel#410 step 2/2 (+2.975µs): return nil
+                                                              Funnel#410 ends at 267.282µs
                                                           Skim#422 step 3/4 (+0s): 0s self time
                                                           Skim#422 step 4/4 (+0s): return nil
                                                           Skim#422 ends at 254.31µs
-                                                      Combine#430 step 3/4 (+878ns): 120ns self time
-                                                      Combine#430 step 4/4 (+998ns): return nil
-                                                      Combine#430 ends at 225.145µs
-                                                  Combine#437 step 9/12 (+861ns): 21ns self time
-                                                  Combine#437 step 10/12 (+882ns): scatter:
+                                                      Funnel#430 step 3/4 (+878ns): 120ns self time
+                                                      Funnel#430 step 4/4 (+998ns): return nil
+                                                      Funnel#430 ends at 225.145µs
+                                                  Funnel#437 step 9/12 (+861ns): 21ns self time
+                                                  Funnel#437 step 10/12 (+882ns): scatter:
                                                     Task#404: pool=0
                                                     Task#404 step 1/2 (+0s): 9.985µs self time
                                                     Task#404 step 2/2 (+9.985µs): return nil
@@ -1862,19 +1862,19 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#404 step 1/2 (+0s): 920ns self time
                                                       Skim#404 step 2/2 (+920ns): return nil
                                                       Skim#404 ends at 225.036µs
-                                                  Combine#437 step 11/12 (+882ns): 0s self time
-                                                  Combine#437 step 12/12 (+882ns): return nil
-                                                  Combine#437 ends at 214.131µs
+                                                  Funnel#437 step 11/12 (+882ns): 0s self time
+                                                  Funnel#437 step 12/12 (+882ns): return nil
+                                                  Funnel#437 ends at 214.131µs
                                               Skim#441 step 3/6 (+193.238µs): 193.249µs self time
                                               Skim#441 step 4/6 (+386.487µs): scatter:
                                                 Task#413: pool=0
                                                 Task#413 step 1/2 (+0s): 9.767µs self time
                                                 Task#413 step 2/2 (+9.767µs): return nil
                                                 Task#413 ends at 406.259µs
-                                                  Combine#413: index=3 flush=<nil>
-                                                  Combine#413 step 1/2 (+0s): 1.041µs self time
-                                                  Combine#413 step 2/2 (+1.041µs): return nil
-                                                  Combine#413 ends at 407.3µs
+                                                  Funnel#413: index=3 flush=<nil>
+                                                  Funnel#413 step 1/2 (+0s): 1.041µs self time
+                                                  Funnel#413 step 2/2 (+1.041µs): return nil
+                                                  Funnel#413 ends at 407.3µs
                                               Skim#441 step 5/6 (+386.487µs): 193.193µs self time
                                               Skim#441 step 6/6 (+579.68µs): return nil
                                               Skim#441 ends at 589.685µs
@@ -1883,9 +1883,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#442 step 1/2 (+0s): 10.024µs self time
                                             Task#442 step 2/2 (+10.024µs): return nil
                                             Task#442 ends at 10.024µs
-                                              Combine#442: index=0 flush=<nil>
-                                              Combine#442 step 1/8 (+0s): 648ns self time
-                                              Combine#442 step 2/8 (+648ns): scatter:
+                                              Funnel#442: index=0 flush=<nil>
+                                              Funnel#442 step 1/8 (+0s): 648ns self time
+                                              Funnel#442 step 2/8 (+648ns): scatter:
                                                 Task#436: pool=0
                                                 Task#436 step 1/2 (+0s): 10µs self time
                                                 Task#436 step 2/2 (+10µs): return nil
@@ -1897,9 +1897,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#432 step 1/2 (+0s): 9.797µs self time
                                                     Task#432 step 2/2 (+9.797µs): return nil
                                                     Task#432 ends at 30.973µs
-                                                      Combine#432: index=13 flush=<nil>
-                                                      Combine#432 step 1/4 (+0s): 63ns self time
-                                                      Combine#432 step 2/4 (+63ns): scatter:
+                                                      Funnel#432: index=13 flush=<nil>
+                                                      Funnel#432 step 1/4 (+0s): 63ns self time
+                                                      Funnel#432 step 2/4 (+63ns): scatter:
                                                         Task#407: pool=0
                                                         Task#407 step 1/2 (+0s): 9.949µs self time
                                                         Task#407 step 2/2 (+9.949µs): return nil
@@ -1908,14 +1908,14 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Skim#407 step 1/2 (+0s): 1.494µs self time
                                                           Skim#407 step 2/2 (+1.494µs): return nil
                                                           Skim#407 ends at 42.479µs
-                                                      Combine#432 step 3/4 (+63ns): 67ns self time
-                                                      Combine#432 step 4/4 (+130ns): return nil
-                                                      Combine#432 ends at 31.103µs
+                                                      Funnel#432 step 3/4 (+63ns): 67ns self time
+                                                      Funnel#432 step 4/4 (+130ns): return nil
+                                                      Funnel#432 ends at 31.103µs
                                                   Skim#436 step 3/4 (+504ns): 509ns self time
                                                   Skim#436 step 4/4 (+1.013µs): return nil
                                                   Skim#436 ends at 21.685µs
-                                              Combine#442 step 3/8 (+648ns): 27ns self time
-                                              Combine#442 step 4/8 (+675ns): scatter:
+                                              Funnel#442 step 3/8 (+648ns): 27ns self time
+                                              Funnel#442 step 4/8 (+675ns): scatter:
                                                 Task#439: pool=0
                                                 Task#439 step 1/2 (+0s): 1.556989ms self time
                                                 Task#439 step 2/2 (+1.556989ms): return nil
@@ -1944,8 +1944,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Skim#439 step 3/4 (+10ns): 38ns self time
                                                   Skim#439 step 4/4 (+48ns): return nil
                                                   Skim#439 ends at 1.567736ms
-                                              Combine#442 step 5/8 (+675ns): 36ns self time
-                                              Combine#442 step 6/8 (+711ns): scatter:
+                                              Funnel#442 step 5/8 (+675ns): 36ns self time
+                                              Funnel#442 step 6/8 (+711ns): scatter:
                                                 Task#435: pool=0
                                                 Task#435 step 1/2 (+0s): 9.872µs self time
                                                 Task#435 step 2/2 (+9.872µs): return nil
@@ -1957,9 +1957,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#431 step 1/2 (+0s): 9.996µs self time
                                                     Task#431 step 2/2 (+9.996µs): return nil
                                                     Task#431 ends at 32.392µs
-                                                      Combine#431: index=2 flush=Skim#431
-                                                      Combine#431 step 1/4 (+0s): 276ns self time
-                                                      Combine#431 step 2/4 (+276ns): scatter:
+                                                      Funnel#431: index=2 flush=Skim#431
+                                                      Funnel#431 step 1/4 (+0s): 276ns self time
+                                                      Funnel#431 step 2/4 (+276ns): scatter:
                                                         Task#425: pool=0
                                                         Task#425 step 1/2 (+0s): 9.998µs self time
                                                         Task#425 step 2/2 (+9.998µs): return error
@@ -1971,16 +1971,16 @@ Plan#0 step 3/5 (+0s): scatter:
                                                             Task#408 step 1/2 (+0s): 93.572µs self time
                                                             Task#408 step 2/2 (+93.572µs): return nil
                                                             Task#408 ends at 136.768µs
-                                                              Combine#408: index=2 flush=<nil>
-                                                              Combine#408 step 1/2 (+0s): 992ns self time
-                                                              Combine#408 step 2/2 (+992ns): return nil
-                                                              Combine#408 ends at 137.76µs
+                                                              Funnel#408: index=2 flush=<nil>
+                                                              Funnel#408 step 1/2 (+0s): 992ns self time
+                                                              Funnel#408 step 2/2 (+992ns): return nil
+                                                              Funnel#408 ends at 137.76µs
                                                           Skim#425 step 3/4 (+530ns): 80ns self time
                                                           Skim#425 step 4/4 (+610ns): return nil
                                                           Skim#425 ends at 43.276µs
-                                                      Combine#431 step 3/4 (+276ns): 504ns self time
-                                                      Combine#431 step 4/4 (+780ns): return nil
-                                                      Combine#431 ends at 33.172µs
+                                                      Funnel#431 step 3/4 (+276ns): 504ns self time
+                                                      Funnel#431 step 4/4 (+780ns): return nil
+                                                      Funnel#431 ends at 33.172µs
                                                         Skim#431: index=0
                                                         Skim#431 step 1/2 (+0s): 953ns self time
                                                         Skim#431 step 2/2 (+953ns): return nil
@@ -1988,9 +1988,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Skim#435 step 3/4 (+1.789µs): 2.387µs self time
                                                   Skim#435 step 4/4 (+4.176µs): return nil
                                                   Skim#435 ends at 24.783µs
-                                              Combine#442 step 7/8 (+711ns): 36ns self time
-                                              Combine#442 step 8/8 (+747ns): return nil
-                                              Combine#442 ends at 10.771µs
+                                              Funnel#442 step 7/8 (+711ns): 36ns self time
+                                              Funnel#442 step 8/8 (+747ns): return nil
+                                              Funnel#442 ends at 10.771µs
                                           Plan#18 step 3/8 (+0s): scatter:
                                             Task#443: pool=0
                                             Task#443 step 1/2 (+0s): 10.015µs self time
@@ -2010,9 +2010,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#428 step 1/2 (+0s): 10µs self time
                                                     Task#428 step 2/2 (+10µs): return nil
                                                     Task#428 ends at 37.216µs
-                                                      Combine#428: index=1 flush=<nil>
-                                                      Combine#428 step 1/4 (+0s): 159ns self time
-                                                      Combine#428 step 2/4 (+159ns): scatter:
+                                                      Funnel#428: index=1 flush=<nil>
+                                                      Funnel#428 step 1/4 (+0s): 159ns self time
+                                                      Funnel#428 step 2/4 (+159ns): scatter:
                                                         Task#424: pool=0
                                                         Task#424 step 1/2 (+0s): 3.277µs self time
                                                         Task#424 step 2/2 (+3.277µs): return nil
@@ -2031,9 +2031,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Skim#424 step 3/4 (+468ns): 533ns self time
                                                           Skim#424 step 4/4 (+1.001µs): return nil
                                                           Skim#424 ends at 41.653µs
-                                                      Combine#428 step 3/4 (+159ns): 159ns self time
-                                                      Combine#428 step 4/4 (+318ns): return nil
-                                                      Combine#428 ends at 37.534µs
+                                                      Funnel#428 step 3/4 (+159ns): 159ns self time
+                                                      Funnel#428 step 4/4 (+318ns): return nil
+                                                      Funnel#428 ends at 37.534µs
                                                   Skim#434 step 3/4 (+6.937µs): 6.941µs self time
                                                   Skim#434 step 4/4 (+13.878µs): return nil
                                                   Skim#434 ends at 34.157µs
@@ -2043,10 +2043,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#405 step 1/2 (+0s): 9.993µs self time
                                                 Task#405 step 2/2 (+9.993µs): return nil
                                                 Task#405 ends at 20.662µs
-                                                  Combine#405: index=13 flush=<nil>
-                                                  Combine#405 step 1/2 (+0s): 999ns self time
-                                                  Combine#405 step 2/2 (+999ns): return nil
-                                                  Combine#405 ends at 21.661µs
+                                                  Funnel#405: index=13 flush=<nil>
+                                                  Funnel#405 step 1/2 (+0s): 999ns self time
+                                                  Funnel#405 step 2/2 (+999ns): return nil
+                                                  Funnel#405 ends at 21.661µs
                                               Skim#443 step 5/6 (+654ns): 439ns self time
                                               Skim#443 step 6/6 (+1.093µs): return nil
                                               Skim#443 ends at 11.108µs
@@ -2055,10 +2055,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#412 step 1/2 (+0s): 10µs self time
                                             Task#412 step 2/2 (+10µs): return nil
                                             Task#412 ends at 10µs
-                                              Combine#412: index=11 flush=<nil>
-                                              Combine#412 step 1/2 (+0s): 901ns self time
-                                              Combine#412 step 2/2 (+901ns): return nil
-                                              Combine#412 ends at 10.901µs
+                                              Funnel#412: index=11 flush=<nil>
+                                              Funnel#412 step 1/2 (+0s): 901ns self time
+                                              Funnel#412 step 2/2 (+901ns): return nil
+                                              Funnel#412 ends at 10.901µs
                                           Plan#18 step 5/8 (+0s): scatter:
                                             Task#414: pool=0
                                             Task#414 step 1/2 (+0s): 10.001µs self time
@@ -2073,10 +2073,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#406 step 1/2 (+0s): 2.763116ms self time
                                             Task#406 step 2/2 (+2.763116ms): return nil
                                             Task#406 ends at 2.763116ms
-                                              Combine#406: index=0 flush=<nil>
-                                              Combine#406 step 1/2 (+0s): 653ns self time
-                                              Combine#406 step 2/2 (+653ns): return nil
-                                              Combine#406 ends at 2.763769ms
+                                              Funnel#406: index=0 flush=<nil>
+                                              Funnel#406 step 1/2 (+0s): 653ns self time
+                                              Funnel#406 step 2/2 (+653ns): return nil
+                                              Funnel#406 ends at 2.763769ms
                                           Plan#18 step 7/8 (+0s): scatter:
                                             Task#440: pool=0
                                             Task#440 step 1/2 (+0s): 10.024µs self time
@@ -2157,39 +2157,39 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Skim#440 step 4/4 (+265ns): return nil
                                               Skim#440 ends at 10.289µs
                                           Plan#18 step 8/8 (+0s): ends at 8.618889ms
-                                        Combine#402 step 3/4 (+8.619832ms): 0s self time
-                                        Combine#402 step 4/4 (+8.619832ms): return nil
-                                        Combine#402 ends at 8.640578ms
-                                    Combine#541 step 3/14 (+728ns): 703ns self time
-                                    Combine#541 step 4/14 (+1.431µs): scatter:
+                                        Funnel#402 step 3/4 (+8.619832ms): 0s self time
+                                        Funnel#402 step 4/4 (+8.619832ms): return nil
+                                        Funnel#402 ends at 8.640578ms
+                                    Funnel#541 step 3/14 (+728ns): 703ns self time
+                                    Funnel#541 step 4/14 (+1.431µs): scatter:
                                       Task#445: pool=2
                                       Task#445 step 1/2 (+0s): 1.445µs self time
                                       Task#445 step 2/2 (+1.445µs): return nil
                                       Task#445 ends at 12.874µs
-                                        Combine#445: index=7 flush=<nil>
-                                        Combine#445 step 1/2 (+0s): 985ns self time
-                                        Combine#445 step 2/2 (+985ns): return nil
-                                        Combine#445 ends at 13.859µs
-                                    Combine#541 step 5/14 (+1.431µs): 722ns self time
-                                    Combine#541 step 6/14 (+2.153µs): scatter:
+                                        Funnel#445: index=7 flush=<nil>
+                                        Funnel#445 step 1/2 (+0s): 985ns self time
+                                        Funnel#445 step 2/2 (+985ns): return nil
+                                        Funnel#445 ends at 13.859µs
+                                    Funnel#541 step 5/14 (+1.431µs): 722ns self time
+                                    Funnel#541 step 6/14 (+2.153µs): scatter:
                                       Task#455: pool=2
                                       Task#455 step 1/4 (+0s): 505ns self time
                                       Task#455 step 2/4 (+505ns): subjob:
                                         Plan#19: pathCount=29 taskCount=57 maxPathDuration=13.762195ms minSkimCount=48 maxSkimCount=57
                                            TaskPools[0]: TaskPool#57: limit=10
-                                           CombinerPools[0]: CombinerPool#102: limit=1
-                                           CombinerPools[1]: CombinerPool#103: limit=1
-                                           CombinerPools[2]: CombinerPool#104: limit=4
-                                           CombinerPools[3]: CombinerPool#105: limit=1
-                                           CombinerPools[4]: CombinerPool#106: limit=1
-                                           CombinerPools[5]: CombinerPool#107: limit=3
-                                           CombinerPools[6]: CombinerPool#108: limit=10
-                                           CombinerPools[7]: CombinerPool#109: limit=7
-                                           CombinerPools[8]: CombinerPool#110: limit=2
-                                           CombinerPools[9]: CombinerPool#111: limit=4
-                                           Combiners[0]: pool=1
-                                           Combiners[1]: pool=0
-                                           Combiners[2]: pool=0
+                                           FunnelPools[0]: FunnelPool#102: limit=1
+                                           FunnelPools[1]: FunnelPool#103: limit=1
+                                           FunnelPools[2]: FunnelPool#104: limit=4
+                                           FunnelPools[3]: FunnelPool#105: limit=1
+                                           FunnelPools[4]: FunnelPool#106: limit=1
+                                           FunnelPools[5]: FunnelPool#107: limit=3
+                                           FunnelPools[6]: FunnelPool#108: limit=10
+                                           FunnelPools[7]: FunnelPool#109: limit=7
+                                           FunnelPools[8]: FunnelPool#110: limit=2
+                                           FunnelPools[9]: FunnelPool#111: limit=4
+                                           Funnels[0]: pool=1
+                                           Funnels[1]: pool=0
+                                           Funnels[2]: pool=0
                                         Plan#19 step 1/13 (+0s): scatter:
                                           Task#509: pool=0
                                           Task#509 step 1/2 (+0s): 10.007µs self time
@@ -2238,10 +2238,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#480 step 1/2 (+0s): 9.999µs self time
                                                   Task#480 step 2/2 (+9.999µs): return nil
                                                   Task#480 ends at 530.273µs
-                                                    Combine#480: index=2 flush=<nil>
-                                                    Combine#480 step 1/2 (+0s): 1.179µs self time
-                                                    Combine#480 step 2/2 (+1.179µs): return nil
-                                                    Combine#480 ends at 531.452µs
+                                                    Funnel#480: index=2 flush=<nil>
+                                                    Funnel#480 step 1/2 (+0s): 1.179µs self time
+                                                    Funnel#480 step 2/2 (+1.179µs): return nil
+                                                    Funnel#480 ends at 531.452µs
                                                 Skim#500 step 3/4 (+497ns): 495ns self time
                                                 Skim#500 step 4/4 (+992ns): return nil
                                                 Skim#500 ends at 520.769µs
@@ -2279,10 +2279,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#474 step 1/2 (+0s): 9.999µs self time
                                               Task#474 step 2/2 (+9.999µs): return nil
                                               Task#474 ends at 20.379µs
-                                                Combine#474: index=1 flush=<nil>
-                                                Combine#474 step 1/2 (+0s): 745ns self time
-                                                Combine#474 step 2/2 (+745ns): return nil
-                                                Combine#474 ends at 21.124µs
+                                                Funnel#474: index=1 flush=<nil>
+                                                Funnel#474 step 1/2 (+0s): 745ns self time
+                                                Funnel#474 step 2/2 (+745ns): return nil
+                                                Funnel#474 ends at 21.124µs
                                             Skim#512 step 3/4 (+280ns): 297ns self time
                                             Skim#512 step 4/4 (+577ns): return nil
                                             Skim#512 ends at 10.677µs
@@ -2300,9 +2300,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#507 step 1/2 (+0s): 10.028µs self time
                                           Task#507 step 2/2 (+10.028µs): return nil
                                           Task#507 ends at 10.028µs
-                                            Combine#507: index=2 flush=<nil>
-                                            Combine#507 step 1/12 (+0s): 35ns self time
-                                            Combine#507 step 2/12 (+35ns): scatter:
+                                            Funnel#507: index=2 flush=<nil>
+                                            Funnel#507 step 1/12 (+0s): 35ns self time
+                                            Funnel#507 step 2/12 (+35ns): scatter:
                                               Task#499: pool=0
                                               Task#499 step 1/2 (+0s): 9.998µs self time
                                               Task#499 step 2/2 (+9.998µs): return nil
@@ -2331,8 +2331,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#499 step 3/4 (+582ns): 404ns self time
                                                 Skim#499 step 4/4 (+986ns): return error
                                                 Skim#499 ends at 21.047µs
-                                            Combine#507 step 3/12 (+35ns): 188ns self time
-                                            Combine#507 step 4/12 (+223ns): scatter:
+                                            Funnel#507 step 3/12 (+35ns): 188ns self time
+                                            Funnel#507 step 4/12 (+223ns): scatter:
                                               Task#461: pool=0
                                               Task#461 step 1/2 (+0s): 8.338µs self time
                                               Task#461 step 2/2 (+8.338µs): return nil
@@ -2341,8 +2341,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#461 step 1/2 (+0s): 1.001µs self time
                                                 Skim#461 step 2/2 (+1.001µs): return nil
                                                 Skim#461 ends at 19.59µs
-                                            Combine#507 step 5/12 (+223ns): 637ns self time
-                                            Combine#507 step 6/12 (+860ns): scatter:
+                                            Funnel#507 step 5/12 (+223ns): 637ns self time
+                                            Funnel#507 step 6/12 (+860ns): scatter:
                                               Task#475: pool=0
                                               Task#475 step 1/2 (+0s): 9.695µs self time
                                               Task#475 step 2/2 (+9.695µs): return nil
@@ -2351,8 +2351,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#475 step 1/2 (+0s): 489.301µs self time
                                                 Skim#475 step 2/2 (+489.301µs): return nil
                                                 Skim#475 ends at 509.884µs
-                                            Combine#507 step 7/12 (+860ns): 75ns self time
-                                            Combine#507 step 8/12 (+935ns): scatter:
+                                            Funnel#507 step 7/12 (+860ns): 75ns self time
+                                            Funnel#507 step 8/12 (+935ns): scatter:
                                               Task#484: pool=0
                                               Task#484 step 1/2 (+0s): 10.002µs self time
                                               Task#484 step 2/2 (+10.002µs): return nil
@@ -2361,8 +2361,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#484 step 1/2 (+0s): 1.007µs self time
                                                 Skim#484 step 2/2 (+1.007µs): return nil
                                                 Skim#484 ends at 21.972µs
-                                            Combine#507 step 9/12 (+935ns): 27ns self time
-                                            Combine#507 step 10/12 (+962ns): scatter:
+                                            Funnel#507 step 9/12 (+935ns): 27ns self time
+                                            Funnel#507 step 10/12 (+962ns): scatter:
                                               Task#503: pool=0
                                               Task#503 step 1/2 (+0s): 10.064µs self time
                                               Task#503 step 2/2 (+10.064µs): return nil
@@ -2391,9 +2391,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#503 step 3/4 (+16.956µs): 16.907µs self time
                                                 Skim#503 step 4/4 (+33.863µs): return nil
                                                 Skim#503 ends at 54.917µs
-                                            Combine#507 step 11/12 (+962ns): 36ns self time
-                                            Combine#507 step 12/12 (+998ns): return nil
-                                            Combine#507 ends at 11.026µs
+                                            Funnel#507 step 11/12 (+962ns): 36ns self time
+                                            Funnel#507 step 12/12 (+998ns): return nil
+                                            Funnel#507 ends at 11.026µs
                                         Plan#19 step 7/13 (+0s): scatter:
                                           Task#468: pool=0
                                           Task#468 step 1/2 (+0s): 9.841µs self time
@@ -2417,40 +2417,40 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#511 step 1/2 (+0s): 0s self time
                                           Task#511 step 2/2 (+0s): return nil
                                           Task#511 ends at 0s
-                                            Combine#511: index=0 flush=<nil>
-                                            Combine#511 step 1/4 (+0s): 497ns self time
-                                            Combine#511 step 2/4 (+497ns): scatter:
+                                            Funnel#511: index=0 flush=<nil>
+                                            Funnel#511 step 1/4 (+0s): 497ns self time
+                                            Funnel#511 step 2/4 (+497ns): scatter:
                                               Task#504: pool=0
                                               Task#504 step 1/2 (+0s): 9.998µs self time
                                               Task#504 step 2/2 (+9.998µs): return nil
                                               Task#504 ends at 10.495µs
-                                                Combine#504: index=1 flush=<nil>
-                                                Combine#504 step 1/4 (+0s): 593ns self time
-                                                Combine#504 step 2/4 (+593ns): scatter:
+                                                Funnel#504: index=1 flush=<nil>
+                                                Funnel#504 step 1/4 (+0s): 593ns self time
+                                                Funnel#504 step 2/4 (+593ns): scatter:
                                                   Task#494: pool=0
                                                   Task#494 step 1/2 (+0s): 9.998µs self time
                                                   Task#494 step 2/2 (+9.998µs): return nil
                                                   Task#494 ends at 21.086µs
-                                                    Combine#494: index=2 flush=<nil>
-                                                    Combine#494 step 1/4 (+0s): 40ns self time
-                                                    Combine#494 step 2/4 (+40ns): scatter:
+                                                    Funnel#494: index=2 flush=<nil>
+                                                    Funnel#494 step 1/4 (+0s): 40ns self time
+                                                    Funnel#494 step 2/4 (+40ns): scatter:
                                                       Task#457: pool=0
                                                       Task#457 step 1/2 (+0s): 9.623µs self time
                                                       Task#457 step 2/2 (+9.623µs): return nil
                                                       Task#457 ends at 30.749µs
-                                                        Combine#457: index=1 flush=<nil>
-                                                        Combine#457 step 1/2 (+0s): 1ms self time
-                                                        Combine#457 step 2/2 (+1ms): return nil
-                                                        Combine#457 ends at 1.030749ms
-                                                    Combine#494 step 3/4 (+40ns): 954ns self time
-                                                    Combine#494 step 4/4 (+994ns): return nil
-                                                    Combine#494 ends at 22.08µs
-                                                Combine#504 step 3/4 (+593ns): 408ns self time
-                                                Combine#504 step 4/4 (+1.001µs): return nil
-                                                Combine#504 ends at 11.496µs
-                                            Combine#511 step 3/4 (+497ns): 501ns self time
-                                            Combine#511 step 4/4 (+998ns): return nil
-                                            Combine#511 ends at 998ns
+                                                        Funnel#457: index=1 flush=<nil>
+                                                        Funnel#457 step 1/2 (+0s): 1ms self time
+                                                        Funnel#457 step 2/2 (+1ms): return nil
+                                                        Funnel#457 ends at 1.030749ms
+                                                    Funnel#494 step 3/4 (+40ns): 954ns self time
+                                                    Funnel#494 step 4/4 (+994ns): return nil
+                                                    Funnel#494 ends at 22.08µs
+                                                Funnel#504 step 3/4 (+593ns): 408ns self time
+                                                Funnel#504 step 4/4 (+1.001µs): return nil
+                                                Funnel#504 ends at 11.496µs
+                                            Funnel#511 step 3/4 (+497ns): 501ns self time
+                                            Funnel#511 step 4/4 (+998ns): return nil
+                                            Funnel#511 ends at 998ns
                                         Plan#19 step 10/13 (+0s): scatter:
                                           Task#505: pool=0
                                           Task#505 step 1/2 (+0s): 10.244µs self time
@@ -2693,10 +2693,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Task#462 step 1/2 (+0s): 9.998µs self time
                                                           Task#462 step 2/2 (+9.998µs): return nil
                                                           Task#462 ends at 10.052974ms
-                                                            Combine#462: index=0 flush=<nil>
-                                                            Combine#462 step 1/2 (+0s): 117ns self time
-                                                            Combine#462 step 2/2 (+117ns): return nil
-                                                            Combine#462 ends at 10.053091ms
+                                                            Funnel#462: index=0 flush=<nil>
+                                                            Funnel#462 step 1/2 (+0s): 117ns self time
+                                                            Funnel#462 step 2/2 (+117ns): return nil
+                                                            Funnel#462 ends at 10.053091ms
                                                         Skim#488 step 7/10 (+949ns): 17ns self time
                                                         Skim#488 step 8/10 (+966ns): scatter:
                                                           Task#466: pool=0
@@ -2732,10 +2732,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#463 step 1/2 (+0s): 2.008µs self time
                                               Task#463 step 2/2 (+2.008µs): return nil
                                               Task#463 ends at 10.002818ms
-                                                Combine#463: index=1 flush=<nil>
-                                                Combine#463 step 1/2 (+0s): 997ns self time
-                                                Combine#463 step 2/2 (+997ns): return nil
-                                                Combine#463 ends at 10.003815ms
+                                                Funnel#463: index=1 flush=<nil>
+                                                Funnel#463 step 1/2 (+0s): 997ns self time
+                                                Funnel#463 step 2/2 (+997ns): return nil
+                                                Funnel#463 ends at 10.003815ms
                                             Skim#506 step 7/8 (+810ns): 130ns self time
                                             Skim#506 step 8/8 (+940ns): return nil
                                             Skim#506 ends at 10.00094ms
@@ -2765,23 +2765,23 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Plan#17: pathCount=13 taskCount=24 maxPathDuration=4.787481ms minSkimCount=15 maxSkimCount=24
                                                  TaskPools[0]: TaskPool#54: limit=1
                                                  TaskPools[1]: TaskPool#55: limit=1
-                                                 CombinerPools[0]: CombinerPool#86: limit=2
-                                                 CombinerPools[1]: CombinerPool#87: limit=1
-                                                 CombinerPools[2]: CombinerPool#88: limit=1
-                                                 CombinerPools[3]: CombinerPool#89: limit=1
-                                                 CombinerPools[4]: CombinerPool#90: limit=1
-                                                 CombinerPools[5]: CombinerPool#91: limit=1
-                                                 CombinerPools[6]: CombinerPool#92: limit=1
-                                                 Combiners[0]: pool=6
-                                                 Combiners[1]: pool=2
+                                                 FunnelPools[0]: FunnelPool#86: limit=2
+                                                 FunnelPools[1]: FunnelPool#87: limit=1
+                                                 FunnelPools[2]: FunnelPool#88: limit=1
+                                                 FunnelPools[3]: FunnelPool#89: limit=1
+                                                 FunnelPools[4]: FunnelPool#90: limit=1
+                                                 FunnelPools[5]: FunnelPool#91: limit=1
+                                                 FunnelPools[6]: FunnelPool#92: limit=1
+                                                 Funnels[0]: pool=6
+                                                 Funnels[1]: pool=2
                                               Plan#17 step 1/5 (+0s): scatter:
                                                 Task#401: pool=0
                                                 Task#401 step 1/2 (+0s): 37.527µs self time
                                                 Task#401 step 2/2 (+37.527µs): return nil
                                                 Task#401 ends at 37.527µs
-                                                  Combine#401: index=0 flush=<nil>
-                                                  Combine#401 step 1/4 (+0s): 109ns self time
-                                                  Combine#401 step 2/4 (+109ns): scatter:
+                                                  Funnel#401: index=0 flush=<nil>
+                                                  Funnel#401 step 1/4 (+0s): 109ns self time
+                                                  Funnel#401 step 2/4 (+109ns): scatter:
                                                     Task#390: pool=0
                                                     Task#390 step 1/2 (+0s): 4.879µs self time
                                                     Task#390 step 2/2 (+4.879µs): return nil
@@ -2790,27 +2790,27 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#390 step 1/2 (+0s): 842ns self time
                                                       Skim#390 step 2/2 (+842ns): return nil
                                                       Skim#390 ends at 43.357µs
-                                                  Combine#401 step 3/4 (+109ns): 112ns self time
-                                                  Combine#401 step 4/4 (+221ns): return nil
-                                                  Combine#401 ends at 37.748µs
+                                                  Funnel#401 step 3/4 (+109ns): 112ns self time
+                                                  Funnel#401 step 4/4 (+221ns): return nil
+                                                  Funnel#401 ends at 37.748µs
                                               Plan#17 step 2/5 (+0s): scatter:
                                                 Task#383: pool=0
                                                 Task#383 step 1/2 (+0s): 9.999µs self time
                                                 Task#383 step 2/2 (+9.999µs): return nil
                                                 Task#383 ends at 9.999µs
-                                                  Combine#383: index=0 flush=<nil>
-                                                  Combine#383 step 1/2 (+0s): 999ns self time
-                                                  Combine#383 step 2/2 (+999ns): return nil
-                                                  Combine#383 ends at 10.998µs
+                                                  Funnel#383: index=0 flush=<nil>
+                                                  Funnel#383 step 1/2 (+0s): 999ns self time
+                                                  Funnel#383 step 2/2 (+999ns): return nil
+                                                  Funnel#383 ends at 10.998µs
                                               Plan#17 step 3/5 (+0s): scatter:
                                                 Task#388: pool=1
                                                 Task#388 step 1/2 (+0s): 9.994µs self time
                                                 Task#388 step 2/2 (+9.994µs): return nil
                                                 Task#388 ends at 9.994µs
-                                                  Combine#388: index=1 flush=<nil>
-                                                  Combine#388 step 1/2 (+0s): 975ns self time
-                                                  Combine#388 step 2/2 (+975ns): return nil
-                                                  Combine#388 ends at 10.969µs
+                                                  Funnel#388: index=1 flush=<nil>
+                                                  Funnel#388 step 1/2 (+0s): 975ns self time
+                                                  Funnel#388 step 2/2 (+975ns): return nil
+                                                  Funnel#388 ends at 10.969µs
                                               Plan#17 step 4/5 (+0s): scatter:
                                                 Task#400: pool=1
                                                 Task#400 step 1/2 (+0s): 10.259µs self time
@@ -2830,10 +2830,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#382 step 1/2 (+0s): 9.999µs self time
                                                         Task#382 step 2/2 (+9.999µs): return nil
                                                         Task#382 ends at 30.977µs
-                                                          Combine#382: index=0 flush=<nil>
-                                                          Combine#382 step 1/2 (+0s): 534ns self time
-                                                          Combine#382 step 2/2 (+534ns): return nil
-                                                          Combine#382 ends at 31.511µs
+                                                          Funnel#382: index=0 flush=<nil>
+                                                          Funnel#382 step 1/2 (+0s): 534ns self time
+                                                          Funnel#382 step 2/2 (+534ns): return nil
+                                                          Funnel#382 ends at 31.511µs
                                                       Skim#396 step 3/4 (+447ns): 554ns self time
                                                       Skim#396 step 4/4 (+1.001µs): return nil
                                                       Skim#396 ends at 21.532µs
@@ -2843,20 +2843,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#395 step 1/2 (+0s): 9.999µs self time
                                                     Task#395 step 2/2 (+9.999µs): return nil
                                                     Task#395 ends at 20.563µs
-                                                      Combine#395: index=0 flush=<nil>
-                                                      Combine#395 step 1/4 (+0s): 284ns self time
-                                                      Combine#395 step 2/4 (+284ns): scatter:
+                                                      Funnel#395: index=0 flush=<nil>
+                                                      Funnel#395 step 1/4 (+0s): 284ns self time
+                                                      Funnel#395 step 2/4 (+284ns): scatter:
                                                         Task#386: pool=0
                                                         Task#386 step 1/2 (+0s): 9.916µs self time
                                                         Task#386 step 2/2 (+9.916µs): return nil
                                                         Task#386 ends at 30.763µs
-                                                          Combine#386: index=0 flush=<nil>
-                                                          Combine#386 step 1/2 (+0s): 998ns self time
-                                                          Combine#386 step 2/2 (+998ns): return nil
-                                                          Combine#386 ends at 31.761µs
-                                                      Combine#395 step 3/4 (+284ns): 286ns self time
-                                                      Combine#395 step 4/4 (+570ns): return nil
-                                                      Combine#395 ends at 21.133µs
+                                                          Funnel#386: index=0 flush=<nil>
+                                                          Funnel#386 step 1/2 (+0s): 998ns self time
+                                                          Funnel#386 step 2/2 (+998ns): return nil
+                                                          Funnel#386 ends at 31.761µs
+                                                      Funnel#395 step 3/4 (+284ns): 286ns self time
+                                                      Funnel#395 step 4/4 (+570ns): return nil
+                                                      Funnel#395 ends at 21.133µs
                                                   Skim#400 step 5/16 (+305ns): 92ns self time
                                                   Skim#400 step 6/16 (+397ns): scatter:
                                                     Task#379: pool=1
@@ -2924,10 +2924,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Task#380 step 1/2 (+0s): 15.59µs self time
                                                                 Task#380 step 2/2 (+15.59µs): return nil
                                                                 Task#380 ends at 49.048µs
-                                                                  Combine#380: index=0 flush=<nil>
-                                                                  Combine#380 step 1/2 (+0s): 0s self time
-                                                                  Combine#380 step 2/2 (+0s): return nil
-                                                                  Combine#380 ends at 49.048µs
+                                                                  Funnel#380: index=0 flush=<nil>
+                                                                  Funnel#380 step 1/2 (+0s): 0s self time
+                                                                  Funnel#380 step 2/2 (+0s): return nil
+                                                                  Funnel#380 ends at 49.048µs
                                                               Skim#391 step 5/8 (+912ns): 66ns self time
                                                               Skim#391 step 6/8 (+978ns): scatter:
                                                                 Task#387: pool=1
@@ -2953,9 +2953,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#399 step 1/2 (+0s): 9.975µs self time
                                                     Task#399 step 2/2 (+9.975µs): return nil
                                                     Task#399 ends at 21µs
-                                                      Combine#399: index=0 flush=<nil>
-                                                      Combine#399 step 1/4 (+0s): 768ns self time
-                                                      Combine#399 step 2/4 (+768ns): scatter:
+                                                      Funnel#399: index=0 flush=<nil>
+                                                      Funnel#399 step 1/4 (+0s): 768ns self time
+                                                      Funnel#399 step 2/4 (+768ns): scatter:
                                                         Task#394: pool=1
                                                         Task#394 step 1/2 (+0s): 9.997µs self time
                                                         Task#394 step 2/2 (+9.997µs): return error
@@ -2984,19 +2984,19 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Task#385 step 1/2 (+0s): 23.247µs self time
                                                                 Task#385 step 2/2 (+23.247µs): return nil
                                                                 Task#385 ends at 107.27µs
-                                                                  Combine#385: index=1 flush=<nil>
-                                                                  Combine#385 step 1/2 (+0s): 1.003µs self time
-                                                                  Combine#385 step 2/2 (+1.003µs): return nil
-                                                                  Combine#385 ends at 108.273µs
+                                                                  Funnel#385: index=1 flush=<nil>
+                                                                  Funnel#385 step 1/2 (+0s): 1.003µs self time
+                                                                  Funnel#385 step 2/2 (+1.003µs): return nil
+                                                                  Funnel#385 ends at 108.273µs
                                                               Skim#392 step 5/6 (+41.798µs): 20.872µs self time
                                                               Skim#392 step 6/6 (+62.67µs): return nil
                                                               Skim#392 ends at 104.895µs
                                                           Skim#394 step 3/4 (+499ns): 504ns self time
                                                           Skim#394 step 4/4 (+1.003µs): return nil
                                                           Skim#394 ends at 32.768µs
-                                                      Combine#399 step 3/4 (+768ns): 770ns self time
-                                                      Combine#399 step 4/4 (+1.538µs): return nil
-                                                      Combine#399 ends at 22.538µs
+                                                      Funnel#399 step 3/4 (+768ns): 770ns self time
+                                                      Funnel#399 step 4/4 (+1.538µs): return nil
+                                                      Funnel#399 ends at 22.538µs
                                                   Skim#400 step 13/16 (+766ns): 223ns self time
                                                   Skim#400 step 14/16 (+989ns): scatter:
                                                     Task#381: pool=0
@@ -3020,9 +3020,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#453 step 1/2 (+0s): 10.117µs self time
                                           Task#453 step 2/2 (+10.117µs): return nil
                                           Task#453 ends at 13.787993ms
-                                            Combine#453: index=1 flush=<nil>
-                                            Combine#453 step 1/6 (+0s): 37.544µs self time
-                                            Combine#453 step 2/6 (+37.544µs): scatter:
+                                            Funnel#453: index=1 flush=<nil>
+                                            Funnel#453 step 1/6 (+0s): 37.544µs self time
+                                            Funnel#453 step 2/6 (+37.544µs): scatter:
                                               Task#451: pool=1
                                               Task#451 step 1/2 (+0s): 147.645µs self time
                                               Task#451 step 2/2 (+147.645µs): return nil
@@ -3034,15 +3034,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#288 step 1/2 (+0s): 10.017µs self time
                                                   Task#288 step 2/2 (+10.017µs): return nil
                                                   Task#288 ends at 13.983701ms
-                                                    Combine#288: index=2 flush=<nil>
-                                                    Combine#288 step 1/2 (+0s): 996ns self time
-                                                    Combine#288 step 2/2 (+996ns): return nil
-                                                    Combine#288 ends at 13.984697ms
+                                                    Funnel#288: index=2 flush=<nil>
+                                                    Funnel#288 step 1/2 (+0s): 996ns self time
+                                                    Funnel#288 step 2/2 (+996ns): return nil
+                                                    Funnel#288 ends at 13.984697ms
                                                 Skim#451 step 3/4 (+502ns): 503ns self time
                                                 Skim#451 step 4/4 (+1.005µs): return nil
                                                 Skim#451 ends at 13.974187ms
-                                            Combine#453 step 3/6 (+37.544µs): 37.541µs self time
-                                            Combine#453 step 4/6 (+75.085µs): scatter:
+                                            Funnel#453 step 3/6 (+37.544µs): 37.541µs self time
+                                            Funnel#453 step 4/6 (+75.085µs): scatter:
                                               Task#448: pool=2
                                               Task#448 step 1/2 (+0s): 10.491µs self time
                                               Task#448 step 2/2 (+10.491µs): return nil
@@ -3051,19 +3051,19 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#448 step 1/2 (+0s): 1µs self time
                                                 Skim#448 step 2/2 (+1µs): return nil
                                                 Skim#448 ends at 13.874569ms
-                                            Combine#453 step 5/6 (+75.085µs): 37.538µs self time
-                                            Combine#453 step 6/6 (+112.623µs): return nil
-                                            Combine#453 ends at 13.900616ms
+                                            Funnel#453 step 5/6 (+75.085µs): 37.538µs self time
+                                            Funnel#453 step 6/6 (+112.623µs): return nil
+                                            Funnel#453 ends at 13.900616ms
                                         Skim#455 step 5/10 (+0s): 0s self time
                                         Skim#455 step 6/10 (+0s): scatter:
                                           Task#452: pool=1
                                           Task#452 step 1/2 (+0s): 10.019µs self time
                                           Task#452 step 2/2 (+10.019µs): return nil
                                           Task#452 ends at 13.787895ms
-                                            Combine#452: index=8 flush=Skim#452
-                                            Combine#452 step 1/2 (+0s): 2.014µs self time
-                                            Combine#452 step 2/2 (+2.014µs): return nil
-                                            Combine#452 ends at 13.789909ms
+                                            Funnel#452: index=8 flush=Skim#452
+                                            Funnel#452 step 1/2 (+0s): 2.014µs self time
+                                            Funnel#452 step 2/2 (+2.014µs): return nil
+                                            Funnel#452 ends at 13.789909ms
                                               Skim#452: index=5
                                               Skim#452 step 1/4 (+0s): 562ns self time
                                               Skim#452 step 2/4 (+562ns): scatter:
@@ -3091,18 +3091,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#455 step 9/10 (+0s): 0s self time
                                         Skim#455 step 10/10 (+0s): return nil
                                         Skim#455 ends at 13.777876ms
-                                    Combine#541 step 7/14 (+2.153µs): 389ns self time
-                                    Combine#541 step 8/14 (+2.542µs): scatter:
+                                    Funnel#541 step 7/14 (+2.153µs): 389ns self time
+                                    Funnel#541 step 8/14 (+2.542µs): scatter:
                                       Task#447: pool=1
                                       Task#447 step 1/2 (+0s): 10µs self time
                                       Task#447 step 2/2 (+10µs): return nil
                                       Task#447 ends at 22.54µs
-                                        Combine#447: index=10 flush=<nil>
-                                        Combine#447 step 1/2 (+0s): 1.001µs self time
-                                        Combine#447 step 2/2 (+1.001µs): return nil
-                                        Combine#447 ends at 23.541µs
-                                    Combine#541 step 9/14 (+2.542µs): 757ns self time
-                                    Combine#541 step 10/14 (+3.299µs): scatter:
+                                        Funnel#447: index=10 flush=<nil>
+                                        Funnel#447 step 1/2 (+0s): 1.001µs self time
+                                        Funnel#447 step 2/2 (+1.001µs): return nil
+                                        Funnel#447 ends at 23.541µs
+                                    Funnel#541 step 9/14 (+2.542µs): 757ns self time
+                                    Funnel#541 step 10/14 (+3.299µs): scatter:
                                       Task#454: pool=1
                                       Task#454 step 1/2 (+0s): 10ms self time
                                       Task#454 step 2/2 (+10ms): return nil
@@ -3144,10 +3144,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#298 step 1/2 (+0s): 9.985µs self time
                                           Task#298 step 2/2 (+9.985µs): return nil
                                           Task#298 ends at 10.024066ms
-                                            Combine#298: index=0 flush=Skim#298
-                                            Combine#298 step 1/2 (+0s): 1.025µs self time
-                                            Combine#298 step 2/2 (+1.025µs): return nil
-                                            Combine#298 ends at 10.025091ms
+                                            Funnel#298: index=0 flush=Skim#298
+                                            Funnel#298 step 1/2 (+0s): 1.025µs self time
+                                            Funnel#298 step 2/2 (+1.025µs): return nil
+                                            Funnel#298 ends at 10.025091ms
                                               Skim#298: index=1
                                               Skim#298 step 1/2 (+0s): 1.001µs self time
                                               Skim#298 step 2/2 (+1.001µs): return nil
@@ -3155,8 +3155,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#454 step 9/10 (+784ns): 215ns self time
                                         Skim#454 step 10/10 (+999ns): return nil
                                         Skim#454 ends at 10.014296ms
-                                    Combine#541 step 11/14 (+3.299µs): 867ns self time
-                                    Combine#541 step 12/14 (+4.166µs): scatter:
+                                    Funnel#541 step 11/14 (+3.299µs): 867ns self time
+                                    Funnel#541 step 12/14 (+4.166µs): scatter:
                                       Task#294: pool=0
                                       Task#294 step 1/2 (+0s): 10.345µs self time
                                       Task#294 step 2/2 (+10.345µs): return nil
@@ -3165,9 +3165,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#294 step 1/2 (+0s): 356ns self time
                                         Skim#294 step 2/2 (+356ns): return nil
                                         Skim#294 ends at 24.865µs
-                                    Combine#541 step 13/14 (+4.166µs): 874ns self time
-                                    Combine#541 step 14/14 (+5.04µs): return nil
-                                    Combine#541 ends at 15.038µs
+                                    Funnel#541 step 13/14 (+4.166µs): 874ns self time
+                                    Funnel#541 step 14/14 (+5.04µs): return nil
+                                    Funnel#541 ends at 15.038µs
                                 Plan#13 step 3/12 (+0s): scatter:
                                   Task#299: pool=1
                                   Task#299 step 1/2 (+0s): 9.999µs self time
@@ -3179,23 +3179,23 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Plan#14: pathCount=20 taskCount=26 maxPathDuration=6.169932ms minSkimCount=21 maxSkimCount=35
                                          TaskPools[0]: TaskPool#43: limit=4
                                          TaskPools[1]: TaskPool#44: limit=1
-                                         CombinerPools[0]: CombinerPool#67: limit=2
-                                         CombinerPools[1]: CombinerPool#68: limit=2
-                                         CombinerPools[2]: CombinerPool#69: limit=1
-                                         CombinerPools[3]: CombinerPool#70: limit=4
-                                         CombinerPools[4]: CombinerPool#71: limit=7
-                                         CombinerPools[5]: CombinerPool#72: limit=2
-                                         CombinerPools[6]: CombinerPool#73: limit=1
-                                         CombinerPools[7]: CombinerPool#74: limit=6
-                                         CombinerPools[8]: CombinerPool#75: limit=3
-                                         Combiners[0]: pool=2
-                                         Combiners[1]: pool=7
-                                         Combiners[2]: pool=3
-                                         Combiners[3]: pool=7
-                                         Combiners[4]: pool=0
-                                         Combiners[5]: pool=6
-                                         Combiners[6]: pool=2
-                                         Combiners[7]: pool=1
+                                         FunnelPools[0]: FunnelPool#67: limit=2
+                                         FunnelPools[1]: FunnelPool#68: limit=2
+                                         FunnelPools[2]: FunnelPool#69: limit=1
+                                         FunnelPools[3]: FunnelPool#70: limit=4
+                                         FunnelPools[4]: FunnelPool#71: limit=7
+                                         FunnelPools[5]: FunnelPool#72: limit=2
+                                         FunnelPools[6]: FunnelPool#73: limit=1
+                                         FunnelPools[7]: FunnelPool#74: limit=6
+                                         FunnelPools[8]: FunnelPool#75: limit=3
+                                         Funnels[0]: pool=2
+                                         Funnels[1]: pool=7
+                                         Funnels[2]: pool=3
+                                         Funnels[3]: pool=7
+                                         Funnels[4]: pool=0
+                                         Funnels[5]: pool=6
+                                         Funnels[6]: pool=2
+                                         Funnels[7]: pool=1
                                       Plan#14 step 1/6 (+0s): scatter:
                                         Task#318: pool=1
                                         Task#318 step 1/2 (+0s): 6.169225ms self time
@@ -3255,10 +3255,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#308 step 1/2 (+0s): 11.585µs self time
                                             Task#308 step 2/2 (+11.585µs): return nil
                                             Task#308 ends at 22.562µs
-                                              Combine#308: index=7 flush=<nil>
-                                              Combine#308 step 1/2 (+0s): 1.001µs self time
-                                              Combine#308 step 2/2 (+1.001µs): return nil
-                                              Combine#308 ends at 23.563µs
+                                              Funnel#308: index=7 flush=<nil>
+                                              Funnel#308 step 1/2 (+0s): 1.001µs self time
+                                              Funnel#308 step 2/2 (+1.001µs): return nil
+                                              Funnel#308 ends at 23.563µs
                                           Skim#324 step 5/14 (+1.005µs): 0s self time
                                           Skim#324 step 6/14 (+1.005µs): scatter:
                                             Task#322: pool=1
@@ -3292,10 +3292,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#307 step 1/2 (+0s): 9.998µs self time
                                                 Task#307 step 2/2 (+9.998µs): return nil
                                                 Task#307 ends at 31.908µs
-                                                  Combine#307: index=0 flush=<nil>
-                                                  Combine#307 step 1/2 (+0s): 951ns self time
-                                                  Combine#307 step 2/2 (+951ns): return nil
-                                                  Combine#307 ends at 32.859µs
+                                                  Funnel#307: index=0 flush=<nil>
+                                                  Funnel#307 step 1/2 (+0s): 951ns self time
+                                                  Funnel#307 step 2/2 (+951ns): return nil
+                                                  Funnel#307 ends at 32.859µs
                                               Skim#322 step 7/16 (+926ns): 43ns self time
                                               Skim#322 step 8/16 (+969ns): scatter:
                                                 Task#315: pool=0
@@ -3322,10 +3322,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#312 step 1/2 (+0s): 9.988µs self time
                                                 Task#312 step 2/2 (+9.988µs): return nil
                                                 Task#312 ends at 31.957µs
-                                                  Combine#312: index=1 flush=<nil>
-                                                  Combine#312 step 1/2 (+0s): 2.944µs self time
-                                                  Combine#312 step 2/2 (+2.944µs): return nil
-                                                  Combine#312 ends at 34.901µs
+                                                  Funnel#312: index=1 flush=<nil>
+                                                  Funnel#312 step 1/2 (+0s): 2.944µs self time
+                                                  Funnel#312 step 2/2 (+2.944µs): return nil
+                                                  Funnel#312 ends at 34.901µs
                                               Skim#322 step 13/16 (+985ns): 7ns self time
                                               Skim#322 step 14/16 (+992ns): scatter:
                                                 Task#317: pool=0
@@ -3399,20 +3399,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#320 step 1/2 (+0s): 9.968µs self time
                                                     Task#320 step 2/2 (+9.968µs): return nil
                                                     Task#320 ends at 58.379µs
-                                                      Combine#320: index=2 flush=<nil>
-                                                      Combine#320 step 1/4 (+0s): 744ns self time
-                                                      Combine#320 step 2/4 (+744ns): scatter:
+                                                      Funnel#320: index=2 flush=<nil>
+                                                      Funnel#320 step 1/4 (+0s): 744ns self time
+                                                      Funnel#320 step 2/4 (+744ns): scatter:
                                                         Task#302: pool=0
                                                         Task#302 step 1/2 (+0s): 10µs self time
                                                         Task#302 step 2/2 (+10µs): return nil
                                                         Task#302 ends at 69.123µs
-                                                          Combine#302: index=0 flush=<nil>
-                                                          Combine#302 step 1/2 (+0s): 974ns self time
-                                                          Combine#302 step 2/2 (+974ns): return nil
-                                                          Combine#302 ends at 70.097µs
-                                                      Combine#320 step 3/4 (+744ns): 748ns self time
-                                                      Combine#320 step 4/4 (+1.492µs): return nil
-                                                      Combine#320 ends at 59.871µs
+                                                          Funnel#302: index=0 flush=<nil>
+                                                          Funnel#302 step 1/2 (+0s): 974ns self time
+                                                          Funnel#302 step 2/2 (+974ns): return nil
+                                                          Funnel#302 ends at 70.097µs
+                                                      Funnel#320 step 3/4 (+744ns): 748ns self time
+                                                      Funnel#320 step 4/4 (+1.492µs): return nil
+                                                      Funnel#320 ends at 59.871µs
                                                   Skim#321 step 5/8 (+7.297µs): 5.394µs self time
                                                   Skim#321 step 6/8 (+12.691µs): scatter:
                                                     Task#311: pool=0
@@ -3488,10 +3488,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Task#289 step 1/2 (+0s): 10.028µs self time
                                   Task#289 step 2/2 (+10.028µs): return error
                                   Task#289 ends at 10.028µs
-                                    Combine#289: index=0 flush=<nil>
-                                    Combine#289 step 1/2 (+0s): 1.001µs self time
-                                    Combine#289 step 2/2 (+1.001µs): return nil
-                                    Combine#289 ends at 11.029µs
+                                    Funnel#289: index=0 flush=<nil>
+                                    Funnel#289 step 1/2 (+0s): 1.001µs self time
+                                    Funnel#289 step 2/2 (+1.001µs): return nil
+                                    Funnel#289 ends at 11.029µs
                                 Plan#13 step 7/12 (+0s): scatter:
                                   Task#543: pool=2
                                   Task#543 step 1/2 (+0s): 10.002µs self time
@@ -3536,12 +3536,12 @@ Plan#0 step 3/5 (+0s): scatter:
                                          TaskPools[3]: TaskPool#61: limit=2
                                          TaskPools[4]: TaskPool#62: limit=1
                                          TaskPools[5]: TaskPool#63: limit=7
-                                         CombinerPools[0]: CombinerPool#112: limit=2
-                                         Combiners[0]: pool=0
-                                         Combiners[1]: pool=0
-                                         Combiners[2]: pool=0
-                                         Combiners[3]: pool=0
-                                         Combiners[4]: pool=0
+                                         FunnelPools[0]: FunnelPool#112: limit=2
+                                         Funnels[0]: pool=0
+                                         Funnels[1]: pool=0
+                                         Funnels[2]: pool=0
+                                         Funnels[3]: pool=0
+                                         Funnels[4]: pool=0
                                       Plan#20 step 1/5 (+0s): scatter:
                                         Task#538: pool=3
                                         Task#538 step 1/2 (+0s): 2.282µs self time
@@ -3591,10 +3591,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#519 step 1/2 (+0s): 10.194µs self time
                                                 Task#519 step 2/2 (+10.194µs): return nil
                                                 Task#519 ends at 23.531µs
-                                                  Combine#519: index=3 flush=<nil>
-                                                  Combine#519 step 1/2 (+0s): 999ns self time
-                                                  Combine#519 step 2/2 (+999ns): return nil
-                                                  Combine#519 ends at 24.53µs
+                                                  Funnel#519: index=3 flush=<nil>
+                                                  Funnel#519 step 1/2 (+0s): 999ns self time
+                                                  Funnel#519 step 2/2 (+999ns): return nil
+                                                  Funnel#519 ends at 24.53µs
                                               Skim#537 step 3/4 (+525ns): 368ns self time
                                               Skim#537 step 4/4 (+893ns): return nil
                                               Skim#537 ends at 13.705µs
@@ -3621,10 +3621,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#531 step 1/2 (+0s): 6.293µs self time
                                                 Task#531 step 2/2 (+6.293µs): return error
                                                 Task#531 ends at 283.934µs
-                                                  Combine#531: index=2 flush=<nil>
-                                                  Combine#531 step 1/2 (+0s): 1.001µs self time
-                                                  Combine#531 step 2/2 (+1.001µs): return nil
-                                                  Combine#531 ends at 284.935µs
+                                                  Funnel#531: index=2 flush=<nil>
+                                                  Funnel#531 step 1/2 (+0s): 1.001µs self time
+                                                  Funnel#531 step 2/2 (+1.001µs): return nil
+                                                  Funnel#531 ends at 284.935µs
                                               Skim#535 step 3/6 (+262.616µs): 263.614µs self time
                                               Skim#535 step 4/6 (+526.23µs): scatter:
                                                 Task#534: pool=5
@@ -3645,10 +3645,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#518 step 1/2 (+0s): 10.001µs self time
                                                         Task#518 step 2/2 (+10.001µs): return nil
                                                         Task#518 ends at 571.961µs
-                                                          Combine#518: index=0 flush=Skim#518
-                                                          Combine#518 step 1/2 (+0s): 1.989µs self time
-                                                          Combine#518 step 2/2 (+1.989µs): return nil
-                                                          Combine#518 ends at 573.95µs
+                                                          Funnel#518: index=0 flush=Skim#518
+                                                          Funnel#518 step 1/2 (+0s): 1.989µs self time
+                                                          Funnel#518 step 2/2 (+1.989µs): return nil
+                                                          Funnel#518 ends at 573.95µs
                                                             Skim#518: index=0
                                                             Skim#518 step 1/2 (+0s): 1.011µs self time
                                                             Skim#518 step 2/2 (+1.011µs): return nil
@@ -3659,10 +3659,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#520 step 1/2 (+0s): 10.113µs self time
                                                         Task#520 step 2/2 (+10.113µs): return nil
                                                         Task#520 ends at 572.121µs
-                                                          Combine#520: index=1 flush=Skim#520
-                                                          Combine#520 step 1/2 (+0s): 999ns self time
-                                                          Combine#520 step 2/2 (+999ns): return nil
-                                                          Combine#520 ends at 573.12µs
+                                                          Funnel#520: index=1 flush=Skim#520
+                                                          Funnel#520 step 1/2 (+0s): 999ns self time
+                                                          Funnel#520 step 2/2 (+999ns): return nil
+                                                          Funnel#520 ends at 573.12µs
                                                             Skim#520: index=0
                                                             Skim#520 step 1/2 (+0s): 998ns self time
                                                             Skim#520 step 2/2 (+998ns): return nil
@@ -3683,10 +3683,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#515 step 1/2 (+0s): 10.716µs self time
                                                         Task#515 step 2/2 (+10.716µs): return nil
                                                         Task#515 ends at 692.753µs
-                                                          Combine#515: index=0 flush=<nil>
-                                                          Combine#515 step 1/2 (+0s): 1.14µs self time
-                                                          Combine#515 step 2/2 (+1.14µs): return nil
-                                                          Combine#515 ends at 693.893µs
+                                                          Funnel#515: index=0 flush=<nil>
+                                                          Funnel#515 step 1/2 (+0s): 1.14µs self time
+                                                          Funnel#515 step 2/2 (+1.14µs): return nil
+                                                          Funnel#515 ends at 693.893µs
                                                       Skim#532 step 3/4 (+120.538µs): 115.596µs self time
                                                       Skim#532 step 4/4 (+236.134µs): return nil
                                                       Skim#532 ends at 797.633µs
@@ -3763,9 +3763,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#539 step 1/2 (+0s): 4.547021ms self time
                                         Task#539 step 2/2 (+4.547021ms): return nil
                                         Task#539 ends at 4.547021ms
-                                          Combine#539: index=3 flush=<nil>
-                                          Combine#539 step 1/4 (+0s): 312.338µs self time
-                                          Combine#539 step 2/4 (+312.338µs): scatter:
+                                          Funnel#539: index=3 flush=<nil>
+                                          Funnel#539 step 1/4 (+0s): 312.338µs self time
+                                          Funnel#539 step 2/4 (+312.338µs): scatter:
                                             Task#536: pool=5
                                             Task#536 step 1/2 (+0s): 10.003µs self time
                                             Task#536 step 2/2 (+10.003µs): return nil
@@ -3794,9 +3794,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Skim#536 step 5/6 (+610ns): 385ns self time
                                               Skim#536 step 6/6 (+995ns): return nil
                                               Skim#536 ends at 4.870357ms
-                                          Combine#539 step 3/4 (+312.338µs): 505.815µs self time
-                                          Combine#539 step 4/4 (+818.153µs): return nil
-                                          Combine#539 ends at 5.365174ms
+                                          Funnel#539 step 3/4 (+312.338µs): 505.815µs self time
+                                          Funnel#539 step 4/4 (+818.153µs): return nil
+                                          Funnel#539 ends at 5.365174ms
                                       Plan#20 step 4/5 (+0s): scatter:
                                         Task#525: pool=2
                                         Task#525 step 1/2 (+0s): 9.999µs self time
@@ -3829,16 +3829,16 @@ Plan#0 step 3/5 (+0s): scatter:
                                        TaskPools[1]: TaskPool#51: limit=2
                                        TaskPools[2]: TaskPool#52: limit=2
                                        TaskPools[3]: TaskPool#53: limit=2
-                                       CombinerPools[0]: CombinerPool#82: limit=2
-                                       CombinerPools[1]: CombinerPool#83: limit=2
-                                       CombinerPools[2]: CombinerPool#84: limit=5
-                                       CombinerPools[3]: CombinerPool#85: limit=1
-                                       Combiners[0]: pool=0
-                                       Combiners[1]: pool=1
-                                       Combiners[2]: pool=1
-                                       Combiners[3]: pool=3
-                                       Combiners[4]: pool=3
-                                       Combiners[5]: pool=3
+                                       FunnelPools[0]: FunnelPool#82: limit=2
+                                       FunnelPools[1]: FunnelPool#83: limit=2
+                                       FunnelPools[2]: FunnelPool#84: limit=5
+                                       FunnelPools[3]: FunnelPool#85: limit=1
+                                       Funnels[0]: pool=0
+                                       Funnels[1]: pool=1
+                                       Funnels[2]: pool=1
+                                       Funnels[3]: pool=3
+                                       Funnels[4]: pool=3
+                                       Funnels[5]: pool=3
                                     Plan#16 step 1/7 (+0s): scatter:
                                       Task#376: pool=3
                                       Task#376 step 1/2 (+0s): 5.713447ms self time
@@ -3920,10 +3920,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#371 step 1/2 (+0s): 7.593µs self time
                                           Task#371 step 2/2 (+7.593µs): return nil
                                           Task#371 ends at 20.187µs
-                                            Combine#371: index=1 flush=Skim#371
-                                            Combine#371 step 1/2 (+0s): 1.008µs self time
-                                            Combine#371 step 2/2 (+1.008µs): return nil
-                                            Combine#371 ends at 21.195µs
+                                            Funnel#371: index=1 flush=Skim#371
+                                            Funnel#371 step 1/2 (+0s): 1.008µs self time
+                                            Funnel#371 step 2/2 (+1.008µs): return nil
+                                            Funnel#371 ends at 21.195µs
                                               Skim#371: index=0
                                               Skim#371 step 1/4 (+0s): 950ns self time
                                               Skim#371 step 2/4 (+950ns): scatter:
@@ -3944,30 +3944,30 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#373 step 1/2 (+0s): 9.998µs self time
                                           Task#373 step 2/2 (+9.998µs): return nil
                                           Task#373 ends at 24.971µs
-                                            Combine#373: index=2 flush=<nil>
-                                            Combine#373 step 1/6 (+0s): 241ns self time
-                                            Combine#373 step 2/6 (+241ns): scatter:
+                                            Funnel#373: index=2 flush=<nil>
+                                            Funnel#373 step 1/6 (+0s): 241ns self time
+                                            Funnel#373 step 2/6 (+241ns): scatter:
                                               Task#354: pool=1
                                               Task#354 step 1/2 (+0s): 56.049µs self time
                                               Task#354 step 2/2 (+56.049µs): return nil
                                               Task#354 ends at 81.261µs
-                                                Combine#354: index=4 flush=<nil>
-                                                Combine#354 step 1/2 (+0s): 1.223µs self time
-                                                Combine#354 step 2/2 (+1.223µs): return nil
-                                                Combine#354 ends at 82.484µs
-                                            Combine#373 step 3/6 (+241ns): 242ns self time
-                                            Combine#373 step 4/6 (+483ns): scatter:
+                                                Funnel#354: index=4 flush=<nil>
+                                                Funnel#354 step 1/2 (+0s): 1.223µs self time
+                                                Funnel#354 step 2/2 (+1.223µs): return nil
+                                                Funnel#354 ends at 82.484µs
+                                            Funnel#373 step 3/6 (+241ns): 242ns self time
+                                            Funnel#373 step 4/6 (+483ns): scatter:
                                               Task#363: pool=0
                                               Task#363 step 1/2 (+0s): 10.009µs self time
                                               Task#363 step 2/2 (+10.009µs): return nil
                                               Task#363 ends at 35.463µs
-                                                Combine#363: index=5 flush=<nil>
-                                                Combine#363 step 1/2 (+0s): 998ns self time
-                                                Combine#363 step 2/2 (+998ns): return nil
-                                                Combine#363 ends at 36.461µs
-                                            Combine#373 step 5/6 (+483ns): 236ns self time
-                                            Combine#373 step 6/6 (+719ns): return nil
-                                            Combine#373 ends at 25.69µs
+                                                Funnel#363: index=5 flush=<nil>
+                                                Funnel#363 step 1/2 (+0s): 998ns self time
+                                                Funnel#363 step 2/2 (+998ns): return nil
+                                                Funnel#363 ends at 36.461µs
+                                            Funnel#373 step 5/6 (+483ns): 236ns self time
+                                            Funnel#373 step 6/6 (+719ns): return nil
+                                            Funnel#373 ends at 25.69µs
                                         Skim#375 step 7/8 (+5.952µs): 1.24µs self time
                                         Skim#375 step 8/8 (+7.192µs): return nil
                                         Skim#375 ends at 16.213µs
@@ -4031,23 +4031,23 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#372 step 1/2 (+0s): 1.045392ms self time
                                           Task#372 step 2/2 (+1.045392ms): return nil
                                           Task#372 ends at 1.055777ms
-                                            Combine#372: index=0 flush=<nil>
-                                            Combine#372 step 1/6 (+0s): 0s self time
-                                            Combine#372 step 2/6 (+0s): scatter:
+                                            Funnel#372: index=0 flush=<nil>
+                                            Funnel#372 step 1/6 (+0s): 0s self time
+                                            Funnel#372 step 2/6 (+0s): scatter:
                                               Task#367: pool=1
                                               Task#367 step 1/2 (+0s): 9.162µs self time
                                               Task#367 step 2/2 (+9.162µs): return nil
                                               Task#367 ends at 1.064939ms
-                                                Combine#367: index=1 flush=<nil>
-                                                Combine#367 step 1/8 (+0s): 296ns self time
-                                                Combine#367 step 2/8 (+296ns): scatter:
+                                                Funnel#367: index=1 flush=<nil>
+                                                Funnel#367 step 1/8 (+0s): 296ns self time
+                                                Funnel#367 step 2/8 (+296ns): scatter:
                                                   Task#366: pool=3
                                                   Task#366 step 1/2 (+0s): 9.98µs self time
                                                   Task#366 step 2/2 (+9.98µs): return nil
                                                   Task#366 ends at 1.075215ms
-                                                    Combine#366: index=1 flush=<nil>
-                                                    Combine#366 step 1/4 (+0s): 628ns self time
-                                                    Combine#366 step 2/4 (+628ns): scatter:
+                                                    Funnel#366: index=1 flush=<nil>
+                                                    Funnel#366 step 1/4 (+0s): 628ns self time
+                                                    Funnel#366 step 2/4 (+628ns): scatter:
                                                       Task#357: pool=0
                                                       Task#357 step 1/2 (+0s): 10.001µs self time
                                                       Task#357 step 2/2 (+10.001µs): return error
@@ -4056,11 +4056,11 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#357 step 1/2 (+0s): 2.413µs self time
                                                         Skim#357 step 2/2 (+2.413µs): return nil
                                                         Skim#357 ends at 1.088257ms
-                                                    Combine#366 step 3/4 (+628ns): 374ns self time
-                                                    Combine#366 step 4/4 (+1.002µs): return nil
-                                                    Combine#366 ends at 1.076217ms
-                                                Combine#367 step 3/8 (+296ns): 257ns self time
-                                                Combine#367 step 4/8 (+553ns): scatter:
+                                                    Funnel#366 step 3/4 (+628ns): 374ns self time
+                                                    Funnel#366 step 4/4 (+1.002µs): return nil
+                                                    Funnel#366 ends at 1.076217ms
+                                                Funnel#367 step 3/8 (+296ns): 257ns self time
+                                                Funnel#367 step 4/8 (+553ns): scatter:
                                                   Task#365: pool=0
                                                   Task#365 step 1/2 (+0s): 9.994µs self time
                                                   Task#365 step 2/2 (+9.994µs): return nil
@@ -4079,8 +4079,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Skim#365 step 3/4 (+1.48µs): 480ns self time
                                                     Skim#365 step 4/4 (+1.96µs): return nil
                                                     Skim#365 ends at 1.077446ms
-                                                Combine#367 step 5/8 (+553ns): 234ns self time
-                                                Combine#367 step 6/8 (+787ns): scatter:
+                                                Funnel#367 step 5/8 (+553ns): 234ns self time
+                                                Funnel#367 step 6/8 (+787ns): scatter:
                                                   Task#350: pool=3
                                                   Task#350 step 1/2 (+0s): 10ms self time
                                                   Task#350 step 2/2 (+10ms): return nil
@@ -4089,11 +4089,11 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Skim#350 step 1/2 (+0s): 1.008µs self time
                                                     Skim#350 step 2/2 (+1.008µs): return nil
                                                     Skim#350 ends at 11.066734ms
-                                                Combine#367 step 7/8 (+787ns): 215ns self time
-                                                Combine#367 step 8/8 (+1.002µs): return nil
-                                                Combine#367 ends at 1.065941ms
-                                            Combine#372 step 3/6 (+0s): 252ns self time
-                                            Combine#372 step 4/6 (+252ns): scatter:
+                                                Funnel#367 step 7/8 (+787ns): 215ns self time
+                                                Funnel#367 step 8/8 (+1.002µs): return nil
+                                                Funnel#367 ends at 1.065941ms
+                                            Funnel#372 step 3/6 (+0s): 252ns self time
+                                            Funnel#372 step 4/6 (+252ns): scatter:
                                               Task#362: pool=2
                                               Task#362 step 1/2 (+0s): 10.054µs self time
                                               Task#362 step 2/2 (+10.054µs): return error
@@ -4102,9 +4102,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#362 step 1/2 (+0s): 1.656µs self time
                                                 Skim#362 step 2/2 (+1.656µs): return nil
                                                 Skim#362 ends at 1.067739ms
-                                            Combine#372 step 5/6 (+252ns): 377ns self time
-                                            Combine#372 step 6/6 (+629ns): return nil
-                                            Combine#372 ends at 1.056406ms
+                                            Funnel#372 step 5/6 (+252ns): 377ns self time
+                                            Funnel#372 step 6/6 (+629ns): return nil
+                                            Funnel#372 ends at 1.056406ms
                                         Skim#374 step 7/8 (+404ns): 594ns self time
                                         Skim#374 step 8/8 (+998ns): return nil
                                         Skim#374 ends at 10.979µs
@@ -4130,14 +4130,14 @@ Plan#0 step 3/5 (+0s): scatter:
                                          TaskPools[2]: TaskPool#47: limit=10
                                          TaskPools[3]: TaskPool#48: limit=2
                                          TaskPools[4]: TaskPool#49: limit=1
-                                         CombinerPools[0]: CombinerPool#76: limit=10
-                                         CombinerPools[1]: CombinerPool#77: limit=2
-                                         CombinerPools[2]: CombinerPool#78: limit=8
-                                         CombinerPools[3]: CombinerPool#79: limit=6
-                                         CombinerPools[4]: CombinerPool#80: limit=6
-                                         CombinerPools[5]: CombinerPool#81: limit=2
-                                         Combiners[0]: pool=3
-                                         Combiners[1]: pool=0
+                                         FunnelPools[0]: FunnelPool#76: limit=10
+                                         FunnelPools[1]: FunnelPool#77: limit=2
+                                         FunnelPools[2]: FunnelPool#78: limit=8
+                                         FunnelPools[3]: FunnelPool#79: limit=6
+                                         FunnelPools[4]: FunnelPool#80: limit=6
+                                         FunnelPools[5]: FunnelPool#81: limit=2
+                                         Funnels[0]: pool=3
+                                         Funnels[1]: pool=0
                                       Plan#15 step 1/6 (+0s): scatter:
                                         Task#338: pool=0
                                         Task#338 step 1/2 (+0s): 2.445µs self time
@@ -4152,10 +4152,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#333 step 1/2 (+0s): 10.17µs self time
                                         Task#333 step 2/2 (+10.17µs): return nil
                                         Task#333 ends at 10.17µs
-                                          Combine#333: index=0 flush=<nil>
-                                          Combine#333 step 1/2 (+0s): 1µs self time
-                                          Combine#333 step 2/2 (+1µs): return nil
-                                          Combine#333 ends at 11.17µs
+                                          Funnel#333: index=0 flush=<nil>
+                                          Funnel#333 step 1/2 (+0s): 1µs self time
+                                          Funnel#333 step 2/2 (+1µs): return nil
+                                          Funnel#333 ends at 11.17µs
                                       Plan#15 step 3/6 (+0s): scatter:
                                         Task#347: pool=3
                                         Task#347 step 1/2 (+0s): 10.027µs self time
@@ -4192,10 +4192,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#340 step 1/2 (+0s): 9.966µs self time
                                                     Task#340 step 2/2 (+9.966µs): return nil
                                                     Task#340 ends at 40.815µs
-                                                      Combine#340: index=0 flush=<nil>
-                                                      Combine#340 step 1/2 (+0s): 982ns self time
-                                                      Combine#340 step 2/2 (+982ns): return nil
-                                                      Combine#340 ends at 41.797µs
+                                                      Funnel#340: index=0 flush=<nil>
+                                                      Funnel#340 step 1/2 (+0s): 982ns self time
+                                                      Funnel#340 step 2/2 (+982ns): return nil
+                                                      Funnel#340 ends at 41.797µs
                                                   Skim#343 step 3/4 (+488ns): 484ns self time
                                                   Skim#343 step 4/4 (+972ns): return nil
                                                   Skim#343 ends at 31.333µs
@@ -4234,9 +4234,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#344 step 1/2 (+0s): 10.993µs self time
                                                 Task#344 step 2/2 (+10.993µs): return nil
                                                 Task#344 ends at 526.013µs
-                                                  Combine#344: index=1 flush=<nil>
-                                                  Combine#344 step 1/12 (+0s): 166ns self time
-                                                  Combine#344 step 2/12 (+166ns): scatter:
+                                                  Funnel#344: index=1 flush=<nil>
+                                                  Funnel#344 step 1/12 (+0s): 166ns self time
+                                                  Funnel#344 step 2/12 (+166ns): scatter:
                                                     Task#332: pool=2
                                                     Task#332 step 1/2 (+0s): 9.999µs self time
                                                     Task#332 step 2/2 (+9.999µs): return nil
@@ -4245,8 +4245,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#332 step 1/2 (+0s): 1.001µs self time
                                                       Skim#332 step 2/2 (+1.001µs): return nil
                                                       Skim#332 ends at 537.179µs
-                                                  Combine#344 step 3/12 (+166ns): 232ns self time
-                                                  Combine#344 step 4/12 (+398ns): scatter:
+                                                  Funnel#344 step 3/12 (+166ns): 232ns self time
+                                                  Funnel#344 step 4/12 (+398ns): scatter:
                                                     Task#342: pool=3
                                                     Task#342 step 1/2 (+0s): 9.769µs self time
                                                     Task#342 step 2/2 (+9.769µs): return nil
@@ -4258,15 +4258,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#336 step 1/2 (+0s): 10.006µs self time
                                                         Task#336 step 2/2 (+10.006µs): return nil
                                                         Task#336 ends at 546.827µs
-                                                          Combine#336: index=1 flush=<nil>
-                                                          Combine#336 step 1/2 (+0s): 255ns self time
-                                                          Combine#336 step 2/2 (+255ns): return nil
-                                                          Combine#336 ends at 547.082µs
+                                                          Funnel#336: index=1 flush=<nil>
+                                                          Funnel#336 step 1/2 (+0s): 255ns self time
+                                                          Funnel#336 step 2/2 (+255ns): return nil
+                                                          Funnel#336 ends at 547.082µs
                                                       Skim#342 step 3/4 (+641ns): 377ns self time
                                                       Skim#342 step 4/4 (+1.018µs): return nil
                                                       Skim#342 ends at 537.198µs
-                                                  Combine#344 step 5/12 (+398ns): 135ns self time
-                                                  Combine#344 step 6/12 (+533ns): scatter:
+                                                  Funnel#344 step 5/12 (+398ns): 135ns self time
+                                                  Funnel#344 step 6/12 (+533ns): scatter:
                                                     Task#335: pool=4
                                                     Task#335 step 1/2 (+0s): 10.029µs self time
                                                     Task#335 step 2/2 (+10.029µs): return nil
@@ -4275,8 +4275,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#335 step 1/2 (+0s): 998ns self time
                                                       Skim#335 step 2/2 (+998ns): return nil
                                                       Skim#335 ends at 537.573µs
-                                                  Combine#344 step 7/12 (+533ns): 154ns self time
-                                                  Combine#344 step 8/12 (+687ns): scatter:
+                                                  Funnel#344 step 7/12 (+533ns): 154ns self time
+                                                  Funnel#344 step 8/12 (+687ns): scatter:
                                                     Task#341: pool=2
                                                     Task#341 step 1/2 (+0s): 9.934µs self time
                                                     Task#341 step 2/2 (+9.934µs): return nil
@@ -4288,10 +4288,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#337 step 1/2 (+0s): 7.40344ms self time
                                                         Task#337 step 2/2 (+7.40344ms): return nil
                                                         Task#337 ends at 7.940427ms
-                                                          Combine#337: index=1 flush=<nil>
-                                                          Combine#337 step 1/2 (+0s): 1.001µs self time
-                                                          Combine#337 step 2/2 (+1.001µs): return nil
-                                                          Combine#337 ends at 7.941428ms
+                                                          Funnel#337: index=1 flush=<nil>
+                                                          Funnel#337 step 1/2 (+0s): 1.001µs self time
+                                                          Funnel#337 step 2/2 (+1.001µs): return nil
+                                                          Funnel#337 ends at 7.941428ms
                                                       Skim#341 step 3/6 (+353ns): 211ns self time
                                                       Skim#341 step 4/6 (+564ns): scatter:
                                                         Task#334: pool=4
@@ -4305,8 +4305,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#341 step 5/6 (+564ns): 433ns self time
                                                       Skim#341 step 6/6 (+997ns): return nil
                                                       Skim#341 ends at 537.631µs
-                                                  Combine#344 step 9/12 (+687ns): 157ns self time
-                                                  Combine#344 step 10/12 (+844ns): scatter:
+                                                  Funnel#344 step 9/12 (+687ns): 157ns self time
+                                                  Funnel#344 step 10/12 (+844ns): scatter:
                                                     Task#339: pool=3
                                                     Task#339 step 1/2 (+0s): 9.996µs self time
                                                     Task#339 step 2/2 (+9.996µs): return nil
@@ -4315,9 +4315,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#339 step 1/2 (+0s): 984ns self time
                                                       Skim#339 step 2/2 (+984ns): return nil
                                                       Skim#339 ends at 537.837µs
-                                                  Combine#344 step 11/12 (+844ns): 155ns self time
-                                                  Combine#344 step 12/12 (+999ns): return nil
-                                                  Combine#344 ends at 527.012µs
+                                                  Funnel#344 step 11/12 (+844ns): 155ns self time
+                                                  Funnel#344 step 12/12 (+999ns): return nil
+                                                  Funnel#344 ends at 527.012µs
                                               Skim#345 step 3/4 (+499.988µs): 500.012µs self time
                                               Skim#345 step 4/4 (+1ms): return nil
                                               Skim#345 ends at 1.015032ms
@@ -4385,16 +4385,16 @@ Plan#0 step 3/5 (+0s): scatter:
                                TaskPools[0]: TaskPool#64: limit=3
                                TaskPools[1]: TaskPool#65: limit=1
                                TaskPools[2]: TaskPool#66: limit=4
-                               CombinerPools[0]: CombinerPool#113: limit=9
-                               CombinerPools[1]: CombinerPool#114: limit=1
-                               Combiners[0]: pool=1
-                               Combiners[1]: pool=0
-                               Combiners[2]: pool=1
-                               Combiners[3]: pool=0
-                               Combiners[4]: pool=1
-                               Combiners[5]: pool=0
-                               Combiners[6]: pool=0
-                               Combiners[7]: pool=1
+                               FunnelPools[0]: FunnelPool#113: limit=9
+                               FunnelPools[1]: FunnelPool#114: limit=1
+                               Funnels[0]: pool=1
+                               Funnels[1]: pool=0
+                               Funnels[2]: pool=1
+                               Funnels[3]: pool=0
+                               Funnels[4]: pool=1
+                               Funnels[5]: pool=0
+                               Funnels[6]: pool=0
+                               Funnels[7]: pool=1
                             Plan#21 step 1/6 (+0s): scatter:
                               Task#697: pool=2
                               Task#697 step 1/2 (+0s): 9.978µs self time
@@ -4431,18 +4431,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Plan#22: pathCount=17 taskCount=27 maxPathDuration=1.017615ms minSkimCount=16 maxSkimCount=34
                                    TaskPools[0]: TaskPool#67: limit=1
                                    TaskPools[1]: TaskPool#68: limit=2
-                                   CombinerPools[0]: CombinerPool#115: limit=1
-                                   CombinerPools[1]: CombinerPool#116: limit=2
-                                   CombinerPools[2]: CombinerPool#117: limit=2
-                                   CombinerPools[3]: CombinerPool#118: limit=2
-                                   CombinerPools[4]: CombinerPool#119: limit=10
-                                   Combiners[0]: pool=1
-                                   Combiners[1]: pool=3
-                                   Combiners[2]: pool=2
-                                   Combiners[3]: pool=0
-                                   Combiners[4]: pool=3
-                                   Combiners[5]: pool=2
-                                   Combiners[6]: pool=0
+                                   FunnelPools[0]: FunnelPool#115: limit=1
+                                   FunnelPools[1]: FunnelPool#116: limit=2
+                                   FunnelPools[2]: FunnelPool#117: limit=2
+                                   FunnelPools[3]: FunnelPool#118: limit=2
+                                   FunnelPools[4]: FunnelPool#119: limit=10
+                                   Funnels[0]: pool=1
+                                   Funnels[1]: pool=3
+                                   Funnels[2]: pool=2
+                                   Funnels[3]: pool=0
+                                   Funnels[4]: pool=3
+                                   Funnels[5]: pool=2
+                                   Funnels[6]: pool=0
                                 Plan#22 step 1/6 (+0s): scatter:
                                   Task#573: pool=1
                                   Task#573 step 1/2 (+0s): 9.935µs self time
@@ -4462,9 +4462,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#570 step 1/2 (+0s): 10.092µs self time
                                           Task#570 step 2/2 (+10.092µs): return nil
                                           Task#570 ends at 126.696µs
-                                            Combine#570: index=4 flush=<nil>
-                                            Combine#570 step 1/4 (+0s): 750ns self time
-                                            Combine#570 step 2/4 (+750ns): scatter:
+                                            Funnel#570: index=4 flush=<nil>
+                                            Funnel#570 step 1/4 (+0s): 750ns self time
+                                            Funnel#570 step 2/4 (+750ns): scatter:
                                               Task#558: pool=1
                                               Task#558 step 1/2 (+0s): 9.998µs self time
                                               Task#558 step 2/2 (+9.998µs): return nil
@@ -4473,9 +4473,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#558 step 1/2 (+0s): 110.882µs self time
                                                 Skim#558 step 2/2 (+110.882µs): return nil
                                                 Skim#558 ends at 248.326µs
-                                            Combine#570 step 3/4 (+750ns): 229ns self time
-                                            Combine#570 step 4/4 (+979ns): return nil
-                                            Combine#570 ends at 127.675µs
+                                            Funnel#570 step 3/4 (+750ns): 229ns self time
+                                            Funnel#570 step 4/4 (+979ns): return nil
+                                            Funnel#570 ends at 127.675µs
                                         Skim#571 step 3/14 (+96.392µs): 96.408µs self time
                                         Skim#571 step 4/14 (+192.8µs): scatter:
                                           Task#569: pool=1
@@ -4489,10 +4489,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#563 step 1/2 (+0s): 8.612µs self time
                                               Task#563 step 2/2 (+8.612µs): return nil
                                               Task#563 ends at 232.182µs
-                                                Combine#563: index=1 flush=<nil>
-                                                Combine#563 step 1/2 (+0s): 1.003µs self time
-                                                Combine#563 step 2/2 (+1.003µs): return error
-                                                Combine#563 ends at 233.185µs
+                                                Funnel#563: index=1 flush=<nil>
+                                                Funnel#563 step 1/2 (+0s): 1.003µs self time
+                                                Funnel#563 step 2/2 (+1.003µs): return error
+                                                Funnel#563 ends at 233.185µs
                                             Skim#569 step 3/4 (+541ns): 506ns self time
                                             Skim#569 step 4/4 (+1.047µs): return nil
                                             Skim#569 ends at 224.076µs
@@ -4509,10 +4509,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#552 step 1/2 (+0s): 9.998µs self time
                                               Task#552 step 2/2 (+9.998µs): return error
                                               Task#552 ends at 325.828µs
-                                                Combine#552: index=3 flush=<nil>
-                                                Combine#552 step 1/2 (+0s): 996ns self time
-                                                Combine#552 step 2/2 (+996ns): return error
-                                                Combine#552 ends at 326.824µs
+                                                Funnel#552: index=3 flush=<nil>
+                                                Funnel#552 step 1/2 (+0s): 996ns self time
+                                                Funnel#552 step 2/2 (+996ns): return error
+                                                Funnel#552 ends at 326.824µs
                                             Skim#567 step 3/4 (+587ns): 411ns self time
                                             Skim#567 step 4/4 (+998ns): return nil
                                             Skim#567 ends at 316.241µs
@@ -4522,10 +4522,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#559 step 1/2 (+0s): 9.998µs self time
                                           Task#559 step 2/2 (+9.998µs): return nil
                                           Task#559 ends at 413.204µs
-                                            Combine#559: index=3 flush=<nil>
-                                            Combine#559 step 1/2 (+0s): 7.258µs self time
-                                            Combine#559 step 2/2 (+7.258µs): return nil
-                                            Combine#559 ends at 420.462µs
+                                            Funnel#559: index=3 flush=<nil>
+                                            Funnel#559 step 1/2 (+0s): 7.258µs self time
+                                            Funnel#559 step 2/2 (+7.258µs): return nil
+                                            Funnel#559 ends at 420.462µs
                                         Skim#571 step 9/14 (+382.994µs): 97.299µs self time
                                         Skim#571 step 10/14 (+480.293µs): scatter:
                                           Task#549: pool=1
@@ -4542,10 +4542,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#551 step 1/2 (+0s): 9.805µs self time
                                           Task#551 step 2/2 (+9.805µs): return nil
                                           Task#551 ends at 607.563µs
-                                            Combine#551: index=3 flush=<nil>
-                                            Combine#551 step 1/2 (+0s): 1.281µs self time
-                                            Combine#551 step 2/2 (+1.281µs): return nil
-                                            Combine#551 ends at 608.844µs
+                                            Funnel#551: index=3 flush=<nil>
+                                            Funnel#551 step 1/2 (+0s): 1.281µs self time
+                                            Funnel#551 step 2/2 (+1.281µs): return nil
+                                            Funnel#551 ends at 608.844µs
                                         Skim#571 step 13/14 (+577.546µs): 97.343µs self time
                                         Skim#571 step 14/14 (+674.889µs): return nil
                                         Skim#571 ends at 695.101µs
@@ -4555,10 +4555,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Task#564 step 1/2 (+0s): 9.597µs self time
                                       Task#564 step 2/2 (+9.597µs): return nil
                                       Task#564 ends at 20.535µs
-                                        Combine#564: index=6 flush=<nil>
-                                        Combine#564 step 1/2 (+0s): 996ns self time
-                                        Combine#564 step 2/2 (+996ns): return nil
-                                        Combine#564 ends at 21.531µs
+                                        Funnel#564: index=6 flush=<nil>
+                                        Funnel#564 step 1/2 (+0s): 996ns self time
+                                        Funnel#564 step 2/2 (+996ns): return nil
+                                        Funnel#564 ends at 21.531µs
                                     Skim#573 step 5/12 (+1.003µs): 1ns self time
                                     Skim#573 step 6/12 (+1.004µs): scatter:
                                       Task#556: pool=1
@@ -4620,10 +4620,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#554 step 1/2 (+0s): 8.877µs self time
                                           Task#554 step 2/2 (+8.877µs): return nil
                                           Task#554 ends at 40.036µs
-                                            Combine#554: index=5 flush=<nil>
-                                            Combine#554 step 1/2 (+0s): 504ns self time
-                                            Combine#554 step 2/2 (+504ns): return nil
-                                            Combine#554 ends at 40.54µs
+                                            Funnel#554: index=5 flush=<nil>
+                                            Funnel#554 step 1/2 (+0s): 504ns self time
+                                            Funnel#554 step 2/2 (+504ns): return nil
+                                            Funnel#554 ends at 40.54µs
                                         Skim#572 step 3/6 (+333ns): 321ns self time
                                         Skim#572 step 4/6 (+654ns): scatter:
                                           Task#568: pool=0
@@ -4644,10 +4644,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#550 step 1/2 (+0s): 9.997µs self time
                                                   Task#550 step 2/2 (+9.997µs): return nil
                                                   Task#550 ends at 62.823µs
-                                                    Combine#550: index=1 flush=<nil>
-                                                    Combine#550 step 1/2 (+0s): 1.001µs self time
-                                                    Combine#550 step 2/2 (+1.001µs): return nil
-                                                    Combine#550 ends at 63.824µs
+                                                    Funnel#550: index=1 flush=<nil>
+                                                    Funnel#550 step 1/2 (+0s): 1.001µs self time
+                                                    Funnel#550 step 2/2 (+1.001µs): return nil
+                                                    Funnel#550 ends at 63.824µs
                                                 Skim#566 step 3/4 (+1.14µs): 103ns self time
                                                 Skim#566 step 4/4 (+1.243µs): return nil
                                                 Skim#566 ends at 52.929µs
@@ -4657,10 +4657,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#557 step 1/2 (+0s): 9.997µs self time
                                               Task#557 step 2/2 (+9.997µs): return nil
                                               Task#557 ends at 51.948µs
-                                                Combine#557: index=5 flush=<nil>
-                                                Combine#557 step 1/2 (+0s): 1.001µs self time
-                                                Combine#557 step 2/2 (+1.001µs): return nil
-                                                Combine#557 ends at 52.949µs
+                                                Funnel#557: index=5 flush=<nil>
+                                                Funnel#557 step 1/2 (+0s): 1.001µs self time
+                                                Funnel#557 step 2/2 (+1.001µs): return nil
+                                                Funnel#557 ends at 52.949µs
                                             Skim#568 step 5/8 (+470ns): 29ns self time
                                             Skim#568 step 6/8 (+499ns): scatter:
                                               Task#553: pool=0
@@ -4694,28 +4694,28 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Task#575 step 1/2 (+0s): 10µs self time
                                   Task#575 step 2/2 (+10µs): return nil
                                   Task#575 ends at 10µs
-                                    Combine#575: index=2 flush=<nil>
-                                    Combine#575 step 1/4 (+0s): 159ns self time
-                                    Combine#575 step 2/4 (+159ns): scatter:
+                                    Funnel#575: index=2 flush=<nil>
+                                    Funnel#575 step 1/4 (+0s): 159ns self time
+                                    Funnel#575 step 2/4 (+159ns): scatter:
                                       Task#561: pool=0
                                       Task#561 step 1/2 (+0s): 9.999µs self time
                                       Task#561 step 2/2 (+9.999µs): return nil
                                       Task#561 ends at 20.158µs
-                                        Combine#561: index=0 flush=<nil>
-                                        Combine#561 step 1/2 (+0s): 995ns self time
-                                        Combine#561 step 2/2 (+995ns): return nil
-                                        Combine#561 ends at 21.153µs
-                                    Combine#575 step 3/4 (+159ns): 367ns self time
-                                    Combine#575 step 4/4 (+526ns): return nil
-                                    Combine#575 ends at 10.526µs
+                                        Funnel#561: index=0 flush=<nil>
+                                        Funnel#561 step 1/2 (+0s): 995ns self time
+                                        Funnel#561 step 2/2 (+995ns): return nil
+                                        Funnel#561 ends at 21.153µs
+                                    Funnel#575 step 3/4 (+159ns): 367ns self time
+                                    Funnel#575 step 4/4 (+526ns): return nil
+                                    Funnel#575 ends at 10.526µs
                                 Plan#22 step 6/6 (+0s): ends at 1.017615ms
                               Task#548 step 3/4 (+1.019002ms): 1.392µs self time
                               Task#548 step 4/4 (+1.020394ms): return nil
                               Task#548 ends at 1.020394ms
-                                Combine#548: index=0 flush=<nil>
-                                Combine#548 step 1/2 (+0s): 788ns self time
-                                Combine#548 step 2/2 (+788ns): return nil
-                                Combine#548 ends at 1.021182ms
+                                Funnel#548: index=0 flush=<nil>
+                                Funnel#548 step 1/2 (+0s): 788ns self time
+                                Funnel#548 step 2/2 (+788ns): return nil
+                                Funnel#548 ends at 1.021182ms
                             Plan#21 step 3/6 (+0s): scatter:
                               Task#696: pool=1
                               Task#696 step 1/2 (+0s): 10.001µs self time
@@ -4761,15 +4761,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Plan#23: pathCount=27 taskCount=39 maxPathDuration=10.236591ms minSkimCount=31 maxSkimCount=72
                                                    TaskPools[0]: TaskPool#69: limit=4
                                                    TaskPools[1]: TaskPool#70: limit=8
-                                                   CombinerPools[0]: CombinerPool#120: limit=10
-                                                   CombinerPools[1]: CombinerPool#121: limit=7
-                                                   CombinerPools[2]: CombinerPool#122: limit=5
-                                                   CombinerPools[3]: CombinerPool#123: limit=10
-                                                   CombinerPools[4]: CombinerPool#124: limit=2
-                                                   Combiners[0]: pool=4
-                                                   Combiners[1]: pool=2
-                                                   Combiners[2]: pool=4
-                                                   Combiners[3]: pool=0
+                                                   FunnelPools[0]: FunnelPool#120: limit=10
+                                                   FunnelPools[1]: FunnelPool#121: limit=7
+                                                   FunnelPools[2]: FunnelPool#122: limit=5
+                                                   FunnelPools[3]: FunnelPool#123: limit=10
+                                                   FunnelPools[4]: FunnelPool#124: limit=2
+                                                   Funnels[0]: pool=4
+                                                   Funnels[1]: pool=2
+                                                   Funnels[2]: pool=4
+                                                   Funnels[3]: pool=0
                                                 Plan#23 step 1/15 (+0s): scatter:
                                                   Task#596: pool=0
                                                   Task#596 step 1/2 (+0s): 546.541µs self time
@@ -4805,9 +4805,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                               Task#606 step 1/2 (+0s): 8.199µs self time
                                                               Task#606 step 2/2 (+8.199µs): return nil
                                                               Task#606 ends at 280.198µs
-                                                                Combine#606: index=3 flush=<nil>
-                                                                Combine#606 step 1/4 (+0s): 233.336µs self time
-                                                                Combine#606 step 2/4 (+233.336µs): scatter:
+                                                                Funnel#606: index=3 flush=<nil>
+                                                                Funnel#606 step 1/4 (+0s): 233.336µs self time
+                                                                Funnel#606 step 2/4 (+233.336µs): scatter:
                                                                   Task#588: pool=1
                                                                   Task#588 step 1/2 (+0s): 10.41µs self time
                                                                   Task#588 step 2/2 (+10.41µs): return nil
@@ -4816,9 +4816,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                     Skim#588 step 1/2 (+0s): 1µs self time
                                                                     Skim#588 step 2/2 (+1µs): return nil
                                                                     Skim#588 ends at 524.944µs
-                                                                Combine#606 step 3/4 (+233.336µs): 195.412µs self time
-                                                                Combine#606 step 4/4 (+428.748µs): return nil
-                                                                Combine#606 ends at 708.946µs
+                                                                Funnel#606 step 3/4 (+233.336µs): 195.412µs self time
+                                                                Funnel#606 step 4/4 (+428.748µs): return nil
+                                                                Funnel#606 ends at 708.946µs
                                                             Skim#608 step 3/4 (+212.384µs): 114.605µs self time
                                                             Skim#608 step 4/4 (+326.989µs): return nil
                                                             Skim#608 ends at 386.604µs
@@ -4831,10 +4831,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Task#591 step 1/2 (+0s): 10µs self time
                                                       Task#591 step 2/2 (+10µs): return nil
                                                       Task#591 ends at 20.743µs
-                                                        Combine#591: index=2 flush=<nil>
-                                                        Combine#591 step 1/2 (+0s): 0s self time
-                                                        Combine#591 step 2/2 (+0s): return nil
-                                                        Combine#591 ends at 20.743µs
+                                                        Funnel#591: index=2 flush=<nil>
+                                                        Funnel#591 step 1/2 (+0s): 0s self time
+                                                        Funnel#591 step 2/2 (+0s): return nil
+                                                        Funnel#591 ends at 20.743µs
                                                     Skim#615 step 5/10 (+745ns): 73ns self time
                                                     Skim#615 step 6/10 (+818ns): scatter:
                                                       Task#583: pool=1
@@ -4872,18 +4872,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#599 step 1/2 (+0s): 10.003µs self time
                                                   Task#599 step 2/2 (+10.003µs): return nil
                                                   Task#599 ends at 10.003µs
-                                                    Combine#599: index=2 flush=<nil>
-                                                    Combine#599 step 1/2 (+0s): 1µs self time
-                                                    Combine#599 step 2/2 (+1µs): return nil
-                                                    Combine#599 ends at 11.003µs
+                                                    Funnel#599: index=2 flush=<nil>
+                                                    Funnel#599 step 1/2 (+0s): 1µs self time
+                                                    Funnel#599 step 2/2 (+1µs): return nil
+                                                    Funnel#599 ends at 11.003µs
                                                 Plan#23 step 5/15 (+0s): scatter:
                                                   Task#614: pool=1
                                                   Task#614 step 1/2 (+0s): 10ms self time
                                                   Task#614 step 2/2 (+10ms): return nil
                                                   Task#614 ends at 10ms
-                                                    Combine#614: index=1 flush=<nil>
-                                                    Combine#614 step 1/4 (+0s): 506ns self time
-                                                    Combine#614 step 2/4 (+506ns): scatter:
+                                                    Funnel#614: index=1 flush=<nil>
+                                                    Funnel#614 step 1/4 (+0s): 506ns self time
+                                                    Funnel#614 step 2/4 (+506ns): scatter:
                                                       Task#601: pool=1
                                                       Task#601 step 1/2 (+0s): 20.801µs self time
                                                       Task#601 step 2/2 (+20.801µs): return nil
@@ -4892,9 +4892,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#601 step 1/2 (+0s): 1.029µs self time
                                                         Skim#601 step 2/2 (+1.029µs): return nil
                                                         Skim#601 ends at 10.022336ms
-                                                    Combine#614 step 3/4 (+506ns): 506ns self time
-                                                    Combine#614 step 4/4 (+1.012µs): return nil
-                                                    Combine#614 ends at 10.001012ms
+                                                    Funnel#614 step 3/4 (+506ns): 506ns self time
+                                                    Funnel#614 step 4/4 (+1.012µs): return nil
+                                                    Funnel#614 ends at 10.001012ms
                                                 Plan#23 step 6/15 (+0s): scatter:
                                                   Task#613: pool=1
                                                   Task#613 step 1/2 (+0s): 10.011µs self time
@@ -4938,10 +4938,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                   Task#598 step 1/2 (+0s): 9.995µs self time
                                                                   Task#598 step 2/2 (+9.995µs): return nil
                                                                   Task#598 ends at 10.17224ms
-                                                                    Combine#598: index=2 flush=<nil>
-                                                                    Combine#598 step 1/2 (+0s): 64.351µs self time
-                                                                    Combine#598 step 2/2 (+64.351µs): return nil
-                                                                    Combine#598 ends at 10.236591ms
+                                                                    Funnel#598: index=2 flush=<nil>
+                                                                    Funnel#598 step 1/2 (+0s): 64.351µs self time
+                                                                    Funnel#598 step 2/2 (+64.351µs): return nil
+                                                                    Funnel#598 ends at 10.236591ms
                                                                 Skim#604 step 3/6 (+331ns): 49ns self time
                                                                 Skim#604 step 4/6 (+380ns): scatter:
                                                                   Task#577: pool=1
@@ -5004,10 +5004,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Task#584 step 1/2 (+0s): 10.001µs self time
                                                           Task#584 step 2/2 (+10.001µs): return nil
                                                           Task#584 ends at 32.489µs
-                                                            Combine#584: index=1 flush=<nil>
-                                                            Combine#584 step 1/2 (+0s): 1µs self time
-                                                            Combine#584 step 2/2 (+1µs): return nil
-                                                            Combine#584 ends at 33.489µs
+                                                            Funnel#584: index=1 flush=<nil>
+                                                            Funnel#584 step 1/2 (+0s): 1µs self time
+                                                            Funnel#584 step 2/2 (+1µs): return nil
+                                                            Funnel#584 ends at 33.489µs
                                                         Skim#611 step 7/10 (+2.222µs): 275ns self time
                                                         Skim#611 step 8/10 (+2.497µs): scatter:
                                                           Task#607: pool=0
@@ -5069,10 +5069,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#578 step 1/2 (+0s): 4.911278ms self time
                                                   Task#578 step 2/2 (+4.911278ms): return error
                                                   Task#578 ends at 4.911278ms
-                                                    Combine#578: index=1 flush=<nil>
-                                                    Combine#578 step 1/2 (+0s): 654ns self time
-                                                    Combine#578 step 2/2 (+654ns): return nil
-                                                    Combine#578 ends at 4.911932ms
+                                                    Funnel#578: index=1 flush=<nil>
+                                                    Funnel#578 step 1/2 (+0s): 654ns self time
+                                                    Funnel#578 step 2/2 (+654ns): return nil
+                                                    Funnel#578 ends at 4.911932ms
                                                 Plan#23 step 8/15 (+0s): scatter:
                                                   Task#595: pool=0
                                                   Task#595 step 1/2 (+0s): 5.712µs self time
@@ -5124,10 +5124,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#587 step 1/2 (+0s): 10.001µs self time
                                                   Task#587 step 2/2 (+10.001µs): return nil
                                                   Task#587 ends at 10.001µs
-                                                    Combine#587: index=3 flush=<nil>
-                                                    Combine#587 step 1/2 (+0s): 951ns self time
-                                                    Combine#587 step 2/2 (+951ns): return nil
-                                                    Combine#587 ends at 10.952µs
+                                                    Funnel#587: index=3 flush=<nil>
+                                                    Funnel#587 step 1/2 (+0s): 951ns self time
+                                                    Funnel#587 step 2/2 (+951ns): return nil
+                                                    Funnel#587 ends at 10.952µs
                                                 Plan#23 step 13/15 (+0s): scatter:
                                                   Task#594: pool=1
                                                   Task#594 step 1/2 (+0s): 12.232µs self time
@@ -5162,10 +5162,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Plan#25: pathCount=20 taskCount=32 maxPathDuration=9.41487ms minSkimCount=22 maxSkimCount=32
                                              TaskPools[0]: TaskPool#72: limit=1
                                              TaskPools[1]: TaskPool#73: limit=6
-                                             CombinerPools[0]: CombinerPool#126: limit=10
-                                             CombinerPools[1]: CombinerPool#127: limit=2
-                                             CombinerPools[2]: CombinerPool#128: limit=1
-                                             Combiners[0]: pool=2
+                                             FunnelPools[0]: FunnelPool#126: limit=10
+                                             FunnelPools[1]: FunnelPool#127: limit=2
+                                             FunnelPools[2]: FunnelPool#128: limit=1
+                                             Funnels[0]: pool=2
                                           Plan#25 step 1/13 (+0s): scatter:
                                             Task#668: pool=1
                                             Task#668 step 1/2 (+0s): 3.452844ms self time
@@ -5189,9 +5189,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#692 step 1/2 (+0s): 4.662µs self time
                                             Task#692 step 2/2 (+4.662µs): return nil
                                             Task#692 ends at 4.662µs
-                                              Combine#692: index=0 flush=<nil>
-                                              Combine#692 step 1/4 (+0s): 38ns self time
-                                              Combine#692 step 2/4 (+38ns): scatter:
+                                              Funnel#692: index=0 flush=<nil>
+                                              Funnel#692 step 1/4 (+0s): 38ns self time
+                                              Funnel#692 step 2/4 (+38ns): scatter:
                                                 Task#665: pool=1
                                                 Task#665 step 1/2 (+0s): 9.984µs self time
                                                 Task#665 step 2/2 (+9.984µs): return nil
@@ -5200,9 +5200,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Skim#665 step 1/2 (+0s): 256ns self time
                                                   Skim#665 step 2/2 (+256ns): return nil
                                                   Skim#665 ends at 14.94µs
-                                              Combine#692 step 3/4 (+38ns): 362ns self time
-                                              Combine#692 step 4/4 (+400ns): return nil
-                                              Combine#692 ends at 5.062µs
+                                              Funnel#692 step 3/4 (+38ns): 362ns self time
+                                              Funnel#692 step 4/4 (+400ns): return nil
+                                              Funnel#692 ends at 5.062µs
                                           Plan#25 step 4/13 (+0s): scatter:
                                             Task#690: pool=0
                                             Task#690 step 1/2 (+0s): 6.194452ms self time
@@ -5215,10 +5215,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#678 step 1/2 (+0s): 9.907µs self time
                                                 Task#678 step 2/2 (+9.907µs): return nil
                                                 Task#678 ends at 6.204539ms
-                                                  Combine#678: index=0 flush=<nil>
-                                                  Combine#678 step 1/2 (+0s): 962.4µs self time
-                                                  Combine#678 step 2/2 (+962.4µs): return nil
-                                                  Combine#678 ends at 7.166939ms
+                                                  Funnel#678: index=0 flush=<nil>
+                                                  Funnel#678 step 1/2 (+0s): 962.4µs self time
+                                                  Funnel#678 step 2/2 (+962.4µs): return nil
+                                                  Funnel#678 ends at 7.166939ms
                                               Skim#690 step 3/6 (+180ns): 181ns self time
                                               Skim#690 step 4/6 (+361ns): scatter:
                                                 Task#672: pool=1
@@ -5237,10 +5237,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#688 step 1/2 (+0s): 10.002µs self time
                                             Task#688 step 2/2 (+10.002µs): return nil
                                             Task#688 ends at 10.002µs
-                                              Combine#688: index=0 flush=Skim#688
-                                              Combine#688 step 1/2 (+0s): 974ns self time
-                                              Combine#688 step 2/2 (+974ns): return nil
-                                              Combine#688 ends at 10.976µs
+                                              Funnel#688: index=0 flush=Skim#688
+                                              Funnel#688 step 1/2 (+0s): 974ns self time
+                                              Funnel#688 step 2/2 (+974ns): return nil
+                                              Funnel#688 ends at 10.976µs
                                                 Skim#688: index=1
                                                 Skim#688 step 1/4 (+0s): 292ns self time
                                                 Skim#688 step 2/4 (+292ns): scatter:
@@ -5255,10 +5255,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Task#662 step 1/2 (+0s): 9.999µs self time
                                                       Task#662 step 2/2 (+9.999µs): return nil
                                                       Task#662 ends at 0s
-                                                        Combine#662: index=0 flush=<nil>
-                                                        Combine#662 step 1/2 (+0s): 1.006µs self time
-                                                        Combine#662 step 2/2 (+1.006µs): return nil
-                                                        Combine#662 ends at 0s
+                                                        Funnel#662: index=0 flush=<nil>
+                                                        Funnel#662 step 1/2 (+0s): 1.006µs self time
+                                                        Funnel#662 step 2/2 (+1.006µs): return nil
+                                                        Funnel#662 ends at 0s
                                                     Skim#687 step 3/4 (+377.473µs): 622.527µs self time
                                                     Skim#687 step 4/4 (+1ms): return nil
                                                     Skim#687 ends at 0s
@@ -5313,19 +5313,19 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#682 step 1/2 (+0s): 11.278µs self time
                                                     Task#682 step 2/2 (+11.278µs): return nil
                                                     Task#682 ends at 305.772µs
-                                                      Combine#682: index=0 flush=<nil>
-                                                      Combine#682 step 1/10 (+0s): 733ns self time
-                                                      Combine#682 step 2/10 (+733ns): scatter:
+                                                      Funnel#682: index=0 flush=<nil>
+                                                      Funnel#682 step 1/10 (+0s): 733ns self time
+                                                      Funnel#682 step 2/10 (+733ns): scatter:
                                                         Task#671: pool=0
                                                         Task#671 step 1/2 (+0s): 9.956µs self time
                                                         Task#671 step 2/2 (+9.956µs): return nil
                                                         Task#671 ends at 316.461µs
-                                                          Combine#671: index=0 flush=<nil>
-                                                          Combine#671 step 1/2 (+0s): 1µs self time
-                                                          Combine#671 step 2/2 (+1µs): return nil
-                                                          Combine#671 ends at 317.461µs
-                                                      Combine#682 step 3/10 (+733ns): 4ns self time
-                                                      Combine#682 step 4/10 (+737ns): scatter:
+                                                          Funnel#671: index=0 flush=<nil>
+                                                          Funnel#671 step 1/2 (+0s): 1µs self time
+                                                          Funnel#671 step 2/2 (+1µs): return nil
+                                                          Funnel#671 ends at 317.461µs
+                                                      Funnel#682 step 3/10 (+733ns): 4ns self time
+                                                      Funnel#682 step 4/10 (+737ns): scatter:
                                                         Task#663: pool=0
                                                         Task#663 step 1/2 (+0s): 9.999µs self time
                                                         Task#663 step 2/2 (+9.999µs): return error
@@ -5334,8 +5334,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Skim#663 step 1/2 (+0s): 5.128µs self time
                                                           Skim#663 step 2/2 (+5.128µs): return nil
                                                           Skim#663 ends at 321.636µs
-                                                      Combine#682 step 5/10 (+737ns): 21ns self time
-                                                      Combine#682 step 6/10 (+758ns): scatter:
+                                                      Funnel#682 step 5/10 (+737ns): 21ns self time
+                                                      Funnel#682 step 6/10 (+758ns): scatter:
                                                         Task#673: pool=1
                                                         Task#673 step 1/2 (+0s): 9.104231ms self time
                                                         Task#673 step 2/2 (+9.104231ms): return nil
@@ -5344,23 +5344,23 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Skim#673 step 1/2 (+0s): 4.109µs self time
                                                           Skim#673 step 2/2 (+4.109µs): return nil
                                                           Skim#673 ends at 9.41487ms
-                                                      Combine#682 step 7/10 (+758ns): 0s self time
-                                                      Combine#682 step 8/10 (+758ns): scatter:
+                                                      Funnel#682 step 7/10 (+758ns): 0s self time
+                                                      Funnel#682 step 8/10 (+758ns): scatter:
                                                         Task#675: pool=0
                                                         Task#675 step 1/2 (+0s): 9.999µs self time
                                                         Task#675 step 2/2 (+9.999µs): return nil
                                                         Task#675 ends at 316.529µs
-                                                          Combine#675: index=0 flush=Skim#675
-                                                          Combine#675 step 1/2 (+0s): 1.161µs self time
-                                                          Combine#675 step 2/2 (+1.161µs): return nil
-                                                          Combine#675 ends at 317.69µs
+                                                          Funnel#675: index=0 flush=Skim#675
+                                                          Funnel#675 step 1/2 (+0s): 1.161µs self time
+                                                          Funnel#675 step 2/2 (+1.161µs): return nil
+                                                          Funnel#675 ends at 317.69µs
                                                             Skim#675: index=0
                                                             Skim#675 step 1/2 (+0s): 999ns self time
                                                             Skim#675 step 2/2 (+999ns): return nil
                                                             Skim#675 ends at 0s
-                                                      Combine#682 step 9/10 (+758ns): 449ns self time
-                                                      Combine#682 step 10/10 (+1.207µs): return nil
-                                                      Combine#682 ends at 306.979µs
+                                                      Funnel#682 step 9/10 (+758ns): 449ns self time
+                                                      Funnel#682 step 10/10 (+1.207µs): return nil
+                                                      Funnel#682 ends at 306.979µs
                                                   Skim#686 step 3/4 (+274.158µs): 274.161µs self time
                                                   Skim#686 step 4/4 (+548.319µs): return nil
                                                   Skim#686 ends at 568.655µs
@@ -5381,10 +5381,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#674 step 1/2 (+0s): 9.969µs self time
                                             Task#674 step 2/2 (+9.969µs): return nil
                                             Task#674 ends at 9.969µs
-                                              Combine#674: index=0 flush=<nil>
-                                              Combine#674 step 1/2 (+0s): 922ns self time
-                                              Combine#674 step 2/2 (+922ns): return nil
-                                              Combine#674 ends at 10.891µs
+                                              Funnel#674: index=0 flush=<nil>
+                                              Funnel#674 step 1/2 (+0s): 922ns self time
+                                              Funnel#674 step 2/2 (+922ns): return nil
+                                              Funnel#674 ends at 10.891µs
                                           Plan#25 step 10/13 (+0s): scatter:
                                             Task#677: pool=0
                                             Task#677 step 1/2 (+0s): 10µs self time
@@ -5428,16 +5428,16 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#691 step 1/2 (+0s): 10.005µs self time
                                             Task#691 step 2/2 (+10.005µs): return nil
                                             Task#691 ends at 10.005µs
-                                              Combine#691: index=0 flush=<nil>
-                                              Combine#691 step 1/4 (+0s): 720ns self time
-                                              Combine#691 step 2/4 (+720ns): scatter:
+                                              Funnel#691: index=0 flush=<nil>
+                                              Funnel#691 step 1/4 (+0s): 720ns self time
+                                              Funnel#691 step 2/4 (+720ns): scatter:
                                                 Task#685: pool=0
                                                 Task#685 step 1/2 (+0s): 9.998µs self time
                                                 Task#685 step 2/2 (+9.998µs): return nil
                                                 Task#685 ends at 20.723µs
-                                                  Combine#685: index=0 flush=<nil>
-                                                  Combine#685 step 1/10 (+0s): 186ns self time
-                                                  Combine#685 step 2/10 (+186ns): scatter:
+                                                  Funnel#685: index=0 flush=<nil>
+                                                  Funnel#685 step 1/10 (+0s): 186ns self time
+                                                  Funnel#685 step 2/10 (+186ns): scatter:
                                                     Task#667: pool=0
                                                     Task#667 step 1/2 (+0s): 947ns self time
                                                     Task#667 step 2/2 (+947ns): return nil
@@ -5446,8 +5446,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#667 step 1/2 (+0s): 65.76µs self time
                                                       Skim#667 step 2/2 (+65.76µs): return nil
                                                       Skim#667 ends at 87.616µs
-                                                  Combine#685 step 3/10 (+186ns): 162ns self time
-                                                  Combine#685 step 4/10 (+348ns): scatter:
+                                                  Funnel#685 step 3/10 (+186ns): 162ns self time
+                                                  Funnel#685 step 4/10 (+348ns): scatter:
                                                     Task#681: pool=1
                                                     Task#681 step 1/2 (+0s): 8.672µs self time
                                                     Task#681 step 2/2 (+8.672µs): return nil
@@ -5456,32 +5456,32 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#681 step 1/2 (+0s): 326.651µs self time
                                                       Skim#681 step 2/2 (+326.651µs): return nil
                                                       Skim#681 ends at 356.394µs
-                                                  Combine#685 step 5/10 (+348ns): 221ns self time
-                                                  Combine#685 step 6/10 (+569ns): scatter:
+                                                  Funnel#685 step 5/10 (+348ns): 221ns self time
+                                                  Funnel#685 step 6/10 (+569ns): scatter:
                                                     Task#680: pool=0
                                                     Task#680 step 1/2 (+0s): 9.996µs self time
                                                     Task#680 step 2/2 (+9.996µs): return nil
                                                     Task#680 ends at 31.288µs
-                                                      Combine#680: index=0 flush=<nil>
-                                                      Combine#680 step 1/2 (+0s): 990ns self time
-                                                      Combine#680 step 2/2 (+990ns): return nil
-                                                      Combine#680 ends at 32.278µs
-                                                  Combine#685 step 7/10 (+569ns): 268ns self time
-                                                  Combine#685 step 8/10 (+837ns): scatter:
+                                                      Funnel#680: index=0 flush=<nil>
+                                                      Funnel#680 step 1/2 (+0s): 990ns self time
+                                                      Funnel#680 step 2/2 (+990ns): return nil
+                                                      Funnel#680 ends at 32.278µs
+                                                  Funnel#685 step 7/10 (+569ns): 268ns self time
+                                                  Funnel#685 step 8/10 (+837ns): scatter:
                                                     Task#670: pool=0
                                                     Task#670 step 1/2 (+0s): 9.998µs self time
                                                     Task#670 step 2/2 (+9.998µs): return nil
                                                     Task#670 ends at 31.558µs
-                                                      Combine#670: index=0 flush=<nil>
-                                                      Combine#670 step 1/2 (+0s): 999ns self time
-                                                      Combine#670 step 2/2 (+999ns): return nil
-                                                      Combine#670 ends at 32.557µs
-                                                  Combine#685 step 9/10 (+837ns): 173ns self time
-                                                  Combine#685 step 10/10 (+1.01µs): return nil
-                                                  Combine#685 ends at 21.733µs
-                                              Combine#691 step 3/4 (+720ns): 87ns self time
-                                              Combine#691 step 4/4 (+807ns): return nil
-                                              Combine#691 ends at 10.812µs
+                                                      Funnel#670: index=0 flush=<nil>
+                                                      Funnel#670 step 1/2 (+0s): 999ns self time
+                                                      Funnel#670 step 2/2 (+999ns): return nil
+                                                      Funnel#670 ends at 32.557µs
+                                                  Funnel#685 step 9/10 (+837ns): 173ns self time
+                                                  Funnel#685 step 10/10 (+1.01µs): return nil
+                                                  Funnel#685 ends at 21.733µs
+                                              Funnel#691 step 3/4 (+720ns): 87ns self time
+                                              Funnel#691 step 4/4 (+807ns): return nil
+                                              Funnel#691 ends at 10.812µs
                                           Plan#25 step 13/13 (+0s): ends at 9.41487ms
                                         Skim#661 step 7/16 (+9.415102ms): 709ns self time
                                         Skim#661 step 8/16 (+9.415811ms): scatter:
@@ -5527,31 +5527,31 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#620 step 2/4 (+1.353µs): subjob:
                                                 Plan#24: pathCount=22 taskCount=33 maxPathDuration=9.876581ms minSkimCount=22 maxSkimCount=33
                                                    TaskPools[0]: TaskPool#71: limit=7
-                                                   CombinerPools[0]: CombinerPool#125: limit=1
-                                                   Combiners[0]: pool=0
-                                                   Combiners[1]: pool=0
-                                                   Combiners[2]: pool=0
-                                                   Combiners[3]: pool=0
-                                                   Combiners[4]: pool=0
-                                                   Combiners[5]: pool=0
-                                                   Combiners[6]: pool=0
-                                                   Combiners[7]: pool=0
-                                                   Combiners[8]: pool=0
-                                                   Combiners[9]: pool=0
-                                                   Combiners[10]: pool=0
-                                                   Combiners[11]: pool=0
-                                                   Combiners[12]: pool=0
-                                                   Combiners[13]: pool=0
-                                                   Combiners[14]: pool=0
+                                                   FunnelPools[0]: FunnelPool#125: limit=1
+                                                   Funnels[0]: pool=0
+                                                   Funnels[1]: pool=0
+                                                   Funnels[2]: pool=0
+                                                   Funnels[3]: pool=0
+                                                   Funnels[4]: pool=0
+                                                   Funnels[5]: pool=0
+                                                   Funnels[6]: pool=0
+                                                   Funnels[7]: pool=0
+                                                   Funnels[8]: pool=0
+                                                   Funnels[9]: pool=0
+                                                   Funnels[10]: pool=0
+                                                   Funnels[11]: pool=0
+                                                   Funnels[12]: pool=0
+                                                   Funnels[13]: pool=0
+                                                   Funnels[14]: pool=0
                                                 Plan#24 step 1/4 (+0s): scatter:
                                                   Task#633: pool=0
                                                   Task#633 step 1/2 (+0s): 9.595µs self time
                                                   Task#633 step 2/2 (+9.595µs): return nil
                                                   Task#633 ends at 9.595µs
-                                                    Combine#633: index=12 flush=<nil>
-                                                    Combine#633 step 1/2 (+0s): 1.066µs self time
-                                                    Combine#633 step 2/2 (+1.066µs): return nil
-                                                    Combine#633 ends at 10.661µs
+                                                    Funnel#633: index=12 flush=<nil>
+                                                    Funnel#633 step 1/2 (+0s): 1.066µs self time
+                                                    Funnel#633 step 2/2 (+1.066µs): return nil
+                                                    Funnel#633 ends at 10.661µs
                                                 Plan#24 step 2/4 (+0s): scatter:
                                                   Task#623: pool=0
                                                   Task#623 step 1/2 (+0s): 10.004µs self time
@@ -5566,9 +5566,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#653 step 1/2 (+0s): 10.027µs self time
                                                   Task#653 step 2/2 (+10.027µs): return nil
                                                   Task#653 ends at 10.027µs
-                                                    Combine#653: index=13 flush=<nil>
-                                                    Combine#653 step 1/22 (+0s): 50ns self time
-                                                    Combine#653 step 2/22 (+50ns): scatter:
+                                                    Funnel#653: index=13 flush=<nil>
+                                                    Funnel#653 step 1/22 (+0s): 50ns self time
+                                                    Funnel#653 step 2/22 (+50ns): scatter:
                                                       Task#649: pool=0
                                                       Task#649 step 1/2 (+0s): 9.993µs self time
                                                       Task#649 step 2/2 (+9.993µs): return nil
@@ -5587,8 +5587,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#649 step 3/4 (+1.045µs): 1.048µs self time
                                                         Skim#649 step 4/4 (+2.093µs): return nil
                                                         Skim#649 ends at 22.163µs
-                                                    Combine#653 step 3/22 (+50ns): 13ns self time
-                                                    Combine#653 step 4/22 (+63ns): scatter:
+                                                    Funnel#653 step 3/22 (+50ns): 13ns self time
+                                                    Funnel#653 step 4/22 (+63ns): scatter:
                                                       Task#650: pool=0
                                                       Task#650 step 1/2 (+0s): 9.768µs self time
                                                       Task#650 step 2/2 (+9.768µs): return nil
@@ -5600,16 +5600,16 @@ Plan#0 step 3/5 (+0s): scatter:
                                                           Task#648 step 1/2 (+0s): 9.997µs self time
                                                           Task#648 step 2/2 (+9.997µs): return nil
                                                           Task#648 ends at 29.857µs
-                                                            Combine#648: index=12 flush=<nil>
-                                                            Combine#648 step 1/22 (+0s): 82ns self time
-                                                            Combine#648 step 2/22 (+82ns): scatter:
+                                                            Funnel#648: index=12 flush=<nil>
+                                                            Funnel#648 step 1/22 (+0s): 82ns self time
+                                                            Funnel#648 step 2/22 (+82ns): scatter:
                                                               Task#647: pool=0
                                                               Task#647 step 1/2 (+0s): 9.986µs self time
                                                               Task#647 step 2/2 (+9.986µs): return nil
                                                               Task#647 ends at 39.925µs
-                                                                Combine#647: index=4 flush=<nil>
-                                                                Combine#647 step 1/4 (+0s): 641ns self time
-                                                                Combine#647 step 2/4 (+641ns): scatter:
+                                                                Funnel#647: index=4 flush=<nil>
+                                                                Funnel#647 step 1/4 (+0s): 641ns self time
+                                                                Funnel#647 step 2/4 (+641ns): scatter:
                                                                   Task#642: pool=0
                                                                   Task#642 step 1/2 (+0s): 9.998µs self time
                                                                   Task#642 step 2/2 (+9.998µs): return nil
@@ -5618,11 +5618,11 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                     Skim#642 step 1/2 (+0s): 0s self time
                                                                     Skim#642 step 2/2 (+0s): return nil
                                                                     Skim#642 ends at 50.564µs
-                                                                Combine#647 step 3/4 (+641ns): 358ns self time
-                                                                Combine#647 step 4/4 (+999ns): return nil
-                                                                Combine#647 ends at 40.924µs
-                                                            Combine#648 step 3/22 (+82ns): 85ns self time
-                                                            Combine#648 step 4/22 (+167ns): scatter:
+                                                                Funnel#647 step 3/4 (+641ns): 358ns self time
+                                                                Funnel#647 step 4/4 (+999ns): return nil
+                                                                Funnel#647 ends at 40.924µs
+                                                            Funnel#648 step 3/22 (+82ns): 85ns self time
+                                                            Funnel#648 step 4/22 (+167ns): scatter:
                                                               Task#645: pool=0
                                                               Task#645 step 1/2 (+0s): 38.702µs self time
                                                               Task#645 step 2/2 (+38.702µs): return error
@@ -5634,15 +5634,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                   Task#629 step 1/2 (+0s): 10.001µs self time
                                                                   Task#629 step 2/2 (+10.001µs): return nil
                                                                   Task#629 ends at 79.202µs
-                                                                    Combine#629: index=1 flush=<nil>
-                                                                    Combine#629 step 1/2 (+0s): 17.47µs self time
-                                                                    Combine#629 step 2/2 (+17.47µs): return nil
-                                                                    Combine#629 ends at 96.672µs
+                                                                    Funnel#629: index=1 flush=<nil>
+                                                                    Funnel#629 step 1/2 (+0s): 17.47µs self time
+                                                                    Funnel#629 step 2/2 (+17.47µs): return nil
+                                                                    Funnel#629 ends at 96.672µs
                                                                 Skim#645 step 3/4 (+475ns): 260ns self time
                                                                 Skim#645 step 4/4 (+735ns): return nil
                                                                 Skim#645 ends at 69.461µs
-                                                            Combine#648 step 5/22 (+167ns): 89ns self time
-                                                            Combine#648 step 6/22 (+256ns): scatter:
+                                                            Funnel#648 step 5/22 (+167ns): 89ns self time
+                                                            Funnel#648 step 6/22 (+256ns): scatter:
                                                               Task#643: pool=0
                                                               Task#643 step 1/2 (+0s): 9.998µs self time
                                                               Task#643 step 2/2 (+9.998µs): return nil
@@ -5661,18 +5661,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Skim#643 step 3/4 (+508ns): 510ns self time
                                                                 Skim#643 step 4/4 (+1.018µs): return nil
                                                                 Skim#643 ends at 41.129µs
-                                                            Combine#648 step 7/22 (+256ns): 92ns self time
-                                                            Combine#648 step 8/22 (+348ns): scatter:
+                                                            Funnel#648 step 7/22 (+256ns): 92ns self time
+                                                            Funnel#648 step 8/22 (+348ns): scatter:
                                                               Task#624: pool=0
                                                               Task#624 step 1/2 (+0s): 10.03µs self time
                                                               Task#624 step 2/2 (+10.03µs): return error
                                                               Task#624 ends at 40.235µs
-                                                                Combine#624: index=1 flush=<nil>
-                                                                Combine#624 step 1/2 (+0s): 1.001µs self time
-                                                                Combine#624 step 2/2 (+1.001µs): return nil
-                                                                Combine#624 ends at 41.236µs
-                                                            Combine#648 step 9/22 (+348ns): 90ns self time
-                                                            Combine#648 step 10/22 (+438ns): scatter:
+                                                                Funnel#624: index=1 flush=<nil>
+                                                                Funnel#624 step 1/2 (+0s): 1.001µs self time
+                                                                Funnel#624 step 2/2 (+1.001µs): return nil
+                                                                Funnel#624 ends at 41.236µs
+                                                            Funnel#648 step 9/22 (+348ns): 90ns self time
+                                                            Funnel#648 step 10/22 (+438ns): scatter:
                                                               Task#632: pool=0
                                                               Task#632 step 1/2 (+0s): 10.97µs self time
                                                               Task#632 step 2/2 (+10.97µs): return nil
@@ -5681,8 +5681,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Skim#632 step 1/2 (+0s): 1.003µs self time
                                                                 Skim#632 step 2/2 (+1.003µs): return nil
                                                                 Skim#632 ends at 42.268µs
-                                                            Combine#648 step 11/22 (+438ns): 89ns self time
-                                                            Combine#648 step 12/22 (+527ns): scatter:
+                                                            Funnel#648 step 11/22 (+438ns): 89ns self time
+                                                            Funnel#648 step 12/22 (+527ns): scatter:
                                                               Task#646: pool=0
                                                               Task#646 step 1/2 (+0s): 9.989µs self time
                                                               Task#646 step 2/2 (+9.989µs): return nil
@@ -5701,8 +5701,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Skim#646 step 3/4 (+499ns): 500ns self time
                                                                 Skim#646 step 4/4 (+999ns): return nil
                                                                 Skim#646 ends at 41.372µs
-                                                            Combine#648 step 13/22 (+527ns): 93ns self time
-                                                            Combine#648 step 14/22 (+620ns): scatter:
+                                                            Funnel#648 step 13/22 (+527ns): 93ns self time
+                                                            Funnel#648 step 14/22 (+620ns): scatter:
                                                               Task#644: pool=0
                                                               Task#644 step 1/2 (+0s): 34.51µs self time
                                                               Task#644 step 2/2 (+34.51µs): return nil
@@ -5724,15 +5724,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                   Task#627 step 1/2 (+0s): 8.811064ms self time
                                                                   Task#627 step 2/2 (+8.811064ms): return nil
                                                                   Task#627 ends at 8.876581ms
-                                                                    Combine#627: index=9 flush=<nil>
-                                                                    Combine#627 step 1/2 (+0s): 1ms self time
-                                                                    Combine#627 step 2/2 (+1ms): return nil
-                                                                    Combine#627 ends at 9.876581ms
+                                                                    Funnel#627: index=9 flush=<nil>
+                                                                    Funnel#627 step 1/2 (+0s): 1ms self time
+                                                                    Funnel#627 step 2/2 (+1ms): return nil
+                                                                    Funnel#627 ends at 9.876581ms
                                                                 Skim#644 step 5/6 (+530ns): 521ns self time
                                                                 Skim#644 step 6/6 (+1.051µs): return nil
                                                                 Skim#644 ends at 66.038µs
-                                                            Combine#648 step 15/22 (+620ns): 124ns self time
-                                                            Combine#648 step 16/22 (+744ns): scatter:
+                                                            Funnel#648 step 15/22 (+620ns): 124ns self time
+                                                            Funnel#648 step 16/22 (+744ns): scatter:
                                                               Task#630: pool=0
                                                               Task#630 step 1/2 (+0s): 10.073µs self time
                                                               Task#630 step 2/2 (+10.073µs): return nil
@@ -5741,22 +5741,22 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Skim#630 step 1/2 (+0s): 1.002µs self time
                                                                 Skim#630 step 2/2 (+1.002µs): return nil
                                                                 Skim#630 ends at 41.676µs
-                                                            Combine#648 step 17/22 (+744ns): 183ns self time
-                                                            Combine#648 step 18/22 (+927ns): scatter:
+                                                            Funnel#648 step 17/22 (+744ns): 183ns self time
+                                                            Funnel#648 step 18/22 (+927ns): scatter:
                                                               Task#634: pool=0
                                                               Task#634 step 1/2 (+0s): 10.081µs self time
                                                               Task#634 step 2/2 (+10.081µs): return nil
                                                               Task#634 ends at 40.865µs
-                                                                Combine#634: index=2 flush=Skim#634
-                                                                Combine#634 step 1/2 (+0s): 996ns self time
-                                                                Combine#634 step 2/2 (+996ns): return nil
-                                                                Combine#634 ends at 41.861µs
+                                                                Funnel#634: index=2 flush=Skim#634
+                                                                Funnel#634 step 1/2 (+0s): 996ns self time
+                                                                Funnel#634 step 2/2 (+996ns): return nil
+                                                                Funnel#634 ends at 41.861µs
                                                                   Skim#634: index=0
                                                                   Skim#634 step 1/2 (+0s): 321.554µs self time
                                                                   Skim#634 step 2/2 (+321.554µs): return nil
                                                                   Skim#634 ends at 0s
-                                                            Combine#648 step 19/22 (+927ns): 31ns self time
-                                                            Combine#648 step 20/22 (+958ns): scatter:
+                                                            Funnel#648 step 19/22 (+927ns): 31ns self time
+                                                            Funnel#648 step 20/22 (+958ns): scatter:
                                                               Task#626: pool=0
                                                               Task#626 step 1/2 (+0s): 10.001µs self time
                                                               Task#626 step 2/2 (+10.001µs): return error
@@ -5765,14 +5765,14 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Skim#626 step 1/2 (+0s): 0s self time
                                                                 Skim#626 step 2/2 (+0s): return nil
                                                                 Skim#626 ends at 40.816µs
-                                                            Combine#648 step 21/22 (+958ns): 25ns self time
-                                                            Combine#648 step 22/22 (+983ns): return nil
-                                                            Combine#648 ends at 30.84µs
+                                                            Funnel#648 step 21/22 (+958ns): 25ns self time
+                                                            Funnel#648 step 22/22 (+983ns): return nil
+                                                            Funnel#648 ends at 30.84µs
                                                         Skim#650 step 3/4 (+2ns): 3ns self time
                                                         Skim#650 step 4/4 (+5ns): return nil
                                                         Skim#650 ends at 19.863µs
-                                                    Combine#653 step 5/22 (+63ns): 35ns self time
-                                                    Combine#653 step 6/22 (+98ns): scatter:
+                                                    Funnel#653 step 5/22 (+63ns): 35ns self time
+                                                    Funnel#653 step 6/22 (+98ns): scatter:
                                                       Task#652: pool=0
                                                       Task#652 step 1/2 (+0s): 10.492µs self time
                                                       Task#652 step 2/2 (+10.492µs): return nil
@@ -5791,28 +5791,28 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#652 step 3/4 (+497ns): 501ns self time
                                                         Skim#652 step 4/4 (+998ns): return nil
                                                         Skim#652 ends at 21.615µs
-                                                    Combine#653 step 7/22 (+98ns): 84ns self time
-                                                    Combine#653 step 8/22 (+182ns): scatter:
+                                                    Funnel#653 step 7/22 (+98ns): 84ns self time
+                                                    Funnel#653 step 8/22 (+182ns): scatter:
                                                       Task#651: pool=0
                                                       Task#651 step 1/2 (+0s): 9.997µs self time
                                                       Task#651 step 2/2 (+9.997µs): return nil
                                                       Task#651 ends at 20.206µs
-                                                        Combine#651: index=12 flush=<nil>
-                                                        Combine#651 step 1/4 (+0s): 495ns self time
-                                                        Combine#651 step 2/4 (+495ns): scatter:
+                                                        Funnel#651: index=12 flush=<nil>
+                                                        Funnel#651 step 1/4 (+0s): 495ns self time
+                                                        Funnel#651 step 2/4 (+495ns): scatter:
                                                           Task#638: pool=0
                                                           Task#638 step 1/2 (+0s): 684.175µs self time
                                                           Task#638 step 2/2 (+684.175µs): return nil
                                                           Task#638 ends at 704.876µs
-                                                            Combine#638: index=2 flush=<nil>
-                                                            Combine#638 step 1/2 (+0s): 936ns self time
-                                                            Combine#638 step 2/2 (+936ns): return nil
-                                                            Combine#638 ends at 705.812µs
-                                                        Combine#651 step 3/4 (+495ns): 503ns self time
-                                                        Combine#651 step 4/4 (+998ns): return nil
-                                                        Combine#651 ends at 21.204µs
-                                                    Combine#653 step 9/22 (+182ns): 97ns self time
-                                                    Combine#653 step 10/22 (+279ns): scatter:
+                                                            Funnel#638: index=2 flush=<nil>
+                                                            Funnel#638 step 1/2 (+0s): 936ns self time
+                                                            Funnel#638 step 2/2 (+936ns): return nil
+                                                            Funnel#638 ends at 705.812µs
+                                                        Funnel#651 step 3/4 (+495ns): 503ns self time
+                                                        Funnel#651 step 4/4 (+998ns): return nil
+                                                        Funnel#651 ends at 21.204µs
+                                                    Funnel#653 step 9/22 (+182ns): 97ns self time
+                                                    Funnel#653 step 10/22 (+279ns): scatter:
                                                       Task#635: pool=0
                                                       Task#635 step 1/2 (+0s): 10.001µs self time
                                                       Task#635 step 2/2 (+10.001µs): return nil
@@ -5821,8 +5821,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#635 step 1/2 (+0s): 989ns self time
                                                         Skim#635 step 2/2 (+989ns): return nil
                                                         Skim#635 ends at 21.296µs
-                                                    Combine#653 step 11/22 (+279ns): 63ns self time
-                                                    Combine#653 step 12/22 (+342ns): scatter:
+                                                    Funnel#653 step 11/22 (+279ns): 63ns self time
+                                                    Funnel#653 step 12/22 (+342ns): scatter:
                                                       Task#636: pool=0
                                                       Task#636 step 1/2 (+0s): 9.999µs self time
                                                       Task#636 step 2/2 (+9.999µs): return nil
@@ -5831,18 +5831,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#636 step 1/2 (+0s): 850ns self time
                                                         Skim#636 step 2/2 (+850ns): return nil
                                                         Skim#636 ends at 21.218µs
-                                                    Combine#653 step 13/22 (+342ns): 130ns self time
-                                                    Combine#653 step 14/22 (+472ns): scatter:
+                                                    Funnel#653 step 13/22 (+342ns): 130ns self time
+                                                    Funnel#653 step 14/22 (+472ns): scatter:
                                                       Task#640: pool=0
                                                       Task#640 step 1/2 (+0s): 9.942µs self time
                                                       Task#640 step 2/2 (+9.942µs): return nil
                                                       Task#640 ends at 20.441µs
-                                                        Combine#640: index=2 flush=<nil>
-                                                        Combine#640 step 1/2 (+0s): 998ns self time
-                                                        Combine#640 step 2/2 (+998ns): return nil
-                                                        Combine#640 ends at 21.439µs
-                                                    Combine#653 step 15/22 (+472ns): 104ns self time
-                                                    Combine#653 step 16/22 (+576ns): scatter:
+                                                        Funnel#640: index=2 flush=<nil>
+                                                        Funnel#640 step 1/2 (+0s): 998ns self time
+                                                        Funnel#640 step 2/2 (+998ns): return nil
+                                                        Funnel#640 ends at 21.439µs
+                                                    Funnel#653 step 15/22 (+472ns): 104ns self time
+                                                    Funnel#653 step 16/22 (+576ns): scatter:
                                                       Task#631: pool=0
                                                       Task#631 step 1/2 (+0s): 9.948µs self time
                                                       Task#631 step 2/2 (+9.948µs): return nil
@@ -5851,18 +5851,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#631 step 1/2 (+0s): 997ns self time
                                                         Skim#631 step 2/2 (+997ns): return nil
                                                         Skim#631 ends at 21.548µs
-                                                    Combine#653 step 17/22 (+576ns): 141ns self time
-                                                    Combine#653 step 18/22 (+717ns): scatter:
+                                                    Funnel#653 step 17/22 (+576ns): 141ns self time
+                                                    Funnel#653 step 18/22 (+717ns): scatter:
                                                       Task#639: pool=0
                                                       Task#639 step 1/2 (+0s): 9.97µs self time
                                                       Task#639 step 2/2 (+9.97µs): return nil
                                                       Task#639 ends at 20.714µs
-                                                        Combine#639: index=2 flush=<nil>
-                                                        Combine#639 step 1/2 (+0s): 1.053µs self time
-                                                        Combine#639 step 2/2 (+1.053µs): return nil
-                                                        Combine#639 ends at 21.767µs
-                                                    Combine#653 step 19/22 (+717ns): 142ns self time
-                                                    Combine#653 step 20/22 (+859ns): scatter:
+                                                        Funnel#639: index=2 flush=<nil>
+                                                        Funnel#639 step 1/2 (+0s): 1.053µs self time
+                                                        Funnel#639 step 2/2 (+1.053µs): return nil
+                                                        Funnel#639 ends at 21.767µs
+                                                    Funnel#653 step 19/22 (+717ns): 142ns self time
+                                                    Funnel#653 step 20/22 (+859ns): scatter:
                                                       Task#625: pool=0
                                                       Task#625 step 1/2 (+0s): 10.438µs self time
                                                       Task#625 step 2/2 (+10.438µs): return nil
@@ -5871,9 +5871,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#625 step 1/2 (+0s): 1.004µs self time
                                                         Skim#625 step 2/2 (+1.004µs): return nil
                                                         Skim#625 ends at 22.328µs
-                                                    Combine#653 step 21/22 (+859ns): 142ns self time
-                                                    Combine#653 step 22/22 (+1.001µs): return nil
-                                                    Combine#653 ends at 11.028µs
+                                                    Funnel#653 step 21/22 (+859ns): 142ns self time
+                                                    Funnel#653 step 22/22 (+1.001µs): return nil
+                                                    Funnel#653 ends at 11.028µs
                                                 Plan#24 step 4/4 (+0s): ends at 9.876581ms
                                               Task#620 step 3/4 (+9.877934ms): 1.154µs self time
                                               Task#620 step 4/4 (+9.879088ms): return nil
@@ -5888,10 +5888,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#616 step 1/2 (+0s): 9.999µs self time
                                               Task#616 step 2/2 (+9.999µs): return nil
                                               Task#616 ends at 9.492806ms
-                                                Combine#616: index=5 flush=<nil>
-                                                Combine#616 step 1/2 (+0s): 852ns self time
-                                                Combine#616 step 2/2 (+852ns): return nil
-                                                Combine#616 ends at 9.493658ms
+                                                Funnel#616: index=5 flush=<nil>
+                                                Funnel#616 step 1/2 (+0s): 852ns self time
+                                                Funnel#616 step 2/2 (+852ns): return nil
+                                                Funnel#616 ends at 9.493658ms
                                             Skim#660 step 9/10 (+589ns): 411ns self time
                                             Skim#660 step 10/10 (+1µs): return nil
                                             Skim#660 ends at 9.483218ms
@@ -5949,10 +5949,10 @@ Plan#0 step 3/5 (+0s): scatter:
                             Task#277 step 1/2 (+0s): 9.996µs self time
                             Task#277 step 2/2 (+9.996µs): return nil
                             Task#277 ends at 20.346675ms
-                              Combine#277: index=0 flush=<nil>
-                              Combine#277 step 1/2 (+0s): 1.002µs self time
-                              Combine#277 step 2/2 (+1.002µs): return nil
-                              Combine#277 ends at 20.347677ms
+                              Funnel#277: index=0 flush=<nil>
+                              Funnel#277 step 1/2 (+0s): 1.002µs self time
+                              Funnel#277 step 2/2 (+1.002µs): return nil
+                              Funnel#277 ends at 20.347677ms
                           Skim#546 step 5/6 (+20.305647ms): 77ns self time
                           Skim#546 step 6/6 (+20.305724ms): return nil
                           Skim#546 ends at 20.336756ms
@@ -6000,10 +6000,10 @@ Plan#0 step 3/5 (+0s): scatter:
                         Task#278 step 1/2 (+0s): 10.097µs self time
                         Task#278 step 2/2 (+10.097µs): return nil
                         Task#278 ends at 5.04631ms
-                          Combine#278: index=0 flush=<nil>
-                          Combine#278 step 1/2 (+0s): 999ns self time
-                          Combine#278 step 2/2 (+999ns): return nil
-                          Combine#278 ends at 5.047309ms
+                          Funnel#278: index=0 flush=<nil>
+                          Funnel#278 step 1/2 (+0s): 999ns self time
+                          Funnel#278 step 2/2 (+999ns): return nil
+                          Funnel#278 ends at 5.047309ms
                       Skim#704 step 3/6 (+276ns): 470ns self time
                       Skim#704 step 4/6 (+746ns): subjob:
                         Plan#26: pathCount=21 taskCount=28 maxPathDuration=28.307391ms minSkimCount=19 maxSkimCount=109
@@ -6012,20 +6012,20 @@ Plan#0 step 3/5 (+0s): scatter:
                            TaskPools[2]: TaskPool#76: limit=1
                            TaskPools[3]: TaskPool#77: limit=10
                            TaskPools[4]: TaskPool#78: limit=3
-                           CombinerPools[0]: CombinerPool#129: limit=2
-                           CombinerPools[1]: CombinerPool#130: limit=2
-                           CombinerPools[2]: CombinerPool#131: limit=10
-                           CombinerPools[3]: CombinerPool#132: limit=7
-                           CombinerPools[4]: CombinerPool#133: limit=2
-                           Combiners[0]: pool=2
+                           FunnelPools[0]: FunnelPool#129: limit=2
+                           FunnelPools[1]: FunnelPool#130: limit=2
+                           FunnelPools[2]: FunnelPool#131: limit=10
+                           FunnelPools[3]: FunnelPool#132: limit=7
+                           FunnelPools[4]: FunnelPool#133: limit=2
+                           Funnels[0]: pool=2
                         Plan#26 step 1/9 (+0s): scatter:
                           Task#894: pool=0
                           Task#894 step 1/2 (+0s): 6.77981ms self time
                           Task#894 step 2/2 (+6.77981ms): return error
                           Task#894 ends at 6.77981ms
-                            Combine#894: index=0 flush=<nil>
-                            Combine#894 step 1/16 (+0s): 124ns self time
-                            Combine#894 step 2/16 (+124ns): scatter:
+                            Funnel#894: index=0 flush=<nil>
+                            Funnel#894 step 1/16 (+0s): 124ns self time
+                            Funnel#894 step 2/16 (+124ns): scatter:
                               Task#833: pool=4
                               Task#833 step 1/2 (+0s): 12.774µs self time
                               Task#833 step 2/2 (+12.774µs): return nil
@@ -6034,18 +6034,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#833 step 1/2 (+0s): 1µs self time
                                 Skim#833 step 2/2 (+1µs): return nil
                                 Skim#833 ends at 6.793708ms
-                            Combine#894 step 3/16 (+124ns): 56ns self time
-                            Combine#894 step 4/16 (+180ns): scatter:
+                            Funnel#894 step 3/16 (+124ns): 56ns self time
+                            Funnel#894 step 4/16 (+180ns): scatter:
                               Task#706: pool=1
                               Task#706 step 1/2 (+0s): 9.843µs self time
                               Task#706 step 2/2 (+9.843µs): return nil
                               Task#706 ends at 6.789833ms
-                                Combine#706: index=0 flush=<nil>
-                                Combine#706 step 1/2 (+0s): 997ns self time
-                                Combine#706 step 2/2 (+997ns): return nil
-                                Combine#706 ends at 6.79083ms
-                            Combine#894 step 5/16 (+180ns): 0s self time
-                            Combine#894 step 6/16 (+180ns): scatter:
+                                Funnel#706: index=0 flush=<nil>
+                                Funnel#706 step 1/2 (+0s): 997ns self time
+                                Funnel#706 step 2/2 (+997ns): return nil
+                                Funnel#706 ends at 6.79083ms
+                            Funnel#894 step 5/16 (+180ns): 0s self time
+                            Funnel#894 step 6/16 (+180ns): scatter:
                               Task#713: pool=0
                               Task#713 step 1/2 (+0s): 9.761µs self time
                               Task#713 step 2/2 (+9.761µs): return nil
@@ -6061,14 +6061,14 @@ Plan#0 step 3/5 (+0s): scatter:
                                      TaskPools[4]: TaskPool#83: limit=8
                                      TaskPools[5]: TaskPool#84: limit=2
                                      TaskPools[6]: TaskPool#85: limit=2
-                                     CombinerPools[0]: CombinerPool#134: limit=5
-                                     CombinerPools[1]: CombinerPool#135: limit=2
-                                     Combiners[0]: pool=1
-                                     Combiners[1]: pool=1
-                                     Combiners[2]: pool=0
-                                     Combiners[3]: pool=1
-                                     Combiners[4]: pool=1
-                                     Combiners[5]: pool=1
+                                     FunnelPools[0]: FunnelPool#134: limit=5
+                                     FunnelPools[1]: FunnelPool#135: limit=2
+                                     Funnels[0]: pool=1
+                                     Funnels[1]: pool=1
+                                     Funnels[2]: pool=0
+                                     Funnels[3]: pool=1
+                                     Funnels[4]: pool=1
+                                     Funnels[5]: pool=1
                                   Plan#27 step 1/4 (+0s): scatter:
                                     Task#715: pool=1
                                     Task#715 step 1/2 (+0s): 9.913µs self time
@@ -6083,9 +6083,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Task#728 step 1/2 (+0s): 9.985µs self time
                                     Task#728 step 2/2 (+9.985µs): return nil
                                     Task#728 ends at 9.985µs
-                                      Combine#728: index=3 flush=<nil>
-                                      Combine#728 step 1/4 (+0s): 455ns self time
-                                      Combine#728 step 2/4 (+455ns): scatter:
+                                      Funnel#728: index=3 flush=<nil>
+                                      Funnel#728 step 1/4 (+0s): 455ns self time
+                                      Funnel#728 step 2/4 (+455ns): scatter:
                                         Task#726: pool=2
                                         Task#726 step 1/2 (+0s): 10.002µs self time
                                         Task#726 step 2/2 (+10.002µs): return nil
@@ -6107,26 +6107,26 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#725 step 1/2 (+0s): 9.999µs self time
                                             Task#725 step 2/2 (+9.999µs): return nil
                                             Task#725 ends at 30.886µs
-                                              Combine#725: index=5 flush=<nil>
-                                              Combine#725 step 1/6 (+0s): 370ns self time
-                                              Combine#725 step 2/6 (+370ns): scatter:
+                                              Funnel#725: index=5 flush=<nil>
+                                              Funnel#725 step 1/6 (+0s): 370ns self time
+                                              Funnel#725 step 2/6 (+370ns): scatter:
                                                 Task#717: pool=6
                                                 Task#717 step 1/2 (+0s): 8.978µs self time
                                                 Task#717 step 2/2 (+8.978µs): return nil
                                                 Task#717 ends at 40.234µs
-                                                  Combine#717: index=1 flush=<nil>
-                                                  Combine#717 step 1/2 (+0s): 448.659µs self time
-                                                  Combine#717 step 2/2 (+448.659µs): return nil
-                                                  Combine#717 ends at 488.893µs
-                                              Combine#725 step 3/6 (+370ns): 400ns self time
-                                              Combine#725 step 4/6 (+770ns): scatter:
+                                                  Funnel#717: index=1 flush=<nil>
+                                                  Funnel#717 step 1/2 (+0s): 448.659µs self time
+                                                  Funnel#717 step 2/2 (+448.659µs): return nil
+                                                  Funnel#717 ends at 488.893µs
+                                              Funnel#725 step 3/6 (+370ns): 400ns self time
+                                              Funnel#725 step 4/6 (+770ns): scatter:
                                                 Task#724: pool=4
                                                 Task#724 step 1/2 (+0s): 9.986µs self time
                                                 Task#724 step 2/2 (+9.986µs): return nil
                                                 Task#724 ends at 41.642µs
-                                                  Combine#724: index=2 flush=<nil>
-                                                  Combine#724 step 1/4 (+0s): 525ns self time
-                                                  Combine#724 step 2/4 (+525ns): scatter:
+                                                  Funnel#724: index=2 flush=<nil>
+                                                  Funnel#724 step 1/4 (+0s): 525ns self time
+                                                  Funnel#724 step 2/4 (+525ns): scatter:
                                                     Task#714: pool=0
                                                     Task#714 step 1/2 (+0s): 0s self time
                                                     Task#714 step 2/2 (+0s): return nil
@@ -6135,12 +6135,12 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#714 step 1/2 (+0s): 996ns self time
                                                       Skim#714 step 2/2 (+996ns): return nil
                                                       Skim#714 ends at 43.163µs
-                                                  Combine#724 step 3/4 (+525ns): 471ns self time
-                                                  Combine#724 step 4/4 (+996ns): return nil
-                                                  Combine#724 ends at 42.638µs
-                                              Combine#725 step 5/6 (+770ns): 171ns self time
-                                              Combine#725 step 6/6 (+941ns): return nil
-                                              Combine#725 ends at 31.827µs
+                                                  Funnel#724 step 3/4 (+525ns): 471ns self time
+                                                  Funnel#724 step 4/4 (+996ns): return nil
+                                                  Funnel#724 ends at 42.638µs
+                                              Funnel#725 step 5/6 (+770ns): 171ns self time
+                                              Funnel#725 step 6/6 (+941ns): return nil
+                                              Funnel#725 ends at 31.827µs
                                           Skim#726 step 5/12 (+445ns): 151ns self time
                                           Skim#726 step 6/12 (+596ns): scatter:
                                             Task#720: pool=2
@@ -6174,17 +6174,17 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Skim#726 step 11/12 (+986ns): 84ns self time
                                           Skim#726 step 12/12 (+1.07µs): return error
                                           Skim#726 ends at 21.512µs
-                                      Combine#728 step 3/4 (+455ns): 459ns self time
-                                      Combine#728 step 4/4 (+914ns): return nil
-                                      Combine#728 ends at 10.899µs
+                                      Funnel#728 step 3/4 (+455ns): 459ns self time
+                                      Funnel#728 step 4/4 (+914ns): return nil
+                                      Funnel#728 ends at 10.899µs
                                   Plan#27 step 3/4 (+0s): scatter:
                                     Task#729: pool=2
                                     Task#729 step 1/2 (+0s): 11.364µs self time
                                     Task#729 step 2/2 (+11.364µs): return nil
                                     Task#729 ends at 11.364µs
-                                      Combine#729: index=4 flush=Skim#729
-                                      Combine#729 step 1/4 (+0s): 198ns self time
-                                      Combine#729 step 2/4 (+198ns): scatter:
+                                      Funnel#729: index=4 flush=Skim#729
+                                      Funnel#729 step 1/4 (+0s): 198ns self time
+                                      Funnel#729 step 2/4 (+198ns): scatter:
                                         Task#718: pool=3
                                         Task#718 step 1/2 (+0s): 9.999µs self time
                                         Task#718 step 2/2 (+9.999µs): return nil
@@ -6193,9 +6193,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Skim#718 step 1/2 (+0s): 848.317µs self time
                                           Skim#718 step 2/2 (+848.317µs): return nil
                                           Skim#718 ends at 869.878µs
-                                      Combine#729 step 3/4 (+198ns): 401ns self time
-                                      Combine#729 step 4/4 (+599ns): return nil
-                                      Combine#729 ends at 11.963µs
+                                      Funnel#729 step 3/4 (+198ns): 401ns self time
+                                      Funnel#729 step 4/4 (+599ns): return nil
+                                      Funnel#729 ends at 11.963µs
                                         Skim#729: index=1
                                         Skim#729 step 1/6 (+0s): 714ns self time
                                         Skim#729 step 2/6 (+714ns): scatter:
@@ -6210,10 +6210,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#722 step 1/2 (+0s): 10µs self time
                                               Task#722 step 2/2 (+10µs): return nil
                                               Task#722 ends at 0s
-                                                Combine#722: index=1 flush=<nil>
-                                                Combine#722 step 1/2 (+0s): 969ns self time
-                                                Combine#722 step 2/2 (+969ns): return nil
-                                                Combine#722 ends at 0s
+                                                Funnel#722: index=1 flush=<nil>
+                                                Funnel#722 step 1/2 (+0s): 969ns self time
+                                                Funnel#722 step 2/2 (+969ns): return nil
+                                                Funnel#722 ends at 0s
                                             Skim#727 step 3/4 (+531ns): 470ns self time
                                             Skim#727 step 4/4 (+1.001µs): return nil
                                             Skim#727 ends at 0s
@@ -6234,8 +6234,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#713 step 3/4 (+869.886µs): 998ns self time
                                 Skim#713 step 4/4 (+870.884µs): return nil
                                 Skim#713 ends at 7.660635ms
-                            Combine#894 step 7/16 (+180ns): 161ns self time
-                            Combine#894 step 8/16 (+341ns): scatter:
+                            Funnel#894 step 7/16 (+180ns): 161ns self time
+                            Funnel#894 step 8/16 (+341ns): scatter:
                               Task#781: pool=0
                               Task#781 step 1/2 (+0s): 9.998µs self time
                               Task#781 step 2/2 (+9.998µs): return nil
@@ -6244,8 +6244,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#781 step 1/2 (+0s): 40.817µs self time
                                 Skim#781 step 2/2 (+40.817µs): return nil
                                 Skim#781 ends at 6.830966ms
-                            Combine#894 step 9/16 (+341ns): 163ns self time
-                            Combine#894 step 10/16 (+504ns): scatter:
+                            Funnel#894 step 9/16 (+341ns): 163ns self time
+                            Funnel#894 step 10/16 (+504ns): scatter:
                               Task#780: pool=4
                               Task#780 step 1/2 (+0s): 0s self time
                               Task#780 step 2/2 (+0s): return nil
@@ -6254,55 +6254,55 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#780 step 1/2 (+0s): 1.077µs self time
                                 Skim#780 step 2/2 (+1.077µs): return nil
                                 Skim#780 ends at 6.781391ms
-                            Combine#894 step 11/16 (+504ns): 500ns self time
-                            Combine#894 step 12/16 (+1.004µs): scatter:
+                            Funnel#894 step 11/16 (+504ns): 500ns self time
+                            Funnel#894 step 12/16 (+1.004µs): scatter:
                               Task#834: pool=1
                               Task#834 step 1/2 (+0s): 10.005µs self time
                               Task#834 step 2/2 (+10.005µs): return nil
                               Task#834 ends at 6.790819ms
-                                Combine#834: index=0 flush=<nil>
-                                Combine#834 step 1/2 (+0s): 998ns self time
-                                Combine#834 step 2/2 (+998ns): return nil
-                                Combine#834 ends at 6.791817ms
-                            Combine#894 step 13/16 (+1.004µs): 0s self time
-                            Combine#894 step 14/16 (+1.004µs): scatter:
+                                Funnel#834: index=0 flush=<nil>
+                                Funnel#834 step 1/2 (+0s): 998ns self time
+                                Funnel#834 step 2/2 (+998ns): return nil
+                                Funnel#834 ends at 6.791817ms
+                            Funnel#894 step 13/16 (+1.004µs): 0s self time
+                            Funnel#894 step 14/16 (+1.004µs): scatter:
                               Task#864: pool=1
                               Task#864 step 1/4 (+0s): 4.36691ms self time
                               Task#864 step 2/4 (+4.36691ms): subjob:
                                 Plan#32: pathCount=19 taskCount=29 maxPathDuration=8.011406ms minSkimCount=19 maxSkimCount=69
                                    TaskPools[0]: TaskPool#100: limit=1
-                                   CombinerPools[0]: CombinerPool#148: limit=4
-                                   CombinerPools[1]: CombinerPool#149: limit=2
-                                   CombinerPools[2]: CombinerPool#150: limit=10
-                                   CombinerPools[3]: CombinerPool#151: limit=1
-                                   Combiners[0]: pool=1
-                                   Combiners[1]: pool=3
-                                   Combiners[2]: pool=1
-                                   Combiners[3]: pool=2
-                                   Combiners[4]: pool=3
-                                   Combiners[5]: pool=1
-                                   Combiners[6]: pool=2
-                                   Combiners[7]: pool=1
-                                   Combiners[8]: pool=2
-                                   Combiners[9]: pool=3
-                                   Combiners[10]: pool=1
-                                   Combiners[11]: pool=1
-                                   Combiners[12]: pool=1
-                                   Combiners[13]: pool=0
-                                   Combiners[14]: pool=3
-                                   Combiners[15]: pool=1
-                                   Combiners[16]: pool=1
-                                   Combiners[17]: pool=2
-                                   Combiners[18]: pool=3
+                                   FunnelPools[0]: FunnelPool#148: limit=4
+                                   FunnelPools[1]: FunnelPool#149: limit=2
+                                   FunnelPools[2]: FunnelPool#150: limit=10
+                                   FunnelPools[3]: FunnelPool#151: limit=1
+                                   Funnels[0]: pool=1
+                                   Funnels[1]: pool=3
+                                   Funnels[2]: pool=1
+                                   Funnels[3]: pool=2
+                                   Funnels[4]: pool=3
+                                   Funnels[5]: pool=1
+                                   Funnels[6]: pool=2
+                                   Funnels[7]: pool=1
+                                   Funnels[8]: pool=2
+                                   Funnels[9]: pool=3
+                                   Funnels[10]: pool=1
+                                   Funnels[11]: pool=1
+                                   Funnels[12]: pool=1
+                                   Funnels[13]: pool=0
+                                   Funnels[14]: pool=3
+                                   Funnels[15]: pool=1
+                                   Funnels[16]: pool=1
+                                   Funnels[17]: pool=2
+                                   Funnels[18]: pool=3
                                 Plan#32 step 1/9 (+0s): scatter:
                                   Task#882: pool=0
                                   Task#882 step 1/2 (+0s): 10µs self time
                                   Task#882 step 2/2 (+10µs): return nil
                                   Task#882 ends at 10µs
-                                    Combine#882: index=16 flush=<nil>
-                                    Combine#882 step 1/2 (+0s): 998ns self time
-                                    Combine#882 step 2/2 (+998ns): return nil
-                                    Combine#882 ends at 10.998µs
+                                    Funnel#882: index=16 flush=<nil>
+                                    Funnel#882 step 1/2 (+0s): 998ns self time
+                                    Funnel#882 step 2/2 (+998ns): return nil
+                                    Funnel#882 ends at 10.998µs
                                 Plan#32 step 2/9 (+0s): scatter:
                                   Task#892: pool=0
                                   Task#892 step 1/2 (+0s): 9.99µs self time
@@ -6315,9 +6315,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Task#889 step 1/2 (+0s): 9.999µs self time
                                       Task#889 step 2/2 (+9.999µs): return nil
                                       Task#889 ends at 20.527µs
-                                        Combine#889: index=0 flush=<nil>
-                                        Combine#889 step 1/4 (+0s): 499.875µs self time
-                                        Combine#889 step 2/4 (+499.875µs): scatter:
+                                        Funnel#889: index=0 flush=<nil>
+                                        Funnel#889 step 1/4 (+0s): 499.875µs self time
+                                        Funnel#889 step 2/4 (+499.875µs): scatter:
                                           Task#886: pool=0
                                           Task#886 step 1/2 (+0s): 10.001µs self time
                                           Task#886 step 2/2 (+10.001µs): return nil
@@ -6349,10 +6349,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#875 step 1/2 (+0s): 10.998µs self time
                                               Task#875 step 2/2 (+10.998µs): return nil
                                               Task#875 ends at 548.295µs
-                                                Combine#875: index=3 flush=<nil>
-                                                Combine#875 step 1/2 (+0s): 997ns self time
-                                                Combine#875 step 2/2 (+997ns): return nil
-                                                Combine#875 ends at 549.292µs
+                                                Funnel#875: index=3 flush=<nil>
+                                                Funnel#875 step 1/2 (+0s): 997ns self time
+                                                Funnel#875 step 2/2 (+997ns): return nil
+                                                Funnel#875 ends at 549.292µs
                                             Skim#886 step 5/8 (+6.894µs): 3.476µs self time
                                             Skim#886 step 6/8 (+10.37µs): scatter:
                                               Task#885: pool=0
@@ -6386,10 +6386,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#880 step 1/2 (+0s): 9.994µs self time
                                                   Task#880 step 2/2 (+9.994µs): return nil
                                                   Task#880 ends at 584.342µs
-                                                    Combine#880: index=9 flush=<nil>
-                                                    Combine#880 step 1/2 (+0s): 1µs self time
-                                                    Combine#880 step 2/2 (+1µs): return nil
-                                                    Combine#880 ends at 585.342µs
+                                                    Funnel#880: index=9 flush=<nil>
+                                                    Funnel#880 step 1/2 (+0s): 1µs self time
+                                                    Funnel#880 step 2/2 (+1µs): return nil
+                                                    Funnel#880 ends at 585.342µs
                                                 Skim#885 step 7/10 (+814ns): 117ns self time
                                                 Skim#885 step 8/10 (+931ns): scatter:
                                                   Task#874: pool=0
@@ -6406,9 +6406,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Skim#886 step 7/8 (+10.37µs): 3.462µs self time
                                             Skim#886 step 8/8 (+13.832µs): return nil
                                             Skim#886 ends at 544.235µs
-                                        Combine#889 step 3/4 (+499.875µs): 500.125µs self time
-                                        Combine#889 step 4/4 (+1ms): return nil
-                                        Combine#889 ends at 1.020527ms
+                                        Funnel#889 step 3/4 (+499.875µs): 500.125µs self time
+                                        Funnel#889 step 4/4 (+1ms): return nil
+                                        Funnel#889 ends at 1.020527ms
                                     Skim#892 step 3/4 (+538ns): 461ns self time
                                     Skim#892 step 4/4 (+999ns): return nil
                                     Skim#892 ends at 10.989µs
@@ -6435,30 +6435,30 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Task#893 step 1/2 (+0s): 9.503µs self time
                                   Task#893 step 2/2 (+9.503µs): return nil
                                   Task#893 ends at 9.503µs
-                                    Combine#893: index=6 flush=<nil>
-                                    Combine#893 step 1/4 (+0s): 896ns self time
-                                    Combine#893 step 2/4 (+896ns): scatter:
+                                    Funnel#893: index=6 flush=<nil>
+                                    Funnel#893 step 1/4 (+0s): 896ns self time
+                                    Funnel#893 step 2/4 (+896ns): scatter:
                                       Task#888: pool=0
                                       Task#888 step 1/2 (+0s): 9.752µs self time
                                       Task#888 step 2/2 (+9.752µs): return nil
                                       Task#888 ends at 20.151µs
-                                        Combine#888: index=6 flush=<nil>
-                                        Combine#888 step 1/4 (+0s): 2.605µs self time
-                                        Combine#888 step 2/4 (+2.605µs): scatter:
+                                        Funnel#888: index=6 flush=<nil>
+                                        Funnel#888 step 1/4 (+0s): 2.605µs self time
+                                        Funnel#888 step 2/4 (+2.605µs): scatter:
                                           Task#869: pool=0
                                           Task#869 step 1/2 (+0s): 7.29µs self time
                                           Task#869 step 2/2 (+7.29µs): return nil
                                           Task#869 ends at 30.046µs
-                                            Combine#869: index=2 flush=<nil>
-                                            Combine#869 step 1/2 (+0s): 79ns self time
-                                            Combine#869 step 2/2 (+79ns): return nil
-                                            Combine#869 ends at 30.125µs
-                                        Combine#888 step 3/4 (+2.605µs): 2.583µs self time
-                                        Combine#888 step 4/4 (+5.188µs): return nil
-                                        Combine#888 ends at 25.339µs
-                                    Combine#893 step 3/4 (+896ns): 102ns self time
-                                    Combine#893 step 4/4 (+998ns): return nil
-                                    Combine#893 ends at 10.501µs
+                                            Funnel#869: index=2 flush=<nil>
+                                            Funnel#869 step 1/2 (+0s): 79ns self time
+                                            Funnel#869 step 2/2 (+79ns): return nil
+                                            Funnel#869 ends at 30.125µs
+                                        Funnel#888 step 3/4 (+2.605µs): 2.583µs self time
+                                        Funnel#888 step 4/4 (+5.188µs): return nil
+                                        Funnel#888 ends at 25.339µs
+                                    Funnel#893 step 3/4 (+896ns): 102ns self time
+                                    Funnel#893 step 4/4 (+998ns): return nil
+                                    Funnel#893 ends at 10.501µs
                                 Plan#32 step 6/9 (+0s): scatter:
                                   Task#883: pool=0
                                   Task#883 step 1/2 (+0s): 4.600604ms self time
@@ -6482,9 +6482,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Task#891 step 1/2 (+0s): 9.999µs self time
                                   Task#891 step 2/2 (+9.999µs): return nil
                                   Task#891 ends at 9.999µs
-                                    Combine#891: index=6 flush=<nil>
-                                    Combine#891 step 1/14 (+0s): 207ns self time
-                                    Combine#891 step 2/14 (+207ns): scatter:
+                                    Funnel#891: index=6 flush=<nil>
+                                    Funnel#891 step 1/14 (+0s): 207ns self time
+                                    Funnel#891 step 2/14 (+207ns): scatter:
                                       Task#870: pool=0
                                       Task#870 step 1/2 (+0s): 8.000199ms self time
                                       Task#870 step 2/2 (+8.000199ms): return nil
@@ -6493,8 +6493,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#870 step 1/2 (+0s): 1.001µs self time
                                         Skim#870 step 2/2 (+1.001µs): return nil
                                         Skim#870 ends at 8.011406ms
-                                    Combine#891 step 3/14 (+207ns): 206ns self time
-                                    Combine#891 step 4/14 (+413ns): scatter:
+                                    Funnel#891 step 3/14 (+207ns): 206ns self time
+                                    Funnel#891 step 4/14 (+413ns): scatter:
                                       Task#876: pool=0
                                       Task#876 step 1/2 (+0s): 10.209µs self time
                                       Task#876 step 2/2 (+10.209µs): return nil
@@ -6503,8 +6503,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#876 step 1/2 (+0s): 2.222µs self time
                                         Skim#876 step 2/2 (+2.222µs): return nil
                                         Skim#876 ends at 22.843µs
-                                    Combine#891 step 5/14 (+413ns): 177ns self time
-                                    Combine#891 step 6/14 (+590ns): scatter:
+                                    Funnel#891 step 5/14 (+413ns): 177ns self time
+                                    Funnel#891 step 6/14 (+590ns): scatter:
                                       Task#890: pool=0
                                       Task#890 step 1/2 (+0s): 0s self time
                                       Task#890 step 2/2 (+0s): return error
@@ -6516,9 +6516,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#887 step 1/2 (+0s): 9.988µs self time
                                           Task#887 step 2/2 (+9.988µs): return nil
                                           Task#887 ends at 21.222µs
-                                            Combine#887: index=4 flush=<nil>
-                                            Combine#887 step 1/4 (+0s): 321.985µs self time
-                                            Combine#887 step 2/4 (+321.985µs): scatter:
+                                            Funnel#887: index=4 flush=<nil>
+                                            Funnel#887 step 1/4 (+0s): 321.985µs self time
+                                            Funnel#887 step 2/4 (+321.985µs): scatter:
                                               Task#868: pool=0
                                               Task#868 step 1/2 (+0s): 4.406µs self time
                                               Task#868 step 2/2 (+4.406µs): return error
@@ -6527,9 +6527,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#868 step 1/2 (+0s): 863ns self time
                                                 Skim#868 step 2/2 (+863ns): return nil
                                                 Skim#868 ends at 348.476µs
-                                            Combine#887 step 3/4 (+321.985µs): 321.963µs self time
-                                            Combine#887 step 4/4 (+643.948µs): return nil
-                                            Combine#887 ends at 665.17µs
+                                            Funnel#887 step 3/4 (+321.985µs): 321.963µs self time
+                                            Funnel#887 step 4/4 (+643.948µs): return nil
+                                            Funnel#887 ends at 665.17µs
                                         Skim#890 step 3/6 (+645ns): 47ns self time
                                         Skim#890 step 4/6 (+692ns): scatter:
                                           Task#881: pool=0
@@ -6543,18 +6543,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#890 step 5/6 (+692ns): 32ns self time
                                         Skim#890 step 6/6 (+724ns): return nil
                                         Skim#890 ends at 11.313µs
-                                    Combine#891 step 7/14 (+590ns): 96ns self time
-                                    Combine#891 step 8/14 (+686ns): scatter:
+                                    Funnel#891 step 7/14 (+590ns): 96ns self time
+                                    Funnel#891 step 8/14 (+686ns): scatter:
                                       Task#877: pool=0
                                       Task#877 step 1/2 (+0s): 9.761µs self time
                                       Task#877 step 2/2 (+9.761µs): return nil
                                       Task#877 ends at 20.446µs
-                                        Combine#877: index=7 flush=<nil>
-                                        Combine#877 step 1/2 (+0s): 3.331µs self time
-                                        Combine#877 step 2/2 (+3.331µs): return nil
-                                        Combine#877 ends at 23.777µs
-                                    Combine#891 step 9/14 (+686ns): 395ns self time
-                                    Combine#891 step 10/14 (+1.081µs): scatter:
+                                        Funnel#877: index=7 flush=<nil>
+                                        Funnel#877 step 1/2 (+0s): 3.331µs self time
+                                        Funnel#877 step 2/2 (+3.331µs): return nil
+                                        Funnel#877 ends at 23.777µs
+                                    Funnel#891 step 9/14 (+686ns): 395ns self time
+                                    Funnel#891 step 10/14 (+1.081µs): scatter:
                                       Task#867: pool=0
                                       Task#867 step 1/2 (+0s): 203.125µs self time
                                       Task#867 step 2/2 (+203.125µs): return nil
@@ -6563,8 +6563,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#867 step 1/2 (+0s): 999ns self time
                                         Skim#867 step 2/2 (+999ns): return nil
                                         Skim#867 ends at 215.204µs
-                                    Combine#891 step 11/14 (+1.081µs): 2ns self time
-                                    Combine#891 step 12/14 (+1.083µs): scatter:
+                                    Funnel#891 step 11/14 (+1.081µs): 2ns self time
+                                    Funnel#891 step 12/14 (+1.083µs): scatter:
                                       Task#871: pool=0
                                       Task#871 step 1/2 (+0s): 9.994µs self time
                                       Task#871 step 2/2 (+9.994µs): return nil
@@ -6573,23 +6573,23 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#871 step 1/2 (+0s): 994ns self time
                                         Skim#871 step 2/2 (+994ns): return nil
                                         Skim#871 ends at 22.07µs
-                                    Combine#891 step 13/14 (+1.083µs): 359ns self time
-                                    Combine#891 step 14/14 (+1.442µs): return nil
-                                    Combine#891 ends at 11.441µs
+                                    Funnel#891 step 13/14 (+1.083µs): 359ns self time
+                                    Funnel#891 step 14/14 (+1.442µs): return nil
+                                    Funnel#891 ends at 11.441µs
                                 Plan#32 step 9/9 (+0s): ends at 8.011406ms
                               Task#864 step 3/4 (+12.378316ms): 4.366909ms self time
                               Task#864 step 4/4 (+16.745225ms): return nil
                               Task#864 ends at 23.526039ms
-                                Combine#864: index=0 flush=<nil>
-                                Combine#864 step 1/14 (+0s): 87ns self time
-                                Combine#864 step 2/14 (+87ns): scatter:
+                                Funnel#864: index=0 flush=<nil>
+                                Funnel#864 step 1/14 (+0s): 87ns self time
+                                Funnel#864 step 2/14 (+87ns): scatter:
                                   Task#862: pool=0
                                   Task#862 step 1/2 (+0s): 9.997µs self time
                                   Task#862 step 2/2 (+9.997µs): return nil
                                   Task#862 ends at 23.536123ms
-                                    Combine#862: index=0 flush=<nil>
-                                    Combine#862 step 1/4 (+0s): 22ns self time
-                                    Combine#862 step 2/4 (+22ns): scatter:
+                                    Funnel#862: index=0 flush=<nil>
+                                    Funnel#862 step 1/4 (+0s): 22ns self time
+                                    Funnel#862 step 2/4 (+22ns): scatter:
                                       Task#711: pool=4
                                       Task#711 step 1/2 (+0s): 10.018µs self time
                                       Task#711 step 2/2 (+10.018µs): return nil
@@ -6598,11 +6598,11 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Skim#711 step 1/2 (+0s): 1µs self time
                                         Skim#711 step 2/2 (+1µs): return nil
                                         Skim#711 ends at 23.547163ms
-                                    Combine#862 step 3/4 (+22ns): 983ns self time
-                                    Combine#862 step 4/4 (+1.005µs): return nil
-                                    Combine#862 ends at 23.537128ms
-                                Combine#864 step 3/14 (+87ns): 161ns self time
-                                Combine#864 step 4/14 (+248ns): scatter:
+                                    Funnel#862 step 3/4 (+22ns): 983ns self time
+                                    Funnel#862 step 4/4 (+1.005µs): return nil
+                                    Funnel#862 ends at 23.537128ms
+                                Funnel#864 step 3/14 (+87ns): 161ns self time
+                                Funnel#864 step 4/14 (+248ns): scatter:
                                   Task#861: pool=1
                                   Task#861 step 1/2 (+0s): 10µs self time
                                   Task#861 step 2/2 (+10µs): return nil
@@ -6621,18 +6621,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#861 step 3/4 (+511ns): 490ns self time
                                     Skim#861 step 4/4 (+1.001µs): return nil
                                     Skim#861 ends at 23.537288ms
-                                Combine#864 step 5/14 (+248ns): 122ns self time
-                                Combine#864 step 6/14 (+370ns): scatter:
+                                Funnel#864 step 5/14 (+248ns): 122ns self time
+                                Funnel#864 step 6/14 (+370ns): scatter:
                                   Task#707: pool=1
                                   Task#707 step 1/2 (+0s): 8.859µs self time
                                   Task#707 step 2/2 (+8.859µs): return nil
                                   Task#707 ends at 23.535268ms
-                                    Combine#707: index=0 flush=<nil>
-                                    Combine#707 step 1/2 (+0s): 17ns self time
-                                    Combine#707 step 2/2 (+17ns): return nil
-                                    Combine#707 ends at 23.535285ms
-                                Combine#864 step 7/14 (+370ns): 486ns self time
-                                Combine#864 step 8/14 (+856ns): scatter:
+                                    Funnel#707: index=0 flush=<nil>
+                                    Funnel#707 step 1/2 (+0s): 17ns self time
+                                    Funnel#707 step 2/2 (+17ns): return nil
+                                    Funnel#707 ends at 23.535285ms
+                                Funnel#864 step 7/14 (+370ns): 486ns self time
+                                Funnel#864 step 8/14 (+856ns): scatter:
                                   Task#860: pool=0
                                   Task#860 step 1/2 (+0s): 9.997µs self time
                                   Task#860 step 2/2 (+9.997µs): return nil
@@ -6661,32 +6661,32 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#860 step 5/6 (+646ns): 335ns self time
                                     Skim#860 step 6/6 (+981ns): return nil
                                     Skim#860 ends at 23.537873ms
-                                Combine#864 step 9/14 (+856ns): 68ns self time
-                                Combine#864 step 10/14 (+924ns): scatter:
+                                Funnel#864 step 9/14 (+856ns): 68ns self time
+                                Funnel#864 step 10/14 (+924ns): scatter:
                                   Task#732: pool=1
                                   Task#732 step 1/4 (+0s): 0s self time
                                   Task#732 step 2/4 (+0s): subjob:
                                     Plan#28: pathCount=25 taskCount=46 maxPathDuration=454.078µs minSkimCount=40 maxSkimCount=64
                                        TaskPools[0]: TaskPool#86: limit=6
-                                       CombinerPools[0]: CombinerPool#136: limit=4
-                                       Combiners[0]: pool=0
-                                       Combiners[1]: pool=0
-                                       Combiners[2]: pool=0
-                                       Combiners[3]: pool=0
-                                       Combiners[4]: pool=0
-                                       Combiners[5]: pool=0
-                                       Combiners[6]: pool=0
-                                       Combiners[7]: pool=0
-                                       Combiners[8]: pool=0
-                                       Combiners[9]: pool=0
-                                       Combiners[10]: pool=0
-                                       Combiners[11]: pool=0
-                                       Combiners[12]: pool=0
-                                       Combiners[13]: pool=0
-                                       Combiners[14]: pool=0
-                                       Combiners[15]: pool=0
-                                       Combiners[16]: pool=0
-                                       Combiners[17]: pool=0
+                                       FunnelPools[0]: FunnelPool#136: limit=4
+                                       Funnels[0]: pool=0
+                                       Funnels[1]: pool=0
+                                       Funnels[2]: pool=0
+                                       Funnels[3]: pool=0
+                                       Funnels[4]: pool=0
+                                       Funnels[5]: pool=0
+                                       Funnels[6]: pool=0
+                                       Funnels[7]: pool=0
+                                       Funnels[8]: pool=0
+                                       Funnels[9]: pool=0
+                                       Funnels[10]: pool=0
+                                       Funnels[11]: pool=0
+                                       Funnels[12]: pool=0
+                                       Funnels[13]: pool=0
+                                       Funnels[14]: pool=0
+                                       Funnels[15]: pool=0
+                                       Funnels[16]: pool=0
+                                       Funnels[17]: pool=0
                                     Plan#28 step 1/11 (+0s): scatter:
                                       Task#775: pool=0
                                       Task#775 step 1/2 (+0s): 9.996µs self time
@@ -6699,9 +6699,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#766 step 1/2 (+0s): 9.975µs self time
                                           Task#766 step 2/2 (+9.975µs): return nil
                                           Task#766 ends at 20.26µs
-                                            Combine#766: index=1 flush=<nil>
-                                            Combine#766 step 1/4 (+0s): 154ns self time
-                                            Combine#766 step 2/4 (+154ns): scatter:
+                                            Funnel#766: index=1 flush=<nil>
+                                            Funnel#766 step 1/4 (+0s): 154ns self time
+                                            Funnel#766 step 2/4 (+154ns): scatter:
                                               Task#734: pool=0
                                               Task#734 step 1/2 (+0s): 11.314µs self time
                                               Task#734 step 2/2 (+11.314µs): return nil
@@ -6710,18 +6710,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#734 step 1/2 (+0s): 8.504µs self time
                                                 Skim#734 step 2/2 (+8.504µs): return nil
                                                 Skim#734 ends at 40.232µs
-                                            Combine#766 step 3/4 (+154ns): 155ns self time
-                                            Combine#766 step 4/4 (+309ns): return nil
-                                            Combine#766 ends at 20.569µs
+                                            Funnel#766 step 3/4 (+154ns): 155ns self time
+                                            Funnel#766 step 4/4 (+309ns): return nil
+                                            Funnel#766 ends at 20.569µs
                                         Skim#775 step 3/8 (+289ns): 299ns self time
                                         Skim#775 step 4/8 (+588ns): scatter:
                                           Task#769: pool=0
                                           Task#769 step 1/2 (+0s): 21.496µs self time
                                           Task#769 step 2/2 (+21.496µs): return nil
                                           Task#769 ends at 32.08µs
-                                            Combine#769: index=0 flush=<nil>
-                                            Combine#769 step 1/4 (+0s): 39.8µs self time
-                                            Combine#769 step 2/4 (+39.8µs): scatter:
+                                            Funnel#769: index=0 flush=<nil>
+                                            Funnel#769 step 1/4 (+0s): 39.8µs self time
+                                            Funnel#769 step 2/4 (+39.8µs): scatter:
                                               Task#744: pool=0
                                               Task#744 step 1/2 (+0s): 9.999µs self time
                                               Task#744 step 2/2 (+9.999µs): return error
@@ -6730,9 +6730,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#744 step 1/2 (+0s): 1.004µs self time
                                                 Skim#744 step 2/2 (+1.004µs): return nil
                                                 Skim#744 ends at 82.883µs
-                                            Combine#769 step 3/4 (+39.8µs): 38.972µs self time
-                                            Combine#769 step 4/4 (+78.772µs): return nil
-                                            Combine#769 ends at 110.852µs
+                                            Funnel#769 step 3/4 (+39.8µs): 38.972µs self time
+                                            Funnel#769 step 4/4 (+78.772µs): return nil
+                                            Funnel#769 ends at 110.852µs
                                         Skim#775 step 5/8 (+588ns): 354ns self time
                                         Skim#775 step 6/8 (+942ns): scatter:
                                           Task#741: pool=0
@@ -6832,9 +6832,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#758 step 1/2 (+0s): 51.82µs self time
                                                   Task#758 step 2/2 (+51.82µs): return nil
                                                   Task#758 ends at 85.227µs
-                                                    Combine#758: index=13 flush=<nil>
-                                                    Combine#758 step 1/4 (+0s): 683ns self time
-                                                    Combine#758 step 2/4 (+683ns): scatter:
+                                                    Funnel#758: index=13 flush=<nil>
+                                                    Funnel#758 step 1/4 (+0s): 683ns self time
+                                                    Funnel#758 step 2/4 (+683ns): scatter:
                                                       Task#739: pool=0
                                                       Task#739 step 1/2 (+0s): 10.009µs self time
                                                       Task#739 step 2/2 (+10.009µs): return nil
@@ -6843,9 +6843,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#739 step 1/2 (+0s): 851ns self time
                                                         Skim#739 step 2/2 (+851ns): return nil
                                                         Skim#739 ends at 96.77µs
-                                                    Combine#758 step 3/4 (+683ns): 176ns self time
-                                                    Combine#758 step 4/4 (+859ns): return nil
-                                                    Combine#758 ends at 86.086µs
+                                                    Funnel#758 step 3/4 (+683ns): 176ns self time
+                                                    Funnel#758 step 4/4 (+859ns): return nil
+                                                    Funnel#758 ends at 86.086µs
                                                 Skim#764 step 9/10 (+438ns): 152ns self time
                                                 Skim#764 step 10/10 (+590ns): return nil
                                                 Skim#764 ends at 33.559µs
@@ -6884,10 +6884,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#761 step 1/2 (+0s): 9.986µs self time
                                               Task#761 step 2/2 (+9.986µs): return nil
                                               Task#761 ends at 29.724µs
-                                                Combine#761: index=3 flush=Skim#761
-                                                Combine#761 step 1/2 (+0s): 994ns self time
-                                                Combine#761 step 2/2 (+994ns): return nil
-                                                Combine#761 ends at 30.718µs
+                                                Funnel#761: index=3 flush=Skim#761
+                                                Funnel#761 step 1/2 (+0s): 994ns self time
+                                                Funnel#761 step 2/2 (+994ns): return nil
+                                                Funnel#761 ends at 30.718µs
                                                   Skim#761: index=11
                                                   Skim#761 step 1/4 (+0s): 628ns self time
                                                   Skim#761 step 2/4 (+628ns): scatter:
@@ -6915,9 +6915,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#760 step 1/2 (+0s): 10.014µs self time
                                                   Task#760 step 2/2 (+10.014µs): return nil
                                                   Task#760 ends at 40.657µs
-                                                    Combine#760: index=6 flush=<nil>
-                                                    Combine#760 step 1/4 (+0s): 495ns self time
-                                                    Combine#760 step 2/4 (+495ns): scatter:
+                                                    Funnel#760: index=6 flush=<nil>
+                                                    Funnel#760 step 1/4 (+0s): 495ns self time
+                                                    Funnel#760 step 2/4 (+495ns): scatter:
                                                       Task#745: pool=0
                                                       Task#745 step 1/2 (+0s): 9.998µs self time
                                                       Task#745 step 2/2 (+9.998µs): return nil
@@ -6926,9 +6926,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#745 step 1/2 (+0s): 821ns self time
                                                         Skim#745 step 2/2 (+821ns): return nil
                                                         Skim#745 ends at 51.971µs
-                                                    Combine#760 step 3/4 (+495ns): 495ns self time
-                                                    Combine#760 step 4/4 (+990ns): return nil
-                                                    Combine#760 ends at 41.647µs
+                                                    Funnel#760 step 3/4 (+495ns): 495ns self time
+                                                    Funnel#760 step 4/4 (+990ns): return nil
+                                                    Funnel#760 ends at 41.647µs
                                                 Skim#762 step 3/4 (+658ns): 701ns self time
                                                 Skim#762 step 4/4 (+1.359µs): return nil
                                                 Skim#762 ends at 31.344µs
@@ -7000,10 +7000,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#756 step 1/2 (+0s): 10.035µs self time
                                           Task#756 step 2/2 (+10.035µs): return nil
                                           Task#756 ends at 20.527µs
-                                            Combine#756: index=1 flush=<nil>
-                                            Combine#756 step 1/2 (+0s): 1.002µs self time
-                                            Combine#756 step 2/2 (+1.002µs): return nil
-                                            Combine#756 ends at 21.529µs
+                                            Funnel#756: index=1 flush=<nil>
+                                            Funnel#756 step 1/2 (+0s): 1.002µs self time
+                                            Funnel#756 step 2/2 (+1.002µs): return nil
+                                            Funnel#756 ends at 21.529µs
                                         Skim#774 step 3/4 (+515ns): 596ns self time
                                         Skim#774 step 4/4 (+1.111µs): return nil
                                         Skim#774 ends at 11.088µs
@@ -7058,9 +7058,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Task#777 step 1/2 (+0s): 9.961µs self time
                                       Task#777 step 2/2 (+9.961µs): return nil
                                       Task#777 ends at 9.961µs
-                                        Combine#777: index=2 flush=<nil>
-                                        Combine#777 step 1/4 (+0s): 13.311µs self time
-                                        Combine#777 step 2/4 (+13.311µs): scatter:
+                                        Funnel#777: index=2 flush=<nil>
+                                        Funnel#777 step 1/4 (+0s): 13.311µs self time
+                                        Funnel#777 step 2/4 (+13.311µs): scatter:
                                           Task#772: pool=0
                                           Task#772 step 1/2 (+0s): 9.999µs self time
                                           Task#772 step 2/2 (+9.999µs): return nil
@@ -7129,9 +7129,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Skim#772 step 5/6 (+294ns): 463ns self time
                                             Skim#772 step 6/6 (+757ns): return nil
                                             Skim#772 ends at 34.028µs
-                                        Combine#777 step 3/4 (+13.311µs): 13.338µs self time
-                                        Combine#777 step 4/4 (+26.649µs): return nil
-                                        Combine#777 ends at 36.61µs
+                                        Funnel#777 step 3/4 (+13.311µs): 13.338µs self time
+                                        Funnel#777 step 4/4 (+26.649µs): return nil
+                                        Funnel#777 ends at 36.61µs
                                     Plan#28 step 10/11 (+0s): scatter:
                                       Task#747: pool=0
                                       Task#747 step 1/2 (+0s): 0s self time
@@ -7149,8 +7149,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#732 step 1/2 (+0s): 248.866µs self time
                                     Skim#732 step 2/2 (+248.866µs): return nil
                                     Skim#732 ends at 24.229907ms
-                                Combine#864 step 11/14 (+924ns): 123ns self time
-                                Combine#864 step 12/14 (+1.047µs): scatter:
+                                Funnel#864 step 11/14 (+924ns): 123ns self time
+                                Funnel#864 step 12/14 (+1.047µs): scatter:
                                   Task#863: pool=2
                                   Task#863 step 1/2 (+0s): 10.002µs self time
                                   Task#863 step 2/2 (+10.002µs): return nil
@@ -7169,12 +7169,12 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#863 step 3/4 (+205.909µs): 206.394µs self time
                                     Skim#863 step 4/4 (+412.303µs): return nil
                                     Skim#863 ends at 23.949391ms
-                                Combine#864 step 13/14 (+1.047µs): 20ns self time
-                                Combine#864 step 14/14 (+1.067µs): return nil
-                                Combine#864 ends at 23.527106ms
-                            Combine#894 step 15/16 (+1.004µs): 1ns self time
-                            Combine#894 step 16/16 (+1.005µs): return nil
-                            Combine#894 ends at 6.780815ms
+                                Funnel#864 step 13/14 (+1.047µs): 20ns self time
+                                Funnel#864 step 14/14 (+1.067µs): return nil
+                                Funnel#864 ends at 23.527106ms
+                            Funnel#894 step 15/16 (+1.004µs): 1ns self time
+                            Funnel#894 step 16/16 (+1.005µs): return nil
+                            Funnel#894 ends at 6.780815ms
                         Plan#26 step 2/9 (+0s): scatter:
                           Task#895: pool=1
                           Task#895 step 1/2 (+0s): 4.698µs self time
@@ -7187,10 +7187,10 @@ Plan#0 step 3/5 (+0s): scatter:
                               Task#709 step 1/2 (+0s): 10.116µs self time
                               Task#709 step 2/2 (+10.116µs): return nil
                               Task#709 ends at 15.145µs
-                                Combine#709: index=0 flush=<nil>
-                                Combine#709 step 1/2 (+0s): 131.812µs self time
-                                Combine#709 step 2/2 (+131.812µs): return nil
-                                Combine#709 ends at 146.957µs
+                                Funnel#709: index=0 flush=<nil>
+                                Funnel#709 step 1/2 (+0s): 131.812µs self time
+                                Funnel#709 step 2/2 (+131.812µs): return nil
+                                Funnel#709 ends at 146.957µs
                             Skim#895 step 3/6 (+331ns): 624ns self time
                             Skim#895 step 4/6 (+955ns): scatter:
                               Task#835: pool=0
@@ -7202,31 +7202,31 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#835 step 2/4 (+498ns): subjob:
                                   Plan#31: pathCount=16 taskCount=24 maxPathDuration=8.320124ms minSkimCount=19 maxSkimCount=40
                                      TaskPools[0]: TaskPool#99: limit=2
-                                     CombinerPools[0]: CombinerPool#143: limit=4
-                                     CombinerPools[1]: CombinerPool#144: limit=8
-                                     CombinerPools[2]: CombinerPool#145: limit=1
-                                     CombinerPools[3]: CombinerPool#146: limit=2
-                                     CombinerPools[4]: CombinerPool#147: limit=8
-                                     Combiners[0]: pool=2
-                                     Combiners[1]: pool=1
-                                     Combiners[2]: pool=1
-                                     Combiners[3]: pool=1
-                                     Combiners[4]: pool=3
-                                     Combiners[5]: pool=1
-                                     Combiners[6]: pool=0
-                                     Combiners[7]: pool=2
-                                     Combiners[8]: pool=2
-                                     Combiners[9]: pool=0
-                                     Combiners[10]: pool=4
-                                     Combiners[11]: pool=0
-                                     Combiners[12]: pool=3
-                                     Combiners[13]: pool=0
-                                     Combiners[14]: pool=3
-                                     Combiners[15]: pool=2
-                                     Combiners[16]: pool=2
-                                     Combiners[17]: pool=1
-                                     Combiners[18]: pool=0
-                                     Combiners[19]: pool=0
+                                     FunnelPools[0]: FunnelPool#143: limit=4
+                                     FunnelPools[1]: FunnelPool#144: limit=8
+                                     FunnelPools[2]: FunnelPool#145: limit=1
+                                     FunnelPools[3]: FunnelPool#146: limit=2
+                                     FunnelPools[4]: FunnelPool#147: limit=8
+                                     Funnels[0]: pool=2
+                                     Funnels[1]: pool=1
+                                     Funnels[2]: pool=1
+                                     Funnels[3]: pool=1
+                                     Funnels[4]: pool=3
+                                     Funnels[5]: pool=1
+                                     Funnels[6]: pool=0
+                                     Funnels[7]: pool=2
+                                     Funnels[8]: pool=2
+                                     Funnels[9]: pool=0
+                                     Funnels[10]: pool=4
+                                     Funnels[11]: pool=0
+                                     Funnels[12]: pool=3
+                                     Funnels[13]: pool=0
+                                     Funnels[14]: pool=3
+                                     Funnels[15]: pool=2
+                                     Funnels[16]: pool=2
+                                     Funnels[17]: pool=1
+                                     Funnels[18]: pool=0
+                                     Funnels[19]: pool=0
                                   Plan#31 step 1/8 (+0s): scatter:
                                     Task#858: pool=0
                                     Task#858 step 1/2 (+0s): 10.056µs self time
@@ -7266,10 +7266,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#848 step 1/2 (+0s): 10.002µs self time
                                             Task#848 step 2/2 (+10.002µs): return nil
                                             Task#848 ends at 42.91µs
-                                              Combine#848: index=10 flush=<nil>
-                                              Combine#848 step 1/2 (+0s): 632ns self time
-                                              Combine#848 step 2/2 (+632ns): return nil
-                                              Combine#848 ends at 43.542µs
+                                              Funnel#848: index=10 flush=<nil>
+                                              Funnel#848 step 1/2 (+0s): 632ns self time
+                                              Funnel#848 step 2/2 (+632ns): return nil
+                                              Funnel#848 ends at 43.542µs
                                           Skim#855 step 7/12 (+454ns): 292ns self time
                                           Skim#855 step 8/12 (+746ns): scatter:
                                             Task#841: pool=0
@@ -7369,10 +7369,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#850 step 1/2 (+0s): 9.765µs self time
                                         Task#850 step 2/2 (+9.765µs): return nil
                                         Task#850 ends at 41.636µs
-                                          Combine#850: index=0 flush=<nil>
-                                          Combine#850 step 1/2 (+0s): 984ns self time
-                                          Combine#850 step 2/2 (+984ns): return nil
-                                          Combine#850 ends at 42.62µs
+                                          Funnel#850: index=0 flush=<nil>
+                                          Funnel#850 step 1/2 (+0s): 984ns self time
+                                          Funnel#850 step 2/2 (+984ns): return nil
+                                          Funnel#850 ends at 42.62µs
                                       Skim#858 step 5/6 (+21.815µs): 9.426µs self time
                                       Skim#858 step 6/6 (+31.241µs): return nil
                                       Skim#858 ends at 41.297µs
@@ -7409,10 +7409,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Task#840 step 1/2 (+0s): 10.113µs self time
                                     Task#840 step 2/2 (+10.113µs): return nil
                                     Task#840 ends at 10.113µs
-                                      Combine#840: index=6 flush=<nil>
-                                      Combine#840 step 1/2 (+0s): 999ns self time
-                                      Combine#840 step 2/2 (+999ns): return nil
-                                      Combine#840 ends at 11.112µs
+                                      Funnel#840: index=6 flush=<nil>
+                                      Funnel#840 step 1/2 (+0s): 999ns self time
+                                      Funnel#840 step 2/2 (+999ns): return nil
+                                      Funnel#840 ends at 11.112µs
                                   Plan#31 step 5/8 (+0s): scatter:
                                     Task#846: pool=0
                                     Task#846 step 1/2 (+0s): 10.006µs self time
@@ -7427,20 +7427,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Task#857 step 1/2 (+0s): 9.974µs self time
                                     Task#857 step 2/2 (+9.974µs): return nil
                                     Task#857 ends at 9.974µs
-                                      Combine#857: index=9 flush=<nil>
-                                      Combine#857 step 1/4 (+0s): 12.718µs self time
-                                      Combine#857 step 2/4 (+12.718µs): scatter:
+                                      Funnel#857: index=9 flush=<nil>
+                                      Funnel#857 step 1/4 (+0s): 12.718µs self time
+                                      Funnel#857 step 2/4 (+12.718µs): scatter:
                                         Task#839: pool=0
                                         Task#839 step 1/2 (+0s): 9.995µs self time
                                         Task#839 step 2/2 (+9.995µs): return nil
                                         Task#839 ends at 32.687µs
-                                          Combine#839: index=13 flush=<nil>
-                                          Combine#839 step 1/2 (+0s): 996ns self time
-                                          Combine#839 step 2/2 (+996ns): return nil
-                                          Combine#839 ends at 33.683µs
-                                      Combine#857 step 3/4 (+12.718µs): 7.868µs self time
-                                      Combine#857 step 4/4 (+20.586µs): return nil
-                                      Combine#857 ends at 30.56µs
+                                          Funnel#839: index=13 flush=<nil>
+                                          Funnel#839 step 1/2 (+0s): 996ns self time
+                                          Funnel#839 step 2/2 (+996ns): return nil
+                                          Funnel#839 ends at 33.683µs
+                                      Funnel#857 step 3/4 (+12.718µs): 7.868µs self time
+                                      Funnel#857 step 4/4 (+20.586µs): return nil
+                                      Funnel#857 ends at 30.56µs
                                   Plan#31 step 7/8 (+0s): scatter:
                                     Task#859: pool=0
                                     Task#859 step 1/2 (+0s): 740ns self time
@@ -7499,23 +7499,23 @@ Plan#0 step 3/5 (+0s): scatter:
                           Task#813 step 1/2 (+0s): 9.998µs self time
                           Task#813 step 2/2 (+9.998µs): return nil
                           Task#813 ends at 9.998µs
-                            Combine#813: index=0 flush=<nil>
-                            Combine#813 step 1/4 (+0s): 474.076µs self time
-                            Combine#813 step 2/4 (+474.076µs): subjob:
+                            Funnel#813: index=0 flush=<nil>
+                            Funnel#813 step 1/4 (+0s): 474.076µs self time
+                            Funnel#813 step 2/4 (+474.076µs): subjob:
                               Plan#30: pathCount=15 taskCount=19 maxPathDuration=9.751329ms minSkimCount=13 maxSkimCount=37
                                  TaskPools[0]: TaskPool#97: limit=9
                                  TaskPools[1]: TaskPool#98: limit=2
-                                 CombinerPools[0]: CombinerPool#141: limit=4
-                                 CombinerPools[1]: CombinerPool#142: limit=4
-                                 Combiners[0]: pool=0
-                                 Combiners[1]: pool=0
-                                 Combiners[2]: pool=0
-                                 Combiners[3]: pool=0
-                                 Combiners[4]: pool=1
-                                 Combiners[5]: pool=0
-                                 Combiners[6]: pool=1
-                                 Combiners[7]: pool=1
-                                 Combiners[8]: pool=0
+                                 FunnelPools[0]: FunnelPool#141: limit=4
+                                 FunnelPools[1]: FunnelPool#142: limit=4
+                                 Funnels[0]: pool=0
+                                 Funnels[1]: pool=0
+                                 Funnels[2]: pool=0
+                                 Funnels[3]: pool=0
+                                 Funnels[4]: pool=1
+                                 Funnels[5]: pool=0
+                                 Funnels[6]: pool=1
+                                 Funnels[7]: pool=1
+                                 Funnels[8]: pool=0
                               Plan#30 step 1/4 (+0s): scatter:
                                 Task#821: pool=1
                                 Task#821 step 1/2 (+0s): 11.517µs self time
@@ -7544,10 +7544,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#822 step 1/2 (+0s): 10.001µs self time
                                         Task#822 step 2/2 (+10.001µs): return nil
                                         Task#822 ends at 8.982954ms
-                                          Combine#822: index=1 flush=<nil>
-                                          Combine#822 step 1/2 (+0s): 993ns self time
-                                          Combine#822 step 2/2 (+993ns): return nil
-                                          Combine#822 ends at 8.983947ms
+                                          Funnel#822: index=1 flush=<nil>
+                                          Funnel#822 step 1/2 (+0s): 993ns self time
+                                          Funnel#822 step 2/2 (+993ns): return nil
+                                          Funnel#822 ends at 8.983947ms
                                       Skim#831 step 3/12 (+138.369µs): 138.339µs self time
                                       Skim#831 step 4/12 (+276.708µs): scatter:
                                         Task#816: pool=0
@@ -7564,10 +7564,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#817 step 1/2 (+0s): 41.162µs self time
                                         Task#817 step 2/2 (+41.162µs): return nil
                                         Task#817 ends at 9.290825ms
-                                          Combine#817: index=1 flush=<nil>
-                                          Combine#817 step 1/2 (+0s): 995ns self time
-                                          Combine#817 step 2/2 (+995ns): return nil
-                                          Combine#817 ends at 9.29182ms
+                                          Funnel#817: index=1 flush=<nil>
+                                          Funnel#817 step 1/2 (+0s): 995ns self time
+                                          Funnel#817 step 2/2 (+995ns): return nil
+                                          Funnel#817 ends at 9.29182ms
                                       Skim#831 step 7/12 (+415.079µs): 138.373µs self time
                                       Skim#831 step 8/12 (+553.452µs): scatter:
                                         Task#830: pool=0
@@ -7588,20 +7588,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#823 step 1/2 (+0s): 313.562µs self time
                                                 Task#823 step 2/2 (+313.562µs): return error
                                                 Task#823 ends at 9.725371ms
-                                                  Combine#823: index=7 flush=<nil>
-                                                  Combine#823 step 1/2 (+0s): 999ns self time
-                                                  Combine#823 step 2/2 (+999ns): return nil
-                                                  Combine#823 ends at 9.72637ms
+                                                  Funnel#823: index=7 flush=<nil>
+                                                  Funnel#823 step 1/2 (+0s): 999ns self time
+                                                  Funnel#823 step 2/2 (+999ns): return nil
+                                                  Funnel#823 ends at 9.72637ms
                                               Skim#829 step 3/6 (+327ns): 94ns self time
                                               Skim#829 step 4/6 (+421ns): scatter:
                                                 Task#819: pool=1
                                                 Task#819 step 1/2 (+0s): 9.996µs self time
                                                 Task#819 step 2/2 (+9.996µs): return nil
                                                 Task#819 ends at 9.421899ms
-                                                  Combine#819: index=4 flush=<nil>
-                                                  Combine#819 step 1/2 (+0s): 818ns self time
-                                                  Combine#819 step 2/2 (+818ns): return nil
-                                                  Combine#819 ends at 9.422717ms
+                                                  Funnel#819: index=4 flush=<nil>
+                                                  Funnel#819 step 1/2 (+0s): 818ns self time
+                                                  Funnel#819 step 2/2 (+818ns): return nil
+                                                  Funnel#819 ends at 9.422717ms
                                               Skim#829 step 5/6 (+421ns): 562ns self time
                                               Skim#829 step 6/6 (+983ns): return error
                                               Skim#829 ends at 9.412465ms
@@ -7611,10 +7611,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#824 step 1/2 (+0s): 9.979µs self time
                                             Task#824 step 2/2 (+9.979µs): return error
                                             Task#824 ends at 9.408172ms
-                                              Combine#824: index=8 flush=Skim#824
-                                              Combine#824 step 1/2 (+0s): 1.098µs self time
-                                              Combine#824 step 2/2 (+1.098µs): return nil
-                                              Combine#824 ends at 9.40927ms
+                                              Funnel#824: index=8 flush=Skim#824
+                                              Funnel#824 step 1/2 (+0s): 1.098µs self time
+                                              Funnel#824 step 2/2 (+1.098µs): return nil
+                                              Funnel#824 ends at 9.40927ms
                                                 Skim#824: index=1
                                                 Skim#824 step 1/2 (+0s): 0s self time
                                                 Skim#824 step 2/2 (+0s): return nil
@@ -7625,10 +7625,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#827 step 1/2 (+0s): 7.065µs self time
                                             Task#827 step 2/2 (+7.065µs): return nil
                                             Task#827 ends at 9.405286ms
-                                              Combine#827: index=2 flush=<nil>
-                                              Combine#827 step 1/2 (+0s): 1.26µs self time
-                                              Combine#827 step 2/2 (+1.26µs): return nil
-                                              Combine#827 ends at 9.406546ms
+                                              Funnel#827: index=2 flush=<nil>
+                                              Funnel#827 step 1/2 (+0s): 1.26µs self time
+                                              Funnel#827 step 2/2 (+1.26µs): return nil
+                                              Funnel#827 ends at 9.406546ms
                                           Skim#830 step 7/16 (+195ns): 199ns self time
                                           Skim#830 step 8/16 (+394ns): scatter:
                                             Task#826: pool=1
@@ -7703,14 +7703,14 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Task#820 step 1/2 (+0s): 10.23µs self time
                                 Task#820 step 2/2 (+10.23µs): return nil
                                 Task#820 ends at 10.23µs
-                                  Combine#820: index=3 flush=<nil>
-                                  Combine#820 step 1/2 (+0s): 949ns self time
-                                  Combine#820 step 2/2 (+949ns): return nil
-                                  Combine#820 ends at 11.179µs
+                                  Funnel#820: index=3 flush=<nil>
+                                  Funnel#820 step 1/2 (+0s): 949ns self time
+                                  Funnel#820 step 2/2 (+949ns): return nil
+                                  Funnel#820 ends at 11.179µs
                               Plan#30 step 4/4 (+0s): ends at 9.751329ms
-                            Combine#813 step 3/4 (+10.225405ms): 474.052µs self time
-                            Combine#813 step 4/4 (+10.699457ms): return nil
-                            Combine#813 ends at 10.709455ms
+                            Funnel#813 step 3/4 (+10.225405ms): 474.052µs self time
+                            Funnel#813 step 4/4 (+10.699457ms): return nil
+                            Funnel#813 ends at 10.709455ms
                         Plan#26 step 7/9 (+0s): scatter:
                           Task#783: pool=3
                           Task#783 step 1/4 (+0s): 1.102µs self time
@@ -7726,24 +7726,24 @@ Plan#0 step 3/5 (+0s): scatter:
                                TaskPools[7]: TaskPool#94: limit=8
                                TaskPools[8]: TaskPool#95: limit=2
                                TaskPools[9]: TaskPool#96: limit=7
-                               CombinerPools[0]: CombinerPool#137: limit=1
-                               CombinerPools[1]: CombinerPool#138: limit=6
-                               CombinerPools[2]: CombinerPool#139: limit=6
-                               CombinerPools[3]: CombinerPool#140: limit=4
-                               Combiners[0]: pool=1
-                               Combiners[1]: pool=0
-                               Combiners[2]: pool=3
-                               Combiners[3]: pool=3
-                               Combiners[4]: pool=3
-                               Combiners[5]: pool=0
-                               Combiners[6]: pool=3
-                               Combiners[7]: pool=0
-                               Combiners[8]: pool=3
-                               Combiners[9]: pool=2
-                               Combiners[10]: pool=3
-                               Combiners[11]: pool=3
-                               Combiners[12]: pool=3
-                               Combiners[13]: pool=0
+                               FunnelPools[0]: FunnelPool#137: limit=1
+                               FunnelPools[1]: FunnelPool#138: limit=6
+                               FunnelPools[2]: FunnelPool#139: limit=6
+                               FunnelPools[3]: FunnelPool#140: limit=4
+                               Funnels[0]: pool=1
+                               Funnels[1]: pool=0
+                               Funnels[2]: pool=3
+                               Funnels[3]: pool=3
+                               Funnels[4]: pool=3
+                               Funnels[5]: pool=0
+                               Funnels[6]: pool=3
+                               Funnels[7]: pool=0
+                               Funnels[8]: pool=3
+                               Funnels[9]: pool=2
+                               Funnels[10]: pool=3
+                               Funnels[11]: pool=3
+                               Funnels[12]: pool=3
+                               Funnels[13]: pool=0
                             Plan#29 step 1/10 (+0s): scatter:
                               Task#808: pool=2
                               Task#808 step 1/2 (+0s): 9.642µs self time
@@ -7768,19 +7768,19 @@ Plan#0 step 3/5 (+0s): scatter:
                               Task#811 step 1/2 (+0s): 9.918µs self time
                               Task#811 step 2/2 (+9.918µs): return nil
                               Task#811 ends at 9.918µs
-                                Combine#811: index=1 flush=<nil>
-                                Combine#811 step 1/8 (+0s): 108ns self time
-                                Combine#811 step 2/8 (+108ns): scatter:
+                                Funnel#811: index=1 flush=<nil>
+                                Funnel#811 step 1/8 (+0s): 108ns self time
+                                Funnel#811 step 2/8 (+108ns): scatter:
                                   Task#799: pool=0
                                   Task#799 step 1/2 (+0s): 10.001µs self time
                                   Task#799 step 2/2 (+10.001µs): return nil
                                   Task#799 ends at 20.027µs
-                                    Combine#799: index=6 flush=<nil>
-                                    Combine#799 step 1/2 (+0s): 1.038µs self time
-                                    Combine#799 step 2/2 (+1.038µs): return nil
-                                    Combine#799 ends at 21.065µs
-                                Combine#811 step 3/8 (+108ns): 321ns self time
-                                Combine#811 step 4/8 (+429ns): scatter:
+                                    Funnel#799: index=6 flush=<nil>
+                                    Funnel#799 step 1/2 (+0s): 1.038µs self time
+                                    Funnel#799 step 2/2 (+1.038µs): return nil
+                                    Funnel#799 ends at 21.065µs
+                                Funnel#811 step 3/8 (+108ns): 321ns self time
+                                Funnel#811 step 4/8 (+429ns): scatter:
                                   Task#801: pool=2
                                   Task#801 step 1/2 (+0s): 10µs self time
                                   Task#801 step 2/2 (+10µs): return error
@@ -7789,8 +7789,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#801 step 1/2 (+0s): 991ns self time
                                     Skim#801 step 2/2 (+991ns): return nil
                                     Skim#801 ends at 21.338µs
-                                Combine#811 step 5/8 (+429ns): 316ns self time
-                                Combine#811 step 6/8 (+745ns): scatter:
+                                Funnel#811 step 5/8 (+429ns): 316ns self time
+                                Funnel#811 step 6/8 (+745ns): scatter:
                                   Task#794: pool=0
                                   Task#794 step 1/2 (+0s): 9.191µs self time
                                   Task#794 step 2/2 (+9.191µs): return nil
@@ -7799,27 +7799,27 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#794 step 1/2 (+0s): 438.154µs self time
                                     Skim#794 step 2/2 (+438.154µs): return nil
                                     Skim#794 ends at 458.008µs
-                                Combine#811 step 7/8 (+745ns): 321ns self time
-                                Combine#811 step 8/8 (+1.066µs): return nil
-                                Combine#811 ends at 10.984µs
+                                Funnel#811 step 7/8 (+745ns): 321ns self time
+                                Funnel#811 step 8/8 (+1.066µs): return nil
+                                Funnel#811 ends at 10.984µs
                             Plan#29 step 3/10 (+0s): scatter:
                               Task#810: pool=8
                               Task#810 step 1/2 (+0s): 28.675µs self time
                               Task#810 step 2/2 (+28.675µs): return nil
                               Task#810 ends at 28.675µs
-                                Combine#810: index=13 flush=<nil>
-                                Combine#810 step 1/6 (+0s): 1.098µs self time
-                                Combine#810 step 2/6 (+1.098µs): scatter:
+                                Funnel#810: index=13 flush=<nil>
+                                Funnel#810 step 1/6 (+0s): 1.098µs self time
+                                Funnel#810 step 2/6 (+1.098µs): scatter:
                                   Task#784: pool=7
                                   Task#784 step 1/2 (+0s): 10.019µs self time
                                   Task#784 step 2/2 (+10.019µs): return nil
                                   Task#784 ends at 39.792µs
-                                    Combine#784: index=13 flush=<nil>
-                                    Combine#784 step 1/2 (+0s): 996ns self time
-                                    Combine#784 step 2/2 (+996ns): return nil
-                                    Combine#784 ends at 40.788µs
-                                Combine#810 step 3/6 (+1.098µs): 777ns self time
-                                Combine#810 step 4/6 (+1.875µs): scatter:
+                                    Funnel#784: index=13 flush=<nil>
+                                    Funnel#784 step 1/2 (+0s): 996ns self time
+                                    Funnel#784 step 2/2 (+996ns): return nil
+                                    Funnel#784 ends at 40.788µs
+                                Funnel#810 step 3/6 (+1.098µs): 777ns self time
+                                Funnel#810 step 4/6 (+1.875µs): scatter:
                                   Task#807: pool=1
                                   Task#807 step 1/2 (+0s): 10µs self time
                                   Task#807 step 2/2 (+10µs): return nil
@@ -7878,9 +7878,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#803 step 1/2 (+0s): 15.061µs self time
                                           Task#803 step 2/2 (+15.061µs): return nil
                                           Task#803 ends at 66.429µs
-                                            Combine#803: index=3 flush=<nil>
-                                            Combine#803 step 1/4 (+0s): 563ns self time
-                                            Combine#803 step 2/4 (+563ns): scatter:
+                                            Funnel#803: index=3 flush=<nil>
+                                            Funnel#803 step 1/4 (+0s): 563ns self time
+                                            Funnel#803 step 2/4 (+563ns): scatter:
                                               Task#797: pool=8
                                               Task#797 step 1/2 (+0s): 9.997µs self time
                                               Task#797 step 2/2 (+9.997µs): return nil
@@ -7889,19 +7889,19 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Skim#797 step 1/2 (+0s): 992ns self time
                                                 Skim#797 step 2/2 (+992ns): return nil
                                                 Skim#797 ends at 77.981µs
-                                            Combine#803 step 3/4 (+563ns): 566ns self time
-                                            Combine#803 step 4/4 (+1.129µs): return nil
-                                            Combine#803 ends at 67.558µs
+                                            Funnel#803 step 3/4 (+563ns): 566ns self time
+                                            Funnel#803 step 4/4 (+1.129µs): return nil
+                                            Funnel#803 ends at 67.558µs
                                         Skim#805 step 3/10 (+179ns): 383ns self time
                                         Skim#805 step 4/10 (+562ns): scatter:
                                           Task#790: pool=0
                                           Task#790 step 1/2 (+0s): 10.163µs self time
                                           Task#790 step 2/2 (+10.163µs): return nil
                                           Task#790 ends at 61.914µs
-                                            Combine#790: index=4 flush=<nil>
-                                            Combine#790 step 1/2 (+0s): 1.318µs self time
-                                            Combine#790 step 2/2 (+1.318µs): return nil
-                                            Combine#790 ends at 63.232µs
+                                            Funnel#790: index=4 flush=<nil>
+                                            Funnel#790 step 1/2 (+0s): 1.318µs self time
+                                            Funnel#790 step 2/2 (+1.318µs): return nil
+                                            Funnel#790 ends at 63.232µs
                                         Skim#805 step 5/10 (+562ns): 173ns self time
                                         Skim#805 step 6/10 (+735ns): scatter:
                                           Task#802: pool=8
@@ -7915,10 +7915,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#792 step 1/2 (+0s): 6.803013ms self time
                                               Task#792 step 2/2 (+6.803013ms): return nil
                                               Task#792 ends at 6.865306ms
-                                                Combine#792: index=12 flush=<nil>
-                                                Combine#792 step 1/2 (+0s): 1.007µs self time
-                                                Combine#792 step 2/2 (+1.007µs): return nil
-                                                Combine#792 ends at 6.866313ms
+                                                Funnel#792: index=12 flush=<nil>
+                                                Funnel#792 step 1/2 (+0s): 1.007µs self time
+                                                Funnel#792 step 2/2 (+1.007µs): return nil
+                                                Funnel#792 ends at 6.866313ms
                                             Skim#802 step 3/6 (+370ns): 350ns self time
                                             Skim#802 step 4/6 (+720ns): scatter:
                                               Task#787: pool=9
@@ -7948,18 +7948,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#807 step 7/8 (+833ns): 197ns self time
                                     Skim#807 step 8/8 (+1.03µs): return nil
                                     Skim#807 ends at 41.58µs
-                                Combine#810 step 5/6 (+1.875µs): 783ns self time
-                                Combine#810 step 6/6 (+2.658µs): return nil
-                                Combine#810 ends at 31.333µs
+                                Funnel#810 step 5/6 (+1.875µs): 783ns self time
+                                Funnel#810 step 6/6 (+2.658µs): return nil
+                                Funnel#810 ends at 31.333µs
                             Plan#29 step 4/10 (+0s): scatter:
                               Task#798: pool=9
                               Task#798 step 1/2 (+0s): 9.999µs self time
                               Task#798 step 2/2 (+9.999µs): return nil
                               Task#798 ends at 9.999µs
-                                Combine#798: index=10 flush=<nil>
-                                Combine#798 step 1/2 (+0s): 787ns self time
-                                Combine#798 step 2/2 (+787ns): return nil
-                                Combine#798 ends at 10.786µs
+                                Funnel#798: index=10 flush=<nil>
+                                Funnel#798 step 1/2 (+0s): 787ns self time
+                                Funnel#798 step 2/2 (+787ns): return nil
+                                Funnel#798 ends at 10.786µs
                             Plan#29 step 5/10 (+0s): scatter:
                               Task#788: pool=1
                               Task#788 step 1/2 (+0s): 9.995µs self time
@@ -7974,9 +7974,9 @@ Plan#0 step 3/5 (+0s): scatter:
                               Task#812 step 1/2 (+0s): 4.782148ms self time
                               Task#812 step 2/2 (+4.782148ms): return nil
                               Task#812 ends at 4.782148ms
-                                Combine#812: index=0 flush=<nil>
-                                Combine#812 step 1/4 (+0s): 9.414µs self time
-                                Combine#812 step 2/4 (+9.414µs): scatter:
+                                Funnel#812: index=0 flush=<nil>
+                                Funnel#812 step 1/4 (+0s): 9.414µs self time
+                                Funnel#812 step 2/4 (+9.414µs): scatter:
                                   Task#789: pool=5
                                   Task#789 step 1/2 (+0s): 9.943µs self time
                                   Task#789 step 2/2 (+9.943µs): return nil
@@ -7985,9 +7985,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#789 step 1/2 (+0s): 144ns self time
                                     Skim#789 step 2/2 (+144ns): return nil
                                     Skim#789 ends at 4.801649ms
-                                Combine#812 step 3/4 (+9.414µs): 12.191µs self time
-                                Combine#812 step 4/4 (+21.605µs): return nil
-                                Combine#812 ends at 4.803753ms
+                                Funnel#812 step 3/4 (+9.414µs): 12.191µs self time
+                                Funnel#812 step 4/4 (+21.605µs): return nil
+                                Funnel#812 ends at 4.803753ms
                             Plan#29 step 7/10 (+0s): scatter:
                               Task#793: pool=5
                               Task#793 step 1/2 (+0s): 10.007µs self time
@@ -8002,10 +8002,10 @@ Plan#0 step 3/5 (+0s): scatter:
                               Task#785 step 1/2 (+0s): 10µs self time
                               Task#785 step 2/2 (+10µs): return nil
                               Task#785 ends at 10µs
-                                Combine#785: index=10 flush=<nil>
-                                Combine#785 step 1/2 (+0s): 1.041µs self time
-                                Combine#785 step 2/2 (+1.041µs): return nil
-                                Combine#785 ends at 11.041µs
+                                Funnel#785: index=10 flush=<nil>
+                                Funnel#785 step 1/2 (+0s): 1.041µs self time
+                                Funnel#785 step 2/2 (+1.041µs): return nil
+                                Funnel#785 ends at 11.041µs
                             Plan#29 step 9/10 (+0s): scatter:
                               Task#809: pool=0
                               Task#809 step 1/2 (+0s): 9.933µs self time
@@ -8029,10 +8029,10 @@ Plan#0 step 3/5 (+0s): scatter:
                           Task#783 step 3/4 (+11.042285ms): 1.113µs self time
                           Task#783 step 4/4 (+11.043398ms): return nil
                           Task#783 ends at 11.043398ms
-                            Combine#783: index=0 flush=<nil>
-                            Combine#783 step 1/2 (+0s): 1.009µs self time
-                            Combine#783 step 2/2 (+1.009µs): return nil
-                            Combine#783 ends at 11.044407ms
+                            Funnel#783: index=0 flush=<nil>
+                            Funnel#783 step 1/2 (+0s): 1.009µs self time
+                            Funnel#783 step 2/2 (+1.009µs): return nil
+                            Funnel#783 ends at 11.044407ms
                         Plan#26 step 8/9 (+0s): scatter:
                           Task#712: pool=4
                           Task#712 step 1/2 (+0s): 9.998µs self time
@@ -8063,9 +8063,9 @@ Plan#0 step 3/5 (+0s): scatter:
                 Task#898 step 1/2 (+0s): 9.999µs self time
                 Task#898 step 2/2 (+9.999µs): return nil
                 Task#898 ends at 9.999µs
-                  Combine#898: index=1 flush=<nil>
-                  Combine#898 step 1/4 (+0s): 499ns self time
-                  Combine#898 step 2/4 (+499ns): scatter:
+                  Funnel#898: index=1 flush=<nil>
+                  Funnel#898 step 1/4 (+0s): 499ns self time
+                  Funnel#898 step 2/4 (+499ns): scatter:
                     Task#269: pool=0
                     Task#269 step 1/2 (+0s): 9.893µs self time
                     Task#269 step 2/2 (+9.893µs): return nil
@@ -8074,9 +8074,9 @@ Plan#0 step 3/5 (+0s): scatter:
                       Skim#269 step 1/2 (+0s): 980ns self time
                       Skim#269 step 2/2 (+980ns): return nil
                       Skim#269 ends at 21.371µs
-                  Combine#898 step 3/4 (+499ns): 502ns self time
-                  Combine#898 step 4/4 (+1.001µs): return nil
-                  Combine#898 ends at 11µs
+                  Funnel#898 step 3/4 (+499ns): 502ns self time
+                  Funnel#898 step 4/4 (+1.001µs): return nil
+                  Funnel#898 ends at 11µs
               Plan#12 step 9/10 (+0s): scatter:
                 Task#900: pool=0
                 Task#900 step 1/4 (+0s): 0s self time
@@ -8088,21 +8088,21 @@ Plan#0 step 3/5 (+0s): scatter:
                      TaskPools[3]: TaskPool#120: limit=9
                      TaskPools[4]: TaskPool#121: limit=7
                      TaskPools[5]: TaskPool#122: limit=1
-                     CombinerPools[0]: CombinerPool#158: limit=2
-                     CombinerPools[1]: CombinerPool#159: limit=3
-                     CombinerPools[2]: CombinerPool#160: limit=3
-                     Combiners[0]: pool=2
-                     Combiners[1]: pool=1
-                     Combiners[2]: pool=1
-                     Combiners[3]: pool=2
+                     FunnelPools[0]: FunnelPool#158: limit=2
+                     FunnelPools[1]: FunnelPool#159: limit=3
+                     FunnelPools[2]: FunnelPool#160: limit=3
+                     Funnels[0]: pool=2
+                     Funnels[1]: pool=1
+                     Funnels[2]: pool=1
+                     Funnels[3]: pool=2
                   Plan#36 step 1/5 (+0s): scatter:
                     Task#1053: pool=2
                     Task#1053 step 1/2 (+0s): 7.968523ms self time
                     Task#1053 step 2/2 (+7.968523ms): return nil
                     Task#1053 ends at 7.968523ms
-                      Combine#1053: index=0 flush=<nil>
-                      Combine#1053 step 1/4 (+0s): 604.968µs self time
-                      Combine#1053 step 2/4 (+604.968µs): scatter:
+                      Funnel#1053: index=0 flush=<nil>
+                      Funnel#1053 step 1/4 (+0s): 604.968µs self time
+                      Funnel#1053 step 2/4 (+604.968µs): scatter:
                         Task#997: pool=2
                         Task#997 step 1/2 (+0s): 10µs self time
                         Task#997 step 2/2 (+10µs): return nil
@@ -8116,17 +8116,17 @@ Plan#0 step 3/5 (+0s): scatter:
                                TaskPools[2]: TaskPool#125: limit=1
                                TaskPools[3]: TaskPool#126: limit=3
                                TaskPools[4]: TaskPool#127: limit=1
-                               CombinerPools[0]: CombinerPool#161: limit=1
-                               CombinerPools[1]: CombinerPool#162: limit=1
-                               CombinerPools[2]: CombinerPool#163: limit=4
-                               Combiners[0]: pool=2
-                               Combiners[1]: pool=1
-                               Combiners[2]: pool=2
-                               Combiners[3]: pool=1
-                               Combiners[4]: pool=1
-                               Combiners[5]: pool=0
-                               Combiners[6]: pool=1
-                               Combiners[7]: pool=0
+                               FunnelPools[0]: FunnelPool#161: limit=1
+                               FunnelPools[1]: FunnelPool#162: limit=1
+                               FunnelPools[2]: FunnelPool#163: limit=4
+                               Funnels[0]: pool=2
+                               Funnels[1]: pool=1
+                               Funnels[2]: pool=2
+                               Funnels[3]: pool=1
+                               Funnels[4]: pool=1
+                               Funnels[5]: pool=0
+                               Funnels[6]: pool=1
+                               Funnels[7]: pool=0
                             Plan#37 step 1/9 (+0s): scatter:
                               Task#1016: pool=2
                               Task#1016 step 1/2 (+0s): 8.922µs self time
@@ -8156,10 +8156,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Task#1007 step 1/2 (+0s): 10.003µs self time
                                       Task#1007 step 2/2 (+10.003µs): return nil
                                       Task#1007 ends at 28.982µs
-                                        Combine#1007: index=7 flush=<nil>
-                                        Combine#1007 step 1/2 (+0s): 996ns self time
-                                        Combine#1007 step 2/2 (+996ns): return nil
-                                        Combine#1007 ends at 29.978µs
+                                        Funnel#1007: index=7 flush=<nil>
+                                        Funnel#1007 step 1/2 (+0s): 996ns self time
+                                        Funnel#1007 step 2/2 (+996ns): return nil
+                                        Funnel#1007 ends at 29.978µs
                                     Skim#1015 step 5/12 (+24ns): 31ns self time
                                     Skim#1015 step 6/12 (+55ns): scatter:
                                       Task#1014: pool=1
@@ -8173,10 +8173,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                           Task#1003 step 1/2 (+0s): 10.018µs self time
                                           Task#1003 step 2/2 (+10.018µs): return nil
                                           Task#1003 ends at 40.021µs
-                                            Combine#1003: index=5 flush=<nil>
-                                            Combine#1003 step 1/2 (+0s): 986ns self time
-                                            Combine#1003 step 2/2 (+986ns): return nil
-                                            Combine#1003 ends at 41.007µs
+                                            Funnel#1003: index=5 flush=<nil>
+                                            Funnel#1003 step 1/2 (+0s): 986ns self time
+                                            Funnel#1003 step 2/2 (+986ns): return nil
+                                            Funnel#1003 ends at 41.007µs
                                         Skim#1014 step 3/4 (+482ns): 519ns self time
                                         Skim#1014 step 4/4 (+1.001µs): return nil
                                         Skim#1014 ends at 30.522µs
@@ -8186,9 +8186,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Task#1013 step 1/2 (+0s): 10.027µs self time
                                       Task#1013 step 2/2 (+10.027µs): return nil
                                       Task#1013 ends at 29.065µs
-                                        Combine#1013: index=5 flush=<nil>
-                                        Combine#1013 step 1/4 (+0s): 4.339µs self time
-                                        Combine#1013 step 2/4 (+4.339µs): scatter:
+                                        Funnel#1013: index=5 flush=<nil>
+                                        Funnel#1013 step 1/4 (+0s): 4.339µs self time
+                                        Funnel#1013 step 2/4 (+4.339µs): scatter:
                                           Task#1002: pool=3
                                           Task#1002 step 1/2 (+0s): 9.998µs self time
                                           Task#1002 step 2/2 (+9.998µs): return nil
@@ -8197,9 +8197,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Skim#1002 step 1/2 (+0s): 999ns self time
                                             Skim#1002 step 2/2 (+999ns): return nil
                                             Skim#1002 ends at 44.401µs
-                                        Combine#1013 step 3/4 (+4.339µs): 4.322µs self time
-                                        Combine#1013 step 4/4 (+8.661µs): return nil
-                                        Combine#1013 ends at 37.726µs
+                                        Funnel#1013 step 3/4 (+4.339µs): 4.322µs self time
+                                        Funnel#1013 step 4/4 (+8.661µs): return nil
+                                        Funnel#1013 ends at 37.726µs
                                     Skim#1015 step 9/12 (+83ns): 34ns self time
                                     Skim#1015 step 10/12 (+117ns): scatter:
                                       Task#1009: pool=3
@@ -8229,10 +8229,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Task#1001 step 1/2 (+0s): 10µs self time
                                   Task#1001 step 2/2 (+10µs): return nil
                                   Task#1001 ends at 19.23µs
-                                    Combine#1001: index=2 flush=<nil>
-                                    Combine#1001 step 1/2 (+0s): 1.02µs self time
-                                    Combine#1001 step 2/2 (+1.02µs): return nil
-                                    Combine#1001 ends at 20.25µs
+                                    Funnel#1001: index=2 flush=<nil>
+                                    Funnel#1001 step 1/2 (+0s): 1.02µs self time
+                                    Funnel#1001 step 2/2 (+1.02µs): return nil
+                                    Funnel#1001 ends at 20.25µs
                                 Skim#1016 step 7/10 (+308ns): 409ns self time
                                 Skim#1016 step 8/10 (+717ns): scatter:
                                   Task#1006: pool=0
@@ -8260,10 +8260,10 @@ Plan#0 step 3/5 (+0s): scatter:
                               Task#1000 step 1/2 (+0s): 4.71µs self time
                               Task#1000 step 2/2 (+4.71µs): return nil
                               Task#1000 ends at 4.71µs
-                                Combine#1000: index=6 flush=<nil>
-                                Combine#1000 step 1/2 (+0s): 2.472µs self time
-                                Combine#1000 step 2/2 (+2.472µs): return nil
-                                Combine#1000 ends at 7.182µs
+                                Funnel#1000: index=6 flush=<nil>
+                                Funnel#1000 step 1/2 (+0s): 2.472µs self time
+                                Funnel#1000 step 2/2 (+2.472µs): return nil
+                                Funnel#1000 ends at 7.182µs
                             Plan#37 step 4/9 (+0s): scatter:
                               Task#1008: pool=1
                               Task#1008 step 1/2 (+0s): 9.986µs self time
@@ -8313,9 +8313,9 @@ Plan#0 step 3/5 (+0s): scatter:
                           Skim#997 step 3/4 (+44.888µs): 469ns self time
                           Skim#997 step 4/4 (+45.357µs): return nil
                           Skim#997 ends at 8.628848ms
-                      Combine#1053 step 3/4 (+604.968µs): 324.158µs self time
-                      Combine#1053 step 4/4 (+929.126µs): return nil
-                      Combine#1053 ends at 8.897649ms
+                      Funnel#1053 step 3/4 (+604.968µs): 324.158µs self time
+                      Funnel#1053 step 4/4 (+929.126µs): return nil
+                      Funnel#1053 ends at 8.897649ms
                   Plan#36 step 2/5 (+0s): scatter:
                     Task#1052: pool=1
                     Task#1052 step 1/2 (+0s): 10.061µs self time
@@ -8349,19 +8349,19 @@ Plan#0 step 3/5 (+0s): scatter:
                          TaskPools[6]: TaskPool#134: limit=1
                          TaskPools[7]: TaskPool#135: limit=1
                          TaskPools[8]: TaskPool#136: limit=4
-                         CombinerPools[0]: CombinerPool#164: limit=2
-                         Combiners[0]: pool=0
-                         Combiners[1]: pool=0
-                         Combiners[2]: pool=0
-                         Combiners[3]: pool=0
+                         FunnelPools[0]: FunnelPool#164: limit=2
+                         Funnels[0]: pool=0
+                         Funnels[1]: pool=0
+                         Funnels[2]: pool=0
+                         Funnels[3]: pool=0
                       Plan#38 step 1/8 (+0s): scatter:
                         Task#1051: pool=0
                         Task#1051 step 1/2 (+0s): 9.998µs self time
                         Task#1051 step 2/2 (+9.998µs): return error
                         Task#1051 ends at 9.998µs
-                          Combine#1051: index=3 flush=<nil>
-                          Combine#1051 step 1/18 (+0s): 35ns self time
-                          Combine#1051 step 2/18 (+35ns): scatter:
+                          Funnel#1051: index=3 flush=<nil>
+                          Funnel#1051 step 1/18 (+0s): 35ns self time
+                          Funnel#1051 step 2/18 (+35ns): scatter:
                             Task#1047: pool=4
                             Task#1047 step 1/2 (+0s): 833.724µs self time
                             Task#1047 step 2/2 (+833.724µs): return nil
@@ -8407,10 +8407,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#1040 step 1/2 (+0s): 9.998µs self time
                                         Task#1040 step 2/2 (+9.998µs): return nil
                                         Task#1040 ends at 9.340479ms
-                                          Combine#1040: index=1 flush=<nil>
-                                          Combine#1040 step 1/2 (+0s): 4.235µs self time
-                                          Combine#1040 step 2/2 (+4.235µs): return nil
-                                          Combine#1040 ends at 9.344714ms
+                                          Funnel#1040: index=1 flush=<nil>
+                                          Funnel#1040 step 1/2 (+0s): 4.235µs self time
+                                          Funnel#1040 step 2/2 (+4.235µs): return nil
+                                          Funnel#1040 ends at 9.344714ms
                                       Skim#1044 step 3/4 (+725ns): 229ns self time
                                       Skim#1044 step 4/4 (+954ns): return nil
                                       Skim#1044 ends at 9.33071ms
@@ -8430,10 +8430,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Task#1024 step 1/2 (+0s): 10.002µs self time
                                     Task#1024 step 2/2 (+10.002µs): return nil
                                     Task#1024 ends at 870.265µs
-                                      Combine#1024: index=1 flush=<nil>
-                                      Combine#1024 step 1/2 (+0s): 175ns self time
-                                      Combine#1024 step 2/2 (+175ns): return nil
-                                      Combine#1024 ends at 870.44µs
+                                      Funnel#1024: index=1 flush=<nil>
+                                      Funnel#1024 step 1/2 (+0s): 175ns self time
+                                      Funnel#1024 step 2/2 (+175ns): return nil
+                                      Funnel#1024 ends at 870.44µs
                                   Skim#1045 step 11/14 (+6.174µs): 1.347µs self time
                                   Skim#1045 step 12/14 (+7.521µs): scatter:
                                     Task#1028: pool=0
@@ -8453,15 +8453,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Task#1042 step 1/2 (+0s): 9.993µs self time
                                 Task#1042 step 2/2 (+9.993µs): return nil
                                 Task#1042 ends at 854.416µs
-                                  Combine#1042: index=2 flush=<nil>
-                                  Combine#1042 step 1/2 (+0s): 441ns self time
-                                  Combine#1042 step 2/2 (+441ns): return nil
-                                  Combine#1042 ends at 854.857µs
+                                  Funnel#1042: index=2 flush=<nil>
+                                  Funnel#1042 step 1/2 (+0s): 441ns self time
+                                  Funnel#1042 step 2/2 (+441ns): return nil
+                                  Funnel#1042 ends at 854.857µs
                               Skim#1047 step 5/6 (+666ns): 331ns self time
                               Skim#1047 step 6/6 (+997ns): return nil
                               Skim#1047 ends at 844.754µs
-                          Combine#1051 step 3/18 (+35ns): 9ns self time
-                          Combine#1051 step 4/18 (+44ns): scatter:
+                          Funnel#1051 step 3/18 (+35ns): 9ns self time
+                          Funnel#1051 step 4/18 (+44ns): scatter:
                             Task#1022: pool=3
                             Task#1022 step 1/2 (+0s): 632.248µs self time
                             Task#1022 step 2/2 (+632.248µs): return nil
@@ -8470,18 +8470,18 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#1022 step 1/2 (+0s): 1.009µs self time
                               Skim#1022 step 2/2 (+1.009µs): return nil
                               Skim#1022 ends at 643.299µs
-                          Combine#1051 step 5/18 (+44ns): 258ns self time
-                          Combine#1051 step 6/18 (+302ns): scatter:
+                          Funnel#1051 step 5/18 (+44ns): 258ns self time
+                          Funnel#1051 step 6/18 (+302ns): scatter:
                             Task#1041: pool=3
                             Task#1041 step 1/2 (+0s): 3.179µs self time
                             Task#1041 step 2/2 (+3.179µs): return nil
                             Task#1041 ends at 13.479µs
-                              Combine#1041: index=1 flush=<nil>
-                              Combine#1041 step 1/2 (+0s): 1.345µs self time
-                              Combine#1041 step 2/2 (+1.345µs): return nil
-                              Combine#1041 ends at 14.824µs
-                          Combine#1051 step 7/18 (+302ns): 0s self time
-                          Combine#1051 step 8/18 (+302ns): scatter:
+                              Funnel#1041: index=1 flush=<nil>
+                              Funnel#1041 step 1/2 (+0s): 1.345µs self time
+                              Funnel#1041 step 2/2 (+1.345µs): return nil
+                              Funnel#1041 ends at 14.824µs
+                          Funnel#1051 step 7/18 (+302ns): 0s self time
+                          Funnel#1051 step 8/18 (+302ns): scatter:
                             Task#1043: pool=6
                             Task#1043 step 1/2 (+0s): 10.003µs self time
                             Task#1043 step 2/2 (+10.003µs): return nil
@@ -8490,8 +8490,8 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#1043 step 1/2 (+0s): 999ns self time
                               Skim#1043 step 2/2 (+999ns): return nil
                               Skim#1043 ends at 21.302µs
-                          Combine#1051 step 9/18 (+302ns): 0s self time
-                          Combine#1051 step 10/18 (+302ns): scatter:
+                          Funnel#1051 step 9/18 (+302ns): 0s self time
+                          Funnel#1051 step 10/18 (+302ns): scatter:
                             Task#1048: pool=2
                             Task#1048 step 1/2 (+0s): 4.406µs self time
                             Task#1048 step 2/2 (+4.406µs): return nil
@@ -8510,8 +8510,8 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#1048 step 3/4 (+405ns): 595ns self time
                               Skim#1048 step 4/4 (+1µs): return nil
                               Skim#1048 ends at 15.706µs
-                          Combine#1051 step 11/18 (+302ns): 0s self time
-                          Combine#1051 step 12/18 (+302ns): scatter:
+                          Funnel#1051 step 11/18 (+302ns): 0s self time
+                          Funnel#1051 step 12/18 (+302ns): scatter:
                             Task#1049: pool=2
                             Task#1049 step 1/2 (+0s): 10µs self time
                             Task#1049 step 2/2 (+10µs): return nil
@@ -8553,15 +8553,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Task#1036 step 1/2 (+0s): 35.62µs self time
                                 Task#1036 step 2/2 (+35.62µs): return nil
                                 Task#1036 ends at 56.596µs
-                                  Combine#1036: index=2 flush=<nil>
-                                  Combine#1036 step 1/2 (+0s): 1µs self time
-                                  Combine#1036 step 2/2 (+1µs): return nil
-                                  Combine#1036 ends at 57.596µs
+                                  Funnel#1036: index=2 flush=<nil>
+                                  Funnel#1036 step 1/2 (+0s): 1µs self time
+                                  Funnel#1036 step 2/2 (+1µs): return nil
+                                  Funnel#1036 ends at 57.596µs
                               Skim#1049 step 7/8 (+676ns): 274ns self time
                               Skim#1049 step 8/8 (+950ns): return nil
                               Skim#1049 ends at 21.25µs
-                          Combine#1051 step 13/18 (+302ns): 1ns self time
-                          Combine#1051 step 14/18 (+303ns): scatter:
+                          Funnel#1051 step 13/18 (+302ns): 1ns self time
+                          Funnel#1051 step 14/18 (+303ns): scatter:
                             Task#1039: pool=5
                             Task#1039 step 1/2 (+0s): 10.068µs self time
                             Task#1039 step 2/2 (+10.068µs): return nil
@@ -8570,19 +8570,19 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#1039 step 1/2 (+0s): 590ns self time
                               Skim#1039 step 2/2 (+590ns): return error
                               Skim#1039 ends at 20.959µs
-                          Combine#1051 step 15/18 (+303ns): 5ns self time
-                          Combine#1051 step 16/18 (+308ns): scatter:
+                          Funnel#1051 step 15/18 (+303ns): 5ns self time
+                          Funnel#1051 step 16/18 (+308ns): scatter:
                             Task#1030: pool=1
                             Task#1030 step 1/2 (+0s): 10.008µs self time
                             Task#1030 step 2/2 (+10.008µs): return error
                             Task#1030 ends at 20.314µs
-                              Combine#1030: index=0 flush=<nil>
-                              Combine#1030 step 1/2 (+0s): 977ns self time
-                              Combine#1030 step 2/2 (+977ns): return nil
-                              Combine#1030 ends at 21.291µs
-                          Combine#1051 step 17/18 (+308ns): 4ns self time
-                          Combine#1051 step 18/18 (+312ns): return nil
-                          Combine#1051 ends at 10.31µs
+                              Funnel#1030: index=0 flush=<nil>
+                              Funnel#1030 step 1/2 (+0s): 977ns self time
+                              Funnel#1030 step 2/2 (+977ns): return nil
+                              Funnel#1030 ends at 21.291µs
+                          Funnel#1051 step 17/18 (+308ns): 4ns self time
+                          Funnel#1051 step 18/18 (+312ns): return nil
+                          Funnel#1051 ends at 10.31µs
                       Plan#38 step 2/8 (+0s): scatter:
                         Task#1050: pool=6
                         Task#1050 step 1/2 (+0s): 7.352µs self time
@@ -8607,10 +8607,10 @@ Plan#0 step 3/5 (+0s): scatter:
                         Task#1029 step 1/2 (+0s): 10.675µs self time
                         Task#1029 step 2/2 (+10.675µs): return nil
                         Task#1029 ends at 10.675µs
-                          Combine#1029: index=2 flush=<nil>
-                          Combine#1029 step 1/2 (+0s): 65.215µs self time
-                          Combine#1029 step 2/2 (+65.215µs): return nil
-                          Combine#1029 ends at 75.89µs
+                          Funnel#1029: index=2 flush=<nil>
+                          Funnel#1029 step 1/2 (+0s): 65.215µs self time
+                          Funnel#1029 step 2/2 (+65.215µs): return nil
+                          Funnel#1029 ends at 75.89µs
                       Plan#38 step 4/8 (+0s): scatter:
                         Task#1033: pool=1
                         Task#1033 step 1/2 (+0s): 10µs self time
@@ -8643,17 +8643,17 @@ Plan#0 step 3/5 (+0s): scatter:
                         Task#1026 step 1/2 (+0s): 10.003µs self time
                         Task#1026 step 2/2 (+10.003µs): return nil
                         Task#1026 ends at 10.003µs
-                          Combine#1026: index=0 flush=<nil>
-                          Combine#1026 step 1/2 (+0s): 408ns self time
-                          Combine#1026 step 2/2 (+408ns): return nil
-                          Combine#1026 ends at 10.411µs
+                          Funnel#1026: index=0 flush=<nil>
+                          Funnel#1026 step 1/2 (+0s): 408ns self time
+                          Funnel#1026 step 2/2 (+408ns): return nil
+                          Funnel#1026 ends at 10.411µs
                       Plan#38 step 8/8 (+0s): ends at 9.344714ms
                     Task#1021 step 3/4 (+9.349658ms): 4.942µs self time
                     Task#1021 step 4/4 (+9.3546ms): return nil
                     Task#1021 ends at 9.3546ms
-                      Combine#1021: index=2 flush=<nil>
-                      Combine#1021 step 1/6 (+0s): 0s self time
-                      Combine#1021 step 2/6 (+0s): scatter:
+                      Funnel#1021: index=2 flush=<nil>
+                      Funnel#1021 step 1/6 (+0s): 0s self time
+                      Funnel#1021 step 2/6 (+0s): scatter:
                         Task#1019: pool=0
                         Task#1019 step 1/2 (+0s): 9.639µs self time
                         Task#1019 step 2/2 (+9.639µs): return nil
@@ -8672,8 +8672,8 @@ Plan#0 step 3/5 (+0s): scatter:
                           Skim#1019 step 3/4 (+510ns): 482ns self time
                           Skim#1019 step 4/4 (+992ns): return nil
                           Skim#1019 ends at 9.365231ms
-                      Combine#1021 step 3/6 (+0s): 3.378µs self time
-                      Combine#1021 step 4/6 (+3.378µs): scatter:
+                      Funnel#1021 step 3/6 (+0s): 3.378µs self time
+                      Funnel#1021 step 4/6 (+3.378µs): scatter:
                         Task#993: pool=0
                         Task#993 step 1/2 (+0s): 6.467606ms self time
                         Task#993 step 2/2 (+6.467606ms): return nil
@@ -8682,31 +8682,31 @@ Plan#0 step 3/5 (+0s): scatter:
                           Skim#993 step 1/2 (+0s): 729ns self time
                           Skim#993 step 2/2 (+729ns): return nil
                           Skim#993 ends at 15.826313ms
-                      Combine#1021 step 5/6 (+3.378µs): 9.1µs self time
-                      Combine#1021 step 6/6 (+12.478µs): return nil
-                      Combine#1021 ends at 9.367078ms
+                      Funnel#1021 step 5/6 (+3.378µs): 9.1µs self time
+                      Funnel#1021 step 6/6 (+12.478µs): return nil
+                      Funnel#1021 ends at 9.367078ms
                   Plan#36 step 4/5 (+0s): scatter:
                     Task#1020: pool=4
                     Task#1020 step 1/2 (+0s): 30ns self time
                     Task#1020 step 2/2 (+30ns): return nil
                     Task#1020 ends at 30ns
-                      Combine#1020: index=2 flush=<nil>
-                      Combine#1020 step 1/4 (+0s): 529ns self time
-                      Combine#1020 step 2/4 (+529ns): scatter:
+                      Funnel#1020: index=2 flush=<nil>
+                      Funnel#1020 step 1/4 (+0s): 529ns self time
+                      Funnel#1020 step 2/4 (+529ns): scatter:
                         Task#1018: pool=0
                         Task#1018 step 1/2 (+0s): 9.99µs self time
                         Task#1018 step 2/2 (+9.99µs): return nil
                         Task#1018 ends at 10.549µs
-                          Combine#1018: index=3 flush=<nil>
-                          Combine#1018 step 1/4 (+0s): 482ns self time
-                          Combine#1018 step 2/4 (+482ns): scatter:
+                          Funnel#1018: index=3 flush=<nil>
+                          Funnel#1018 step 1/4 (+0s): 482ns self time
+                          Funnel#1018 step 2/4 (+482ns): scatter:
                             Task#1017: pool=4
                             Task#1017 step 1/2 (+0s): 9.993µs self time
                             Task#1017 step 2/2 (+9.993µs): return nil
                             Task#1017 ends at 21.024µs
-                              Combine#1017: index=2 flush=<nil>
-                              Combine#1017 step 1/4 (+0s): 23ns self time
-                              Combine#1017 step 2/4 (+23ns): scatter:
+                              Funnel#1017: index=2 flush=<nil>
+                              Funnel#1017 step 1/4 (+0s): 23ns self time
+                              Funnel#1017 step 2/4 (+23ns): scatter:
                                 Task#995: pool=4
                                 Task#995 step 1/2 (+0s): 2.872322ms self time
                                 Task#995 step 2/2 (+2.872322ms): return nil
@@ -8715,15 +8715,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Skim#995 step 1/2 (+0s): 1.015µs self time
                                   Skim#995 step 2/2 (+1.015µs): return nil
                                   Skim#995 ends at 2.894384ms
-                              Combine#1017 step 3/4 (+23ns): 975ns self time
-                              Combine#1017 step 4/4 (+998ns): return nil
-                              Combine#1017 ends at 22.022µs
-                          Combine#1018 step 3/4 (+482ns): 519ns self time
-                          Combine#1018 step 4/4 (+1.001µs): return error
-                          Combine#1018 ends at 11.55µs
-                      Combine#1020 step 3/4 (+529ns): 522ns self time
-                      Combine#1020 step 4/4 (+1.051µs): return nil
-                      Combine#1020 ends at 1.081µs
+                              Funnel#1017 step 3/4 (+23ns): 975ns self time
+                              Funnel#1017 step 4/4 (+998ns): return nil
+                              Funnel#1017 ends at 22.022µs
+                          Funnel#1018 step 3/4 (+482ns): 519ns self time
+                          Funnel#1018 step 4/4 (+1.001µs): return error
+                          Funnel#1018 ends at 11.55µs
+                      Funnel#1020 step 3/4 (+529ns): 522ns self time
+                      Funnel#1020 step 4/4 (+1.051µs): return nil
+                      Funnel#1020 ends at 1.081µs
                   Plan#36 step 5/5 (+0s): ends at 15.826313ms
                 Task#900 step 3/4 (+15.826313ms): 0s self time
                 Task#900 step 4/4 (+15.826313ms): return nil
@@ -8792,22 +8792,22 @@ Plan#0 step 3/5 (+0s): scatter:
                        TaskPools[7]: TaskPool#108: limit=4
                        TaskPools[8]: TaskPool#109: limit=7
                        TaskPools[9]: TaskPool#110: limit=2
-                       CombinerPools[0]: CombinerPool#152: limit=3
-                       CombinerPools[1]: CombinerPool#153: limit=2
-                       CombinerPools[2]: CombinerPool#154: limit=1
-                       Combiners[0]: pool=2
-                       Combiners[1]: pool=2
-                       Combiners[2]: pool=2
-                       Combiners[3]: pool=1
-                       Combiners[4]: pool=0
-                       Combiners[5]: pool=0
-                       Combiners[6]: pool=2
-                       Combiners[7]: pool=2
-                       Combiners[8]: pool=2
-                       Combiners[9]: pool=1
-                       Combiners[10]: pool=0
-                       Combiners[11]: pool=0
-                       Combiners[12]: pool=2
+                       FunnelPools[0]: FunnelPool#152: limit=3
+                       FunnelPools[1]: FunnelPool#153: limit=2
+                       FunnelPools[2]: FunnelPool#154: limit=1
+                       Funnels[0]: pool=2
+                       Funnels[1]: pool=2
+                       Funnels[2]: pool=2
+                       Funnels[3]: pool=1
+                       Funnels[4]: pool=0
+                       Funnels[5]: pool=0
+                       Funnels[6]: pool=2
+                       Funnels[7]: pool=2
+                       Funnels[8]: pool=2
+                       Funnels[9]: pool=1
+                       Funnels[10]: pool=0
+                       Funnels[11]: pool=0
+                       Funnels[12]: pool=2
                     Plan#33 step 1/7 (+0s): scatter:
                       Task#991: pool=2
                       Task#991 step 1/2 (+0s): 9.997µs self time
@@ -8869,13 +8869,13 @@ Plan#0 step 3/5 (+0s): scatter:
                              TaskPools[2]: TaskPool#114: limit=2
                              TaskPools[3]: TaskPool#115: limit=1
                              TaskPools[4]: TaskPool#116: limit=5
-                             CombinerPools[0]: CombinerPool#157: limit=2
-                             Combiners[0]: pool=0
-                             Combiners[1]: pool=0
-                             Combiners[2]: pool=0
-                             Combiners[3]: pool=0
-                             Combiners[4]: pool=0
-                             Combiners[5]: pool=0
+                             FunnelPools[0]: FunnelPool#157: limit=2
+                             Funnels[0]: pool=0
+                             Funnels[1]: pool=0
+                             Funnels[2]: pool=0
+                             Funnels[3]: pool=0
+                             Funnels[4]: pool=0
+                             Funnels[5]: pool=0
                           Plan#35 step 1/12 (+0s): scatter:
                             Task#958: pool=2
                             Task#958 step 1/2 (+0s): 9.996µs self time
@@ -8927,10 +8927,10 @@ Plan#0 step 3/5 (+0s): scatter:
                             Task#970 step 1/2 (+0s): 11.975µs self time
                             Task#970 step 2/2 (+11.975µs): return nil
                             Task#970 ends at 11.975µs
-                              Combine#970: index=0 flush=<nil>
-                              Combine#970 step 1/2 (+0s): 942ns self time
-                              Combine#970 step 2/2 (+942ns): return nil
-                              Combine#970 ends at 12.917µs
+                              Funnel#970: index=0 flush=<nil>
+                              Funnel#970 step 1/2 (+0s): 942ns self time
+                              Funnel#970 step 2/2 (+942ns): return nil
+                              Funnel#970 ends at 12.917µs
                           Plan#35 step 6/12 (+0s): scatter:
                             Task#957: pool=4
                             Task#957 step 1/2 (+0s): 9.988µs self time
@@ -8945,28 +8945,28 @@ Plan#0 step 3/5 (+0s): scatter:
                             Task#977 step 1/2 (+0s): 9.996µs self time
                             Task#977 step 2/2 (+9.996µs): return nil
                             Task#977 ends at 9.996µs
-                              Combine#977: index=4 flush=<nil>
-                              Combine#977 step 1/2 (+0s): 603ns self time
-                              Combine#977 step 2/2 (+603ns): return nil
-                              Combine#977 ends at 10.599µs
+                              Funnel#977: index=4 flush=<nil>
+                              Funnel#977 step 1/2 (+0s): 603ns self time
+                              Funnel#977 step 2/2 (+603ns): return nil
+                              Funnel#977 ends at 10.599µs
                           Plan#35 step 8/12 (+0s): scatter:
                             Task#988: pool=0
                             Task#988 step 1/2 (+0s): 9.999µs self time
                             Task#988 step 2/2 (+9.999µs): return error
                             Task#988 ends at 9.999µs
-                              Combine#988: index=4 flush=<nil>
-                              Combine#988 step 1/16 (+0s): 23.294µs self time
-                              Combine#988 step 2/16 (+23.294µs): scatter:
+                              Funnel#988: index=4 flush=<nil>
+                              Funnel#988 step 1/16 (+0s): 23.294µs self time
+                              Funnel#988 step 2/16 (+23.294µs): scatter:
                                 Task#965: pool=0
                                 Task#965 step 1/2 (+0s): 9.967µs self time
                                 Task#965 step 2/2 (+9.967µs): return nil
                                 Task#965 ends at 43.26µs
-                                  Combine#965: index=3 flush=<nil>
-                                  Combine#965 step 1/2 (+0s): 6.471µs self time
-                                  Combine#965 step 2/2 (+6.471µs): return nil
-                                  Combine#965 ends at 49.731µs
-                              Combine#988 step 3/16 (+23.294µs): 16.25µs self time
-                              Combine#988 step 4/16 (+39.544µs): scatter:
+                                  Funnel#965: index=3 flush=<nil>
+                                  Funnel#965 step 1/2 (+0s): 6.471µs self time
+                                  Funnel#965 step 2/2 (+6.471µs): return nil
+                                  Funnel#965 ends at 49.731µs
+                              Funnel#988 step 3/16 (+23.294µs): 16.25µs self time
+                              Funnel#988 step 4/16 (+39.544µs): scatter:
                                 Task#966: pool=1
                                 Task#966 step 1/2 (+0s): 9.992µs self time
                                 Task#966 step 2/2 (+9.992µs): return nil
@@ -8975,8 +8975,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Skim#966 step 1/2 (+0s): 863ns self time
                                   Skim#966 step 2/2 (+863ns): return nil
                                   Skim#966 ends at 60.398µs
-                              Combine#988 step 5/16 (+39.544µs): 26.521µs self time
-                              Combine#988 step 6/16 (+66.065µs): scatter:
+                              Funnel#988 step 5/16 (+39.544µs): 26.521µs self time
+                              Funnel#988 step 6/16 (+66.065µs): scatter:
                                 Task#974: pool=1
                                 Task#974 step 1/2 (+0s): 10.103µs self time
                                 Task#974 step 2/2 (+10.103µs): return nil
@@ -8985,18 +8985,18 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Skim#974 step 1/2 (+0s): 12.22µs self time
                                   Skim#974 step 2/2 (+12.22µs): return nil
                                   Skim#974 ends at 98.387µs
-                              Combine#988 step 7/16 (+66.065µs): 23.879µs self time
-                              Combine#988 step 8/16 (+89.944µs): scatter:
+                              Funnel#988 step 7/16 (+66.065µs): 23.879µs self time
+                              Funnel#988 step 8/16 (+89.944µs): scatter:
                                 Task#967: pool=0
                                 Task#967 step 1/2 (+0s): 8.068µs self time
                                 Task#967 step 2/2 (+8.068µs): return nil
                                 Task#967 ends at 108.011µs
-                                  Combine#967: index=0 flush=<nil>
-                                  Combine#967 step 1/2 (+0s): 1.008µs self time
-                                  Combine#967 step 2/2 (+1.008µs): return nil
-                                  Combine#967 ends at 109.019µs
-                              Combine#988 step 9/16 (+89.944µs): 24.432µs self time
-                              Combine#988 step 10/16 (+114.376µs): scatter:
+                                  Funnel#967: index=0 flush=<nil>
+                                  Funnel#967 step 1/2 (+0s): 1.008µs self time
+                                  Funnel#967 step 2/2 (+1.008µs): return nil
+                                  Funnel#967 ends at 109.019µs
+                              Funnel#988 step 9/16 (+89.944µs): 24.432µs self time
+                              Funnel#988 step 10/16 (+114.376µs): scatter:
                                 Task#984: pool=2
                                 Task#984 step 1/2 (+0s): 10.813µs self time
                                 Task#984 step 2/2 (+10.813µs): return nil
@@ -9028,29 +9028,29 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Task#961 step 1/2 (+0s): 10ms self time
                                     Task#961 step 2/2 (+10ms): return nil
                                     Task#961 ends at 10.135826ms
-                                      Combine#961: index=0 flush=<nil>
-                                      Combine#961 step 1/2 (+0s): 0s self time
-                                      Combine#961 step 2/2 (+0s): return nil
-                                      Combine#961 ends at 10.135826ms
+                                      Funnel#961: index=0 flush=<nil>
+                                      Funnel#961 step 1/2 (+0s): 0s self time
+                                      Funnel#961 step 2/2 (+0s): return nil
+                                      Funnel#961 ends at 10.135826ms
                                   Skim#984 step 5/6 (+638ns): 364ns self time
                                   Skim#984 step 6/6 (+1.002µs): return nil
                                   Skim#984 ends at 136.19µs
-                              Combine#988 step 11/16 (+114.376µs): 29.357µs self time
-                              Combine#988 step 12/16 (+143.733µs): scatter:
+                              Funnel#988 step 11/16 (+114.376µs): 29.357µs self time
+                              Funnel#988 step 12/16 (+143.733µs): scatter:
                                 Task#986: pool=2
                                 Task#986 step 1/2 (+0s): 9.999µs self time
                                 Task#986 step 2/2 (+9.999µs): return nil
                                 Task#986 ends at 163.731µs
-                                  Combine#986: index=4 flush=<nil>
-                                  Combine#986 step 1/4 (+0s): 513ns self time
-                                  Combine#986 step 2/4 (+513ns): scatter:
+                                  Funnel#986: index=4 flush=<nil>
+                                  Funnel#986 step 1/4 (+0s): 513ns self time
+                                  Funnel#986 step 2/4 (+513ns): scatter:
                                     Task#982: pool=0
                                     Task#982 step 1/2 (+0s): 9.999µs self time
                                     Task#982 step 2/2 (+9.999µs): return nil
                                     Task#982 ends at 174.243µs
-                                      Combine#982: index=1 flush=<nil>
-                                      Combine#982 step 1/4 (+0s): 267ns self time
-                                      Combine#982 step 2/4 (+267ns): scatter:
+                                      Funnel#982: index=1 flush=<nil>
+                                      Funnel#982 step 1/4 (+0s): 267ns self time
+                                      Funnel#982 step 2/4 (+267ns): scatter:
                                         Task#980: pool=4
                                         Task#980 step 1/2 (+0s): 10.002µs self time
                                         Task#980 step 2/2 (+10.002µs): return nil
@@ -9072,10 +9072,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#959 step 1/2 (+0s): 9.939µs self time
                                             Task#959 step 2/2 (+9.939µs): return nil
                                             Task#959 ends at 194.659µs
-                                              Combine#959: index=2 flush=<nil>
-                                              Combine#959 step 1/2 (+0s): 200ns self time
-                                              Combine#959 step 2/2 (+200ns): return nil
-                                              Combine#959 ends at 194.859µs
+                                              Funnel#959: index=2 flush=<nil>
+                                              Funnel#959 step 1/2 (+0s): 200ns self time
+                                              Funnel#959 step 2/2 (+200ns): return nil
+                                              Funnel#959 ends at 194.859µs
                                           Skim#980 step 5/10 (+208ns): 134ns self time
                                           Skim#980 step 6/10 (+342ns): scatter:
                                             Task#964: pool=4
@@ -9092,21 +9092,21 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#968 step 1/2 (+0s): 10.023µs self time
                                             Task#968 step 2/2 (+10.023µs): return nil
                                             Task#968 ends at 195.215µs
-                                              Combine#968: index=1 flush=<nil>
-                                              Combine#968 step 1/2 (+0s): 1.157µs self time
-                                              Combine#968 step 2/2 (+1.157µs): return nil
-                                              Combine#968 ends at 196.372µs
+                                              Funnel#968: index=1 flush=<nil>
+                                              Funnel#968 step 1/2 (+0s): 1.157µs self time
+                                              Funnel#968 step 2/2 (+1.157µs): return nil
+                                              Funnel#968 ends at 196.372µs
                                           Skim#980 step 9/10 (+680ns): 346ns self time
                                           Skim#980 step 10/10 (+1.026µs): return nil
                                           Skim#980 ends at 185.538µs
-                                      Combine#982 step 3/4 (+267ns): 246ns self time
-                                      Combine#982 step 4/4 (+513ns): return nil
-                                      Combine#982 ends at 174.756µs
-                                  Combine#986 step 3/4 (+513ns): 479ns self time
-                                  Combine#986 step 4/4 (+992ns): return nil
-                                  Combine#986 ends at 164.723µs
-                              Combine#988 step 13/16 (+143.733µs): 18.595µs self time
-                              Combine#988 step 14/16 (+162.328µs): scatter:
+                                      Funnel#982 step 3/4 (+267ns): 246ns self time
+                                      Funnel#982 step 4/4 (+513ns): return nil
+                                      Funnel#982 ends at 174.756µs
+                                  Funnel#986 step 3/4 (+513ns): 479ns self time
+                                  Funnel#986 step 4/4 (+992ns): return nil
+                                  Funnel#986 ends at 164.723µs
+                              Funnel#988 step 13/16 (+143.733µs): 18.595µs self time
+                              Funnel#988 step 14/16 (+162.328µs): scatter:
                                 Task#985: pool=1
                                 Task#985 step 1/2 (+0s): 9.562µs self time
                                 Task#985 step 2/2 (+9.562µs): return nil
@@ -9125,9 +9125,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#979 step 1/2 (+0s): 10.088µs self time
                                         Task#979 step 2/2 (+10.088µs): return nil
                                         Task#979 ends at 561.251µs
-                                          Combine#979: index=5 flush=<nil>
-                                          Combine#979 step 1/4 (+0s): 50.028µs self time
-                                          Combine#979 step 2/4 (+50.028µs): scatter:
+                                          Funnel#979: index=5 flush=<nil>
+                                          Funnel#979 step 1/4 (+0s): 50.028µs self time
+                                          Funnel#979 step 2/4 (+50.028µs): scatter:
                                             Task#956: pool=4
                                             Task#956 step 1/2 (+0s): 1.523192ms self time
                                             Task#956 step 2/2 (+1.523192ms): return nil
@@ -9136,9 +9136,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Skim#956 step 1/2 (+0s): 1.001µs self time
                                               Skim#956 step 2/2 (+1.001µs): return nil
                                               Skim#956 ends at 2.135472ms
-                                          Combine#979 step 3/4 (+50.028µs): 36.664µs self time
-                                          Combine#979 step 4/4 (+86.692µs): return nil
-                                          Combine#979 ends at 647.943µs
+                                          Funnel#979 step 3/4 (+50.028µs): 36.664µs self time
+                                          Funnel#979 step 4/4 (+86.692µs): return nil
+                                          Funnel#979 ends at 647.943µs
                                       Skim#983 step 3/6 (+41.847µs): 42.429µs self time
                                       Skim#983 step 4/6 (+84.276µs): scatter:
                                         Task#975: pool=0
@@ -9158,25 +9158,25 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Task#971 step 1/2 (+0s): 10.339µs self time
                                     Task#971 step 2/2 (+10.339µs): return nil
                                     Task#971 ends at 826.088µs
-                                      Combine#971: index=4 flush=<nil>
-                                      Combine#971 step 1/2 (+0s): 1.005µs self time
-                                      Combine#971 step 2/2 (+1.005µs): return nil
-                                      Combine#971 ends at 827.093µs
+                                      Funnel#971: index=4 flush=<nil>
+                                      Funnel#971 step 1/2 (+0s): 1.005µs self time
+                                      Funnel#971 step 2/2 (+1.005µs): return nil
+                                      Funnel#971 ends at 827.093µs
                                   Skim#985 step 5/6 (+633.86µs): 316.384µs self time
                                   Skim#985 step 6/6 (+950.244µs): return nil
                                   Skim#985 ends at 1.132133ms
-                              Combine#988 step 15/16 (+162.328µs): 25.353µs self time
-                              Combine#988 step 16/16 (+187.681µs): return nil
-                              Combine#988 ends at 197.68µs
+                              Funnel#988 step 15/16 (+162.328µs): 25.353µs self time
+                              Funnel#988 step 16/16 (+187.681µs): return nil
+                              Funnel#988 ends at 197.68µs
                           Plan#35 step 9/12 (+0s): scatter:
                             Task#973: pool=2
                             Task#973 step 1/2 (+0s): 3.782µs self time
                             Task#973 step 2/2 (+3.782µs): return nil
                             Task#973 ends at 3.782µs
-                              Combine#973: index=4 flush=<nil>
-                              Combine#973 step 1/2 (+0s): 1.007µs self time
-                              Combine#973 step 2/2 (+1.007µs): return nil
-                              Combine#973 ends at 4.789µs
+                              Funnel#973: index=4 flush=<nil>
+                              Funnel#973 step 1/2 (+0s): 1.007µs self time
+                              Funnel#973 step 2/2 (+1.007µs): return nil
+                              Funnel#973 ends at 4.789µs
                           Plan#35 step 10/12 (+0s): scatter:
                             Task#976: pool=0
                             Task#976 step 1/2 (+0s): 10.005µs self time
@@ -9202,9 +9202,9 @@ Plan#0 step 3/5 (+0s): scatter:
                           Task#954 step 1/2 (+0s): 370.989µs self time
                           Task#954 step 2/2 (+370.989µs): return nil
                           Task#954 ends at 10.517481ms
-                            Combine#954: index=0 flush=<nil>
-                            Combine#954 step 1/10 (+0s): 743ns self time
-                            Combine#954 step 2/10 (+743ns): scatter:
+                            Funnel#954: index=0 flush=<nil>
+                            Funnel#954 step 1/10 (+0s): 743ns self time
+                            Funnel#954 step 2/10 (+743ns): scatter:
                               Task#951: pool=1
                               Task#951 step 1/2 (+0s): 9.997µs self time
                               Task#951 step 2/2 (+9.997µs): return nil
@@ -9213,8 +9213,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#951 step 1/2 (+0s): 10.197µs self time
                                 Skim#951 step 2/2 (+10.197µs): return nil
                                 Skim#951 ends at 10.538418ms
-                            Combine#954 step 3/10 (+743ns): 189ns self time
-                            Combine#954 step 4/10 (+932ns): scatter:
+                            Funnel#954 step 3/10 (+743ns): 189ns self time
+                            Funnel#954 step 4/10 (+932ns): scatter:
                               Task#907: pool=7
                               Task#907 step 1/2 (+0s): 10.031µs self time
                               Task#907 step 2/2 (+10.031µs): return nil
@@ -9223,8 +9223,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#907 step 1/2 (+0s): 931ns self time
                                 Skim#907 step 2/2 (+931ns): return nil
                                 Skim#907 ends at 10.529375ms
-                            Combine#954 step 5/10 (+932ns): 19ns self time
-                            Combine#954 step 6/10 (+951ns): scatter:
+                            Funnel#954 step 5/10 (+932ns): 19ns self time
+                            Funnel#954 step 6/10 (+951ns): scatter:
                               Task#906: pool=5
                               Task#906 step 1/2 (+0s): 12.142µs self time
                               Task#906 step 2/2 (+12.142µs): return nil
@@ -9233,8 +9233,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#906 step 1/2 (+0s): 755ns self time
                                 Skim#906 step 2/2 (+755ns): return error
                                 Skim#906 ends at 10.531329ms
-                            Combine#954 step 7/10 (+951ns): 26ns self time
-                            Combine#954 step 8/10 (+977ns): scatter:
+                            Funnel#954 step 7/10 (+951ns): 26ns self time
+                            Funnel#954 step 8/10 (+977ns): scatter:
                               Task#953: pool=0
                               Task#953 step 1/2 (+0s): 9.998µs self time
                               Task#953 step 2/2 (+9.998µs): return nil
@@ -9273,20 +9273,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Task#903 step 1/2 (+0s): 9.347µs self time
                                       Task#903 step 2/2 (+9.347µs): return nil
                                       Task#903 ends at 10.549148ms
-                                        Combine#903: index=2 flush=<nil>
-                                        Combine#903 step 1/2 (+0s): 1.054µs self time
-                                        Combine#903 step 2/2 (+1.054µs): return error
-                                        Combine#903 ends at 10.550202ms
+                                        Funnel#903: index=2 flush=<nil>
+                                        Funnel#903 step 1/2 (+0s): 1.054µs self time
+                                        Funnel#903 step 2/2 (+1.054µs): return error
+                                        Funnel#903 ends at 10.550202ms
                                     Skim#952 step 7/10 (+516ns): 241ns self time
                                     Skim#952 step 8/10 (+757ns): scatter:
                                       Task#905: pool=3
                                       Task#905 step 1/2 (+0s): 0s self time
                                       Task#905 step 2/2 (+0s): return nil
                                       Task#905 ends at 10.540042ms
-                                        Combine#905: index=6 flush=<nil>
-                                        Combine#905 step 1/2 (+0s): 57.044µs self time
-                                        Combine#905 step 2/2 (+57.044µs): return nil
-                                        Combine#905 ends at 10.597086ms
+                                        Funnel#905: index=6 flush=<nil>
+                                        Funnel#905 step 1/2 (+0s): 57.044µs self time
+                                        Funnel#905 step 2/2 (+57.044µs): return nil
+                                        Funnel#905 ends at 10.597086ms
                                     Skim#952 step 9/10 (+757ns): 244ns self time
                                     Skim#952 step 10/10 (+1.001µs): return nil
                                     Skim#952 ends at 10.540286ms
@@ -9321,28 +9321,28 @@ Plan#0 step 3/5 (+0s): scatter:
                                     Skim#910 step 2/4 (+492ns): subjob:
                                       Plan#34: pathCount=20 taskCount=36 maxPathDuration=8.611944ms minSkimCount=28 maxSkimCount=42
                                          TaskPools[0]: TaskPool#111: limit=1
-                                         CombinerPools[0]: CombinerPool#155: limit=4
-                                         CombinerPools[1]: CombinerPool#156: limit=1
-                                         Combiners[0]: pool=1
-                                         Combiners[1]: pool=1
-                                         Combiners[2]: pool=0
-                                         Combiners[3]: pool=1
-                                         Combiners[4]: pool=0
-                                         Combiners[5]: pool=1
-                                         Combiners[6]: pool=0
-                                         Combiners[7]: pool=0
-                                         Combiners[8]: pool=1
-                                         Combiners[9]: pool=1
-                                         Combiners[10]: pool=1
-                                         Combiners[11]: pool=0
-                                         Combiners[12]: pool=1
-                                         Combiners[13]: pool=1
-                                         Combiners[14]: pool=1
-                                         Combiners[15]: pool=0
-                                         Combiners[16]: pool=1
-                                         Combiners[17]: pool=0
-                                         Combiners[18]: pool=1
-                                         Combiners[19]: pool=1
+                                         FunnelPools[0]: FunnelPool#155: limit=4
+                                         FunnelPools[1]: FunnelPool#156: limit=1
+                                         Funnels[0]: pool=1
+                                         Funnels[1]: pool=1
+                                         Funnels[2]: pool=0
+                                         Funnels[3]: pool=1
+                                         Funnels[4]: pool=0
+                                         Funnels[5]: pool=1
+                                         Funnels[6]: pool=0
+                                         Funnels[7]: pool=0
+                                         Funnels[8]: pool=1
+                                         Funnels[9]: pool=1
+                                         Funnels[10]: pool=1
+                                         Funnels[11]: pool=0
+                                         Funnels[12]: pool=1
+                                         Funnels[13]: pool=1
+                                         Funnels[14]: pool=1
+                                         Funnels[15]: pool=0
+                                         Funnels[16]: pool=1
+                                         Funnels[17]: pool=0
+                                         Funnels[18]: pool=1
+                                         Funnels[19]: pool=1
                                       Plan#34 step 1/8 (+0s): scatter:
                                         Task#918: pool=0
                                         Task#918 step 1/2 (+0s): 8.610945ms self time
@@ -9357,19 +9357,19 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#911 step 1/2 (+0s): 10.201µs self time
                                         Task#911 step 2/2 (+10.201µs): return nil
                                         Task#911 ends at 10.201µs
-                                          Combine#911: index=0 flush=<nil>
-                                          Combine#911 step 1/2 (+0s): 1.001µs self time
-                                          Combine#911 step 2/2 (+1.001µs): return nil
-                                          Combine#911 ends at 11.202µs
+                                          Funnel#911: index=0 flush=<nil>
+                                          Funnel#911 step 1/2 (+0s): 1.001µs self time
+                                          Funnel#911 step 2/2 (+1.001µs): return nil
+                                          Funnel#911 ends at 11.202µs
                                       Plan#34 step 3/8 (+0s): scatter:
                                         Task#917: pool=0
                                         Task#917 step 1/2 (+0s): 9.836µs self time
                                         Task#917 step 2/2 (+9.836µs): return nil
                                         Task#917 ends at 9.836µs
-                                          Combine#917: index=0 flush=<nil>
-                                          Combine#917 step 1/2 (+0s): 1.014µs self time
-                                          Combine#917 step 2/2 (+1.014µs): return nil
-                                          Combine#917 ends at 10.85µs
+                                          Funnel#917: index=0 flush=<nil>
+                                          Funnel#917 step 1/2 (+0s): 1.014µs self time
+                                          Funnel#917 step 2/2 (+1.014µs): return nil
+                                          Funnel#917 ends at 10.85µs
                                       Plan#34 step 4/8 (+0s): scatter:
                                         Task#945: pool=0
                                         Task#945 step 1/2 (+0s): 9.999µs self time
@@ -9437,9 +9437,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#938 step 1/2 (+0s): 9.752µs self time
                                                 Task#938 step 2/2 (+9.752µs): return nil
                                                 Task#938 ends at 40.055µs
-                                                  Combine#938: index=1 flush=<nil>
-                                                  Combine#938 step 1/16 (+0s): 957ns self time
-                                                  Combine#938 step 2/16 (+957ns): scatter:
+                                                  Funnel#938: index=1 flush=<nil>
+                                                  Funnel#938 step 1/16 (+0s): 957ns self time
+                                                  Funnel#938 step 2/16 (+957ns): scatter:
                                                     Task#919: pool=0
                                                     Task#919 step 1/2 (+0s): 9.999µs self time
                                                     Task#919 step 2/2 (+9.999µs): return nil
@@ -9448,8 +9448,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#919 step 1/2 (+0s): 1.012µs self time
                                                       Skim#919 step 2/2 (+1.012µs): return nil
                                                       Skim#919 ends at 52.023µs
-                                                  Combine#938 step 3/16 (+957ns): 0s self time
-                                                  Combine#938 step 4/16 (+957ns): scatter:
+                                                  Funnel#938 step 3/16 (+957ns): 0s self time
+                                                  Funnel#938 step 4/16 (+957ns): scatter:
                                                     Task#934: pool=0
                                                     Task#934 step 1/2 (+0s): 9.489µs self time
                                                     Task#934 step 2/2 (+9.489µs): return nil
@@ -9478,8 +9478,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#934 step 5/6 (+216ns): 275ns self time
                                                       Skim#934 step 6/6 (+491ns): return nil
                                                       Skim#934 ends at 50.992µs
-                                                  Combine#938 step 5/16 (+957ns): 2ns self time
-                                                  Combine#938 step 6/16 (+959ns): scatter:
+                                                  Funnel#938 step 5/16 (+957ns): 2ns self time
+                                                  Funnel#938 step 6/16 (+959ns): scatter:
                                                     Task#924: pool=0
                                                     Task#924 step 1/2 (+0s): 9.994µs self time
                                                     Task#924 step 2/2 (+9.994µs): return nil
@@ -9488,8 +9488,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#924 step 1/2 (+0s): 1.001µs self time
                                                       Skim#924 step 2/2 (+1.001µs): return nil
                                                       Skim#924 ends at 52.009µs
-                                                  Combine#938 step 7/16 (+959ns): 34ns self time
-                                                  Combine#938 step 8/16 (+993ns): scatter:
+                                                  Funnel#938 step 7/16 (+959ns): 34ns self time
+                                                  Funnel#938 step 8/16 (+993ns): scatter:
                                                     Task#928: pool=0
                                                     Task#928 step 1/2 (+0s): 190.436µs self time
                                                     Task#928 step 2/2 (+190.436µs): return nil
@@ -9498,8 +9498,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#928 step 1/2 (+0s): 999ns self time
                                                       Skim#928 step 2/2 (+999ns): return error
                                                       Skim#928 ends at 232.483µs
-                                                  Combine#938 step 9/16 (+993ns): 4ns self time
-                                                  Combine#938 step 10/16 (+997ns): scatter:
+                                                  Funnel#938 step 9/16 (+993ns): 4ns self time
+                                                  Funnel#938 step 10/16 (+997ns): scatter:
                                                     Task#912: pool=0
                                                     Task#912 step 1/2 (+0s): 10µs self time
                                                     Task#912 step 2/2 (+10µs): return nil
@@ -9508,8 +9508,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#912 step 1/2 (+0s): 328.754µs self time
                                                       Skim#912 step 2/2 (+328.754µs): return nil
                                                       Skim#912 ends at 379.806µs
-                                                  Combine#938 step 11/16 (+997ns): 4ns self time
-                                                  Combine#938 step 12/16 (+1.001µs): scatter:
+                                                  Funnel#938 step 11/16 (+997ns): 4ns self time
+                                                  Funnel#938 step 12/16 (+1.001µs): scatter:
                                                     Task#926: pool=0
                                                     Task#926 step 1/2 (+0s): 9.853µs self time
                                                     Task#926 step 2/2 (+9.853µs): return error
@@ -9518,29 +9518,29 @@ Plan#0 step 3/5 (+0s): scatter:
                                                       Skim#926 step 1/2 (+0s): 320ns self time
                                                       Skim#926 step 2/2 (+320ns): return nil
                                                       Skim#926 ends at 51.229µs
-                                                  Combine#938 step 13/16 (+1.001µs): 2ns self time
-                                                  Combine#938 step 14/16 (+1.003µs): scatter:
+                                                  Funnel#938 step 13/16 (+1.001µs): 2ns self time
+                                                  Funnel#938 step 14/16 (+1.003µs): scatter:
                                                     Task#933: pool=0
                                                     Task#933 step 1/2 (+0s): 10.001µs self time
                                                     Task#933 step 2/2 (+10.001µs): return nil
                                                     Task#933 ends at 51.059µs
-                                                      Combine#933: index=0 flush=<nil>
-                                                      Combine#933 step 1/4 (+0s): 420.554µs self time
-                                                      Combine#933 step 2/4 (+420.554µs): scatter:
+                                                      Funnel#933: index=0 flush=<nil>
+                                                      Funnel#933 step 1/4 (+0s): 420.554µs self time
+                                                      Funnel#933 step 2/4 (+420.554µs): scatter:
                                                         Task#922: pool=0
                                                         Task#922 step 1/2 (+0s): 10.007µs self time
                                                         Task#922 step 2/2 (+10.007µs): return nil
                                                         Task#922 ends at 481.62µs
-                                                          Combine#922: index=1 flush=<nil>
-                                                          Combine#922 step 1/2 (+0s): 998ns self time
-                                                          Combine#922 step 2/2 (+998ns): return nil
-                                                          Combine#922 ends at 482.618µs
-                                                      Combine#933 step 3/4 (+420.554µs): 423.49µs self time
-                                                      Combine#933 step 4/4 (+844.044µs): return error
-                                                      Combine#933 ends at 895.103µs
-                                                  Combine#938 step 15/16 (+1.003µs): 0s self time
-                                                  Combine#938 step 16/16 (+1.003µs): return nil
-                                                  Combine#938 ends at 41.058µs
+                                                          Funnel#922: index=1 flush=<nil>
+                                                          Funnel#922 step 1/2 (+0s): 998ns self time
+                                                          Funnel#922 step 2/2 (+998ns): return nil
+                                                          Funnel#922 ends at 482.618µs
+                                                      Funnel#933 step 3/4 (+420.554µs): 423.49µs self time
+                                                      Funnel#933 step 4/4 (+844.044µs): return error
+                                                      Funnel#933 ends at 895.103µs
+                                                  Funnel#938 step 15/16 (+1.003µs): 0s self time
+                                                  Funnel#938 step 16/16 (+1.003µs): return nil
+                                                  Funnel#938 ends at 41.058µs
                                               Skim#943 step 3/4 (+474ns): 483ns self time
                                               Skim#943 step 4/4 (+957ns): return nil
                                               Skim#943 ends at 30.786µs
@@ -9666,30 +9666,30 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#937 step 1/2 (+0s): 9.996µs self time
                                                 Task#937 step 2/2 (+9.996µs): return nil
                                                 Task#937 ends at 31.591µs
-                                                  Combine#937: index=0 flush=<nil>
-                                                  Combine#937 step 1/4 (+0s): 72ns self time
-                                                  Combine#937 step 2/4 (+72ns): scatter:
+                                                  Funnel#937: index=0 flush=<nil>
+                                                  Funnel#937 step 1/4 (+0s): 72ns self time
+                                                  Funnel#937 step 2/4 (+72ns): scatter:
                                                     Task#932: pool=0
                                                     Task#932 step 1/2 (+0s): 9.998µs self time
                                                     Task#932 step 2/2 (+9.998µs): return nil
                                                     Task#932 ends at 41.661µs
-                                                      Combine#932: index=15 flush=<nil>
-                                                      Combine#932 step 1/4 (+0s): 0s self time
-                                                      Combine#932 step 2/4 (+0s): scatter:
+                                                      Funnel#932: index=15 flush=<nil>
+                                                      Funnel#932 step 1/4 (+0s): 0s self time
+                                                      Funnel#932 step 2/4 (+0s): scatter:
                                                         Task#929: pool=0
                                                         Task#929 step 1/2 (+0s): 9.997µs self time
                                                         Task#929 step 2/2 (+9.997µs): return nil
                                                         Task#929 ends at 51.658µs
-                                                          Combine#929: index=6 flush=<nil>
-                                                          Combine#929 step 1/2 (+0s): 6.922µs self time
-                                                          Combine#929 step 2/2 (+6.922µs): return nil
-                                                          Combine#929 ends at 58.58µs
-                                                      Combine#932 step 3/4 (+0s): 1.92µs self time
-                                                      Combine#932 step 4/4 (+1.92µs): return nil
-                                                      Combine#932 ends at 43.581µs
-                                                  Combine#937 step 3/4 (+72ns): 61ns self time
-                                                  Combine#937 step 4/4 (+133ns): return error
-                                                  Combine#937 ends at 31.724µs
+                                                          Funnel#929: index=6 flush=<nil>
+                                                          Funnel#929 step 1/2 (+0s): 6.922µs self time
+                                                          Funnel#929 step 2/2 (+6.922µs): return nil
+                                                          Funnel#929 ends at 58.58µs
+                                                      Funnel#932 step 3/4 (+0s): 1.92µs self time
+                                                      Funnel#932 step 4/4 (+1.92µs): return nil
+                                                      Funnel#932 ends at 43.581µs
+                                                  Funnel#937 step 3/4 (+72ns): 61ns self time
+                                                  Funnel#937 step 4/4 (+133ns): return error
+                                                  Funnel#937 ends at 31.724µs
                                               Skim#941 step 5/6 (+420ns): 221ns self time
                                               Skim#941 step 6/6 (+641ns): return nil
                                               Skim#941 ends at 21.816µs
@@ -9703,9 +9703,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                 Skim#953 step 9/10 (+904ns): 95ns self time
                                 Skim#953 step 10/10 (+999ns): return nil
                                 Skim#953 ends at 10.529455ms
-                            Combine#954 step 9/10 (+977ns): 24ns self time
-                            Combine#954 step 10/10 (+1.001µs): return nil
-                            Combine#954 ends at 10.518482ms
+                            Funnel#954 step 9/10 (+977ns): 24ns self time
+                            Funnel#954 step 10/10 (+1.001µs): return nil
+                            Funnel#954 ends at 10.518482ms
                         Skim#955 step 5/6 (+10.136496ms): 453ns self time
                         Skim#955 step 6/6 (+10.136949ms): return error
                         Skim#955 ends at 10.146945ms
@@ -9714,9 +9714,9 @@ Plan#0 step 3/5 (+0s): scatter:
                       Task#989 step 1/2 (+0s): 9.992µs self time
                       Task#989 step 2/2 (+9.992µs): return error
                       Task#989 ends at 9.992µs
-                        Combine#989: index=1 flush=<nil>
-                        Combine#989 step 1/4 (+0s): 168ns self time
-                        Combine#989 step 2/4 (+168ns): scatter:
+                        Funnel#989: index=1 flush=<nil>
+                        Funnel#989 step 1/4 (+0s): 168ns self time
+                        Funnel#989 step 2/4 (+168ns): scatter:
                           Task#950: pool=6
                           Task#950 step 1/2 (+0s): 10.02µs self time
                           Task#950 step 2/2 (+10.02µs): return nil
@@ -9725,9 +9725,9 @@ Plan#0 step 3/5 (+0s): scatter:
                             Skim#950 step 1/2 (+0s): 1µs self time
                             Skim#950 step 2/2 (+1µs): return nil
                             Skim#950 ends at 21.18µs
-                        Combine#989 step 3/4 (+168ns): 3ns self time
-                        Combine#989 step 4/4 (+171ns): return nil
-                        Combine#989 ends at 10.163µs
+                        Funnel#989 step 3/4 (+168ns): 3ns self time
+                        Funnel#989 step 4/4 (+171ns): return nil
+                        Funnel#989 ends at 10.163µs
                     Plan#33 step 6/7 (+0s): scatter:
                       Task#992: pool=2
                       Task#992 step 1/2 (+0s): 5.10464ms self time
@@ -9788,10 +9788,10 @@ Plan#0 step 3/5 (+0s): scatter:
                             Task#283 step 1/2 (+0s): 9.988µs self time
                             Task#283 step 2/2 (+9.988µs): return nil
                             Task#283 ends at 35.01162ms
-                              Combine#283: index=1 flush=<nil>
-                              Combine#283 step 1/2 (+0s): 996ns self time
-                              Combine#283 step 2/2 (+996ns): return error
-                              Combine#283 ends at 35.012616ms
+                              Funnel#283: index=1 flush=<nil>
+                              Funnel#283 step 1/2 (+0s): 996ns self time
+                              Funnel#283 step 2/2 (+996ns): return error
+                              Funnel#283 ends at 35.012616ms
                           Skim#700 step 5/8 (+1.838µs): 13ns self time
                           Skim#700 step 6/8 (+1.851µs): scatter:
                             Task#285: pool=0
@@ -9812,29 +9812,29 @@ Plan#0 step 3/5 (+0s): scatter:
                   Skim#900 step 10/10 (+19.153157ms): return nil
                   Skim#900 ends at 34.97947ms
               Plan#12 step 10/10 (+0s): ends at 35.158538ms
-            Combine#268 step 5/6 (+35.159179ms): 328ns self time
-            Combine#268 step 6/6 (+35.159507ms): return nil
-            Combine#268 ends at 35.186905ms
+            Funnel#268 step 5/6 (+35.159179ms): 328ns self time
+            Funnel#268 step 6/6 (+35.159507ms): return nil
+            Funnel#268 ends at 35.186905ms
         Skim#1056 step 3/12 (+283ns): 16ns self time
         Skim#1056 step 4/12 (+299ns): scatter:
           Task#126: pool=0
           Task#126 step 1/2 (+0s): 9.811µs self time
           Task#126 step 2/2 (+9.811µs): return nil
           Task#126 ends at 27.227µs
-            Combine#126: index=5 flush=<nil>
-            Combine#126 step 1/2 (+0s): 1.043µs self time
-            Combine#126 step 2/2 (+1.043µs): return nil
-            Combine#126 ends at 28.27µs
+            Funnel#126: index=5 flush=<nil>
+            Funnel#126 step 1/2 (+0s): 1.043µs self time
+            Funnel#126 step 2/2 (+1.043µs): return nil
+            Funnel#126 ends at 28.27µs
         Skim#1056 step 5/12 (+299ns): 185ns self time
         Skim#1056 step 6/12 (+484ns): scatter:
           Task#128: pool=1
           Task#128 step 1/2 (+0s): 9.98µs self time
           Task#128 step 2/2 (+9.98µs): return nil
           Task#128 ends at 27.581µs
-            Combine#128: index=14 flush=Skim#128
-            Combine#128 step 1/2 (+0s): 1.057µs self time
-            Combine#128 step 2/2 (+1.057µs): return nil
-            Combine#128 ends at 28.638µs
+            Funnel#128: index=14 flush=Skim#128
+            Funnel#128 step 1/2 (+0s): 1.057µs self time
+            Funnel#128 step 2/2 (+1.057µs): return nil
+            Funnel#128 ends at 28.638µs
               Skim#128: index=5
               Skim#128 step 1/2 (+0s): 894.471µs self time
               Skim#128 step 2/2 (+894.471µs): return nil
@@ -9852,9 +9852,9 @@ Plan#0 step 3/5 (+0s): scatter:
               Task#267 step 1/2 (+0s): 9.843µs self time
               Task#267 step 2/2 (+9.843µs): return nil
               Task#267 ends at 37µs
-                Combine#267: index=3 flush=<nil>
-                Combine#267 step 1/4 (+0s): 731ns self time
-                Combine#267 step 2/4 (+731ns): scatter:
+                Funnel#267: index=3 flush=<nil>
+                Funnel#267 step 1/4 (+0s): 731ns self time
+                Funnel#267 step 2/4 (+731ns): scatter:
                   Task#266: pool=0
                   Task#266 step 1/2 (+0s): 10.015µs self time
                   Task#266 step 2/2 (+10.015µs): return nil
@@ -9863,9 +9863,9 @@ Plan#0 step 3/5 (+0s): scatter:
                     Skim#266 step 1/2 (+0s): 1.023µs self time
                     Skim#266 step 2/2 (+1.023µs): return nil
                     Skim#266 ends at 48.769µs
-                Combine#267 step 3/4 (+731ns): 268ns self time
-                Combine#267 step 4/4 (+999ns): return nil
-                Combine#267 ends at 37.999µs
+                Funnel#267 step 3/4 (+731ns): 268ns self time
+                Funnel#267 step 4/4 (+999ns): return nil
+                Funnel#267 ends at 37.999µs
             Skim#1055 step 3/6 (+198ns): 0s self time
             Skim#1055 step 4/6 (+198ns): scatter:
               Task#0: pool=0
@@ -9886,12 +9886,12 @@ Plan#0 step 3/5 (+0s): scatter:
                      TaskPools[7]: TaskPool#9: limit=5
                      TaskPools[8]: TaskPool#10: limit=7
                      TaskPools[9]: TaskPool#11: limit=4
-                     CombinerPools[0]: CombinerPool#1: limit=2
-                     CombinerPools[1]: CombinerPool#2: limit=1
-                     Combiners[0]: pool=1
-                     Combiners[1]: pool=0
-                     Combiners[2]: pool=1
-                     Combiners[3]: pool=1
+                     FunnelPools[0]: FunnelPool#1: limit=2
+                     FunnelPools[1]: FunnelPool#2: limit=1
+                     Funnels[0]: pool=1
+                     Funnels[1]: pool=0
+                     Funnels[2]: pool=1
+                     Funnels[3]: pool=1
                   Plan#1 step 1/6 (+0s): scatter:
                     Task#123: pool=1
                     Task#123 step 1/2 (+0s): 9.998µs self time
@@ -9904,9 +9904,9 @@ Plan#0 step 3/5 (+0s): scatter:
                         Task#121 step 1/2 (+0s): 10.454µs self time
                         Task#121 step 2/2 (+10.454µs): return nil
                         Task#121 ends at 20.942µs
-                          Combine#121: index=1 flush=<nil>
-                          Combine#121 step 1/4 (+0s): 4ns self time
-                          Combine#121 step 2/4 (+4ns): scatter:
+                          Funnel#121: index=1 flush=<nil>
+                          Funnel#121 step 1/4 (+0s): 4ns self time
+                          Funnel#121 step 2/4 (+4ns): scatter:
                             Task#5: pool=3
                             Task#5 step 1/2 (+0s): 0s self time
                             Task#5 step 2/2 (+0s): return nil
@@ -9915,9 +9915,9 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#5 step 1/2 (+0s): 1µs self time
                               Skim#5 step 2/2 (+1µs): return nil
                               Skim#5 ends at 21.946µs
-                          Combine#121 step 3/4 (+4ns): 1.009µs self time
-                          Combine#121 step 4/4 (+1.013µs): return nil
-                          Combine#121 ends at 21.955µs
+                          Funnel#121 step 3/4 (+4ns): 1.009µs self time
+                          Funnel#121 step 4/4 (+1.013µs): return nil
+                          Funnel#121 ends at 21.955µs
                       Skim#123 step 3/4 (+490ns): 489ns self time
                       Skim#123 step 4/4 (+979ns): return nil
                       Skim#123 ends at 10.977µs
@@ -9940,10 +9940,10 @@ Plan#0 step 3/5 (+0s): scatter:
                             Task#2 step 1/2 (+0s): 10.014µs self time
                             Task#2 step 2/2 (+10.014µs): return nil
                             Task#2 ends at 45.601µs
-                              Combine#2: index=1 flush=<nil>
-                              Combine#2 step 1/2 (+0s): 438ns self time
-                              Combine#2 step 2/2 (+438ns): return nil
-                              Combine#2 ends at 46.039µs
+                              Funnel#2: index=1 flush=<nil>
+                              Funnel#2 step 1/2 (+0s): 438ns self time
+                              Funnel#2 step 2/2 (+438ns): return nil
+                              Funnel#2 ends at 46.039µs
                           Skim#118 step 3/4 (+0s): 0s self time
                           Skim#118 step 4/4 (+0s): return nil
                           Skim#118 ends at 35.587µs
@@ -9953,16 +9953,16 @@ Plan#0 step 3/5 (+0s): scatter:
                         Task#119 step 1/2 (+0s): 4.062µs self time
                         Task#119 step 2/2 (+4.062µs): return nil
                         Task#119 ends at 43.177µs
-                          Combine#119: index=1 flush=<nil>
-                          Combine#119 step 1/4 (+0s): 422ns self time
-                          Combine#119 step 2/4 (+422ns): scatter:
+                          Funnel#119: index=1 flush=<nil>
+                          Funnel#119 step 1/4 (+0s): 422ns self time
+                          Funnel#119 step 2/4 (+422ns): scatter:
                             Task#117: pool=4
                             Task#117 step 1/2 (+0s): 1.344µs self time
                             Task#117 step 2/2 (+1.344µs): return nil
                             Task#117 ends at 44.943µs
-                              Combine#117: index=1 flush=<nil>
-                              Combine#117 step 1/4 (+0s): 510ns self time
-                              Combine#117 step 2/4 (+510ns): scatter:
+                              Funnel#117: index=1 flush=<nil>
+                              Funnel#117 step 1/4 (+0s): 510ns self time
+                              Funnel#117 step 2/4 (+510ns): scatter:
                                 Task#115: pool=0
                                 Task#115 step 1/2 (+0s): 1.371µs self time
                                 Task#115 step 2/2 (+1.371µs): return nil
@@ -9981,31 +9981,31 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Skim#115 step 3/4 (+73ns): 933ns self time
                                   Skim#115 step 4/4 (+1.006µs): return nil
                                   Skim#115 ends at 47.83µs
-                              Combine#117 step 3/4 (+510ns): 504ns self time
-                              Combine#117 step 4/4 (+1.014µs): return nil
-                              Combine#117 ends at 45.957µs
-                          Combine#119 step 3/4 (+422ns): 412ns self time
-                          Combine#119 step 4/4 (+834ns): return nil
-                          Combine#119 ends at 44.011µs
+                              Funnel#117 step 3/4 (+510ns): 504ns self time
+                              Funnel#117 step 4/4 (+1.014µs): return nil
+                              Funnel#117 ends at 45.957µs
+                          Funnel#119 step 3/4 (+422ns): 412ns self time
+                          Funnel#119 step 4/4 (+834ns): return nil
+                          Funnel#119 ends at 44.011µs
                       Skim#122 step 5/8 (+29.164µs): 16.366µs self time
                       Skim#122 step 6/8 (+45.53µs): scatter:
                         Task#120: pool=5
                         Task#120 step 1/2 (+0s): 8.359µs self time
                         Task#120 step 2/2 (+8.359µs): return nil
                         Task#120 ends at 63.84µs
-                          Combine#120: index=3 flush=<nil>
-                          Combine#120 step 1/10 (+0s): 1.226µs self time
-                          Combine#120 step 2/10 (+1.226µs): scatter:
+                          Funnel#120: index=3 flush=<nil>
+                          Funnel#120 step 1/10 (+0s): 1.226µs self time
+                          Funnel#120 step 2/10 (+1.226µs): scatter:
                             Task#66: pool=4
                             Task#66 step 1/2 (+0s): 13.569µs self time
                             Task#66 step 2/2 (+13.569µs): return nil
                             Task#66 ends at 78.635µs
-                              Combine#66: index=0 flush=<nil>
-                              Combine#66 step 1/2 (+0s): 996ns self time
-                              Combine#66 step 2/2 (+996ns): return nil
-                              Combine#66 ends at 79.631µs
-                          Combine#120 step 3/10 (+1.226µs): 1.225µs self time
-                          Combine#120 step 4/10 (+2.451µs): scatter:
+                              Funnel#66: index=0 flush=<nil>
+                              Funnel#66 step 1/2 (+0s): 996ns self time
+                              Funnel#66 step 2/2 (+996ns): return nil
+                              Funnel#66 ends at 79.631µs
+                          Funnel#120 step 3/10 (+1.226µs): 1.225µs self time
+                          Funnel#120 step 4/10 (+2.451µs): scatter:
                             Task#116: pool=1
                             Task#116 step 1/2 (+0s): 9.974µs self time
                             Task#116 step 2/2 (+9.974µs): return nil
@@ -10059,13 +10059,13 @@ Plan#0 step 3/5 (+0s): scatter:
                                   Plan#4: pathCount=8 taskCount=14 maxPathDuration=9.239344ms minSkimCount=12 maxSkimCount=15
                                      TaskPools[0]: TaskPool#21: limit=2
                                      TaskPools[1]: TaskPool#22: limit=2
-                                     CombinerPools[0]: CombinerPool#12: limit=2
-                                     CombinerPools[1]: CombinerPool#13: limit=1
-                                     Combiners[0]: pool=1
-                                     Combiners[1]: pool=1
-                                     Combiners[2]: pool=0
-                                     Combiners[3]: pool=1
-                                     Combiners[4]: pool=1
+                                     FunnelPools[0]: FunnelPool#12: limit=2
+                                     FunnelPools[1]: FunnelPool#13: limit=1
+                                     Funnels[0]: pool=1
+                                     Funnels[1]: pool=1
+                                     Funnels[2]: pool=0
+                                     Funnels[3]: pool=1
+                                     Funnels[4]: pool=1
                                   Plan#4 step 1/5 (+0s): scatter:
                                     Task#113: pool=0
                                     Task#113 step 1/2 (+0s): 10.082µs self time
@@ -10078,9 +10078,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                         Task#112 step 1/2 (+0s): 9.998µs self time
                                         Task#112 step 2/2 (+9.998µs): return nil
                                         Task#112 ends at 20.626µs
-                                          Combine#112: index=3 flush=<nil>
-                                          Combine#112 step 1/4 (+0s): 517ns self time
-                                          Combine#112 step 2/4 (+517ns): scatter:
+                                          Funnel#112: index=3 flush=<nil>
+                                          Funnel#112 step 1/4 (+0s): 517ns self time
+                                          Funnel#112 step 2/4 (+517ns): scatter:
                                             Task#73: pool=1
                                             Task#73 step 1/2 (+0s): 948.337µs self time
                                             Task#73 step 2/2 (+948.337µs): return nil
@@ -10089,9 +10089,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Skim#73 step 1/2 (+0s): 1.002µs self time
                                               Skim#73 step 2/2 (+1.002µs): return nil
                                               Skim#73 ends at 970.482µs
-                                          Combine#112 step 3/4 (+517ns): 480ns self time
-                                          Combine#112 step 4/4 (+997ns): return error
-                                          Combine#112 ends at 21.623µs
+                                          Funnel#112 step 3/4 (+517ns): 480ns self time
+                                          Funnel#112 step 4/4 (+997ns): return error
+                                          Funnel#112 ends at 21.623µs
                                       Skim#113 step 3/4 (+546ns): 438ns self time
                                       Skim#113 step 4/4 (+984ns): return nil
                                       Skim#113 ends at 11.066µs
@@ -10127,15 +10127,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                                  TaskPools[0]: TaskPool#23: limit=7
                                                  TaskPools[1]: TaskPool#24: limit=3
                                                  TaskPools[2]: TaskPool#25: limit=2
-                                                 CombinerPools[0]: CombinerPool#14: limit=6
-                                                 CombinerPools[1]: CombinerPool#15: limit=6
-                                                 CombinerPools[2]: CombinerPool#16: limit=7
-                                                 CombinerPools[3]: CombinerPool#17: limit=4
-                                                 CombinerPools[4]: CombinerPool#18: limit=6
-                                                 CombinerPools[5]: CombinerPool#19: limit=5
-                                                 Combiners[0]: pool=3
-                                                 Combiners[1]: pool=2
-                                                 Combiners[2]: pool=0
+                                                 FunnelPools[0]: FunnelPool#14: limit=6
+                                                 FunnelPools[1]: FunnelPool#15: limit=6
+                                                 FunnelPools[2]: FunnelPool#16: limit=7
+                                                 FunnelPools[3]: FunnelPool#17: limit=4
+                                                 FunnelPools[4]: FunnelPool#18: limit=6
+                                                 FunnelPools[5]: FunnelPool#19: limit=5
+                                                 Funnels[0]: pool=3
+                                                 Funnels[1]: pool=2
+                                                 Funnels[2]: pool=0
                                               Plan#5 step 1/9 (+0s): scatter:
                                                 Task#94: pool=1
                                                 Task#94 step 1/2 (+0s): 1.786µs self time
@@ -10157,10 +10157,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Task#78 step 1/2 (+0s): 10.472µs self time
                                                     Task#78 step 2/2 (+10.472µs): return nil
                                                     Task#78 ends at 20.894µs
-                                                      Combine#78: index=0 flush=<nil>
-                                                      Combine#78 step 1/2 (+0s): 375.685µs self time
-                                                      Combine#78 step 2/2 (+375.685µs): return nil
-                                                      Combine#78 ends at 396.579µs
+                                                      Funnel#78: index=0 flush=<nil>
+                                                      Funnel#78 step 1/2 (+0s): 375.685µs self time
+                                                      Funnel#78 step 2/2 (+375.685µs): return nil
+                                                      Funnel#78 ends at 396.579µs
                                                   Skim#104 step 3/6 (+347ns): 154ns self time
                                                   Skim#104 step 4/6 (+501ns): scatter:
                                                     Task#101: pool=1
@@ -10174,10 +10174,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#87 step 1/2 (+0s): 9.902µs self time
                                                         Task#87 step 2/2 (+9.902µs): return nil
                                                         Task#87 ends at 30.966µs
-                                                          Combine#87: index=1 flush=<nil>
-                                                          Combine#87 step 1/2 (+0s): 782ns self time
-                                                          Combine#87 step 2/2 (+782ns): return nil
-                                                          Combine#87 ends at 31.748µs
+                                                          Funnel#87: index=1 flush=<nil>
+                                                          Funnel#87 step 1/2 (+0s): 782ns self time
+                                                          Funnel#87 step 2/2 (+782ns): return nil
+                                                          Funnel#87 ends at 31.748µs
                                                       Skim#101 step 3/4 (+492ns): 507ns self time
                                                       Skim#101 step 4/4 (+999ns): return nil
                                                       Skim#101 ends at 21.571µs
@@ -10223,10 +10223,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#84 step 1/2 (+0s): 9.999µs self time
                                                         Task#84 step 2/2 (+9.999µs): return nil
                                                         Task#84 ends at 641.552µs
-                                                          Combine#84: index=1 flush=<nil>
-                                                          Combine#84 step 1/2 (+0s): 1.002µs self time
-                                                          Combine#84 step 2/2 (+1.002µs): return nil
-                                                          Combine#84 ends at 642.554µs
+                                                          Funnel#84: index=1 flush=<nil>
+                                                          Funnel#84 step 1/2 (+0s): 1.002µs self time
+                                                          Funnel#84 step 2/2 (+1.002µs): return nil
+                                                          Funnel#84 ends at 642.554µs
                                                       Skim#100 step 3/4 (+499.98µs): 500.02µs self time
                                                       Skim#100 step 4/4 (+1ms): return nil
                                                       Skim#100 ends at 1.131573ms
@@ -10260,10 +10260,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                             Task#82 step 1/2 (+0s): 10.436µs self time
                                                             Task#82 step 2/2 (+10.436µs): return nil
                                                             Task#82 ends at 9.006341ms
-                                                              Combine#82: index=2 flush=<nil>
-                                                              Combine#82 step 1/2 (+0s): 990ns self time
-                                                              Combine#82 step 2/2 (+990ns): return error
-                                                              Combine#82 ends at 9.007331ms
+                                                              Funnel#82: index=2 flush=<nil>
+                                                              Funnel#82 step 1/2 (+0s): 990ns self time
+                                                              Funnel#82 step 2/2 (+990ns): return error
+                                                              Funnel#82 ends at 9.007331ms
                                                           Skim#99 step 3/10 (+0s): 243ns self time
                                                           Skim#99 step 4/10 (+243ns): scatter:
                                                             Task#85: pool=1
@@ -10297,20 +10297,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                 Task#91 step 1/2 (+0s): 11.014µs self time
                                                                 Task#91 step 2/2 (+11.014µs): return nil
                                                                 Task#91 ends at 9.018032ms
-                                                                  Combine#91: index=2 flush=<nil>
-                                                                  Combine#91 step 1/2 (+0s): 994ns self time
-                                                                  Combine#91 step 2/2 (+994ns): return nil
-                                                                  Combine#91 ends at 9.019026ms
+                                                                  Funnel#91: index=2 flush=<nil>
+                                                                  Funnel#91 step 1/2 (+0s): 994ns self time
+                                                                  Funnel#91 step 2/2 (+994ns): return nil
+                                                                  Funnel#91 ends at 9.019026ms
                                                               Skim#97 step 3/6 (+332ns): 599ns self time
                                                               Skim#97 step 4/6 (+931ns): scatter:
                                                                 Task#89: pool=2
                                                                 Task#89 step 1/2 (+0s): 9.993µs self time
                                                                 Task#89 step 2/2 (+9.993µs): return nil
                                                                 Task#89 ends at 9.01761ms
-                                                                  Combine#89: index=0 flush=<nil>
-                                                                  Combine#89 step 1/2 (+0s): 996ns self time
-                                                                  Combine#89 step 2/2 (+996ns): return nil
-                                                                  Combine#89 ends at 9.018606ms
+                                                                  Funnel#89: index=0 flush=<nil>
+                                                                  Funnel#89 step 1/2 (+0s): 996ns self time
+                                                                  Funnel#89 step 2/2 (+996ns): return nil
+                                                                  Funnel#89 ends at 9.018606ms
                                                               Skim#97 step 5/6 (+931ns): 71ns self time
                                                               Skim#97 step 6/6 (+1.002µs): return nil
                                                               Skim#97 ends at 9.007688ms
@@ -10323,10 +10323,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#77 step 1/2 (+0s): 9.998µs self time
                                                         Task#77 step 2/2 (+9.998µs): return nil
                                                         Task#77 ends at 9.000459ms
-                                                          Combine#77: index=1 flush=<nil>
-                                                          Combine#77 step 1/2 (+0s): 1.051µs self time
-                                                          Combine#77 step 2/2 (+1.051µs): return nil
-                                                          Combine#77 ends at 9.00151ms
+                                                          Funnel#77: index=1 flush=<nil>
+                                                          Funnel#77 step 1/2 (+0s): 1.051µs self time
+                                                          Funnel#77 step 2/2 (+1.051µs): return nil
+                                                          Funnel#77 ends at 9.00151ms
                                                       Skim#102 step 7/14 (+960ns): 3ns self time
                                                       Skim#102 step 8/14 (+963ns): scatter:
                                                         Task#98: pool=2
@@ -10363,10 +10363,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Task#81 step 1/2 (+0s): 6.315µs self time
                                                         Task#81 step 2/2 (+6.315µs): return error
                                                         Task#81 ends at 8.996791ms
-                                                          Combine#81: index=0 flush=Skim#81
-                                                          Combine#81 step 1/2 (+0s): 997ns self time
-                                                          Combine#81 step 2/2 (+997ns): return nil
-                                                          Combine#81 ends at 8.997788ms
+                                                          Funnel#81: index=0 flush=Skim#81
+                                                          Funnel#81 step 1/2 (+0s): 997ns self time
+                                                          Funnel#81 step 2/2 (+997ns): return nil
+                                                          Funnel#81 ends at 8.997788ms
                                                             Skim#81: index=5
                                                             Skim#81 step 1/2 (+0s): 999ns self time
                                                             Skim#81 step 2/2 (+999ns): return nil
@@ -10409,10 +10409,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                 Task#95 step 1/2 (+0s): 9.997µs self time
                                                 Task#95 step 2/2 (+9.997µs): return nil
                                                 Task#95 ends at 9.997µs
-                                                  Combine#95: index=0 flush=<nil>
-                                                  Combine#95 step 1/2 (+0s): 183ns self time
-                                                  Combine#95 step 2/2 (+183ns): return nil
-                                                  Combine#95 ends at 10.18µs
+                                                  Funnel#95: index=0 flush=<nil>
+                                                  Funnel#95 step 1/2 (+0s): 183ns self time
+                                                  Funnel#95 step 2/2 (+183ns): return nil
+                                                  Funnel#95 ends at 10.18µs
                                               Plan#5 step 8/9 (+0s): scatter:
                                                 Task#80: pool=2
                                                 Task#80 step 1/2 (+0s): 10.005µs self time
@@ -10426,10 +10426,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                             Task#75 step 3/4 (+9.024053ms): 5.03µs self time
                                             Task#75 step 4/4 (+9.029083ms): return nil
                                             Task#75 ends at 9.238297ms
-                                              Combine#75: index=2 flush=<nil>
-                                              Combine#75 step 1/2 (+0s): 1.047µs self time
-                                              Combine#75 step 2/2 (+1.047µs): return nil
-                                              Combine#75 ends at 9.239344ms
+                                              Funnel#75: index=2 flush=<nil>
+                                              Funnel#75 step 1/2 (+0s): 1.047µs self time
+                                              Funnel#75 step 2/2 (+1.047µs): return nil
+                                              Funnel#75 ends at 9.239344ms
                                           Skim#111 step 3/6 (+18ns): 123ns self time
                                           Skim#111 step 4/6 (+141ns): scatter:
                                             Task#110: pool=1
@@ -10520,15 +10520,15 @@ Plan#0 step 3/5 (+0s): scatter:
                                       Skim#6 step 2/4 (+69ns): subjob:
                                         Plan#2: pathCount=13 taskCount=27 maxPathDuration=4.373299ms minSkimCount=23 maxSkimCount=31
                                            TaskPools[0]: TaskPool#12: limit=5
-                                           CombinerPools[0]: CombinerPool#3: limit=1
-                                           CombinerPools[1]: CombinerPool#4: limit=10
-                                           CombinerPools[2]: CombinerPool#5: limit=2
-                                           CombinerPools[3]: CombinerPool#6: limit=5
-                                           CombinerPools[4]: CombinerPool#7: limit=4
-                                           CombinerPools[5]: CombinerPool#8: limit=1
-                                           CombinerPools[6]: CombinerPool#9: limit=1
-                                           CombinerPools[7]: CombinerPool#10: limit=1
-                                           Combiners[0]: pool=2
+                                           FunnelPools[0]: FunnelPool#3: limit=1
+                                           FunnelPools[1]: FunnelPool#4: limit=10
+                                           FunnelPools[2]: FunnelPool#5: limit=2
+                                           FunnelPools[3]: FunnelPool#6: limit=5
+                                           FunnelPools[4]: FunnelPool#7: limit=4
+                                           FunnelPools[5]: FunnelPool#8: limit=1
+                                           FunnelPools[6]: FunnelPool#9: limit=1
+                                           FunnelPools[7]: FunnelPool#10: limit=1
+                                           Funnels[0]: pool=2
                                         Plan#2 step 1/3 (+0s): scatter:
                                           Task#59: pool=0
                                           Task#59 step 1/2 (+0s): 14.537µs self time
@@ -10541,9 +10541,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                               Task#55 step 1/2 (+0s): 9.416µs self time
                                               Task#55 step 2/2 (+9.416µs): return nil
                                               Task#55 ends at 24.451µs
-                                                Combine#55: index=0 flush=<nil>
-                                                Combine#55 step 1/4 (+0s): 66ns self time
-                                                Combine#55 step 2/4 (+66ns): scatter:
+                                                Funnel#55: index=0 flush=<nil>
+                                                Funnel#55 step 1/4 (+0s): 66ns self time
+                                                Funnel#55 step 2/4 (+66ns): scatter:
                                                   Task#8: pool=0
                                                   Task#8 step 1/2 (+0s): 9.998µs self time
                                                   Task#8 step 2/2 (+9.998µs): return nil
@@ -10552,9 +10552,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                     Skim#8 step 1/2 (+0s): 851ns self time
                                                     Skim#8 step 2/2 (+851ns): return nil
                                                     Skim#8 ends at 35.366µs
-                                                Combine#55 step 3/4 (+66ns): 835ns self time
-                                                Combine#55 step 4/4 (+901ns): return nil
-                                                Combine#55 ends at 25.352µs
+                                                Funnel#55 step 3/4 (+66ns): 835ns self time
+                                                Funnel#55 step 4/4 (+901ns): return nil
+                                                Funnel#55 ends at 25.352µs
                                             Skim#59 step 3/4 (+498ns): 500ns self time
                                             Skim#59 step 4/4 (+998ns): return nil
                                             Skim#59 ends at 15.535µs
@@ -10607,9 +10607,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#53 step 1/2 (+0s): 32.683µs self time
                                                   Task#53 step 2/2 (+32.683µs): return nil
                                                   Task#53 ends at 53.08µs
-                                                    Combine#53: index=0 flush=<nil>
-                                                    Combine#53 step 1/6 (+0s): 65ns self time
-                                                    Combine#53 step 2/6 (+65ns): scatter:
+                                                    Funnel#53: index=0 flush=<nil>
+                                                    Funnel#53 step 1/6 (+0s): 65ns self time
+                                                    Funnel#53 step 2/6 (+65ns): scatter:
                                                       Task#21: pool=0
                                                       Task#21 step 1/2 (+0s): 9.996µs self time
                                                       Task#21 step 2/2 (+9.996µs): return nil
@@ -10628,8 +10628,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#21 step 3/4 (+414.18µs): 414.191µs self time
                                                         Skim#21 step 4/4 (+828.371µs): return nil
                                                         Skim#21 ends at 891.512µs
-                                                    Combine#53 step 3/6 (+65ns): 672ns self time
-                                                    Combine#53 step 4/6 (+737ns): scatter:
+                                                    Funnel#53 step 3/6 (+65ns): 672ns self time
+                                                    Funnel#53 step 4/6 (+737ns): scatter:
                                                       Task#50: pool=0
                                                       Task#50 step 1/2 (+0s): 9.993µs self time
                                                       Task#50 step 2/2 (+9.993µs): return nil
@@ -10648,9 +10648,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#50 step 3/4 (+1.077µs): 1.125µs self time
                                                         Skim#50 step 4/4 (+2.202µs): return nil
                                                         Skim#50 ends at 66.012µs
-                                                    Combine#53 step 5/6 (+737ns): 277ns self time
-                                                    Combine#53 step 6/6 (+1.014µs): return nil
-                                                    Combine#53 ends at 54.094µs
+                                                    Funnel#53 step 5/6 (+737ns): 277ns self time
+                                                    Funnel#53 step 6/6 (+1.014µs): return nil
+                                                    Funnel#53 ends at 54.094µs
                                                 Skim#56 step 3/4 (+263ns): 871ns self time
                                                 Skim#56 step 4/4 (+1.134µs): return nil
                                                 Skim#56 ends at 21.268µs
@@ -10687,9 +10687,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#51 step 1/2 (+0s): 9.998µs self time
                                                   Task#51 step 2/2 (+9.998µs): return nil
                                                   Task#51 ends at 31.29µs
-                                                    Combine#51: index=0 flush=<nil>
-                                                    Combine#51 step 1/10 (+0s): 211ns self time
-                                                    Combine#51 step 2/10 (+211ns): scatter:
+                                                    Funnel#51: index=0 flush=<nil>
+                                                    Funnel#51 step 1/10 (+0s): 211ns self time
+                                                    Funnel#51 step 2/10 (+211ns): scatter:
                                                       Task#22: pool=0
                                                       Task#22 step 1/4 (+0s): 1.977µs self time
                                                       Task#22 step 2/4 (+1.977µs): subjob:
@@ -10702,11 +10702,11 @@ Plan#0 step 3/5 (+0s): scatter:
                                                            TaskPools[5]: TaskPool#18: limit=3
                                                            TaskPools[6]: TaskPool#19: limit=4
                                                            TaskPools[7]: TaskPool#20: limit=1
-                                                           CombinerPools[0]: CombinerPool#11: limit=5
-                                                           Combiners[0]: pool=0
-                                                           Combiners[1]: pool=0
-                                                           Combiners[2]: pool=0
-                                                           Combiners[3]: pool=0
+                                                           FunnelPools[0]: FunnelPool#11: limit=5
+                                                           Funnels[0]: pool=0
+                                                           Funnels[1]: pool=0
+                                                           Funnels[2]: pool=0
+                                                           Funnels[3]: pool=0
                                                         Plan#3 step 1/11 (+0s): scatter:
                                                           Task#34: pool=0
                                                           Task#34 step 1/2 (+0s): 8.177µs self time
@@ -10745,20 +10745,20 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                   Task#40 step 1/2 (+0s): 31.14µs self time
                                                                   Task#40 step 2/2 (+31.14µs): return error
                                                                   Task#40 ends at 4.305499ms
-                                                                    Combine#40: index=3 flush=<nil>
-                                                                    Combine#40 step 1/4 (+0s): 1.288µs self time
-                                                                    Combine#40 step 2/4 (+1.288µs): scatter:
+                                                                    Funnel#40: index=3 flush=<nil>
+                                                                    Funnel#40 step 1/4 (+0s): 1.288µs self time
+                                                                    Funnel#40 step 2/4 (+1.288µs): scatter:
                                                                       Task#37: pool=7
                                                                       Task#37 step 1/2 (+0s): 9.955µs self time
                                                                       Task#37 step 2/2 (+9.955µs): return nil
                                                                       Task#37 ends at 4.316742ms
-                                                                        Combine#37: index=3 flush=<nil>
-                                                                        Combine#37 step 1/2 (+0s): 997ns self time
-                                                                        Combine#37 step 2/2 (+997ns): return nil
-                                                                        Combine#37 ends at 4.317739ms
-                                                                    Combine#40 step 3/4 (+1.288µs): 1.29µs self time
-                                                                    Combine#40 step 4/4 (+2.578µs): return nil
-                                                                    Combine#40 ends at 4.308077ms
+                                                                        Funnel#37: index=3 flush=<nil>
+                                                                        Funnel#37 step 1/2 (+0s): 997ns self time
+                                                                        Funnel#37 step 2/2 (+997ns): return nil
+                                                                        Funnel#37 ends at 4.317739ms
+                                                                    Funnel#40 step 3/4 (+1.288µs): 1.29µs self time
+                                                                    Funnel#40 step 4/4 (+2.578µs): return nil
+                                                                    Funnel#40 ends at 4.308077ms
                                                                 Skim#43 step 3/4 (+656ns): 86ns self time
                                                                 Skim#43 step 4/4 (+742ns): return nil
                                                                 Skim#43 ends at 4.274445ms
@@ -10896,10 +10896,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                       Task#38 step 1/2 (+0s): 9.763µs self time
                                                                       Task#38 step 2/2 (+9.763µs): return nil
                                                                       Task#38 ends at 41.316µs
-                                                                        Combine#38: index=0 flush=Skim#38
-                                                                        Combine#38 step 1/2 (+0s): 1.04µs self time
-                                                                        Combine#38 step 2/2 (+1.04µs): return nil
-                                                                        Combine#38 ends at 42.356µs
+                                                                        Funnel#38: index=0 flush=Skim#38
+                                                                        Funnel#38 step 1/2 (+0s): 1.04µs self time
+                                                                        Funnel#38 step 2/2 (+1.04µs): return nil
+                                                                        Funnel#38 ends at 42.356µs
                                                                           Skim#38: index=2
                                                                           Skim#38 step 1/6 (+0s): 847ns self time
                                                                           Skim#38 step 2/6 (+847ns): scatter:
@@ -10961,10 +10961,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                                   Task#30 step 1/2 (+0s): 10µs self time
                                                                   Task#30 step 2/2 (+10µs): return nil
                                                                   Task#30 ends at 451.859µs
-                                                                    Combine#30: index=3 flush=<nil>
-                                                                    Combine#30 step 1/2 (+0s): 1.472µs self time
-                                                                    Combine#30 step 2/2 (+1.472µs): return nil
-                                                                    Combine#30 ends at 453.331µs
+                                                                    Funnel#30: index=3 flush=<nil>
+                                                                    Funnel#30 step 1/2 (+0s): 1.472µs self time
+                                                                    Funnel#30 step 2/2 (+1.472µs): return nil
+                                                                    Funnel#30 ends at 453.331µs
                                                                 Skim#45 step 3/4 (+121.594µs): 368.673µs self time
                                                                 Skim#45 step 4/4 (+490.267µs): return nil
                                                                 Skim#45 ends at 810.532µs
@@ -10989,8 +10989,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#22 step 3/4 (+55ns): 943ns self time
                                                         Skim#22 step 4/4 (+998ns): return nil
                                                         Skim#22 ends at 4.360088ms
-                                                    Combine#51 step 3/10 (+211ns): 387ns self time
-                                                    Combine#51 step 4/10 (+598ns): scatter:
+                                                    Funnel#51 step 3/10 (+211ns): 387ns self time
+                                                    Funnel#51 step 4/10 (+598ns): scatter:
                                                       Task#11: pool=0
                                                       Task#11 step 1/2 (+0s): 9.998µs self time
                                                       Task#11 step 2/2 (+9.998µs): return nil
@@ -10999,8 +10999,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#11 step 1/2 (+0s): 1µs self time
                                                         Skim#11 step 2/2 (+1µs): return nil
                                                         Skim#11 ends at 42.886µs
-                                                    Combine#51 step 5/10 (+598ns): 84ns self time
-                                                    Combine#51 step 6/10 (+682ns): scatter:
+                                                    Funnel#51 step 5/10 (+598ns): 84ns self time
+                                                    Funnel#51 step 6/10 (+682ns): scatter:
                                                       Task#9: pool=0
                                                       Task#9 step 1/2 (+0s): 10.022µs self time
                                                       Task#9 step 2/2 (+10.022µs): return nil
@@ -11009,8 +11009,8 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#9 step 1/2 (+0s): 512ns self time
                                                         Skim#9 step 2/2 (+512ns): return nil
                                                         Skim#9 ends at 42.506µs
-                                                    Combine#51 step 7/10 (+682ns): 140ns self time
-                                                    Combine#51 step 8/10 (+822ns): scatter:
+                                                    Funnel#51 step 7/10 (+682ns): 140ns self time
+                                                    Funnel#51 step 8/10 (+822ns): scatter:
                                                       Task#20: pool=0
                                                       Task#20 step 1/2 (+0s): 10.002µs self time
                                                       Task#20 step 2/2 (+10.002µs): return nil
@@ -11029,9 +11029,9 @@ Plan#0 step 3/5 (+0s): scatter:
                                                         Skim#20 step 3/4 (+513ns): 487ns self time
                                                         Skim#20 step 4/4 (+1µs): return nil
                                                         Skim#20 ends at 43.114µs
-                                                    Combine#51 step 9/10 (+822ns): 54ns self time
-                                                    Combine#51 step 10/10 (+876ns): return nil
-                                                    Combine#51 ends at 32.166µs
+                                                    Funnel#51 step 9/10 (+822ns): 54ns self time
+                                                    Funnel#51 step 10/10 (+876ns): return nil
+                                                    Funnel#51 ends at 32.166µs
                                                 Skim#57 step 3/4 (+687ns): 136ns self time
                                                 Skim#57 step 4/4 (+823ns): return nil
                                                 Skim#57 ends at 21.428µs
@@ -11058,10 +11058,10 @@ Plan#0 step 3/5 (+0s): scatter:
                                                   Task#17 step 1/2 (+0s): 1.843416ms self time
                                                   Task#17 step 2/2 (+1.843416ms): return nil
                                                   Task#17 ends at 1.858232ms
-                                                    Combine#17: index=0 flush=<nil>
-                                                    Combine#17 step 1/2 (+0s): 886ns self time
-                                                    Combine#17 step 2/2 (+886ns): return nil
-                                                    Combine#17 ends at 1.859118ms
+                                                    Funnel#17: index=0 flush=<nil>
+                                                    Funnel#17 step 1/2 (+0s): 886ns self time
+                                                    Funnel#17 step 2/2 (+886ns): return nil
+                                                    Funnel#17 ends at 1.859118ms
                                                 Skim#54 step 3/4 (+468ns): 532ns self time
                                                 Skim#54 step 4/4 (+1µs): return nil
                                                 Skim#54 ends at 15.348µs
@@ -11088,8 +11088,8 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#116 step 5/6 (+53.425µs): 28.568µs self time
                               Skim#116 step 6/6 (+81.993µs): return nil
                               Skim#116 ends at 158.258µs
-                          Combine#120 step 5/10 (+2.451µs): 32ns self time
-                          Combine#120 step 6/10 (+2.483µs): scatter:
+                          Funnel#120 step 5/10 (+2.451µs): 32ns self time
+                          Funnel#120 step 6/10 (+2.483µs): scatter:
                             Task#65: pool=8
                             Task#65 step 1/2 (+0s): 7.562µs self time
                             Task#65 step 2/2 (+7.562µs): return nil
@@ -11098,8 +11098,8 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#65 step 1/2 (+0s): 1.003µs self time
                               Skim#65 step 2/2 (+1.003µs): return nil
                               Skim#65 ends at 74.888µs
-                          Combine#120 step 7/10 (+2.483µs): 1.836µs self time
-                          Combine#120 step 8/10 (+4.319µs): scatter:
+                          Funnel#120 step 7/10 (+2.483µs): 1.836µs self time
+                          Funnel#120 step 8/10 (+4.319µs): scatter:
                             Task#61: pool=6
                             Task#61 step 1/2 (+0s): 9.941µs self time
                             Task#61 step 2/2 (+9.941µs): return nil
@@ -11108,9 +11108,9 @@ Plan#0 step 3/5 (+0s): scatter:
                               Skim#61 step 1/2 (+0s): 781ns self time
                               Skim#61 step 2/2 (+781ns): return nil
                               Skim#61 ends at 78.881µs
-                          Combine#120 step 9/10 (+4.319µs): 1.839µs self time
-                          Combine#120 step 10/10 (+6.158µs): return nil
-                          Combine#120 ends at 69.998µs
+                          Funnel#120 step 9/10 (+4.319µs): 1.839µs self time
+                          Funnel#120 step 10/10 (+6.158µs): return nil
+                          Funnel#120 ends at 69.998µs
                       Skim#122 step 7/8 (+45.53µs): 16.364µs self time
                       Skim#122 step 8/8 (+61.894µs): return nil
                       Skim#122 ends at 71.845µs
@@ -11135,10 +11135,10 @@ Plan#0 step 3/5 (+0s): scatter:
                         Task#64 step 1/2 (+0s): 1.529821ms self time
                         Task#64 step 2/2 (+1.529821ms): return nil
                         Task#64 ends at 1.543048ms
-                          Combine#64: index=1 flush=<nil>
-                          Combine#64 step 1/2 (+0s): 1.007µs self time
-                          Combine#64 step 2/2 (+1.007µs): return nil
-                          Combine#64 ends at 1.544055ms
+                          Funnel#64: index=1 flush=<nil>
+                          Funnel#64 step 1/2 (+0s): 1.007µs self time
+                          Funnel#64 step 2/2 (+1.007µs): return nil
+                          Funnel#64 ends at 1.544055ms
                       Skim#125 step 3/4 (+3.228µs): 3.333µs self time
                       Skim#125 step 4/4 (+6.561µs): return nil
                       Skim#125 ends at 16.56µs
@@ -11147,9 +11147,9 @@ Plan#0 step 3/5 (+0s): scatter:
                     Task#124 step 1/2 (+0s): 9.971µs self time
                     Task#124 step 2/2 (+9.971µs): return nil
                     Task#124 ends at 9.971µs
-                      Combine#124: index=3 flush=<nil>
-                      Combine#124 step 1/8 (+0s): 999ns self time
-                      Combine#124 step 2/8 (+999ns): scatter:
+                      Funnel#124: index=3 flush=<nil>
+                      Funnel#124 step 1/8 (+0s): 999ns self time
+                      Funnel#124 step 2/8 (+999ns): scatter:
                         Task#62: pool=2
                         Task#62 step 1/2 (+0s): 2.073313ms self time
                         Task#62 step 2/2 (+2.073313ms): return nil
@@ -11158,18 +11158,18 @@ Plan#0 step 3/5 (+0s): scatter:
                           Skim#62 step 1/2 (+0s): 800.596µs self time
                           Skim#62 step 2/2 (+800.596µs): return nil
                           Skim#62 ends at 2.884879ms
-                      Combine#124 step 3/8 (+999ns): 0s self time
-                      Combine#124 step 4/8 (+999ns): scatter:
+                      Funnel#124 step 3/8 (+999ns): 0s self time
+                      Funnel#124 step 4/8 (+999ns): scatter:
                         Task#69: pool=9
                         Task#69 step 1/2 (+0s): 9.904µs self time
                         Task#69 step 2/2 (+9.904µs): return nil
                         Task#69 ends at 20.874µs
-                          Combine#69: index=3 flush=<nil>
-                          Combine#69 step 1/2 (+0s): 687ns self time
-                          Combine#69 step 2/2 (+687ns): return nil
-                          Combine#69 ends at 21.561µs
-                      Combine#124 step 5/8 (+999ns): 0s self time
-                      Combine#124 step 6/8 (+999ns): scatter:
+                          Funnel#69: index=3 flush=<nil>
+                          Funnel#69 step 1/2 (+0s): 687ns self time
+                          Funnel#69 step 2/2 (+687ns): return nil
+                          Funnel#69 ends at 21.561µs
+                      Funnel#124 step 5/8 (+999ns): 0s self time
+                      Funnel#124 step 6/8 (+999ns): scatter:
                         Task#67: pool=7
                         Task#67 step 1/2 (+0s): 9.998µs self time
                         Task#67 step 2/2 (+9.998µs): return nil
@@ -11178,9 +11178,9 @@ Plan#0 step 3/5 (+0s): scatter:
                           Skim#67 step 1/2 (+0s): 999ns self time
                           Skim#67 step 2/2 (+999ns): return nil
                           Skim#67 ends at 21.967µs
-                      Combine#124 step 7/8 (+999ns): 0s self time
-                      Combine#124 step 8/8 (+999ns): return nil
-                      Combine#124 ends at 10.97µs
+                      Funnel#124 step 7/8 (+999ns): 0s self time
+                      Funnel#124 step 8/8 (+999ns): return nil
+                      Funnel#124 ends at 10.97µs
                   Plan#1 step 6/6 (+0s): ends at 13.758854ms
                 Skim#0 step 3/4 (+13.759359ms): 516ns self time
                 Skim#0 step 4/4 (+13.759875ms): return nil
@@ -11194,16 +11194,16 @@ Plan#0 step 3/5 (+0s): scatter:
           Task#130 step 1/2 (+0s): 9.992µs self time
           Task#130 step 2/2 (+9.992µs): return nil
           Task#130 ends at 27.921µs
-            Combine#130: index=8 flush=<nil>
-            Combine#130 step 1/2 (+0s): 326ns self time
-            Combine#130 step 2/2 (+326ns): return nil
-            Combine#130 ends at 28.247µs
+            Funnel#130: index=8 flush=<nil>
+            Funnel#130 step 1/2 (+0s): 326ns self time
+            Funnel#130 step 2/2 (+326ns): return nil
+            Funnel#130 ends at 28.247µs
         Skim#1056 step 11/12 (+812ns): 189ns self time
         Skim#1056 step 12/12 (+1.001µs): return nil
         Skim#1056 ends at 18.118µs
-    Combine#1057 step 3/4 (+358ns): 318ns self time
-    Combine#1057 step 4/4 (+676ns): return nil
-    Combine#1057 ends at 10.681µs
+    Funnel#1057 step 3/4 (+358ns): 318ns self time
+    Funnel#1057 step 4/4 (+676ns): return nil
+    Funnel#1057 ends at 10.681µs
 Plan#0 step 4/5 (+0s): scatter:
   Task#1059: pool=1
   Task#1059 step 1/2 (+0s): 11.656µs self time

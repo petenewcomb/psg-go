@@ -4,9 +4,9 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-// This file holds the Wave-2-era benchmark suite for the combiner.
-// Wave 3 reshaped Task / Skimmer / Combiner enough that the benchmark
-// requires a deliberate redesign (see REFACTOR_PLAN.md: combiner-
+// This file holds the Wave-2-era benchmark suite for the funnel.
+// Wave 3 reshaped Task / Skimmer / Funnel enough that the benchmark
+// requires a deliberate redesign (see REFACTOR_PLAN.md: funnel-
 // benchmark requirements session). To keep Wave 3 focused, the entire
 // benchmark is gated behind the `psg_wave3_legacy_bench` build tag and
 // is NOT compiled by default. Restore by either porting it to the new
@@ -37,7 +37,7 @@ import (
 type benchmarkTaskResult struct {
 	Time                      time.Time
 	Depth                     int
-	CombineSubtaskBudget      int
+	FunnelSubtaskBudget       int
 	SkimSubtaskBudget         int
 	CumulativeNominalDuration time.Duration
 	Latency                   time.Duration
@@ -46,7 +46,7 @@ type benchmarkTaskResult struct {
 type benchmarkTask struct {
 	startTime                 time.Time
 	depth                     int
-	combineSubtaskBudget      int
+	funnelSubtaskBudget       int
 	skimSubtaskBudget         int
 	cumulativeNominalDuration time.Duration
 	executeFn                 psgfn.Task[benchmarkTaskResult]
@@ -56,13 +56,13 @@ var benchmarkTaskPool = omnipool.For[benchmarkTask]()
 
 func newBenchmarkTaskFn(
 	startTime time.Time,
-	depth, combineSubtaskBudget, skimSubtaskBudget int,
+	depth, funnelSubtaskBudget, skimSubtaskBudget int,
 	cumulativeNominalDuration time.Duration,
 ) psgfn.Task[benchmarkTaskResult] {
 	task := benchmarkTaskPool.Get()
 	task.startTime = startTime
 	task.depth = depth
-	task.combineSubtaskBudget = combineSubtaskBudget
+	task.funnelSubtaskBudget = funnelSubtaskBudget
 	task.skimSubtaskBudget = skimSubtaskBudget
 	task.cumulativeNominalDuration = cumulativeNominalDuration
 	return task.executeFn
@@ -85,7 +85,7 @@ func (t *benchmarkTask) execute(context.Context) (benchmarkTaskResult, error) {
 		Time:                      now,
 		Latency:                   now.Sub(t.startTime),
 		Depth:                     t.depth,
-		CombineSubtaskBudget:      t.combineSubtaskBudget,
+		FunnelSubtaskBudget:       t.funnelSubtaskBudget,
 		SkimSubtaskBudget:         t.skimSubtaskBudget,
 		CumulativeNominalDuration: t.cumulativeNominalDuration,
 	}
@@ -94,10 +94,10 @@ func (t *benchmarkTask) execute(context.Context) (benchmarkTaskResult, error) {
 	return res, nil
 }
 
-type benchmarkCombinedResult struct {
+type benchmarkFunneldResult struct {
 	Time                         time.Time
 	MaxDepth                     int
-	CombineSubtaskBudget         int
+	FunnelSubtaskBudget          int
 	SkimSubtaskBudget            int
 	MaxCumulativeNominalDuration time.Duration
 	Count                        int
@@ -110,28 +110,28 @@ type benchmarkCombinedResult struct {
 	MaxConcurrency               int
 }
 
-type benchmarkCombiner struct {
-	firstCombineTime       time.Duration // since epoch
-	testStartTime          *atomic.Int64 // time.Duration since epoch
-	testEndTime            *atomic.Int64 // time.Duration since epoch
-	cumulativeCombinerTime *atomic.Int64 // time.Duration
-	abandonedTaskCount     *atomic.Int64
-	simulateWorkFrom       func(t time.Time, d time.Duration)
-	workloadDuration       time.Duration
-	flushPeriod            time.Duration
-	scatter                func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
+type benchmarkFunnel struct {
+	firstFunnelTime      time.Duration // since epoch
+	testStartTime        *atomic.Int64 // time.Duration since epoch
+	testEndTime          *atomic.Int64 // time.Duration since epoch
+	cumulativeFunnelTime *atomic.Int64 // time.Duration
+	abandonedTaskCount   *atomic.Int64
+	simulateWorkFrom     func(t time.Time, d time.Duration)
+	workloadDuration     time.Duration
+	flushPeriod          time.Duration
+	scatter              func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 		task psgfn.Task[benchmarkTaskResult]) (bool, error)
 	target    psg.TaskPoolOrJob
-	newTaskFn func(startTime time.Time, depth, combineSubtaskBudget, skimSubtaskBudget int,
+	newTaskFn func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
 		cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult]
-	idealCombinesPerSkim int
+	idealFunnelsPerSkim int
 
 	// Downstream sink captured for Submit-on-Flush (Wave 2 reshape).
-	skimmer psg.Skimmer[benchmarkCombinedResult]
+	skimmer psg.Skimmer[benchmarkFunneldResult]
 	job     *psg.Pool
 
 	maxDepth                     int
-	combineSubtaskBudget         int
+	funnelSubtaskBudget          int
 	skimSubtaskBudget            int
 	maxCumulativeNominalDuration time.Duration
 	count                        int
@@ -143,14 +143,14 @@ type benchmarkCombiner struct {
 	maxConcurrency               int
 }
 
-var benchmarkCombinerPool = omnipool.For[benchmarkCombiner]()
+var benchmarkFunnelPool = omnipool.For[benchmarkFunnel]()
 
 var epoch = time.Now()
 
-func newBenchmarkCombiner(
+func newBenchmarkFunnel(
 	testStartTime *atomic.Int64,
 	testEndTime *atomic.Int64,
-	cumulativeCombinerTime *atomic.Int64,
+	cumulativeFunnelTime *atomic.Int64,
 	abandonedTaskCount *atomic.Int64,
 	simulateWorkFrom func(t time.Time, d time.Duration),
 	workloadDuration time.Duration,
@@ -158,17 +158,17 @@ func newBenchmarkCombiner(
 	scatter func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 		task psgfn.Task[benchmarkTaskResult]) (bool, error),
 	target psg.TaskPoolOrJob,
-	newTaskFn func(startTime time.Time, depth, combineSubtaskBudget, skimSubtaskBudget int,
+	newTaskFn func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
 		cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult],
-	idealCombinesPerSkim int,
-	skimmer psg.Skimmer[benchmarkCombinedResult],
+	idealFunnelsPerSkim int,
+	skimmer psg.Skimmer[benchmarkFunneldResult],
 	job *psg.Pool,
-) *benchmarkCombiner {
-	c := benchmarkCombinerPool.Get()
-	c.firstCombineTime = time.Since(epoch)
+) *benchmarkFunnel {
+	c := benchmarkFunnelPool.Get()
+	c.firstFunnelTime = time.Since(epoch)
 	c.testStartTime = testStartTime
 	c.testEndTime = testEndTime
-	c.cumulativeCombinerTime = cumulativeCombinerTime
+	c.cumulativeFunnelTime = cumulativeFunnelTime
 	c.abandonedTaskCount = abandonedTaskCount
 	c.simulateWorkFrom = simulateWorkFrom
 	c.workloadDuration = workloadDuration
@@ -176,15 +176,15 @@ func newBenchmarkCombiner(
 	c.scatter = scatter
 	c.target = target
 	c.newTaskFn = newTaskFn
-	c.idealCombinesPerSkim = idealCombinesPerSkim
+	c.idealFunnelsPerSkim = idealFunnelsPerSkim
 	c.skimmer = skimmer
 	c.job = job
 	return c
 }
 
-func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTaskResult, err error) (time.Time, error) {
-	combineStartTime := time.Now()
-	latency := combineStartTime.Sub(taskRes.Time)
+func (c *benchmarkFunnel) Accumulate(ctx context.Context, taskRes benchmarkTaskResult, err error) (time.Time, error) {
+	funnelStartTime := time.Now()
+	latency := funnelStartTime.Sub(taskRes.Time)
 
 	// Front-load all measurement work before simulated work
 	c.maxDepth = max(c.maxDepth, taskRes.Depth)
@@ -194,33 +194,33 @@ func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTas
 		c.latenciesNs = newTDigest()
 		c.durationsNs = newTDigest()
 		c.workflowLatenciesNs = newTDigest()
-		c.maxConcurrency = max(c.maxConcurrency, int(c.cumulativeCombinerTime.Add(1)))
+		c.maxConcurrency = max(c.maxConcurrency, int(c.cumulativeFunnelTime.Add(1)))
 	}
 	c.count++
 
-	flushDeadline := combineStartTime
-	if c.count < c.idealCombinesPerSkim {
+	flushDeadline := funnelStartTime
+	if c.count < c.idealFunnelsPerSkim {
 		flushDeadline = flushDeadline.Add(c.flushPeriod)
 	}
 
 	c.taskLatenciesNs.Add(float64(taskRes.Latency.Nanoseconds()), 1.0)
 	c.latenciesNs.Add(float64(latency.Nanoseconds()), 1.0)
-	// Workflow latency: scatter to combine start (queueing time)
+	// Workflow latency: scatter to funnel start (queueing time)
 	c.workflowLatenciesNs.Add(float64((taskRes.Latency + latency).Nanoseconds()), 1.0)
 
-	c.simulateWorkFrom(combineStartTime, c.workloadDuration)
+	c.simulateWorkFrom(funnelStartTime, c.workloadDuration)
 
 	// Don't include scatter time in work duration
-	c.combineSubtaskBudget += taskRes.CombineSubtaskBudget
+	c.funnelSubtaskBudget += taskRes.FunnelSubtaskBudget
 	c.skimSubtaskBudget += taskRes.SkimSubtaskBudget
 	switch {
-	case c.combineSubtaskBudget < 0:
-		panic("combineSubtaskBudget is negative")
+	case c.funnelSubtaskBudget < 0:
+		panic("funnelSubtaskBudget is negative")
 	case c.skimSubtaskBudget < 0:
 		panic("skimSubtaskBudget is negative")
-	case c.combineSubtaskBudget > 0:
-		scatters := bits.Len(uint(c.combineSubtaskBudget))
-		c.combineSubtaskBudget -= scatters
+	case c.funnelSubtaskBudget > 0:
+		scatters := bits.Len(uint(c.funnelSubtaskBudget))
+		c.funnelSubtaskBudget -= scatters
 		shares := scatters
 
 		skimSubtaskBudget := c.skimSubtaskBudget
@@ -231,14 +231,14 @@ func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTas
 			skimSubtaskBudgetPerScatter = max(1, skimSubtaskBudget/shares)
 		}
 
-		combineSubtaskBudget := c.combineSubtaskBudget
-		combineSubtaskBudgetPerScatter := max(1, combineSubtaskBudget/shares)
-		combineSubtaskBudget = min(combineSubtaskBudget, scatters*combineSubtaskBudgetPerScatter)
-		c.combineSubtaskBudget -= combineSubtaskBudget
+		funnelSubtaskBudget := c.funnelSubtaskBudget
+		funnelSubtaskBudgetPerScatter := max(1, funnelSubtaskBudget/shares)
+		funnelSubtaskBudget = min(funnelSubtaskBudget, scatters*funnelSubtaskBudgetPerScatter)
+		c.funnelSubtaskBudget -= funnelSubtaskBudget
 
 		if skimSubtaskBudget > 0 {
-			if c.combineSubtaskBudget > 0 {
-				// If we have combine subtask budget to flush, we must also
+			if c.funnelSubtaskBudget > 0 {
+				// If we have funnel subtask budget to flush, we must also
 				// reserve budget for at least one skim subtask
 				skimSubtaskBudget--
 			}
@@ -248,8 +248,8 @@ func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTas
 		}
 
 		for range scatters {
-			scatterCombineSubtaskBudget := min(combineSubtaskBudget, combineSubtaskBudgetPerScatter)
-			combineSubtaskBudget -= scatterCombineSubtaskBudget
+			scatterFunnelSubtaskBudget := min(funnelSubtaskBudget, funnelSubtaskBudgetPerScatter)
+			funnelSubtaskBudget -= scatterFunnelSubtaskBudget
 			scatterSkimSubtaskBudget := min(skimSubtaskBudget, skimSubtaskBudgetPerScatter)
 			skimSubtaskBudget -= scatterSkimSubtaskBudget
 			for {
@@ -257,7 +257,7 @@ func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTas
 				taskFn := c.newTaskFn(
 					time.Now(),
 					taskRes.Depth+1,
-					scatterCombineSubtaskBudget,
+					scatterFunnelSubtaskBudget,
 					scatterSkimSubtaskBudget,
 					taskRes.CumulativeNominalDuration+c.workloadDuration,
 				)
@@ -276,7 +276,7 @@ func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTas
 		}
 	}
 
-	duration := time.Since(combineStartTime)
+	duration := time.Since(funnelStartTime)
 	c.durationsNs.Add(float64(duration.Nanoseconds()), 1.0)
 
 	c.durationSum += duration
@@ -284,12 +284,12 @@ func (c *benchmarkCombiner) Accumulate(ctx context.Context, taskRes benchmarkTas
 	return flushDeadline, err
 }
 
-func (c *benchmarkCombiner) Flush(ctx context.Context) error {
+func (c *benchmarkFunnel) Flush(ctx context.Context) error {
 	now := time.Now()
-	res := benchmarkCombinedResult{
+	res := benchmarkFunneldResult{
 		Time:                         now,
 		MaxDepth:                     c.maxDepth,
-		CombineSubtaskBudget:         c.combineSubtaskBudget,
+		FunnelSubtaskBudget:          c.funnelSubtaskBudget,
 		SkimSubtaskBudget:            c.skimSubtaskBudget,
 		MaxCumulativeNominalDuration: c.maxCumulativeNominalDuration + c.workloadDuration + c.flushPeriod,
 		Count:                        c.count,
@@ -310,21 +310,21 @@ func (c *benchmarkCombiner) Flush(ctx context.Context) error {
 	testStartTime := time.Duration(c.testStartTime.Load())
 	if testStartTime > 0 {
 		testEndTime := time.Duration(c.testEndTime.Load())
-		combinerStartTime := c.firstCombineTime
-		if testEndTime == 0 || combinerStartTime < testEndTime {
-			if combinerStartTime < testStartTime {
-				combinerStartTime = testStartTime
+		funnelStartTime := c.firstFunnelTime
+		if testEndTime == 0 || funnelStartTime < testEndTime {
+			if funnelStartTime < testStartTime {
+				funnelStartTime = testStartTime
 			}
-			combinerEndTime := testEndTime
-			if combinerEndTime == 0 {
-				combinerEndTime = time.Since(epoch)
+			funnelEndTime := testEndTime
+			if funnelEndTime == 0 {
+				funnelEndTime = time.Since(epoch)
 			}
-			c.cumulativeCombinerTime.Add(int64(combinerEndTime - combinerStartTime))
+			c.cumulativeFunnelTime.Add(int64(funnelEndTime - funnelStartTime))
 		}
 	}
 	skimmer := c.skimmer
 	job := c.job
-	benchmarkCombinerPool.Put(c)
+	benchmarkFunnelPool.Put(c)
 
 	return skimmer.Submit(ctx, job, res, nil)
 }
@@ -358,25 +358,25 @@ func poolCentroidList(cl tdigest.CentroidList) {
 	centroidListPool.Put(cl)
 }
 
-// BenchmarkCombinerThroughput measures the maximum throughput of processing
-// a continuous stream of data with skim-only vs. combiner approaches
-func BenchmarkCombinerThroughput(b *testing.B) {
-	combinerLimits := []int{
-		-1, // combine, unlimited
+// BenchmarkFunnelThroughput measures the maximum throughput of processing
+// a continuous stream of data with skim-only vs. funnel approaches
+func BenchmarkFunnelThroughput(b *testing.B) {
+	funnelLimits := []int{
+		-1, // funnel, unlimited
 		0,  // skim-only
 		1, 2, 3, 4,
 	}
 	availableCores := runtime.GOMAXPROCS(-1)
 	for {
-		prevLimit := combinerLimits[len(combinerLimits)-1]
+		prevLimit := funnelLimits[len(funnelLimits)-1]
 		if prevLimit >= availableCores {
 			break
 		}
-		combinerLimits = append(combinerLimits, prevLimit*2)
+		funnelLimits = append(funnelLimits, prevLimit*2)
 	}
-	combinerLimits = append(combinerLimits, availableCores, availableCores*2)
-	slices.Sort(combinerLimits)
-	combinerLimits = slices.Compact(combinerLimits)
+	funnelLimits = append(funnelLimits, availableCores, availableCores*2)
+	slices.Sort(funnelLimits)
+	funnelLimits = slices.Compact(funnelLimits)
 
 	// Run with different worker configurations
 	for _, workload := range []string{"processing", "waiting"} {
@@ -390,26 +390,26 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 				10 * workloadDuration,
 				100 * workloadDuration,
 			} {
-				for _, combinerLimit := range combinerLimits {
+				for _, funnelLimit := range funnelLimits {
 					// Only need to run skim-only once to cover all flush periods
-					if combinerLimit == 0 && fpi > 0 {
+					if funnelLimit == 0 && fpi > 0 {
 						continue
 					}
 
 					var method string
-					switch combinerLimit {
+					switch funnelLimit {
 					case 0:
 						method = "skimOnly"
 					default:
-						method = "combine"
+						method = "funnel"
 					}
 					name := fmt.Sprintf(
-						"workload=%s/duration=%v/flushPeriod=%v/method=%s/combinerLimit=%d",
+						"workload=%s/duration=%v/flushPeriod=%v/method=%s/funnelLimit=%d",
 						workload,
 						workloadDuration,
 						flushPeriod,
 						method,
-						combinerLimit,
+						funnelLimit,
 					)
 
 					burnCPU := func(d time.Duration) {
@@ -449,12 +449,12 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 						taskLatenciesNs := tdigest.New()
 
-						combineLatenciesNs := tdigest.New()
-						combineDurationsNs := tdigest.New()
-						var combineDurationSum time.Duration
-						combineDurationCount := 0
-						combineWorkflowLatenciesNs := tdigest.New()
-						combineCounts := tdigest.New()
+						funnelLatenciesNs := tdigest.New()
+						funnelDurationsNs := tdigest.New()
+						var funnelDurationSum time.Duration
+						funnelDurationCount := 0
+						funnelWorkflowLatenciesNs := tdigest.New()
+						funnelCounts := tdigest.New()
 
 						skimLatenciesNs := tdigest.New()
 						skimDurationsNs := tdigest.New()
@@ -463,79 +463,79 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 
 						workflowLatenciesNs := tdigest.New()
 
-						var testStartTime atomic.Int64          // time.Duration since epoch
-						var testEndTime atomic.Int64            // time.Duration since epoch
-						var cumulativeCombinerTime atomic.Int64 // time.Duration
+						var testStartTime atomic.Int64        // time.Duration since epoch
+						var testEndTime atomic.Int64          // time.Duration since epoch
+						var cumulativeFunnelTime atomic.Int64 // time.Duration
 
 						var abandonedTaskCount atomic.Int64
 						maxDepth := 0
 						var maxCumulativeNominalDuration time.Duration
 
-						var newTaskFn func(startTime time.Time, depth, combineSubtaskBudget, skimSubtaskBudget int,
+						var newTaskFn func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
 							cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult]
 						var scatter func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 							task psgfn.Task[benchmarkTaskResult]) (bool, error)
 
-						skimFn := func(ctx context.Context, combineRes benchmarkCombinedResult, err error) error {
+						skimFn := func(ctx context.Context, funnelRes benchmarkFunneldResult, err error) error {
 							if err != nil {
 								return err
 							}
 
 							skimStartTime := time.Now()
-							skimLatencyNs := float64(skimStartTime.Sub(combineRes.Time).Nanoseconds())
+							skimLatencyNs := float64(skimStartTime.Sub(funnelRes.Time).Nanoseconds())
 
 							// Front-load all measurement work before simulated work
 							skimLatenciesNs.Add(skimLatencyNs, 1.0)
-							totalTasksSkimed += combineRes.Count
-							taskLatenciesNs.AddCentroidList(combineRes.TaskLatenciesNs)
-							combineLatenciesNs.AddCentroidList(combineRes.LatenciesNs)
-							combineDurationsNs.AddCentroidList(combineRes.DurationsNs)
-							combineDurationSum += combineRes.DurationSum
-							combineDurationCount += combineRes.DurationCount
-							combineWorkflowLatenciesNs.AddCentroidList(combineRes.WorkflowLatenciesNs)
+							totalTasksSkimed += funnelRes.Count
+							taskLatenciesNs.AddCentroidList(funnelRes.TaskLatenciesNs)
+							funnelLatenciesNs.AddCentroidList(funnelRes.LatenciesNs)
+							funnelDurationsNs.AddCentroidList(funnelRes.DurationsNs)
+							funnelDurationSum += funnelRes.DurationSum
+							funnelDurationCount += funnelRes.DurationCount
+							funnelWorkflowLatenciesNs.AddCentroidList(funnelRes.WorkflowLatenciesNs)
 
-							maxDepth = max(maxDepth, combineRes.MaxDepth)
-							maxCumulativeNominalDuration = max(maxCumulativeNominalDuration, combineRes.MaxCumulativeNominalDuration)
+							maxDepth = max(maxDepth, funnelRes.MaxDepth)
+							maxCumulativeNominalDuration = max(maxCumulativeNominalDuration, funnelRes.MaxCumulativeNominalDuration)
 
 							// Add skim latency to workflow latencies to get scatter-to-skim-start time
-							for i := range combineRes.WorkflowLatenciesNs {
-								combineRes.WorkflowLatenciesNs[i].Mean += skimLatencyNs
+							for i := range funnelRes.WorkflowLatenciesNs {
+								funnelRes.WorkflowLatenciesNs[i].Mean += skimLatencyNs
 							}
-							workflowLatenciesNs.AddCentroidList(combineRes.WorkflowLatenciesNs)
+							workflowLatenciesNs.AddCentroidList(funnelRes.WorkflowLatenciesNs)
 
-							combineCounts.Add(float64(combineRes.Count), 1.0)
+							funnelCounts.Add(float64(funnelRes.Count), 1.0)
 
 							simulateWorkFrom(skimStartTime, workloadDuration)
 
-							combineSubtaskBudget := combineRes.CombineSubtaskBudget
-							skimSubtaskBudget := combineRes.SkimSubtaskBudget
+							funnelSubtaskBudget := funnelRes.FunnelSubtaskBudget
+							skimSubtaskBudget := funnelRes.SkimSubtaskBudget
 							switch {
-							case combineSubtaskBudget < 0:
-								panic("combineSubtaskBudget is negative")
+							case funnelSubtaskBudget < 0:
+								panic("funnelSubtaskBudget is negative")
 							case skimSubtaskBudget < 0:
 								panic("skimSubtaskBudget is negative")
 							case skimSubtaskBudget == 0:
-								if combineSubtaskBudget != 0 {
-									panic("skimSubtaskBudget is zero, but combineSubtaskBudget is non-zero")
+								if funnelSubtaskBudget != 0 {
+									panic("skimSubtaskBudget is zero, but funnelSubtaskBudget is non-zero")
 								}
 							case skimSubtaskBudget > 0:
 								scatters := bits.Len(uint(skimSubtaskBudget))
 								skimSubtaskBudget -= scatters
-								combineSubtaskBudgetPerScatter := max(1, combineSubtaskBudget/scatters)
+								funnelSubtaskBudgetPerScatter := max(1, funnelSubtaskBudget/scatters)
 								skimSubtaskBudgetPerScatter := max(1, skimSubtaskBudget/scatters)
 								for range scatters {
-									scatterCombineSubtaskBudget := min(combineSubtaskBudget, combineSubtaskBudgetPerScatter)
+									scatterFunnelSubtaskBudget := min(funnelSubtaskBudget, funnelSubtaskBudgetPerScatter)
 									scatterSkimSubtaskBudget := min(skimSubtaskBudget, skimSubtaskBudgetPerScatter)
-									combineSubtaskBudget -= scatterCombineSubtaskBudget
+									funnelSubtaskBudget -= scatterFunnelSubtaskBudget
 									skimSubtaskBudget -= scatterSkimSubtaskBudget
 									for {
 										deadline := time.Now().Add(workloadDuration)
 										taskFn := newTaskFn(
 											time.Now(),
-											combineRes.MaxDepth+1,
-											scatterCombineSubtaskBudget,
+											funnelRes.MaxDepth+1,
+											scatterFunnelSubtaskBudget,
 											scatterSkimSubtaskBudget,
-											combineRes.MaxCumulativeNominalDuration+workloadDuration,
+											funnelRes.MaxCumulativeNominalDuration+workloadDuration,
 										)
 										ok, err := scatter(ctx, deadline, job, taskFn)
 										if !ok {
@@ -558,10 +558,10 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 							skimDurationSum += skimDuration
 							skimDurationCount++
 
-							poolCentroidList(combineRes.TaskLatenciesNs)
-							poolCentroidList(combineRes.LatenciesNs)
-							poolCentroidList(combineRes.DurationsNs)
-							poolCentroidList(combineRes.WorkflowLatenciesNs)
+							poolCentroidList(funnelRes.TaskLatenciesNs)
+							poolCentroidList(funnelRes.LatenciesNs)
+							poolCentroidList(funnelRes.DurationsNs)
+							poolCentroidList(funnelRes.WorkflowLatenciesNs)
 
 							return nil
 						}
@@ -572,7 +572,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								Mean:   float64(now.Sub(taskRes.Time).Nanoseconds()),
 								Weight: 1.0,
 							}
-							combinedRes := benchmarkCombinedResult{
+							funneldRes := benchmarkFunneldResult{
 								Time:                         now,
 								MaxDepth:                     taskRes.Depth,
 								MaxCumulativeNominalDuration: taskRes.CumulativeNominalDuration,
@@ -582,13 +582,13 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								DurationsNs:                  newCentroidList(),
 								WorkflowLatenciesNs:          newCentroidList(taskLatencyNsCentroid),
 							}
-							return skimFn(ctx, combinedRes, err)
+							return skimFn(ctx, funneldRes, err)
 						}
 
-						idealCombinesPerSkim := int(math.Round(float64(flushPeriod) / float64(workloadDuration)))
+						idealFunnelsPerSkim := int(math.Round(float64(flushPeriod) / float64(workloadDuration)))
 
-						// Setup processing - either skim-only or with combiner
-						if combinerLimit == 0 {
+						// Setup processing - either skim-only or with funnel
+						if funnelLimit == 0 {
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
 								// Tests to make sure that NewSkimmer does not incur allocation overhead
@@ -599,13 +599,13 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 								return skimmer.TryStart(ctx, deadline, target, task)
 							}
 						} else {
-							combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(combinerLimit))
-							skimmer := psg.NewSkimmer(psgfn.HandlerFunc[benchmarkCombinedResult](skimFn))
-							combinerFactory := func() psgfn.Accumulator[benchmarkTaskResult] {
-								return newBenchmarkCombiner(
+							funnelPool := psg.NewFunnelPool(job, psgopt.WithMaxConcurrency(funnelLimit))
+							skimmer := psg.NewSkimmer(psgfn.HandlerFunc[benchmarkFunneldResult](skimFn))
+							funnelFactory := func() psgfn.Accumulator[benchmarkTaskResult] {
+								return newBenchmarkFunnel(
 									&testStartTime,
 									&testEndTime,
-									&cumulativeCombinerTime,
+									&cumulativeFunnelTime,
 									&abandonedTaskCount,
 									simulateWorkFrom,
 									workloadDuration,
@@ -613,35 +613,35 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 									scatter,
 									job,
 									newTaskFn,
-									idealCombinesPerSkim,
+									idealFunnelsPerSkim,
 									skimmer,
 									job,
 								)
 							}
 
-							combineOp := psg.NewCombiner(combinerPool, combinerFactory)
-							defer combineOp.Close()
+							funnelOp := psg.NewFunnel(funnelPool, funnelFactory)
+							defer funnelOp.Close()
 
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
-								localCombineOp := combineOp
-								if idealCombinesPerSkim == 1 {
-									// Tests to make sure that NewCombiner does not incur allocation overhead
-									localCombineOp = psg.NewCombiner(combinerPool, combinerFactory)
-									defer localCombineOp.Close()
+								localFunnelOp := funnelOp
+								if idealFunnelsPerSkim == 1 {
+									// Tests to make sure that NewFunnel does not incur allocation overhead
+									localFunnelOp = psg.NewFunnel(funnelPool, funnelFactory)
+									defer localFunnelOp.Close()
 								}
 								if deadline.IsZero() {
-									return true, localCombineOp.Start(ctx, target, task)
+									return true, localFunnelOp.Start(ctx, target, task)
 								}
-								return localCombineOp.TryStart(ctx, deadline, target, task)
+								return localFunnelOp.TryStart(ctx, deadline, target, task)
 							}
 						}
 
 						var totalTasksLaunched atomic.Int64
-						newTaskFn = func(startTime time.Time, depth, combineSubtaskBudget, skimSubtaskBudget int,
+						newTaskFn = func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
 							cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult] {
 							totalTasksLaunched.Add(1)
-							return newBenchmarkTaskFn(startTime, depth, combineSubtaskBudget, skimSubtaskBudget, cumulativeNominalDuration)
+							return newBenchmarkTaskFn(startTime, depth, funnelSubtaskBudget, skimSubtaskBudget, cumulativeNominalDuration)
 						}
 
 						opTasksSkimedOrigin := totalTasksSkimed
@@ -681,11 +681,11 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						maxDepth = 0
 						maxCumulativeNominalDuration = 0
 						taskLatenciesNs.Reset()
-						combineLatenciesNs.Reset()
-						combineDurationsNs.Reset()
-						combineDurationSum = 0
-						combineDurationCount = 0
-						combineWorkflowLatenciesNs.Reset()
+						funnelLatenciesNs.Reset()
+						funnelDurationsNs.Reset()
+						funnelDurationSum = 0
+						funnelDurationCount = 0
+						funnelWorkflowLatenciesNs.Reset()
 						skimLatenciesNs.Reset()
 						skimDurationsNs.Reset()
 						skimDurationSum = 0
@@ -693,7 +693,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						workflowLatenciesNs.Reset()
 						testStartTime.Store(int64(time.Since(epoch)))
 						func() {
-							defer trace.StartRegion(ctx, "BenchmarkCombinerThroughput.Loop").End()
+							defer trace.StartRegion(ctx, "BenchmarkFunnelThroughput.Loop").End()
 							for b.Loop() {
 								op()
 							}
@@ -712,7 +712,7 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						assert.NoError(b, job.CloseAndSkimAll(ctx))
 						assert.Equal(b, totalTasksLaunched.Load(), int64(totalTasksSkimed)+abandonedTaskCount.Load())
 
-						avgCombinerConcurrency := float64(cumulativeCombinerTime.Load()) /
+						avgFunnelConcurrency := float64(cumulativeFunnelTime.Load()) /
 							float64(testEndTime.Load()-testStartTime.Load())
 
 						b.ReportAllocs()
@@ -733,16 +733,16 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						b.ReportMetric(taskLatenciesNs.Quantile(0.99), "p99-task-latency-ns")
 						b.ReportMetric(taskLatenciesNs.Quantile(0.50), "p50-task-latency-ns")
 
-						if combinerLimit != 0 {
-							b.ReportMetric(combineLatenciesNs.Quantile(0.99), "p99-combine-latency-ns")
-							b.ReportMetric(combineLatenciesNs.Quantile(0.50), "p50-combine-latency-ns")
-							b.ReportMetric(combineDurationsNs.Quantile(0.99), "p99-combine-duration-ns")
-							b.ReportMetric(combineDurationsNs.Quantile(0.50), "p50-combine-duration-ns")
-							b.ReportMetric(combineWorkflowLatenciesNs.Quantile(0.99), "p99-combine-workflow-latency-ns")
-							b.ReportMetric(combineWorkflowLatenciesNs.Quantile(0.50), "p50-combine-workflow-latency-ns")
-							b.ReportMetric(combineCounts.Quantile(0.99), "p99-combine-count")
-							b.ReportMetric(combineCounts.Quantile(0.50), "p50-combine-count")
-							b.ReportMetric(combineCounts.Quantile(0.01), "p01-combine-count")
+						if funnelLimit != 0 {
+							b.ReportMetric(funnelLatenciesNs.Quantile(0.99), "p99-funnel-latency-ns")
+							b.ReportMetric(funnelLatenciesNs.Quantile(0.50), "p50-funnel-latency-ns")
+							b.ReportMetric(funnelDurationsNs.Quantile(0.99), "p99-funnel-duration-ns")
+							b.ReportMetric(funnelDurationsNs.Quantile(0.50), "p50-funnel-duration-ns")
+							b.ReportMetric(funnelWorkflowLatenciesNs.Quantile(0.99), "p99-funnel-workflow-latency-ns")
+							b.ReportMetric(funnelWorkflowLatenciesNs.Quantile(0.50), "p50-funnel-workflow-latency-ns")
+							b.ReportMetric(funnelCounts.Quantile(0.99), "p99-funnel-count")
+							b.ReportMetric(funnelCounts.Quantile(0.50), "p50-funnel-count")
+							b.ReportMetric(funnelCounts.Quantile(0.01), "p01-funnel-count")
 						}
 
 						b.ReportMetric(skimLatenciesNs.Quantile(0.99), "p99-skim-latency-ns")
@@ -755,8 +755,8 @@ func BenchmarkCombinerThroughput(b *testing.B) {
 						b.ReportMetric(workflowLatenciesNs.Quantile(0.99), "p99-workflow-latency-ns")
 						b.ReportMetric(workflowLatenciesNs.Quantile(0.50), "p50-workflow-latency-ns")
 
-						if combinerLimit != 0 {
-							b.ReportMetric(avgCombinerConcurrency, "avg-combiner-concurrency")
+						if funnelLimit != 0 {
+							b.ReportMetric(avgFunnelConcurrency, "avg-funnel-concurrency")
 						}
 					})
 				}

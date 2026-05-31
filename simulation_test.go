@@ -35,31 +35,31 @@ func TestBySimulation(t *testing.T) {
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		// planConfig.Task.UseCombine.Probability = 0
-		// planConfig.Combine.Flush.Probability = 0
+		// planConfig.Task.UseFunnel.Probability = 0
+		// planConfig.Funnel.Flush.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Task.Func.ReturnError.Probability = 0
-		// planConfig.Combine.Func.ReturnError.Probability = 0
+		// planConfig.Funnel.Func.ReturnError.Probability = 0
 		// planConfig.Skim.Func.ReturnError.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Subjob.MaxDepth = 0
 		// planConfig.Task.Func.Subjob.Add.Probability = 0
-		// planConfig.Combine.Func.Subjob.Add.Probability = 0
+		// planConfig.Funnel.Func.Subjob.Add.Probability = 0
 		// planConfig.Skim.Func.Subjob.Add.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.Combine.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.Funnel.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.Skim.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.TaskPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.TaskPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		// planConfig.CombinerPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		// planConfig.CombinerPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.FunnelPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.FunnelPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Task.Func.SelfTime = sim.BiasedDurationConfig{}
-		// planConfig.Combine.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Funnel.Func.SelfTime = sim.BiasedDurationConfig{}
 		// planConfig.Skim.Func.SelfTime = sim.BiasedDurationConfig{}
 
 		plan := sim.NewPlan(t, &planConfig)

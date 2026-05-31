@@ -13,7 +13,7 @@ import (
 // GenericTaskRunner dispatches a workflow-aware task onto a [psg.Pool].
 // The runner owns the workflow ref/unref lifecycle: each [Start] takes
 // one reference to the workflow; the matching unref happens when the
-// downstream Skimmer (or Combiner) sink processes the result that the
+// downstream Skimmer (or Funnel) sink processes the result that the
 // task produces.
 //
 // If [Start] fails (returns a non-nil error), the reference is released
@@ -49,22 +49,22 @@ func NewGenericTaskRunner[T, C any](
 	})
 }
 
-// NewGenericTaskRunnerForCombiner constructs a Wave-independent
+// NewGenericTaskRunnerForFunnel constructs a Wave-independent
 // [GenericTaskRunner] that wraps workflow context propagation and
-// forwards the result to the supplied Combiner sink. Pass psg op
+// forwards the result to the supplied Funnel sink. Pass psg op
 // options (e.g. [psg.WithLimits]) via opts to throttle dispatch. The
 // caller supplies a [psg.Wave] at each [GenericTaskRunner.Start] call.
-// The Combiner itself is not Wave-bound; the Wave argument is ignored
+// The Funnel itself is not Wave-bound; the Wave argument is ignored
 // in the submit step.
-func NewGenericTaskRunnerForCombiner[T, C any](
-	sink GenericCombineOp[T, C],
+func NewGenericTaskRunnerForFunnel[T, C any](
+	sink GenericFunnelOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts ...psg.OpOption,
 ) GenericTaskRunner[T, C] {
-	combiner := sink.inner()
+	funnel := sink.inner()
 	return newGenericTaskRunner(wf, taskFn, opts, func(ctx context.Context, _ *psg.Wave, value T, err error) error {
-		return combiner.SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
+		return funnel.SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 

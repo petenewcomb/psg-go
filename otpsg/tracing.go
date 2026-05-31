@@ -36,26 +36,26 @@ func TracedTask[T any](
 	}
 }
 
-// TracedGather adds spans with the given operation name to a gather function.
-// This builds on PropagateGather, adding explicit span creation while maintaining
+// TracedSkim adds spans with the given operation name to a skim function.
+// This builds on PropagateSkim, adding explicit span creation while maintaining
 // trace context propagation.
-func TracedGather[T any](
+func TracedSkim[T any](
 	operationName string,
-	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.Gatherer[PropagatedResult[T]] {
-	// Create a gather function that adds tracing
-	tracedGatherFn := func(ctx context.Context, result T, err error) error {
+	skimFn func(ctx context.Context, result T, err error) error,
+) psg.Skimmer[PropagatedResult[T]] {
+	// Create a skim function that adds tracing
+	tracedSkimFn := func(ctx context.Context, result T, err error) error {
 		// Create span with meaningful name
 		tracer := otel.Tracer("otpsg")
 		ctx, span := tracer.Start(ctx, operationName)
 		defer span.End()
 
-		// Call the original gather function
-		return gatherFn(ctx, result, err)
+		// Call the original skim function
+		return skimFn(ctx, result, err)
 	}
 
 	// Then use the base propagation
-	return PropagateGather(tracedGatherFn)
+	return PropagateSkim(tracedSkimFn)
 }
 
 // TracedCombiner adds spans with the given operation names to an accumulator.

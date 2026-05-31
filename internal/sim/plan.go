@@ -18,19 +18,19 @@ import (
 //
 // The generator produces a layered DAG:
 //
-//   - Gatherers (terminal sinks) at depth 0
+//   - Skimmers (terminal sinks) at depth 0
 //   - Combiners at depths 1..MaxCombinerDepth, each Accumulate.Submit
 //     wired to a shallower sink. Multiple paths may share a Combiner
 //     (fan-in).
 //   - Origin TaskRunners (one per path), Body.Submit wired to a sink
 //     at depth = path-length - 1. StartTask entries for these go into
 //     Plan.Steps.
-//   - Fan-out TaskRunners dispatched from inside Gatherer.Handle and
+//   - Fan-out TaskRunners dispatched from inside Skimmer.Handle and
 //     Combiner.Accumulate bodies via StartTask steps
-//     (scatter-from-gather/combine, the recursive-spawn pattern).
-//     Each fan-out runner Submits to a Gatherer; cycle prevention is
-//     enforced by ordering (Gatherer #i's StartTasks only target
-//     Gatherers with index > i).
+//     (scatter-from-skim/combine, the recursive-spawn pattern).
+//     Each fan-out runner Submits to a Skimmer; cycle prevention is
+//     enforced by ordering (Skimmer #i's StartTasks only target
+//     Skimmers with index > i).
 //
 // Sink-invocation bounds and path durations are computed by walking
 // the DAG forward from each top-level StartTask, memoized per op.
@@ -43,16 +43,16 @@ type Plan struct {
 	CombinerLimiters []Limiter
 	TaskRunners      []*TaskRunner
 	Combiners        []*Combiner
-	Gatherers        []*Gatherer
+	Skimmers         []*Skimmer
 	SubjobCount      int
 	SubjobTaskCount  int
 	// Sink-invocation bounds computed at plan time. In Deterministic
 	// mode and the current v1 generator (all Probs = 1.0),
-	// MinGathererInvocations[i] == MaxGathererInvocations[i]. When
+	// MinSkimmerInvocations[i] == MaxSkimmerInvocations[i]. When
 	// probabilistic-mode generation lands, Min may drop to 0 for
 	// non-unit probabilities.
-	MinGathererInvocations []int
-	MaxGathererInvocations []int
+	MinSkimmerInvocations []int
+	MaxSkimmerInvocations []int
 }
 
 // NewPlan generates a new Plan for property-based testing.
@@ -67,7 +67,7 @@ type idCounters struct {
 	CombLimiter int
 	TaskRunner  int
 	Combiner    int
-	Gatherer    int
+	Skimmer     int
 }
 
 // The generator is dense by nature; refactoring into helpers obscures
@@ -104,39 +104,39 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		}
 	}
 
-	// === Gatherers, layered by depth across [0, MaxDepth]. Gatherers
+	// === Skimmers, layered by depth across [0, MaxDepth]. Skimmers
 	// at depth == MaxDepth are terminal (no StartTasks); shallower ones
-	// can scatter to strictly-deeper Gatherers. Multiple Gatherers may
+	// can scatter to strictly-deeper Skimmers. Multiple Skimmers may
 	// share a depth (including multiple terminals). ===
-	maxGathererDepth := config.Gatherer.MaxDepth
-	if maxGathererDepth < 0 {
-		maxGathererDepth = 0
+	maxSkimmerDepth := config.Skimmer.MaxDepth
+	if maxSkimmerDepth < 0 {
+		maxSkimmerDepth = 0
 	}
-	gathererCount := config.Gatherer.Count.Draw(t, planName+".GathererCount")
-	plan.Gatherers = make([]*Gatherer, gathererCount)
-	for i := range plan.Gatherers {
-		id := nextIDs.Gatherer
-		nextIDs.Gatherer++
+	skimmerCount := config.Skimmer.Count.Draw(t, planName+".SkimmerCount")
+	plan.Skimmers = make([]*Skimmer, skimmerCount)
+	for i := range plan.Skimmers {
+		id := nextIDs.Skimmer
+		nextIDs.Skimmer++
 		depth := 0
-		if maxGathererDepth > 0 {
-			depth = rapid.IntRange(0, maxGathererDepth).Draw(t, fmt.Sprintf("Gatherer#%d.Depth", id))
+		if maxSkimmerDepth > 0 {
+			depth = rapid.IntRange(0, maxSkimmerDepth).Draw(t, fmt.Sprintf("Skimmer#%d.Depth", id))
 		}
-		plan.Gatherers[i] = &Gatherer{
+		plan.Skimmers[i] = &Skimmer{
 			ID:     id,
 			Depth:  depth,
-			Handle: newFunc(t, plan, config, &config.Gatherer.Handle, nextIDs, fmt.Sprintf("Gatherer#%d.Handle", id)),
+			Handle: newFunc(t, plan, config, &config.Skimmer.Handle, nextIDs, fmt.Sprintf("Skimmer#%d.Handle", id)),
 		}
 	}
-	// Sort Gatherers by depth ascending — needed so cascade-target
+	// Sort Skimmers by depth ascending — needed so cascade-target
 	// lookups can iterate forward when wiring StartTasks below.
-	sort.SliceStable(plan.Gatherers, func(i, j int) bool {
-		return plan.Gatherers[i].Depth < plan.Gatherers[j].Depth
+	sort.SliceStable(plan.Skimmers, func(i, j int) bool {
+		return plan.Skimmers[i].Depth < plan.Skimmers[j].Depth
 	})
-	// Ensure at least one Gatherer is at MaxDepth (terminal). If the
-	// random draw didn't produce one, snap the last Gatherer to MaxDepth.
-	if maxGathererDepth > 0 && len(plan.Gatherers) > 0 &&
-		plan.Gatherers[len(plan.Gatherers)-1].Depth < maxGathererDepth {
-		plan.Gatherers[len(plan.Gatherers)-1].Depth = maxGathererDepth
+	// Ensure at least one Skimmer is at MaxDepth (terminal). If the
+	// random draw didn't produce one, snap the last Skimmer to MaxDepth.
+	if maxSkimmerDepth > 0 && len(plan.Skimmers) > 0 &&
+		plan.Skimmers[len(plan.Skimmers)-1].Depth < maxSkimmerDepth {
+		plan.Skimmers[len(plan.Skimmers)-1].Depth = maxSkimmerDepth
 	}
 
 	// === Combiners (depth 1..maxCombinerDepth, shared across paths for fan-in) ===
@@ -170,15 +170,15 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 	})
 
 	// Wire each Combiner.Accumulate.Submit to a shallower sink
-	// (Gatherer or Combiner with strictly smaller Depth).
+	// (Skimmer or Combiner with strictly smaller Depth).
 	type sinkRef struct {
 		kind SinkKind
 		idx  int
 	}
 	for i, c := range plan.Combiners {
 		var sinks []sinkRef
-		for gi := range plan.Gatherers {
-			sinks = append(sinks, sinkRef{SinkGatherer, gi})
+		for gi := range plan.Skimmers {
+			sinks = append(sinks, sinkRef{SinkSkimmer, gi})
 		}
 		for ci := 0; ci < i; ci++ {
 			if plan.Combiners[ci].Depth < c.Depth {
@@ -194,20 +194,20 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		})
 	}
 
-	// === Scatter-from-gather and scatter-from-combine. ===
+	// === Scatter-from-skim and scatter-from-combine. ===
 	//
-	// Non-terminal Gatherers (depth < MaxDepth) dispatch fan-out
-	// runners targeting Gatherers at strictly greater depth — this
-	// gives multi-hop Gatherer chains while keeping the cascade
+	// Non-terminal Skimmers (depth < MaxDepth) dispatch fan-out
+	// runners targeting Skimmers at strictly greater depth — this
+	// gives multi-hop Skimmer chains while keeping the cascade
 	// bounded by MaxDepth. Combiners dispatch fan-out runners
-	// targeting any Gatherer.
+	// targeting any Skimmer.
 	// Fan-out runners have intentionally simple bodies: SelfTime
 	// drawn from TaskRunner.Body config, plus the destination Submit.
 	// No Subjob — Subjobs in fan-outs compound the cascade
-	// catastrophically (each Gatherer-cascade level multiplies, and
+	// catastrophically (each Skimmer-cascade level multiplies, and
 	// adding Subjob recursion on top is too much). Origin TaskRunners
 	// (paths) still get Subjob via newFunc.
-	addFanoutRunner := func(targetGathererIdx int, name string) int {
+	addFanoutRunner := func(targetSkimmerIdx int, name string) int {
 		id := nextIDs.TaskRunner
 		nextIDs.TaskRunner++
 		body := &Func{}
@@ -225,8 +225,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			SelfTime{Dist: dist},
 			Submit{
 				Prob:      probValue(config, 1.0),
-				SinkKind:  SinkGatherer,
-				SinkIndex: targetGathererIdx,
+				SinkKind:  SinkSkimmer,
+				SinkIndex: targetSkimmerIdx,
 			},
 		)
 		runner := &TaskRunner{
@@ -241,13 +241,13 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		plan.TaskRunners = append(plan.TaskRunners, runner)
 		return len(plan.TaskRunners) - 1
 	}
-	for gIdx, g := range plan.Gatherers {
-		if g.Depth >= maxGathererDepth {
+	for gIdx, g := range plan.Skimmers {
+		if g.Depth >= maxSkimmerDepth {
 			continue // terminal — no StartTasks
 		}
-		// Candidate targets: Gatherers at strictly greater depth.
+		// Candidate targets: Skimmers at strictly greater depth.
 		var candidates []int
-		for tIdx, t := range plan.Gatherers {
+		for tIdx, t := range plan.Skimmers {
 			if t.Depth > g.Depth {
 				candidates = append(candidates, tIdx)
 			}
@@ -255,12 +255,12 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		if len(candidates) == 0 {
 			continue
 		}
-		sc := config.Gatherer.ScatterCount.Draw(t, fmt.Sprintf("Gatherer#%d.ScatterCount", g.ID))
+		sc := config.Skimmer.ScatterCount.Draw(t, fmt.Sprintf("Skimmer#%d.ScatterCount", g.ID))
 		for s := 0; s < sc; s++ {
 			pick := rapid.IntRange(0, len(candidates)-1).Draw(t,
-				fmt.Sprintf("Gatherer#%d.Scatter[%d].TargetGatherer", g.ID, s))
+				fmt.Sprintf("Skimmer#%d.Scatter[%d].TargetSkimmer", g.ID, s))
 			runnerIdx := addFanoutRunner(candidates[pick],
-				fmt.Sprintf("FanoutRunner.from-Gatherer#%d[%d]", g.ID, s))
+				fmt.Sprintf("FanoutRunner.from-Skimmer#%d[%d]", g.ID, s))
 			g.Handle.Steps = append(g.Handle.Steps, StartTask{
 				Prob:        probValue(config, 1.0),
 				RunnerIndex: runnerIdx,
@@ -269,13 +269,13 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		_ = gIdx
 	}
 	for _, c := range plan.Combiners {
-		if len(plan.Gatherers) == 0 {
+		if len(plan.Skimmers) == 0 {
 			continue
 		}
 		sc := config.Combiner.ScatterCount.Draw(t, fmt.Sprintf("Combiner#%d.ScatterCount", c.ID))
 		for s := 0; s < sc; s++ {
-			targetIdx := rapid.IntRange(0, len(plan.Gatherers)-1).Draw(t,
-				fmt.Sprintf("Combiner#%d.Scatter[%d].TargetGatherer", c.ID, s))
+			targetIdx := rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t,
+				fmt.Sprintf("Combiner#%d.Scatter[%d].TargetSkimmer", c.ID, s))
 			runnerIdx := addFanoutRunner(targetIdx,
 				fmt.Sprintf("FanoutRunner.from-Combiner#%d[%d]", c.ID, s))
 			c.Accumulate.Steps = append(c.Accumulate.Steps, StartTask{
@@ -296,8 +296,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		var pickedSinkKind SinkKind
 		var pickedSinkIdx int
 		if length == 1 {
-			pickedSinkKind = SinkGatherer
-			pickedSinkIdx = rapid.IntRange(0, len(plan.Gatherers)-1).Draw(t, pathName+".TerminalGatherer")
+			pickedSinkKind = SinkSkimmer
+			pickedSinkIdx = rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t, pathName+".TerminalSkimmer")
 		} else {
 			// Try to find a Combiner exactly at depth length-1
 			var candidates []int
@@ -315,9 +315,9 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 				pickedSinkKind = SinkCombiner
 				pickedSinkIdx = rapid.IntRange(0, len(plan.Combiners)-1).Draw(t, pathName+".SinkPick")
 			default:
-				// No Combiners — target a Gatherer
-				pickedSinkKind = SinkGatherer
-				pickedSinkIdx = rapid.IntRange(0, len(plan.Gatherers)-1).Draw(t, pathName+".SinkPick")
+				// No Combiners — target a Skimmer
+				pickedSinkKind = SinkSkimmer
+				pickedSinkIdx = rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t, pathName+".SinkPick")
 			}
 		}
 
@@ -346,12 +346,12 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 	plan.Steps = rapid.Permutation(plan.Steps).Draw(t, planName+".StepsPermutation")
 
 	// === Compute sink-invocation bounds and path durations via DAG walk. ===
-	plan.MinGathererInvocations = make([]int, len(plan.Gatherers))
-	plan.MaxGathererInvocations = make([]int, len(plan.Gatherers))
+	plan.MinSkimmerInvocations = make([]int, len(plan.Skimmers))
+	plan.MaxSkimmerInvocations = make([]int, len(plan.Skimmers))
 	contribCache := map[any]map[int]int{}
-	gathererIdx := map[*Gatherer]int{}
-	for gi, g := range plan.Gatherers {
-		gathererIdx[g] = gi
+	skimmerIdx := map[*Skimmer]int{}
+	for gi, g := range plan.Skimmers {
+		skimmerIdx[g] = gi
 	}
 	var contribOf func(op any) map[int]int
 	contribOf = func(op any) map[int]int {
@@ -365,9 +365,9 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			body = o.Body
 		case *Combiner:
 			body = o.Accumulate
-		case *Gatherer:
+		case *Skimmer:
 			body = o.Handle
-			contrib[gathererIdx[o]] = 1
+			contrib[skimmerIdx[o]] = 1
 		}
 		if body != nil {
 			for _, step := range body.Steps {
@@ -375,8 +375,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 				case Submit:
 					var target any
 					switch s.SinkKind {
-					case SinkGatherer:
-						target = plan.Gatherers[s.SinkIndex]
+					case SinkSkimmer:
+						target = plan.Skimmers[s.SinkIndex]
 					case SinkCombiner:
 						target = plan.Combiners[s.SinkIndex]
 					}
@@ -399,8 +399,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			continue
 		}
 		for gi, cnt := range contribOf(plan.TaskRunners[st.RunnerIndex]) {
-			plan.MinGathererInvocations[gi] += cnt
-			plan.MaxGathererInvocations[gi] += cnt
+			plan.MinSkimmerInvocations[gi] += cnt
+			plan.MaxSkimmerInvocations[gi] += cnt
 		}
 	}
 
@@ -471,7 +471,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 			body = o.Body
 		case *Combiner:
 			body = o.Accumulate
-		case *Gatherer:
+		case *Skimmer:
 			body = o.Handle
 		}
 		var bodyDur time.Duration
@@ -483,8 +483,8 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 				case Submit:
 					var target any
 					switch s.SinkKind {
-					case SinkGatherer:
-						target = plan.Gatherers[s.SinkIndex]
+					case SinkSkimmer:
+						target = plan.Skimmers[s.SinkIndex]
 					case SinkCombiner:
 						target = plan.Combiners[s.SinkIndex]
 					}
@@ -506,7 +506,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 			o.pathDuration = total
 		case *Combiner:
 			o.pathDuration = total
-		case *Gatherer:
+		case *Skimmer:
 			o.pathDuration = total
 		}
 		return total
@@ -553,8 +553,8 @@ func (p *Plan) Dump(fs fmt.State, indent string) {
 		_, _ = fmt.Fprintf(fs, "\n%s   Combiners[%d]: ", indent, i)
 		c.Dump(fs, indent+"     ")
 	}
-	for i, g := range p.Gatherers {
-		_, _ = fmt.Fprintf(fs, "\n%s   Gatherers[%d]: ", indent, i)
+	for i, g := range p.Skimmers {
+		_, _ = fmt.Fprintf(fs, "\n%s   Skimmers[%d]: ", indent, i)
 		g.Dump(fs, indent+"     ")
 	}
 	var t time.Duration

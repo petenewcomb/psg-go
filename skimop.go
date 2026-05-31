@@ -14,43 +14,43 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// Gatherer is a terminal sink: values arrive via [Gatherer.Submit] /
-// [Gatherer.SubmitErr] and are dispatched to the user-supplied gather
-// function during the supplied Wave's Gather / GatherAll. Task
-// dispatch lives separately on [TaskRunner] — a Gatherer never runs
+// Skimmer is a terminal sink: values arrive via [Skimmer.Submit] /
+// [Skimmer.SubmitErr] and are dispatched to the user-supplied skim
+// function during the supplied Wave's Skim / SkimAll. Task
+// dispatch lives separately on [TaskRunner] — a Skimmer never runs
 // tasks of its own.
 //
-// Thread-safety and copying: a Gatherer value is designed to be
-// copied. All copies share the same gather function binding, so they
+// Thread-safety and copying: a Skimmer value is designed to be
+// copied. All copies share the same skim function binding, so they
 // can be passed by value to goroutines or stored in structures and
 // used concurrently.
-type Gatherer[T any] struct {
+type Skimmer[T any] struct {
 	handler  psgfn.Handler[T]
-	workPool *omnipool.Pool[gatherWork[T]]
+	workPool *omnipool.Pool[skimWork[T]]
 }
 
-// NewGatherer binds a [psgfn.Handler] for value+err dispatch during
-// the bound Wave's drain. The Gatherer is Wave-independent: callers
-// supply a [Wave] at each [Gatherer.Submit] / [Gatherer.SubmitErr]
+// NewSkimmer binds a [psgfn.Handler] for value+err dispatch during
+// the bound Wave's drain. The Skimmer is Wave-independent: callers
+// supply a [Wave] at each [Skimmer.Submit] / [Skimmer.SubmitErr]
 // call. For closure-based handlers, wrap in [psgfn.HandlerFunc][T]
 // at the call site; struct implementations of Handler[T] support
 // the alloc-free hot path.
-func NewGatherer[T any](
+func NewSkimmer[T any](
 	handler psgfn.Handler[T],
-) Gatherer[T] {
+) Skimmer[T] {
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
-	return Gatherer[T]{
+	return Skimmer[T]{
 		handler:  handler,
-		workPool: omnipool.For[gatherWork[T]](),
+		workPool: omnipool.For[skimWork[T]](),
 	}
 }
 
-// Submit posts a value to the Gatherer's queue for later dispatch via
-// the Wave's Gather / GatherAll. Convenience sugar for SubmitErr with
+// Submit posts a value to the Skimmer's queue for later dispatch via
+// the Wave's Skim / SkimAll. Convenience sugar for SubmitErr with
 // a nil error.
-func (g Gatherer[T]) Submit(
+func (g Skimmer[T]) Submit(
 	ctx context.Context,
 	wave *Wave,
 	value T,
@@ -58,11 +58,11 @@ func (g Gatherer[T]) Submit(
 	return g.SubmitErr(ctx, wave, value, nil)
 }
 
-// SubmitErr posts a (value, err) pair to the Gatherer's queue for
-// later dispatch by the Wave's Gather / GatherAll. err is delivered
-// to the gather handler alongside value; use nil when reporting a
+// SubmitErr posts a (value, err) pair to the Skimmer's queue for
+// later dispatch by the Wave's Skim / SkimAll. err is delivered
+// to the skim handler alongside value; use nil when reporting a
 // successful result.
-func (g Gatherer[T]) SubmitErr(
+func (g Skimmer[T]) SubmitErr(
 	ctx context.Context,
 	wave *Wave,
 	value T,
@@ -71,7 +71,7 @@ func (g Gatherer[T]) SubmitErr(
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "Gatherer.SubmitErr"
+	traceRegion := "Skimmer.SubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	target := wave.pool
@@ -88,8 +88,8 @@ func (g Gatherer[T]) SubmitErr(
 }
 
 // TrySubmit attempts to Submit without blocking past deadline. See
-// [Gatherer.Submit].
-func (g Gatherer[T]) TrySubmit(
+// [Skimmer.Submit].
+func (g Skimmer[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	wave *Wave,
@@ -99,8 +99,8 @@ func (g Gatherer[T]) TrySubmit(
 }
 
 // TrySubmitErr attempts to SubmitErr without blocking past deadline.
-// See [Gatherer.SubmitErr].
-func (g Gatherer[T]) TrySubmitErr(
+// See [Skimmer.SubmitErr].
+func (g Skimmer[T]) TrySubmitErr(
 	ctx context.Context,
 	deadline time.Time,
 	wave *Wave,
@@ -110,7 +110,7 @@ func (g Gatherer[T]) TrySubmitErr(
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "Gatherer.TrySubmitErr"
+	traceRegion := "Skimmer.TrySubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	target := wave.pool
@@ -126,31 +126,31 @@ func (g Gatherer[T]) TrySubmitErr(
 	return g.trySubmit(ctx, meta, target, group, value, err, deadline)
 }
 
-// boundGatherWork interface allows type erasure for gatherWork instances
-type boundGatherWork interface {
+// boundSkimWork interface allows type erasure for skimWork instances
+type boundSkimWork interface {
 	workq.Work
 	Waiting(*workq.Governor)
 }
 
-type gatherWork[T any] struct {
+type skimWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
 	job     *Pool
-	pool    *omnipool.Pool[gatherWork[T]]
+	pool    *omnipool.Pool[skimWork[T]]
 	handler psgfn.Handler[T]
 	value   T
 	err     error
 }
 
-// newGatherWork creates a new gather work item with the provided values
-func (g Gatherer[T]) newGatherWork(group workq.GroupID, job *Pool, value T, err error) *gatherWork[T] {
+// newSkimWork creates a new skim work item with the provided values
+func (g Skimmer[T]) newSkimWork(group workq.GroupID, job *Pool, value T, err error) *skimWork[T] {
 	w := g.workPool.Get()
 	w.Init(g.workPool, group, job, g.handler, value, err)
 	return w
 }
 
-func (w *gatherWork[T]) Init(
-	pool *omnipool.Pool[gatherWork[T]],
+func (w *skimWork[T]) Init(
+	pool *omnipool.Pool[skimWork[T]],
 	group workq.GroupID,
 	job *Pool,
 	handler psgfn.Handler[T],
@@ -165,8 +165,8 @@ func (w *gatherWork[T]) Init(
 	w.err = err
 }
 
-func (w *gatherWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "gatherWork.Execute"
+func (w *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "skimWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
@@ -180,8 +180,8 @@ func (w *gatherWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *gatherWork[T]) Free() {
-	traceRegion := "gatherWork.Free"
+func (w *skimWork[T]) Free() {
+	traceRegion := "skimWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
@@ -190,8 +190,8 @@ func (w *gatherWork[T]) Free() {
 	w.pool.Put(w)
 }
 
-// submit creates gather work and posts it to the gather queue
-func (g Gatherer[T]) submit(
+// submit creates skim work and posts it to the skim queue
+func (g Skimmer[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
 	job *Pool,
@@ -199,13 +199,13 @@ func (g Gatherer[T]) submit(
 	value T,
 	err error,
 ) error {
-	gatherWork := g.newGatherWork(group, job, value, err)
-	postWork := job.newGatherPostWork(group, gatherWork)
+	skimWork := g.newSkimWork(group, job, value, err)
+	postWork := job.newSkimPostWork(group, skimWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-// submit creates gather work and posts it to the gather queue
-func (g Gatherer[T]) trySubmit(
+// submit creates skim work and posts it to the skim queue
+func (g Skimmer[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
 	job *Pool,
@@ -214,8 +214,8 @@ func (g Gatherer[T]) trySubmit(
 	err error,
 	deadline time.Time,
 ) (bool, error) {
-	gatherWork := g.newGatherWork(group, job, value, err)
-	postWork := job.newGatherPostWork(group, gatherWork)
+	skimWork := g.newSkimWork(group, job, value, err)
+	postWork := job.newSkimPostWork(group, skimWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()

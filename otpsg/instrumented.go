@@ -12,7 +12,7 @@ import (
 
 // InstrumentedTask combines tracing, metrics, and logging for tasks into a
 // single wrapper. Returns a value-producing task body; pair it with a sink
-// Gatherer via [Scatter] (or build your own [psg.TaskRunner]) to dispatch.
+// Skimmer via [Scatter] (or build your own [psg.TaskRunner]) to dispatch.
 func InstrumentedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
@@ -28,21 +28,21 @@ func InstrumentedTask[T any](
 	return TracedTask(operationName, metricsTask)
 }
 
-// InstrumentedGather combines tracing, metrics, and logging for gather functions into a single wrapper.
+// InstrumentedSkim combines tracing, metrics, and logging for skim functions into a single wrapper.
 // This provides a convenient way to apply all instrumentation at once.
-func InstrumentedGather[T any](
+func InstrumentedSkim[T any](
 	operationName string,
-	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.Gatherer[PropagatedResult[T]] {
+	skimFn func(ctx context.Context, result T, err error) error,
+) psg.Skimmer[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
-	loggedGather := LoggedGather(operationName, gatherFn)
+	loggedSkim := LoggedSkim(operationName, skimFn)
 
 	// 2. Then add metrics
-	metricsGather := MetricsGather(operationName, loggedGather)
+	metricsSkim := MetricsSkim(operationName, loggedSkim)
 
 	// 3. Finally add tracing (which includes propagation)
-	return TracedGather(operationName, metricsGather)
+	return TracedSkim(operationName, metricsSkim)
 }
 
 // InstrumentedCombiner combines tracing, metrics, and logging for combiners into a single wrapper.
@@ -64,24 +64,24 @@ func InstrumentedCombiner[T any](
 }
 
 // Scatter wraps the value-producing task in a one-shot [psg.TaskRunner0]
-// that submits the result to gather, and dispatches it on wave. Pass
+// that submits the result to skim, and dispatches it on wave. Pass
 // psg op options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 //
 // Example:
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFn)
-//	gatherer := otpsg.InstrumentedGather("handle-result", myGatherFn)
-//	err := otpsg.Scatter(ctx, wave, gatherer, task)
+//	skimmer := otpsg.InstrumentedSkim("handle-result", mySkimFn)
+//	err := otpsg.Scatter(ctx, wave, skimmer, task)
 func Scatter[T any](
 	ctx context.Context,
 	wave *psg.Wave,
-	gather psg.Gatherer[PropagatedResult[T]],
+	skim psg.Skimmer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
 	runner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		result, err := task(ctx)
-		return gather.SubmitErr(ctx, wave, result, err)
+		return skim.SubmitErr(ctx, wave, result, err)
 	}), opts...)
 	return runner.Start(ctx, wave)
 }

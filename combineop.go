@@ -44,7 +44,7 @@ func (combineOpHandleTrait[T]) String(c *combineOp[T]) string {
 // CombinerPool worker. Downstream emission is the Accumulator body's
 // responsibility — it calls Submit on whatever downstream sinks it has
 // captured. There is no framework-mediated output type; Accumulator
-// errors are surfaced via the Pool's GatherAll path.
+// errors are surfaced via the Pool's SkimAll path.
 //
 // Thread-safety and copying: a Combiner value is designed to be copied.
 // While a single Combiner value does not support concurrent calls to
@@ -66,7 +66,7 @@ type Combiner[T any] struct {
 // number of concurrent combine-work executions for this Combiner.
 //
 // The framework manages an internal error sink that surfaces
-// Accumulator errors through the Pool's GatherAll path; the user's
+// Accumulator errors through the Pool's SkimAll path; the user's
 // Accumulator body is responsible for routing successful results via
 // Submit on whatever downstream sinks it captures.
 //
@@ -106,9 +106,9 @@ func NewCombiner[T any](
 
 	inner.refCount.Store(1)
 	// Framework-owned error sink: Accumulator errors flow through this
-	// Gatherer[struct{}] whose handler returns err as-is, surfacing via
-	// the Pool's GatherAll path.
-	inner.errSink = NewGatherer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
+	// Skimmer[struct{}] whose handler returns err as-is, surfacing via
+	// the Pool's SkimAll path.
+	inner.errSink = NewSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
 	}))
 	inner.combinerPool = combinerPool
@@ -235,8 +235,8 @@ type combineOp[T any] struct {
 	refCount atomic.Int64
 
 	// errSink is framework-owned. Accumulator errors are routed through
-	// it; its handler returns err as-is so it surfaces via GatherAll.
-	errSink         Gatherer[struct{}]
+	// it; its handler returns err as-is so it surfaces via SkimAll.
+	errSink         Skimmer[struct{}]
 	combinerPool    *CombinerPool
 	combinerFactory psgfn.CombinerFactory[T]
 
@@ -302,7 +302,7 @@ func (c *combineOp[T]) unref() {
 	innerPool := c.innerPool
 
 	// Clear all fields
-	c.errSink = Gatherer[struct{}]{}
+	c.errSink = Skimmer[struct{}]{}
 	c.combinerPool = nil
 	c.combinerFactory = nil
 	c.limiter = Limiter{}
@@ -432,7 +432,7 @@ func (c *halfBoundCombiner[T]) allocate(
 
 // emitErr surfaces an Accumulator error through the framework-owned error
 // sink. The errSink's handler returns the error to the caller of
-// Pool.GatherAll. Successful results are not surfaced this way — the
+// Pool.SkimAll. Successful results are not surfaced this way — the
 // Accumulator body is expected to Submit those to user-owned downstream
 // sinks directly.
 func (c *halfBoundCombiner[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {

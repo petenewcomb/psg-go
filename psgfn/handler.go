@@ -8,7 +8,7 @@ import (
 )
 
 // Handler[T] is the universal user-supplied body interface — invoked
-// by TaskRunner on a worker goroutine, by Gatherer during a Wave's
+// by TaskRunner on a worker goroutine, by Skimmer during a Wave's
 // drain, and by anywhere else the framework needs to dispatch a
 // (value, err) pair to user code. Handle is called synchronously in
 // the framework's chosen goroutine; the surrounding op type
@@ -48,7 +48,7 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 // ErrHandler is the named func adapter for the no-value, with-err
 // case: a body that receives only an upstream err. Satisfies
 // Handler[struct{}]. Named descriptively rather than "ErrTask"
-// because "handle" reads naturally in both TaskRunner and Gatherer
+// because "handle" reads naturally in both TaskRunner and Skimmer
 // contexts, while "task" carries TaskRunner-specific vocabulary.
 type ErrHandler func(ctx context.Context, err error) error
 

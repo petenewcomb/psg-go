@@ -24,7 +24,7 @@ type contextType int
 const (
 	topLevelContext contextType = iota // top-level
 	taskContext                        // task
-	gatherContext                      // gather
+	skimContext                        // skim
 	combineContext                     // combine
 )
 
@@ -410,7 +410,7 @@ func (j *Pool) ensureCtxMeta(
 	return ctx, meta
 }
 
-type gatherCtxMetaValueKey struct{}
+type skimCtxMetaValueKey struct{}
 
 // checkCtxType should panic if the type is not allowed
 func (j *Pool) topLevelCtxMeta(
@@ -435,21 +435,21 @@ func (j *Pool) topLevelCtxMeta(
 	return ctx, meta
 }
 
-func (j *Pool) gatherCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
-	traceRegion := "Pool.gatherCtxMeta"
+func (j *Pool) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+	traceRegion := "Pool.skimCtxMeta"
 
 	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
-		if ctxType != topLevelContext && ctxType != gatherContext {
-			panic(fmt.Sprintf("Gather called from %v context but allowed only by top-level or gather context", ctxType))
+		if ctxType != topLevelContext && ctxType != skimContext {
+			panic(fmt.Sprintf("Skim called from %v context but allowed only by top-level or skim context", ctxType))
 		}
 	})
-	if meta.ctxType == gatherContext {
+	if meta.ctxType == skimContext {
 		return ctx, meta
 	}
 
-	ctx, _ = j.gatherCtxMetaMap.WithValue(ctx,
+	ctx, _ = j.skimCtxMetaMap.WithValue(ctx,
 		func(*Pool, bool) (context.Context, *Pool) {
-			trace.Logf(ctx, traceRegion, "creating new gather context")
+			trace.Logf(ctx, traceRegion, "creating new skim context")
 			return ctx, j
 		},
 	)
@@ -457,19 +457,19 @@ func (j *Pool) gatherCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	ctx, meta = j.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			if meta.ctxType != topLevelContext {
-				panic(fmt.Sprintf("context type %v is not valid for gather, expected top-level context", meta.ctxType))
+				panic(fmt.Sprintf("context type %v is not valid for skim, expected top-level context", meta.ctxType))
 			}
 			if meta.executionEnvironment == nil {
-				panic("top-level context missing executionEnvironment; required for gather")
+				panic("top-level context missing executionEnvironment; required for skim")
 			}
-			meta.ctxType = gatherContext
-			trace.Logf(ctx, traceRegion, "registering new gather context, ctxMeta=%v", meta)
+			meta.ctxType = skimContext
+			trace.Logf(ctx, traceRegion, "registering new skim context, ctxMeta=%v", meta)
 			return ctx
 		},
 	)
 
-	if meta.ctxType != gatherContext {
-		panic(fmt.Sprintf("context type %v is not valid for gather, expected gather context", meta.ctxType))
+	if meta.ctxType != skimContext {
+		panic(fmt.Sprintf("context type %v is not valid for skim, expected skim context", meta.ctxType))
 	}
 	return ctx, meta
 }

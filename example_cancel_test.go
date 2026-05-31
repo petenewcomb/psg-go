@@ -27,7 +27,7 @@ func ExamplePool_Cancel() {
 
 	limit := psg.NewSemaphore(1)
 
-	printResult := psg.NewGatherer(psgfn.HandlerFunc[string](
+	printResult := psg.NewSkimmer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
@@ -45,7 +45,7 @@ func ExamplePool_Cancel() {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
-	// Launch second task, which must wait for the first result to be gathered
+	// Launch second task, which must wait for the first result to be skimmed
 	// because the Limiter only grants one permit at a time.
 	fmt.Println("Launching second task")
 	secondRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
@@ -57,7 +57,7 @@ func ExamplePool_Cancel() {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
-	// Cancel the wave after gathering starts but before the second task
+	// Cancel the wave after skimming starts but before the second task
 	// finishes.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -65,15 +65,15 @@ func ExamplePool_Cancel() {
 	}()
 
 	// Wait for all tasks to complete
-	if err := wave.CloseAndGatherAll(ctx); err != nil {
-		fmt.Printf("Error while gathering: %v\n", err)
+	if err := wave.CloseAndSkimAll(ctx); err != nil {
+		fmt.Printf("Error while skimming: %v\n", err)
 	}
 
 	// Output:
 	// Launching first task
 	// Launching second task
 	// Got "first task result", err=<nil>
-	// Error while gathering: context canceled
+	// Error while skimming: context canceled
 }
 
 // Demonstrates job cancellation from inside a task.
@@ -89,7 +89,7 @@ func ExamplePool_Cancel_task() {
 
 	limit := psg.NewSemaphore(1)
 
-	printResult := psg.NewGatherer(psgfn.HandlerFunc[string](
+	printResult := psg.NewSkimmer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
@@ -109,12 +109,12 @@ func ExamplePool_Cancel_task() {
 	time.Sleep(10 * time.Millisecond)
 
 	// Launch second task, which also provides an opportunity for the first task
-	// result to be gathered.
+	// result to be skimmed.
 	fmt.Println("Launching second task")
 	secondRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Force cancellation from inside the task. This is a way to cut
 		// short the overall wave due to a fatal error within a task without
-		// even waiting for the task result to be gathered.
+		// even waiting for the task result to be skimmed.
 		wave.Cancel()
 		time.Sleep(10 * time.Millisecond)
 		return printResult.Submit(ctx, wave, "second task result")
@@ -124,13 +124,13 @@ func ExamplePool_Cancel_task() {
 	}
 
 	// Wait for all tasks to complete
-	if err := wave.CloseAndGatherAll(ctx); err != nil {
-		fmt.Printf("Error while gathering: %v\n", err)
+	if err := wave.CloseAndSkimAll(ctx); err != nil {
+		fmt.Printf("Error while skimming: %v\n", err)
 	}
 
 	// Output:
 	// Launching first task
 	// Launching second task
 	// Got "first task result", err=<nil>
-	// Error while gathering: context canceled
+	// Error while skimming: context canceled
 }

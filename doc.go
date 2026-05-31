@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // Package psg provides an API for launching (scattering) tasks and aggregating
-// (gathering) their results. It separates these stages so that the tasks can
+// (skimming) their results. It separates these stages so that the tasks can
 // run concurrently while aggregation remains sequential. This reduces the
 // wall-clock time required for an overall operation (job) as compared to
 // executing the tasks serially, without adding synchronization complexity to
@@ -16,7 +16,7 @@
 //
 // Non-trivial tasks often involve different stages that use different kinds of
 // resources, for instance I/O to retrieve a chunk of data followed by compute
-// to process it. The psg package therefore allows gather functions to launch
+// to process it. The psg package therefore allows skim functions to launch
 // new tasks into the same or different pools all within the context of the same
 // job, creating incremental pipelines that are free of unnecessary
 // synchronization barriers between stages and that neither over- nor
@@ -37,8 +37,8 @@
 //     cancellation, such tasks may continue running until they complete
 //     naturally, even after the job has been canceled.
 //
-//  2. Gather Functions: The context passed to Gather is the context from
-//     the calling Start or Gather* method, not the job's context. User code
+//  2. Skim Functions: The context passed to Skim is the context from
+//     the calling Start or Skim* method, not the job's context. User code
 //     should propagate this context, especially when calling Start to create
 //     new tasks.
 //
@@ -65,8 +65,8 @@
 //     dangerous calling patterns. For example, calling Start from within a
 //     Task of the same job will panic with a helpful error message.
 //
-//  2. Gather Queuing: Gather operations are queued rather than processed
-//     recursively to prevent stack overflow when gather functions launch new
+//  2. Skim Queuing: Skim operations are queued rather than processed
+//     recursively to prevent stack overflow when skim functions launch new
 //     tasks.
 //
 // # Potential Issues with Improper Context Handling
@@ -82,12 +82,12 @@
 //  3. Backpressure mechanisms may not function correctly, potentially leading
 //     to resource exhaustion.
 //
-//  4. Gather operations might process in incorrect order or recursively rather
+//  4. Skim operations might process in incorrect order or recursively rather
 //     than sequentially.
 //
 // # Best Practices
 //
-//  1. Always use the provided context in Task, Gather, and Combiner
+//  1. Always use the provided context in Task, Skim, and Combiner
 //     methods.
 //
 //  2. Follow the pattern of checking ctx.Done() regularly in long-running tasks.
@@ -95,7 +95,7 @@
 //  3. Don't create new root contexts (e.g., context.Background()) within
 //     functions that receive a context from the library.
 //
-//  4. Launch new tasks from Gather or Combiner methods, not from Task.
+//  4. Launch new tasks from Skim or Combiner methods, not from Task.
 //
 //  5. For tasks that need to create internal concurrency, consider creating a
 //     sub-job within the task rather than calling Start directly.

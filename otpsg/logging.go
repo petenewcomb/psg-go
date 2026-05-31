@@ -51,43 +51,43 @@ func LoggedTask[T any](
 	}
 }
 
-// LoggedGather adds structured logging to gather functions.
-// This wrapper logs the processing of gather operations, including timing
+// LoggedSkim adds structured logging to skim functions.
+// This wrapper logs the processing of skim operations, including timing
 // information and any errors that occur.
-func LoggedGather[T any](
+func LoggedSkim[T any](
 	operationName string,
-	gatherFn func(ctx context.Context, result T, err error) error,
-) psgfn.Gather[T] {
+	skimFn func(ctx context.Context, result T, err error) error,
+) psgfn.Skim[T] {
 	return func(ctx context.Context, result T, err error) error {
 		// Get logger from context or use a default
 		logger := zap.L()
 
-		// Log starting gather operation
-		logger.Debug("Processing gather",
+		// Log starting skim operation
+		logger.Debug("Processing skim",
 			zap.String("operation", operationName),
 			zap.String("component", "otpsg"),
 			zap.Bool("input_has_error", err != nil))
 
 		// Time the operation
 		startTime := time.Now()
-		gatherErr := gatherFn(ctx, result, err)
+		skimErr := skimFn(ctx, result, err)
 		duration := time.Since(startTime)
 
 		// Log completion with appropriate level based on success/failure
-		if gatherErr != nil {
-			logger.Error("Gather failed",
+		if skimErr != nil {
+			logger.Error("Skim failed",
 				zap.String("operation", operationName),
 				zap.String("component", "otpsg"),
 				zap.Duration("duration", duration),
-				zap.Error(gatherErr))
+				zap.Error(skimErr))
 		} else {
-			logger.Debug("Gather completed",
+			logger.Debug("Skim completed",
 				zap.String("operation", operationName),
 				zap.String("component", "otpsg"),
 				zap.Duration("duration", duration))
 		}
 
-		return gatherErr
+		return skimErr
 	}
 }
 

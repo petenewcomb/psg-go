@@ -20,10 +20,10 @@ import (
 
 // Run executes the given Plan against the current psg API via an
 // adapter that translates the new vocabulary's static structure to
-// today's Pool/TaskPool/CombinerPool/Gatherer/Combiner shapes. Real
+// today's Pool/TaskPool/CombinerPool/Skimmer/Combiner shapes. Real
 // data routing uses Submit/TrySubmit; the current API's combiner-
 // output-type slot is satisfied by a singleton dummy struct{}
-// Gatherer.
+// Skimmer.
 //
 // v1 supports only the linear-chain plans the minimal generator
 // produces (one Submit per body, no multi-sink, no probabilistic
@@ -43,13 +43,13 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 		TaskLimiters:              make([]psg.Limiter, len(plan.TaskLimiters)),
 		CombinerPool:              nil, // lazily constructed in ensurePools
 		CombinerLimiters:          make([]psg.Limiter, len(plan.CombinerLimiters)),
-		Gatherers:                 make([]*psg.Gatherer[*simValue], len(plan.Gatherers)),
+		Skimmers:                  make([]*psg.Skimmer[*simValue], len(plan.Skimmers)),
 		Combiners:                 make([]*psg.Combiner[*simValue], len(plan.Combiners)),
 		concurrencyByTaskLimit:    make([]atomic.Int64, len(plan.TaskLimiters)),
 		maxConcurrencyByTaskLimit: make([]atomicMaxInt64, len(plan.TaskLimiters)),
 		concurrencyByCombLimit:    make([]atomic.Int64, len(plan.CombinerLimiters)),
 		maxConcurrencyByCombLimit: make([]atomicMaxInt64, len(plan.CombinerLimiters)),
-		gathererInvocations:       make([]atomic.Int64, len(plan.Gatherers)),
+		skimmerInvocations:        make([]atomic.Int64, len(plan.Skimmers)),
 	}
 	return c.Run(ctx, t)
 }
@@ -69,11 +69,11 @@ type controller struct {
 	TaskLimiters     []psg.Limiter
 	CombinerPool     *psg.CombinerPool
 	CombinerLimiters []psg.Limiter
-	Gatherers        []*psg.Gatherer[*simValue]
+	Skimmers         []*psg.Skimmer[*simValue]
 	Combiners        []*psg.Combiner[*simValue]
 	// TaskRunners holds one psg.TaskRunner0 per Plan TaskRunner. The
 	// closure inside each runs the runner's Body Func, which Submits
-	// directly to downstream Gatherers/Combiners.
+	// directly to downstream Skimmers/Combiners.
 	TaskRunners []psg.TaskRunner0
 
 	limitersOnce sync.Once
@@ -83,7 +83,7 @@ type controller struct {
 	maxConcurrencyByTaskLimit []atomicMaxInt64
 	concurrencyByCombLimit    []atomic.Int64
 	maxConcurrencyByCombLimit []atomicMaxInt64
-	gathererInvocations       []atomic.Int64
+	skimmerInvocations        []atomic.Int64
 	StartTime                 time.Time
 }
 
@@ -93,14 +93,14 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 
 	c.ensurePools()
 
-	// Construct Gatherers and Combiners against the Pool. Order matters:
-	// Combiners reference Gatherers (in body Submits), so Gatherers must
+	// Construct Skimmers and Combiners against the Pool. Order matters:
+	// Combiners reference Skimmers (in body Submits), so Skimmers must
 	// exist first.
-	for i, g := range c.Plan.Gatherers {
+	for i, g := range c.Plan.Skimmers {
 		gp := g
 		idx := i
-		gatherer := psg.NewGatherer(c.newGathererHandler(t, gp, idx))
-		c.Gatherers[i] = &gatherer
+		skimmer := psg.NewSkimmer(c.newSkimmerHandler(t, gp, idx))
+		c.Skimmers[i] = &skimmer
 	}
 	for i, cmb := range c.Plan.Combiners {
 		cp := cmb
@@ -112,7 +112,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		combiner := psg.NewCombiner(c.CombinerPool, c.newCombinerFactory(t, cp, idx), opts...)
 		c.Combiners[i] = &combiner
 	}
-	// Construct TaskRunners after Combiners/Gatherers so the bodies can
+	// Construct TaskRunners after Combiners/Skimmers so the bodies can
 	// reference them via Submit. TaskRunner Bodies may StartTask other
 	// runners, but only after the entire array is populated (a runner's
 	// Body never runs during construction).
@@ -130,31 +130,31 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	// Drain.
 	chk := assert.New(t)
 	for {
-		err := c.Wave.CloseAndGatherAll(ctx)
+		err := c.Wave.CloseAndSkimAll(ctx)
 		if err == nil {
 			break
 		}
 		var expectedErr ExpectedHandlerError
 		if errors.As(err, &expectedErr) {
-			// Gatherer.Handle returned an error as expected.
+			// Skimmer.Handle returned an error as expected.
 			continue
 		}
 		chk.NoError(err)
 		break
 	}
 
-	// Per-Gatherer sink-invocation bounds.
-	for i, want := range c.Plan.MinGathererInvocations {
-		got := c.gathererInvocations[i].Load()
+	// Per-Skimmer sink-invocation bounds.
+	for i, want := range c.Plan.MinSkimmerInvocations {
+		got := c.skimmerInvocations[i].Load()
 		chk.GreaterOrEqualf(got, int64(want),
-			"Plan#%d Gatherer#%d min invocations (got %d, want >=%d)",
-			c.Plan.ID, c.Plan.Gatherers[i].ID, got, want)
+			"Plan#%d Skimmer#%d min invocations (got %d, want >=%d)",
+			c.Plan.ID, c.Plan.Skimmers[i].ID, got, want)
 	}
-	for i, want := range c.Plan.MaxGathererInvocations {
-		got := c.gathererInvocations[i].Load()
+	for i, want := range c.Plan.MaxSkimmerInvocations {
+		got := c.skimmerInvocations[i].Load()
 		chk.LessOrEqualf(got, int64(want),
-			"Plan#%d Gatherer#%d max invocations (got %d, want <=%d)",
-			c.Plan.ID, c.Plan.Gatherers[i].ID, got, want)
+			"Plan#%d Skimmer#%d max invocations (got %d, want <=%d)",
+			c.Plan.ID, c.Plan.Skimmers[i].ID, got, want)
 	}
 	// Per-Limiter aggregate concurrency: observed max must not exceed
 	// configured permits.
@@ -247,7 +247,7 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 
 // newTaskRunner constructs the psg.TaskRunner0 that backs a Plan
 // TaskRunner. The task body walks the Plan's Body Func; Submits go
-// directly to downstream sinks (Combiners/Gatherers) via Submit, and
+// directly to downstream sinks (Combiners/Skimmers) via Submit, and
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
 func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.TaskRunner0 {
@@ -322,8 +322,8 @@ func (c *controller) submitTo(
 		switch kind {
 		case SinkCombiner:
 			err = c.Combiners[idx].SubmitErr(ctx, v, valErr)
-		case SinkGatherer:
-			err = c.Gatherers[idx].SubmitErr(ctx, c.Wave, v, valErr)
+		case SinkSkimmer:
+			err = c.Skimmers[idx].SubmitErr(ctx, c.Wave, v, valErr)
 		default:
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
 			return
@@ -340,23 +340,23 @@ func (c *controller) submitTo(
 	}
 }
 
-// newGathererHandler builds the handler function for a Plan Gatherer —
+// newSkimmerHandler builds the handler function for a Plan Skimmer —
 // walks its Handle Func, accounting invocations. Upstream errors
 // (valErr) are NOT propagated back; the Handler returns either nil or
 // its own injected ExpectedHandlerError. Matches old sim behavior:
 // errors flow alongside values into the handler for it to act on, but
 // the handler doesn't re-propagate them — that would short-circuit
 // the framework's drain and cause subsequent queued work to be lost.
-func (c *controller) newGathererHandler(t assert.TestingT, g *Gatherer, idx int) psgfn.HandlerFunc[*simValue] {
+func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) psgfn.HandlerFunc[*simValue] {
 	return func(ctx context.Context, v *simValue, valErr error) error {
 		_ = valErr
 		_ = v
-		c.gathererInvocations[idx].Add(1)
+		c.skimmerInvocations[idx].Add(1)
 		if err := c.executeFunc(ctx, t, g.Handle, v); err != nil {
-			return ExpectedHandlerError{OpKind: opNameGatherer, OpID: g.ID, Err: err}
+			return ExpectedHandlerError{OpKind: opNameSkimmer, OpID: g.ID, Err: err}
 		}
 		if c.shouldReturnError(g.Handle) {
-			return ExpectedHandlerError{OpKind: opNameGatherer, OpID: g.ID}
+			return ExpectedHandlerError{OpKind: opNameSkimmer, OpID: g.ID}
 		}
 		return nil
 	}
@@ -407,7 +407,7 @@ func (c *controller) newCombinerFactory(
 }
 
 // executeFunc walks a Func's Steps from a context where new tasks may
-// be started (gather/combine handler bodies, top-level dispatch).
+// be started (skim/combine handler bodies, top-level dispatch).
 // SelfTime sleeps for the drawn duration; Submit routes to the target
 // sink; StartTask dispatches a runner; Subjob spawns a nested Pool.
 func (c *controller) executeFunc(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
@@ -484,7 +484,7 @@ func (c *controller) shouldReturnError(fn *Func) bool {
 }
 
 // ExpectedHandlerError marks a deliberately-returned error from a
-// Gatherer Handle, Combiner Accumulate, or Combiner Flush body —
+// Skimmer Handle, Combiner Accumulate, or Combiner Flush body —
 // distinguished from infrastructure errors so the drain loop can
 // continue past them.
 type ExpectedHandlerError struct {

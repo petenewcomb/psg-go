@@ -74,12 +74,12 @@ type TaskWorkerIdleJitterOption interface {
 // for combiners to emit their results. After the callback returns, the job
 // signals any Combiner that has received inputs but hasn't yet emitted its
 // combined results to do so immediately. The callback may be invoked multiple
-// times during a job's lifecycle if a Gather directly or indirectly launches
+// times during a job's lifecycle if a Skim directly or indirectly launches
 // new tasks while processing the flushed results.
 //
 // The callback function is called synchronously from a goroutine calling a
-// gather method (Pool.Gather, Pool.TryGather, Pool.GatherAll, Pool.TryGatherAll,
-// Pool.CloseAndGatherAll), Gather.Start, or Pool.Close if no tasks are in
+// skim method (Pool.Skim, Pool.TrySkim, Pool.SkimAll, Pool.TrySkimAll,
+// Pool.CloseAndSkimAll), Skim.Start, or Pool.Close if no tasks are in
 // flight at the time of closing.
 //
 // No default callback is registered.

@@ -13,9 +13,9 @@ import (
 type GenericAfterFunc[C any] func(ctx context.Context, wf *GenericWorkflow[C])
 type AfterFunc = GenericAfterFunc[Context]
 
-// Workflow establishes a family of tasks, combines, and gathers within a job.
-// It is propagated from tasks to gathers or combines, and then to additional
-// tasks scattered from those gathers or combines.
+// Workflow establishes a family of tasks, combines, and skims within a job.
+// It is propagated from tasks to skims or combines, and then to additional
+// tasks scattered from those skims or combines.
 type GenericWorkflow[C any] struct {
 	pool     *omnipool.Pool[GenericWorkflow[C]]
 	refCount atomic.Int32

@@ -15,7 +15,7 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// "Hello world" example that uses psg to run a couple of tasks and gather their
+// "Hello world" example that uses psg to run a couple of tasks and skim their
 // results.
 //
 //nolint:errcheck,gosec // concise example code for readme
@@ -24,24 +24,24 @@ func Example_hello() {
 	defer wave.CancelAndWait() // hygiene
 
 	var results []string
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[string](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
 		},
 	))
 
-	// Bind a string to a task that submits it to the gatherer after a short delay.
+	// Bind a string to a task that submits it to the skimmer after a short delay.
 	newRunner := func(s string) psg.TaskRunner0 {
 		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			time.Sleep(1 * time.Millisecond)
-			return gatherer.Submit(ctx, wave, s)
+			return skimmer.Submit(ctx, wave, s)
 		}))
 	}
 
 	newRunner("Hello").Start(ctx, wave)
 	newRunner("world!").Start(ctx, wave)
 
-	wave.CloseAndGatherAll(ctx)
+	wave.CloseAndSkimAll(ctx)
 	fmt.Println(strings.Join(results, " "))
 }

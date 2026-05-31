@@ -13,7 +13,7 @@ var DefaultConfig = Config{
 	TaskLimiter:     defaultLimiterConfig,
 	CombinerLimiter: defaultLimiterConfig,
 	TaskRunner:      defaultTaskRunnerConfig,
-	Gatherer:        defaultGathererConfig,
+	Skimmer:         defaultSkimmerConfig,
 	Combiner:        defaultCombinerConfig,
 	Subjob:          SubjobConfig{MaxDepth: 3},
 }
@@ -31,7 +31,7 @@ type Config struct {
 	TaskLimiter     LimiterConfig
 	CombinerLimiter LimiterConfig
 	TaskRunner      TaskRunnerConfig
-	Gatherer        GathererConfig
+	Skimmer         SkimmerConfig
 	Combiner        CombinerConfig
 	Subjob          SubjobConfig
 }

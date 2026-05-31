@@ -27,7 +27,7 @@ type CombinerResult[T any] struct {
 
 type Combiner[T, C any] struct {
 	pool                     *omnipool.Pool[Combiner[T, C]]
-	gatherer                 *CombinerGatherer[T]
+	skimmer                  *CombinerSkimmer[T]
 	creationTime             time.Time
 	wrapped                  psgwf.GenericCombiner[T, C]
 	taskStartLatenciesSec    *tdigest.TDigest
@@ -38,14 +38,14 @@ type Combiner[T, C any] struct {
 }
 
 func NewCombiner[T, C any](
-	gatherer *CombinerGatherer[T],
+	skimmer *CombinerSkimmer[T],
 	wrappedCombiner psgwf.GenericCombiner[T, C],
 	fallbackFn func(res CombinerResult[T]),
 ) *Combiner[T, C] {
 	pool := omnipool.For[Combiner[T, C]]()
 	c := pool.Get()
 	c.pool = pool
-	c.gatherer = gatherer
+	c.skimmer = skimmer
 	c.creationTime = time.Now()
 	c.wrapped = wrappedCombiner
 	c.fallbackFn = fallbackFn
@@ -90,7 +90,7 @@ func (c *Combiner[T, C]) Flush(ctx context.Context) error {
 	}
 
 	defer c.pool.Put(c)
-	defer c.gatherer.recordCombinerTime(c.creationTime)
+	defer c.skimmer.recordCombinerTime(c.creationTime)
 
 	// In the new shape there is no aggregated "Value" return — the
 	// wrapped accumulator's Flush is responsible for routing data
@@ -100,52 +100,52 @@ func (c *Combiner[T, C]) Flush(ctx context.Context) error {
 	return err
 }
 
-type CombinerGatherer[T any] struct {
+type CombinerSkimmer[T any] struct {
 	controller *Controller
-	wrappedFn  psgfn.Gather[T]
+	wrappedFn  psgfn.Skim[T]
 
 	taskStartLatenciesSec    *tdigest.TDigest
 	taskDurationsSec         *tdigest.TDigest
 	combineStartLatenciesSec *tdigest.TDigest
 	combineDurationsSec      *tdigest.TDigest
 
-	combinerAgesSec         *tdigest.TDigest
-	combinerCounts          *tdigest.TDigest
-	gatherStartLatenciesSec *tdigest.TDigest
-	gatherDurationsSec      *tdigest.TDigest
+	combinerAgesSec       *tdigest.TDigest
+	combinerCounts        *tdigest.TDigest
+	skimStartLatenciesSec *tdigest.TDigest
+	skimDurationsSec      *tdigest.TDigest
 
 	cumulativeCombinerTime atomic.Int64 // time.Duration
 
-	gatherFn psgfn.Gather[CombinerResult[T]]
+	skimFn psgfn.Skim[CombinerResult[T]]
 }
 
-func NewCombinerGatherer[T any](c *Controller, gatherFn psgfn.Gather[T]) {
+func NewCombinerSkimmer[T any](c *Controller, skimFn psgfn.Skim[T]) {
 	// TODO: pool
-	g := &CombinerGatherer[T]{
+	g := &CombinerSkimmer[T]{
 		controller: c,
-		wrappedFn:  gatherFn,
+		wrappedFn:  skimFn,
 	}
-	g.gatherFn = g.gather
+	g.skimFn = g.skim
 }
 
-func (g *CombinerGatherer[T]) GatherFn() psgfn.Gather[CombinerResult[T]] {
-	if g.gatherFn == nil {
-		g.gatherFn = g.gather
+func (g *CombinerSkimmer[T]) SkimFn() psgfn.Skim[CombinerResult[T]] {
+	if g.skimFn == nil {
+		g.skimFn = g.skim
 	}
-	return g.gatherFn
+	return g.skimFn
 }
 
-func (g *CombinerGatherer[T]) recordCombinerTime(creationTime time.Time) {
+func (g *CombinerSkimmer[T]) recordCombinerTime(creationTime time.Time) {
 	recordedCombinerTime := g.controller.RecordedDurationSince(creationTime)
 	if recordedCombinerTime != 0 {
 		g.cumulativeCombinerTime.Add(int64(recordedCombinerTime))
 	}
 }
 
-func (g *CombinerGatherer[T]) gather(ctx context.Context, res CombinerResult[T], err error) error {
-	gatherStartTime := time.Now()
+func (g *CombinerSkimmer[T]) skim(ctx context.Context, res CombinerResult[T], err error) error {
+	skimStartTime := time.Now()
 	err = g.wrappedFn(ctx, res.Value, err)
-	gatherDuration := time.Since(gatherStartTime)
+	skimDuration := time.Since(skimStartTime)
 
 	if g.controller.Recording() {
 		adoptOrMergeDigest(&g.taskStartLatenciesSec, res.TaskStartLatenciesSec)
@@ -155,8 +155,8 @@ func (g *CombinerGatherer[T]) gather(ctx context.Context, res CombinerResult[T],
 
 		addToDigest(&g.combinerAgesSec, res.CombinerAge.Seconds(), 1.0)
 		addToDigest(&g.combinerCounts, res.CombineStartLatenciesSec.Count(), 1.0)
-		addToDigest(&g.gatherStartLatenciesSec, gatherStartTime.Sub(res.FlushStartTime.Add(res.FlushDuration)).Seconds(), 1.0)
-		addToDigest(&g.gatherDurationsSec, gatherDuration.Seconds(), 1.0)
+		addToDigest(&g.skimStartLatenciesSec, skimStartTime.Sub(res.FlushStartTime.Add(res.FlushDuration)).Seconds(), 1.0)
+		addToDigest(&g.skimDurationsSec, skimDuration.Seconds(), 1.0)
 	}
 
 	return err

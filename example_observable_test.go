@@ -27,14 +27,14 @@ func Example_observable() {
 	ctx := context.Background()
 
 	// Define a result aggregation function, which will run in the top-level
-	// goroutine from within calls to Start and GatherAll.
+	// goroutine from within calls to Start and SkimAll.
 	var results []string
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[string](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			clock.Sleep(10 * time.Millisecond)
-			fmt.Printf("%3dms:   gathered result %q\n", msSinceStart(), result)
-			// Safe because gather will only ever be called from the current
-			// goroutine within calls to Start and GatherAll below.
+			fmt.Printf("%3dms:   skimmed result %q\n", msSinceStart(), result)
+			// Safe because skim will only ever be called from the current
+			// goroutine within calls to Start and SkimAll below.
 			results = append(results, result)
 			return err
 		},
@@ -48,7 +48,7 @@ func Example_observable() {
 	limit := psg.NewSemaphore(2)
 
 	// Define a factory to bind task-specific inputs and resources into a
-	// TaskRunner. The task body Submits its result to the gatherer.
+	// TaskRunner. The task body Submits its result to the skimmer.
 	newRunner := func(taskName string) psg.TaskRunner0 {
 		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate latency
@@ -62,7 +62,7 @@ func Example_observable() {
 			}
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
-			return gatherer.Submit(ctx, wave, "result for task "+taskName)
+			return skimmer.Submit(ctx, wave, "result for task "+taskName)
 		}), psg.WithLimits(limit))
 	}
 
@@ -80,12 +80,12 @@ func Example_observable() {
 	clock.Sleep(10 * time.Millisecond)
 
 	// Wait for all tasks to complete
-	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
-	err := wave.CloseAndGatherAll(ctx)
+	fmt.Printf("%3dms: skimming remaining tasks\n", msSinceStart())
+	err := wave.CloseAndSkimAll(ctx)
 	if err != nil {
-		fmt.Printf("error during gather: %v\n", err)
+		fmt.Printf("error during skim: %v\n", err)
 	}
-	fmt.Printf("%3dms: gathering complete\n", msSinceStart())
+	fmt.Printf("%3dms: skimming complete\n", msSinceStart())
 
 	// Print the aggregated results
 	for i, result := range results {
@@ -97,14 +97,14 @@ func Example_observable() {
 	//   0ms: launched task "A"
 	//   0ms: launched task "B"
 	//  10ms:   task "B" complete
-	//  20ms:   gathered result "result for task B"
+	//  20ms:   skimmed result "result for task B"
 	//  20ms: launched task "C"
-	//  30ms: gathering remaining tasks
+	//  30ms: skimming remaining tasks
 	//  50ms:   task "C" complete
 	//  60ms:   task "A" complete
-	//  60ms:   gathered result "result for task C"
-	//  70ms:   gathered result "result for task A"
-	//  70ms: gathering complete
+	//  60ms:   skimmed result "result for task C"
+	//  70ms:   skimmed result "result for task A"
+	//  70ms: skimming complete
 	// results[0]="result for task B"
 	// results[1]="result for task C"
 	// results[2]="result for task A"

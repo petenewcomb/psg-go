@@ -22,8 +22,8 @@ func Example_simple() {
 
 	poolLimit := psg.NewSemaphore(10)
 
-	// Create a gather
-	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	// Create a skim
+	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		} else {
@@ -36,7 +36,7 @@ func Example_simple() {
 	wf := psgwf.New(ctx)
 
 	// Start a task
-	runner := psgwf.NewGenericTaskRunner(gatherer, wf,
+	runner := psgwf.NewGenericTaskRunner(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
 		}, psg.WithLimits(poolLimit))
@@ -46,7 +46,7 @@ func Example_simple() {
 	}
 
 	// Process the result
-	if err := wave.CloseAndGatherAll(ctx); err != nil {
+	if err := wave.CloseAndSkimAll(ctx); err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
 

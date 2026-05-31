@@ -145,40 +145,40 @@ func (w *Wave) CancelAndWait() {
 
 // Close signals that no more new top-level dispatches will be made
 // to this Wave. Existing in-flight work continues; use
-// [Wave.GatherAll] or [Wave.CloseAndGatherAll] to wait for it.
+// [Wave.SkimAll] or [Wave.CloseAndSkimAll] to wait for it.
 func (w *Wave) Close() {
 	w.pool.Close()
 }
 
-// Gather pumps the Wave's queue once: it dispatches at least one
-// completed Gatherer's result through its handler, blocking until
+// Skim pumps the Wave's queue once: it dispatches at least one
+// completed Skimmer's result through its handler, blocking until
 // either a handler runs or the context is canceled.
-func (w *Wave) Gather(ctx context.Context) error {
-	return w.pool.Gather(ctx)
+func (w *Wave) Skim(ctx context.Context) error {
+	return w.pool.Skim(ctx)
 }
 
-// TryGather attempts to pump the Wave's queue without blocking.
+// TrySkim attempts to pump the Wave's queue without blocking.
 // Returns (true, nil) if a handler ran, (false, nil) if there was
 // nothing ready, or (false, non-nil) on error.
-func (w *Wave) TryGather(ctx context.Context) (bool, error) {
-	return w.pool.TryGather(ctx)
+func (w *Wave) TrySkim(ctx context.Context) (bool, error) {
+	return w.pool.TrySkim(ctx)
 }
 
-// GatherAll pumps the Wave's queue until every in-flight item has
+// SkimAll pumps the Wave's queue until every in-flight item has
 // completed.
-func (w *Wave) GatherAll(ctx context.Context) error {
-	return w.pool.GatherAll(ctx)
+func (w *Wave) SkimAll(ctx context.Context) error {
+	return w.pool.SkimAll(ctx)
 }
 
-// TryGatherAll pumps the Wave's queue until it is empty, but never
+// TrySkimAll pumps the Wave's queue until it is empty, but never
 // blocks waiting for more work.
-func (w *Wave) TryGatherAll(ctx context.Context) error {
-	return w.pool.TryGatherAll(ctx)
+func (w *Wave) TrySkimAll(ctx context.Context) error {
+	return w.pool.TrySkimAll(ctx)
 }
 
-// CloseAndGatherAll signals no more top-level dispatches will be
+// CloseAndSkimAll signals no more top-level dispatches will be
 // made, then drains the queue until every in-flight item has
 // completed.
-func (w *Wave) CloseAndGatherAll(ctx context.Context) error {
-	return w.pool.CloseAndGatherAll(ctx)
+func (w *Wave) CloseAndSkimAll(ctx context.Context) error {
+	return w.pool.CloseAndSkimAll(ctx)
 }

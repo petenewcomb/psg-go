@@ -4,7 +4,7 @@
 // Package sim provides a way to generate and execute simulated streampool
 // jobs. It generates a Plan for each job — a static description of a unit
 // of work, modeled as a DAG of operations (TaskRunners, Combiners,
-// Gatherers) tied together by explicit Submit and StartTask steps inside
+// Skimmers) tied together by explicit Submit and StartTask steps inside
 // their function bodies. Plans are constructed via property-based
 // generators against a Config, then executed by a runtime adapter that
 // translates the new Plan vocabulary onto the current psg API.

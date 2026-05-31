@@ -31,10 +31,10 @@ func ExampleCombiner() {
 	// Define the results array
 	var results []map[string]int
 
-	gatherFn := func(ctx context.Context, result map[string]int, err error) error {
-		fmt.Printf("%3dms:   gathering result counts: %v\n", msSinceStart(), result)
-		// Safe because gatherFn will only ever be called from the current
-		// goroutine within calls to Start and GatherAll below.
+	skimFn := func(ctx context.Context, result map[string]int, err error) error {
+		fmt.Printf("%3dms:   skimming result counts: %v\n", msSinceStart(), result)
+		// Safe because skimFn will only ever be called from the current
+		// goroutine within calls to Start and SkimAll below.
 		results = append(results, result)
 		return err
 	}
@@ -53,11 +53,11 @@ func ExampleCombiner() {
 	// Create a combiner pool and disable the idle timeout
 	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
 
-	// Define a result aggregation function and create a combined gather/combine operation
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[map[string]int](gatherFn))
+	// Define a result aggregation function and create a combined skim/combine operation
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[map[string]int](skimFn))
 
 	// After Wave 2, the Accumulator factory captures the downstream
-	// gatherer in its closure and Submits the aggregated map from
+	// skimmer in its closure and Submits the aggregated map from
 	// inside FlushFn — there is no framework-routed output type.
 	newAccumulator := func() psgfn.Accumulator[string] {
 		var counts map[string]int
@@ -75,12 +75,12 @@ func ExampleCombiner() {
 			},
 			FlushFn: func(ctx context.Context) error {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-				return gatherer.Submit(ctx, wave, counts)
+				return skimmer.Submit(ctx, wave, counts)
 			},
 		}
 	}
 
-	// Create a Combine operation. No Gatherer arg — the Accumulator
+	// Create a Combine operation. No Skimmer arg — the Accumulator
 	// body routes results downstream via Submit.
 	combineOp := psg.NewCombiner(combinerPool, newAccumulator)
 	defer combineOp.Close()
@@ -118,12 +118,12 @@ func ExampleCombiner() {
 	}
 
 	// Wait for all tasks to complete
-	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
-	err := wave.CloseAndGatherAll(ctx)
+	fmt.Printf("%3dms: skimming remaining tasks\n", msSinceStart())
+	err := wave.CloseAndSkimAll(ctx)
 	if err != nil {
-		fmt.Printf("error during gather: %v\n", err)
+		fmt.Printf("error during skim: %v\n", err)
 	}
-	fmt.Printf("%3dms: gathering complete\n", msSinceStart())
+	fmt.Printf("%3dms: skimming complete\n", msSinceStart())
 
 	// Print the aggregated results
 	for i, result := range results {
@@ -143,7 +143,7 @@ func ExampleCombiner() {
 	//  40ms:   combined "C", result counts now: map[A:1 C:1]
 	//  50ms:   task 2 (50ms -> "B") complete, in-flight count now 1
 	//  50ms: launched task 5: (40ms -> "A"), in-flight count now 2
-	//  50ms: gathering remaining tasks
+	//  50ms: skimming remaining tasks
 	//  60ms:   combined "B", result counts now: map[A:1 B:1 C:1]
 	//  70ms:   task 4 (40ms -> "D") complete, in-flight count now 1
 	//  80ms:   combined "D", result counts now: map[A:1 B:1 C:1 D:1]
@@ -151,7 +151,7 @@ func ExampleCombiner() {
 	// 100ms:   combined "A", result counts now: map[A:2 B:1 C:1 D:1]
 	// 100ms: flush: all tasks completed, waiting for combiners
 	// 100ms:   flushing result counts: map[A:2 B:1 C:1 D:1]
-	// 100ms:   gathering result counts: map[A:2 B:1 C:1 D:1]
-	// 100ms: gathering complete
+	// 100ms:   skimming result counts: map[A:2 B:1 C:1 D:1]
+	// 100ms: skimming complete
 	// results[0]=map[A:2 B:1 C:1 D:1]
 }

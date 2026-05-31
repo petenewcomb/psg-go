@@ -6,7 +6,7 @@
 <g transform="scale(1, -1) translate(0, -432)">
 <path d="M1025,294.7L1025,304.89L1045,304.89L1045,294.7Z" style="fill:#A6CEE3" />
 <text x="1048" y="-297.31" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Gather Only</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">gatherOnly (limit 0)</text>
 <path d="M1025,278.52L1025,288.7L1045,288.7L1045,278.52Z" style="fill:#1F78B4" />
 <text x="1048" y="-281.12" transform="scale(1, -1)"
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Combine (limit 1)</text>
@@ -63,14 +63,14 @@
 <path d="M81.635,48.323L81.635,48.403" style="fill:none;stroke:#808080;stroke-width:0.56693" />
 <path d="M75.635,48.323L87.635,48.323" style="fill:none;stroke:#808080;stroke-width:0.56693" />
 <path d="M75.635,48.403L87.635,48.403" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M432.82,37.613L432.82,48.351L456.82,48.351L456.82,37.613Z" style="fill:#A6CEE3" />
-<path d="M444.82,48.323L444.82,48.403" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M438.82,48.323L450.82,48.323" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M438.82,48.403L450.82,48.403" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M796.01,37.613L796.01,48.351L820.01,48.351L820.01,37.613Z" style="fill:#A6CEE3" />
-<path d="M808.01,48.323L808.01,48.403" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M802.01,48.323L814.01,48.323" style="fill:none;stroke:#808080;stroke-width:0.56693" />
-<path d="M802.01,48.403L814.01,48.403" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M432.82,37.613L432.82,37.613L456.82,37.613L456.82,37.613Z" style="fill:#A6CEE3" />
+<path d="M444.82,37.613L444.82,37.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M438.82,37.613L450.82,37.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M438.82,37.613L450.82,37.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M796.01,37.613L796.01,37.613L820.01,37.613L820.01,37.613Z" style="fill:#A6CEE3" />
+<path d="M808.01,37.613L808.01,37.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M802.01,37.613L814.01,37.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
+<path d="M802.01,37.613L814.01,37.613" style="fill:none;stroke:#808080;stroke-width:0.56693" />
 <path d="M96.635,37.613L96.635,47.974L120.63,47.974L120.63,37.613Z" style="fill:#1F78B4" />
 <path d="M108.63,47.953L108.63,48.02" style="fill:none;stroke:#808080;stroke-width:0.56693" />
 <path d="M102.63,47.953L114.63,47.953" style="fill:none;stroke:#808080;stroke-width:0.56693" />

@@ -45,37 +45,37 @@ func MetricsTask[T any](
 	}
 }
 
-// MetricsGather adds metrics collection to gather functions.
-// This wrapper records count, duration, and error metrics for gather execution.
-func MetricsGather[T any](
+// MetricsSkim adds metrics collection to skim functions.
+// This wrapper records count, duration, and error metrics for skim execution.
+func MetricsSkim[T any](
 	metricName string,
-	gatherFn func(ctx context.Context, result T, err error) error,
-) psgfn.Gather[T] {
+	skimFn func(ctx context.Context, result T, err error) error,
+) psgfn.Skim[T] {
 	return func(ctx context.Context, result T, err error) error {
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
 		// Create metrics
-		gatherCounter, _ := meter.Int64Counter(metricName + ".count")
-		gatherDuration, _ := meter.Float64Histogram(metricName + ".duration")
+		skimCounter, _ := meter.Int64Counter(metricName + ".count")
+		skimDuration, _ := meter.Float64Histogram(metricName + ".duration")
 
 		// Track execution
-		gatherCounter.Add(ctx, 1)
+		skimCounter.Add(ctx, 1)
 
-		// Execute gather
-		gatherErr := gatherFn(ctx, result, err)
+		// Execute skim
+		skimErr := skimFn(ctx, result, err)
 
 		// Record duration
 		duration := time.Since(startTime).Seconds()
-		gatherDuration.Record(ctx, duration)
+		skimDuration.Record(ctx, duration)
 
 		// Record error if any
-		if gatherErr != nil {
+		if skimErr != nil {
 			errorCounter, _ := meter.Int64Counter(metricName + ".errors")
 			errorCounter.Add(ctx, 1)
 		}
 
-		return gatherErr
+		return skimErr
 	}
 }
 

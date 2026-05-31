@@ -50,8 +50,8 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestGatherer := func(path string) psg.Gatherer[[md5.Size]byte] {
-		return psg.NewGatherer(psgfn.HandlerFunc[[md5.Size]byte](
+	newDigestSkimmer := func(path string) psg.Skimmer[[md5.Size]byte] {
+		return psg.NewSkimmer(psgfn.HandlerFunc[[md5.Size]byte](
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
@@ -60,17 +60,17 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	}
 
 	newDigestingRunner := func(path string, data []byte) psg.TaskRunner0 {
-		gatherer := newDigestGatherer(path)
+		skimmer := newDigestSkimmer(path)
 		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
-			return gatherer.Submit(ctx, wave, md5.Sum(data))
+			return skimmer.Submit(ctx, wave, md5.Sum(data))
 		}), psg.WithLimits(digestLimit))
 	}
 
-	// Creates a gatherer for a reading task whose handler dispatches a
+	// Creates a skimmer for a reading task whose handler dispatches a
 	// digesting task with the bytes that were read.
-	newReadGatherer := func(path string) psg.Gatherer[[]byte] {
-		return psg.NewGatherer(psgfn.HandlerFunc[[]byte](
+	newReadSkimmer := func(path string) psg.Skimmer[[]byte] {
+		return psg.NewSkimmer(psgfn.HandlerFunc[[]byte](
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestingRunner(path, data).Start(ctx, wave)
 			},
@@ -81,11 +81,11 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// since they should be I/O-bound and will be subject to backpressure from
 	// the digesters.
 	newReadingRunner := func(path string) psg.TaskRunner0 {
-		gatherer := newReadGatherer(path)
+		skimmer := newReadSkimmer(path)
 		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
-			return gatherer.SubmitErr(ctx, wave, data, err)
+			return skimmer.SubmitErr(ctx, wave, data, err)
 		}))
 	}
 
@@ -103,8 +103,8 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		return nil, err
 	}
 
-	// Gather task results until there are no more outstanding tasks.
-	if err := wave.CloseAndGatherAll(ctx); err != nil {
+	// Skim task results until there are no more outstanding tasks.
+	if err := wave.CloseAndSkimAll(ctx); err != nil {
 		return nil, err
 	}
 

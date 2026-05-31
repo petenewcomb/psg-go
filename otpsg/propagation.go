@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // Package otpsg provides OpenTelemetry integration for the psg scatter-gather library.
-// It enables transparent propagation of trace context through psg tasks, gathers, and
+// It enables transparent propagation of trace context through psg tasks, skims, and
 // combiners without requiring users to manually handle context propagation.
 package otpsg
 
@@ -47,13 +47,13 @@ func PropagateTask[T any](
 	}
 }
 
-// PropagateGather wraps a gather function to ensure trace context flows through.
-// The gather function receives a context with the propagated trace context properly
-// set, allowing spans created in the gather function to be properly parented.
-func PropagateGather[T any](
-	gatherFn func(ctx context.Context, result T, err error) error,
-) psg.Gatherer[PropagatedResult[T]] {
-	return psg.NewGatherer(psgfn.HandlerFunc[PropagatedResult[T]](
+// PropagateSkim wraps a skim function to ensure trace context flows through.
+// The skim function receives a context with the propagated trace context properly
+// set, allowing spans created in the skim function to be properly parented.
+func PropagateSkim[T any](
+	skimFn func(ctx context.Context, result T, err error) error,
+) psg.Skimmer[PropagatedResult[T]] {
+	return psg.NewSkimmer(psgfn.HandlerFunc[PropagatedResult[T]](
 		func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 			// Create context with propagated trace data
 			propagatedCtx := ctx
@@ -61,8 +61,8 @@ func PropagateGather[T any](
 				propagatedCtx = trace.ContextWithRemoteSpanContext(ctx, wrapped.TraceContext)
 			}
 
-			// Call original gather with enhanced context
-			return gatherFn(propagatedCtx, wrapped.UserResult, err)
+			// Call original skim with enhanced context
+			return skimFn(propagatedCtx, wrapped.UserResult, err)
 		},
 	))
 }

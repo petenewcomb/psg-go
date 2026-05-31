@@ -45,7 +45,7 @@ func main() {
 	}
 
 	fmt.Println()
-	printGatherOnlyComparison(baseline, current)
+	printSkimOnlyComparison(baseline, current)
 	fmt.Println()
 	fmt.Println()
 	printBestLimitedCombinerConcurrencyComparison(baseline, current)
@@ -102,7 +102,7 @@ func loadBenchmarkData(filename string) (map[Config]map[int]*BenchData, error) {
 	for benchFiles.Scan() {
 		switch rec := benchFiles.Result(); rec := rec.(type) {
 		case *benchfmt.Result:
-			// Process all benchmarks - combinerLimit=0 is gatherOnly, positive values are combine
+			// Process all benchmarks - combinerLimit=0 is skimOnly, positive values are combine
 
 			// Extract configuration
 			workloadKey := workloadP.Project(rec)
@@ -318,10 +318,10 @@ func compareMeasurements(baseline, current *Measurement) benchmath.Comparison {
 	return benchmath.AssumeNothing.Compare(baseline.Sample, current.Sample)
 }
 
-func printGatherOnlyComparison(baseline, current map[Config]map[int]*BenchData) {
+func printSkimOnlyComparison(baseline, current map[Config]map[int]*BenchData) {
 
 	t := table.NewWriter()
-	t.SetTitle("Gather-Only Benchmark Comparison")
+	t.SetTitle("Skim-Only Benchmark Comparison")
 	t.SetOutputMirror(os.Stdout)
 	t.SetStyle(tableStyle)
 

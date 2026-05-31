@@ -30,8 +30,8 @@ func Example() {
 	var mu sync.Mutex
 	completed := []string{}
 
-	// Create a gather for collecting results
-	resultGather := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	// Create a skim for collecting results
+	resultSkim := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -47,7 +47,7 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		runner := psgwf.NewGenericTaskRunner(resultGather, wf,
+		runner := psgwf.NewGenericTaskRunner(resultSkim, wf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				select {
 				case <-time.After(sleepTime):
@@ -75,8 +75,8 @@ func Example() {
 	defer cancel2()
 	handleRequest("req2", ctx2, 50*time.Millisecond)
 
-	// Close the wave and gather all results
-	if err := wave.CloseAndGatherAll(context.Background()); err != nil {
+	// Close the wave and skim all results
+	if err := wave.CloseAndSkimAll(context.Background()); err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
 

@@ -13,7 +13,7 @@ import (
 // GenericTaskRunner dispatches a workflow-aware task onto a [psg.Pool].
 // The runner owns the workflow ref/unref lifecycle: each [Start] takes
 // one reference to the workflow; the matching unref happens when the
-// downstream Gatherer (or Combiner) sink processes the result that the
+// downstream Skimmer (or Combiner) sink processes the result that the
 // task produces.
 //
 // If [Start] fails (returns a non-nil error), the reference is released
@@ -35,11 +35,11 @@ type TaskRunner[T any] = GenericTaskRunner[T, Context]
 
 // NewGenericTaskRunner constructs a Wave-independent
 // [GenericTaskRunner] that wraps the workflow context propagation and
-// downstream submission to the supplied Gatherer sink. Pass psg op
+// downstream submission to the supplied Skimmer sink. Pass psg op
 // options (e.g. [psg.WithLimits]) via opts to throttle dispatch. The
 // caller supplies a [psg.Wave] at each [GenericTaskRunner.Start] call.
 func NewGenericTaskRunner[T, C any](
-	sink GenericGatherOp[T, C],
+	sink GenericSkimOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts ...psg.OpOption,

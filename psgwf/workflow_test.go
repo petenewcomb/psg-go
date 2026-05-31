@@ -48,20 +48,20 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 	// Create a simple task to ensure workflow is used
 	poolLimit := psg.NewSemaphore(1)
-	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	runner := psgwf.NewGenericTaskRunner(gatherer, wf,
+	runner := psgwf.NewGenericTaskRunner(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
 		}, psg.WithLimits(poolLimit))
 	err := runner.Start(context.Background(), wave)
 	assert.NoError(t, err)
 
-	// Close wave and gather all results
-	// During gathering, the final Unref will trigger AfterFuncs
-	err = wave.CloseAndGatherAll(context.Background())
+	// Close wave and skim all results
+	// During skimming, the final Unref will trigger AfterFuncs
+	err = wave.CloseAndSkimAll(context.Background())
 	assert.NoError(t, err)
 
 	// Verify all AfterFuncs were called
@@ -112,7 +112,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		// Create new workflow for new tasks
 		newWf := psgwf.New(ctx)
 
-		gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+		skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 			mu.Lock()
 			newTaskRan = true
 			mu.Unlock()
@@ -120,7 +120,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Start a new task from within the AfterFunc
-		runner := psgwf.NewGenericTaskRunner(gatherer, newWf,
+		runner := psgwf.NewGenericTaskRunner(skimmer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
 			}, psg.WithLimits(poolLimit))
@@ -129,21 +129,21 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	})
 
 	// Run a simple task to use the workflow
-	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	outerRunner := psgwf.NewGenericTaskRunner(gatherer, wf,
+	outerRunner := psgwf.NewGenericTaskRunner(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
 		}, psg.WithLimits(poolLimit))
 	err := outerRunner.Start(context.Background(), wave)
 	assert.NoError(t, err)
 
-	// Close wave and gather all results
-	// During gathering, the final Unref will trigger AfterFuncs
-	// The AfterFunc will scatter new tasks that will also be gathered
-	err = wave.CloseAndGatherAll(context.Background())
+	// Close wave and skim all results
+	// During skimming, the final Unref will trigger AfterFuncs
+	// The AfterFunc will scatter new tasks that will also be skimmed
+	err = wave.CloseAndSkimAll(context.Background())
 	assert.NoError(t, err)
 
 	// Verify both AfterFunc and new task ran

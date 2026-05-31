@@ -32,9 +32,9 @@ func Example_clientTimeout() {
 		return clock.Elapsed(10 * time.Millisecond).Milliseconds()
 	}
 
-	// Create a gather for collecting results
-	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
-		fmt.Printf("%2dms [%s] result gathered\n", msSinceStart(), requestID)
+	// Create a skim for collecting results
+	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
+		fmt.Printf("%2dms [%s] result skimmed\n", msSinceStart(), requestID)
 		return nil
 	})
 
@@ -60,7 +60,7 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		runner := psgwf.NewGenericTaskRunner(gatherer, wf, newRequestTaskFn(requestID),
+		runner := psgwf.NewGenericTaskRunner(skimmer, wf, newRequestTaskFn(requestID),
 			psg.WithLimits(poolLimit))
 		err := runner.Start(ctx, wave)
 		if err != nil {
@@ -91,10 +91,10 @@ func Example_clientTimeout() {
 
 	time.Sleep(20 * time.Millisecond)
 
-	fmt.Printf("gathering results\n")
+	fmt.Printf("skimming results\n")
 
 	// Process results
-	err := wave.CloseAndGatherAll(ctx)
+	err := wave.CloseAndSkimAll(ctx)
 	if err != nil {
 		// For test output stability, don't report the error until req3 has had
 		// a chance to report its cancellation.
@@ -110,11 +110,11 @@ func Example_clientTimeout() {
 	// 10ms [req2] launching workflow
 	// 20ms [req1] workflow cancelled
 	// 30ms [req3] launching workflow
-	// 30ms [req1] result gathered
+	// 30ms [req1] result skimmed
 	// 40ms [req2] task completed
-	// gathering results
-	// 50ms [req2] result gathered
+	// skimming results
+	// 50ms [req2] result skimmed
 	// 60ms [req3] task completed
-	// 60ms [req3] result gathered
+	// 60ms [req3] result skimmed
 	// job ended
 }

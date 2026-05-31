@@ -315,8 +315,8 @@ func main() {
 	}
 
 	// Read the benchmark results.
-	gatherOnlyMatcher := regexp.MustCompile(`/method=gatherOnly/`)
-	var gatherOnlyResults []*benchfmt.Result
+	skimOnlyMatcher := regexp.MustCompile(`/method=skimOnly/`)
+	var skimOnlyResults []*benchfmt.Result
 	benchFiles := &benchfmt.Files{
 		Paths:       flag.Args(),
 		AllowStdin:  true,
@@ -350,8 +350,8 @@ func main() {
 
 		// Need to save these to expand and match the appropriate sets of
 		// flushPeriod values later.
-		if gatherOnlyMatcher.Match(res.Name) {
-			gatherOnlyResults = append(gatherOnlyResults, res.Clone())
+		if skimOnlyMatcher.Match(res.Name) {
+			skimOnlyResults = append(skimOnlyResults, res.Clone())
 			continue
 		}
 
@@ -413,10 +413,10 @@ func main() {
 		}
 	}
 
-	// Expand each gatherOnly result to cover all relevant values for
+	// Expand each skimOnly result to cover all relevant values for
 	// flushPeriod
 	flushPeriodReplacer := regexp.MustCompile(`(/flushPeriod=)[^/]*`)
-	for _, res := range gatherOnlyResults {
+	for _, res := range skimOnlyResults {
 		workloadDurationKey := WorkloadDurationKey{workloadDurationP.Project(res)}
 		for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
 			res.Name = flushPeriodReplacer.ReplaceAll(res.Name, []byte(`${1}`+flushPeriodKey.Get(flushPeriodP.Fields()[0])))
@@ -571,7 +571,7 @@ func main() {
 
 					var methodDisplayName string
 					switch methodName {
-					case "gatherOnly":
+					case "skimOnly":
 						continue
 					case "combine":
 						if concurrencyLimit == -1 {
@@ -665,8 +665,8 @@ func main() {
 
 			var methodDisplayName string
 			switch methodName {
-			case "gatherOnly":
-				methodDisplayName = "Gather Only"
+			case "skimOnly":
+				methodDisplayName = "Skim Only"
 			case "combine":
 				if concurrencyLimit == -1 {
 					methodDisplayName = "Combine (unlimited)"

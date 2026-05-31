@@ -32,9 +32,9 @@ type Pool struct {
 	wg       sync.WaitGroup
 	state    jobstate.JobState
 
-	gatherQueue workq.Pending
+	skimQueue workq.Pending
 
-	// If there are tasks waiting to post work to gatherQueue, the governor
+	// If there are tasks waiting to post work to skimQueue, the governor
 	// will block new top-level scatters, thereby applying backpressure to
 	// regulate the system.
 	governor workq.Governor
@@ -52,8 +52,8 @@ type Pool struct {
 	taskWorkerMu             sync.Mutex
 	latestTaskWorkerIdleExit time.Time // protected by taskWorkerMu
 
-	ctxMetaMap       ctxmap.Map[ctxMetaValueKey, *ctxMeta]
-	gatherCtxMetaMap ctxmap.Map[gatherCtxMetaValueKey, *Pool]
+	ctxMetaMap     ctxmap.Map[ctxMetaValueKey, *ctxMeta]
+	skimCtxMetaMap ctxmap.Map[skimCtxMetaValueKey, *Pool]
 
 	protoBB      workq.BlockBehavior  // avoid closure reallocation
 	blockFn      workq.BlockFunc      // avoid closure reallocation
@@ -147,11 +147,11 @@ func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
 	j.addWorkFn = j.addWork
 
 	trace.Logf(ctx, traceRegion,
-		"Pool=%p, state=%p, gatherQueue=%p, governor=%p, workQueue=%p, taskQueue=%p",
-		j, &j.state, &j.gatherQueue, &j.governor, &j.workQueue, &j.taskQueue)
+		"Pool=%p, state=%p, skimQueue=%p, governor=%p, workQueue=%p, taskQueue=%p",
+		j, &j.state, &j.skimQueue, &j.governor, &j.workQueue, &j.taskQueue)
 
 	j.state.Init()
-	j.gatherQueue.Init()
+	j.skimQueue.Init()
 	j.governor.Init()
 	j.workQueue.Init()
 	j.taskQueue.Init()
@@ -166,18 +166,18 @@ func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
 	return j
 }
 
-// Cancel terminates any in-flight tasks and forfeits any ungathered results.
-// Outstanding calls to [Start], [Pool.Gather], [Pool.TryGather],
-// [Pool.GatherAll], or [Pool.TryGatherAll] using the job or any of its task pools will
-// fail with [context.Canceled] or other error returned by a [Gather].
+// Cancel terminates any in-flight tasks and forfeits any unskimed results.
+// Outstanding calls to [Start], [Pool.Skim], [Pool.TrySkim],
+// [Pool.SkimAll], or [Pool.TrySkimAll] using the job or any of its task pools will
+// fail with [context.Canceled] or other error returned by a [Skim].
 //
 // While Cancel always returns immediately, any running [Task] or
-// [Gather] will delay termination of their independent goroutine or caller
+// [Skim] will delay termination of their independent goroutine or caller
 // until it returns. This method cancels the context passed to each [Task],
-// but not the context passed to each [Gather]. Gather functions instead
-// receive the context passed to the calling [Start], [Pool.Gather],
-// [Pool.TryGather], [Pool.GatherAll], or [Pool.TryGatherAll] function. If it is
-// desirable to transmit a cancelation signal to a running [Gather], one
+// but not the context passed to each [Skim]. Skim functions instead
+// receive the context passed to the calling [Start], [Pool.Skim],
+// [Pool.TrySkim], [Pool.SkimAll], or [Pool.TrySkimAll] function. If it is
+// desirable to transmit a cancelation signal to a running [Skim], one
 // must also cancel any contexts being passed to those callers.
 //
 // Cancel is always thread-safe and calling it more than once has no additional
@@ -201,41 +201,41 @@ func (j *Pool) CancelAndWait() {
 
 	j.Cancel()
 	j.wg.Wait()
-	j.gatherCtxMetaMap.Clear()
+	j.skimCtxMetaMap.Clear()
 	j.ctxMetaMap.Clear()
 }
 
-// Gather processes outstanding task results and then waits for the next
+// Skim processes outstanding task results and then waits for the next
 // task result from a task previously launched via [Start]. It will block until
 // a completed task is available, the provided context or job is canceled, or
 // another event causes a wake-up (e.g. a call to [TaskPool.SetOptions]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
-// See [Pool.TryGather] for a non-blocking alternative.
+// See [Pool.TrySkim] for a non-blocking alternative.
 //
 // Returns an error if one occurred:
 //
-//   - nil: a task completed and was successfully gathered
-//   - ErrJobDone: the job is done and therefore nothing is left to gather
-//   - other error: a task's gather function returned a non-nil error, or the
+//   - nil: a task completed and was successfully skimmed
+//   - ErrJobDone: the job is done and therefore nothing is left to skim
+//   - other error: a task's skim function returned a non-nil error, or the
 //     argument or job-internal context was canceled
 //
-// If a gather function returns an error, the job continues running and you can
-// keep calling Gather to process more tasks (and errors, if any) until you
+// If a skim function returns an error, the job continues running and you can
+// keep calling Skim to process more tasks (and errors, if any) until you
 // receive ErrJobDone.
 //
-// If all gather functions are thread-safe, then Gather is thread-safe and
+// If all skim functions are thread-safe, then Skim is thread-safe and
 // may be called concurrently from multiple goroutines. Blocking and
-// non-blocking calls may also be mixed, as can calls to any of the other gather
+// non-blocking calls may also be mixed, as can calls to any of the other skim
 // methods.
 //
-// NOTE: If a task result is gathered, this method will call the task's
-// [Gather] and wait until it returns.
-func (j *Pool) Gather(ctx context.Context) error {
-	traceRegion := "Pool.Gather"
+// NOTE: If a task result is skimmed, this method will call the task's
+// [Skim] and wait until it returns.
+func (j *Pool) Skim(ctx context.Context) error {
+	traceRegion := "Pool.Skim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := j.vetGather(ctx)
-	_, err := j.gather(ctx, meta)
+	ctx, meta := j.vetSkim(ctx)
+	_, err := j.skim(ctx, meta)
 	return err
 }
 
@@ -243,39 +243,39 @@ func (j *Pool) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) erro
 	traceRegion := "Pool.tryAddWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Pool=%p", j)
-	if workFn, ok := j.gatherQueue.TryPopFront(); ok {
+	if workFn, ok := j.skimQueue.TryPopFront(); ok {
 		queueFn(workFn)
 	}
 	return nil
 }
 
-func (j *Pool) vetGather(ctx context.Context) (context.Context, *ctxMeta) {
-	return j.gatherCtxMeta(ctx)
+func (j *Pool) vetSkim(ctx context.Context) (context.Context, *ctxMeta) {
+	return j.skimCtxMeta(ctx)
 }
 
-func (j *Pool) tryGather(ctx context.Context, _ *ctxMeta) (bool, error) {
+func (j *Pool) trySkim(ctx context.Context, _ *ctxMeta) (bool, error) {
 	return j.workQueue.TryExecuteOne(ctx, j.tryAddWorkFn)
 }
 
-func (j *Pool) gather(ctx context.Context, meta *ctxMeta) (bool, error) {
+func (j *Pool) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
 	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn, nil)
 }
 
 // This function is designed to be called before scattering a new task to
-// preemptively gather or gather results from completed tasks. This smooths
+// preemptively skim or skim results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
 func (j *Pool) yield(ctx context.Context, deadline time.Time) error {
 	traceRegion := "Pool.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := j.vetGather(ctx)
+	ctx, meta := j.vetSkim(ctx)
 	for {
-		ok, err := j.tryGather(ctx, meta)
+		ok, err := j.trySkim(ctx, meta)
 		if err != nil {
 			return err
 		}
-		// Test for deadline passing only after trying at least one gather
+		// Test for deadline passing only after trying at least one skim
 		if !ok || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			break
 		}
@@ -302,7 +302,7 @@ func (j *Pool) block(
 	traceRegion := "Pool.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Pool=%p", j)
-	ctx, meta := j.vetGather(ctx)
+	ctx, meta := j.vetSkim(ctx)
 	adder := blockingWorkAdderPool.Get()
 	defer blockingWorkAdderPool.Put(adder)
 	adder.job = j
@@ -387,7 +387,7 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 		err = j.tryAddWork(ctx, queueFn)
 	} else {
 		var psResult rdvq.PopSelectResult[workq.Work]
-		work, ok := j.gatherQueue.PopFrontFunc(
+		work, ok := j.skimQueue.PopFrontFunc(
 			meta.Receiver(),
 			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
 				workRf = workWaiters.WaitFunc(
@@ -396,7 +396,7 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 					func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 						var innerWorkRf rdvq.RenotifyFunc
 						if blockWaiters == nil {
-							psResult, innerWorkRf, _, err = j.gatherSelect(
+							psResult, innerWorkRf, _, err = j.skimSelect(
 								ctx, inboxCh, outboxWaitCh, workWaitCh, nil, nil,
 							)
 						} else {
@@ -418,7 +418,7 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 										blockTimerCh = blockTimer.C
 									}
 									var innerBlockRf rdvq.RenotifyFunc
-									psResult, innerWorkRf, innerBlockRf, err = j.gatherSelect(
+									psResult, innerWorkRf, innerBlockRf, err = j.skimSelect(
 										ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh,
 									)
 									return innerBlockRf
@@ -438,7 +438,7 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 	return workRf, blockRf, err
 }
 
-func (j *Pool) gatherSelect(
+func (j *Pool) skimSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
 	outboxWaitCh <-chan rdvq.RenotifyFunc,
@@ -446,7 +446,7 @@ func (j *Pool) gatherSelect(
 	blockTimerCh <-chan time.Time,
 	blockWaitCh <-chan rdvq.RenotifyFunc,
 ) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.RenotifyFunc, err error) {
-	traceRegion := "Pool.gatherSelect"
+	traceRegion := "Pool.skimSelect"
 	trace.Logf(ctx, traceRegion,
 		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, blockWaitCh=%p",
 		inboxCh, outboxWaitCh, workWaitCh, blockWaitCh)
@@ -475,20 +475,20 @@ func (j *Pool) gatherSelect(
 	return
 }
 
-type gatherPostWork struct {
+type skimPostWork struct {
 	poolWork
 	job  *Pool
-	work boundGatherWork
+	work boundSkimWork
 }
 
-func (w *gatherPostWork) Init(group workq.GroupID, job *Pool, work boundGatherWork) {
+func (w *skimPostWork) Init(group workq.GroupID, job *Pool, work boundSkimWork) {
 	w.poolWork.Init(group, job)
 	w.job = job
 	w.work = work
 }
 
-func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "gatherPostWork.Execute"
+func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "skimPostWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
@@ -497,13 +497,13 @@ func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 		ctx, meta := w.job.ctxMeta(ctx)
 
 		waiting := func() {
-			// Call Waiting on the nested gatherWork to notify the governor
+			// Call Waiting on the nested skimWork to notify the governor
 			w.work.Waiting(&w.job.governor)
 		}
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.job.gatherQueue.TryPushBack(meta.Sender(), w.work, nil)
+			return w.job.skimQueue.TryPushBack(meta.Sender(), w.work, nil)
 		}
 
 		for {
@@ -517,7 +517,7 @@ func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 
 			if !meta.ShouldBlock() {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(w.job.gatherQueue.ListenersFor(meta.Sender()))
+				ex.AddToListeners(w.job.skimQueue.ListenersFor(meta.Sender()))
 
 				// Check again after registering for notification, but return
 				// and expect to be called again if needed
@@ -532,7 +532,7 @@ func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.gatherQueue.PushBackFunc(meta.Sender(), w.work, nil, func(outboxCh chan<- workq.Work) bool {
+			w.job.skimQueue.PushBackFunc(meta.Sender(), w.work, nil, func(outboxCh chan<- workq.Work) bool {
 				posted = false
 
 				// Slow path, really going to block now
@@ -562,8 +562,8 @@ func (w *gatherPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *gatherPostWork) Free() {
-	traceRegion := "gatherPostWork.Free"
+func (w *skimPostWork) Free() {
+	traceRegion := "skimPostWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
@@ -575,104 +575,104 @@ func (w *gatherPostWork) Free() {
 	}
 
 	w.Close(w.job)
-	gatherPostWorkPool.Put(w)
+	skimPostWorkPool.Put(w)
 }
 
-var gatherPostWorkPool = omnipool.For[gatherPostWork]()
+var skimPostWorkPool = omnipool.For[skimPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) newGatherPostWork(group workq.GroupID, gatherWork boundGatherWork) *gatherPostWork {
-	traceRegion := "Pool.newGatherPostWork"
+func (j *Pool) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork) *skimPostWork {
+	traceRegion := "Pool.newSkimPostWork"
 
-	w := gatherPostWorkPool.Get()
-	w.Init(group, j, gatherWork)
+	w := skimPostWorkPool.Get()
+	w.Init(group, j, skimWork)
 
 	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
 	return w
 }
 
-// TryGather processes outstanding task results and then attempts to process
+// TrySkim processes outstanding task results and then attempts to process
 // the next task result from a task previously launched via [Start]. Unlike
-// [Pool.Gather], it will not block if a completed task is not immediately available.
+// [Pool.Skim], it will not block if a completed task is not immediately available.
 //
 // Returns a boolean flag indicating whether there might be more task results
 // immediately available to process and an error if one occurred.
 //
 // The error indicates:
-//   - nil: no gather function returned an error
+//   - nil: no skim function returned an error
 //   - ErrJobDone: the job is done and no more tasks will ever be available
-//   - other error: a gather function returned an error or the context was canceled
+//   - other error: a skim function returned an error or the context was canceled
 //
-// If a gather function returns an error, the job continues running and you can
-// keep calling TryGather to process more tasks (and errors, if any) until you
+// If a skim function returns an error, the job continues running and you can
+// keep calling TrySkim to process more tasks (and errors, if any) until you
 // receive ErrJobDone.
 //
-// See Gather for additional details.
-func (j *Pool) TryGather(ctx context.Context) (bool, error) {
-	traceRegion := "Pool.TryGather"
+// See Skim for additional details.
+func (j *Pool) TrySkim(ctx context.Context) (bool, error) {
+	traceRegion := "Pool.TrySkim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := j.vetGather(ctx)
-	return j.tryGather(ctx, meta)
+	ctx, meta := j.vetSkim(ctx)
+	return j.trySkim(ctx, meta)
 }
 
-// GatherAll processes task results until the job completes or an error occurs.
-// If the job has not been closed, GatherAll will block indefinitely, as new
+// SkimAll processes task results until the job completes or an error occurs.
+// If the job has not been closed, SkimAll will block indefinitely, as new
 // tasks might be added at any time. It will return an error if the provided context
-// or job is canceled. After the job is closed, GatherAll will continue processing
+// or job is canceled. After the job is closed, SkimAll will continue processing
 // tasks until all work completes (including tasks spawned during result processing)
 // and then return.
 //
 // Returns nil when the job is done, or an error if the context is canceled or a
-// task's [Gather] returns a non-nil error. If a gather function returns an
-// error, you can call GatherAll again to continue processing more tasks (and
-// errors, if any) until the job is done (i.e., GatherAll returns nil).
+// task's [Skim] returns a non-nil error. If a skim function returns an
+// error, you can call SkimAll again to continue processing more tasks (and
+// errors, if any) until the job is done (i.e., SkimAll returns nil).
 //
-// If all gather functions are thread-safe, then GatherAll is thread-safe and
+// If all skim functions are thread-safe, then SkimAll is thread-safe and
 // can be called concurrently from multiple goroutines. In this case they will
 // collectively process all results, with each call handling a subset. Blocking
 // and non-blocking calls may also be mixed, as can calls to any of the other
-// gather methods.
+// skim methods.
 //
-// NOTE: This method will serially call each gathered task's [Gather] and
+// NOTE: This method will serially call each skimmed task's [Skim] and
 // wait until it returns.
-func (j *Pool) GatherAll(ctx context.Context) error {
-	traceRegion := "Pool.GatherAll"
+func (j *Pool) SkimAll(ctx context.Context) error {
+	traceRegion := "Pool.SkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	err := j.gatherAll(ctx, j.gather)
+	err := j.skimAll(ctx, j.skim)
 	if errors.Is(err, ErrJobDone) {
 		return nil
 	}
 	return err
 }
 
-// TryGatherAll processes all currently available task results without blocking.
-// Unlike [Pool.GatherAll], TryGatherAll will return immediately if there are no
+// TrySkimAll processes all currently available task results without blocking.
+// Unlike [Pool.SkimAll], TrySkimAll will return immediately if there are no
 // completed tasks ready to process, regardless of whether the job is closed or
 // whether there are still tasks in flight.
 //
 // Returns nil when all immediately available tasks have been processed, ErrJobDone
 // when the job is done, or an error if the context is canceled or a task's
-// [Gather] returns a non-nil error. If a gather function returns an error,
-// you can call TryGatherAll again to continue processing more tasks (and errors,
+// [Skim] returns a non-nil error. If a skim function returns an error,
+// you can call TrySkimAll again to continue processing more tasks (and errors,
 // if any) until you receive ErrJobDone.
 //
-// See GatherAll for information about thread safety.
+// See SkimAll for information about thread safety.
 //
 // NOTE: If completed tasks are available, this method must still call each
-// task's [Gather] and wait until it finishes processing.
-func (j *Pool) TryGatherAll(ctx context.Context) error {
-	traceRegion := "Pool.TryGatherAll"
+// task's [Skim] and wait until it finishes processing.
+func (j *Pool) TrySkimAll(ctx context.Context) error {
+	traceRegion := "Pool.TrySkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	return j.gatherAll(ctx, j.tryGather)
+	return j.skimAll(ctx, j.trySkim)
 }
 
-func (j *Pool) gatherAll(ctx context.Context, gatherFn func(context.Context, *ctxMeta) (bool, error)) error {
-	ctx, meta := j.vetGather(ctx)
+func (j *Pool) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMeta) (bool, error)) error {
+	ctx, meta := j.vetSkim(ctx)
 	for {
-		ok, err := gatherFn(ctx, meta)
+		ok, err := skimFn(ctx, meta)
 		if err != nil {
 			return err
 		}
@@ -1003,11 +1003,11 @@ func (j *Pool) panicIfDone() {
 
 // Close changes the job's state from open to closed, which allows it to eventually
 // progress to the done state once all tasks complete. When a job is closed,
-// [Pool.GatherAll] will return after processing all existing tasks and any tasks
+// [Pool.SkimAll] will return after processing all existing tasks and any tasks
 // they spawn, rather than blocking indefinitely.
 //
 // After a job is closed and all tasks have completed, launching new tasks will panic.
-// Gathering operations will continue to work normally but will always return
+// Skimming operations will continue to work normally but will always return
 // immediately with no results.
 //
 // Note that tasks can still be added after Close is called but before all tasks
@@ -1023,14 +1023,14 @@ func (j *Pool) Close() {
 	j.state.Close()
 }
 
-// CloseAndGatherAll closes the job via [Pool.Close] and then waits for and
-// gathers the results of all in-flight tasks via [Pool.GatherAll].
-func (j *Pool) CloseAndGatherAll(ctx context.Context) error {
-	traceRegion := "Pool.CloseAndGatherAll"
+// CloseAndSkimAll closes the job via [Pool.Close] and then waits for and
+// skims the results of all in-flight tasks via [Pool.SkimAll].
+func (j *Pool) CloseAndSkimAll(ctx context.Context) error {
+	traceRegion := "Pool.CloseAndSkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	j.Close()
-	return j.GatherAll(ctx)
+	return j.SkimAll(ctx)
 }
 
 // poolConfigWrapper wraps a Pool to implement the poolConfig interface for options

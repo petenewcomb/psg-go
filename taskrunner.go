@@ -21,7 +21,7 @@ import (
 // Wave. Result delivery is the task body's responsibility — Run calls
 // Submit on whatever downstream sinks it captures. If Run returns a
 // non-nil error, the framework routes it through an internal sink so
-// it surfaces via the Wave's GatherAll path.
+// it surfaces via the Wave's SkimAll path.
 //
 // Concurrency limiting: pass [WithLimits] at construction time to bind
 // a [Limiter] (e.g. via [NewSemaphore]) that caps the number of
@@ -35,7 +35,7 @@ import (
 type TaskRunner0 struct {
 	task     psgfn.Task0
 	limiter  Limiter
-	errSink  Gatherer[struct{}]
+	errSink  Skimmer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork0]
 }
 
@@ -43,7 +43,7 @@ type TaskRunner0 struct {
 // [TaskRunner0]. Pass [WithLimits] in opts to bind one or more
 // [Limiter]s that throttle dispatch. The framework manages an internal
 // error sink that surfaces unexpected errors returned by Task.Run
-// through the dispatching Wave's GatherAll path.
+// through the dispatching Wave's SkimAll path.
 func NewTaskRunner0(task psgfn.Task0, opts ...OpOption) TaskRunner0 {
 	if task == nil {
 		panic("task must be non-nil")
@@ -58,19 +58,19 @@ func NewTaskRunner0(task psgfn.Task0, opts ...OpOption) TaskRunner0 {
 }
 
 // Start launches the task on wave's worker goroutine. Before launching,
-// Start applies backpressure by gathering some already-completed tasks.
+// Start applies backpressure by skimming some already-completed tasks.
 // If a Limiter is at its concurrency limit, Start blocks until a slot
-// becomes available. The ctx may be used to cancel both gathering and
+// becomes available. The ctx may be used to cancel both skimming and
 // launch; only the ctx associated with the wave's Pool is passed to
 // Run.
 //
-// Returns a non-nil error if the ctx is canceled or if a gather function
+// Returns a non-nil error if the ctx is canceled or if a skim function
 // returns an error. If the returned error is non-nil, the task will not
 // have been launched.
 //
 // WARNING: Start must not be called from inside a Task launched on the
 // same wave, since this can deadlock when a concurrency limit is
-// reached. Call Start from an associated Gather or Accumulate body
+// reached. Call Start from an associated Skim or Accumulate body
 // instead. Start attempts to detect this and panics, but the detection
 // works only when the ctx passed to Start descends from the ctx passed
 // to Run.
@@ -152,7 +152,7 @@ type taskRunnerWork0 struct {
 	job     *Pool
 	group   workq.GroupID
 	task    psgfn.Task0
-	errSink Gatherer[struct{}]
+	errSink Skimmer[struct{}]
 }
 
 func (w *taskRunnerWork0) Execute(
@@ -196,7 +196,7 @@ func (w *taskRunnerWork0) Free() {
 type TaskRunner[T any] struct {
 	task     psgfn.Task[T]
 	limiter  Limiter
-	errSink  Gatherer[struct{}]
+	errSink  Skimmer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork[T]]
 }
 
@@ -293,7 +293,7 @@ type taskRunnerWork[T any] struct {
 	group   workq.GroupID
 	task    psgfn.Task[T]
 	arg     T
-	errSink Gatherer[struct{}]
+	errSink Skimmer[struct{}]
 }
 
 func (w *taskRunnerWork[T]) Execute(
@@ -339,7 +339,7 @@ func (w *taskRunnerWork[T]) Free() {
 type TaskRunner2[T1, T2 any] struct {
 	task     psgfn.Task2[T1, T2]
 	limiter  Limiter
-	errSink  Gatherer[struct{}]
+	errSink  Skimmer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork2[T1, T2]]
 }
 
@@ -440,7 +440,7 @@ type taskRunnerWork2[T1, T2 any] struct {
 	task    psgfn.Task2[T1, T2]
 	arg1    T1
 	arg2    T2
-	errSink Gatherer[struct{}]
+	errSink Skimmer[struct{}]
 }
 
 func (w *taskRunnerWork2[T1, T2]) Execute(
@@ -483,18 +483,18 @@ func (w *taskRunnerWork2[T1, T2]) Free() {
 	w.pool.Put(w)
 }
 
-// newTaskErrSink returns a Gatherer[struct{}] whose handler returns
+// newTaskErrSink returns a Skimmer[struct{}] whose handler returns
 // the input error as-is, surfacing unexpected Task.Run errors via the
-// Wave's GatherAll path.
-func newTaskErrSink() Gatherer[struct{}] {
-	return NewGatherer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
+// Wave's SkimAll path.
+func newTaskErrSink() Skimmer[struct{}] {
+	return NewSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
 	}))
 }
 
 // vetStart validates that the given pool and ctx are suitable for
 // launching a task. It checks that the calling ctx is one of the
-// allowed types (top-level, gather, or combine) and that the pool is
+// allowed types (top-level, skim, or combine) and that the pool is
 // not yet done. Panics on misuse.
 func vetStart(
 	ctx context.Context,
@@ -502,11 +502,11 @@ func vetStart(
 ) (context.Context, *ctxMeta) {
 	ctx, meta := pool.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
-		case topLevelContext, gatherContext, combineContext:
+		case topLevelContext, skimContext, combineContext:
 			// These are valid for starting a task
 		default:
 			panic(fmt.Sprintf(
-				"Start called from %v context but allowed only by top-level, gather, or combine context",
+				"Start called from %v context but allowed only by top-level, skim, or combine context",
 				ctxType))
 		}
 	})
@@ -517,7 +517,7 @@ func vetStart(
 }
 
 // taskRunnerScatterWork wraps the target's inner scatter work with the
-// owning Pool's backpressure (protoBB). Mirrors gatherScatterWork's
+// owning Pool's backpressure (protoBB). Mirrors skimScatterWork's
 // role in the pre-Wave-3 codepath.
 type taskRunnerScatterWork struct {
 	workq.Work

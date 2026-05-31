@@ -24,11 +24,11 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	var flushCount atomic.Int32
-	var gatherCount atomic.Int32
+	var skimCount atomic.Int32
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[int](func(ctx context.Context, result int, err error) error {
-		t.Logf("Gather called with result %d", result)
-		gatherCount.Add(1)
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[int](func(ctx context.Context, result int, err error) error {
+		t.Logf("Skim called with result %d", result)
+		skimCount.Add(1)
 		chk.NoError(err)
 		return nil
 	}))
@@ -43,7 +43,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 			},
 			FlushFn: func(ctx context.Context) error {
 				flushCount.Add(1)
-				return gatherer.Submit(ctx, wave, 42)
+				return skimmer.Submit(ctx, wave, 42)
 			},
 		}
 	})
@@ -74,7 +74,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	if flushCountValue == 0 {
 		t.Logf("No flush occurred - trying to trigger wave close")
 		// Try to close wave to see if flush happens then
-		err := wave.CloseAndGatherAll(ctx)
+		err := wave.CloseAndSkimAll(ctx)
 		chk.NoError(err)
 		flushCountValue = flushCount.Load()
 		t.Logf("Flush count after wave close: %d", flushCountValue)

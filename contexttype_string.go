@@ -10,13 +10,13 @@ func _() {
 	var x [1]struct{}
 	_ = x[topLevelContext-0]
 	_ = x[taskContext-1]
-	_ = x[gatherContext-2]
+	_ = x[skimContext-2]
 	_ = x[combineContext-3]
 }
 
-const _contextType_name = "top-leveltaskgathercombine"
+const _contextType_name = "top-leveltaskskimcombine"
 
-var _contextType_index = [...]uint8{0, 9, 13, 19, 26}
+var _contextType_index = [...]uint8{0, 9, 13, 17, 24}
 
 func (i contextType) String() string {
 	if i < 0 || i >= contextType(len(_contextType_index)-1) {

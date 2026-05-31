@@ -21,10 +21,10 @@ func TestNewTaskRunnerNilTaskPanic(t *testing.T) {
 	})
 }
 
-func TestGatherScatterNilGatherPanic(t *testing.T) {
+func TestSkimScatterNilSkimPanic(t *testing.T) {
 	chk := assert.New(t)
 	chk.PanicsWithValue("handler must be non-nil", func() {
-		psg.NewGatherer[int](nil)
+		psg.NewSkimmer[int](nil)
 	})
 }
 
@@ -33,7 +33,7 @@ func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[int](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[int](
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
@@ -45,15 +45,15 @@ func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, gather, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or combine context",
 			func() {
 				_ = innerRunner.Start(ctx, wave)
 			},
 		)
-		return gatherer.Submit(ctx, wave, 0)
+		return skimmer.Submit(ctx, wave, 0)
 	}))
 	chk.NoError(outerRunner.Start(ctx, wave))
-	chk.NoError(wave.CloseAndGatherAll(ctx))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
 
 func TestTaskCanStartTaskInSubJob(t *testing.T) {
@@ -64,7 +64,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -77,7 +77,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subGatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+		subSkimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
@@ -86,18 +86,18 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 		))
 		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			subJobTaskRan = true
-			return subGatherer.Submit(ctx, subWave, true)
+			return subSkimmer.Submit(ctx, subWave, true)
 		}))
 		chk.NoError(subRunner.Start(subCtx, subWave))
 
-		// Gather all results in the sub-wave
-		chk.NoError(subWave.CloseAndGatherAll(subCtx))
+		// Skim all results in the sub-wave
+		chk.NoError(subWave.CloseAndSkimAll(subCtx))
 
-		return gatherer.Submit(ctx, parentWave, true)
+		return skimmer.Submit(ctx, parentWave, true)
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))
-	chk.NoError(parentWave.CloseAndGatherAll(ctx))
+	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 
 	// Verify the sub-wave task executed successfully
 	chk.True(subJobTaskRan, "The task in the sub-wave should have run")
@@ -108,7 +108,7 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -121,24 +121,24 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, gather, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or combine context",
 			func() {
 				_ = innerRunner.Start(ctx, parentWave)
 			},
 		)
-		return gatherer.Submit(ctx, parentWave, true)
+		return skimmer.Submit(ctx, parentWave, true)
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))
-	chk.NoError(parentWave.CloseAndGatherAll(ctx))
+	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 }
 
-func TestTaskCannotGather(t *testing.T) {
+func TestTaskCannotSkim(t *testing.T) {
 	chk := assert.New(t)
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -146,22 +146,22 @@ func TestTaskCannotGather(t *testing.T) {
 		},
 	))
 	runner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
-		chk.PanicsWithValue("Gather called from task context but allowed only by top-level or gather context", func() {
-			_, _ = wave.TryGather(ctx)
+		chk.PanicsWithValue("Skim called from task context but allowed only by top-level or skim context", func() {
+			_, _ = wave.TrySkim(ctx)
 		})
-		return gatherer.Submit(ctx, wave, true)
+		return skimmer.Submit(ctx, wave, true)
 	}))
 
 	chk.NoError(runner.Start(ctx, wave))
-	chk.NoError(wave.CloseAndGatherAll(ctx))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
 
-func TestTaskCannotGatherParentJob(t *testing.T) {
+func TestTaskCannotSkimParentJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -172,7 +172,7 @@ func TestTaskCannotGatherParentJob(t *testing.T) {
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
-		subGatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+		subSkimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
@@ -181,15 +181,15 @@ func TestTaskCannotGatherParentJob(t *testing.T) {
 		))
 		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			chk.PanicsWithValue("Context belongs to a child job", func() {
-				_, _ = parentWave.TryGather(ctx)
+				_, _ = parentWave.TrySkim(ctx)
 			})
-			return subGatherer.Submit(ctx, subWave, true)
+			return subSkimmer.Submit(ctx, subWave, true)
 		}))
 		chk.NoError(subRunner.Start(subCtx, subWave))
-		chk.NoError(subWave.CloseAndGatherAll(subCtx))
-		return gatherer.Submit(ctx, parentWave, true)
+		chk.NoError(subWave.CloseAndSkimAll(subCtx))
+		return skimmer.Submit(ctx, parentWave, true)
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))
-	chk.NoError(parentWave.CloseAndGatherAll(ctx))
+	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 }

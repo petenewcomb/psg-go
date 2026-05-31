@@ -10,7 +10,7 @@ import (
 // Task0, Task[T], and Task2[T1, T2] are user-supplied work bodies that a
 // TaskRunner dispatches on a worker goroutine. Tasks are argument-taking:
 // inputs arrive through Run's parameters, and any results the task wants
-// to deliver downstream are explicitly submitted to a Gatherer or
+// to deliver downstream are explicitly submitted to a Skimmer or
 // Combiner from within Run.
 //
 // Run is invoked synchronously on a worker. Each invocation runs in its
@@ -24,7 +24,7 @@ import (
 // error or a downstream Submit of an error-flavored value.
 //
 // If Run returns a non-nil error, the framework treats it as an
-// unexpected failure and routes it through GatherAll on the owning
+// unexpected failure and routes it through SkimAll on the owning
 // Pool. Errors that are expected as part of business logic should be
 // passed to Submit (or SubmitErr) on a sink the task captures rather
 // than returned from Run.
@@ -32,7 +32,7 @@ import (
 // WARNING: A Task must not synchronously dispatch into the same Pool's
 // worker by calling TaskRunner.Start, since this can deadlock when a
 // concurrency limit is reached. Instead, Start should be called from
-// the associated Gather function (or from Accumulate / Flush on an
+// the associated Skim function (or from Accumulate / Flush on an
 // Accumulator) after the Task completes. Start attempts to recognize
 // this situation and panic, but this detection works only if the ctx
 // passed to Start descends from the ctx passed to Run.
@@ -40,7 +40,7 @@ import (
 // A Task may, however, create its own sub-Pool within which to run
 // concurrent tasks. This serves a different use case: tasks created in
 // such a sub-Pool should complete or be canceled before the outer Task
-// returns, while tasks spawned from a Gather function on behalf of a
+// returns, while tasks spawned from a Skim function on behalf of a
 // Task necessarily form a sequence (or pipeline). Both patterns can be
 // used together as needed.
 type Task0 interface {

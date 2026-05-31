@@ -14,12 +14,12 @@ import (
 )
 
 // passthroughTestAccumulator stores the most recently received value and
-// Submits it to the captured downstream Gatherer on Flush.
+// Submits it to the captured downstream Skimmer on Flush.
 type passthroughTestAccumulator[T any] struct {
-	t        *testing.T
-	value    T
-	gatherer psg.Gatherer[T]
-	wave     *psg.Wave
+	t       *testing.T
+	value   T
+	skimmer psg.Skimmer[T]
+	wave    *psg.Wave
 }
 
 func (c *passthroughTestAccumulator[T]) Accumulate(
@@ -31,25 +31,25 @@ func (c *passthroughTestAccumulator[T]) Accumulate(
 }
 
 func (c *passthroughTestAccumulator[T]) Flush(ctx context.Context) error {
-	return c.gatherer.Submit(ctx, c.wave, c.value)
+	return c.skimmer.Submit(ctx, c.wave, c.value)
 }
 
 //nolint:thelper // not a test helper, but a factory function for creating a test accumulator
 func newPassthroughTestCombinerFactory[T any](
-	t *testing.T, gatherer psg.Gatherer[T], wave *psg.Wave,
+	t *testing.T, skimmer psg.Skimmer[T], wave *psg.Wave,
 ) func() psgfn.Accumulator[T] {
 	return func() psgfn.Accumulator[T] {
-		return &passthroughTestAccumulator[T]{t: t, gatherer: gatherer, wave: wave}
+		return &passthroughTestAccumulator[T]{t: t, skimmer: skimmer, wave: wave}
 	}
 }
 
-func TestCombinerScatterNilGatherPanic(t *testing.T) {
+func TestCombinerScatterNilSkimPanic(t *testing.T) {
 	ctx := context.Background()
 	_, wave := psg.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	assert.PanicsWithValue(t, "handler must be non-nil", func() {
-		psg.NewGatherer[int](nil)
+		psg.NewSkimmer[int](nil)
 	})
 }
 
@@ -58,7 +58,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[int](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[int](
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
@@ -67,7 +67,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	combinerPool := psg.NewCombinerPool(wave.Pool())
 	combineOp := psg.NewCombiner(
 		combinerPool,
-		newPassthroughTestCombinerFactory[int](t, gatherer, wave),
+		newPassthroughTestCombinerFactory[int](t, skimmer, wave),
 	)
 	defer combineOp.Close()
 	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
@@ -76,7 +76,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, gather, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or combine context",
 			func() {
 				_ = innerRunner.Start(ctx, wave)
 			},
@@ -84,7 +84,7 @@ func TestCombinerScatterFromTask(t *testing.T) {
 		return combineOp.Submit(ctx, 0)
 	}))
 	chk.NoError(outerRunner.Start(ctx, wave))
-	chk.NoError(wave.CloseAndGatherAll(ctx))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
 
 func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
@@ -95,7 +95,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -105,7 +105,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 	combinerPool := psg.NewCombinerPool(parentWave.Pool())
 	combineOp := psg.NewCombiner(
 		combinerPool,
-		newPassthroughTestCombinerFactory[bool](t, gatherer, parentWave),
+		newPassthroughTestCombinerFactory[bool](t, skimmer, parentWave),
 	)
 	defer combineOp.Close()
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
@@ -114,7 +114,7 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subGatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+		subSkimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
@@ -123,18 +123,18 @@ func TestCombinerTaskCanScatterToSubJob(t *testing.T) {
 		))
 		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			subJobTaskRan = true
-			return subGatherer.Submit(ctx, subWave, true)
+			return subSkimmer.Submit(ctx, subWave, true)
 		}))
 		chk.NoError(subRunner.Start(subCtx, subWave))
 
-		// Gather all results in the sub-wave
-		chk.NoError(subWave.CloseAndGatherAll(subCtx))
+		// Skim all results in the sub-wave
+		chk.NoError(subWave.CloseAndSkimAll(subCtx))
 
 		return combineOp.Submit(ctx, true)
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))
-	chk.NoError(parentWave.CloseAndGatherAll(ctx))
+	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 
 	// Verify the sub-wave task executed successfully
 	chk.True(subJobTaskRan, "The task in the sub-wave should have run")
@@ -145,7 +145,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	gatherer := psg.NewGatherer(psgfn.HandlerFunc[bool](
+	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[bool](
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -155,7 +155,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	combinerPool := psg.NewCombinerPool(parentWave.Pool())
 	combineOp := psg.NewCombiner(
 		combinerPool,
-		newPassthroughTestCombinerFactory[bool](t, gatherer, parentWave),
+		newPassthroughTestCombinerFactory[bool](t, skimmer, parentWave),
 	)
 	defer combineOp.Close()
 	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
@@ -164,7 +164,7 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	}))
 	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, gather, or combine context",
+			"Start called from task context but allowed only by top-level, skim, or combine context",
 			func() {
 				_ = innerRunner.Start(ctx, parentWave)
 			},
@@ -173,5 +173,5 @@ func TestCombinerTaskCannotScatterToParentJob(t *testing.T) {
 	}))
 
 	chk.NoError(outerRunner.Start(ctx, parentWave))
-	chk.NoError(parentWave.CloseAndGatherAll(ctx))
+	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 }

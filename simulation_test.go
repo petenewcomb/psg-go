@@ -41,17 +41,17 @@ func TestBySimulation(t *testing.T) {
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Task.Func.ReturnError.Probability = 0
 		// planConfig.Combine.Func.ReturnError.Probability = 0
-		// planConfig.Gather.Func.ReturnError.Probability = 0
+		// planConfig.Skim.Func.ReturnError.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Subjob.MaxDepth = 0
 		// planConfig.Task.Func.Subjob.Add.Probability = 0
 		// planConfig.Combine.Func.Subjob.Add.Probability = 0
-		// planConfig.Gather.Func.Subjob.Add.Probability = 0
+		// planConfig.Skim.Func.Subjob.Add.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Combine.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		// planConfig.Gather.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
+		// planConfig.Skim.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.TaskPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.TaskPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.CombinerPool.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
@@ -60,7 +60,7 @@ func TestBySimulation(t *testing.T) {
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Task.Func.SelfTime = sim.BiasedDurationConfig{}
 		// planConfig.Combine.Func.SelfTime = sim.BiasedDurationConfig{}
-		// planConfig.Gather.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Skim.Func.SelfTime = sim.BiasedDurationConfig{}
 
 		plan := sim.NewPlan(t, &planConfig)
 		t.Logf("Test plan:\n%#v", plan)

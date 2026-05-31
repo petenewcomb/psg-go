@@ -12,7 +12,7 @@ type SubjobConfig struct {
 	MaxDepth int
 }
 
-// SubjobOpRef identifies a Plan op (TaskRunner / Combiner / Gatherer)
+// SubjobOpRef identifies a Plan op (TaskRunner / Combiner / Skimmer)
 // inside a Subjob's nested Plan that the parent body is permitted to
 // reference. The runtime adapter registers these into a parent-visible
 // handle table when the Subjob step starts, letting parent bodies call
@@ -27,7 +27,7 @@ type SubjobOpKind int
 const (
 	SubjobOpTaskRunner SubjobOpKind = iota
 	SubjobOpCombiner
-	SubjobOpGatherer
+	SubjobOpSkimmer
 )
 
 func (k SubjobOpKind) String() string {
@@ -36,8 +36,8 @@ func (k SubjobOpKind) String() string {
 		return "TaskRunner"
 	case SubjobOpCombiner:
 		return opNameCombiner
-	case SubjobOpGatherer:
-		return opNameGatherer
+	case SubjobOpSkimmer:
+		return opNameSkimmer
 	default:
 		return fmt.Sprintf("SubjobOpKind(%d)", k)
 	}

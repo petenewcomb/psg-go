@@ -22,13 +22,13 @@ type CombinerFactory[T any] = func() Accumulator[T]
 //
 // Downstream emission is the body's responsibility: an Accumulator that
 // wants to emit aggregated results explicitly calls Submit on whichever
-// downstream sinks (Combiner, Gatherer) it has captured via its factory
+// downstream sinks (Combiner, Skimmer) it has captured via its factory
 // closure. The framework does not auto-route any value returned by
 // Accumulate or Flush — those methods return only an error.
 //
 // Errors returned from Accumulate or Flush are surfaced through
-// [psg.Pool.GatherAll] (the framework's "unexpected error" channel,
-// matching the GatherAll contract for gather-function errors). Expected
+// [psg.Pool.SkimAll] (the framework's "unexpected error" channel,
+// matching the SkimAll contract for skim-function errors). Expected
 // errors that the body wants to forward as values should be passed
 // through Submit/SubmitErr on downstream sinks instead.
 type Accumulator[T any] interface {
@@ -36,7 +36,7 @@ type Accumulator[T any] interface {
 	// error, which may be nil). Returns the time when the instance's
 	// Flush method should be called, or a zero time value if Flush need
 	// not be called until the framework drains. If a non-nil error is
-	// returned, the framework surfaces it via GatherAll and may then
+	// returned, the framework surfaces it via SkimAll and may then
 	// discard this instance; subsequent inputs are handled by a fresh
 	// instance from the factory.
 	Accumulate(ctx context.Context, value T, err error) (time.Time, error)

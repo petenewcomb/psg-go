@@ -3,7 +3,7 @@
 
 package psg
 
-// OpOption configures an op (TaskRunner, Combiner, Gatherer) at
+// OpOption configures an op (TaskRunner, Combiner, Skimmer) at
 // construction time. Users obtain OpOption values from framework
 // constructors such as [WithLimits]. The interface is closed: future
 // option types will live in this package.

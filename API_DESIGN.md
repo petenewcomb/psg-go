@@ -209,9 +209,9 @@ func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
 // their own Limiter types. This keeps the framework free to evolve the
 // internal acquire/notify machinery without breaking users. Custom
 // concurrency logic that doesn't fit the built-ins should live inside
-// the user's TaskFunc / GatherFunc / Accumulate body, calling whatever
-// blocking primitive (rate.Limiter.Wait, semaphore.Weighted.Acquire,
-// custom) is appropriate.
+// the user's Handler / Accumulator body, calling whatever blocking
+// primitive (rate.Limiter.Wait, semaphore.Weighted.Acquire, custom) is
+// appropriate.
 type Limiter struct {
     impl limiterImpl  // unexported; sealed against external implementations
 }
@@ -227,37 +227,54 @@ func NewRateLimit(n int, d time.Duration) Limiter   // wraps x/time/rate; signal
 //
 // All user inputs are defined as interfaces, not function signatures.
 // This lets users implement on structs (with state as fields) to avoid
-// closure allocations on the hot path. Function-type wrappers are
-// provided for the simple closure case, matching the http.Handler /
+// closure allocations on the hot path. Function-type adapters are
+// provided for the closure case, matching the http.Handler /
 // http.HandlerFunc pattern.
 
-// Task interfaces — implemented by user-supplied work. The framework
-// calls Run synchronously on a worker goroutine when dispatching.
-// (The user-facing async dispatch verb is TaskRunner.Start; the
-// interface uses Run because at this level it is synchronous code on
-// a worker.)
-type Task0 interface {
-    Run(ctx context.Context) error
-}
-type Task[T any] interface {
-    Run(ctx context.Context, arg T) error
-}
-type Task2[T1, T2 any] interface {
-    Run(ctx context.Context, arg1 T1, arg2 T2) error
+// Handler is the universal interface for op bodies — implemented by
+// user-supplied work that TaskRunner runs on a worker or Gatherer
+// invokes during drain. The method is named Handle; sync execution
+// verb on the interface, parallel to http.Handler.ServeHTTP. The
+// user-facing async dispatch verbs (Submit / SubmitErr / Start) live
+// on the op types.
+type Handler[T any] interface {
+    Handle(ctx context.Context, value T, err error) error
 }
 
-// Function-type wrappers (satisfy the corresponding interfaces).
-type TaskFunc0           func(context.Context) error
-type TaskFunc[T any]     func(context.Context, T) error
-type TaskFunc2[T1, T2 any] func(context.Context, T1, T2) error
+// HandlerFunc[T] is the canonical adapter — matches Handler[T].Handle
+// exactly. Use this when you want a closure-based handler with both
+// a value and an upstream err.
+type HandlerFunc[T any] func(context.Context, T, error) error
+func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
+    return f(ctx, value, err)
+}
 
-func (f TaskFunc0) Run(ctx context.Context) error                   { return f(ctx) }
-func (f TaskFunc[T]) Run(ctx context.Context, arg T) error          { return f(ctx, arg) }
-func (f TaskFunc2[T1, T2]) Run(ctx context.Context, a1 T1, a2 T2) error { return f(ctx, a1, a2) }
+// Task is the named func adapter for the no-input case: a piece of
+// work that runs without a value or upstream err. Satisfies
+// Handler[struct{}], so it plugs into NewTaskRunner (the common case)
+// and into NewGatherer (rare; a value-less sink). No paired Task
+// interface — no-arg bodies almost always close over state from the
+// surrounding scope, so the struct-implementation pattern that
+// justifies exposing Handler[T] as an interface doesn't pay off
+// strongly for T = struct{}. Users who do want to implement the
+// no-arg case on a struct write Handler[struct{}] directly with
+// Handle(ctx, _ struct{}, _ error) error.
+type Task func(context.Context) error
+func (f Task) Handle(ctx context.Context, _ struct{}, _ error) error { return f(ctx) }
+
+// ErrHandler is Task's err-receiving sibling — a no-value handler
+// that receives an upstream err. Named descriptively (handling an
+// err) rather than tied to either op type's vocabulary, since it
+// reads naturally in both TaskRunner and Gatherer contexts.
+type ErrHandler func(context.Context, error) error
+func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error { return f(ctx, err) }
 
 // Accumulator — the per-instance interface a CombinerFactory returns.
 // Mirrors the existing psgfn.Combiner shape: Accumulate per input,
-// Flush when the framework needs the instance to finalize.
+// Flush when the framework needs the instance to finalize. Distinct
+// from Handler because the two-method shape (Accumulate + Flush) and
+// the (deadline, error) return on Accumulate make it genuinely
+// different from a single-dispatch handler.
 type Accumulator[T any] interface {
     Accumulate(ctx context.Context, value T, err error) (deadline time.Time, returnErr error)
     Flush(ctx context.Context) error
@@ -280,17 +297,19 @@ func (f FuncAccumulator[T]) Flush(ctx context.Context) error {
     return f.FlushFn(ctx)
 }
 
-// Handler — the interface a Gatherer dispatches to when the user calls
-// Wave.Gather / Wave.GatherAll. Receives upstream values paired with
-// any upstream errors.
-type Handler[T any] interface {
-    Handle(ctx context.Context, value T, err error) error
-}
-
-type HandlerFunc[T any] func(context.Context, T, error) error
-
-func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
-    return f(ctx, value, err)
+// NewAccumulator is the type-inference-friendly constructor for a
+// closure-based Accumulator. T is inferred from the accumulate
+// closure's signature, sparing the user the [T] annotation. Pass nil
+// for flush if the accumulator doesn't need a final flush. Returns
+// the concrete FuncAccumulator[T] (which satisfies Accumulator[T]) —
+// callers who want struct-level access keep it; callers who treat
+// the result as an Accumulator interface get that automatically via
+// structural typing.
+func NewAccumulator[T any](
+    accumulate func(ctx context.Context, value T, err error) (time.Time, error),
+    flush func(ctx context.Context) error,
+) FuncAccumulator[T] {
+    return FuncAccumulator[T]{AccumulateFn: accumulate, FlushFn: flush}
 }
 
 // ===== Op constructors =====
@@ -301,8 +320,9 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 // dispatch time, use the wave attached to the dispatch ctx." See
 // "Wave binding" below for the resolution rule.
 //
-// For raw closures, wrap in the corresponding *Func type (TaskFunc[T],
-// HandlerFunc[T], FuncAccumulator[T]) at the call site.
+// For raw closures, use HandlerFunc[T] (parameterized), Task
+// (no-arg, no-err), or ErrHandler (no-arg, with err); for Combiner,
+// use FuncAccumulator[T].
 
 // Per-op options (functional)
 type OpOption interface { /* ... */ }
@@ -310,9 +330,7 @@ type OpOption interface { /* ... */ }
 func WithLimits(limiters ...Limiter) OpOption
 // ... future: WithPriority, WithDeadline, WithRetry, etc.
 
-func NewTaskRunner0(wave *Wave, task Task0, opts ...OpOption) TaskRunner0
-func NewTaskRunner[T any](wave *Wave, task Task[T], opts ...OpOption) TaskRunner[T]
-func NewTaskRunner2[T1, T2 any](wave *Wave, task Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2]
+func NewTaskRunner[T any](wave *Wave, handler Handler[T], opts ...OpOption) TaskRunner[T]
 func NewCombiner[T any](wave *Wave, factory CombinerFactory[T], opts ...OpOption) Combiner[T]
 func NewGatherer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Gatherer[T]
 
@@ -345,23 +363,21 @@ func NewGatherer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Gather
 
 // ===== Op types =====
 //
-// TaskRunners use Start (active dispatch). Combiner and Gatherer use
-// Submit / SubmitErr (sink reception). The verb split tracks the op's
-// role: dispatchers start work; sinks accept submitted values. None
-// of the dispatch methods take a *Wave — the wave was bound at
-// construction (or deferred via nil; see "Wave binding").
-
-type TaskRunner0 struct { /* ... */ }
-func (TaskRunner0) Start(ctx context.Context) error
-func (TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, error)
+// All three ops share the Submit / SubmitErr (and Try variants)
+// dispatch family. TaskRunner additionally has Start / TryStart as
+// sugar for the void case (Submit(*new(T))). None of the dispatch
+// methods take a *Wave — the wave was bound at construction (or
+// deferred via nil; see "Wave binding").
 
 type TaskRunner[T any] struct { /* ... */ }
-func (TaskRunner[T]) Start(ctx context.Context, arg T) error
-func (TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (bool, error)
-
-type TaskRunner2[T1, T2 any] struct { /* ... */ }
-func (TaskRunner2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error
-func (TaskRunner2[T1, T2]) TryStart(ctx context.Context, deadline time.Time, arg1 T1, arg2 T2) (bool, error)
+// Submit-family: the canonical dispatch primitives. All ops share this shape.
+func (TaskRunner[T]) Submit(ctx context.Context, arg T) error                                  // sugar for SubmitErr(ctx, arg, nil)
+func (TaskRunner[T]) SubmitErr(ctx context.Context, arg T, err error) error
+func (TaskRunner[T]) TrySubmit(ctx context.Context, deadline time.Time, arg T) (bool, error)
+func (TaskRunner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, arg T, err error) (bool, error)
+// Start sugars for the void case (T = struct{}): sugar for Submit(ctx, *new(T)).
+func (TaskRunner[T]) Start(ctx context.Context) error
+func (TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error)
 
 // Combiner — stateful aggregation via factory-created Accumulator
 // instances. Parallel by default; cap parallelism via WithLimits.
@@ -373,14 +389,15 @@ func (Combiner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T
 func (Combiner[T]) Close()                                                                     // signals no more input; triggers Flush on each instance
 func (Combiner[T]) Dup() Combiner[T]                                                           // refcounted sharing across handlers
 
-// Gatherer — terminal sink; Handler is dispatched on Wave.Gather pull.
+// Gatherer — terminal sink; the Handler is dispatched on Wave.Gather pull.
 type Gatherer[T any] struct { /* ... */ }
 func (Gatherer[T]) Submit(ctx context.Context, value T) error                                  // sugar for SubmitErr(ctx, value, nil)
 func (Gatherer[T]) SubmitErr(ctx context.Context, value T, err error) error
 func (Gatherer[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)
 func (Gatherer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)
-func (Gatherer[T]) Close()                                                                     // signals no more input; GatherAll branch completes
-func (Gatherer[T]) Dup() Gatherer[T]                                                           // refcounted sharing across handlers
+// (No Close / Dup on Gatherer — handler is stateless from the
+// framework's perspective; GatherAll completion is driven by
+// in-flight tracking, not by an explicit end-of-input signal.)
 ```
 
 ## Hello world
@@ -401,18 +418,17 @@ results := streampool.NewGatherer(wave, streampool.HandlerFunc[*User](
     },
 ))
 
-fetch := streampool.NewTaskRunner(wave, streampool.TaskFunc[UserID](
-    func(ctx context.Context, id UserID) error {
-        user, err := userClient.Fetch(ctx, id)
-        return results.SubmitErr(ctx, user, err)
+fetch := streampool.NewTaskRunner(wave, streampool.HandlerFunc[UserID](
+    func(ctx context.Context, id UserID, err error) error {
+        user, ferr := userClient.Fetch(ctx, id)
+        return results.SubmitErr(ctx, user, ferr)
     },
 ))
 
 for _, id := range userIDs {
-    fetch.Start(ctx, id)
+    fetch.Submit(ctx, id)
 }
 
-results.Close()
 wave.GatherAll(ctx)
 // When this Wave's drain returns, the default Pool's workers have
 // exited synchronously (refcount → 0). If you then create another
@@ -449,31 +465,32 @@ defer flow.Close()  // releases the user's reference; framework refs come from w
 ```go
 totals := streampool.NewCombiner(wave, func() streampool.Accumulator[int] {
     var sum int
-    return streampool.FuncAccumulator[int]{
-        AccumulateFn: func(ctx context.Context, x int, err error) (time.Time, error) {
+    return streampool.NewAccumulator(
+        func(ctx context.Context, x int, err error) (time.Time, error) {
             if err != nil { return time.Time{}, err }
             sum += x
             if sum >= flushThreshold {
-                if err := results.Submit(ctx, sum); err != nil {
-                    return time.Time{}, err
+                if serr := results.Submit(ctx, sum); serr != nil {
+                    return time.Time{}, serr
                 }
                 sum = 0
             }
             return time.Time{}, nil  // no flush deadline; flush only on Close
         },
-        FlushFn: func(ctx context.Context) error {
+        func(ctx context.Context) error {
             if sum != 0 {
                 return results.Submit(ctx, sum)
             }
             return nil
         },
-    }
+    )
 })
 
-score := streampool.NewTaskRunner(wave, streampool.TaskFunc[UserID](
-    func(ctx context.Context, id UserID) error {
-        user, err := userClient.Fetch(ctx, id)
+score := streampool.NewTaskRunner(wave, streampool.HandlerFunc[UserID](
+    func(ctx context.Context, id UserID, err error) error {
         if err != nil { return err }
+        user, ferr := userClient.Fetch(ctx, id)
+        if ferr != nil { return ferr }
         return totals.Submit(ctx, user.Score)
     },
 ))
@@ -488,28 +505,32 @@ flush on Close).
 ## Allocation-free dispatch
 
 To avoid per-call closure allocations on the hot path, implement the
-interface directly on a struct rather than wrapping a closure:
+`Handler[T]` interface directly on a struct rather than wrapping a
+closure:
 
 ```go
 type fetcher struct {
-    db *Database
+    db   *Database
     sink streampool.Gatherer[*User]
 }
 
-func (f *fetcher) Run(ctx context.Context, id UserID) error {
-    user, err := f.db.Fetch(ctx, id)
-    return f.sink.SubmitErr(ctx, user, err)
+func (f *fetcher) Handle(ctx context.Context, id UserID, err error) error {
+    user, ferr := f.db.Fetch(ctx, id)
+    return f.sink.SubmitErr(ctx, user, ferr)
 }
 
 fetch := streampool.NewTaskRunner(wave, &fetcher{db: db, sink: results})
 
 for _, id := range userIDs {
-    fetch.Start(ctx, id)  // no closure allocation per call
+    fetch.Submit(ctx, id)  // no closure allocation per call
 }
 ```
 
 Combined with a pooled argument type, the dispatch loop can run with
-zero allocations per call.
+zero allocations per call. The same struct-implementation pattern
+also works for `T = struct{}` if you want an alloc-free no-arg task
+— pay the cosmetic cost of two unused params in the `Handle` method
+signature (`Handle(ctx, _ struct{}, _ error) error`).
 
 ## With limiters
 
@@ -553,8 +574,8 @@ func NewLogGatherer(logger *slog.Logger) streampool.Gatherer[Event] {
 // ctx's wave.
 sink := NewLogGatherer(slog.Default())
 
-runner := streampool.NewTaskRunner(wave, streampool.TaskFunc[ID](
-    func(ctx context.Context, id ID) error {
+runner := streampool.NewTaskRunner(wave, streampool.HandlerFunc[ID](
+    func(ctx context.Context, id ID, _ error) error {
         evt := process(id)
         return sink.Submit(ctx, evt)  // dispatches to `wave` via ctx
     },
@@ -581,20 +602,25 @@ body running in a wave.
 | Dispatch methods take no *Wave | `Start(ctx, ...)` / `Submit(ctx, v)` / `SubmitErr(ctx, v, err)` | Considered three alternatives and rejected each: (a) explicit *Wave on every dispatch — verbose in the common case where one wave handles many dispatches; (b) `Submit` / `SubmitIn` method split — doubles surface for every dispatch verb; (c) `op.In(wave)` bind-chain — breaks the lifecycle model for ops with Close (Combiner, Gatherer), since the unassigned intermediate handle has no way to be closed. Wave-at-construction with a nil sentinel preserves single-verb dispatch, single lifecycle, and explicit binding when desired. |
 | Pool lifecycle | Refcount-driven; workers exit synchronously on last Wave drain | No `Shutdown` / `Wait` API. Each referencing Wave bumps refcount; drain completion drops it. When count → 0, workers terminate synchronously before the last Wave's drain returns — strong guarantee that no Pool goroutines outlive the user's drain calls. Pool reuse after this is automatic; the next Wave that references the Pool spins workers up again. |
 | Op constructor verb | `NewTaskRunner`, `NewCombiner`, `NewGatherer` | Agent nouns (`-er` suffix). The type names describe roles, not the function-call verb. Matches `http.Handler`, `io.Reader`, `sync.Mutex`. |
-| TaskRunner dispatch verb | `Start` | Active async dispatch ("start a task with this arg"). Matches `os/exec.Cmd.Start()` precedent — fire-it-off-async-don't-wait. Works across arities including the no-arg case (`runner0.Start(ctx)`). |
-| Sink dispatch verb | `Submit` / `SubmitErr` | Committed-delivery semantics: "submit this value to the sink." Avoids the Java `BlockingQueue.offer` baggage that would mislead users to expect try-semantics from `Offer`. No collision with TaskRunner verb since TaskRunner uses Start. |
-| Interface method verbs | `Run` (Task), `Accumulate`/`Flush` (Accumulator), `Handle` (Handler) | Sync execution verbs on user-implemented interfaces, mirroring the http.Handler.ServeHTTP / exec.Cmd inner-process pattern: async dispatch on the op (Start, Submit), sync invocation on the implementation (Run, Accumulate, Handle). |
-| User inputs as interfaces | `Task[T]`, `Task0`, `Task2[T1,T2]`, `Accumulator[T]`, `Handler[T]` | Function signatures forced closure allocations for any stateful task. Interfaces let users implement on structs with state as fields (alloc-free hot path). Function-type wrappers (`TaskFunc[T]`, `HandlerFunc[T]`, `FuncAccumulator[T]`) provide the closure-based convenience for simple cases. Same pattern as http.Handler / http.HandlerFunc. |
+| Sink dispatch verb | `Submit` / `SubmitErr` | Committed-delivery semantics: "submit this value to the sink." Avoids the Java `BlockingQueue.offer` baggage that would mislead users to expect try-semantics from `Offer`. Used uniformly across TaskRunner, Combiner, and Gatherer — submitting a value to a TaskRunner dispatches a task with that value as its arg, exactly mirroring how Submit works for Combiner and Gatherer. |
+| `Start` as sugar for void TaskRunner dispatch | `Start(ctx)` == `Submit(ctx, *new(T))` | When `T = struct{}` (the no-input task case), `Submit(ctx, struct{}{})` is the explicit form and reads awkwardly. `Start(ctx)` is the sugar — matches the conventional "start a fire-and-forget task" intent and the `os/exec.Cmd.Start()` precedent. Available on all `TaskRunner[T]` instantiations; meaningful primarily when T's zero value is conventional (`struct{}` or similar). |
+| Interface method verb | `Handle` (Handler), `Accumulate`/`Flush` (Accumulator) | Sync execution verb on the user-implemented interface, parallel to `http.Handler.ServeHTTP`. The user-facing async dispatch verbs (Submit, Start) live on the op types; the body invokes the synchronous method. |
+| Single `Handler[T]` interface across TaskRunner + Gatherer | Both take `Handler[T]` | The two op types' bodies have identical signatures — `(ctx, T, err) error`. Defining separate `Task[T]` and `Handler[T]` interfaces with the same shape and different method names (`Run` vs `Handle`) would force users to write the same closure twice if they want the same body in both contexts. Unifying under `Handler[T]` lets adapters and struct implementations work for both ops without rewrap; the runtime context (worker vs drain goroutine) is the op type's job, not the interface's. |
+| `Task` as named func adapter, not a separate interface | `type Task func(context.Context) error`, satisfies `Handler[struct{}]` | No-arg task bodies almost always close over state from the surrounding scope (they're closures by necessity), so the struct-implementation pattern that justifies exposing `Handler[T]` as an interface doesn't earn its keep for `T = struct{}`. Users who do want alloc-free no-arg work implement `Handler[struct{}]` directly with `Handle(ctx, _ struct{}, _ error)`. The named `Task` adapter provides the closure shorthand; no paired `Task` interface, hence no `Func` suffix. |
+| `ErrHandler` as the no-value with-err adapter | `type ErrHandler func(ctx, error) error`, satisfies `Handler[struct{}]` | Sibling of `Task`. Named descriptively (handles an err) rather than `ErrTask` because "handle" reads naturally in both TaskRunner and Gatherer contexts, while "task" carries TaskRunner-specific vocabulary. The asymmetric pair `Task` / `ErrHandler` lives with this: each name fits its primary use case. |
+| Single `TaskRunner[T]` type (no `TaskRunner0` / `TaskRunner2`) | One parameterized type | Per-arity types proliferate without earning their keep: zero-arg uses `T = struct{}` (with `Start` sugar), two-arg packs into a struct (named-field call sites). The type-parameter inference makes the single-type signature concise at use sites. |
+| User inputs as interfaces | `Handler[T]`, `Accumulator[T]` | Function signatures forced closure allocations for any stateful body. Interfaces let users implement on structs with state as fields (alloc-free hot path). Function-type adapters — canonical `HandlerFunc[T]` plus named `Task` / `ErrHandler` for the void cases, and `FuncAccumulator[T]` — provide closure convenience. Same pattern as `http.Handler` / `http.HandlerFunc`. |
 | No `.To(sink)` wiring | Function bodies call `sink.Submit(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Combiner. |
 | No `Sink[T]` in public API | Not exported | Nothing in the framework's own API consumes a Sink type. User code that wants polymorphism over "things you can Submit to" defines a one-method interface locally; Go's structural typing makes that work without a published contract. |
 | Combiner state | Via `CombinerFactory[T]` returning `Accumulator[T]` | Factory creates per-instance Accumulators (each with closure state); framework calls each instance's `Combine` per input and `Flush` on Close. Same shape as the existing `psgfn.Combiner` interface. |
 | Serial accumulation ("reducer") | Combiner with `WithLimits(NewSemaphore(1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
 | TaskRunner.Close | Not present | The framework can't deduce what sinks a task body will Submit to, so closing the TaskRunner tells the framework nothing useful. Resources release via leakguard finalizer when the value falls out of scope. |
-| Combiner.Close / Gatherer.Close | Present, type-specific behavior | Combiner.Close triggers final accumulator flush. Gatherer.Close signals end-of-input to GatherAll. Both are semantically meaningful because the op has its own state to finalize. |
-| Dup() on Combiner / Gatherer | Present | Refcounted-handle pattern earns its place in psgwf-style scenarios where ops cross handler boundaries with independent lifecycles. Single-scope usage doesn't require Dup; advanced shared usage does. |
+| Combiner.Close | Present | Combiner has refcounted Accumulator instances that need final Flush on end-of-input. Close releases the user's reference; the framework's per-work-item refs unwind through GatherAll. |
+| Gatherer.Close / .Dup | Absent | Gatherer's Handler is stateless from the framework's perspective; GatherAll completion is driven by in-flight tracking, not by an explicit end-of-input signal. No Dup either — sharing across handlers needs no lifecycle ceremony. |
+| Combiner.Dup | Present | Refcounted-handle pattern earns its place in psgwf-style scenarios where the Combiner crosses handler boundaries with independent lifecycles. Single-scope usage doesn't require Dup; advanced shared usage does. |
 | Per-op configuration | Functional options on constructor (`opts ...OpOption`) | Standard Go idiom for multiple optional parameters. Composable, extensible without breaking existing call sites. |
 | Limiters | First-class entity, not a pool property | Limiters compose; pools don't. Multiple Tasks can share a Limiter; an op can have multiple Limiters; new Limiter types extend the system without core-API changes. |
-| Type parameter convention | `T` (or `T1`, `T2`) | Default to T per user preference. Use T1/T2 for binary variants like `TaskRunner2`, not `T, U`, for explicit naming under refactor. |
+| Type parameter convention | `T` | Default to T per user preference. (Earlier drafts considered T1/T2 for binary variants; with the unified TaskRunner[T] there are no per-arity types, and binary use cases pack into a struct.) |
 
 ---
 
@@ -606,17 +632,20 @@ body running in a wave.
 | `*Job` / `*Pool` (conflated) | `*Pool` (workers, fungible) + `*Wave` (batch, user-primary) | See three-type model above. |
 | `psg.NewPool` / `psg.NewTaskPool` | (removed) | Per-op concurrency limits move to Limiters; workers are managed by the Pool. |
 | `psg.NewCombinerPool` | (removed) | Same — combiner workloads run in the Pool's goroutine pool, bounded by Limiters. |
-| `psg.NewGatherOp(handler)` | `streampool.NewGatherer(wave, handler)` | Wave bound at construction (or nil to defer to dispatch-ctx). Handler signature unchanged. |
+| `psg.NewGatherOp(handler)` | `streampool.NewGatherer(wave, handler)` | Wave bound at construction (or nil to defer to dispatch-ctx). Handler is `Handler[T]` (renamed from psgfn.Gather). |
 | `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewCombiner(wave, factory)` | Output type parameter gone; downstream sink wired via factory's closure. Wave bindable like Gatherer. |
-| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewTaskRunner(wave, taskFn)` + `runner.Start(ctx, arg)` | Two-step: construct once (with wave or nil), dispatch with arg. The dispatch takes no *Wave; the wave was locked in at construction. |
+| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewTaskRunner(wave, handler)` + `runner.Submit(ctx, arg)` | Two-step: construct once (with wave or nil), dispatch with arg. Dispatch verb is `Submit` (matches Combiner / Gatherer); `Start` is sugar for `Submit(*new(T))`. The dispatch takes no *Wave; the wave was locked in at construction. |
 | `gatherer.Submit(ctx, job, value)` | `gatherer.Submit(ctx, value)` / `gatherer.SubmitErr(ctx, value, err)` | Job/Wave arg drops out of dispatch — was bound at construction. SubmitErr is the explicit form; Submit is the sugar for nil-err. |
-| `runner.Start(ctx)` (post-Wave-3 shape with positional pool) | `runner.Start(ctx, arg...)` | Pool/Wave arg drops out of dispatch. |
+| `runner.Start(ctx)` (post-Wave-3 shape with positional pool) | `runner.Submit(ctx, arg)` / `runner.Start(ctx)` | Pool/Wave arg drops out of dispatch. Start exists as sugar for void Submit (`T = struct{}`). |
+| `psg.TaskRunner0`, `psg.TaskRunner[T]`, `psg.TaskRunner2[T1, T2]` | `TaskRunner[T]` (single) | Per-arity types collapse: void = `T = struct{}`, two-arg packs into a struct with named fields. |
 | `Pool.CloseAndGatherAll(ctx)` | `wave.GatherAll(ctx)` | Single call. Pool worker termination is automatic (refcount → 0 → synchronous worker exit before drain returns). |
 | `*GatherOp[T]` | `Gatherer[T]` | Op-suffix dropped; agent noun. |
 | `*CombineOp[I, O]` | `Combiner[T]` | Output type parameter eliminated. |
-| (n/a) | `TaskRunner[T]` / `TaskRunner2[T1, T2]` | Stateless dispatch op surfaced as a first-class type. |
-| `psgfn.Task[T]` | `TaskFunc[T]` | Naming convention: function-signature types end in `Func`. |
+| `psgfn.Task[T]` interface (`Run` method) | `Handler[T]` interface (`Handle` method) | Task interface unified with the Gatherer Handler interface — same shape, single name. TaskRunner now takes `Handler[T]`. |
+| `psgfn.TaskFunc[T]` | `HandlerFunc[T]` (parameterized), `Task` (void, no-err), `ErrHandler` (void, with err) | Adapter set reshaped: HandlerFunc[T] is the canonical Func adapter; Task and ErrHandler are named func adapters for the no-input cases (no paired interface, hence no `Func` suffix). |
+| `psgfn.Gather[T]` (function type) | `Handler[T]` (interface) | Was a function-type alias; promoted to interface for the struct-implementation alloc-free path. |
 | `psgfn.CombinerFactory[I, O]` | `CombinerFactory[T]` | Output type removed. |
+| `psgfn.FuncAccumulator[T]` struct-literal construction | `streampool.NewAccumulator(accumulate, flush)` (or struct literal still works) | Constructor enables T inference; struct literal stays for named-field clarity. |
 | `psgwf.Workflow` | `streampool.Flow` | Renamed and folded into main package. Same refcounted-ctx-borne lifecycle semantics. |
 | `psgwf` package | (folded into main package; Flow type) | Workflow consolidates into Flow. No separate sub-package. |
 | `otpsg` package | (deleted; replaced by doc page) | OpenTelemetry integration becomes a doc page demonstrating the `Flow` + `trace.ContextWithSpan` pattern. No separate package. |
@@ -773,15 +802,16 @@ right wave automatically via ctx.
 **Rejected**: leaving constructors wave-free and providing a value-typed
 `runner.In(wave).Start(ctx, arg)` bind step.
 
-**Reason**: Combiner and Gatherer carry refcounted lifecycles (Close,
-Dup). The chain `NewCombiner(...).In(wave).Submit(ctx, v)` produces an
+**Reason**: Combiner carries a refcounted lifecycle (Close, Dup). The
+chain `NewCombiner(...).In(wave).Submit(ctx, v)` produces an
 intermediate Combiner handle that no variable holds, so there is no
 way to Close it; either both handles share the same underlying state
 (closing one closes the other, surprising) or `In` Dups (every chain
 leaks a handle). Wave-at-construction sidesteps both: each op has one
 wave, one handle, one Close. The bind-chain pattern only worked
-cleanly for stateless TaskRunner — making it the universal model
-forces lifecycle-having ops into shape they can't accommodate.
+cleanly for stateless ops (TaskRunner, Gatherer) — making it the
+universal model would force Combiner into a shape it can't
+accommodate.
 
 ### `Submit` / `SubmitIn` (and `Start` / `StartIn`) method split
 
@@ -826,6 +856,61 @@ generic composition story that justified the shape. The compositional
 use cases (deferred dispatch, batched enqueue, cross-wave routing)
 are real but rare; when needed, the user can build the equivalent in
 their own code without exposing it in the framework surface.
+
+### Separate `Task[T]` interface alongside `Handler[T]`
+
+**Rejected**: defining `Task[T]` as a separate interface with `Run(ctx,
+T, err) error` for TaskRunner bodies, parallel to `Handler[T]` with
+`Handle(ctx, T, err) error` for Gatherer bodies.
+
+**Reason**: identical signatures, different method names. A user with
+a closure or struct satisfying `Handler[T]` would have to rewrap to
+make it a `Task[T]` (different method name) — pure friction with no
+type-system benefit. Unifying under `Handler[T]` lets the same handler
+plug into TaskRunner or Gatherer; the runtime context (worker vs
+drain goroutine) is the op type's job, not the interface's.
+
+### `Task` as a separate interface with simplified `Run()`
+
+**Rejected**: `type Task interface { Run(ctx) error }` as the
+preferred interface for void task bodies (no `struct{}` value
+parameter visible in the signature).
+
+**Reason**: would force a separate `NewTaskRunnerVoid` constructor (or
+a call-site adapter wrapping a Task into Handler[struct{}]), breaking
+the unified `NewTaskRunner[T any](wave, Handler[T], ...)` story. The
+ergonomic win (a prettier method signature for struct
+implementations of void tasks) doesn't earn its keep — no-arg task
+bodies almost always close over state from the surrounding scope, so
+the struct-implementation case is rare. The named `Task` func adapter
+gives the ergonomic shorthand at construction sites without paying
+the interface-doubling cost.
+
+### Per-arity TaskRunner types (`TaskRunner0` / `TaskRunner2[T1, T2]`)
+
+**Rejected**: separate types for zero-arg and two-arg task bodies.
+
+**Reason**: arity is just T's type. `TaskRunner[struct{}]` covers the
+void case (with `Start` sugar); `TaskRunner[fetchInput]` covers a
+two-arg case with named-field clarity at call sites. Per-arity types
+proliferate without earning their keep. Single `TaskRunner[T]` reads
+identically thanks to type inference at use sites.
+
+### `VoidHandler` / `ErrTask` / `TaskFunc0` naming
+
+**Rejected** (in turn): `VoidHandler` for the no-input adapter,
+`ErrTask` for the with-err sibling, `TaskFunc0` for the zero-arg
+shape.
+
+**Reasons**: `VoidHandler` is technically accurate but reads as
+"handler that produces no output" to readers trained on void-return
+languages; `Task` reads more directly. `ErrTask` reads as "task
+related to errors" (ambiguous between propagating, processing,
+chaining); `ErrHandler` reads cleanly as "handler that takes an
+err." `TaskFunc0` keeps a `Func` suffix that paired with a now-gone
+`Task0` interface — the suffix is dead weight without an interface
+partner. The accepted pair is `Task` / `ErrHandler` as named func
+adapters with no `Func` suffix and no paired interfaces.
 
 ---
 
@@ -935,13 +1020,16 @@ These are real and need answers before implementation locks in.
    Shipping dead options is the worst state for users (they think they
    can tune something they can't).
 
-7. ~~**TaskRunner2 vs higher-arity.**~~ **Resolved (2026-05-24).** Ship
-   `TaskRunner0`, `TaskRunner[T]`, `TaskRunner2[T1, T2]` — 0, 1, and 2
-   arities. Stop there. The TaskRunner0 covers closure-captured-args
-   one-offs and long-running source tasks; TaskRunner[T] is the
-   workhorse; TaskRunner2 mirrors `iter.Seq2`. Higher arities are
-   handled via struct-typed arguments or closure capture — same advice
-   as for HTTP handlers and similar Go APIs.
+7. ~~**TaskRunner2 vs higher-arity.**~~ **Resolved (revised
+   2026-05-31): collapse to single `TaskRunner[T]`.** Earlier resolution
+   shipped per-arity `TaskRunner0` / `TaskRunner[T]` / `TaskRunner2[T1,
+   T2]`. Subsequent reshape unified the Task and Handler interfaces
+   (single `Handler[T]` shared across TaskRunner and Gatherer), which
+   eliminated the per-arity rationale: zero-arg is `T = struct{}` with
+   `Start` sugar, two-arg packs into a struct with named fields, higher
+   arities the same. Single-type TaskRunner[T] reads identically at use
+   sites thanks to type inference. See "Per-arity TaskRunner types"
+   under What we chose not to do.
 
 8. ~~**Migration story for v0.x users.**~~ **Resolved (2026-05-24): no
    migration needed.** psg-go has no users outside this codebase, so

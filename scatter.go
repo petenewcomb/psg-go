@@ -11,7 +11,7 @@ import (
 )
 
 // boundTask is the internal interface every task work item satisfies.
-// TaskRunner constructs boundTask values and feeds them through
+// Launcher constructs boundTask values and feeds them through
 // [Pool.newTaskWork] for execution on a worker.
 type boundTask interface {
 	Execute(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerSender *rdvq.Sender)

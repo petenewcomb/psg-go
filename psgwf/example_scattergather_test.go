@@ -49,7 +49,7 @@ func Example_scatterSkim() {
 	fmt.Printf("%3dms Starting tasks\n", msSinceStart())
 
 	// First task completes quickly
-	quickRunner := psgwf.NewGenericTaskRunner(skimmer, wf,
+	quickRunner := psgwf.NewGenericLauncher(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Quick task started\n", msSinceStart())
 			clock.Sleep(10 * time.Millisecond)
@@ -65,7 +65,7 @@ func Example_scatterSkim() {
 	clock.Sleep(20 * time.Millisecond)
 
 	// Second task fails and cancels workflow
-	failingRunner := psgwf.NewGenericTaskRunner(skimmer, wf,
+	failingRunner := psgwf.NewGenericLauncher(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Failing task started\n", msSinceStart())
 			clock.Sleep(30 * time.Millisecond)
@@ -82,7 +82,7 @@ func Example_scatterSkim() {
 	clock.Sleep(10 * time.Millisecond)
 
 	// Third task should be cancelled
-	slowRunner := psgwf.NewGenericTaskRunner(skimmer, wf,
+	slowRunner := psgwf.NewGenericLauncher(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Slow task started\n", msSinceStart())
 			select {

@@ -48,9 +48,9 @@ func Example_observable() {
 	limit := psg.NewSemaphore(2)
 
 	// Define a factory to bind task-specific inputs and resources into a
-	// TaskRunner. The task body Submits its result to the skimmer.
-	newRunner := func(taskName string) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	// Launcher. The task body Submits its result to the skimmer.
+	newRunner := func(taskName string) psg.Launcher0 {
+		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":

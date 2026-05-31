@@ -47,7 +47,7 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		runner := psgwf.NewGenericTaskRunner(resultSkim, wf,
+		runner := psgwf.NewGenericLauncher(resultSkim, wf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				select {
 				case <-time.After(sleepTime):

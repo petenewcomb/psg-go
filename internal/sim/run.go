@@ -71,10 +71,10 @@ type controller struct {
 	FunnelLimiters []psg.Limiter
 	Skimmers       []*psg.Skimmer[*simValue]
 	Funnels        []*psg.Funnel[*simValue]
-	// TaskRunners holds one psg.TaskRunner0 per Plan TaskRunner. The
+	// Launchers holds one psg.Launcher0 per Plan Launcher. The
 	// closure inside each runs the runner's Body Func, which Submits
 	// directly to downstream Skimmers/Funnels.
-	TaskRunners []psg.TaskRunner0
+	Launchers []psg.Launcher0
 
 	limitersOnce sync.Once
 	combPoolOnce sync.Once
@@ -112,13 +112,13 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		funnel := psg.NewFunnel(c.FunnelPool, c.newFunnelFactory(t, cp, idx), opts...)
 		c.Funnels[i] = &funnel
 	}
-	// Construct TaskRunners after Funnels/Skimmers so the bodies can
-	// reference them via Submit. TaskRunner Bodies may StartTask other
+	// Construct Launchers after Funnels/Skimmers so the bodies can
+	// reference them via Submit. Launcher Bodies may StartTask other
 	// runners, but only after the entire array is populated (a runner's
 	// Body never runs during construction).
-	c.TaskRunners = make([]psg.TaskRunner0, len(c.Plan.TaskRunners))
-	for i, runner := range c.Plan.TaskRunners {
-		c.TaskRunners[i] = c.newTaskRunner(t, runner)
+	c.Launchers = make([]psg.Launcher0, len(c.Plan.Launchers))
+	for i, runner := range c.Plan.Launchers {
+		c.Launchers[i] = c.newLauncher(t, runner)
 	}
 
 	// Execute top-level Steps.
@@ -245,12 +245,12 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 	}
 }
 
-// newTaskRunner constructs the psg.TaskRunner0 that backs a Plan
-// TaskRunner. The task body walks the Plan's Body Func; Submits go
+// newLauncher constructs the psg.Launcher0 that backs a Plan
+// Launcher. The task body walks the Plan's Body Func; Submits go
 // directly to downstream sinks (Funnels/Skimmers) via Submit, and
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
-func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.TaskRunner0 {
+func (c *controller) newLauncher(t assert.TestingT, runner *Launcher) psg.Launcher0 {
 	// Concurrency tracking: bump TaskLimiter counter on entry to the
 	// task body, decrement on exit. Used by the per-Limiter
 	// max-concurrency assertion in Run.
@@ -272,21 +272,21 @@ func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.Ta
 			return err
 		}
 		if c.shouldReturnError(runner.Body) {
-			return ExpectedHandlerError{OpKind: "TaskRunner", OpID: runner.ID}
+			return ExpectedHandlerError{OpKind: "Launcher", OpID: runner.ID}
 		}
 		return nil
 	})
-	return psg.NewTaskRunner0(body, opts...)
+	return psg.NewLauncher0(body, opts...)
 }
 
-// startTask dispatches a Plan TaskRunner. The TaskRunner was pre-built
+// startTask dispatches a Plan Launcher. The Launcher was pre-built
 // in Run(); Start can return an ExpectedHandlerError from internal
 // backpressure-yielding (a previously-queued sink handler returned an
 // injected error). In that case the work was Free()'d and NOT queued;
 // retry until Start either succeeds or returns a non-injected error.
 func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx int) {
 	chk := assert.New(t)
-	runner := &c.TaskRunners[runnerIdx]
+	runner := &c.Launchers[runnerIdx]
 	for {
 		err := runner.Start(ctx, c.Wave)
 		if err == nil {

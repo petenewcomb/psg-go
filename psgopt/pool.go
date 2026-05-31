@@ -24,7 +24,7 @@ import (
 //
 // As of Wave 4 the equivalent TaskPool concurrency limit has been
 // replaced entirely by the framework's
-// [github.com/petenewcomb/psg-go.Limiter] system on [TaskRunner];
+// [github.com/petenewcomb/psg-go.Limiter] system on [Launcher];
 // TaskPool is no longer a user-facing type.
 func WithMaxConcurrency(maxConcurrency int) FunnelPoolOption {
 	return opts.MaxConcurrency{Max: maxConcurrency}

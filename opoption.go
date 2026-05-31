@@ -3,7 +3,7 @@
 
 package psg
 
-// OpOption configures an op (TaskRunner, Funnel, Skimmer) at
+// OpOption configures an op (Launcher, Funnel, Skimmer) at
 // construction time. Users obtain OpOption values from framework
 // constructors such as [WithLimits]. The interface is closed: future
 // option types will live in this package.

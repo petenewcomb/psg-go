@@ -52,7 +52,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 		return nil
 	})
 
-	runner := psgwf.NewGenericTaskRunner(skimmer, wf,
+	runner := psgwf.NewGenericLauncher(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
 		}, psg.WithLimits(poolLimit))
@@ -120,7 +120,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Start a new task from within the AfterFunc
-		runner := psgwf.NewGenericTaskRunner(skimmer, newWf,
+		runner := psgwf.NewGenericLauncher(skimmer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
 			}, psg.WithLimits(poolLimit))
@@ -133,7 +133,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		return nil
 	})
 
-	outerRunner := psgwf.NewGenericTaskRunner(skimmer, wf,
+	outerRunner := psgwf.NewGenericLauncher(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
 		}, psg.WithLimits(poolLimit))

@@ -9,7 +9,7 @@ import (
 )
 
 //nolint:mnd // default configuration
-var defaultTaskRunnerConfig = TaskRunnerConfig{
+var defaultLauncherConfig = LauncherConfig{
 	Body: FuncConfig{
 		SelfTime: BiasedDurationConfig{Min: 0, Med: 10 * time.Microsecond, Max: 10 * time.Millisecond},
 		Subjob: FuncSubjobConfig{
@@ -19,39 +19,39 @@ var defaultTaskRunnerConfig = TaskRunnerConfig{
 	},
 }
 
-type TaskRunnerConfig struct {
+type LauncherConfig struct {
 	Body FuncConfig
 }
 
-// TaskRunner represents a simulated stateless dispatch op. Its Body is
+// Launcher represents a simulated stateless dispatch op. Its Body is
 // invoked once per Start dispatch; the body may execute SelfTime,
-// Subjob, StartTask, and Submit steps. Each TaskRunner binds to zero
+// Subjob, StartTask, and Submit steps. Each Launcher binds to zero
 // or one TaskLimiter for v1 (multi-limiter binding lifts post-Wave-4).
-type TaskRunner struct {
+type Launcher struct {
 	ID             int
-	Depth          int   // higher than any TaskRunner this body may StartTask, prevents cycles
+	Depth          int   // higher than any Launcher this body may StartTask, prevents cycles
 	LimiterIndexes []int // indexes into Plan.TaskLimiters (v1: at most one)
 	Body           *Func
 	pathDuration   time.Duration
 }
 
-func (r *TaskRunner) PathDuration() time.Duration {
+func (r *Launcher) PathDuration() time.Duration {
 	return r.pathDuration
 }
 
 // Format implements fmt.Formatter for pretty-printing.
-func (r *TaskRunner) Format(fs fmt.State, verb rune) {
+func (r *Launcher) Format(fs fmt.State, verb rune) {
 	if verb != 'v' {
 		panic("unsupported verb")
 	}
 	if fs.Flag('#') {
 		r.Dump(fs, "")
 	} else {
-		_, _ = fmt.Fprintf(fs, "TaskRunner#%d", r.ID)
+		_, _ = fmt.Fprintf(fs, "Launcher#%d", r.ID)
 	}
 }
 
-func (r *TaskRunner) Dump(fs fmt.State, indent string) {
+func (r *Launcher) Dump(fs fmt.State, indent string) {
 	name := fmt.Sprint(r)
 	_, _ = fmt.Fprintf(fs, "%s: depth=%d limiters=%v\n%s", name, r.Depth, r.LimiterIndexes, indent)
 	r.Body.Dump(fs, indent, name)

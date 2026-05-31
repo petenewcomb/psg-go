@@ -12,7 +12,7 @@ import (
 
 // InstrumentedTask funnels tracing, metrics, and logging for tasks into a
 // single wrapper. Returns a value-producing task body; pair it with a sink
-// Skimmer via [Scatter] (or build your own [psg.TaskRunner]) to dispatch.
+// Skimmer via [Scatter] (or build your own [psg.Launcher]) to dispatch.
 func InstrumentedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
@@ -63,7 +63,7 @@ func InstrumentedFunnel[T any](
 	return TracedFunnel(funnelOpName, flushOpName, metricsFunnel)
 }
 
-// Scatter wraps the value-producing task in a one-shot [psg.TaskRunner0]
+// Scatter wraps the value-producing task in a one-shot [psg.Launcher0]
 // that submits the result to skim, and dispatches it on wave. Pass
 // psg op options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 //
@@ -79,7 +79,7 @@ func Scatter[T any](
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitErr(ctx, wave, result, err)
 	}), opts...)

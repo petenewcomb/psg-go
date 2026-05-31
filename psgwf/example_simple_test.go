@@ -36,7 +36,7 @@ func Example_simple() {
 	wf := psgwf.New(ctx)
 
 	// Start a task
-	runner := psgwf.NewGenericTaskRunner(skimmer, wf,
+	runner := psgwf.NewGenericLauncher(skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
 		}, psg.WithLimits(poolLimit))

@@ -8,7 +8,7 @@ import (
 )
 
 // Task0, Task[T], and Task2[T1, T2] are user-supplied work bodies that a
-// TaskRunner dispatches on a worker goroutine. Tasks are argument-taking:
+// Launcher dispatches on a worker goroutine. Tasks are argument-taking:
 // inputs arrive through Run's parameters, and any results the task wants
 // to deliver downstream are explicitly submitted to a Skimmer or
 // Funnel from within Run.
@@ -30,7 +30,7 @@ import (
 // than returned from Run.
 //
 // WARNING: A Task must not synchronously dispatch into the same Pool's
-// worker by calling TaskRunner.Start, since this can deadlock when a
+// worker by calling Launcher.Start, since this can deadlock when a
 // concurrency limit is reached. Instead, Start should be called from
 // the associated Skim function (or from Accumulate / Flush on an
 // Accumulator) after the Task completes. Start attempts to recognize

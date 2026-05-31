@@ -22,10 +22,10 @@ import (
 //   - Funnels at depths 1..MaxFunnelDepth, each Accumulate.Submit
 //     wired to a shallower sink. Multiple paths may share a Funnel
 //     (fan-in).
-//   - Origin TaskRunners (one per path), Body.Submit wired to a sink
+//   - Origin Launchers (one per path), Body.Submit wired to a sink
 //     at depth = path-length - 1. StartTask entries for these go into
 //     Plan.Steps.
-//   - Fan-out TaskRunners dispatched from inside Skimmer.Handle and
+//   - Fan-out Launchers dispatched from inside Skimmer.Handle and
 //     Funnel.Accumulate bodies via StartTask steps
 //     (scatter-from-skim/funnel, the recursive-spawn pattern).
 //     Each fan-out runner Submits to a Skimmer; cycle prevention is
@@ -41,7 +41,7 @@ type Plan struct {
 	MaxPathDuration time.Duration
 	TaskLimiters    []Limiter
 	FunnelLimiters  []Limiter
-	TaskRunners     []*TaskRunner
+	Launchers       []*Launcher
 	Funnels         []*Funnel
 	Skimmers        []*Skimmer
 	SubjobCount     int
@@ -65,7 +65,7 @@ type idCounters struct {
 	Plan        int
 	TaskLimiter int
 	CombLimiter int
-	TaskRunner  int
+	Launcher    int
 	Funnel      int
 	Skimmer     int
 }
@@ -202,20 +202,20 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 	// bounded by MaxDepth. Funnels dispatch fan-out runners
 	// targeting any Skimmer.
 	// Fan-out runners have intentionally simple bodies: SelfTime
-	// drawn from TaskRunner.Body config, plus the destination Submit.
+	// drawn from Launcher.Body config, plus the destination Submit.
 	// No Subjob — Subjobs in fan-outs compound the cascade
 	// catastrophically (each Skimmer-cascade level multiplies, and
-	// adding Subjob recursion on top is too much). Origin TaskRunners
+	// adding Subjob recursion on top is too much). Origin Launchers
 	// (paths) still get Subjob via newFunc.
 	addFanoutRunner := func(targetSkimmerIdx int, name string) int {
-		id := nextIDs.TaskRunner
-		nextIDs.TaskRunner++
+		id := nextIDs.Launcher
+		nextIDs.Launcher++
 		body := &Func{}
-		errCfg := BiasedBoolConfig{Probability: config.TaskRunner.Body.ReturnErrorProb}
+		errCfg := BiasedBoolConfig{Probability: config.Launcher.Body.ReturnErrorProb}
 		if errCfg.Draw(t, name+".ReturnError") {
 			body.ReturnErrorProb = 1
 		}
-		dist := config.TaskRunner.Body.SelfTime
+		dist := config.Launcher.Body.SelfTime
 		if config.Deterministic {
 			dist = BiasedDurationConfig{
 				Min: dist.Med, Med: dist.Med, Max: dist.Med,
@@ -229,7 +229,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 				SinkIndex: targetSkimmerIdx,
 			},
 		)
-		runner := &TaskRunner{
+		runner := &Launcher{
 			ID:    id,
 			Depth: 1,
 			Body:  body,
@@ -238,8 +238,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, name+".LimiterIndex")
 			runner.LimiterIndexes = []int{limIdx}
 		}
-		plan.TaskRunners = append(plan.TaskRunners, runner)
-		return len(plan.TaskRunners) - 1
+		plan.Launchers = append(plan.Launchers, runner)
+		return len(plan.Launchers) - 1
 	}
 	for gIdx, g := range plan.Skimmers {
 		if g.Depth >= maxSkimmerDepth {
@@ -285,7 +285,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		}
 	}
 
-	// === Origin TaskRunners (one per path). Each path's Body.Submit
+	// === Origin Launchers (one per path). Each path's Body.Submit
 	// targets a sink at depth = pathLength - 1. Multiple paths may
 	// share the same target — that's fan-in. ===
 	plan.PathCount = config.Path.Count.Draw(t, planName+".PathCount")
@@ -321,15 +321,15 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			}
 		}
 
-		id := nextIDs.TaskRunner
-		nextIDs.TaskRunner++
-		runner := &TaskRunner{
+		id := nextIDs.Launcher
+		nextIDs.Launcher++
+		runner := &Launcher{
 			ID:    id,
 			Depth: length,
-			Body:  newFunc(t, plan, config, &config.TaskRunner.Body, nextIDs, fmt.Sprintf("TaskRunner#%d.Body", id)),
+			Body:  newFunc(t, plan, config, &config.Launcher.Body, nextIDs, fmt.Sprintf("Launcher#%d.Body", id)),
 		}
 		if taskLimiterCount > 0 {
-			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, fmt.Sprintf("TaskRunner#%d.LimiterIndex", id))
+			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, fmt.Sprintf("Launcher#%d.LimiterIndex", id))
 			runner.LimiterIndexes = []int{limIdx}
 		}
 		runner.Body.Steps = append(runner.Body.Steps, Submit{
@@ -337,10 +337,10 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 			SinkKind:  pickedSinkKind,
 			SinkIndex: pickedSinkIdx,
 		})
-		plan.TaskRunners = append(plan.TaskRunners, runner)
+		plan.Launchers = append(plan.Launchers, runner)
 		plan.Steps = append(plan.Steps, StartTask{
 			Prob:        probValue(config, 1.0),
-			RunnerIndex: len(plan.TaskRunners) - 1,
+			RunnerIndex: len(plan.Launchers) - 1,
 		})
 	}
 	plan.Steps = rapid.Permutation(plan.Steps).Draw(t, planName+".StepsPermutation")
@@ -361,7 +361,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		contrib := map[int]int{}
 		var body *Func
 		switch o := op.(type) {
-		case *TaskRunner:
+		case *Launcher:
 			body = o.Body
 		case *Funnel:
 			body = o.Accumulate
@@ -384,7 +384,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 						contrib[gi] += cnt
 					}
 				case StartTask:
-					for gi, cnt := range contribOf(plan.TaskRunners[s.RunnerIndex]) {
+					for gi, cnt := range contribOf(plan.Launchers[s.RunnerIndex]) {
 						contrib[gi] += cnt
 					}
 				}
@@ -398,7 +398,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 		if !ok {
 			continue
 		}
-		for gi, cnt := range contribOf(plan.TaskRunners[st.RunnerIndex]) {
+		for gi, cnt := range contribOf(plan.Launchers[st.RunnerIndex]) {
 			plan.MinSkimmerInvocations[gi] += cnt
 			plan.MaxSkimmerInvocations[gi] += cnt
 		}
@@ -448,7 +448,7 @@ func newFunc(
 		const subjobPathShrinkDivisor = 2
 		subConfig.Path.Length.Med = max(subConfig.Path.Length.Min, subConfig.Path.Length.Med/subjobPathShrinkDivisor)
 		subPlan := newPlan(t, &subConfig, nextIDs)
-		plan.SubjobTaskCount += len(subPlan.TaskRunners) + subPlan.SubjobTaskCount
+		plan.SubjobTaskCount += len(subPlan.Launchers) + subPlan.SubjobTaskCount
 		fn.Steps = append(fn.Steps, Subjob{Prob: probValue(config, 1.0), Plan: subPlan})
 	}
 	return fn
@@ -467,7 +467,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 		}
 		var body *Func
 		switch o := op.(type) {
-		case *TaskRunner:
+		case *Launcher:
 			body = o.Body
 		case *Funnel:
 			body = o.Accumulate
@@ -492,7 +492,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 						maxDownstream = d
 					}
 				case StartTask:
-					if d := durationFromOp(plan.TaskRunners[s.RunnerIndex]); d > maxDownstream {
+					if d := durationFromOp(plan.Launchers[s.RunnerIndex]); d > maxDownstream {
 						maxDownstream = d
 					}
 				}
@@ -502,7 +502,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 		cache[op] = total
 		// Memoize on the op struct's pathDuration field for Dump output.
 		switch o := op.(type) {
-		case *TaskRunner:
+		case *Launcher:
 			o.pathDuration = total
 		case *Funnel:
 			o.pathDuration = total
@@ -515,7 +515,7 @@ func computeMaxPathDuration(plan *Plan) time.Duration {
 	var maxPath time.Duration
 	for _, step := range plan.Steps {
 		if st, ok := step.(StartTask); ok {
-			if d := durationFromOp(plan.TaskRunners[st.RunnerIndex]); d > maxPath {
+			if d := durationFromOp(plan.Launchers[st.RunnerIndex]); d > maxPath {
 				maxPath = d
 			}
 		}
@@ -545,8 +545,8 @@ func (p *Plan) Dump(fs fmt.State, indent string) {
 	for i := range p.FunnelLimiters {
 		_, _ = fmt.Fprintf(fs, "\n%s   FunnelLimiters[%d]: %#v", indent, i, &p.FunnelLimiters[i])
 	}
-	for i, r := range p.TaskRunners {
-		_, _ = fmt.Fprintf(fs, "\n%s   TaskRunners[%d]: ", indent, i)
+	for i, r := range p.Launchers {
+		_, _ = fmt.Fprintf(fs, "\n%s   Launchers[%d]: ", indent, i)
 		r.Dump(fs, indent+"     ")
 	}
 	for i, c := range p.Funnels {

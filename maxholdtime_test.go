@@ -49,8 +49,8 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	})
 	defer funnelOp.Close()
 
-	newRunner := func(value int) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	newRunner := func(value int) psg.Launcher0 {
+		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			return funnelOp.Submit(ctx, value)
 		}))
 	}

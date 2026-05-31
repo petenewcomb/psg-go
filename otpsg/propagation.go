@@ -28,7 +28,7 @@ type PropagatedResult[T any] struct {
 // PropagateTask wraps a value-returning task body so its result carries
 // the trace context from the calling ctx. The returned function is the
 // raw value-producing body — pair it with [Scatter] (or build your own
-// [psg.TaskRunner]) to dispatch.
+// [psg.Launcher]) to dispatch.
 func PropagateTask[T any](
 	taskFn func(ctx context.Context) (T, error),
 ) func(ctx context.Context) (PropagatedResult[T], error) {

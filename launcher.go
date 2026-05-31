@@ -15,9 +15,9 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// TaskRunner0 dispatches a no-argument [psgfn.Task0] onto a [Wave]'s
-// underlying worker pool. Each call to [TaskRunner0.Start] (or
-// [TaskRunner0.TryStart]) launches one Run invocation on the supplied
+// Launcher0 dispatches a no-argument [psgfn.Task0] onto a [Wave]'s
+// underlying worker pool. Each call to [Launcher0.Start] (or
+// [Launcher0.TryStart]) launches one Run invocation on the supplied
 // Wave. Result delivery is the task body's responsibility — Run calls
 // Submit on whatever downstream sinks it captures. If Run returns a
 // non-nil error, the framework routes it through an internal sink so
@@ -27,33 +27,33 @@ import (
 // a [Limiter] (e.g. via [NewSemaphore]) that caps the number of
 // in-flight dispatches.
 //
-// Thread-safety and copying: a TaskRunner value is designed to be
+// Thread-safety and copying: a Launcher value is designed to be
 // copied. All copies share the same binding to task, limiter (if any),
 // and internal error sink, so they can be passed by value or stored in
 // structures and used concurrently. The Wave is supplied per Start
 // call, not at construction time.
-type TaskRunner0 struct {
+type Launcher0 struct {
 	task     psgfn.Task0
 	limiter  Limiter
 	errSink  Skimmer[struct{}]
-	workPool *omnipool.Pool[taskRunnerWork0]
+	workPool *omnipool.Pool[launcherWork0]
 }
 
-// NewTaskRunner0 wraps a [psgfn.Task0] in a Wave-independent
-// [TaskRunner0]. Pass [WithLimits] in opts to bind one or more
+// NewLauncher0 wraps a [psgfn.Task0] in a Wave-independent
+// [Launcher0]. Pass [WithLimits] in opts to bind one or more
 // [Limiter]s that throttle dispatch. The framework manages an internal
 // error sink that surfaces unexpected errors returned by Task.Run
 // through the dispatching Wave's SkimAll path.
-func NewTaskRunner0(task psgfn.Task0, opts ...OpOption) TaskRunner0 {
+func NewLauncher0(task psgfn.Task0, opts ...OpOption) Launcher0 {
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
-	return TaskRunner0{
+	return Launcher0{
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
-		workPool: omnipool.For[taskRunnerWork0](),
+		workPool: omnipool.For[launcherWork0](),
 	}
 }
 
@@ -76,11 +76,11 @@ func NewTaskRunner0(task psgfn.Task0, opts ...OpOption) TaskRunner0 {
 // to Run.
 //
 //nolint:contextcheck // background context used only for tracing
-func (r TaskRunner0) Start(ctx context.Context, wave *Wave) error {
+func (r Launcher0) Start(ctx context.Context, wave *Wave) error {
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "TaskRunner0.Start"
+	traceRegion := "Launcher0.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	pool := wave.pool
@@ -102,11 +102,11 @@ func (r TaskRunner0) Start(ctx context.Context, wave *Wave) error {
 // became available, or (false, non-nil) for any other failure.
 //
 //nolint:contextcheck // background context used only for tracing
-func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time, wave *Wave) (bool, error) {
+func (r Launcher0) TryStart(ctx context.Context, deadline time.Time, wave *Wave) (bool, error) {
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "TaskRunner0.TryStart"
+	traceRegion := "Launcher0.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	pool := wave.pool
@@ -126,7 +126,7 @@ func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time, wave *Wav
 	return ok, err
 }
 
-func (r TaskRunner0) newScatterWork(pool *Pool, group workq.GroupID, deadline time.Time) *taskRunnerScatterWork {
+func (r Launcher0) newScatterWork(pool *Pool, group workq.GroupID, deadline time.Time) *launcherScatterWork {
 	inner := r.newTask(pool, group)
 	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
@@ -134,10 +134,10 @@ func (r TaskRunner0) newScatterWork(pool *Pool, group workq.GroupID, deadline ti
 	if r.limiter.impl != nil {
 		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
 	}
-	return newTaskRunnerScatterWork(pool, deadline, gated)
+	return newLauncherScatterWork(pool, deadline, gated)
 }
 
-func (r TaskRunner0) newTask(pool *Pool, group workq.GroupID) boundTask {
+func (r Launcher0) newTask(pool *Pool, group workq.GroupID) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
 	w.job = pool
@@ -147,15 +147,15 @@ func (r TaskRunner0) newTask(pool *Pool, group workq.GroupID) boundTask {
 	return w
 }
 
-type taskRunnerWork0 struct {
-	pool    *omnipool.Pool[taskRunnerWork0]
+type launcherWork0 struct {
+	pool    *omnipool.Pool[launcherWork0]
 	job     *Pool
 	group   workq.GroupID
 	task    psgfn.Task0
 	errSink Skimmer[struct{}]
 }
 
-func (w *taskRunnerWork0) Execute(
+func (w *launcherWork0) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
@@ -163,7 +163,7 @@ func (w *taskRunnerWork0) Execute(
 ) {
 	_ = group
 	_ = taskWorkerSender
-	traceRegion := "taskRunnerWork0.Execute"
+	traceRegion := "launcherWork0.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	var err error = ErrTaskPanicked
@@ -187,41 +187,41 @@ func (w *taskRunnerWork0) Execute(
 	})
 }
 
-func (w *taskRunnerWork0) Free() {
+func (w *launcherWork0) Free() {
 	w.pool.Put(w)
 }
 
-// TaskRunner[T] dispatches a single-argument [psgfn.Task[T]] onto a
-// [Wave]'s worker pool. See [TaskRunner0] for shared semantics.
-type TaskRunner[T any] struct {
+// Launcher[T] dispatches a single-argument [psgfn.Task[T]] onto a
+// [Wave]'s worker pool. See [Launcher0] for shared semantics.
+type Launcher[T any] struct {
 	task     psgfn.Task[T]
 	limiter  Limiter
 	errSink  Skimmer[struct{}]
-	workPool *omnipool.Pool[taskRunnerWork[T]]
+	workPool *omnipool.Pool[launcherWork[T]]
 }
 
-// NewTaskRunner wraps a [psgfn.Task[T]] in a Wave-independent
-// [TaskRunner[T]]. See [NewTaskRunner0].
-func NewTaskRunner[T any](task psgfn.Task[T], opts ...OpOption) TaskRunner[T] {
+// NewLauncher wraps a [psgfn.Task[T]] in a Wave-independent
+// [Launcher[T]]. See [NewLauncher0].
+func NewLauncher[T any](task psgfn.Task[T], opts ...OpOption) Launcher[T] {
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
-	return TaskRunner[T]{
+	return Launcher[T]{
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
-		workPool: omnipool.For[taskRunnerWork[T]](),
+		workPool: omnipool.For[launcherWork[T]](),
 	}
 }
 
 // Start launches Run(ctx, arg) on wave's worker goroutine. See
-// [TaskRunner0.Start] for backpressure and ctx behavior.
-func (r TaskRunner[T]) Start(ctx context.Context, wave *Wave, arg T) error {
+// [Launcher0.Start] for backpressure and ctx behavior.
+func (r Launcher[T]) Start(ctx context.Context, wave *Wave, arg T) error {
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "TaskRunner.Start"
+	traceRegion := "Launcher.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	pool := wave.pool
@@ -238,12 +238,12 @@ func (r TaskRunner[T]) Start(ctx context.Context, wave *Wave, arg T) error {
 }
 
 // TryStart attempts to launch Run(ctx, arg) on wave without blocking.
-// See [TaskRunner0.TryStart].
-func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, wave *Wave, arg T) (bool, error) {
+// See [Launcher0.TryStart].
+func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, wave *Wave, arg T) (bool, error) {
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "TaskRunner.TryStart"
+	traceRegion := "Launcher.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	pool := wave.pool
@@ -263,9 +263,9 @@ func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, wave *W
 	return ok, err
 }
 
-func (r TaskRunner[T]) newScatterWork(
+func (r Launcher[T]) newScatterWork(
 	pool *Pool, group workq.GroupID, deadline time.Time, arg T,
-) *taskRunnerScatterWork {
+) *launcherScatterWork {
 	inner := r.newTask(pool, group, arg)
 	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
@@ -273,10 +273,10 @@ func (r TaskRunner[T]) newScatterWork(
 	if r.limiter.impl != nil {
 		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
 	}
-	return newTaskRunnerScatterWork(pool, deadline, gated)
+	return newLauncherScatterWork(pool, deadline, gated)
 }
 
-func (r TaskRunner[T]) newTask(pool *Pool, group workq.GroupID, arg T) boundTask {
+func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, arg T) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
 	w.job = pool
@@ -287,8 +287,8 @@ func (r TaskRunner[T]) newTask(pool *Pool, group workq.GroupID, arg T) boundTask
 	return w
 }
 
-type taskRunnerWork[T any] struct {
-	pool    *omnipool.Pool[taskRunnerWork[T]]
+type launcherWork[T any] struct {
+	pool    *omnipool.Pool[launcherWork[T]]
 	job     *Pool
 	group   workq.GroupID
 	task    psgfn.Task[T]
@@ -296,7 +296,7 @@ type taskRunnerWork[T any] struct {
 	errSink Skimmer[struct{}]
 }
 
-func (w *taskRunnerWork[T]) Execute(
+func (w *launcherWork[T]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
@@ -304,7 +304,7 @@ func (w *taskRunnerWork[T]) Execute(
 ) {
 	_ = group
 	_ = taskWorkerSender
-	traceRegion := "taskRunnerWork.Execute"
+	traceRegion := "launcherWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	var err error = ErrTaskPanicked
@@ -328,43 +328,43 @@ func (w *taskRunnerWork[T]) Execute(
 	})
 }
 
-func (w *taskRunnerWork[T]) Free() {
+func (w *launcherWork[T]) Free() {
 	var zero T
 	w.arg = zero
 	w.pool.Put(w)
 }
 
-// TaskRunner2[T1, T2] dispatches a two-argument [psgfn.Task2[T1, T2]]
-// onto a [Wave]'s worker pool. See [TaskRunner0] for shared semantics.
-type TaskRunner2[T1, T2 any] struct {
+// Launcher2[T1, T2] dispatches a two-argument [psgfn.Task2[T1, T2]]
+// onto a [Wave]'s worker pool. See [Launcher0] for shared semantics.
+type Launcher2[T1, T2 any] struct {
 	task     psgfn.Task2[T1, T2]
 	limiter  Limiter
 	errSink  Skimmer[struct{}]
-	workPool *omnipool.Pool[taskRunnerWork2[T1, T2]]
+	workPool *omnipool.Pool[launcherWork2[T1, T2]]
 }
 
-// NewTaskRunner2 wraps a [psgfn.Task2[T1, T2]] in a Wave-independent
-// [TaskRunner2[T1, T2]]. See [NewTaskRunner0].
-func NewTaskRunner2[T1, T2 any](task psgfn.Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2] {
+// NewLauncher2 wraps a [psgfn.Task2[T1, T2]] in a Wave-independent
+// [Launcher2[T1, T2]]. See [NewLauncher0].
+func NewLauncher2[T1, T2 any](task psgfn.Task2[T1, T2], opts ...OpOption) Launcher2[T1, T2] {
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
-	return TaskRunner2[T1, T2]{
+	return Launcher2[T1, T2]{
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
-		workPool: omnipool.For[taskRunnerWork2[T1, T2]](),
+		workPool: omnipool.For[launcherWork2[T1, T2]](),
 	}
 }
 
 // Start launches Run(ctx, arg1, arg2) on wave's worker goroutine. See
-// [TaskRunner0.Start].
-func (r TaskRunner2[T1, T2]) Start(ctx context.Context, wave *Wave, arg1 T1, arg2 T2) error {
+// [Launcher0.Start].
+func (r Launcher2[T1, T2]) Start(ctx context.Context, wave *Wave, arg1 T1, arg2 T2) error {
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "TaskRunner2.Start"
+	traceRegion := "Launcher2.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	pool := wave.pool
@@ -381,14 +381,14 @@ func (r TaskRunner2[T1, T2]) Start(ctx context.Context, wave *Wave, arg1 T1, arg
 }
 
 // TryStart attempts to launch Run(ctx, arg1, arg2) on wave without
-// blocking. See [TaskRunner0.TryStart].
-func (r TaskRunner2[T1, T2]) TryStart(
+// blocking. See [Launcher0.TryStart].
+func (r Launcher2[T1, T2]) TryStart(
 	ctx context.Context, deadline time.Time, wave *Wave, arg1 T1, arg2 T2,
 ) (bool, error) {
 	if wave == nil {
 		panic("wave must be non-nil")
 	}
-	traceRegion := "TaskRunner2.TryStart"
+	traceRegion := "Launcher2.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	pool := wave.pool
@@ -408,9 +408,9 @@ func (r TaskRunner2[T1, T2]) TryStart(
 	return ok, err
 }
 
-func (r TaskRunner2[T1, T2]) newScatterWork(
+func (r Launcher2[T1, T2]) newScatterWork(
 	pool *Pool, group workq.GroupID, deadline time.Time, arg1 T1, arg2 T2,
-) *taskRunnerScatterWork {
+) *launcherScatterWork {
 	inner := r.newTask(pool, group, arg1, arg2)
 	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
@@ -418,10 +418,10 @@ func (r TaskRunner2[T1, T2]) newScatterWork(
 	if r.limiter.impl != nil {
 		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
 	}
-	return newTaskRunnerScatterWork(pool, deadline, gated)
+	return newLauncherScatterWork(pool, deadline, gated)
 }
 
-func (r TaskRunner2[T1, T2]) newTask(pool *Pool, group workq.GroupID, arg1 T1, arg2 T2) boundTask {
+func (r Launcher2[T1, T2]) newTask(pool *Pool, group workq.GroupID, arg1 T1, arg2 T2) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
 	w.job = pool
@@ -433,8 +433,8 @@ func (r TaskRunner2[T1, T2]) newTask(pool *Pool, group workq.GroupID, arg1 T1, a
 	return w
 }
 
-type taskRunnerWork2[T1, T2 any] struct {
-	pool    *omnipool.Pool[taskRunnerWork2[T1, T2]]
+type launcherWork2[T1, T2 any] struct {
+	pool    *omnipool.Pool[launcherWork2[T1, T2]]
 	job     *Pool
 	group   workq.GroupID
 	task    psgfn.Task2[T1, T2]
@@ -443,7 +443,7 @@ type taskRunnerWork2[T1, T2 any] struct {
 	errSink Skimmer[struct{}]
 }
 
-func (w *taskRunnerWork2[T1, T2]) Execute(
+func (w *launcherWork2[T1, T2]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
@@ -451,7 +451,7 @@ func (w *taskRunnerWork2[T1, T2]) Execute(
 ) {
 	_ = group
 	_ = taskWorkerSender
-	traceRegion := "taskRunnerWork2.Execute"
+	traceRegion := "launcherWork2.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	var err error = ErrTaskPanicked
@@ -475,7 +475,7 @@ func (w *taskRunnerWork2[T1, T2]) Execute(
 	})
 }
 
-func (w *taskRunnerWork2[T1, T2]) Free() {
+func (w *launcherWork2[T1, T2]) Free() {
 	var zero1 T1
 	var zero2 T2
 	w.arg1 = zero1
@@ -516,29 +516,29 @@ func vetStart(
 	return ctx, meta
 }
 
-// taskRunnerScatterWork wraps the target's inner scatter work with the
+// launcherScatterWork wraps the target's inner scatter work with the
 // owning Pool's backpressure (protoBB). Mirrors skimScatterWork's
 // role in the pre-Wave-3 codepath.
-type taskRunnerScatterWork struct {
+type launcherScatterWork struct {
 	workq.Work
 	job      *Pool
 	deadline time.Time
 }
 
-func newTaskRunnerScatterWork(
+func newLauncherScatterWork(
 	job *Pool,
 	deadline time.Time,
 	targetScatterWork workq.Work,
-) *taskRunnerScatterWork {
-	w := taskRunnerScatterWorkPool.Get()
+) *launcherScatterWork {
+	w := launcherScatterWorkPool.Get()
 	w.Work = targetScatterWork
 	w.job = job
 	w.deadline = deadline
 	return w
 }
 
-func (w *taskRunnerScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "taskRunnerScatterWork.Execute"
+func (w *launcherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "launcherScatterWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", w)
 
@@ -551,13 +551,13 @@ func (w *taskRunnerScatterWork) Execute(ctx context.Context, ex workq.Execution)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *taskRunnerScatterWork) Free() {
-	traceRegion := "taskRunnerScatterWork.Free"
+func (w *launcherScatterWork) Free() {
+	traceRegion := "launcherScatterWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
 	w.Work.Free()
-	taskRunnerScatterWorkPool.Put(w)
+	launcherScatterWorkPool.Put(w)
 }
 
-var taskRunnerScatterWorkPool = omnipool.For[taskRunnerScatterWork]()
+var launcherScatterWorkPool = omnipool.For[launcherScatterWork]()

@@ -36,7 +36,7 @@ func ExamplePool_Cancel() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	firstRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Simulate a long-running task
 		time.Sleep(20 * time.Millisecond)
 		return printResult.Submit(ctx, wave, "first task result")
@@ -48,7 +48,7 @@ func ExamplePool_Cancel() {
 	// Launch second task, which must wait for the first result to be skimmed
 	// because the Limiter only grants one permit at a time.
 	fmt.Println("Launching second task")
-	secondRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	secondRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Simulate a longer-running task
 		time.Sleep(100 * time.Millisecond)
 		return printResult.Submit(ctx, wave, "second task result")
@@ -98,7 +98,7 @@ func ExamplePool_Cancel_task() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	firstRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		return printResult.Submit(ctx, wave, "first task result")
 	}), psg.WithLimits(limit))
 	if err := firstRunner.Start(ctx, wave); err != nil {
@@ -111,7 +111,7 @@ func ExamplePool_Cancel_task() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be skimmed.
 	fmt.Println("Launching second task")
-	secondRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	secondRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Force cancellation from inside the task. This is a way to cut
 		// short the overall wave due to a fatal error within a task without
 		// even waiting for the task result to be skimmed.

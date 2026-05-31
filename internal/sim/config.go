@@ -12,7 +12,7 @@ var DefaultConfig = Config{
 	},
 	TaskLimiter:   defaultLimiterConfig,
 	FunnelLimiter: defaultLimiterConfig,
-	TaskRunner:    defaultTaskRunnerConfig,
+	Launcher:      defaultLauncherConfig,
 	Skimmer:       defaultSkimmerConfig,
 	Funnel:        defaultFunnelConfig,
 	Subjob:        SubjobConfig{MaxDepth: 3},
@@ -30,7 +30,7 @@ type Config struct {
 	Path          PathConfig
 	TaskLimiter   LimiterConfig
 	FunnelLimiter LimiterConfig
-	TaskRunner    TaskRunnerConfig
+	Launcher      LauncherConfig
 	Skimmer       SkimmerConfig
 	Funnel        FunnelConfig
 	Subjob        SubjobConfig

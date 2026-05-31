@@ -8,7 +8,7 @@ import (
 )
 
 // Handler[T] is the universal user-supplied body interface — invoked
-// by TaskRunner on a worker goroutine, by Skimmer during a Wave's
+// by Launcher on a worker goroutine, by Skimmer during a Wave's
 // drain, and by anywhere else the framework needs to dispatch a
 // (value, err) pair to user code. Handle is called synchronously in
 // the framework's chosen goroutine; the surrounding op type
@@ -48,8 +48,8 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 // ErrHandler is the named func adapter for the no-value, with-err
 // case: a body that receives only an upstream err. Satisfies
 // Handler[struct{}]. Named descriptively rather than "ErrTask"
-// because "handle" reads naturally in both TaskRunner and Skimmer
-// contexts, while "task" carries TaskRunner-specific vocabulary.
+// because "handle" reads naturally in both Launcher and Skimmer
+// contexts, while "task" carries Launcher-specific vocabulary.
 type ErrHandler func(ctx context.Context, err error) error
 
 // Handle satisfies [Handler[struct{}]].
@@ -60,7 +60,7 @@ func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error {
 // NOTE: The destination API also provides a `Task` named func
 // adapter (`func(ctx) error` satisfying Handler[struct{}]) for the
 // no-input, no-err case. It can't be added here yet because the
-// existing psgfn.Task[T] interface (used by TaskRunner during the
-// arity-split phase) occupies that name. After TaskRunner collapses
+// existing psgfn.Task[T] interface (used by Launcher during the
+// arity-split phase) occupies that name. After Launcher collapses
 // to the single-type Handler-based shape (Step 3 of Thread A),
 // psgfn.Task[T] retires and the named Task adapter takes its place.

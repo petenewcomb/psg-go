@@ -9,27 +9,27 @@
 	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">gatherOnly (limit 0)</text>
 <path d="M605.22,289.63L609.49,289.63L609.49,293.9L605.22,293.9Z" style="fill:none;stroke:#1F78B4;stroke-width:0.5" />
 <text x="620.36" y="-289.27" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Limit 1</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit 1)</text>
 <path d="M607.36,278.7L604.65,274.02L610.06,274.02Z" style="fill:none;stroke:#B2DF8A;stroke-width:0.5" />
 <text x="620.36" y="-273.09" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Limit 2</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit 2)</text>
 <path d="M605.59,257.63L609.12,261.16" style="fill:none;stroke:#33A02C;stroke-width:0.5" />
 <path d="M605.59,261.16L609.12,257.63" style="fill:none;stroke:#33A02C;stroke-width:0.5" />
 <text x="620.36" y="-256.91" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Limit 3</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit 3)</text>
 <path d="M607.36,245.71L607.36,240.71" style="fill:none;stroke:#FB9A99;stroke-width:0.5" />
 <path d="M604.86,243.21L609.86,243.21" style="fill:none;stroke:#FB9A99;stroke-width:0.5" />
 <text x="620.36" y="-240.72" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Limit 4</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit 4)</text>
 <path d="M609.86,227.03A2.5,2.5 0 1 1 604.86,227.03A2.5,2.5 0 1 1 609.86,227.03Z" style="fill:#E31A1C" />
 <text x="620.36" y="-224.54" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Limit 8</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit 8)</text>
 <path d="M605.22,208.71L609.49,208.71L609.49,212.98L605.22,212.98Z" style="fill:#FDBF6F" />
 <text x="620.36" y="-208.36" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Limit 16</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit 16)</text>
 <path d="M607.36,197.79L604.65,193.1L610.06,193.1Z" style="fill:#FF7F00" />
 <text x="620.36" y="-192.17" transform="scale(1, -1)"
-	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">Unlimited</text>
+	style="font-family:Liberation Serif;font-variant:normal;font-weight:normal;font-style:normal;font-size:12px;fill:#808080">combine (limit -1)</text>
 <path d="M600.36,186.57L600.36,318.63L720,318.63L720,186.57L600.36,186.57" style="fill:none;stroke:#808080" />
 <path d="M0,0L581.36,0L581.36,432L0,432Z" style="fill:#-8000000000000000-8000000000000000-8000000000000000;fill-opacity:0" />
 <text x="222.35" y="-420.81" transform="scale(1, -1)"

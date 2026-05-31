@@ -16,7 +16,7 @@ import (
 
 func TestPlanFormatting(t *testing.T) {
 	// TODO: regenerate expected output against the new Plan vocabulary
-	// (Pool/Wave/Flow + Limiter + TaskRunner/Funnel/Skimmer). The
+	// (Pool/Wave/Flow + Limiter + Launcher/Funnel/Skimmer). The
 	// 11k-line expected string below was captured against the old
 	// Task/Skim/Funnel/TaskPool/FunnelPool plan shape and no
 	// longer matches. Skip until the new format stabilizes; then

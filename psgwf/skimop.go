@@ -28,7 +28,7 @@ func (g GenericSkimOp[T, C]) inner() psg.Skimmer[result[T, C]] {
 
 func wrapSkimFunc[T, C any](skimFn GenericSkimFunc[T, C]) psgfn.HandlerFunc[result[T, C]] {
 	return func(ctx context.Context, res result[T, C], err error) error {
-		// Reference happened in GenericTaskRunner.Start (in scatter.go).
+		// Reference happened in GenericLauncher.Start (in scatter.go).
 		defer res.Workflow.unref(ctx)
 		return skimFn(ctx, res.Workflow, res.Value, err)
 	}

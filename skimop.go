@@ -17,7 +17,7 @@ import (
 // Skimmer is a terminal sink: values arrive via [Skimmer.Submit] /
 // [Skimmer.SubmitErr] and are dispatched to the user-supplied skim
 // function during the supplied Wave's Skim / SkimAll. Task
-// dispatch lives separately on [TaskRunner] — a Skimmer never runs
+// dispatch lives separately on [Launcher] — a Skimmer never runs
 // tasks of its own.
 //
 // Thread-safety and copying: a Skimmer value is designed to be

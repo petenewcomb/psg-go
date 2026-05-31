@@ -60,7 +60,7 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		runner := psgwf.NewGenericTaskRunner(skimmer, wf, newRequestTaskFn(requestID),
+		runner := psgwf.NewGenericLauncher(skimmer, wf, newRequestTaskFn(requestID),
 			psg.WithLimits(poolLimit))
 		err := runner.Start(ctx, wave)
 		if err != nil {

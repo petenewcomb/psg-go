@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNewTaskRunnerNilTaskPanic(t *testing.T) {
+func TestNewLauncherNilTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 
 	chk.PanicsWithValue("task must be non-nil", func() {
 		// Nil Task should panic at construction.
-		psg.NewTaskRunner0(nil)
+		psg.NewLauncher0(nil)
 	})
 }
 
@@ -28,7 +28,7 @@ func TestSkimScatterNilSkimPanic(t *testing.T) {
 	})
 }
 
-func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
+func TestLauncherStartFromTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
@@ -39,11 +39,11 @@ func TestTaskRunnerStartFromTaskPanic(t *testing.T) {
 			return nil
 		},
 	))
-	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	innerRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
 	}))
-	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -71,7 +71,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 			return nil
 		},
 	))
-	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
@@ -84,7 +84,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 				return nil
 			},
 		))
-		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		subRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, subWave, true)
 		}))
@@ -115,11 +115,11 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 			return nil
 		},
 	))
-	innerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	innerRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.Fail("should not get here - parent pool task should not run")
 		return nil
 	}))
-	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -145,7 +145,7 @@ func TestTaskCannotSkim(t *testing.T) {
 			return nil
 		},
 	))
-	runner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		chk.PanicsWithValue("Skim called from task context but allowed only by top-level or skim context", func() {
 			_, _ = wave.TrySkim(ctx)
 		})
@@ -168,7 +168,7 @@ func TestTaskCannotSkimParentJob(t *testing.T) {
 			return nil
 		},
 	))
-	outerRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
@@ -179,7 +179,7 @@ func TestTaskCannotSkimParentJob(t *testing.T) {
 				return nil
 			},
 		))
-		subRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		subRunner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			chk.PanicsWithValue("Context belongs to a child job", func() {
 				_, _ = parentWave.TrySkim(ctx)
 			})

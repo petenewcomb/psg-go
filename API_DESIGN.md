@@ -363,42 +363,121 @@ func NewGatherer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Gather
 
 // ===== Op types =====
 //
-// All three ops share the Submit / SubmitErr (and Try variants)
-// dispatch family. TaskRunner additionally has Start / TryStart as
-// sugar for the void case (Submit(*new(T))). None of the dispatch
-// methods take a *Wave — the wave was bound at construction (or
-// deferred via nil; see "Wave binding").
+// All three ops share the same dispatch family, layered as sugars
+// over a single primitive (TrySubmitErr taking a deadline parameter).
+// TaskRunner additionally has Start / TryStart as sugar for the void
+// case (T = struct{}). None of the dispatch methods take a *Wave —
+// the wave was bound at construction (or deferred via nil; see
+// "Wave binding").
+//
+// Four methods per sink, all layered sugars over the single
+// primitive TrySubmitErr(ctx, deadline, v, err) (bool, error):
+//   - Submit(ctx, v)              = TrySubmitErr(ctx, Forever, v, nil), bool dropped
+//   - SubmitErr(ctx, v, err)      = TrySubmitErr(ctx, Forever, v, err), bool dropped
+//   - TrySubmit(ctx, t, v)        = TrySubmitErr(ctx, t, v, nil)
+//   - TrySubmitErr(ctx, t, v, err) = primitive
+//
+// The deadline parameter is a time.Time interpreted as:
+//   - time.Time{} (zero) → attempt once (safer default than block-forever)
+//   - Forever (sentinel) → block until success
+//   - past time          → fail fast; no attempt
+//   - future time        → bounded wait
+//
+// Submit / SubmitErr are convenience names for the "block forever"
+// case; they drop the bool return because the deadline is suppressed.
+// See "Forever sentinel and dispatch model" below for the full
+// deadline value semantics.
+
+// Forever is the deadline-sentinel value for "block until success."
+// Pass to TrySubmit / TrySubmitErr to express the same behavior as
+// Submit / SubmitErr (without the bool drop).
+var Forever time.Time = /* implementation-chosen specific instant; opaque */
 
 type TaskRunner[T any] struct { /* ... */ }
-// Submit-family: the canonical dispatch primitives. All ops share this shape.
-func (TaskRunner[T]) Submit(ctx context.Context, arg T) error                                  // sugar for SubmitErr(ctx, arg, nil)
-func (TaskRunner[T]) SubmitErr(ctx context.Context, arg T, err error) error
-func (TaskRunner[T]) TrySubmit(ctx context.Context, deadline time.Time, arg T) (bool, error)
-func (TaskRunner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, arg T, err error) (bool, error)
-// Start sugars for the void case (T = struct{}): sugar for Submit(ctx, *new(T)).
-func (TaskRunner[T]) Start(ctx context.Context) error
-func (TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error)
+// Dispatch surface. All sinks share this shape (TrySubmitErr is the primitive).
+func (TaskRunner[T]) Submit(ctx context.Context, arg T) error                                                // sugar — block forever
+func (TaskRunner[T]) SubmitErr(ctx context.Context, arg T, err error) error                                  // sugar — block forever, carry err
+func (TaskRunner[T]) TrySubmit(ctx context.Context, deadline time.Time, arg T) (bool, error)                 // sugar — drops err
+func (TaskRunner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, arg T, err error) (bool, error)   // primitive
+// Start sugars for the void case (T = struct{}).
+func (TaskRunner[T]) Start(ctx context.Context) error                                                        // sugar for Submit(ctx, *new(T))
+func (TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error)                         // sugar for TrySubmit(ctx, deadline, *new(T))
 
 // Combiner — stateful aggregation via factory-created Accumulator
 // instances. Parallel by default; cap parallelism via WithLimits.
 type Combiner[T any] struct { /* ... */ }
-func (Combiner[T]) Submit(ctx context.Context, value T) error                                  // sugar for SubmitErr(ctx, value, nil)
-func (Combiner[T]) SubmitErr(ctx context.Context, value T, err error) error
-func (Combiner[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)
-func (Combiner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)
-func (Combiner[T]) Close()                                                                     // signals no more input; triggers Flush on each instance
-func (Combiner[T]) Dup() Combiner[T]                                                           // refcounted sharing across handlers
+func (Combiner[T]) Submit(ctx context.Context, value T) error                                                // sugar — block forever
+func (Combiner[T]) SubmitErr(ctx context.Context, value T, err error) error                                  // sugar — block forever, carry err
+func (Combiner[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)                 // sugar — drops err
+func (Combiner[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)   // primitive
+func (Combiner[T]) Close()                                                                                   // signals no more input; triggers Flush on each instance
+func (Combiner[T]) Dup() Combiner[T]                                                                         // refcounted sharing across handlers
 
 // Gatherer — terminal sink; the Handler is dispatched on Wave.Gather pull.
 type Gatherer[T any] struct { /* ... */ }
-func (Gatherer[T]) Submit(ctx context.Context, value T) error                                  // sugar for SubmitErr(ctx, value, nil)
-func (Gatherer[T]) SubmitErr(ctx context.Context, value T, err error) error
-func (Gatherer[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)
-func (Gatherer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)
+func (Gatherer[T]) Submit(ctx context.Context, value T) error                                                // sugar — block forever
+func (Gatherer[T]) SubmitErr(ctx context.Context, value T, err error) error                                  // sugar — block forever, carry err
+func (Gatherer[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error)                 // sugar — drops err
+func (Gatherer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, value T, err error) (bool, error)   // primitive
 // (No Close / Dup on Gatherer — handler is stateless from the
 // framework's perspective; GatherAll completion is driven by
 // in-flight tracking, not by an explicit end-of-input signal.)
 ```
+
+### Forever sentinel and dispatch model
+
+All dispatch verbs reduce to one primitive — `TrySubmitErr(ctx,
+deadline, v, err) (bool, error)` — with the deadline value
+controlling the wait behavior. Submit / SubmitErr / TrySubmit are
+layered sugars over it.
+
+**Deadline value semantics:**
+
+| Value | Behavior |
+|---|---|
+| `time.Time{}` (zero) | attempt once; return immediately |
+| `streampool.Forever` | block until success |
+| past time | already-expired; fail fast without attempting |
+| future time | bounded wait until deadline |
+
+**Why zero = "attempt once":**
+
+`Try` already implies "attempt without committing to wait" (per the
+Go `TryLock` precedent). The deadline parameter on TrySubmit is "how
+long am I willing to wait if it doesn't dispatch immediately?" — a
+zero value naturally answers "not at all." That gives the safest
+default for programmers who don't have a specific deadline to set
+and pass the zero value: one attempt that fails fast, rather than a
+silent indefinite block. Block-forever stays available via the
+named `Submit` / `SubmitErr` sugars or via the explicit `Forever`
+sentinel.
+
+**Implementation notes:**
+
+- The blocking sugars (`Submit` / `SubmitErr`) call the primitive
+  with `Forever` and drop the returned bool. The bool is meaningless
+  when the deadline is suppressed (you either dispatch or you error).
+- An already-expired deadline (`time.Now().After(deadline)`) returns
+  false-with-nil-error without attempting. This matches the
+  ecosystem convention for operations that take a deadline —
+  `context.WithDeadline` with a past time produces an immediately-
+  canceled ctx; `semaphore.Weighted.Acquire` on a canceled ctx
+  returns the ctx error without attempting acquisition. A deadline
+  parameter says "I will not wait past this time," so already-past
+  means no attempt.
+- Generic dispatch over an arbitrary deadline value composes
+  cleanly: pass any time value through `TrySubmit` or `TrySubmitErr`
+  and the deadline value alone determines behavior. No method
+  branching required at the call site.
+
+The `For(duration)` variant was considered and dropped (see What we
+chose not to do): aside from the naming reading ambiguously next to
+a time-typed value, the bigger problem is that `For` silently picks
+"now" as the base time. In real code the relevant base often isn't
+the dispatch instant — it's a request's `receivedAt`, a task's
+`enqueuedAt`, a retry's `firstAttemptAt`, or some other domain time.
+Forcing the user to write `baseTime.Add(d)` explicitly makes them
+confront the base-time choice; the `For` sugar would actively hide it.
 
 ## Hello world
 
@@ -604,6 +683,9 @@ body running in a wave.
 | Op constructor verb | `NewTaskRunner`, `NewCombiner`, `NewGatherer` | Agent nouns (`-er` suffix). The type names describe roles, not the function-call verb. Matches `http.Handler`, `io.Reader`, `sync.Mutex`. |
 | Sink dispatch verb | `Submit` / `SubmitErr` | Committed-delivery semantics: "submit this value to the sink." Avoids the Java `BlockingQueue.offer` baggage that would mislead users to expect try-semantics from `Offer`. Used uniformly across TaskRunner, Combiner, and Gatherer — submitting a value to a TaskRunner dispatches a task with that value as its arg, exactly mirroring how Submit works for Combiner and Gatherer. |
 | `Start` as sugar for void TaskRunner dispatch | `Start(ctx)` == `Submit(ctx, *new(T))` | When `T = struct{}` (the no-input task case), `Submit(ctx, struct{}{})` is the explicit form and reads awkwardly. `Start(ctx)` is the sugar — matches the conventional "start a fire-and-forget task" intent and the `os/exec.Cmd.Start()` precedent. Available on all `TaskRunner[T]` instantiations; meaningful primarily when T's zero value is conventional (`struct{}` or similar). |
+| Layered sugar over one TrySubmitErr primitive | `TrySubmitErr(ctx, deadline time.Time, v, err) (bool, error)` is the only primitive. `TrySubmit` drops the err arg (passes nil); `Submit` / `SubmitErr` use the `Forever` sentinel and drop the bool return. Four methods per sink. | Collapses what would otherwise be a sprawling Try-family into one method whose deadline parameter does all the work. Each named sugar lights up a common case (block-forever via Submit; one-attempt by passing zero deadline; bounded wait by passing future time). Generic dispatch over a deadline value works through a single funnel — no method branching needed. |
+| Zero deadline = "attempt once" (defensive default) | `time.Time{}` (zero) → one immediate attempt; `streampool.Forever` → block until success | The deadline parameter on TrySubmit answers "how long am I willing to wait if it doesn't dispatch immediately?" — a zero value naturally answers "not at all." That gives the safest default for programmers who don't have a deadline to set and pass the zero value: one attempt that fails fast, rather than a silent indefinite block. Block-forever is available via the `Forever` sentinel or via the `Submit` / `SubmitErr` named sugars. |
+| No `For(duration)` family | Dropped | Two reasons: `For` reads ambiguously next to a time-typed value, and it silently picks `time.Now()` as the base time — but the base often isn't dispatch-instant in real code (request `receivedAt`, retry `firstAttemptAt`, etc.). Forcing `baseTime.Add(d)` at the call site is trivial and makes the base-time choice explicit. |
 | Interface method verb | `Handle` (Handler), `Accumulate`/`Flush` (Accumulator) | Sync execution verb on the user-implemented interface, parallel to `http.Handler.ServeHTTP`. The user-facing async dispatch verbs (Submit, Start) live on the op types; the body invokes the synchronous method. |
 | Single `Handler[T]` interface across TaskRunner + Gatherer | Both take `Handler[T]` | The two op types' bodies have identical signatures — `(ctx, T, err) error`. Defining separate `Task[T]` and `Handler[T]` interfaces with the same shape and different method names (`Run` vs `Handle`) would force users to write the same closure twice if they want the same body in both contexts. Unifying under `Handler[T]` lets adapters and struct implementations work for both ops without rewrap; the runtime context (worker vs drain goroutine) is the op type's job, not the interface's. |
 | `Task` as named func adapter, not a separate interface | `type Task func(context.Context) error`, satisfies `Handler[struct{}]` | No-arg task bodies almost always close over state from the surrounding scope (they're closures by necessity), so the struct-implementation pattern that justifies exposing `Handler[T]` as an interface doesn't earn its keep for `T = struct{}`. Users who do want alloc-free no-arg work implement `Handler[struct{}]` directly with `Handle(ctx, _ struct{}, _ error)`. The named `Task` adapter provides the closure shorthand; no paired `Task` interface, hence no `Func` suffix. |
@@ -895,6 +977,23 @@ void case (with `Start` sugar); `TaskRunner[fetchInput]` covers a
 two-arg case with named-field clarity at call sites. Per-arity types
 proliferate without earning their keep. Single `TaskRunner[T]` reads
 identically thanks to type inference at use sites.
+
+### `TrySubmitFor(ctx, duration, v)` duration-sugar variant
+
+**Rejected**: a `For` family of dispatch methods taking a
+`time.Duration` rather than a `time.Time`.
+
+**Reason**: two problems compound. (1) **Naming ambiguity**: `For`
+next to a time-typed value reads ambiguously — "submit for this
+duration" vs. "submit for (on behalf of) this thing." `Until` is
+unambiguously temporal. (2) **Silent base-time choice**, which is
+the larger issue: `For(d)` would compute its deadline as `time.Now()
++ d`, but in real code the relevant base time is often something
+else — a request's `receivedAt`, a task's `enqueuedAt`, a retry's
+`firstAttemptAt`. Forcing the caller to write `baseTime.Add(d)`
+explicitly makes them confront that choice; the `For` sugar would
+hide it behind an implicit `time.Now()` assumption. Trivial savings
+at the call site, real cost in obscured intent.
 
 ### `VoidHandler` / `ErrTask` / `TaskFunc0` naming
 

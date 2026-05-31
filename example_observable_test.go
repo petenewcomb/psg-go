@@ -40,9 +40,9 @@ func Example_observable() {
 		},
 	)
 
-	// Create a scatter-gather job
-	job := psg.New(ctx)
-	defer job.CancelAndWait()
+	// Create a scatter-gather wave
+	ctx, wave := psg.NewWave(ctx)
+	defer wave.CancelAndWait()
 
 	// Limit dispatch concurrency to 2.
 	limit := psg.NewSemaphore(2)
@@ -50,7 +50,7 @@ func Example_observable() {
 	// Define a factory to bind task-specific inputs and resources into a
 	// TaskRunner. The task body Submits its result to the gatherer.
 	newRunner := func(taskName string) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":
@@ -62,14 +62,14 @@ func Example_observable() {
 			}
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
-			return gatherer.Submit(ctx, job, "result for task "+taskName, nil)
+			return gatherer.Submit(ctx, wave, "result for task "+taskName)
 		}), psg.WithLimits(limit))
 	}
 
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		err := newRunner(taskName).Start(ctx)
+		err := newRunner(taskName).Start(ctx, wave)
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}
@@ -81,7 +81,7 @@ func Example_observable() {
 
 	// Wait for all tasks to complete
 	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
-	err := job.CloseAndGatherAll(ctx)
+	err := wave.CloseAndGatherAll(ctx)
 	if err != nil {
 		fmt.Printf("error during gather: %v\n", err)
 	}

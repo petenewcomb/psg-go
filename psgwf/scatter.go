@@ -23,70 +23,79 @@ import (
 // framework error path (the sink receives the wrapped result with the
 // task's error attached, and unrefs in its handler).
 type GenericTaskRunner[T, C any] struct {
-	inner psg.TaskRunner0
-	wf    *GenericWorkflow[C]
+	wf       *GenericWorkflow[C]
+	taskFn   GenericTaskFunc[T, C]
+	opts     []psg.OpOption
+	submitFn func(context.Context, *psg.Wave, T, error) error
 }
 
 // TaskRunner is the convenience alias for [GenericTaskRunner] over the
 // default [Context] type. See [GenericTaskRunner] for semantics.
 type TaskRunner[T any] = GenericTaskRunner[T, Context]
 
-// NewGenericTaskRunner constructs a [GenericTaskRunner] that dispatches
-// taskFn against pool, wrapping the workflow context propagation and
+// NewGenericTaskRunner constructs a Wave-independent
+// [GenericTaskRunner] that wraps the workflow context propagation and
 // downstream submission to the supplied Gatherer sink. Pass psg op
-// options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
+// options (e.g. [psg.WithLimits]) via opts to throttle dispatch. The
+// caller supplies a [psg.Wave] at each [GenericTaskRunner.Start] call.
 func NewGenericTaskRunner[T, C any](
-	pool *psg.Pool,
 	sink GenericGatherOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts ...psg.OpOption,
 ) GenericTaskRunner[T, C] {
-	return newGenericTaskRunner(pool, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
-		return sink.inner().Submit(ctx, pool, result[T, C]{Workflow: wf, Value: value}, err)
+	return newGenericTaskRunner(wf, taskFn, opts, func(ctx context.Context, wave *psg.Wave, value T, err error) error {
+		return sink.inner().SubmitErr(ctx, wave, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
-// NewGenericTaskRunnerForCombiner constructs a [GenericTaskRunner] that
-// dispatches taskFn against pool, wrapping workflow context propagation
-// and forwarding the result to the supplied Combiner sink. Pass psg op
-// options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
+// NewGenericTaskRunnerForCombiner constructs a Wave-independent
+// [GenericTaskRunner] that wraps workflow context propagation and
+// forwards the result to the supplied Combiner sink. Pass psg op
+// options (e.g. [psg.WithLimits]) via opts to throttle dispatch. The
+// caller supplies a [psg.Wave] at each [GenericTaskRunner.Start] call.
+// The Combiner itself is not Wave-bound; the Wave argument is ignored
+// in the submit step.
 func NewGenericTaskRunnerForCombiner[T, C any](
-	pool *psg.Pool,
 	sink GenericCombineOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts ...psg.OpOption,
 ) GenericTaskRunner[T, C] {
 	combiner := sink.inner()
-	return newGenericTaskRunner(pool, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
-		return combiner.Submit(ctx, result[T, C]{Workflow: wf, Value: value}, err)
+	return newGenericTaskRunner(wf, taskFn, opts, func(ctx context.Context, _ *psg.Wave, value T, err error) error {
+		return combiner.SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
 func newGenericTaskRunner[T, C any](
-	pool *psg.Pool,
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts []psg.OpOption,
-	submitFn func(context.Context, T, error) error,
+	submitFn func(context.Context, *psg.Wave, T, error) error,
 ) GenericTaskRunner[T, C] {
-	body := psgfn.TaskFunc0(func(ctx context.Context) error {
-		value, taskErr := taskFn(ctx, wf)
-		return submitFn(ctx, value, taskErr)
-	})
 	return GenericTaskRunner[T, C]{
-		inner: psg.NewTaskRunner0(pool, body, opts...),
-		wf:    wf,
+		wf:       wf,
+		taskFn:   taskFn,
+		opts:     opts,
+		submitFn: submitFn,
 	}
 }
 
-// Start dispatches the wrapped task. The workflow ref taken here is
-// balanced by the unref that fires when the downstream sink processes
-// the result.
-func (r GenericTaskRunner[T, C]) Start(ctx context.Context) error {
+// Start dispatches the wrapped task on wave. The workflow ref taken
+// here is balanced by the unref that fires when the downstream sink
+// processes the result.
+func (r GenericTaskRunner[T, C]) Start(ctx context.Context, wave *psg.Wave) error {
 	r.wf.ref()
-	err := r.inner.Start(ctx)
+	wf := r.wf
+	taskFn := r.taskFn
+	submitFn := r.submitFn
+	body := psgfn.TaskFunc0(func(ctx context.Context) error {
+		value, taskErr := taskFn(ctx, wf)
+		return submitFn(ctx, wave, value, taskErr)
+	})
+	inner := psg.NewTaskRunner0(body, r.opts...)
+	err := inner.Start(ctx, wave)
 	if err != nil {
 		r.wf.unref(ctx)
 	}

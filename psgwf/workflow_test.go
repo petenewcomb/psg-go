@@ -15,8 +15,9 @@ import (
 
 // TestWorkflowAfterFunc verifies that AfterFuncs are called after workflow completion
 func TestWorkflowAfterFunc(t *testing.T) {
-	job := psg.New(context.Background())
-	defer job.CancelAndWait()
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+	_ = ctx
 
 	// Track which AfterFuncs were called
 	var called sync.Map
@@ -46,22 +47,21 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	}
 
 	// Create a simple task to ensure workflow is used
-	pool := job
 	poolLimit := psg.NewSemaphore(1)
 	gatherer := psgwf.NewGatherer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+	runner := psgwf.NewGenericTaskRunner(gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
 		}, psg.WithLimits(poolLimit))
-	err := runner.Start(context.Background())
+	err := runner.Start(context.Background(), wave)
 	assert.NoError(t, err)
 
-	// Close job and gather all results
+	// Close wave and gather all results
 	// During gathering, the final Unref will trigger AfterFuncs
-	err = job.CloseAndGatherAll(context.Background())
+	err = wave.CloseAndGatherAll(context.Background())
 	assert.NoError(t, err)
 
 	// Verify all AfterFuncs were called
@@ -91,9 +91,9 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 // TestWorkflowAfterFuncWithNewTasks verifies AfterFuncs can scatter new tasks
 func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
-	job := psg.New(context.Background())
-	defer job.CancelAndWait()
-	pool := job
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+	_ = ctx
 	poolLimit := psg.NewSemaphore(2)
 
 	// Track execution
@@ -120,11 +120,11 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Start a new task from within the AfterFunc
-		runner := psgwf.NewGenericTaskRunner(pool, gatherer, newWf,
+		runner := psgwf.NewGenericTaskRunner(gatherer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
 			}, psg.WithLimits(poolLimit))
-		err := runner.Start(ctx)
+		err := runner.Start(ctx, wave)
 		assert.NoError(t, err)
 	})
 
@@ -133,17 +133,17 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		return nil
 	})
 
-	outerRunner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+	outerRunner := psgwf.NewGenericTaskRunner(gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
 		}, psg.WithLimits(poolLimit))
-	err := outerRunner.Start(context.Background())
+	err := outerRunner.Start(context.Background(), wave)
 	assert.NoError(t, err)
 
-	// Close job and gather all results
+	// Close wave and gather all results
 	// During gathering, the final Unref will trigger AfterFuncs
 	// The AfterFunc will scatter new tasks that will also be gathered
-	err = job.CloseAndGatherAll(context.Background())
+	err = wave.CloseAndGatherAll(context.Background())
 	assert.NoError(t, err)
 
 	// Verify both AfterFunc and new task ran

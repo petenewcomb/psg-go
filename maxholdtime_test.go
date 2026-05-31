@@ -20,8 +20,8 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	job := psg.New(ctx)
-	defer job.CancelAndWait()
+	ctx, wave := psg.NewWave(ctx)
+	defer wave.CancelAndWait()
 
 	var flushCount atomic.Int32
 	var gatherCount atomic.Int32
@@ -33,7 +33,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		return nil
 	})
 
-	combinerPool := psg.NewCombinerPool(job, psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
+	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
 	combineOp := psg.NewCombiner(combinerPool, func() psgfn.Accumulator[int] {
 		return psgfn.FuncAccumulator[int]{
@@ -43,29 +43,27 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 			},
 			FlushFn: func(ctx context.Context) error {
 				flushCount.Add(1)
-				return gatherer.Submit(ctx, job, 42, nil)
+				return gatherer.Submit(ctx, wave, 42)
 			},
 		}
 	})
 	defer combineOp.Close()
 
-	taskPool := job
-
 	newRunner := func(value int) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(taskPool, psgfn.TaskFunc0(func(ctx context.Context) error {
-			return combineOp.Submit(ctx, value, nil)
+		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+			return combineOp.Submit(ctx, value)
 		}))
 	}
 
 	// Send one input
-	err := newRunner(1).Start(ctx)
+	err := newRunner(1).Start(ctx, wave)
 	chk.NoError(err)
 
 	// Wait a bit to let the first task be processed
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a second input to potentially trigger timer checking
-	err = newRunner(2).Start(ctx)
+	err = newRunner(2).Start(ctx, wave)
 	chk.NoError(err)
 
 	// Wait for flush to happen due to maxHoldTime
@@ -74,12 +72,12 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	// Should have been flushed by timer
 	flushCountValue := flushCount.Load()
 	if flushCountValue == 0 {
-		t.Logf("No flush occurred - trying to trigger job close")
-		// Try to close job to see if flush happens then
-		err := job.CloseAndGatherAll(ctx)
+		t.Logf("No flush occurred - trying to trigger wave close")
+		// Try to close wave to see if flush happens then
+		err := wave.CloseAndGatherAll(ctx)
 		chk.NoError(err)
 		flushCountValue = flushCount.Load()
-		t.Logf("Flush count after job close: %d", flushCountValue)
+		t.Logf("Flush count after wave close: %d", flushCountValue)
 	}
 	chk.Equal(int32(1), flushCountValue)
 }

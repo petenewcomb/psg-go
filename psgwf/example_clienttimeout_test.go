@@ -20,12 +20,10 @@ import (
 // disconnection.
 func Example_clientTimeout() {
 
-	// Create a long-running job for the API server
-	job := psg.New(context.Background())
-	defer job.CancelAndWait()
+	// Create a long-running wave for the API server
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
 
-	// Create a task pool
-	pool := job
 	poolLimit := psg.NewSemaphore(10)
 
 	var clock exmpclk.ExampleClock
@@ -62,17 +60,15 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf, newRequestTaskFn(requestID),
+		runner := psgwf.NewGenericTaskRunner(gatherer, wf, newRequestTaskFn(requestID),
 			psg.WithLimits(poolLimit))
-		err := runner.Start(ctx)
+		err := runner.Start(ctx, wave)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
 	}
 
 	fmt.Println("starting job")
-
-	ctx := context.Background()
 
 	// Request 1: client disconnects early
 	clientCtx1, cancel1 := context.WithTimeout(ctx, 20*time.Millisecond)
@@ -98,7 +94,7 @@ func Example_clientTimeout() {
 	fmt.Printf("gathering results\n")
 
 	// Process results
-	err := job.CloseAndGatherAll(ctx)
+	err := wave.CloseAndGatherAll(ctx)
 	if err != nil {
 		// For test output stability, don't report the error until req3 has had
 		// a chance to report its cancellation.

@@ -39,10 +39,10 @@ func Example_pipeline() {
 // fails or any read operation fails, MD5All returns an error.
 func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error) {
 
-	// Create the scatter-gather job, setting up a deferred call to Cancel to
-	// terminate outstanding tasks in case of error.
-	job := psg.New(ctx)
-	defer job.CancelAndWait()
+	// Create the scatter-gather wave, setting up a deferred call to
+	// Cancel to terminate outstanding tasks in case of error.
+	ctx, wave := psg.NewWave(ctx)
+	defer wave.CancelAndWait()
 
 	// Cap concurrent digesting tasks at the number of cores available
 	// to the program, since they should be CPU-bound.
@@ -61,9 +61,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	newDigestingRunner := func(path string, data []byte) psg.TaskRunner0 {
 		gatherer := newDigestGatherer(path)
-		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
-			return gatherer.Submit(ctx, job, md5.Sum(data), nil)
+			return gatherer.Submit(ctx, wave, md5.Sum(data))
 		}), psg.WithLimits(digestLimit))
 	}
 
@@ -72,7 +72,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	newReadGatherer := func(path string) psg.Gatherer[[]byte] {
 		return psg.NewGatherer(
 			func(ctx context.Context, data []byte, err error) error {
-				return newDigestingRunner(path, data).Start(ctx)
+				return newDigestingRunner(path, data).Start(ctx, wave)
 			},
 		)
 	}
@@ -82,10 +82,10 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// the digesters.
 	newReadingRunner := func(path string) psg.TaskRunner0 {
 		gatherer := newReadGatherer(path)
-		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
-			return gatherer.Submit(ctx, job, data, err)
+			return gatherer.SubmitErr(ctx, wave, data, err)
 		}))
 	}
 
@@ -97,14 +97,14 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadingRunner(path).Start(ctx)
+		return newReadingRunner(path).Start(ctx, wave)
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	// Gather task results until there are no more outstanding tasks.
-	if err := job.CloseAndGatherAll(ctx); err != nil {
+	if err := wave.CloseAndGatherAll(ctx); err != nil {
 		return nil, err
 	}
 

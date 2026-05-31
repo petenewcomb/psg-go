@@ -126,15 +126,24 @@ func NewCombiner[T any](
 	return Combiner[T]{h: h}
 }
 
-// Submit posts values to be combined by the combine queue.
-// This follows the same pattern as Start but for posting combine work instead
-// of launching tasks.
+// Submit posts a value to the Combiner. Sugar for SubmitErr with a
+// nil error.
 func (c *Combiner[T]) Submit(
+	ctx context.Context,
+	value T,
+) error {
+	return c.SubmitErr(ctx, value, nil)
+}
+
+// SubmitErr posts a (value, err) pair to the Combiner. err is
+// delivered to the Accumulator alongside value; use nil when reporting
+// a successful result.
+func (c *Combiner[T]) SubmitErr(
 	ctx context.Context,
 	value T,
 	err error,
 ) error {
-	traceRegion := "Combiner.Submit"
+	traceRegion := "Combiner.SubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
@@ -151,15 +160,25 @@ func (c *Combiner[T]) Submit(
 	return inner.submit(ctx, meta, group, value, err)
 }
 
-// TrySubmit attempts to post values to be combined by the combine queue.
-// Like Submit, but returns instead of blocking if queuing would be required.
+// TrySubmit attempts to Submit without blocking past deadline. See
+// [Combiner.Submit].
 func (c *Combiner[T]) TrySubmit(
+	ctx context.Context,
+	deadline time.Time,
+	value T,
+) (bool, error) {
+	return c.TrySubmitErr(ctx, deadline, value, nil)
+}
+
+// TrySubmitErr attempts to SubmitErr without blocking past deadline.
+// See [Combiner.SubmitErr].
+func (c *Combiner[T]) TrySubmitErr(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "Combiner.TrySubmit"
+	traceRegion := "Combiner.TrySubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()

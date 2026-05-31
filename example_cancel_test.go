@@ -19,11 +19,11 @@ func ExamplePool_Cancel() {
 
 	ctx := context.Background()
 
-	job := psg.New(ctx)
-	// This is the standard deferred call to Pool.CancelAndWait that should
-	// almost always follow creation of a new Pool to ensure cleanup. It is not
-	// the call to Pool.Cancel that is the subject of this example.
-	defer job.CancelAndWait()
+	ctx, wave := psg.NewWave(ctx)
+	// This is the standard deferred call to Wave.CancelAndWait that should
+	// almost always follow creation of a new Wave to ensure cleanup. It is
+	// not the call to Wave.Cancel that is the subject of this example.
+	defer wave.CancelAndWait()
 
 	limit := psg.NewSemaphore(1)
 
@@ -36,36 +36,36 @@ func ExamplePool_Cancel() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+	firstRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Simulate a long-running task
 		time.Sleep(20 * time.Millisecond)
-		return printResult.Submit(ctx, job, "first task result", nil)
+		return printResult.Submit(ctx, wave, "first task result")
 	}), psg.WithLimits(limit))
-	if err := firstRunner.Start(ctx); err != nil {
+	if err := firstRunner.Start(ctx, wave); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
 	// Launch second task, which must wait for the first result to be gathered
 	// because the Limiter only grants one permit at a time.
 	fmt.Println("Launching second task")
-	secondRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+	secondRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Simulate a longer-running task
 		time.Sleep(100 * time.Millisecond)
-		return printResult.Submit(ctx, job, "second task result", nil)
+		return printResult.Submit(ctx, wave, "second task result")
 	}), psg.WithLimits(limit))
-	if err := secondRunner.Start(ctx); err != nil {
+	if err := secondRunner.Start(ctx, wave); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
-	// Cancel the job after gathering starts but before the second task
+	// Cancel the wave after gathering starts but before the second task
 	// finishes.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		job.Cancel()
+		wave.Cancel()
 	}()
 
 	// Wait for all tasks to complete
-	if err := job.CloseAndGatherAll(ctx); err != nil {
+	if err := wave.CloseAndGatherAll(ctx); err != nil {
 		fmt.Printf("Error while gathering: %v\n", err)
 	}
 
@@ -81,11 +81,11 @@ func ExamplePool_Cancel_task() {
 
 	ctx := context.Background()
 
-	job := psg.New(ctx)
-	// This is the standard deferred call to Pool.CancelAndWait that should
-	// almost always follow creation of a new Pool to ensure cleanup. It is not
-	// the call to Pool.Cancel that is the subject of this example.
-	defer job.CancelAndWait()
+	ctx, wave := psg.NewWave(ctx)
+	// This is the standard deferred call to Wave.CancelAndWait that should
+	// almost always follow creation of a new Wave to ensure cleanup. It is
+	// not the call to Wave.Cancel that is the subject of this example.
+	defer wave.CancelAndWait()
 
 	limit := psg.NewSemaphore(1)
 
@@ -98,10 +98,10 @@ func ExamplePool_Cancel_task() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
-		return printResult.Submit(ctx, job, "first task result", nil)
+	firstRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return printResult.Submit(ctx, wave, "first task result")
 	}), psg.WithLimits(limit))
-	if err := firstRunner.Start(ctx); err != nil {
+	if err := firstRunner.Start(ctx, wave); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
@@ -111,20 +111,20 @@ func ExamplePool_Cancel_task() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be gathered.
 	fmt.Println("Launching second task")
-	secondRunner := psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+	secondRunner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		// Force cancellation from inside the task. This is a way to cut
-		// short the overall job due to a fatal error within a task without
+		// short the overall wave due to a fatal error within a task without
 		// even waiting for the task result to be gathered.
-		job.Cancel()
+		wave.Cancel()
 		time.Sleep(10 * time.Millisecond)
-		return printResult.Submit(ctx, job, "second task result", nil)
+		return printResult.Submit(ctx, wave, "second task result")
 	}), psg.WithLimits(limit))
-	if err := secondRunner.Start(ctx); err != nil {
+	if err := secondRunner.Start(ctx, wave); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
 	// Wait for all tasks to complete
-	if err := job.CloseAndGatherAll(ctx); err != nil {
+	if err := wave.CloseAndGatherAll(ctx); err != nil {
 		fmt.Printf("Error while gathering: %v\n", err)
 	}
 

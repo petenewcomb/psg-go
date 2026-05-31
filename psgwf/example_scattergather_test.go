@@ -19,13 +19,12 @@ import (
 // Example_scatterGather demonstrates using workflow context to cancel
 // related operations when one fails.
 func Example_scatterGather() {
-	// Create a job
-	job := psg.New(context.Background())
-	defer job.CancelAndWait()
+	// Create a wave
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
 
-	// Create a task pool with limited concurrency to control timing
-	pool := job
 	poolLimit := psg.NewSemaphore(3)
+	_ = ctx
 
 	var clock exmpclk.ExampleClock
 	clock.Start()
@@ -50,14 +49,14 @@ func Example_scatterGather() {
 	fmt.Printf("%3dms Starting tasks\n", msSinceStart())
 
 	// First task completes quickly
-	quickRunner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+	quickRunner := psgwf.NewGenericTaskRunner(gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Quick task started\n", msSinceStart())
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms Quick task completed\n", msSinceStart())
 			return "Quick result", nil
 		}, psg.WithLimits(poolLimit))
-	err := quickRunner.Start(context.Background())
+	err := quickRunner.Start(context.Background(), wave)
 	if err != nil {
 		fmt.Printf("%3dms Error starting quick task: %v\n", msSinceStart(), err)
 	}
@@ -66,7 +65,7 @@ func Example_scatterGather() {
 	clock.Sleep(20 * time.Millisecond)
 
 	// Second task fails and cancels workflow
-	failingRunner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+	failingRunner := psgwf.NewGenericTaskRunner(gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Failing task started\n", msSinceStart())
 			clock.Sleep(30 * time.Millisecond)
@@ -74,7 +73,7 @@ func Example_scatterGather() {
 			wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 			return "", fmt.Errorf("task failed")
 		}, psg.WithLimits(poolLimit))
-	err = failingRunner.Start(context.Background())
+	err = failingRunner.Start(context.Background(), wave)
 	if err != nil {
 		fmt.Printf("%3dms Error starting failing task: %v\n", msSinceStart(), err)
 	}
@@ -83,7 +82,7 @@ func Example_scatterGather() {
 	clock.Sleep(10 * time.Millisecond)
 
 	// Third task should be cancelled
-	slowRunner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+	slowRunner := psgwf.NewGenericTaskRunner(gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Slow task started\n", msSinceStart())
 			select {
@@ -97,7 +96,7 @@ func Example_scatterGather() {
 				return "", context.Canceled
 			}
 		}, psg.WithLimits(poolLimit))
-	err = slowRunner.Start(context.Background())
+	err = slowRunner.Start(context.Background(), wave)
 	if err != nil {
 		fmt.Printf("%3dms Error starting slow task: %v\n", msSinceStart(), err)
 	}
@@ -106,7 +105,7 @@ func Example_scatterGather() {
 	clock.Sleep(10 * time.Millisecond)
 
 	// Gather all results
-	err = job.CloseAndGatherAll(context.Background())
+	err = wave.CloseAndGatherAll(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error gathering: %v\n", msSinceStart(), err)
 	}

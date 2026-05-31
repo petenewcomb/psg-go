@@ -30,6 +30,7 @@ const (
 
 type ctxMeta struct {
 	job        *Pool
+	wave       *Wave // set by NewWave; nil for ctxs not derived through a Wave
 	parentJobs map[*Pool]struct{}
 	ctxType    contextType
 	executionEnvironment

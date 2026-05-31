@@ -16,12 +16,10 @@ import (
 
 // Example demonstrates basic workflow context usage.
 func Example_simple() {
-	// Create a job
-	job := psg.New(context.Background())
-	defer job.CancelAndWait()
+	// Create a wave
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
 
-	// Create a task pool
-	pool := job
 	poolLimit := psg.NewSemaphore(10)
 
 	// Create a gather
@@ -35,21 +33,20 @@ func Example_simple() {
 	})
 
 	// Create a workflow
-	ctx := context.Background()
 	wf := psgwf.New(ctx)
 
 	// Start a task
-	runner := psgwf.NewGenericTaskRunner(pool, gatherer, wf,
+	runner := psgwf.NewGenericTaskRunner(gatherer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
 		}, psg.WithLimits(poolLimit))
-	err := runner.Start(ctx)
+	err := runner.Start(ctx, wave)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
 
 	// Process the result
-	if err := job.CloseAndGatherAll(context.Background()); err != nil {
+	if err := wave.CloseAndGatherAll(ctx); err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
 

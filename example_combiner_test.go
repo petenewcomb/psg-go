@@ -41,17 +41,17 @@ func ExampleCombiner() {
 
 	ctx := context.Background()
 
-	// Create a scatter-gather job with flush listener to observe when all tasks have completed
-	job := psg.New(ctx, psgopt.WithFlushListener(func() {
+	// Create a scatter-gather wave with flush listener to observe when all tasks have completed
+	ctx, wave := psg.NewWave(ctx, psg.WithPoolOptions(psgopt.WithFlushListener(func() {
 		fmt.Printf("%3dms: flush: all tasks completed, waiting for combiners\n", msSinceStart())
-	}))
-	defer job.CancelAndWait()
+	})))
+	defer wave.CancelAndWait()
 
 	// Limit concurrent tasks to 2.
 	taskLimit := psg.NewSemaphore(2)
 
 	// Create a combiner pool and disable the idle timeout
-	combinerPool := psg.NewCombinerPool(job, psgopt.WithIdleTimeout(-1))
+	combinerPool := psg.NewCombinerPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
 
 	// Define a result aggregation function and create a combined gather/combine operation
 	gatherer := psg.NewGatherer(gatherFn)
@@ -75,7 +75,7 @@ func ExampleCombiner() {
 			},
 			FlushFn: func(ctx context.Context) error {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-				return gatherer.Submit(ctx, job, counts, nil)
+				return gatherer.Submit(ctx, wave, counts)
 			},
 		}
 	}
@@ -88,12 +88,12 @@ func ExampleCombiner() {
 	// Build a TaskRunner factory: the task body submits its result to
 	// combineOp from inside the task context.
 	newRunner := func(number int, delay time.Duration, result string) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
-			return combineOp.Submit(ctx, result, nil)
+			return combineOp.Submit(ctx, result)
 		}), psg.WithLimits(taskLimit))
 	}
 
@@ -109,7 +109,7 @@ func ExampleCombiner() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, combine at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, combine at 100ms
 	} {
-		err := newRunner(i+1, spec.delay, spec.result).Start(ctx)
+		err := newRunner(i+1, spec.delay, spec.result).Start(ctx, wave)
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}
@@ -119,7 +119,7 @@ func ExampleCombiner() {
 
 	// Wait for all tasks to complete
 	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
-	err := job.CloseAndGatherAll(ctx)
+	err := wave.CloseAndGatherAll(ctx)
 	if err != nil {
 		fmt.Printf("error during gather: %v\n", err)
 	}

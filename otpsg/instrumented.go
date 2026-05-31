@@ -64,26 +64,24 @@ func InstrumentedCombiner[T any](
 }
 
 // Scatter wraps the value-producing task in a one-shot [psg.TaskRunner0]
-// that submits the result to gather, and dispatches it. Pass psg op
-// options (e.g. [psg.WithLimits]) via opts to throttle dispatch. This
-// replaces the pre-Wave-3 pattern of [psg.Gatherer].Start on an
-// instrumented-task value.
+// that submits the result to gather, and dispatches it on wave. Pass
+// psg op options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 //
 // Example:
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFn)
 //	gatherer := otpsg.InstrumentedGather("handle-result", myGatherFn)
-//	err := otpsg.Scatter(ctx, job, gatherer, task)
+//	err := otpsg.Scatter(ctx, wave, gatherer, task)
 func Scatter[T any](
 	ctx context.Context,
-	pool *psg.Pool,
+	wave *psg.Wave,
 	gather psg.Gatherer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewTaskRunner0(pool, psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 		result, err := task(ctx)
-		return gather.Submit(ctx, pool, result, err)
+		return gather.SubmitErr(ctx, wave, result, err)
 	}), opts...)
-	return runner.Start(ctx)
+	return runner.Start(ctx, wave)
 }

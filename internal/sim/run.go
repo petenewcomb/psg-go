@@ -34,12 +34,12 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
 
-	pool := psg.New(ctx)
-	defer pool.CancelAndWait()
+	ctx, wave := psg.NewWave(ctx)
+	defer wave.CancelAndWait()
 
 	c := &controller{
 		Plan:                      plan,
-		Pool:                      pool,
+		Wave:                      wave,
 		TaskLimiters:              make([]psg.Limiter, len(plan.TaskLimiters)),
 		CombinerPool:              nil, // lazily constructed in ensurePools
 		CombinerLimiters:          make([]psg.Limiter, len(plan.CombinerLimiters)),
@@ -65,7 +65,7 @@ type simValue struct {
 // objects backing the Plan's static vocabulary.
 type controller struct {
 	Plan             *Plan
-	Pool             *psg.Pool
+	Wave             *psg.Wave
 	TaskLimiters     []psg.Limiter
 	CombinerPool     *psg.CombinerPool
 	CombinerLimiters []psg.Limiter
@@ -130,7 +130,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	// Drain.
 	chk := assert.New(t)
 	for {
-		err := c.Pool.CloseAndGatherAll(ctx)
+		err := c.Wave.CloseAndGatherAll(ctx)
 		if err == nil {
 			break
 		}
@@ -198,7 +198,7 @@ func (c *controller) ensurePools() {
 		}
 	})
 	c.combPoolOnce.Do(func() {
-		c.CombinerPool = psg.NewCombinerPool(c.Pool)
+		c.CombinerPool = psg.NewCombinerPool(c.Wave.Pool())
 	})
 }
 
@@ -276,7 +276,7 @@ func (c *controller) newTaskRunner(t assert.TestingT, runner *TaskRunner) psg.Ta
 		}
 		return nil
 	})
-	return psg.NewTaskRunner0(c.Pool, body, opts...)
+	return psg.NewTaskRunner0(body, opts...)
 }
 
 // startTask dispatches a Plan TaskRunner. The TaskRunner was pre-built
@@ -288,7 +288,7 @@ func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx
 	chk := assert.New(t)
 	runner := &c.TaskRunners[runnerIdx]
 	for {
-		err := runner.Start(ctx)
+		err := runner.Start(ctx, c.Wave)
 		if err == nil {
 			return
 		}
@@ -321,9 +321,9 @@ func (c *controller) submitTo(
 		var err error
 		switch kind {
 		case SinkCombiner:
-			err = c.Combiners[idx].Submit(ctx, v, valErr)
+			err = c.Combiners[idx].SubmitErr(ctx, v, valErr)
 		case SinkGatherer:
-			err = c.Gatherers[idx].Submit(ctx, c.Pool, v, valErr)
+			err = c.Gatherers[idx].SubmitErr(ctx, c.Wave, v, valErr)
 		default:
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
 			return

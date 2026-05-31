@@ -20,9 +20,8 @@ import (
 //
 //nolint:errcheck,gosec // concise example code for readme
 func Example_hello() {
-	ctx := context.Background()
-	job := psg.New(ctx)
-	defer job.CancelAndWait() // hygiene
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait() // hygiene
 
 	var results []string
 	gatherer := psg.NewGatherer(
@@ -34,15 +33,15 @@ func Example_hello() {
 
 	// Bind a string to a task that submits it to the gatherer after a short delay.
 	newRunner := func(s string) psg.TaskRunner0 {
-		return psg.NewTaskRunner0(job, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewTaskRunner0(psgfn.TaskFunc0(func(ctx context.Context) error {
 			time.Sleep(1 * time.Millisecond)
-			return gatherer.Submit(ctx, job, s, nil)
+			return gatherer.Submit(ctx, wave, s)
 		}))
 	}
 
-	newRunner("Hello").Start(ctx)
-	newRunner("world!").Start(ctx)
+	newRunner("Hello").Start(ctx, wave)
+	newRunner("world!").Start(ctx, wave)
 
-	job.CloseAndGatherAll(ctx)
+	wave.CloseAndGatherAll(ctx)
 	fmt.Println(strings.Join(results, " "))
 }

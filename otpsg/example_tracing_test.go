@@ -31,9 +31,9 @@ func Example_tracing() {
 	ctx, rootSpan := otel.Tracer("example").Start(context.Background(), "process-request")
 	defer rootSpan.End()
 
-	// Create a PSG job
-	job := psg.New(ctx)
-	defer job.CancelAndWait()
+	// Create a PSG wave
+	ctx, wave := psg.NewWave(ctx)
+	defer wave.CancelAndWait()
 
 	// Define a traced task for data loading
 	loadDataTask := otpsg.TracedTask("load-data", func(ctx context.Context) ([]int, error) {
@@ -68,16 +68,16 @@ func Example_tracing() {
 					return nil
 				})
 
-			return otpsg.Scatter(ctx, job, processGather, processDataTask)
+			return otpsg.Scatter(ctx, wave, processGather, processDataTask)
 		})
 
 	// Start the pipeline by loading data
-	if err := otpsg.Scatter(ctx, job, dataGather, loadDataTask); err != nil {
+	if err := otpsg.Scatter(ctx, wave, dataGather, loadDataTask); err != nil {
 		fmt.Println("Error:", err)
 	}
 
 	// Wait for all tasks to complete
-	if err := job.CloseAndGatherAll(ctx); err != nil {
+	if err := wave.CloseAndGatherAll(ctx); err != nil {
 		fmt.Println("Error during gather:", err)
 	}
 
@@ -101,10 +101,9 @@ func Example_instrumentedTask() {
 		_ = tp.Shutdown(context.Background())
 	}()
 
-	// Create a PSG job
-	ctx := context.Background()
-	job := psg.New(ctx)
-	defer job.CancelAndWait()
+	// Create a PSG wave
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
 
 	// Create fully instrumented task and gather
 	task := otpsg.InstrumentedTask("calculate-sum",
@@ -123,13 +122,13 @@ func Example_instrumentedTask() {
 		})
 
 	// Use convenience scatter function
-	err := otpsg.Scatter(ctx, job, gatherer, task)
+	err := otpsg.Scatter(ctx, wave, gatherer, task)
 	if err != nil {
 		fmt.Println("Error:", err)
 	}
 
 	// Wait for all tasks to complete
-	if err := job.CloseAndGatherAll(ctx); err != nil {
+	if err := wave.CloseAndGatherAll(ctx); err != nil {
 		fmt.Println("Error during gather:", err)
 	}
 

@@ -19,13 +19,12 @@ import (
 // Example demonstrates workflow context for API request handling where
 // client disconnection cancels only that request's operations.
 func Example() {
-	// Create a long-running job for the API server
-	job := psg.New(context.Background())
-	defer job.CancelAndWait()
+	// Create a long-running wave for the API server
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
 
-	// Create a task pool
-	pool := job
 	poolLimit := psg.NewSemaphore(10)
+	_ = ctx
 
 	// Track completed operations for ordered output
 	var mu sync.Mutex
@@ -48,7 +47,7 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		runner := psgwf.NewGenericTaskRunner(pool, resultGather, wf,
+		runner := psgwf.NewGenericTaskRunner(resultGather, wf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				select {
 				case <-time.After(sleepTime):
@@ -57,7 +56,7 @@ func Example() {
 					return "", fmt.Errorf("[%s] cancelled", requestID)
 				}
 			}, psg.WithLimits(poolLimit))
-		err := runner.Start(clientCtx)
+		err := runner.Start(clientCtx, wave)
 
 		if err != nil {
 			mu.Lock()
@@ -76,8 +75,8 @@ func Example() {
 	defer cancel2()
 	handleRequest("req2", ctx2, 50*time.Millisecond)
 
-	// Close the job and gather all results
-	if err := job.CloseAndGatherAll(context.Background()); err != nil {
+	// Close the wave and gather all results
+	if err := wave.CloseAndGatherAll(context.Background()); err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
 

@@ -15,45 +15,41 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// TaskRunner0 dispatches a no-argument [psgfn.Task0] onto its Pool's
-// worker pool. Each call to [TaskRunner0.Start] (or
-// [TaskRunner0.TryStart]) launches one Run invocation. Result delivery
-// is the task body's responsibility — Run calls Submit on whatever
-// downstream sinks it captures. If Run returns a non-nil error, the
-// framework routes it through an internal sink so it surfaces via the
-// owning Pool's [Pool.GatherAll].
+// TaskRunner0 dispatches a no-argument [psgfn.Task0] onto a [Wave]'s
+// underlying worker pool. Each call to [TaskRunner0.Start] (or
+// [TaskRunner0.TryStart]) launches one Run invocation on the supplied
+// Wave. Result delivery is the task body's responsibility — Run calls
+// Submit on whatever downstream sinks it captures. If Run returns a
+// non-nil error, the framework routes it through an internal sink so
+// it surfaces via the Wave's GatherAll path.
 //
 // Concurrency limiting: pass [WithLimits] at construction time to bind
 // a [Limiter] (e.g. via [NewSemaphore]) that caps the number of
 // in-flight dispatches.
 //
 // Thread-safety and copying: a TaskRunner value is designed to be
-// copied. All copies share the same binding to Pool, task, limiter
-// (if any), and internal error sink, so they can be passed by value or
-// stored in structures and used concurrently.
+// copied. All copies share the same binding to task, limiter (if any),
+// and internal error sink, so they can be passed by value or stored in
+// structures and used concurrently. The Wave is supplied per Start
+// call, not at construction time.
 type TaskRunner0 struct {
-	pool     *Pool
 	task     psgfn.Task0
 	limiter  Limiter
 	errSink  Gatherer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork0]
 }
 
-// NewTaskRunner0 binds a [psgfn.Task0] to a [Pool] and returns a
+// NewTaskRunner0 wraps a [psgfn.Task0] in a Wave-independent
 // [TaskRunner0]. Pass [WithLimits] in opts to bind one or more
 // [Limiter]s that throttle dispatch. The framework manages an internal
 // error sink that surfaces unexpected errors returned by Task.Run
-// through the Pool's GatherAll path.
-func NewTaskRunner0(pool *Pool, task psgfn.Task0, opts ...OpOption) TaskRunner0 {
-	if pool == nil {
-		panic("pool must be non-nil")
-	}
+// through the dispatching Wave's GatherAll path.
+func NewTaskRunner0(task psgfn.Task0, opts ...OpOption) TaskRunner0 {
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return TaskRunner0{
-		pool:     pool,
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -61,30 +57,34 @@ func NewTaskRunner0(pool *Pool, task psgfn.Task0, opts ...OpOption) TaskRunner0 
 	}
 }
 
-// Start launches the task on a worker goroutine. Before launching, Start
-// applies backpressure by gathering some already-completed tasks. If the
-// target is a [TaskPool] at its concurrency limit, Start blocks until a
-// slot becomes available. The ctx may be used to cancel both gathering
-// and launch; only the ctx associated with the task's Pool is passed
-// to Run.
+// Start launches the task on wave's worker goroutine. Before launching,
+// Start applies backpressure by gathering some already-completed tasks.
+// If a Limiter is at its concurrency limit, Start blocks until a slot
+// becomes available. The ctx may be used to cancel both gathering and
+// launch; only the ctx associated with the wave's Pool is passed to
+// Run.
 //
 // Returns a non-nil error if the ctx is canceled or if a gather function
 // returns an error. If the returned error is non-nil, the task will not
 // have been launched.
 //
 // WARNING: Start must not be called from inside a Task launched on the
-// same Pool, since this can deadlock when a concurrency limit is
+// same wave, since this can deadlock when a concurrency limit is
 // reached. Call Start from an associated Gather or Accumulate body
 // instead. Start attempts to detect this and panics, but the detection
 // works only when the ctx passed to Start descends from the ctx passed
 // to Run.
 //
 //nolint:contextcheck // background context used only for tracing
-func (r TaskRunner0) Start(ctx context.Context) error {
+func (r TaskRunner0) Start(ctx context.Context, wave *Wave) error {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	traceRegion := "TaskRunner0.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.pool)
+	pool := wave.pool
+	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -92,21 +92,25 @@ func (r TaskRunner0) Start(ctx context.Context) error {
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(group, time.Time{})
+	work := r.newScatterWork(pool, group, time.Time{})
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch the task without blocking past deadline.
-// Returns (true, nil) on success, (false, nil) if a [Limiter] held the
-// dispatch back and the deadline expired before a permit became
-// available, or (false, non-nil) for any other failure.
+// TryStart attempts to launch the task on wave without blocking past
+// deadline. Returns (true, nil) on success, (false, nil) if a [Limiter]
+// held the dispatch back and the deadline expired before a permit
+// became available, or (false, non-nil) for any other failure.
 //
 //nolint:contextcheck // background context used only for tracing
-func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, error) {
+func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time, wave *Wave) (bool, error) {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	traceRegion := "TaskRunner0.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.pool)
+	pool := wave.pool
+	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -114,7 +118,7 @@ func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, er
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(group, deadline)
+	work := r.newScatterWork(pool, group, deadline)
 	ok, err := meta.TryExecuteNow(ctx, deadline, work)
 	if !ok {
 		work.Free()
@@ -122,21 +126,21 @@ func (r TaskRunner0) TryStart(ctx context.Context, deadline time.Time) (bool, er
 	return ok, err
 }
 
-func (r TaskRunner0) newScatterWork(group workq.GroupID, deadline time.Time) *taskRunnerScatterWork {
-	inner := r.newTask(group)
-	taskWork := r.pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
-	postWork := r.pool.newTaskPostWork(group, deadline, taskWork)
+func (r TaskRunner0) newScatterWork(pool *Pool, group workq.GroupID, deadline time.Time) *taskRunnerScatterWork {
+	inner := r.newTask(pool, group)
+	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if r.limiter.impl != nil {
-		gated = newLimiterScatterWork(r.pool, deadline, gated, r.limiter)
+		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
 	}
-	return newTaskRunnerScatterWork(r.pool, deadline, gated)
+	return newTaskRunnerScatterWork(pool, deadline, gated)
 }
 
-func (r TaskRunner0) newTask(group workq.GroupID) boundTask {
+func (r TaskRunner0) newTask(pool *Pool, group workq.GroupID) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
-	w.job = r.pool
+	w.job = pool
 	w.group = group
 	w.task = r.task
 	w.errSink = r.errSink
@@ -187,28 +191,23 @@ func (w *taskRunnerWork0) Free() {
 	w.pool.Put(w)
 }
 
-// TaskRunner[T] dispatches a single-argument [psgfn.Task[T]] onto its
-// Pool's worker pool. See [TaskRunner0] for shared semantics.
+// TaskRunner[T] dispatches a single-argument [psgfn.Task[T]] onto a
+// [Wave]'s worker pool. See [TaskRunner0] for shared semantics.
 type TaskRunner[T any] struct {
-	pool     *Pool
 	task     psgfn.Task[T]
 	limiter  Limiter
 	errSink  Gatherer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork[T]]
 }
 
-// NewTaskRunner binds a [psgfn.Task[T]] to a [Pool] and returns a
+// NewTaskRunner wraps a [psgfn.Task[T]] in a Wave-independent
 // [TaskRunner[T]]. See [NewTaskRunner0].
-func NewTaskRunner[T any](pool *Pool, task psgfn.Task[T], opts ...OpOption) TaskRunner[T] {
-	if pool == nil {
-		panic("pool must be non-nil")
-	}
+func NewTaskRunner[T any](task psgfn.Task[T], opts ...OpOption) TaskRunner[T] {
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return TaskRunner[T]{
-		pool:     pool,
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -216,13 +215,17 @@ func NewTaskRunner[T any](pool *Pool, task psgfn.Task[T], opts ...OpOption) Task
 	}
 }
 
-// Start launches Run(ctx, arg) on a worker goroutine. See
+// Start launches Run(ctx, arg) on wave's worker goroutine. See
 // [TaskRunner0.Start] for backpressure and ctx behavior.
-func (r TaskRunner[T]) Start(ctx context.Context, arg T) error {
+func (r TaskRunner[T]) Start(ctx context.Context, wave *Wave, arg T) error {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	traceRegion := "TaskRunner.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.pool)
+	pool := wave.pool
+	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -230,17 +233,21 @@ func (r TaskRunner[T]) Start(ctx context.Context, arg T) error {
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(group, time.Time{}, arg)
+	work := r.newScatterWork(pool, group, time.Time{}, arg)
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch Run(ctx, arg) without blocking. See
-// [TaskRunner0.TryStart].
-func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (bool, error) {
+// TryStart attempts to launch Run(ctx, arg) on wave without blocking.
+// See [TaskRunner0.TryStart].
+func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, wave *Wave, arg T) (bool, error) {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	traceRegion := "TaskRunner.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.pool)
+	pool := wave.pool
+	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -248,7 +255,7 @@ func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) 
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(group, deadline, arg)
+	work := r.newScatterWork(pool, group, deadline, arg)
 	ok, err := meta.TryExecuteNow(ctx, deadline, work)
 	if !ok {
 		work.Free()
@@ -256,21 +263,23 @@ func (r TaskRunner[T]) TryStart(ctx context.Context, deadline time.Time, arg T) 
 	return ok, err
 }
 
-func (r TaskRunner[T]) newScatterWork(group workq.GroupID, deadline time.Time, arg T) *taskRunnerScatterWork {
-	inner := r.newTask(group, arg)
-	taskWork := r.pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
-	postWork := r.pool.newTaskPostWork(group, deadline, taskWork)
+func (r TaskRunner[T]) newScatterWork(
+	pool *Pool, group workq.GroupID, deadline time.Time, arg T,
+) *taskRunnerScatterWork {
+	inner := r.newTask(pool, group, arg)
+	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if r.limiter.impl != nil {
-		gated = newLimiterScatterWork(r.pool, deadline, gated, r.limiter)
+		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
 	}
-	return newTaskRunnerScatterWork(r.pool, deadline, gated)
+	return newTaskRunnerScatterWork(pool, deadline, gated)
 }
 
-func (r TaskRunner[T]) newTask(group workq.GroupID, arg T) boundTask {
+func (r TaskRunner[T]) newTask(pool *Pool, group workq.GroupID, arg T) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
-	w.job = r.pool
+	w.job = pool
 	w.group = group
 	w.task = r.task
 	w.arg = arg
@@ -326,27 +335,22 @@ func (w *taskRunnerWork[T]) Free() {
 }
 
 // TaskRunner2[T1, T2] dispatches a two-argument [psgfn.Task2[T1, T2]]
-// onto its Pool's worker pool. See [TaskRunner0] for shared semantics.
+// onto a [Wave]'s worker pool. See [TaskRunner0] for shared semantics.
 type TaskRunner2[T1, T2 any] struct {
-	pool     *Pool
 	task     psgfn.Task2[T1, T2]
 	limiter  Limiter
 	errSink  Gatherer[struct{}]
 	workPool *omnipool.Pool[taskRunnerWork2[T1, T2]]
 }
 
-// NewTaskRunner2 binds a [psgfn.Task2[T1, T2]] to a [Pool] and returns
-// a [TaskRunner2[T1, T2]]. See [NewTaskRunner0].
-func NewTaskRunner2[T1, T2 any](pool *Pool, task psgfn.Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2] {
-	if pool == nil {
-		panic("pool must be non-nil")
-	}
+// NewTaskRunner2 wraps a [psgfn.Task2[T1, T2]] in a Wave-independent
+// [TaskRunner2[T1, T2]]. See [NewTaskRunner0].
+func NewTaskRunner2[T1, T2 any](task psgfn.Task2[T1, T2], opts ...OpOption) TaskRunner2[T1, T2] {
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return TaskRunner2[T1, T2]{
-		pool:     pool,
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -354,13 +358,17 @@ func NewTaskRunner2[T1, T2 any](pool *Pool, task psgfn.Task2[T1, T2], opts ...Op
 	}
 }
 
-// Start launches Run(ctx, arg1, arg2) on a worker goroutine. See
+// Start launches Run(ctx, arg1, arg2) on wave's worker goroutine. See
 // [TaskRunner0.Start].
-func (r TaskRunner2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error {
+func (r TaskRunner2[T1, T2]) Start(ctx context.Context, wave *Wave, arg1 T1, arg2 T2) error {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	traceRegion := "TaskRunner2.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.pool)
+	pool := wave.pool
+	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -368,17 +376,23 @@ func (r TaskRunner2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error 
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(group, time.Time{}, arg1, arg2)
+	work := r.newScatterWork(pool, group, time.Time{}, arg1, arg2)
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch Run(ctx, arg1, arg2) without blocking.
-// See [TaskRunner0.TryStart].
-func (r TaskRunner2[T1, T2]) TryStart(ctx context.Context, deadline time.Time, arg1 T1, arg2 T2) (bool, error) {
+// TryStart attempts to launch Run(ctx, arg1, arg2) on wave without
+// blocking. See [TaskRunner0.TryStart].
+func (r TaskRunner2[T1, T2]) TryStart(
+	ctx context.Context, deadline time.Time, wave *Wave, arg1 T1, arg2 T2,
+) (bool, error) {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	traceRegion := "TaskRunner2.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := vetStart(ctx, r.pool)
+	pool := wave.pool
+	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -386,7 +400,7 @@ func (r TaskRunner2[T1, T2]) TryStart(ctx context.Context, deadline time.Time, a
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(group, deadline, arg1, arg2)
+	work := r.newScatterWork(pool, group, deadline, arg1, arg2)
 	ok, err := meta.TryExecuteNow(ctx, deadline, work)
 	if !ok {
 		work.Free()
@@ -395,22 +409,22 @@ func (r TaskRunner2[T1, T2]) TryStart(ctx context.Context, deadline time.Time, a
 }
 
 func (r TaskRunner2[T1, T2]) newScatterWork(
-	group workq.GroupID, deadline time.Time, arg1 T1, arg2 T2,
+	pool *Pool, group workq.GroupID, deadline time.Time, arg1 T1, arg2 T2,
 ) *taskRunnerScatterWork {
-	inner := r.newTask(group, arg1, arg2)
-	taskWork := r.pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
-	postWork := r.pool.newTaskPostWork(group, deadline, taskWork)
+	inner := r.newTask(pool, group, arg1, arg2)
+	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if r.limiter.impl != nil {
-		gated = newLimiterScatterWork(r.pool, deadline, gated, r.limiter)
+		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
 	}
-	return newTaskRunnerScatterWork(r.pool, deadline, gated)
+	return newTaskRunnerScatterWork(pool, deadline, gated)
 }
 
-func (r TaskRunner2[T1, T2]) newTask(group workq.GroupID, arg1 T1, arg2 T2) boundTask {
+func (r TaskRunner2[T1, T2]) newTask(pool *Pool, group workq.GroupID, arg1 T1, arg2 T2) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
-	w.job = r.pool
+	w.job = pool
 	w.group = group
 	w.task = r.task
 	w.arg1 = arg1
@@ -471,7 +485,7 @@ func (w *taskRunnerWork2[T1, T2]) Free() {
 
 // newTaskErrSink returns a Gatherer[struct{}] whose handler returns
 // the input error as-is, surfacing unexpected Task.Run errors via the
-// Pool's GatherAll path.
+// Wave's GatherAll path.
 func newTaskErrSink() Gatherer[struct{}] {
 	return NewGatherer(func(ctx context.Context, _ struct{}, err error) error {
 		return err

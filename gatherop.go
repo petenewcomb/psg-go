@@ -14,19 +14,24 @@ import (
 	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// Gatherer is a terminal sink: values arrive via Submit and are delivered
-// to the user-supplied gather function during Pool.Gather / Pool.GatherAll.
-// Task dispatch lives separately on [TaskRunner] — a Gatherer never runs
+// Gatherer is a terminal sink: values arrive via [Gatherer.Submit] /
+// [Gatherer.SubmitErr] and are dispatched to the user-supplied gather
+// function during the supplied Wave's Gather / GatherAll. Task
+// dispatch lives separately on [TaskRunner] — a Gatherer never runs
 // tasks of its own.
 //
-// Thread-safety and copying: a Gatherer value is designed to be copied.
-// All copies share the same gather function binding, so they can be passed
-// by value to goroutines or stored in structures and used concurrently.
+// Thread-safety and copying: a Gatherer value is designed to be
+// copied. All copies share the same gather function binding, so they
+// can be passed by value to goroutines or stored in structures and
+// used concurrently.
 type Gatherer[T any] struct {
 	gatherFn psgfn.Gather[T]
 	workPool *omnipool.Pool[gatherWork[T]]
 }
 
+// NewGatherer binds a Gather handler. The Gatherer is Wave-
+// independent: callers supply a [Wave] at each [Gatherer.Submit] /
+// [Gatherer.SubmitErr] call.
 func NewGatherer[T any](
 	gatherFn psgfn.Gather[T],
 ) Gatherer[T] {
@@ -40,16 +45,33 @@ func NewGatherer[T any](
 }
 
 // Submit posts a value to the Gatherer's queue for later dispatch via
-// Pool.Gather / Pool.GatherAll.
+// the Wave's Gather / GatherAll. Convenience sugar for SubmitErr with
+// a nil error.
 func (g Gatherer[T]) Submit(
 	ctx context.Context,
-	target *Pool,
+	wave *Wave,
+	value T,
+) error {
+	return g.SubmitErr(ctx, wave, value, nil)
+}
+
+// SubmitErr posts a (value, err) pair to the Gatherer's queue for
+// later dispatch by the Wave's Gather / GatherAll. err is delivered
+// to the gather handler alongside value; use nil when reporting a
+// successful result.
+func (g Gatherer[T]) SubmitErr(
+	ctx context.Context,
+	wave *Wave,
 	value T,
 	err error,
 ) error {
-	traceRegion := "Gatherer.Submit"
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
+	traceRegion := "Gatherer.SubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
+	target := wave.pool
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
@@ -62,18 +84,33 @@ func (g Gatherer[T]) Submit(
 	return g.submit(ctx, meta, target, group, value, err)
 }
 
-// TrySubmit attempts to post values to be gathered by the gather queue.
-// Like Submit, but returns instead of blocking if queuing would be required.
+// TrySubmit attempts to Submit without blocking past deadline. See
+// [Gatherer.Submit].
 func (g Gatherer[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
-	target *Pool,
+	wave *Wave,
+	value T,
+) (bool, error) {
+	return g.TrySubmitErr(ctx, deadline, wave, value, nil)
+}
+
+// TrySubmitErr attempts to SubmitErr without blocking past deadline.
+// See [Gatherer.SubmitErr].
+func (g Gatherer[T]) TrySubmitErr(
+	ctx context.Context,
+	deadline time.Time,
+	wave *Wave,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "Gatherer.TrySubmit"
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
+	traceRegion := "Gatherer.TrySubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
+	target := wave.pool
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()

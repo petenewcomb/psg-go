@@ -13,9 +13,9 @@ type GenericFunnelOp[T, C any] psg.Funnel[result[T, C]]
 type FunnelOp[T any] = GenericFunnelOp[T, context.Context]
 
 // NewFunnelOp creates a psg.Funnel that propagates workflow contexts
-// through the funnel chain. The user's Accumulator body routes
+// through the funnel chain. The user's psg.Accumulator body routes
 // downstream submissions itself; the Workflow ref/unref balancing
-// happens inside the wrapped Accumulator.
+// happens inside the wrapped psg.Accumulator.
 //
 // Named NewFunnelOp (not NewFunnel) within psgwf to avoid clashing
 // with the distinct Funnel interface alias in psgwf/funnel.go.

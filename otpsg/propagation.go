@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
+
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -57,7 +57,7 @@ func PropagateSkim[T any](
 	wave *psg.Wave,
 	skimFn func(ctx context.Context, result T, err error) error,
 ) psg.Skimmer[PropagatedResult[T]] {
-	return psg.NewSkimmer(wave, psgfn.HandlerFunc[PropagatedResult[T]](
+	return psg.NewSkimmer(wave, psg.HandlerFunc[PropagatedResult[T]](
 		func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 			// Create context with propagated trace data
 			propagatedCtx := ctx
@@ -72,17 +72,17 @@ func PropagateSkim[T any](
 }
 
 // PropagateFunnel wraps an accumulator factory to create accumulators that
-// propagate trace context. After Wave 2 the Accumulator has no output type;
+// propagate trace context. After Wave 2 the psg.Accumulator has no output type;
 // the wrapper just rehydrates the trace span from the incoming
 // PropagatedResult[T] into ctx so any Submit calls inside the user's
 // Accumulate body carry the right trace context downstream.
 func PropagateFunnel[T any](
-	funnelFactory psgfn.FunnelFactory[T],
-) psgfn.FunnelFactory[PropagatedResult[T]] {
-	return func() psgfn.Accumulator[PropagatedResult[T]] {
-		innerFunnel := funnelFactory()
+	funnelFactory psg.AccumulatorFactory[T],
+) psg.AccumulatorFactory[PropagatedResult[T]] {
+	return psg.AccumulatorFactoryFunc[PropagatedResult[T]](func() psg.Accumulator[PropagatedResult[T]] {
+		innerFunnel := funnelFactory.NewAccumulator()
 
-		return psgfn.FuncAccumulator[PropagatedResult[T]]{
+		return psg.FuncAccumulator[PropagatedResult[T]]{
 			AccumulateFn: func(
 				ctx context.Context,
 				input PropagatedResult[T],
@@ -98,5 +98,5 @@ func PropagateFunnel[T any](
 			},
 			FlushFn: innerFunnel.Flush,
 		}
-	}
+	})
 }

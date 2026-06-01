@@ -35,17 +35,17 @@ func TestBySimulation(t *testing.T) {
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		// planConfig.Task.UseFunnel.Probability = 0
+		// planConfig.psg.Task.UseFunnel.Probability = 0
 		// planConfig.Funnel.Flush.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.Task.Func.ReturnError.Probability = 0
+		// planConfig.psg.Task.Func.ReturnError.Probability = 0
 		// planConfig.Funnel.Func.ReturnError.Probability = 0
 		// planConfig.Skim.Func.ReturnError.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Subjob.MaxDepth = 0
-		// planConfig.Task.Func.Subjob.Add.Probability = 0
+		// planConfig.psg.Task.Func.Subjob.Add.Probability = 0
 		// planConfig.Funnel.Func.Subjob.Add.Probability = 0
 		// planConfig.Skim.Func.Subjob.Add.Probability = 0
 
@@ -58,7 +58,7 @@ func TestBySimulation(t *testing.T) {
 		// planConfig.FunnelPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.Task.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.psg.Task.Func.SelfTime = sim.BiasedDurationConfig{}
 		// planConfig.Funnel.Func.SelfTime = sim.BiasedDurationConfig{}
 		// planConfig.Skim.Func.SelfTime = sim.BiasedDurationConfig{}
 

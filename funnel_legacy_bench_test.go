@@ -5,7 +5,7 @@
 // Licensed under the MIT License.
 
 // This file holds the Wave-2-era benchmark suite for the funnel.
-// Wave 3 reshaped Task / Skimmer / Funnel enough that the benchmark
+// Wave 3 reshaped psg.Task / Skimmer / Funnel enough that the benchmark
 // requires a deliberate redesign (see REFACTOR_PLAN.md: funnel-
 // benchmark requirements session). To keep Wave 3 focused, the entire
 // benchmark is gated behind the `psg_wave3_legacy_bench` build tag and
@@ -29,7 +29,7 @@ import (
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/trace"
-	"github.com/petenewcomb/psg-go/psgfn"
+
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
 )
@@ -49,7 +49,7 @@ type benchmarkTask struct {
 	funnelSubtaskBudget       int
 	skimSubtaskBudget         int
 	cumulativeNominalDuration time.Duration
-	executeFn                 psgfn.Task[benchmarkTaskResult]
+	executeFn                 psg.Task[benchmarkTaskResult]
 }
 
 var benchmarkTaskPool = omnipool.For[benchmarkTask]()
@@ -58,7 +58,7 @@ func newBenchmarkTaskFn(
 	startTime time.Time,
 	depth, funnelSubtaskBudget, skimSubtaskBudget int,
 	cumulativeNominalDuration time.Duration,
-) psgfn.Task[benchmarkTaskResult] {
+) psg.Task[benchmarkTaskResult] {
 	task := benchmarkTaskPool.Get()
 	task.startTime = startTime
 	task.depth = depth
@@ -120,10 +120,10 @@ type benchmarkFunnel struct {
 	workloadDuration     time.Duration
 	flushPeriod          time.Duration
 	scatter              func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
-		task psgfn.Task[benchmarkTaskResult]) (bool, error)
+		task psg.Task[benchmarkTaskResult]) (bool, error)
 	target    psg.TaskPoolOrJob
 	newTaskFn func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
-		cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult]
+		cumulativeNominalDuration time.Duration) psg.Task[benchmarkTaskResult]
 	idealFunnelsPerSkim int
 
 	// Downstream sink captured for Submit-on-Flush (Wave 2 reshape).
@@ -156,10 +156,10 @@ func newBenchmarkFunnel(
 	workloadDuration time.Duration,
 	flushPeriod time.Duration,
 	scatter func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
-		task psgfn.Task[benchmarkTaskResult]) (bool, error),
+		task psg.Task[benchmarkTaskResult]) (bool, error),
 	target psg.TaskPoolOrJob,
 	newTaskFn func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
-		cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult],
+		cumulativeNominalDuration time.Duration) psg.Task[benchmarkTaskResult],
 	idealFunnelsPerSkim int,
 	skimmer psg.Skimmer[benchmarkFunneldResult],
 	job *psg.Pool,
@@ -472,9 +472,9 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 						var maxCumulativeNominalDuration time.Duration
 
 						var newTaskFn func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
-							cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult]
+							cumulativeNominalDuration time.Duration) psg.Task[benchmarkTaskResult]
 						var scatter func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
-							task psgfn.Task[benchmarkTaskResult]) (bool, error)
+							task psg.Task[benchmarkTaskResult]) (bool, error)
 
 						skimFn := func(ctx context.Context, funnelRes benchmarkFunneldResult, err error) error {
 							if err != nil {
@@ -590,9 +590,9 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 						// Setup processing - either skim-only or with funnel
 						if funnelLimit == 0 {
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
-								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
+								task psg.Task[benchmarkTaskResult]) (bool, error) {
 								// Tests to make sure that NewSkimmer does not incur allocation overhead
-								skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[benchmarkTaskResult](skimFnAdapter))
+								skimmer := psg.NewSkimmer(wave, psg.NewHandler(skimFnAdapter))
 								if deadline.IsZero() {
 									return true, skimmer.Start(ctx, target, task)
 								}
@@ -600,8 +600,8 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 							}
 						} else {
 							funnelPool := psg.NewFunnelPool(job, psgopt.WithMaxConcurrency(funnelLimit))
-							skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[benchmarkFunneldResult](skimFn))
-							funnelFactory := func() psgfn.Accumulator[benchmarkTaskResult] {
+							skimmer := psg.NewSkimmer(wave, psg.NewHandler(skimFn))
+							funnelFactory := func() psg.Accumulator[benchmarkTaskResult] {
 								return newBenchmarkFunnel(
 									&testStartTime,
 									&testEndTime,
@@ -623,7 +623,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 							defer funnelOp.Close()
 
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
-								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
+								task psg.Task[benchmarkTaskResult]) (bool, error) {
 								localFunnelOp := funnelOp
 								if idealFunnelsPerSkim == 1 {
 									// Tests to make sure that NewFunnel does not incur allocation overhead
@@ -639,7 +639,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 
 						var totalTasksLaunched atomic.Int64
 						newTaskFn = func(startTime time.Time, depth, funnelSubtaskBudget, skimSubtaskBudget int,
-							cumulativeNominalDuration time.Duration) psgfn.Task[benchmarkTaskResult] {
+							cumulativeNominalDuration time.Duration) psg.Task[benchmarkTaskResult] {
 							totalTasksLaunched.Add(1)
 							return newBenchmarkTaskFn(startTime, depth, funnelSubtaskBudget, skimSubtaskBudget, cumulativeNominalDuration)
 						}

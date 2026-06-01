@@ -11,7 +11,6 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/workq"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // Skimmer is a terminal sink: values arrive via [Skimmer.Submit] /
@@ -26,11 +25,11 @@ import (
 // used concurrently.
 type Skimmer[T any] struct {
 	wave     *Wave
-	handler  psgfn.Handler[T]
+	handler  Handler[T]
 	workPool *omnipool.Pool[skimWork[T]]
 }
 
-// NewSkimmer binds a [psgfn.Handler] to wave for value+err dispatch
+// NewSkimmer binds a [Handler] to wave for value+err dispatch
 // during that Wave's drain. wave may be nil — in that case the
 // Skimmer is wave-independent and resolves the target wave at each
 // dispatch from the dispatching ctx (which must descend from a
@@ -38,12 +37,12 @@ type Skimmer[T any] struct {
 // dispatching wave the framework has stamped). This enables one
 // Skimmer instance to be reused across many waves.
 //
-// For closure-based handlers, wrap in [psgfn.HandlerFunc] at the
+// For closure-based handlers, wrap in [HandlerFunc] at the
 // call site; struct implementations of Handler[T] support the
 // alloc-free hot path.
 func NewSkimmer[T any](
 	wave *Wave,
-	handler psgfn.Handler[T],
+	handler Handler[T],
 ) Skimmer[T] {
 	if handler == nil {
 		panic("handler must be non-nil")
@@ -55,6 +54,33 @@ func NewSkimmer[T any](
 	}
 }
 
+// NewFnSkimmer binds a closure-based handler to wave for
+// drain-time dispatch. Convenience wrapper for
+// `NewSkimmer(wave, NewHandler(handle))`. T is inferred from
+// handle's value parameter, sparing the user the [T] annotation.
+// wave may be nil to defer binding to the dispatching ctx; see
+// [NewSkimmer].
+func NewFnSkimmer[T any](
+	wave *Wave,
+	handle func(ctx context.Context, value T, err error) error,
+) Skimmer[T] {
+	return NewSkimmer(wave, NewHandler(handle))
+}
+
+// ErrSkimmer is the [Skimmer][struct{}] case viewed as an err sink
+// — a drain-time sink that processes err results via an
+// err-receiving handler. Typically constructed via [NewErrSkimmer],
+// which pairs with the [ErrHandler] / [ErrHandlerFunc] adapter.
+type ErrSkimmer = Skimmer[struct{}]
+
+// NewErrSkimmer binds an err-receiving handler to wave for
+// drain-time dispatch. Convenience wrapper for
+// `NewSkimmer(wave, NewErrHandler(handle))`. wave may be nil to
+// defer binding to the dispatching ctx; see [NewSkimmer].
+func NewErrSkimmer(wave *Wave, handle func(ctx context.Context, err error) error) ErrSkimmer {
+	return NewSkimmer(wave, NewErrHandler(handle))
+}
+
 // newInternalSkimmer constructs a Skimmer used by the framework for
 // error-routing sinks owned by ops (Launcher, Funnel). It has no
 // Wave because the framework dispatches through it via the
@@ -63,7 +89,7 @@ func NewSkimmer[T any](
 // calling the public Submit / SubmitErr methods on it would
 // dereference a nil wave.
 func newInternalSkimmer[T any](
-	handler psgfn.Handler[T],
+	handler Handler[T],
 ) Skimmer[T] {
 	return Skimmer[T]{
 		handler:  handler,
@@ -84,7 +110,7 @@ func (g Skimmer[T]) Submit(
 // SubmitErr posts an err-only result to the Skimmer's queue. Sugar
 // for SubmitResult(ctx, *new(T), err). Meaningful primarily when
 // T = struct{} (the err-sink pattern, typically paired with
-// [psgfn.ErrHandler]); for other T, the handler receives the
+// [ErrHandler]); for other T, the handler receives the
 // type's zero value alongside the err.
 func (g Skimmer[T]) SubmitErr(
 	ctx context.Context,
@@ -175,7 +201,7 @@ type skimWork[T any] struct {
 	workq.DownstreamWork
 	job     *Pool
 	pool    *omnipool.Pool[skimWork[T]]
-	handler psgfn.Handler[T]
+	handler Handler[T]
 	value   T
 	err     error
 }
@@ -191,7 +217,7 @@ func (w *skimWork[T]) Init(
 	pool *omnipool.Pool[skimWork[T]],
 	group workq.GroupID,
 	job *Pool,
-	handler psgfn.Handler[T],
+	handler Handler[T],
 	value T,
 	err error,
 ) {

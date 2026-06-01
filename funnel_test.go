@@ -5,11 +5,11 @@ package psg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -36,10 +36,66 @@ func (c *passthroughTestAccumulator[T]) Flush(ctx context.Context) error {
 //nolint:thelper // not a test helper, but a factory function for creating a test accumulator
 func newPassthroughTestFunnelFactory[T any](
 	t *testing.T, skimmer psg.Skimmer[T],
-) func() psgfn.Accumulator[T] {
-	return func() psgfn.Accumulator[T] {
+) psg.AccumulatorFactoryFunc[T] {
+	return func() psg.Accumulator[T] {
 		return &passthroughTestAccumulator[T]{t: t, skimmer: skimmer}
 	}
+}
+
+// Verifies that AccumulatorFactory.Close fires when the bound
+// Funnel's refcount hits zero (Funnel.Close on the last reference).
+// Note: this test exercises the unused-factory case (no Submits).
+// When Submits create halfBoundFunnels, the factory remains
+// referenced until those instances are fully flushed and freed —
+// see funnelOp.unref() for the refcount details.
+func TestFunnelFactoryCloseFires(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	funnelPool := psg.NewFunnelPool(wave.Pool())
+	closeCount := 0
+	factory := psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
+		return psg.FuncAccumulator[int]{
+			AccumulateFn: func(_ context.Context, _ int, _ error) (time.Time, error) {
+				return time.Time{}, nil
+			},
+		}
+	}, func() error {
+		closeCount++
+		return nil
+	})
+	funnel := psg.NewFunnel(funnelPool, factory)
+	chk.Equal(0, closeCount, "Close should not fire while funnel is open")
+	funnel.Close()
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.Equal(1, closeCount, "Close should fire exactly once on funnel teardown")
+}
+
+// NewErrFunnel convenience constructor — exercises the
+// err-aggregating funnel shape end-to-end.
+func TestNewErrFunnel(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	funnelPool := psg.NewFunnelPool(wave.Pool())
+	var seen []error
+	funnel := psg.NewErrFunnel(
+		funnelPool,
+		func(_ context.Context, err error) (time.Time, error) {
+			seen = append(seen, err)
+			return time.Time{}, nil
+		},
+		nil, // no flush
+		nil, // no close
+	)
+	var _ psg.ErrFunnel = funnel //nolint:staticcheck // intentional alias type-check
+	chk.NoError(funnel.SubmitErr(ctx, errors.New("first")))
+	chk.NoError(funnel.SubmitErr(ctx, errors.New("second")))
+	funnel.Close()
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.Len(seen, 2)
 }
 
 func TestFunnelScatterNilSkimPanic(t *testing.T) {
@@ -57,23 +113,23 @@ func TestFunnelScatterFromTask(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[int](
+	skimmer := psg.NewFnSkimmer(wave,
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
-	))
+	)
 	funnelPool := psg.NewFunnelPool(wave.Pool())
 	funnelOp := psg.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
+	innerRunner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
 	}))
-	outerRunner := psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -94,33 +150,33 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	skimmer := psg.NewSkimmer(parentWave, psgfn.HandlerFunc[bool](
+	skimmer := psg.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	))
+	)
 	funnelPool := psg.NewFunnelPool(parentWave.Pool())
 	funnelOp := psg.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	outerRunner := psg.NewLauncher(parentWave, psgfn.Task(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subSkimmer := psg.NewSkimmer(subWave, psgfn.HandlerFunc[bool](
+		subSkimmer := psg.NewFnSkimmer(subWave,
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
-		))
-		subRunner := psg.NewLauncher(subWave, psgfn.Task(func(ctx context.Context) error {
+		)
+		subRunner := psg.NewLauncher(subWave, psg.NewTask(func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
 		}))
@@ -144,24 +200,24 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 	ctx, parentWave := psg.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	skimmer := psg.NewSkimmer(parentWave, psgfn.HandlerFunc[bool](
+	skimmer := psg.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	))
+	)
 	funnelPool := psg.NewFunnelPool(parentWave.Pool())
 	funnelOp := psg.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := psg.NewLauncher(parentWave, psgfn.Task(func(ctx context.Context) error {
+	innerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
 		chk.Fail("Should not get here - parent task pool task should not run")
 		return nil
 	}))
-	outerRunner := psg.NewLauncher(parentWave, psgfn.Task(func(ctx context.Context) error {
+	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {

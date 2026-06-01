@@ -12,10 +12,9 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 	"github.com/petenewcomb/psg-go/internal/workq"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
-// Launcher[T] dispatches a [psgfn.Handler[T]] onto a [Wave]'s
+// Launcher[T] dispatches a [Handler[T]] onto a [Wave]'s
 // underlying worker pool. Each dispatch (Submit / Start /
 // TrySubmit / TryStart) invokes Handle once on a worker goroutine.
 // Result delivery is the handler's responsibility — the body calls
@@ -24,9 +23,9 @@ import (
 // internal sink so it surfaces via the Wave's SkimAll path.
 //
 // For the no-arg case (T = struct{}), wrap a func(ctx) error in
-// [psgfn.Task] and dispatch via [Launcher.Start]. For the err-
+// [Task] and dispatch via [Launcher.Start]. For the err-
 // receiving void case, wrap a func(ctx, err) error in
-// [psgfn.ErrHandler]. For arity > 1, define a struct holding the
+// [ErrHandler]. For arity > 1, define a struct holding the
 // fields and use [Launcher][YourStruct].
 //
 // Concurrency limiting: pass [WithLimits] at construction time to
@@ -39,13 +38,13 @@ import (
 // stored in structures and used concurrently.
 type Launcher[T any] struct {
 	wave     *Wave
-	handler  psgfn.Handler[T]
+	handler  Handler[T]
 	limiter  Limiter
-	errSink  Skimmer[struct{}]
+	errSink  ErrSkimmer
 	workPool *omnipool.Pool[launcherWork[T]]
 }
 
-// NewLauncher binds a [psgfn.Handler[T]] to wave. wave may be nil
+// NewLauncher binds a [Handler[T]] to wave. wave may be nil
 // to defer wave binding to the dispatching ctx at Submit / Start
 // time (see [NewSkimmer] for the resolution rules). Pass
 // [WithLimits] in opts to bind one or more [Limiter]s that throttle
@@ -54,7 +53,7 @@ type Launcher[T any] struct {
 // The framework manages an internal error sink that surfaces
 // unexpected errors returned by Handle through the dispatching
 // Wave's SkimAll path.
-func NewLauncher[T any](wave *Wave, handler psgfn.Handler[T], opts ...OpOption) Launcher[T] {
+func NewLauncher[T any](wave *Wave, handler Handler[T], opts ...OpOption) Launcher[T] {
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
@@ -66,6 +65,45 @@ func NewLauncher[T any](wave *Wave, handler psgfn.Handler[T], opts ...OpOption) 
 		errSink:  newTaskErrSink(),
 		workPool: omnipool.For[launcherWork[T]](),
 	}
+}
+
+// NewFnLauncher binds a closure-based handler to wave. Convenience
+// wrapper for `NewLauncher(wave, NewHandler(handle), opts...)`.
+// T is inferred from handle's value parameter, sparing the user
+// the [T] annotation. wave may be nil to defer binding to the
+// dispatching ctx; see [NewLauncher].
+func NewFnLauncher[T any](
+	wave *Wave,
+	handle func(ctx context.Context, value T, err error) error,
+	opts ...OpOption,
+) Launcher[T] {
+	return NewLauncher(wave, NewHandler(handle), opts...)
+}
+
+// TaskLauncher is the [Launcher][struct{}] case — a launcher for
+// no-arg task bodies (typically constructed via [NewTaskLauncher],
+// which pairs with the [Task] / [TaskFunc] no-input adapter).
+type TaskLauncher = Launcher[struct{}]
+
+// NewTaskLauncher binds a no-arg task body to wave. Convenience
+// wrapper for `NewLauncher(wave, NewTask(task), opts...)`. wave may
+// be nil to defer binding to the dispatching ctx; see [NewLauncher].
+func NewTaskLauncher(wave *Wave, task func(ctx context.Context) error, opts ...OpOption) TaskLauncher {
+	return NewLauncher(wave, NewTask(task), opts...)
+}
+
+// ErrLauncher is the [Launcher][struct{}] case viewed as an err
+// sink — same underlying type as [TaskLauncher], named for intent.
+// Typically constructed via [NewErrLauncher], which pairs with the
+// [ErrHandler] / [ErrHandlerFunc] err-receiving adapter.
+type ErrLauncher = Launcher[struct{}]
+
+// NewErrLauncher binds an err-receiving handler to wave.
+// Convenience wrapper for
+// `NewLauncher(wave, NewErrHandler(handle), opts...)`. wave may be
+// nil to defer binding to the dispatching ctx; see [NewLauncher].
+func NewErrLauncher(wave *Wave, handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher {
+	return NewLauncher(wave, NewErrHandler(handle), opts...)
 }
 
 // Submit dispatches Handle(ctx, value, nil) on the bound Wave's
@@ -94,7 +132,7 @@ func (r Launcher[T]) Submit(ctx context.Context, value T) error {
 // SubmitErr dispatches Handle(ctx, *new(T), err) on the bound
 // Wave's worker pool. Sugar for SubmitResult(ctx, *new(T), err).
 // Meaningful primarily when T = struct{} (the err-sink pattern,
-// typically paired with [psgfn.ErrHandler]); for other T, the
+// typically paired with [ErrHandler]); for other T, the
 // handler receives the type's zero value alongside the err.
 func (r Launcher[T]) SubmitErr(ctx context.Context, err error) error {
 	var zero T
@@ -143,7 +181,7 @@ func (r Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, va
 }
 
 // Start is sugar for Submit(ctx, *new(T)). Meaningful primarily
-// when T's zero value is conventional (T = struct{} with a [psgfn.Task]
+// when T's zero value is conventional (T = struct{} with a [Task]
 // handler is the common case); for other T, Start dispatches with
 // the type's zero value.
 func (r Launcher[T]) Start(ctx context.Context) error {
@@ -217,10 +255,10 @@ type launcherWork[T any] struct {
 	pool      *omnipool.Pool[launcherWork[T]]
 	job       *Pool
 	group     workq.GroupID
-	handler   psgfn.Handler[T]
+	handler   Handler[T]
 	value     T
 	callerErr error
-	errSink   Skimmer[struct{}]
+	errSink   ErrSkimmer
 }
 
 func (w *launcherWork[T]) Execute(
@@ -262,11 +300,11 @@ func (w *launcherWork[T]) Free() {
 	w.pool.Put(w)
 }
 
-// newTaskErrSink returns a Skimmer[struct{}] whose handler returns
-// the input error as-is, surfacing unexpected handler errors via
-// the Wave's SkimAll path.
-func newTaskErrSink() Skimmer[struct{}] {
-	return newInternalSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
+// newTaskErrSink returns an ErrSkimmer whose handler returns the
+// input error as-is, surfacing unexpected handler errors via the
+// Wave's SkimAll path.
+func newTaskErrSink() ErrSkimmer {
+	return newInternalSkimmer(NewErrHandler(func(_ context.Context, err error) error {
 		return err
 	}))
 }

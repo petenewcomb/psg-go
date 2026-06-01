@@ -7,7 +7,6 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // InstrumentedTask funnels tracing, metrics, and logging for tasks into a
@@ -53,8 +52,8 @@ func InstrumentedSkim[T any](
 func InstrumentedFunnel[T any](
 	funnelOpName string,
 	flushOpName string,
-	funnelFactory psgfn.FunnelFactory[T],
-) psgfn.FunnelFactory[PropagatedResult[T]] {
+	funnelFactory psg.AccumulatorFactory[T],
+) psg.AccumulatorFactory[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedFunnel := LoggedFunnel(funnelOpName, flushOpName, funnelFactory)
@@ -66,7 +65,7 @@ func InstrumentedFunnel[T any](
 	return TracedFunnel(funnelOpName, flushOpName, metricsFunnel)
 }
 
-// Scatter wraps the value-producing task in a one-shot [psg.Launcher[struct{}]]
+// Scatter wraps the value-producing task in a one-shot [psg.TaskLauncher]
 // that submits the result to skim, and dispatches it. The Launcher is
 // constructed with a nil wave and resolves the dispatching wave from
 // ctx at Start time (see [psg.NewLauncher0]). Pass psg op options
@@ -83,7 +82,7 @@ func Scatter[T any](
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewLauncher(nil, psgfn.Task(func(ctx context.Context) error {
+	runner := psg.NewLauncher(nil, psg.NewTask(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitResult(ctx, result, err)
 	}), opts...)

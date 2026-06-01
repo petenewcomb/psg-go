@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/psgfn"
+	"github.com/petenewcomb/psg-go"
 	"go.uber.org/zap"
 )
 
@@ -57,7 +57,7 @@ func LoggedTask[T any](
 func LoggedSkim[T any](
 	operationName string,
 	skimFn func(ctx context.Context, result T, err error) error,
-) psgfn.Skim[T] {
+) psg.HandlerFunc[T] {
 	return func(ctx context.Context, result T, err error) error {
 		// Get logger from context or use a default
 		logger := zap.L()
@@ -96,12 +96,12 @@ func LoggedSkim[T any](
 func LoggedFunnel[T any](
 	funnelOpName string,
 	flushOpName string,
-	funnelFactory psgfn.FunnelFactory[T],
-) psgfn.FunnelFactory[T] {
-	return func() psgfn.Accumulator[T] {
-		innerFunnel := funnelFactory()
+	funnelFactory psg.AccumulatorFactory[T],
+) psg.AccumulatorFactory[T] {
+	return psg.NewAccumulatorFactory(func() psg.Accumulator[T] {
+		innerFunnel := funnelFactory.NewAccumulator()
 
-		return psgfn.FuncAccumulator[T]{
+		return psg.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Get logger from context or use a default
 				logger := zap.L()
@@ -150,5 +150,5 @@ func LoggedFunnel[T any](
 				return err
 			},
 		}
-	}
+	}, nil)
 }

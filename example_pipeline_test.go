@@ -13,7 +13,6 @@ import (
 	"runtime"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // Pipeline demonstrates the use of multiple psg pools to re-implement the
@@ -51,7 +50,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
 	newDigestSkimmer := func(path string) psg.Skimmer[[md5.Size]byte] {
-		return psg.NewSkimmer(wave, psgfn.HandlerFunc[[md5.Size]byte](
+		return psg.NewSkimmer(wave, psg.HandlerFunc[[md5.Size]byte](
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
@@ -59,9 +58,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		))
 	}
 
-	newDigestingRunner := func(path string, data []byte) psg.Launcher[struct{}] {
+	newDigestingRunner := func(path string, data []byte) psg.TaskLauncher {
 		skimmer := newDigestSkimmer(path)
-		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
+		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return skimmer.Submit(ctx, md5.Sum(data))
 		}), psg.WithLimits(digestLimit))
@@ -70,7 +69,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Creates a skimmer for a reading task whose handler dispatches a
 	// digesting task with the bytes that were read.
 	newReadSkimmer := func(path string) psg.Skimmer[[]byte] {
-		return psg.NewSkimmer(wave, psgfn.HandlerFunc[[]byte](
+		return psg.NewSkimmer(wave, psg.HandlerFunc[[]byte](
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestingRunner(path, data).Start(ctx)
 			},
@@ -80,9 +79,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// No need for a pool to limit how many file reading tasks run concurrently
 	// since they should be I/O-bound and will be subject to backpressure from
 	// the digesters.
-	newReadingRunner := func(path string) psg.Launcher[struct{}] {
+	newReadingRunner := func(path string) psg.TaskLauncher {
 		skimmer := newReadSkimmer(path)
-		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
+		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
 			return skimmer.SubmitResult(ctx, data, err)

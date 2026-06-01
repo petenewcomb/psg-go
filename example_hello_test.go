@@ -12,7 +12,6 @@ import (
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
 	psg "github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // "Hello world" example that uses psg to run a couple of tasks and skim their
@@ -24,16 +23,16 @@ func Example_hello() {
 	defer wave.CancelAndWait() // hygiene
 
 	var results []string
-	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[string](
+	skimmer := psg.NewFnSkimmer(wave,
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
 		},
-	))
+	)
 
 	// Bind a string to a task that submits it to the skimmer after a short delay.
-	newRunner := func(s string) psg.Launcher[struct{}] {
-		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
+	newRunner := func(s string) psg.TaskLauncher {
+		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
 			time.Sleep(1 * time.Millisecond)
 			return skimmer.Submit(ctx, s)
 		}))

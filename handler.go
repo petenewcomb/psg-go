@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psgfn
+package psg
 
 import (
 	"context"
@@ -45,16 +45,45 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, value T, err error) error {
 	return f(ctx, value, err)
 }
 
-// ErrHandler is the named func adapter for the no-value, with-err
-// case: a body that receives only an upstream err. Satisfies
-// Handler[struct{}]. Named descriptively rather than "ErrTask"
-// because "handle" reads naturally in both Launcher and Skimmer
-// contexts, while "task" carries Launcher-specific vocabulary.
-type ErrHandler func(ctx context.Context, err error) error
+// ErrHandler is the err-receiving void case of [Handler]. Alias
+// for [Handler][struct{}] — same underlying type as [Task] but
+// named to signal the err-handling-sink role at the call site
+// (typically: a Launcher or Skimmer constructed with
+// [ErrHandlerFunc]).
+type ErrHandler = Handler[struct{}]
 
-// Handle satisfies [Handler[struct{}]].
-func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error {
+// ErrHandlerFunc is the named func adapter for the no-value,
+// with-err case: a body that receives only an upstream err.
+// Satisfies [ErrHandler] / [Task] / [Handler][struct{}]. Named
+// descriptively rather than "ErrTaskFunc" because "handle" reads
+// naturally in both Launcher and Skimmer contexts.
+//
+// Unlike [TaskFunc], ErrHandlerFunc does NOT short-circuit on
+// non-nil err — it always invokes the wrapped closure, passing err
+// through. The user opted into the err-receiving signature
+// precisely because they want the err to reach their code.
+type ErrHandlerFunc func(ctx context.Context, err error) error
+
+// Handle satisfies [Handler][struct{}].
+func (f ErrHandlerFunc) Handle(ctx context.Context, _ struct{}, err error) error {
 	return f(ctx, err)
+}
+
+// NewErrHandler is the convenience constructor for a closure-based
+// err-receiving handler. Parallel to [NewTask] / [NewHandler];
+// equivalent to [ErrHandlerFunc][type-cast] at the call site.
+func NewErrHandler(handle func(ctx context.Context, err error) error) ErrHandlerFunc {
+	return ErrHandlerFunc(handle)
+}
+
+// NewHandler is the type-inference-friendly constructor for a
+// closure-based [Handler]. T is inferred from the closure's value
+// parameter, sparing the user the [T] annotation. Returns the
+// concrete [HandlerFunc][T] (which satisfies [Handler][T]).
+func NewHandler[T any](
+	handle func(ctx context.Context, value T, err error) error,
+) HandlerFunc[T] {
+	return HandlerFunc[T](handle)
 }
 
 // See [Task] for the no-input, no-err case: a named func adapter

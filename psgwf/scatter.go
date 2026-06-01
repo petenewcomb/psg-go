@@ -7,7 +7,6 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // GenericLauncher dispatches a workflow-aware task onto a [psg.Pool].
@@ -24,7 +23,7 @@ import (
 // task's error attached, and unrefs in its handler).
 type GenericLauncher[T, C any] struct {
 	wf    *GenericWorkflow[C]
-	inner psg.Launcher[struct{}]
+	inner psg.TaskLauncher
 }
 
 // Launcher is the convenience alias for [GenericLauncher] over the
@@ -71,7 +70,7 @@ func newGenericLauncher[T, C any](
 	opts []psg.OpOption,
 	submitFn func(context.Context, T, error) error,
 ) GenericLauncher[T, C] {
-	body := psgfn.Task(func(ctx context.Context) error {
+	body := psg.NewTask(func(ctx context.Context) error {
 		value, taskErr := taskFn(ctx, wf)
 		return submitFn(ctx, value, taskErr)
 	})

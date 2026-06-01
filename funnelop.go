@@ -18,7 +18,6 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/workq"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 // funnelOpHandleTrait implements leakguard.DupTrait for funnelOp resources.
@@ -40,7 +39,7 @@ func (funnelOpHandleTrait[T]) String(c *funnelOp[T]) string {
 
 // Funnel represents a stateful aggregation op. Inputs flow in through
 // [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks);
-// the user-supplied [psgfn.Accumulator] processes them inside a
+// the user-supplied [Accumulator] processes them inside a
 // FunnelPool worker. Downstream emission is the Accumulator body's
 // responsibility — it calls Submit on whatever downstream sinks it has
 // captured. There is no framework-mediated output type; Accumulator
@@ -73,7 +72,7 @@ type Funnel[T any] struct {
 //nolint:contextcheck // background context used only for tracing
 func NewFunnel[T any](
 	funnelPool *FunnelPool,
-	funnelFactory psgfn.FunnelFactory[T],
+	funnelFactory AccumulatorFactory[T],
 	opts ...OpOption,
 ) Funnel[T] {
 	traceRegion := "NewFunnel"
@@ -106,9 +105,9 @@ func NewFunnel[T any](
 
 	inner.refCount.Store(1)
 	// Framework-owned error sink: Accumulator errors flow through this
-	// Skimmer[struct{}] whose handler returns err as-is, surfacing via
-	// the Pool's SkimAll path.
-	inner.errSink = newInternalSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
+	// ErrSkimmer whose handler returns err as-is, surfacing via the
+	// Pool's SkimAll path.
+	inner.errSink = newInternalSkimmer(NewErrHandler(func(_ context.Context, err error) error {
 		return err
 	}))
 	inner.funnelPool = funnelPool
@@ -124,6 +123,51 @@ func NewFunnel[T any](
 	}
 
 	return Funnel[T]{h: h}
+}
+
+// NewFnFunnel binds closure-based factory functions to a
+// FunnelPool. Convenience wrapper for
+// `NewFunnel(funnelPool, NewAccumulatorFactory(newAccumulator, closeFn), opts...)`.
+// Pass nil for closeFn if the factory has no factory-level state
+// to release.
+func NewFnFunnel[T any](
+	funnelPool *FunnelPool,
+	newAccumulator func() Accumulator[T],
+	closeFn func() error,
+	opts ...OpOption,
+) Funnel[T] {
+	return NewFunnel(funnelPool, NewAccumulatorFactory(newAccumulator, closeFn), opts...)
+}
+
+// ErrFunnel is the [Funnel][struct{}] case viewed as an err
+// aggregator — a funnel whose Accumulator receives err inputs (the
+// value half is always void). Typically constructed via
+// [NewErrFunnel], which wires a closure-based factory whose
+// accumulator delivers errs through an err-receiving signature.
+type ErrFunnel = Funnel[struct{}]
+
+// NewErrFunnel constructs a [Funnel][struct{}] whose per-instance
+// accumulator receives err inputs via an err-receiving signature.
+// Convenience wrapper for [NewFunnel] + [NewErrAccumulatorFactory]
+// — uses the direct-fn-storage err-only adapter so the framework
+// adds no closure allocations of its own.
+//
+// accumulate is called for every [Funnel.SubmitErr] (and matching
+// SubmitResult-with-non-nil-err); it returns the flush deadline
+// (zero for "no specific deadline") and any error.
+// flush is optional (pass nil for a no-op flush). closeFn is the
+// factory-level cleanup hook (see [AccumulatorFactory.Close]); pass
+// nil for no-op. For per-instance state, use [NewFunnel] +
+// [NewAccumulatorFactory] with a [NewErrAccumulator] inside the
+// factory closure.
+func NewErrFunnel(
+	funnelPool *FunnelPool,
+	accumulate func(ctx context.Context, err error) (time.Time, error),
+	flush func(ctx context.Context) error,
+	closeFn func() error,
+	opts ...OpOption,
+) ErrFunnel {
+	return NewFunnel(funnelPool, NewErrAccumulatorFactory(accumulate, flush, closeFn), opts...)
 }
 
 // Submit posts a value to the Funnel. Sugar for
@@ -259,9 +303,9 @@ type funnelOp[T any] struct {
 
 	// errSink is framework-owned. Accumulator errors are routed through
 	// it; its handler returns err as-is so it surfaces via SkimAll.
-	errSink       Skimmer[struct{}]
+	errSink       ErrSkimmer
 	funnelPool    *FunnelPool
-	funnelFactory psgfn.FunnelFactory[T]
+	funnelFactory AccumulatorFactory[T]
 
 	// limiter caps how many funnelWorks this Funnel processes
 	// concurrently. The zero Limiter (impl == nil) means unlimited.
@@ -301,6 +345,8 @@ func (c *funnelOp[T]) ref() {
 
 // unref is called by leakguard when a handle is closed.
 // It decrements refCount and cleans up if this was the last reference.
+//
+//nolint:contextcheck // cleanup runs via refcount, not on a caller ctx; framework-internal ctx is correct
 func (c *funnelOp[T]) unref() {
 	newCount := c.refCount.Add(-1)
 	if newCount < 0 {
@@ -321,11 +367,27 @@ func (c *funnelOp[T]) unref() {
 		panic("instance queue was not empty")
 	}
 
+	// Call factory.Close() to release factory-level state. Errors
+	// route through the framework's err path (the errSink) so they
+	// surface via SkimAll.
+	if c.funnelFactory != nil {
+		if closeErr := c.funnelFactory.Close(); closeErr != nil {
+			ctx, meta := c.funnelPool.job.ctxMeta(c.funnelPool.job.ctx)
+			intErr := c.errSink.submit(
+				ctx, meta, c.funnelPool.job, workq.InvalidGroupID,
+				struct{}{}, closeErr,
+			)
+			if intErr != nil && ctx.Err() == nil {
+				panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
+			}
+		}
+	}
+
 	// Save innerPool before clearing
 	innerPool := c.innerPool
 
 	// Clear all fields
-	c.errSink = Skimmer[struct{}]{}
+	c.errSink = ErrSkimmer{}
 	c.funnelPool = nil
 	c.funnelFactory = nil
 	c.limiter = Limiter{}
@@ -342,7 +404,7 @@ type halfBoundFunnel[T any] struct {
 	mu            sync.Mutex
 	refCount      int
 	earliestGroup workq.GroupID
-	accumulator   psgfn.Accumulator[T]
+	accumulator   Accumulator[T]
 
 	// queued reports whether this instance currently has a Ref held on
 	// behalf of an in-flight Schedule on the FunnelPool's flushQ.
@@ -429,7 +491,7 @@ func (c *halfBoundFunnel[T]) free() {
 
 func (c *halfBoundFunnel[T]) allocate(
 	ctx context.Context,
-	newAccumulator psgfn.FunnelFactory[T],
+	newAccumulator AccumulatorFactory[T],
 	sender *rdvq.Sender,
 ) {
 	traceRegion := "halfBoundFunnel.allocate"
@@ -441,7 +503,7 @@ func (c *halfBoundFunnel[T]) allocate(
 			c.emitErr(ctx, sender, ErrFunnelFactoryPanicked)
 		}
 	}()
-	c.accumulator = newAccumulator()
+	c.accumulator = newAccumulator.NewAccumulator()
 	panicked = false
 	if c.accumulator == nil {
 		c.emitErr(ctx, sender, ErrFunnelFactoryReturnedNil)

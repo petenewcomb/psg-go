@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
+
 	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,7 +26,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var flushCount atomic.Int32
 	var skimCount atomic.Int32
 
-	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[int](func(ctx context.Context, result int, err error) error {
+	skimmer := psg.NewSkimmer(wave, psg.NewHandler(func(ctx context.Context, result int, err error) error {
 		t.Logf("Skim called with result %d", result)
 		skimCount.Add(1)
 		chk.NoError(err)
@@ -35,8 +35,8 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
-	funnelOp := psg.NewFunnel(funnelPool, func() psgfn.Accumulator[int] {
-		return psgfn.FuncAccumulator[int]{
+	funnelOp := psg.NewFunnel(funnelPool, psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
+		return psg.FuncAccumulator[int]{
 			AccumulateFn: func(ctx context.Context, value int, err error) (time.Time, error) {
 				// Don't emit immediately - let the deadline trigger flushing
 				return time.Now().Add(100 * time.Millisecond), nil
@@ -46,11 +46,11 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 				return skimmer.Submit(ctx, 42)
 			},
 		}
-	})
+	}, nil))
 	defer funnelOp.Close()
 
-	newRunner := func(value int) psg.Launcher[struct{}] {
-		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
+	newRunner := func(value int) psg.TaskLauncher {
+		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
 			return funnelOp.Submit(ctx, value)
 		}))
 	}

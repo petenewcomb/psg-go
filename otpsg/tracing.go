@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
+
 	"go.opentelemetry.io/otel"
 )
 
@@ -67,13 +67,13 @@ func TracedSkim[T any](
 func TracedFunnel[T any](
 	funnelOpName string,
 	flushOpName string,
-	funnelFactory psgfn.FunnelFactory[T],
-) psgfn.FunnelFactory[PropagatedResult[T]] {
+	funnelFactory psg.AccumulatorFactory[T],
+) psg.AccumulatorFactory[PropagatedResult[T]] {
 	// Create an accumulator factory that adds tracing
-	tracedFactory := func() psgfn.Accumulator[T] {
-		innerFunnel := funnelFactory()
+	tracedFactory := psg.NewAccumulatorFactory(func() psg.Accumulator[T] {
+		innerFunnel := funnelFactory.NewAccumulator()
 
-		return psgfn.FuncAccumulator[T]{
+		return psg.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")
@@ -93,7 +93,7 @@ func TracedFunnel[T any](
 				return innerFunnel.Flush(ctx)
 			},
 		}
-	}
+	}, nil)
 
 	// Then use the base propagation
 	return PropagateFunnel(tracedFactory)

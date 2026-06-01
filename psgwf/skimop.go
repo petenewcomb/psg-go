@@ -7,7 +7,6 @@ import (
 	"context"
 
 	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgfn"
 )
 
 type GenericSkimFunc[T, C any] func(context.Context, *GenericWorkflow[C], T, error) error
@@ -27,7 +26,7 @@ func (g GenericSkimOp[T, C]) inner() psg.Skimmer[result[T, C]] {
 	return psg.Skimmer[result[T, C]](g)
 }
 
-func wrapSkimFunc[T, C any](skimFn GenericSkimFunc[T, C]) psgfn.HandlerFunc[result[T, C]] {
+func wrapSkimFunc[T, C any](skimFn GenericSkimFunc[T, C]) psg.HandlerFunc[result[T, C]] {
 	return func(ctx context.Context, res result[T, C], err error) error {
 		// Reference happened in GenericLauncher.Start (in scatter.go).
 		defer res.Workflow.unref(ctx)

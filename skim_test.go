@@ -138,6 +138,77 @@ func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 	chk.Equal(101, got)
 }
 
+// Thread C: TrySubmit with zero deadline fail-fasts when the
+// dispatch path is contended.
+func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	// Saturate a limiter so the next TrySubmit can't dispatch
+	// immediately.
+	limit := psg.NewSemaphore(1)
+	blocking := make(chan struct{})
+	released := make(chan struct{})
+	runner := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+		close(blocking)
+		<-released
+		return nil
+	}), psg.WithLimits(limit))
+	chk.NoError(runner.Start(ctx))
+	<-blocking // first task is now occupying the limiter permit
+
+	// Zero deadline → fail-fast.
+	contender := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+		return nil
+	}), psg.WithLimits(limit))
+	ok, err := contender.TryStart(ctx, time.Time{})
+	chk.False(ok, "TryStart with zero deadline should fail-fast when contended")
+	chk.NoError(err, "fail-fast should not return an error")
+
+	close(released)
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+}
+
+// Thread C: Submit (non-Try) uses Forever internally; passes
+// through the dispatch path as the "block until success" sentinel.
+// Contended Submit (via limiter) blocks and then succeeds when the
+// limiter is freed — verifies the Forever path through Pool.block.
+func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	limit := psg.NewSemaphore(1)
+	blocking := make(chan struct{})
+	released := make(chan struct{})
+	runner := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+		close(blocking)
+		<-released
+		return nil
+	}), psg.WithLimits(limit))
+	chk.NoError(runner.Start(ctx))
+	<-blocking
+
+	contended := false
+	contenderRan := make(chan struct{})
+	go func() {
+		contender := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+			return nil
+		}), psg.WithLimits(limit))
+		err := contender.Start(ctx) // uses Forever internally
+		contended = err == nil
+		close(contenderRan)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	close(released)
+	<-contenderRan
+	chk.True(contended, "Submit should block then succeed")
+
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+}
+
 // NewErrSkimmer convenience constructor + SubmitErr — exercises
 // the named-intent err sink shape end-to-end.
 func TestNewErrSkimmer(t *testing.T) {

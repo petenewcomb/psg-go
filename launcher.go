@@ -147,7 +147,8 @@ func (r Launcher[T]) SubmitErr(ctx context.Context, err error) error {
 func (r Launcher[T]) SubmitResult(ctx context.Context, value T, err error) error {
 	traceRegion := "Launcher.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	return r.dispatch(ctx, time.Time{}, value, err, false)
+	_, derr := r.dispatch(ctx, Forever, value, err, false)
+	return derr
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
@@ -171,13 +172,7 @@ func (r Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err e
 func (r Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, value T, err error) (bool, error) {
 	traceRegion := "Launcher.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	derr := r.dispatch(ctx, deadline, value, err, true)
-	if derr == nil {
-		return true, nil
-	}
-	// TODO Thread C: distinguish the "dispatch held back past deadline"
-	// case from genuine errors and return (false, nil) for the former.
-	return false, derr
+	return r.dispatch(ctx, deadline, value, err, true)
 }
 
 // Start is sugar for Submit(ctx, *new(T)). Meaningful primarily
@@ -197,7 +192,9 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, er
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool) error {
+func (r Launcher[T]) dispatch(
+	ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool,
+) (bool, error) {
 	wave := resolveWave(r.wave, ctx)
 	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
@@ -214,16 +211,10 @@ func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, 
 		if !ok {
 			work.Free()
 		}
-		if err != nil {
-			return err
-		}
-		if !ok {
-			// caller's TrySubmit / TrySubmitResult returns (false, nil)
-			return nil
-		}
-		return nil
+		return ok, err
 	}
-	return meta.ExecuteNowOrQueue(ctx, work)
+	err := meta.ExecuteNowOrQueue(ctx, work)
+	return err == nil, err
 }
 
 func (r Launcher[T]) newScatterWork(

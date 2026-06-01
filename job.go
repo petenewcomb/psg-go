@@ -428,7 +428,11 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 								},
 								func(blockWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 									var blockTimerCh <-chan time.Time
-									if !blockDeadline.IsZero() {
+									// Zero or Forever deadline: no timer (block until ctx
+									// cancel or notification). Non-zero, non-Forever: set
+									// up a timer; if it fires we'll return up through
+									// errBlockWaitSignaled.
+									if !blockDeadline.IsZero() && !isForever(blockDeadline) {
 										blockTimer := timerp.Get()
 										defer timerp.Put(blockTimer)
 										timerp.Reset(blockTimer, max(0, time.Until(blockDeadline)))

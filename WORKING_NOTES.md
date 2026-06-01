@@ -191,7 +191,19 @@ API_DESIGN.md contains the trio-rename rationale and a `considered & rejected` e
 ### Threads B and C status
 
 - **Thread B**: complete.
-- **Thread C**: not started. Introduce `Forever` sentinel; flip zero-deadline semantic from "block forever" to "attempt once". Atomic across all dispatch sites. Risky single-shot change per the impl survey.
+- **Thread C v0.1 landed**: `Forever` sentinel added (`time.Date(9999, 1, 1, ...)` UTC); Submit / SubmitErr / SubmitResult on Launcher pass it through to the dispatch path so the intent reads as "block until success." `Launcher.dispatch` returns `(bool, error)` so the Try* family no longer needs the TODO sentinel-error path. `Pool.block` treats `Forever` the same as zero (no timer) — block until cancellation / notification. Zero-deadline semantic in `TryExecuteNow` was already "attempt once" via the unset `ex.AddToListeners` (the blocking layer skips listener registration when AddToListeners is nil, so contended dispatch returns `(false, nil)` after one attempt). Doc-aligned; no behavior change for zero.
+
+### Thread C — blocked on Pool/workq consolidation
+
+The remaining Thread C work (Try* honoring non-zero non-Forever deadlines via bounded-wait blocking) can't land cleanly until the underlying inconsistencies in the Pool + workq integration are resolved. The investigation surfaced three:
+
+1. **Work-type deadline propagation is uneven.** `limiterScatterWork`, `launcherScatterWork`, `funnelWork`: pass `w.deadline` to `ExecuteOrWait` / `governor.Execute`; the timer reaches `Pool.block`. `taskPostWork` receives a deadline parameter, doesn't store it, calls `BasicPushSelect` which only watches `ctx.Done()` and `outboxCh` — no timer. (Pre-existing open issue: "Deadline propagation in taskPostWork.")
+
+2. **Dispatch entry points use different "should block" signaling.** `ExecuteNowOrQueue` sets `ex.AddToListeners` to a panicking func to enable the `ShouldBlockOrPostpone` path. `TryExecuteNow` leaves it nil, so the entire blocking loop in `ExecuteOrWait` is bypassed regardless of deadline. Naively setting `AddToListeners` in `TryExecuteNow` causes hangs (see #3).
+
+3. **`errBlockWaitSignaled` conflates timer-fired with notification-received.** `Pool.block` converts both to `nil` before returning. `ExecuteOrWait` can't distinguish "deadline reached, give up" from "got a signal, re-check condition" — re-enters `blockFn` with an already-expired deadline, the new timer fires at 0ns, tight loop.
+
+The structural fix overlaps with the destination doc's **Pool consolidation** (merge TaskPool + FunnelPool into one Pool, rationalize the workq integration). Doing Thread C now would mean wrestling the same inconsistencies twice. Defer Thread C until after the pool consolidation pass; it will likely fall out naturally once `taskPostWork`, the `AddToListeners` signaling, and the `errBlockWaitSignaled` conflation are unified.
 
 ### Naming-pass deferred items (still relevant)
 

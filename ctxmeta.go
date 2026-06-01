@@ -104,7 +104,18 @@ func (cm *ctxMeta) TryExecuteNow(
 		}
 	}
 
-	if !deadline.IsZero() && !time.Now().Before(deadline) {
+	// Deadline interpretation (as currently implemented):
+	//   - past time → fail-fast (no attempt)
+	//   - other     → attempt once
+	// The "attempt once" semantic is enforced by ex.AddToListeners
+	// being nil — the blocking layer treats nil AddToListeners as
+	// "don't block." Forever and future deadlines do not currently
+	// install genuine bounded-wait blocking at this level; that is
+	// deferred Thread C work (see WORKING_NOTES). Naively enabling
+	// AddToListeners here causes hangs because the timer/listener
+	// plumbing through taskPostWork isn't fully wired (known open
+	// issue: "Deadline propagation in taskPostWork").
+	if !deadline.IsZero() && !isForever(deadline) && !time.Now().Before(deadline) {
 		return false, nil
 	}
 

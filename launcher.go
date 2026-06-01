@@ -43,13 +43,10 @@ type Launcher0 struct {
 // NewLauncher0 binds a [psgfn.Task0] to wave. wave may be nil — in
 // that case the Launcher is wave-independent and resolves the target
 // wave at each [Launcher0.Start] / [Launcher0.TryStart] call from
-// the dispatching ctx (which must descend from a [NewWave] call).
-// This enables one Launcher instance to be reused across many waves.
-//
-// Limitation (Thread B follow-up): nil-wave dispatch currently
-// works only from a ctx returned by NewWave directly. Dispatching
-// from inside a task / skim / accumulate body panics because the
-// worker's ctx does not yet carry the dispatching wave.
+// the dispatching ctx (which must descend from a [NewWave] call, or
+// be a task body ctx whose dispatching wave the framework has
+// stamped). This enables one Launcher instance to be reused across
+// many waves.
 //
 // Pass [WithLimits] in opts to bind one or more [Limiter]s that
 // throttle dispatch. The framework manages an internal error sink
@@ -92,7 +89,8 @@ func (r Launcher0) Start(ctx context.Context) error {
 	traceRegion := "Launcher0.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := resolveWave(r.wave, ctx).pool
+	wave := resolveWave(r.wave, ctx)
+	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -101,7 +99,7 @@ func (r Launcher0) Start(ctx context.Context) error {
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, time.Time{})
+	work := r.newScatterWork(pool, group, time.Time{}, wave)
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
@@ -116,7 +114,8 @@ func (r Launcher0) TryStart(ctx context.Context, deadline time.Time) (bool, erro
 	traceRegion := "Launcher0.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := resolveWave(r.wave, ctx).pool
+	wave := resolveWave(r.wave, ctx)
+	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -125,7 +124,7 @@ func (r Launcher0) TryStart(ctx context.Context, deadline time.Time) (bool, erro
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, deadline)
+	work := r.newScatterWork(pool, group, deadline, wave)
 	ok, err := meta.TryExecuteNow(ctx, deadline, work)
 	if !ok {
 		work.Free()
@@ -134,9 +133,11 @@ func (r Launcher0) TryStart(ctx context.Context, deadline time.Time) (bool, erro
 }
 
 //nolint:gocritic // Launcher0 is designed to be passed by value
-func (r Launcher0) newScatterWork(pool *Pool, group workq.GroupID, deadline time.Time) *launcherScatterWork {
+func (r Launcher0) newScatterWork(
+	pool *Pool, group workq.GroupID, deadline time.Time, wave *Wave,
+) *launcherScatterWork {
 	inner := r.newTask(pool, group)
-	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter), wave)
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if r.limiter.impl != nil {
@@ -233,7 +234,8 @@ func (r Launcher[T]) Start(ctx context.Context, arg T) error {
 	traceRegion := "Launcher.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := resolveWave(r.wave, ctx).pool
+	wave := resolveWave(r.wave, ctx)
+	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -242,7 +244,7 @@ func (r Launcher[T]) Start(ctx context.Context, arg T) error {
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, time.Time{}, arg)
+	work := r.newScatterWork(pool, group, time.Time{}, arg, wave)
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
@@ -252,7 +254,8 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (b
 	traceRegion := "Launcher.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := resolveWave(r.wave, ctx).pool
+	wave := resolveWave(r.wave, ctx)
+	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -261,7 +264,7 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (b
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, deadline, arg)
+	work := r.newScatterWork(pool, group, deadline, arg, wave)
 	ok, err := meta.TryExecuteNow(ctx, deadline, work)
 	if !ok {
 		work.Free()
@@ -270,10 +273,10 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (b
 }
 
 func (r Launcher[T]) newScatterWork(
-	pool *Pool, group workq.GroupID, deadline time.Time, arg T,
+	pool *Pool, group workq.GroupID, deadline time.Time, arg T, wave *Wave,
 ) *launcherScatterWork {
 	inner := r.newTask(pool, group, arg)
-	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter), wave)
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if r.limiter.impl != nil {
@@ -372,7 +375,8 @@ func (r Launcher2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error {
 	traceRegion := "Launcher2.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := resolveWave(r.wave, ctx).pool
+	wave := resolveWave(r.wave, ctx)
+	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -381,7 +385,7 @@ func (r Launcher2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error {
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, time.Time{}, arg1, arg2)
+	work := r.newScatterWork(pool, group, time.Time{}, arg1, arg2, wave)
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
@@ -393,7 +397,8 @@ func (r Launcher2[T1, T2]) TryStart(
 	traceRegion := "Launcher2.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := resolveWave(r.wave, ctx).pool
+	wave := resolveWave(r.wave, ctx)
+	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -402,7 +407,7 @@ func (r Launcher2[T1, T2]) TryStart(
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, deadline, arg1, arg2)
+	work := r.newScatterWork(pool, group, deadline, arg1, arg2, wave)
 	ok, err := meta.TryExecuteNow(ctx, deadline, work)
 	if !ok {
 		work.Free()
@@ -411,10 +416,10 @@ func (r Launcher2[T1, T2]) TryStart(
 }
 
 func (r Launcher2[T1, T2]) newScatterWork(
-	pool *Pool, group workq.GroupID, deadline time.Time, arg1 T1, arg2 T2,
+	pool *Pool, group workq.GroupID, deadline time.Time, arg1 T1, arg2 T2, wave *Wave,
 ) *launcherScatterWork {
 	inner := r.newTask(pool, group, arg1, arg2)
-	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
+	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter), wave)
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if r.limiter.impl != nil {

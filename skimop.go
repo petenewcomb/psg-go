@@ -34,15 +34,9 @@ type Skimmer[T any] struct {
 // during that Wave's drain. wave may be nil — in that case the
 // Skimmer is wave-independent and resolves the target wave at each
 // dispatch from the dispatching ctx (which must descend from a
-// [NewWave] call). This enables one Skimmer instance to be reused
-// across many waves.
-//
-// Limitation (Thread B follow-up): nil-wave dispatch currently
-// works only from a ctx returned by NewWave directly. Dispatching
-// from inside a task / skim / accumulate body panics because the
-// worker's ctx does not yet carry the dispatching wave. Sinks used
-// from inside op bodies must be constructed with an explicit wave
-// until the worker plumbing propagates the wave.
+// [NewWave] call, or be a task / skim / accumulate body ctx whose
+// dispatching wave the framework has stamped). This enables one
+// Skimmer instance to be reused across many waves.
 //
 // For closure-based handlers, wrap in [psgfn.HandlerFunc] at the
 // call site; struct implementations of Handler[T] support the

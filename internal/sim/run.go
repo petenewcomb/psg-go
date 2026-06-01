@@ -96,10 +96,19 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	// Construct Skimmers and Funnels against the Pool. Order matters:
 	// Funnels reference Skimmers (in body Submits), so Skimmers must
 	// exist first.
+	// Alternate explicit-wave (even idx) vs nil-wave (odd idx) to
+	// exercise both the bound-wave path and the nil-sentinel
+	// ctx-resolution path. Nil-wave ops resolve the dispatching wave
+	// from the ctx at Submit time (top-level ctx, or the worker-
+	// stamped ctx inside task / accumulate bodies).
 	for i, g := range c.Plan.Skimmers {
 		gp := g
 		idx := i
-		skimmer := psg.NewSkimmer(c.Wave, c.newSkimmerHandler(t, gp, idx))
+		var w *psg.Wave
+		if i%2 == 0 {
+			w = c.Wave
+		}
+		skimmer := psg.NewSkimmer(w, c.newSkimmerHandler(t, gp, idx))
 		c.Skimmers[i] = &skimmer
 	}
 	for i, cmb := range c.Plan.Funnels {
@@ -116,9 +125,12 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	// reference them via Submit. Launcher Bodies may StartTask other
 	// runners, but only after the entire array is populated (a runner's
 	// Body never runs during construction).
+	// Alternate explicit-wave (even idx) vs nil-wave (odd idx) for
+	// Launchers too — same rationale as the Skimmer construction
+	// above.
 	c.Launchers = make([]psg.Launcher0, len(c.Plan.Launchers))
 	for i, runner := range c.Plan.Launchers {
-		c.Launchers[i] = c.newLauncher(t, runner)
+		c.Launchers[i] = c.newLauncher(t, runner, i%2 == 0)
 	}
 
 	// Execute top-level Steps.
@@ -250,7 +262,7 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 // directly to downstream sinks (Funnels/Skimmers) via Submit, and
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
-func (c *controller) newLauncher(t assert.TestingT, runner *Launcher) psg.Launcher0 {
+func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) psg.Launcher0 {
 	// Concurrency tracking: bump TaskLimiter counter on entry to the
 	// task body, decrement on exit. Used by the per-Limiter
 	// max-concurrency assertion in Run.
@@ -276,7 +288,11 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher) psg.Launch
 		}
 		return nil
 	})
-	return psg.NewLauncher0(c.Wave, body, opts...)
+	var w *psg.Wave
+	if bindWave {
+		w = c.Wave
+	}
+	return psg.NewLauncher0(w, body, opts...)
 }
 
 // startTask dispatches a Plan Launcher. The Launcher was pre-built

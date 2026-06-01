@@ -62,13 +62,14 @@ type Pool struct {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, completedFn func()) *taskWork {
+func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, completedFn func(), wave *Wave) *taskWork {
 	traceRegion := "Pool.newTaskWork"
 
 	w := taskWorkPool.Get()
 	w.Init(group, j)
 	w.task = task
 	w.completedFn = completedFn
+	w.wave = wave
 
 	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
 	return w
@@ -76,8 +77,12 @@ func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, completedFn func
 
 type taskWork struct {
 	poolWork
-	task             boundTask
-	completedFn      func()
+	task        boundTask
+	completedFn func()
+	// wave is the dispatching Wave; stamped onto the worker's
+	// ctxMeta during Execute so nil-wave op dispatches from the task
+	// body can resolve it.
+	wave             *Wave
 	demandRegistered atomic.Bool
 }
 
@@ -89,6 +94,7 @@ func (w *taskWork) Reset() {
 	w.poolWork = poolWork{}
 	w.task = nil
 	w.completedFn = nil
+	w.wave = nil
 	if w.demandRegistered.Load() {
 		panic(fmt.Sprintf("taskWork.Reset: demandRegistered still true - unbalanced demand counter (task=%p)", w))
 	}
@@ -97,6 +103,17 @@ func (w *taskWork) Reset() {
 func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
+
+	// Stamp the dispatching wave onto the worker's per-worker ctxMeta
+	// so nil-wave op dispatches inside the task body resolve to it.
+	// The worker's ctxMeta is exclusive to this goroutine for the
+	// task's lifetime; mutation is race-free as long as user code
+	// doesn't capture ctx into a goroutine that outlives the body.
+	if meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta); ok {
+		prev := meta.wave
+		meta.wave = w.wave
+		defer func() { meta.wave = prev }()
+	}
 
 	w.task.Execute(ctx, w.Group(), w.completedFn, taskWorkerSender)
 }

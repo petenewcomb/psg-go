@@ -554,7 +554,7 @@ func (c *funnelOp[T]) submit(
 	value T,
 	err error,
 ) error {
-	funnelWork := c.newFunnelWork(group, value, err)
+	funnelWork := c.newFunnelWork(group, value, err, meta.wave)
 	postWork := c.funnelPool.newFunnelPostWork(group, funnelWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
@@ -568,7 +568,7 @@ func (c *funnelOp[T]) trySubmit(
 	deadline time.Time,
 ) (bool, error) {
 	// Create funnel work directly with values
-	funnelWork := c.newFunnelWork(group, value, err)
+	funnelWork := c.newFunnelWork(group, value, err, meta.wave)
 	postWork := c.funnelPool.newFunnelPostWork(group, funnelWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
@@ -590,19 +590,24 @@ type funnelWork[T any] struct {
 	op       *funnelOp[T]
 	input    T
 	inputErr error
+	// wave is the dispatching wave; stamped onto the funnel worker's
+	// ctxMeta during executeInner so nil-wave op dispatches from the
+	// Accumulate / Flush body can resolve it.
+	wave *Wave
 }
 
-func (c *funnelOp[T]) newFunnelWork(group workq.GroupID, value T, err error) *funnelWork[T] {
+func (c *funnelOp[T]) newFunnelWork(group workq.GroupID, value T, err error, wave *Wave) *funnelWork[T] {
 	w := c.funnelWorkPool.Get()
-	w.Init(group, c, value, err)
+	w.Init(group, c, value, err, wave)
 	return w
 }
 
-func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inputErr error) {
+func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inputErr error, wave *Wave) {
 	w.poolWork.Init(group, op.funnelPool.job)
 	w.op = op
 	w.input = input
 	w.inputErr = inputErr
+	w.wave = wave
 	op.funnelPool.inFlight.Increment()
 	op.ref() // Add reference for the funnel work
 }
@@ -688,6 +693,15 @@ func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) er
 	cw := meta.executionEnvironment.(*cpWorker)
 	cw.PushGroup(w.Group())
 	defer cw.PopGroup()
+	// Stamp the dispatching wave onto the worker's per-worker
+	// ctxMeta so nil-wave op dispatches from inside the Accumulate /
+	// Flush body resolve to it. The worker's ctxMeta is exclusive to
+	// this goroutine for the funnel's lifetime; mutation is race-free
+	// as long as user code doesn't capture ctx into a goroutine that
+	// outlives the body.
+	prevWave := meta.wave
+	meta.wave = w.wave
+	defer func() { meta.wave = prevWave }()
 	cw.executeFunnel(workerCtx, w)
 	return nil
 }

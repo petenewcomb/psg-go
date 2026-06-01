@@ -393,6 +393,14 @@ func (j *Pool) ensureCtxMeta(
 				ctxType:              ctxType,
 				executionEnvironment: exEnv,
 			}
+			// Preserve the wave across same-job ctx transitions
+			// (e.g. top-level → skim) so nil-wave op dispatch from
+			// inside a Skim/Accumulate body can still resolve.
+			// Across-job transitions intentionally drop the wave —
+			// the source wave is bound to a different Pool.
+			if sourceMeta != nil && sourceMeta.job == j {
+				meta.wave = sourceMeta.wave
+			}
 
 			if updateFn != nil {
 				ctx = updateFn(ctx, meta)

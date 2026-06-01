@@ -180,7 +180,7 @@ API_DESIGN.md updated with the trio rationale and a `considered & rejected` entr
 
 ### Threads B and C
 
-- **Thread B (B.1 + B.2 landed)**: wave-at-construction with nil-sentinel resolution. B.1 moved wave to constructor (required); B.2 relaxed to nil-OK with ctx-based resolution via the existing `ctxMeta.wave` machinery. Known follow-up: nil-wave dispatch from *inside* task / skim / accumulate bodies panics because the worker's ctx does not yet carry the dispatching wave. Documented in `TestSkimmerNilWaveFromTaskBodyPanicsKnownLimitation` and in NewSkimmer / NewLauncher0 doc comments. Fix is worker-plumbing: stamp the dispatching wave onto the task body's ctx via the existing taskWork / exEnv path (analogous to how `exEnv.group` is set in job.go:794).
+- **Thread B (B.1 + B.2 + full worker-plumbing landed)**: wave-at-construction with nil-sentinel resolution. B.1 moved wave to constructor (required); B.2 relaxed to nil-OK with ctx-based resolution via the existing `ctxMeta.wave` machinery; the worker-plumbing follow-up made nil-wave dispatch work from inside ALL three op body types: (1) task bodies via taskWork carrying the dispatching wave; (2) Funnel Accumulate/Flush bodies via funnelWork carrying the dispatching wave; (3) Skim handler bodies via fixing `ensureCtxMeta` to preserve `wave` across same-job ctx transitions. Sim now alternates between explicit-wave and nil-wave construction (even idx = explicit, odd idx = nil) for both Skimmers and Launchers, exercising both code paths on every test run.
 - **Thread C**: introduce `Forever` sentinel; flip zero-deadline semantic from "block forever" to "attempt once". Atomic across all dispatch sites. Risky single-shot change per the impl survey.
 
 ### Naming-pass deferred items

@@ -6,6 +6,7 @@ package psg_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/petenewcomb/psg-go"
 	"github.com/petenewcomb/psg-go/psgfn"
@@ -81,30 +82,85 @@ func TestLauncherNilWaveResolvesFromCtx(t *testing.T) {
 	chk.True(ran)
 }
 
-// Documents a known limitation: a nil-wave Skimmer dispatched from
-// inside a task body panics because the worker's ctx doesn't yet
-// carry the dispatching wave. The fix lives in the worker plumbing
-// (stamp the wave onto the task body's ctx) and is left for a
-// follow-up to Thread B. For now, sinks used from inside task /
-// skim / accumulate bodies must be constructed with an explicit
-// wave.
-func TestSkimmerNilWaveFromTaskBodyPanicsKnownLimitation(t *testing.T) {
+// Nil-wave Skimmer dispatched from inside a task body resolves to
+// the dispatching wave via the worker plumbing: taskWork carries
+// the dispatching wave and Execute stamps it onto the worker's
+// ctxMeta around task.Run.
+func TestSkimmerNilWaveResolvesFromTaskBodyCtx(t *testing.T) {
 	chk := assert.New(t)
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
+	var got int
 	skimmer := psg.NewSkimmer(nil, psgfn.HandlerFunc[int](
-		func(_ context.Context, _ int, _ error) error { return nil },
+		func(_ context.Context, v int, err error) error {
+			chk.NoError(err)
+			got = v
+			return nil
+		},
 	))
 	runner := psg.NewLauncher0(wave, psgfn.TaskFunc0(func(taskCtx context.Context) error {
-		chk.PanicsWithValue(
-			"op constructed with nil wave dispatched from a ctx with no wave (call NewWave first)",
-			func() { _ = skimmer.Submit(taskCtx, 1) },
-		)
-		return nil
+		return skimmer.Submit(taskCtx, 99)
 	}))
 	chk.NoError(runner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.Equal(99, got)
+}
+
+// Nil-wave dispatch from inside a Funnel Accumulator body. Verifies
+// that the ctx reaching Accumulate carries the dispatching wave so
+// downstream nil-wave ops resolve.
+func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	var got int
+	downstream := psg.NewSkimmer(nil, psgfn.HandlerFunc[int](
+		func(_ context.Context, v int, err error) error {
+			chk.NoError(err)
+			got = v
+			return nil
+		},
+	))
+	funnelPool := psg.NewFunnelPool(wave.Pool())
+	funnel := psg.NewFunnel(funnelPool, func() psgfn.Accumulator[int] {
+		return psgfn.FuncAccumulator[int]{
+			AccumulateFn: func(accCtx context.Context, v int, _ error) (time.Time, error) {
+				return time.Time{}, downstream.Submit(accCtx, v+1)
+			},
+		}
+	})
+	defer funnel.Close()
+	chk.NoError(funnel.Submit(ctx, 100))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.Equal(101, got)
+}
+
+// Nil-wave dispatch from inside a Skimmer handler body. Verifies
+// that the ctx reaching the handler still carries the wave so
+// downstream nil-wave ops resolve.
+func TestSkimmerNilWaveResolvesFromSkimBodyCtx(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	var got int
+	downstream := psg.NewSkimmer(nil, psgfn.HandlerFunc[int](
+		func(_ context.Context, v int, err error) error {
+			chk.NoError(err)
+			got = v
+			return nil
+		},
+	))
+	upstream := psg.NewSkimmer(wave, psgfn.HandlerFunc[int](
+		func(skimCtx context.Context, v int, _ error) error {
+			return downstream.Submit(skimCtx, v*2)
+		},
+	))
+	chk.NoError(upstream.Submit(ctx, 21))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.Equal(42, got)
 }
 
 func TestLauncherStartFromTaskPanic(t *testing.T) {

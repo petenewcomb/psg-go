@@ -85,7 +85,7 @@ func Scatter[T any](
 ) error {
 	runner := psg.NewLauncher(nil, psgfn.Task(func(ctx context.Context) error {
 		result, err := task(ctx)
-		return skim.SubmitErr(ctx, result, err)
+		return skim.SubmitResult(ctx, result, err)
 	}), opts...)
 	return runner.Start(ctx)
 }

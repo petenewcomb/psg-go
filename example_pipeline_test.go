@@ -85,7 +85,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
-			return skimmer.SubmitErr(ctx, data, err)
+			return skimmer.SubmitResult(ctx, data, err)
 		}))
 	}
 

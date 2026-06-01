@@ -337,9 +337,9 @@ func (c *controller) submitTo(
 		var err error
 		switch kind {
 		case SinkFunnel:
-			err = c.Funnels[idx].SubmitErr(ctx, v, valErr)
+			err = c.Funnels[idx].SubmitResult(ctx, v, valErr)
 		case SinkSkimmer:
-			err = c.Skimmers[idx].SubmitErr(ctx, v, valErr)
+			err = c.Skimmers[idx].SubmitResult(ctx, v, valErr)
 		default:
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
 			return

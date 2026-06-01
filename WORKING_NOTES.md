@@ -174,9 +174,9 @@ API_DESIGN.md updated with the trio rationale and a `considered & rejected` entr
 
 ### What's left in Thread A
 
-- **Step 3 (collapse Launcher arities)**: drop `Launcher0` / `Launcher2[T1, T2]`; collapse to single `Launcher[T]` taking `Handler[T]`. Update `Task[T]` interface to take `err` param (matching `Handler[T]`). Zero-arg uses `T = struct{}` with `Start` sugar; two-arg packs into a struct.
-- **Step 4 (Submit family on Launcher)**: add the dispatch family per the resolved API_DESIGN spec — `Submit(v)` / `SubmitErr(err)` / `SubmitResult(v, err)` plus the three Try variants plus `Start` / `TryStart` sugars for the void-T case. `TrySubmitResult(ctx, deadline, v, err)` is the single primitive; the other five are layered sugars over it. Each name describes its args (value-only / err-only / both); the naming matches the empirical frequency ordering (value-only > err-only > both). The current code uses the older `Submit(v, err)` single-form; this step replaces it everywhere.
-- **Deferred adapter**: add `Task` named func adapter (`func(ctx) error` satisfying `Handler[struct{}]`) — currently can't because `psgfn.Task[T]` interface still occupies the name. After Step 3 retires the per-arity Task interfaces, this can land. Note in `psgfn/handler.go` flags it. Short-circuit-on-non-nil-err semantics are now nailed down in API_DESIGN.md; the implementation just needs to match the spec.
+- ~~**Step 3 (collapse Launcher arities)**~~ — landed: single `Launcher[T]` takes `psgfn.Handler[T]`; Launcher0/Launcher2 removed; `psgfn.Task0/Task[T]/Task2` interfaces removed; `psgfn.Task` named func adapter added with short-circuit-on-err semantics.
+- ~~**Step 4 (Submit family across all sinks)**~~ — landed: `Submit(v)` / `SubmitErr(err)` / `SubmitResult(v, err)` plus the three Try variants plus `Start` / `TryStart` sugars; same family on Launcher, Skimmer, Funnel. Each name describes its args; frequency-ordered as per the API_DESIGN.
+- ~~**Deferred Task adapter**~~ — landed alongside Step 3.
 
 ### Threads B and C
 

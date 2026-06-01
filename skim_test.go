@@ -5,6 +5,7 @@ package psg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -135,6 +136,46 @@ func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 	chk.NoError(funnel.Submit(ctx, 100))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.Equal(101, got)
+}
+
+// Err-only sink via ErrHandler + SubmitErr(ctx, err) — verifies
+// the err-only convenience pair lands cleanly.
+func TestSkimmerErrHandlerErrOnlySink(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	wantErr := errors.New("propagate me")
+	var got error
+	errSink := psg.NewSkimmer(wave, psgfn.ErrHandler(
+		func(_ context.Context, err error) error {
+			got = err
+			return nil
+		},
+	))
+	chk.NoError(errSink.SubmitErr(ctx, wantErr))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.ErrorIs(got, wantErr)
+}
+
+// Launcher's err-only dispatch: Task adapter + SubmitErr should
+// short-circuit (Task.Handle returns err immediately when non-nil),
+// so the task body never runs.
+func TestLauncherTaskShortCircuitsOnSubmitErr(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	bodyRan := false
+	runner := psg.NewLauncher(wave, psgfn.Task(func(_ context.Context) error {
+		bodyRan = true
+		return nil
+	}))
+	chk.NoError(runner.SubmitErr(ctx, errors.New("propagated")))
+	// CloseAndSkimAll should surface the propagated err.
+	err := wave.CloseAndSkimAll(ctx)
+	chk.Error(err)
+	chk.False(bodyRan, "Task body must not run when err is non-nil")
 }
 
 // Nil-wave dispatch from inside a Skimmer handler body. Verifies

@@ -69,11 +69,13 @@ func NewLauncher[T any](wave *Wave, handler psgfn.Handler[T], opts ...OpOption) 
 }
 
 // Submit dispatches Handle(ctx, value, nil) on the bound Wave's
-// worker pool. Before launching, Submit applies backpressure by
-// skimming some already-completed work. If a Limiter is at its
-// concurrency limit, Submit blocks until a slot becomes available.
-// The ctx may be used to cancel both skimming and launch; only the
-// ctx associated with the Wave's Pool is passed to Handle.
+// worker pool. Sugar for SubmitResult(ctx, value, nil).
+//
+// Before launching, Submit applies backpressure by skimming some
+// already-completed work. If a Limiter is at its concurrency limit,
+// Submit blocks until a slot becomes available. The ctx may be used
+// to cancel both skimming and launch; only the ctx associated with
+// the Wave's Pool is passed to Handle.
 //
 // Returns a non-nil error if the ctx is canceled or if a skim
 // function returns an error. If the returned error is non-nil, the
@@ -86,26 +88,58 @@ func NewLauncher[T any](wave *Wave, handler psgfn.Handler[T], opts ...OpOption) 
 // and panics, but the detection works only when the ctx passed to
 // Submit descends from the ctx passed to Handle.
 func (r Launcher[T]) Submit(ctx context.Context, value T) error {
-	traceRegion := "Launcher.Submit"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	return r.dispatch(ctx, time.Time{}, value, false)
+	return r.SubmitResult(ctx, value, nil)
 }
 
-// TrySubmit attempts to dispatch Handle(ctx, value, nil) without
-// blocking past deadline. Returns (true, nil) on success, (false,
-// nil) if a [Limiter] held the dispatch back and the deadline
-// expired before a permit became available, or (false, non-nil) for
-// any other failure.
-func (r Launcher[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error) {
-	traceRegion := "Launcher.TrySubmit"
+// SubmitErr dispatches Handle(ctx, *new(T), err) on the bound
+// Wave's worker pool. Sugar for SubmitResult(ctx, *new(T), err).
+// Meaningful primarily when T = struct{} (the err-sink pattern,
+// typically paired with [psgfn.ErrHandler]); for other T, the
+// handler receives the type's zero value alongside the err.
+func (r Launcher[T]) SubmitErr(ctx context.Context, err error) error {
+	var zero T
+	return r.SubmitResult(ctx, zero, err)
+}
+
+// SubmitResult dispatches Handle(ctx, value, err) on the bound
+// Wave's worker pool. The (value, err) pair is forwarded to the
+// handler as-is; sinks that genuinely want both halves of a Go
+// result tuple use this form. See [Launcher.Submit] for backpressure
+// and ctx behavior.
+func (r Launcher[T]) SubmitResult(ctx context.Context, value T, err error) error {
+	traceRegion := "Launcher.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	err := r.dispatch(ctx, deadline, value, true)
-	if err == nil {
+	return r.dispatch(ctx, time.Time{}, value, err, false)
+}
+
+// TrySubmit attempts to Submit without blocking past deadline.
+// Sugar for TrySubmitResult(ctx, deadline, value, nil).
+func (r Launcher[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error) {
+	return r.TrySubmitResult(ctx, deadline, value, nil)
+}
+
+// TrySubmitErr attempts to SubmitErr without blocking past deadline.
+// Sugar for TrySubmitResult(ctx, deadline, *new(T), err).
+func (r Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error) {
+	var zero T
+	return r.TrySubmitResult(ctx, deadline, zero, err)
+}
+
+// TrySubmitResult attempts to SubmitResult without blocking past
+// deadline. Returns (true, nil) on success, (false, nil) if a
+// [Limiter] held the dispatch back and the deadline expired before
+// a permit became available, or (false, non-nil) for any other
+// failure.
+func (r Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, value T, err error) (bool, error) {
+	traceRegion := "Launcher.TrySubmitResult"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	derr := r.dispatch(ctx, deadline, value, err, true)
+	if derr == nil {
 		return true, nil
 	}
 	// TODO Thread C: distinguish the "dispatch held back past deadline"
 	// case from genuine errors and return (false, nil) for the former.
-	return false, err
+	return false, derr
 }
 
 // Start is sugar for Submit(ctx, *new(T)). Meaningful primarily
@@ -125,7 +159,7 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, er
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, isTry bool) error {
+func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool) error {
 	wave := resolveWave(r.wave, ctx)
 	pool := wave.pool
 	ctx, meta := vetStart(ctx, pool)
@@ -136,7 +170,7 @@ func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, 
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, deadline, value, wave)
+	work := r.newScatterWork(pool, group, deadline, value, callerErr, wave)
 	if isTry {
 		ok, err := meta.TryExecuteNow(ctx, deadline, work)
 		if !ok {
@@ -146,7 +180,7 @@ func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, 
 			return err
 		}
 		if !ok {
-			// caller's TrySubmit returns (false, nil)
+			// caller's TrySubmit / TrySubmitResult returns (false, nil)
 			return nil
 		}
 		return nil
@@ -155,9 +189,9 @@ func (r Launcher[T]) dispatch(ctx context.Context, deadline time.Time, value T, 
 }
 
 func (r Launcher[T]) newScatterWork(
-	pool *Pool, group workq.GroupID, deadline time.Time, value T, wave *Wave,
+	pool *Pool, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
 ) *launcherScatterWork {
-	inner := r.newTask(pool, group, value)
+	inner := r.newTask(pool, group, value, callerErr)
 	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter), wave)
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
@@ -167,24 +201,26 @@ func (r Launcher[T]) newScatterWork(
 	return newLauncherScatterWork(pool, deadline, gated)
 }
 
-func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, value T) boundTask {
+func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, value T, callerErr error) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
 	w.job = pool
 	w.group = group
 	w.handler = r.handler
 	w.value = value
+	w.callerErr = callerErr
 	w.errSink = r.errSink
 	return w
 }
 
 type launcherWork[T any] struct {
-	pool    *omnipool.Pool[launcherWork[T]]
-	job     *Pool
-	group   workq.GroupID
-	handler psgfn.Handler[T]
-	value   T
-	errSink Skimmer[struct{}]
+	pool      *omnipool.Pool[launcherWork[T]]
+	job       *Pool
+	group     workq.GroupID
+	handler   psgfn.Handler[T]
+	value     T
+	callerErr error
+	errSink   Skimmer[struct{}]
 }
 
 func (w *launcherWork[T]) Execute(
@@ -215,13 +251,14 @@ func (w *launcherWork[T]) Execute(
 	}()
 
 	trace.WithRegion(ctx, traceRegion+".handler", func() {
-		err = w.handler.Handle(ctx, w.value, nil)
+		err = w.handler.Handle(ctx, w.value, w.callerErr)
 	})
 }
 
 func (w *launcherWork[T]) Free() {
 	var zero T
 	w.value = zero
+	w.callerErr = nil
 	w.pool.Put(w)
 }
 

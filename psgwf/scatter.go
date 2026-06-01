@@ -43,7 +43,7 @@ func NewGenericLauncher[T, C any](
 	opts ...psg.OpOption,
 ) GenericLauncher[T, C] {
 	return newGenericLauncher(wave, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
-		return sink.inner().SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
+		return sink.inner().SubmitResult(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
@@ -60,7 +60,7 @@ func NewGenericLauncherForFunnel[T, C any](
 ) GenericLauncher[T, C] {
 	funnel := sink.inner()
 	return newGenericLauncher(wave, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
-		return funnel.SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
+		return funnel.SubmitResult(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 

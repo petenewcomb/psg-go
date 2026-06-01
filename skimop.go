@@ -71,26 +71,39 @@ func newInternalSkimmer[T any](
 	}
 }
 
-// Submit posts a value to the Skimmer's queue for later dispatch via
-// the bound Wave's Skim / SkimAll. Convenience sugar for SubmitErr
-// with a nil error.
+// Submit posts a value to the Skimmer's queue for later dispatch
+// via the bound Wave's Skim / SkimAll. Sugar for
+// SubmitResult(ctx, value, nil).
 func (g Skimmer[T]) Submit(
 	ctx context.Context,
 	value T,
 ) error {
-	return g.SubmitErr(ctx, value, nil)
+	return g.SubmitResult(ctx, value, nil)
 }
 
-// SubmitErr posts a (value, err) pair to the Skimmer's queue for
-// later dispatch by the bound Wave's Skim / SkimAll. err is
-// delivered to the skim handler alongside value; use nil when
-// reporting a successful result.
+// SubmitErr posts an err-only result to the Skimmer's queue. Sugar
+// for SubmitResult(ctx, *new(T), err). Meaningful primarily when
+// T = struct{} (the err-sink pattern, typically paired with
+// [psgfn.ErrHandler]); for other T, the handler receives the
+// type's zero value alongside the err.
 func (g Skimmer[T]) SubmitErr(
+	ctx context.Context,
+	err error,
+) error {
+	var zero T
+	return g.SubmitResult(ctx, zero, err)
+}
+
+// SubmitResult posts a (value, err) pair to the Skimmer's queue
+// for later dispatch by the bound Wave's Skim / SkimAll. The pair
+// is forwarded to the skim handler as-is; sinks that genuinely
+// want both halves of a Go result tuple use this form.
+func (g Skimmer[T]) SubmitResult(
 	ctx context.Context,
 	value T,
 	err error,
 ) error {
-	traceRegion := "Skimmer.SubmitErr"
+	traceRegion := "Skimmer.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	target := resolveWave(g.wave, ctx).pool
@@ -106,25 +119,36 @@ func (g Skimmer[T]) SubmitErr(
 	return g.submit(ctx, meta, target, group, value, err)
 }
 
-// TrySubmit attempts to Submit without blocking past deadline. See
-// [Skimmer.Submit].
+// TrySubmit attempts to Submit without blocking past deadline.
+// Sugar for TrySubmitResult(ctx, deadline, value, nil).
 func (g Skimmer[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 ) (bool, error) {
-	return g.TrySubmitErr(ctx, deadline, value, nil)
+	return g.TrySubmitResult(ctx, deadline, value, nil)
 }
 
-// TrySubmitErr attempts to SubmitErr without blocking past deadline.
-// See [Skimmer.SubmitErr].
+// TrySubmitErr attempts to SubmitErr without blocking past
+// deadline. Sugar for TrySubmitResult(ctx, deadline, *new(T), err).
 func (g Skimmer[T]) TrySubmitErr(
+	ctx context.Context,
+	deadline time.Time,
+	err error,
+) (bool, error) {
+	var zero T
+	return g.TrySubmitResult(ctx, deadline, zero, err)
+}
+
+// TrySubmitResult attempts to SubmitResult without blocking past
+// deadline. See [Skimmer.TrySubmit] for return semantics.
+func (g Skimmer[T]) TrySubmitResult(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "Skimmer.TrySubmitErr"
+	traceRegion := "Skimmer.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	target := resolveWave(g.wave, ctx).pool

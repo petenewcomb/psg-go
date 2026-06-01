@@ -126,24 +126,36 @@ func NewFunnel[T any](
 	return Funnel[T]{h: h}
 }
 
-// Submit posts a value to the Funnel. Sugar for SubmitErr with a
-// nil error.
+// Submit posts a value to the Funnel. Sugar for
+// SubmitResult(ctx, value, nil).
 func (c *Funnel[T]) Submit(
 	ctx context.Context,
 	value T,
 ) error {
-	return c.SubmitErr(ctx, value, nil)
+	return c.SubmitResult(ctx, value, nil)
 }
 
-// SubmitErr posts a (value, err) pair to the Funnel. err is
-// delivered to the Accumulator alongside value; use nil when reporting
-// a successful result.
+// SubmitErr posts an err-only result to the Funnel. Sugar for
+// SubmitResult(ctx, *new(T), err). Meaningful primarily when
+// T = struct{}; for other T, the Accumulator receives the type's
+// zero value alongside the err.
 func (c *Funnel[T]) SubmitErr(
+	ctx context.Context,
+	err error,
+) error {
+	var zero T
+	return c.SubmitResult(ctx, zero, err)
+}
+
+// SubmitResult posts a (value, err) pair to the Funnel. The pair
+// is forwarded to the Accumulator as-is; sinks that genuinely want
+// both halves of a Go result tuple use this form.
+func (c *Funnel[T]) SubmitResult(
 	ctx context.Context,
 	value T,
 	err error,
 ) error {
-	traceRegion := "Funnel.SubmitErr"
+	traceRegion := "Funnel.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()
@@ -160,25 +172,36 @@ func (c *Funnel[T]) SubmitErr(
 	return inner.submit(ctx, meta, group, value, err)
 }
 
-// TrySubmit attempts to Submit without blocking past deadline. See
-// [Funnel.Submit].
+// TrySubmit attempts to Submit without blocking past deadline.
+// Sugar for TrySubmitResult(ctx, deadline, value, nil).
 func (c *Funnel[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 ) (bool, error) {
-	return c.TrySubmitErr(ctx, deadline, value, nil)
+	return c.TrySubmitResult(ctx, deadline, value, nil)
 }
 
-// TrySubmitErr attempts to SubmitErr without blocking past deadline.
-// See [Funnel.SubmitErr].
+// TrySubmitErr attempts to SubmitErr without blocking past
+// deadline. Sugar for TrySubmitResult(ctx, deadline, *new(T), err).
 func (c *Funnel[T]) TrySubmitErr(
+	ctx context.Context,
+	deadline time.Time,
+	err error,
+) (bool, error) {
+	var zero T
+	return c.TrySubmitResult(ctx, deadline, zero, err)
+}
+
+// TrySubmitResult attempts to SubmitResult without blocking past
+// deadline. See [Funnel.TrySubmit] for return semantics.
+func (c *Funnel[T]) TrySubmitResult(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 	err error,
 ) (bool, error) {
-	traceRegion := "Funnel.TrySubmitErr"
+	traceRegion := "Funnel.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	inner := c.refInner()
 	defer inner.unref()

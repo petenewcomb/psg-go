@@ -294,18 +294,27 @@ func (f Task) Handle(ctx context.Context, _ struct{}, err error) error {
 type ErrHandler func(context.Context, error) error
 func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error { return f(ctx, err) }
 
-// Accumulator — the per-instance interface a FunnelFactory returns.
-// Mirrors the existing psgfn.Combiner shape: Accumulate per input,
-// Flush when the framework needs the instance to finalize. Distinct
-// from Handler because the two-method shape (Accumulate + Flush) and
-// the (deadline, error) return on Accumulate make it genuinely
-// different from a single-dispatch handler.
+// Accumulator — the per-instance interface an AccumulatorFactory
+// returns. Mirrors the existing combine-style shape: Accumulate per
+// input, Flush when the framework needs the instance to finalize.
+// Distinct from Handler because the two-method shape (Accumulate +
+// Flush) and the (deadline, error) return on Accumulate make it
+// genuinely different from a single-dispatch handler.
 type Accumulator[T any] interface {
     Accumulate(ctx context.Context, value T, err error) (deadline time.Time, returnErr error)
     Flush(ctx context.Context) error
 }
 
-type FunnelFactory[T any] = func() Accumulator[T]
+// AccumulatorFactory creates per-instance Accumulators for a Funnel.
+// The framework calls NewAccumulator whenever fresh accumulator
+// state is needed. Close fires once when the bound Funnel's
+// refcount hits zero — gives the factory a hook to release
+// factory-level state. Errors from Close surface through SkimAll
+// (same path as Accumulator errors).
+type AccumulatorFactory[T any] interface {
+    NewAccumulator() Accumulator[T]
+    Close() error
+}
 
 // FuncAccumulator builds an Accumulator from function fields; FlushFn
 // is optional. Convenience for the common closure-over-state case.
@@ -314,28 +323,62 @@ type FuncAccumulator[T any] struct {
     FlushFn      func(ctx context.Context) error
 }
 
-func (f FuncAccumulator[T]) Accumulate(ctx context.Context, value T, err error) (time.Time, error) {
-    return f.AccumulateFn(ctx, value, err)
-}
-func (f FuncAccumulator[T]) Flush(ctx context.Context) error {
-    if f.FlushFn == nil { return nil }
-    return f.FlushFn(ctx)
-}
-
-// NewAccumulator is the type-inference-friendly constructor for a
-// closure-based Accumulator. T is inferred from the accumulate
-// closure's signature, sparing the user the [T] annotation. Pass nil
-// for flush if the accumulator doesn't need a final flush. Returns
-// the concrete FuncAccumulator[T] (which satisfies Accumulator[T]) —
-// callers who want struct-level access keep it; callers who treat
-// the result as an Accumulator interface get that automatically via
-// structural typing.
 func NewAccumulator[T any](
     accumulate func(ctx context.Context, value T, err error) (time.Time, error),
     flush func(ctx context.Context) error,
-) FuncAccumulator[T] {
-    return FuncAccumulator[T]{AccumulateFn: accumulate, FlushFn: flush}
+) FuncAccumulator[T]
+
+// FuncErrAccumulator: err-only Accumulator[struct{}] adapter — the
+// user's Accumulate body receives (ctx, err) without the void value
+// parameter. Saves a framework-added signature-adapter closure when
+// the user's body doesn't care about the void value.
+type FuncErrAccumulator struct {
+    AccumulateFn func(ctx context.Context, err error) (time.Time, error)
+    FlushFn      func(ctx context.Context) error
 }
+
+func NewErrAccumulator(
+    accumulate func(ctx context.Context, err error) (time.Time, error),
+    flush func(ctx context.Context) error,
+) FuncErrAccumulator
+
+// FuncAccumulatorFactory: factory-closure adapter for
+// AccumulatorFactory[T]. Use when each Accumulator needs per-instance
+// state via closure capture.
+type FuncAccumulatorFactory[T any] struct {
+    NewAccumulatorFn func() Accumulator[T]
+    CloseFn          func() error
+}
+
+func NewAccumulatorFactory[T any](
+    newAccumulator func() Accumulator[T],
+    closeFn func() error,
+) FuncAccumulatorFactory[T]
+
+// AccumulatorFactoryFunc[T]: bare-func adapter — equivalent to a
+// FuncAccumulatorFactory with no CloseFn. Compact form for the
+// no-cleanup case.
+type AccumulatorFactoryFunc[T any] func() Accumulator[T]
+
+// FuncErrAccumulatorFactory: err-only direct-fn-storage adapter for
+// AccumulatorFactory[struct{}]. Stores the AccumulateFn / FlushFn /
+// CloseFn as struct fields directly (no factory closure). Each
+// NewAccumulator() call returns a fresh FuncErrAccumulator with the
+// stored fns copied in. Zero framework-added closures. Suitable for
+// stateless err-aggregation; for per-instance state, use
+// FuncAccumulatorFactory[struct{}] with a NewErrAccumulator inside
+// the factory closure.
+type FuncErrAccumulatorFactory struct {
+    AccumulateFn func(ctx context.Context, err error) (time.Time, error)
+    FlushFn      func(ctx context.Context) error
+    CloseFn      func() error
+}
+
+func NewErrAccumulatorFactory(
+    accumulate func(ctx context.Context, err error) (time.Time, error),
+    flush func(ctx context.Context) error,
+    closeFn func() error,
+) FuncErrAccumulatorFactory
 
 // ===== Op constructors =====
 //
@@ -355,15 +398,60 @@ type OpOption interface { /* ... */ }
 func WithLimits(limiters ...Limiter) OpOption
 // ... future: WithPriority, WithDeadline, WithRetry, etc.
 
+// ===== Constructor progression =====
+//
+// Each op type exposes a progression of constructors from most
+// general (interface-accepting, alloc-free hot path) to most
+// specialized. Users pick the shortest one that fits their case.
+//
+// Launcher:
+//   NewLauncher(wave, handler Handler[T], opts...)         // interface; struct or HandlerFunc
+//   NewFnLauncher(wave, fn func(ctx, T, error) error, ...) // closure form, T inferred
+//   NewTaskLauncher(wave, fn func(ctx) error, opts...)     // no-arg (T=struct{}); wraps in TaskFunc
+//   NewErrLauncher(wave, fn func(ctx, err) error, opts...) // err-only (T=struct{}); wraps in ErrHandlerFunc
+//
+// Skimmer (same pattern, no TaskSkimmer):
+//   NewSkimmer(wave, handler Handler[T])
+//   NewFnSkimmer(wave, fn func(ctx, T, error) error)
+//   NewErrSkimmer(wave, fn func(ctx, err) error)
+//
+// Funnel (interface accepts AccumulatorFactory[T]; closure form
+// takes factory + close fns; err-only form takes accumulate/flush/
+// close fns directly via FuncErrAccumulatorFactory — zero framework-
+// added closures):
+//   NewFunnel(funnelPool, factory AccumulatorFactory[T], opts...)
+//   NewFnFunnel(funnelPool, newAccFn, closeFn, opts...)
+//   NewErrFunnel(funnelPool, accumulate, flush, closeFn, opts...)
+
 func NewLauncher[T any](wave *Wave, handler Handler[T], opts ...OpOption) Launcher[T]
-func NewFunnel[T any](wave *Wave, factory FunnelFactory[T], opts ...OpOption) Funnel[T]
-func NewSkimmer[T any](wave *Wave, handler Handler[T], opts ...OpOption) Skimmer[T]
+func NewFnLauncher[T any](wave *Wave, handle func(ctx context.Context, value T, err error) error, opts ...OpOption) Launcher[T]
+func NewTaskLauncher(wave *Wave, task func(ctx context.Context) error, opts ...OpOption) TaskLauncher
+func NewErrLauncher(wave *Wave, handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher
+
+func NewSkimmer[T any](wave *Wave, handler Handler[T]) Skimmer[T]
+func NewFnSkimmer[T any](wave *Wave, handle func(ctx context.Context, value T, err error) error) Skimmer[T]
+func NewErrSkimmer(wave *Wave, handle func(ctx context.Context, err error) error) ErrSkimmer
+
+func NewFunnel[T any](funnelPool *FunnelPool, factory AccumulatorFactory[T], opts ...OpOption) Funnel[T]
+func NewFnFunnel[T any](funnelPool *FunnelPool, newAccumulator func() Accumulator[T], closeFn func() error, opts ...OpOption) Funnel[T]
+func NewErrFunnel(funnelPool *FunnelPool, accumulate func(ctx, err error) (time.Time, error), flush func(ctx) error, closeFn func() error, opts ...OpOption) ErrFunnel
+
+// ===== Void-T type aliases (named for intent) =====
+
+type Task                  = Handler[struct{}]              // no-arg or void-value handler
+type ErrHandler            = Handler[struct{}]              // err-only handler (alias for Task; distinct intent name)
+type ErrAccumulator        = Accumulator[struct{}]
+type ErrAccumulatorFactory = AccumulatorFactory[struct{}]
+type TaskLauncher          = Launcher[struct{}]
+type ErrLauncher           = Launcher[struct{}]
+type ErrSkimmer            = Skimmer[struct{}]
+type ErrFunnel             = Funnel[struct{}]
 
 // For "reducer" behavior — strictly serial accumulation, only one
 // instance active at a time — construct a Funnel with a 1-permit
 // limiter:
 //
-//   ordered := streampool.NewFunnel(wave, factory,
+//   ordered := streampool.NewFunnel(funnelPool, factory,
 //       streampool.WithLimits(streampool.NewSemaphore(1)),
 //   )
 
@@ -748,7 +836,7 @@ body running in a wave.
 | User inputs as interfaces | `Handler[T]`, `Accumulator[T]` | Function signatures forced closure allocations for any stateful body. Interfaces let users implement on structs with state as fields (alloc-free hot path). Function-type adapters — canonical `HandlerFunc[T]` plus named `Task` / `ErrHandler` for the void cases, and `FuncAccumulator[T]` — provide closure convenience. Same pattern as `http.Handler` / `http.HandlerFunc`. |
 | No `.To(sink)` wiring | Function bodies call `sink.Submit(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Funnel. |
 | No `Sink[T]` in public API | Not exported | Nothing in the framework's own API consumes a Sink type. User code that wants polymorphism over "things you can Submit to" defines a one-method interface locally; Go's structural typing makes that work without a published contract. |
-| Funnel state | Via `FunnelFactory[T]` returning `Accumulator[T]` | Factory creates per-instance Accumulators (each with closure state); framework calls each instance's `Accumulate` per input and `Flush` on Close. Same shape as the existing `psgfn.Combiner` interface (legacy name). |
+| Funnel state | Via `AccumulatorFactory[T]` interface (NewAccumulator + Close) returning `Accumulator[T]` instances | Factory creates per-instance Accumulators (each with closure state); framework calls each instance's `Accumulate` per input and `Flush` on Close. The factory's `Close()` fires once when the bound Funnel's refcount hits zero — releases factory-level state (shared connections, registries, etc.). For closure-based factories with no cleanup, `AccumulatorFactoryFunc[T]` is a bare-func adapter with no-op Close; for cleanup, `FuncAccumulatorFactory[T]` (struct) or `NewAccumulatorFactory[T](fn, closeFn)` (inference-friendly constructor). |
 | Serial accumulation ("reducer") | Funnel with `WithLimits(NewSemaphore(1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
 | Launcher.Close | Not present | The framework can't deduce what sinks a task body will Submit to, so closing the Launcher tells the framework nothing useful. Resources release via leakguard finalizer when the value falls out of scope. |
 | Funnel.Close | Present | Funnel has refcounted Accumulator instances that need final Flush on end-of-input. Close releases the user's reference; the framework's per-work-item refs unwind through SkimAll. |
@@ -780,7 +868,7 @@ body running in a wave.
 | `psgfn.Task[T]` interface (`Run` method) | `Handler[T]` interface (`Handle` method) | Task interface unified with the Skimmer Handler interface — same shape, single name. Launcher now takes `Handler[T]`. |
 | `psgfn.TaskFunc[T]` | `HandlerFunc[T]` (parameterized), `Task` (void, no-err), `ErrHandler` (void, with err) | Adapter set reshaped: HandlerFunc[T] is the canonical Func adapter; Task and ErrHandler are named func adapters for the no-input cases (no paired interface, hence no `Func` suffix). |
 | `psgfn.Gather[T]` (function type) | `Handler[T]` (interface) | Was a function-type alias; promoted to interface for the struct-implementation alloc-free path. |
-| `psgfn.FunnelFactory[I, O]` | `FunnelFactory[T]` | Output type removed. |
+| `psgfn.FunnelFactory[I, O]` | `AccumulatorFactory[T]` interface (NewAccumulator + Close) | Output type removed; func-type alias replaced with an interface that adds a `Close() error` lifecycle hook (called when the bound Funnel's refcount hits zero). Closure-based factories use `AccumulatorFactoryFunc[T]` (no-op Close) or `NewAccumulatorFactory(fn, closeFn)` (with Close). |
 | `psgfn.FuncAccumulator[T]` struct-literal construction | `streampool.NewAccumulator(accumulate, flush)` (or struct literal still works) | Constructor enables T inference; struct literal stays for named-field clarity. |
 | `psgwf.Workflow` | `streampool.Flow` | Renamed and folded into main package. Same refcounted-ctx-borne lifecycle semantics. |
 | `psgwf` package | (folded into main package; Flow type) | Workflow consolidates into Flow. No separate sub-package. |

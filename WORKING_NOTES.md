@@ -156,45 +156,55 @@ The mutex approach is the cleanest. Note: this is a test-only race; production `
 - `internal/leakguard/leakguard.go:130` — `LogLeak` (the writer side)
 - `internal/leakguard/leakguard.go:314` — finalizer registration in `Init`
 
-## Thread A: Handler[T] unification + op trio rename (2026-05-31)
+## Thread A: Handler[T] unification + op trio rename (2026-05-31 / 2026-06-01)
 
-Substantial reshape in flight on the `combiner` branch. **Status: paused at a clean checkpoint.** All committed work is on origin; tests green; build green.
+Substantial reshape on the `combiner` branch. **Status: largely complete.** All committed work is on origin; tests green; build green.
 
-### What landed
+### Thread A: complete (landed in commit order)
 
-In commit order on origin:
+1. `0509241` **psgfn**: add `Handler[T]` interface, `HandlerFunc[T]` / `ErrHandler` adapters, `NewAccumulator` constructor — additive.
+2. `9ebc5cd` **psg**: migrate `Gatherer` to take `psgfn.Handler[T]`.
+3. `24553ee` **Op trio step 1**: `Gather`/`Gatherer` → `Skim`/`Skimmer`. Wave methods, internal types, files renamed.
+4. `942620f` **Op trio step 2**: `Combiner`/`Combine` → `Funnel`. `CombinerPool` → `FunnelPool` (transitional).
+5. `91872d0` **Op trio step 3**: `TaskRunner` → `Launcher`.
+6. `cac52fc` **Step 3 (arity collapse)**: single `Launcher[T]` takes `psgfn.Handler[T]`; Launcher0/Launcher2 removed; per-arity Task interfaces removed; `psgfn.Task` named func adapter with short-circuit-on-err.
+7. `bdca508` **Step 4 (Submit family)**: `Submit(v)` / `SubmitErr(err)` / `SubmitResult(v, err)` plus Try variants plus `Start`/`TryStart` sugars; same family across Launcher / Skimmer / Funnel.
 
-1. `0509241` **psgfn**: add `Handler[T]` interface, `HandlerFunc[T]` and `ErrHandler` adapters, `NewAccumulator` constructor — additive.
-2. `9ebc5cd` **psg**: migrate `Gatherer` to take `psgfn.Handler[T]` instead of `psgfn.Gather[T]`. All call sites wrap function literals in `psgfn.HandlerFunc[T]`.
-3. `24553ee` **Op trio rename step 1**: `Gather`/`Gatherer` → `Skim`/`Skimmer`. Wave methods, internal types, files all renamed. `psgfn.Gather` aliased to `psgfn.Skim` (transitional).
-4. `942620f` **Op trio rename step 2**: `Combiner`/`Combine` → `Funnel`. `CombinerPool` → `FunnelPool` (transitional; will retire on Pool consolidation). File renames throughout.
-5. `91872d0` **Op trio rename step 3**: `TaskRunner` → `Launcher`. Per-arity types (`Launcher0` / `Launcher[T]` / `Launcher2[T1, T2]`) retained for this commit; collapse to single `Launcher[T]` is the next step.
+API_DESIGN.md contains the trio-rename rationale and a `considered & rejected` entry.
 
-API_DESIGN.md updated with the trio rationale and a `considered & rejected` entry covering the alternatives evaluated (`Drain`, `Mix`, `Caster`, `Pitcher`, `Sluice`, etc.).
+### Thread B: complete (B.1 + B.2 + worker plumbing + factory pass)
 
-### What's left in Thread A
+`bd3ff60` B.1: wave moves to constructor (required).
+`8bf2541` B.2: nil-OK at construction; resolution via existing `ctxMeta.wave`.
+`c187379` Worker plumbing: nil-wave dispatch works from inside ALL three op body types — task bodies (taskWork carries dispatching wave), Funnel Accumulate/Flush bodies (funnelWork carries it), and Skim handler bodies (via fixing `ensureCtxMeta` to preserve `wave` across same-job ctx transitions). Sim alternates explicit-vs-nil wave for both Skimmers and Launchers, exercising both code paths every run.
+`32c0c62` Factory pass: psgwf and otpsg wrappers accept nil wave; `otpsg.Scatter` drops the wave param (resolves from ctx).
 
-- ~~**Step 3 (collapse Launcher arities)**~~ — landed: single `Launcher[T]` takes `psgfn.Handler[T]`; Launcher0/Launcher2 removed; `psgfn.Task0/Task[T]/Task2` interfaces removed; `psgfn.Task` named func adapter added with short-circuit-on-err semantics.
-- ~~**Step 4 (Submit family across all sinks)**~~ — landed: `Submit(v)` / `SubmitErr(err)` / `SubmitResult(v, err)` plus the three Try variants plus `Start` / `TryStart` sugars; same family on Launcher, Skimmer, Funnel. Each name describes its args; frequency-ordered as per the API_DESIGN.
-- ~~**Deferred Task adapter**~~ — landed alongside Step 3.
+### psgfn fold + AccumulatorFactory + full convenience surface
 
-### Threads B and C
+`e853a2a` Big consolidation commit:
+- **psgfn package deleted**; all types moved to top-level `psg` (Handler, HandlerFunc, Accumulator, FuncAccumulator, NewAccumulator, NewHandler).
+- **AccumulatorFactory is now an interface** with `NewAccumulator() Accumulator[T]` + `Close() error`. `funnelOp.unref()` calls `factory.Close()` on the last-reference cleanup path; Close errors route through the framework err sink.
+- **Adapter parallel set**: for each interface (Handler, Accumulator, AccumulatorFactory), there are both generic and err-only flavors. `FuncErrAccumulator` and `FuncErrAccumulatorFactory` store fns in struct fields directly — zero framework-added closures for the err-only path.
+- **Op constructor progression** per type: `NewLauncher` (interface, alloc-free hot path) → `NewFnLauncher` (closure, T inferred) → `NewTaskLauncher` (no-arg) → `NewErrLauncher` (err-only). Same shape for Skimmer (minus Task) and Funnel.
+- **Type aliases** for every void-T case: `Task`, `ErrHandler`, `ErrAccumulator`, `ErrAccumulatorFactory`, `TaskLauncher`, `ErrLauncher`, `ErrSkimmer`, `ErrFunnel` — all aliases for the `*[struct{}]` instantiations, named for intent.
 
-- **Thread B (B.1 + B.2 + full worker-plumbing landed)**: wave-at-construction with nil-sentinel resolution. B.1 moved wave to constructor (required); B.2 relaxed to nil-OK with ctx-based resolution via the existing `ctxMeta.wave` machinery; the worker-plumbing follow-up made nil-wave dispatch work from inside ALL three op body types: (1) task bodies via taskWork carrying the dispatching wave; (2) Funnel Accumulate/Flush bodies via funnelWork carrying the dispatching wave; (3) Skim handler bodies via fixing `ensureCtxMeta` to preserve `wave` across same-job ctx transitions. Sim now alternates between explicit-wave and nil-wave construction (even idx = explicit, odd idx = nil) for both Skimmers and Launchers, exercising both code paths on every test run.
-- **Thread C**: introduce `Forever` sentinel; flip zero-deadline semantic from "block forever" to "attempt once". Atomic across all dispatch sites. Risky single-shot change per the impl survey.
+### Threads B and C status
 
-### Naming-pass deferred items
+- **Thread B**: complete.
+- **Thread C**: not started. Introduce `Forever` sentinel; flip zero-deadline semantic from "block forever" to "attempt once". Atomic across all dispatch sites. Risky single-shot change per the impl survey.
 
-- `psgfn.Skim` is the renamed `psgfn.Gather` function-type alias; legacy compatibility name. Retire entirely when the broader `psgfn` cleanup lands.
-- `CombinerPool` → `FunnelPool` retained for now; goes away when Pool consolidates per the destination doc.
+### Naming-pass deferred items (still relevant)
+
+- `CombinerPool` → `FunnelPool` retained; goes away when Pool consolidates per the destination doc.
 - `psgwf.GenericTaskRunner` (and related psgwf wrappers) still use legacy names; rename or retire with the broader psgwf migration.
-- chartgen's bench-data parser still reads the historical metric name `combinerLimit`; the legacy benchmark file emits `funnelLimit` after the rename. Will need re-aligning when `bench.txt` is regenerated post-rename.
+- chartgen's bench-data parser still reads the historical metric name `combinerLimit`; legacy benchmark file emits `funnelLimit`. Re-align when `bench.txt` is regenerated post-rename.
+- Several `psg.NewLauncher(wave, psg.NewTask(fn))` and similar wrap-pattern call sites remain in tests/examples (perl-migration didn't catch multi-line ones). Not broken; just stylistically older. Migrate opportunistically to the New*Launcher convenience constructors.
 
 ### Next session pickup
 
-If continuing Thread A: start with Step 3 (Launcher arity collapse). The 1/2-arity types are dead weight given the unified `Handler[T]` interface, and collapsing unlocks the deferred `Task` adapter naming.
-
-If switching threads: B or C are both small, focused, and well-scoped per the docs.
+- **Thread C**: Forever sentinel + zero-deadline polarity flip. Single coherent change with API impact across all `Try*` methods.
+- **Opportunistic wrap-pattern migration**: replace remaining `NewSkimmer(..., NewHandler(fn))` and `NewLauncher(..., NewTask(fn))` with the `NewFn*` / `NewTask*` / `NewErr*` constructors. Low priority; cleanup.
+- **Pool consolidation**: retire CombinerPool/FunnelPool transitional name and merge with the worker Pool per the destination doc. Bigger architectural change.
 
 ## Open issues
 

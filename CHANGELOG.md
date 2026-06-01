@@ -20,6 +20,14 @@ format.
 - Comprehensive options pattern implementation via psgopt package
 - SetOptions methods for atomic configuration updates across all components
 - `PSGTRACEINTERNALS` environment variable to enable and configure `runtime/trace` instrumentation of PSG internals
+- `Wave` type as the user-facing batch primitive, hosting op references; replaces direct Pool ops at the user surface
+- Universal `Handler[T]` interface across Launcher and Skimmer (single interface; per-op-type vocabulary distinction)
+- Wave-at-construction with nil-sentinel: ops bind to a Wave at construction, nil defers binding to the dispatching ctx (one op reusable across many waves); resolved transparently from inside any op body (task / accumulate / skim handler)
+- `AccumulatorFactory[T]` interface with `Close() error`; framework calls Close on the last reference drop of the bound Funnel
+- Per-op-type constructor progression: interface form (alloc-free hot path) → closure form (`NewFn*`) → no-arg specialization (`NewTask*`) → err-only specialization (`NewErr*`)
+- Void-T type aliases for intent-naming: `Task`, `ErrHandler`, `ErrAccumulator`, `ErrAccumulatorFactory`, `TaskLauncher`, `ErrLauncher`, `ErrSkimmer`, `ErrFunnel`
+- `FuncErrAccumulator` and `FuncErrAccumulatorFactory` adapters: err-only direct-fn-storage adapters that avoid framework-added signature-adapter closures
+- `Submit` / `SubmitErr` / `SubmitResult` dispatch family with Try variants on all sinks; each name describes its args (frequency-ordered: value-only > err-only > both)
 
 ### Changed
 
@@ -35,6 +43,10 @@ format.
 - Pool renamed to TaskPool for clarity vs. the new CombinerPool type
 - Significant performance improvements: up to 73% throughput increase and 32% memory reduction
 - Pool.SetLimit → TaskPool.SetOptions with WithMaxConcurrency option
+- Op trio rename: `Gather`/`Gatherer` → `Skim`/`Skimmer`, `Combiner` → `Funnel`, `TaskRunner` → `Launcher`. Coheres with the streampool nautical theme; drops the academic `scatter-gather` vocabulary
+- `Launcher` collapses from per-arity types (Launcher0/Launcher[T]/Launcher2) to a single `Launcher[T]` taking `Handler[T]`; zero-arg via `T=struct{}` with `psgfn.Task` adapter; multi-arg via user struct
+- `psgfn` package folded into top-level `psg`; all user-facing function types (Handler, HandlerFunc, Task, ErrHandler, Accumulator, FuncAccumulator, NewAccumulator) are now `psg.*`
+- Funnel factory becomes interface: `psgfn.FunnelFactory[T] = func() Accumulator[T]` → `psg.AccumulatorFactory[T]` interface with `NewAccumulator() Accumulator[T]` and `Close() error`
 
 ### Fixed
 
@@ -44,6 +56,9 @@ format.
 ### Removed
 
 - Job.MultiGatherAll and Job.TryMultiGatherAll
+- `psgfn.Task0`, `psgfn.Task[T]`, `psgfn.Task2[T1, T2]` interfaces and their `TaskFunc*` adapters; replaced by the universal `Handler[T]` plus `psg.Task` named adapter (closure form for `T=struct{}` with short-circuit-on-err semantics)
+- `psgfn` package (all types moved to top-level `psg`)
+- `Launcher0` and `Launcher2[T1, T2]` types (collapsed to single `Launcher[T]`)
 
 ## [0.0.1] - 2025-04-09
 

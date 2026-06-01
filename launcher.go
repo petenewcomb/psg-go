@@ -33,23 +33,28 @@ import (
 // structures and used concurrently. The Wave is supplied per Start
 // call, not at construction time.
 type Launcher0 struct {
+	wave     *Wave
 	task     psgfn.Task0
 	limiter  Limiter
 	errSink  Skimmer[struct{}]
 	workPool *omnipool.Pool[launcherWork0]
 }
 
-// NewLauncher0 wraps a [psgfn.Task0] in a Wave-independent
-// [Launcher0]. Pass [WithLimits] in opts to bind one or more
-// [Limiter]s that throttle dispatch. The framework manages an internal
-// error sink that surfaces unexpected errors returned by Task.Run
-// through the dispatching Wave's SkimAll path.
-func NewLauncher0(task psgfn.Task0, opts ...OpOption) Launcher0 {
+// NewLauncher0 binds a [psgfn.Task0] to the given [Wave]. wave
+// must be non-nil. Pass [WithLimits] in opts to bind one or more
+// [Limiter]s that throttle dispatch. The framework manages an
+// internal error sink that surfaces unexpected errors returned by
+// Task.Run through the bound Wave's SkimAll path.
+func NewLauncher0(wave *Wave, task psgfn.Task0, opts ...OpOption) Launcher0 {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return Launcher0{
+		wave:     wave,
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -57,33 +62,30 @@ func NewLauncher0(task psgfn.Task0, opts ...OpOption) Launcher0 {
 	}
 }
 
-// Start launches the task on wave's worker goroutine. Before launching,
-// Start applies backpressure by skimming some already-completed tasks.
-// If a Limiter is at its concurrency limit, Start blocks until a slot
-// becomes available. The ctx may be used to cancel both skimming and
-// launch; only the ctx associated with the wave's Pool is passed to
-// Run.
+// Start launches the task on the bound Wave's worker goroutine.
+// Before launching, Start applies backpressure by skimming some
+// already-completed tasks. If a Limiter is at its concurrency limit,
+// Start blocks until a slot becomes available. The ctx may be used
+// to cancel both skimming and launch; only the ctx associated with
+// the Wave's Pool is passed to Run.
 //
-// Returns a non-nil error if the ctx is canceled or if a skim function
-// returns an error. If the returned error is non-nil, the task will not
-// have been launched.
+// Returns a non-nil error if the ctx is canceled or if a skim
+// function returns an error. If the returned error is non-nil, the
+// task will not have been launched.
 //
-// WARNING: Start must not be called from inside a Task launched on the
-// same wave, since this can deadlock when a concurrency limit is
-// reached. Call Start from an associated Skim or Accumulate body
-// instead. Start attempts to detect this and panics, but the detection
-// works only when the ctx passed to Start descends from the ctx passed
-// to Run.
+// WARNING: Start must not be called from inside a Task launched on
+// the same wave, since this can deadlock when a concurrency limit
+// is reached. Call Start from an associated Skim or Accumulate body
+// instead. Start attempts to detect this and panics, but the
+// detection works only when the ctx passed to Start descends from
+// the ctx passed to Run.
 //
-//nolint:contextcheck // background context used only for tracing
-func (r Launcher0) Start(ctx context.Context, wave *Wave) error {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
+//nolint:contextcheck,gocritic // bg ctx for tracing; Launcher0 designed to pass by value
+func (r Launcher0) Start(ctx context.Context) error {
 	traceRegion := "Launcher0.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := wave.pool
+	pool := r.wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -96,20 +98,18 @@ func (r Launcher0) Start(ctx context.Context, wave *Wave) error {
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch the task on wave without blocking past
-// deadline. Returns (true, nil) on success, (false, nil) if a [Limiter]
-// held the dispatch back and the deadline expired before a permit
-// became available, or (false, non-nil) for any other failure.
+// TryStart attempts to launch the task on the bound Wave without
+// blocking past deadline. Returns (true, nil) on success, (false,
+// nil) if a [Limiter] held the dispatch back and the deadline
+// expired before a permit became available, or (false, non-nil) for
+// any other failure.
 //
-//nolint:contextcheck // background context used only for tracing
-func (r Launcher0) TryStart(ctx context.Context, deadline time.Time, wave *Wave) (bool, error) {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
+//nolint:contextcheck,gocritic // bg ctx for tracing; Launcher0 designed to pass by value
+func (r Launcher0) TryStart(ctx context.Context, deadline time.Time) (bool, error) {
 	traceRegion := "Launcher0.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := wave.pool
+	pool := r.wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -126,6 +126,7 @@ func (r Launcher0) TryStart(ctx context.Context, deadline time.Time, wave *Wave)
 	return ok, err
 }
 
+//nolint:gocritic // Launcher0 is designed to be passed by value
 func (r Launcher0) newScatterWork(pool *Pool, group workq.GroupID, deadline time.Time) *launcherScatterWork {
 	inner := r.newTask(pool, group)
 	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter))
@@ -137,6 +138,7 @@ func (r Launcher0) newScatterWork(pool *Pool, group workq.GroupID, deadline time
 	return newLauncherScatterWork(pool, deadline, gated)
 }
 
+//nolint:gocritic // Launcher0 designed to pass by value
 func (r Launcher0) newTask(pool *Pool, group workq.GroupID) boundTask {
 	w := r.workPool.Get()
 	w.pool = r.workPool
@@ -194,20 +196,25 @@ func (w *launcherWork0) Free() {
 // Launcher[T] dispatches a single-argument [psgfn.Task[T]] onto a
 // [Wave]'s worker pool. See [Launcher0] for shared semantics.
 type Launcher[T any] struct {
+	wave     *Wave
 	task     psgfn.Task[T]
 	limiter  Limiter
 	errSink  Skimmer[struct{}]
 	workPool *omnipool.Pool[launcherWork[T]]
 }
 
-// NewLauncher wraps a [psgfn.Task[T]] in a Wave-independent
-// [Launcher[T]]. See [NewLauncher0].
-func NewLauncher[T any](task psgfn.Task[T], opts ...OpOption) Launcher[T] {
+// NewLauncher binds a [psgfn.Task[T]] to the given [Wave]. wave
+// must be non-nil. See [NewLauncher0].
+func NewLauncher[T any](wave *Wave, task psgfn.Task[T], opts ...OpOption) Launcher[T] {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return Launcher[T]{
+		wave:     wave,
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -215,16 +222,14 @@ func NewLauncher[T any](task psgfn.Task[T], opts ...OpOption) Launcher[T] {
 	}
 }
 
-// Start launches Run(ctx, arg) on wave's worker goroutine. See
-// [Launcher0.Start] for backpressure and ctx behavior.
-func (r Launcher[T]) Start(ctx context.Context, wave *Wave, arg T) error {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
+// Start launches Run(ctx, arg) on the bound Wave's worker
+// goroutine. See [Launcher0.Start] for backpressure and ctx
+// behavior.
+func (r Launcher[T]) Start(ctx context.Context, arg T) error {
 	traceRegion := "Launcher.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := wave.pool
+	pool := r.wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -237,16 +242,13 @@ func (r Launcher[T]) Start(ctx context.Context, wave *Wave, arg T) error {
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch Run(ctx, arg) on wave without blocking.
-// See [Launcher0.TryStart].
-func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, wave *Wave, arg T) (bool, error) {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
+// TryStart attempts to launch Run(ctx, arg) on the bound Wave
+// without blocking past deadline. See [Launcher0.TryStart].
+func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (bool, error) {
 	traceRegion := "Launcher.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := wave.pool
+	pool := r.wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -337,20 +339,25 @@ func (w *launcherWork[T]) Free() {
 // Launcher2[T1, T2] dispatches a two-argument [psgfn.Task2[T1, T2]]
 // onto a [Wave]'s worker pool. See [Launcher0] for shared semantics.
 type Launcher2[T1, T2 any] struct {
+	wave     *Wave
 	task     psgfn.Task2[T1, T2]
 	limiter  Limiter
 	errSink  Skimmer[struct{}]
 	workPool *omnipool.Pool[launcherWork2[T1, T2]]
 }
 
-// NewLauncher2 wraps a [psgfn.Task2[T1, T2]] in a Wave-independent
-// [Launcher2[T1, T2]]. See [NewLauncher0].
-func NewLauncher2[T1, T2 any](task psgfn.Task2[T1, T2], opts ...OpOption) Launcher2[T1, T2] {
+// NewLauncher2 binds a [psgfn.Task2[T1, T2]] to the given [Wave].
+// wave must be non-nil. See [NewLauncher0].
+func NewLauncher2[T1, T2 any](wave *Wave, task psgfn.Task2[T1, T2], opts ...OpOption) Launcher2[T1, T2] {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return Launcher2[T1, T2]{
+		wave:     wave,
 		task:     task,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -358,16 +365,13 @@ func NewLauncher2[T1, T2 any](task psgfn.Task2[T1, T2], opts ...OpOption) Launch
 	}
 }
 
-// Start launches Run(ctx, arg1, arg2) on wave's worker goroutine. See
-// [Launcher0.Start].
-func (r Launcher2[T1, T2]) Start(ctx context.Context, wave *Wave, arg1 T1, arg2 T2) error {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
+// Start launches Run(ctx, arg1, arg2) on the bound Wave's worker
+// goroutine. See [Launcher0.Start].
+func (r Launcher2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error {
 	traceRegion := "Launcher2.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := wave.pool
+	pool := r.wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -380,18 +384,15 @@ func (r Launcher2[T1, T2]) Start(ctx context.Context, wave *Wave, arg1 T1, arg2 
 	return meta.ExecuteNowOrQueue(ctx, work)
 }
 
-// TryStart attempts to launch Run(ctx, arg1, arg2) on wave without
-// blocking. See [Launcher0.TryStart].
+// TryStart attempts to launch Run(ctx, arg1, arg2) on the bound
+// Wave without blocking past deadline. See [Launcher0.TryStart].
 func (r Launcher2[T1, T2]) TryStart(
-	ctx context.Context, deadline time.Time, wave *Wave, arg1 T1, arg2 T2,
+	ctx context.Context, deadline time.Time, arg1 T1, arg2 T2,
 ) (bool, error) {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	traceRegion := "Launcher2.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := wave.pool
+	pool := r.wave.pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -487,7 +488,7 @@ func (w *launcherWork2[T1, T2]) Free() {
 // the input error as-is, surfacing unexpected Task.Run errors via the
 // Wave's SkimAll path.
 func newTaskErrSink() Skimmer[struct{}] {
-	return NewSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
+	return newInternalSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
 	}))
 }

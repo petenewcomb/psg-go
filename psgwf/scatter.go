@@ -23,79 +23,70 @@ import (
 // framework error path (the sink receives the wrapped result with the
 // task's error attached, and unrefs in its handler).
 type GenericLauncher[T, C any] struct {
-	wf       *GenericWorkflow[C]
-	taskFn   GenericTaskFunc[T, C]
-	opts     []psg.OpOption
-	submitFn func(context.Context, *psg.Wave, T, error) error
+	wf    *GenericWorkflow[C]
+	inner psg.Launcher0
 }
 
 // Launcher is the convenience alias for [GenericLauncher] over the
 // default [Context] type. See [GenericLauncher] for semantics.
 type Launcher[T any] = GenericLauncher[T, Context]
 
-// NewGenericLauncher constructs a Wave-independent
-// [GenericLauncher] that wraps the workflow context propagation and
-// downstream submission to the supplied Skimmer sink. Pass psg op
-// options (e.g. [psg.WithLimits]) via opts to throttle dispatch. The
-// caller supplies a [psg.Wave] at each [GenericLauncher.Start] call.
+// NewGenericLauncher binds a workflow-aware task to the given
+// [psg.Wave]. The wrapped task is dispatched onto the Wave's Pool
+// when [GenericLauncher.Start] is called. Pass psg op options
+// (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 func NewGenericLauncher[T, C any](
+	wave *psg.Wave,
 	sink GenericSkimOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts ...psg.OpOption,
 ) GenericLauncher[T, C] {
-	return newGenericLauncher(wf, taskFn, opts, func(ctx context.Context, wave *psg.Wave, value T, err error) error {
-		return sink.inner().SubmitErr(ctx, wave, result[T, C]{Workflow: wf, Value: value}, err)
+	return newGenericLauncher(wave, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
+		return sink.inner().SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
-// NewGenericLauncherForFunnel constructs a Wave-independent
-// [GenericLauncher] that wraps workflow context propagation and
-// forwards the result to the supplied Funnel sink. Pass psg op
-// options (e.g. [psg.WithLimits]) via opts to throttle dispatch. The
-// caller supplies a [psg.Wave] at each [GenericLauncher.Start] call.
-// The Funnel itself is not Wave-bound; the Wave argument is ignored
-// in the submit step.
+// NewGenericLauncherForFunnel binds a workflow-aware task to the
+// given [psg.Wave], forwarding results to the supplied Funnel sink.
+// Pass psg op options (e.g. [psg.WithLimits]) via opts to throttle
+// dispatch.
 func NewGenericLauncherForFunnel[T, C any](
+	wave *psg.Wave,
 	sink GenericFunnelOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts ...psg.OpOption,
 ) GenericLauncher[T, C] {
 	funnel := sink.inner()
-	return newGenericLauncher(wf, taskFn, opts, func(ctx context.Context, _ *psg.Wave, value T, err error) error {
+	return newGenericLauncher(wave, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
 		return funnel.SubmitErr(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
 func newGenericLauncher[T, C any](
+	wave *psg.Wave,
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
 	opts []psg.OpOption,
-	submitFn func(context.Context, *psg.Wave, T, error) error,
+	submitFn func(context.Context, T, error) error,
 ) GenericLauncher[T, C] {
+	body := psgfn.TaskFunc0(func(ctx context.Context) error {
+		value, taskErr := taskFn(ctx, wf)
+		return submitFn(ctx, value, taskErr)
+	})
 	return GenericLauncher[T, C]{
-		wf:       wf,
-		taskFn:   taskFn,
-		opts:     opts,
-		submitFn: submitFn,
+		wf:    wf,
+		inner: psg.NewLauncher0(wave, body, opts...),
 	}
 }
 
-// Start dispatches the wrapped task on wave. The workflow ref taken
-// here is balanced by the unref that fires when the downstream sink
-// processes the result.
-func (r GenericLauncher[T, C]) Start(ctx context.Context, wave *psg.Wave) error {
+// Start dispatches the wrapped task on the bound Wave. The workflow
+// ref taken here is balanced by the unref that fires when the
+// downstream sink processes the result.
+func (r GenericLauncher[T, C]) Start(ctx context.Context) error {
 	r.wf.ref()
-	wf := r.wf
-	taskFn := r.taskFn
-	submitFn := r.submitFn
-	body := psgfn.TaskFunc0(func(ctx context.Context) error {
-		value, taskErr := taskFn(ctx, wf)
-		return submitFn(ctx, wave, value, taskErr)
-	})
-	inner := psg.NewLauncher0(body, r.opts...)
-	err := inner.Start(ctx, wave)
+	err := r.inner.Start(ctx)
 	if err != nil {
 		r.wf.unref(ctx)
 	}

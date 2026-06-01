@@ -40,6 +40,7 @@ func TracedTask[T any](
 // This builds on PropagateSkim, adding explicit span creation while maintaining
 // trace context propagation.
 func TracedSkim[T any](
+	wave *psg.Wave,
 	operationName string,
 	skimFn func(ctx context.Context, result T, err error) error,
 ) psg.Skimmer[PropagatedResult[T]] {
@@ -55,7 +56,7 @@ func TracedSkim[T any](
 	}
 
 	// Then use the base propagation
-	return PropagateSkim(tracedSkimFn)
+	return PropagateSkim(wave, tracedSkimFn)
 }
 
 // TracedFunnel adds spans with the given operation names to an accumulator.

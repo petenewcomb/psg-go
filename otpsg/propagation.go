@@ -51,9 +51,10 @@ func PropagateTask[T any](
 // The skim function receives a context with the propagated trace context properly
 // set, allowing spans created in the skim function to be properly parented.
 func PropagateSkim[T any](
+	wave *psg.Wave,
 	skimFn func(ctx context.Context, result T, err error) error,
 ) psg.Skimmer[PropagatedResult[T]] {
-	return psg.NewSkimmer(psgfn.HandlerFunc[PropagatedResult[T]](
+	return psg.NewSkimmer(wave, psgfn.HandlerFunc[PropagatedResult[T]](
 		func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 			// Create context with propagated trace data
 			propagatedCtx := ctx

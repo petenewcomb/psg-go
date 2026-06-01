@@ -24,7 +24,7 @@ func Example_hello() {
 	defer wave.CancelAndWait() // hygiene
 
 	var results []string
-	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[string](
+	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
@@ -33,14 +33,14 @@ func Example_hello() {
 
 	// Bind a string to a task that submits it to the skimmer after a short delay.
 	newRunner := func(s string) psg.Launcher0 {
-		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 			time.Sleep(1 * time.Millisecond)
-			return skimmer.Submit(ctx, wave, s)
+			return skimmer.Submit(ctx, s)
 		}))
 	}
 
-	newRunner("Hello").Start(ctx, wave)
-	newRunner("world!").Start(ctx, wave)
+	newRunner("Hello").Start(ctx)
+	newRunner("world!").Start(ctx)
 
 	wave.CloseAndSkimAll(ctx)
 	fmt.Println(strings.Join(results, " "))

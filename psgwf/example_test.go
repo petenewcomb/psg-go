@@ -31,7 +31,7 @@ func Example() {
 	completed := []string{}
 
 	// Create a skim for collecting results
-	resultSkim := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	resultSkim := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -47,7 +47,7 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		runner := psgwf.NewGenericLauncher(resultSkim, wf,
+		runner := psgwf.NewGenericLauncher(wave, resultSkim, wf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				select {
 				case <-time.After(sleepTime):
@@ -56,7 +56,7 @@ func Example() {
 					return "", fmt.Errorf("[%s] cancelled", requestID)
 				}
 			}, psg.WithLimits(poolLimit))
-		err := runner.Start(clientCtx, wave)
+		err := runner.Start(clientCtx)
 
 		if err != nil {
 			mu.Lock()

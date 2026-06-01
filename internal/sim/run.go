@@ -99,7 +99,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	for i, g := range c.Plan.Skimmers {
 		gp := g
 		idx := i
-		skimmer := psg.NewSkimmer(c.newSkimmerHandler(t, gp, idx))
+		skimmer := psg.NewSkimmer(c.Wave, c.newSkimmerHandler(t, gp, idx))
 		c.Skimmers[i] = &skimmer
 	}
 	for i, cmb := range c.Plan.Funnels {
@@ -276,7 +276,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher) psg.Launch
 		}
 		return nil
 	})
-	return psg.NewLauncher0(body, opts...)
+	return psg.NewLauncher0(c.Wave, body, opts...)
 }
 
 // startTask dispatches a Plan Launcher. The Launcher was pre-built
@@ -288,7 +288,7 @@ func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx
 	chk := assert.New(t)
 	runner := &c.Launchers[runnerIdx]
 	for {
-		err := runner.Start(ctx, c.Wave)
+		err := runner.Start(ctx)
 		if err == nil {
 			return
 		}
@@ -323,7 +323,7 @@ func (c *controller) submitTo(
 		case SinkFunnel:
 			err = c.Funnels[idx].SubmitErr(ctx, v, valErr)
 		case SinkSkimmer:
-			err = c.Skimmers[idx].SubmitErr(ctx, c.Wave, v, valErr)
+			err = c.Skimmers[idx].SubmitErr(ctx, v, valErr)
 		default:
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
 			return

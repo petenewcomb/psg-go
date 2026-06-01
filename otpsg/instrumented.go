@@ -31,6 +31,7 @@ func InstrumentedTask[T any](
 // InstrumentedSkim funnels tracing, metrics, and logging for skim functions into a single wrapper.
 // This provides a convenient way to apply all instrumentation at once.
 func InstrumentedSkim[T any](
+	wave *psg.Wave,
 	operationName string,
 	skimFn func(ctx context.Context, result T, err error) error,
 ) psg.Skimmer[PropagatedResult[T]] {
@@ -42,7 +43,7 @@ func InstrumentedSkim[T any](
 	metricsSkim := MetricsSkim(operationName, loggedSkim)
 
 	// 3. Finally add tracing (which includes propagation)
-	return TracedSkim(operationName, metricsSkim)
+	return TracedSkim(wave, operationName, metricsSkim)
 }
 
 // InstrumentedFunnel funnels tracing, metrics, and logging for funnels into a single wrapper.
@@ -79,9 +80,9 @@ func Scatter[T any](
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 		result, err := task(ctx)
-		return skim.SubmitErr(ctx, wave, result, err)
+		return skim.SubmitErr(ctx, result, err)
 	}), opts...)
-	return runner.Start(ctx, wave)
+	return runner.Start(ctx)
 }

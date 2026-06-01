@@ -17,9 +17,9 @@ type GenericSkimOp[T, C any] psg.Skimmer[result[T, C]]
 type Skimmer[T any] = GenericSkimOp[T, context.Context]
 
 // NewSkimmer creates a [psg.Skimmer] workalike set up to receive and propagate
-// workflow context from tasks or funnels.
-func NewSkimmer[T, C any](skimFn GenericSkimFunc[T, C]) GenericSkimOp[T, C] {
-	return GenericSkimOp[T, C](psg.NewSkimmer(wrapSkimFunc(skimFn)))
+// workflow context from tasks or funnels. wave must be non-nil.
+func NewSkimmer[T, C any](wave *psg.Wave, skimFn GenericSkimFunc[T, C]) GenericSkimOp[T, C] {
+	return GenericSkimOp[T, C](psg.NewSkimmer(wave, wrapSkimFunc(skimFn)))
 }
 
 func (g GenericSkimOp[T, C]) inner() psg.Skimmer[result[T, C]] {

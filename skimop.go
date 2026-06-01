@@ -16,31 +16,52 @@ import (
 
 // Skimmer is a terminal sink: values arrive via [Skimmer.Submit] /
 // [Skimmer.SubmitErr] and are dispatched to the user-supplied skim
-// function during the supplied Wave's Skim / SkimAll. Task
-// dispatch lives separately on [Launcher] — a Skimmer never runs
-// tasks of its own.
+// function during the bound Wave's Skim / SkimAll. Task dispatch
+// lives separately on [Launcher] — a Skimmer never runs tasks of
+// its own.
 //
 // Thread-safety and copying: a Skimmer value is designed to be
 // copied. All copies share the same skim function binding, so they
 // can be passed by value to goroutines or stored in structures and
 // used concurrently.
 type Skimmer[T any] struct {
+	wave     *Wave
 	handler  psgfn.Handler[T]
 	workPool *omnipool.Pool[skimWork[T]]
 }
 
-// NewSkimmer binds a [psgfn.Handler] for value+err dispatch during
-// the bound Wave's drain. The Skimmer is Wave-independent: callers
-// supply a [Wave] at each [Skimmer.Submit] / [Skimmer.SubmitErr]
-// call. For closure-based handlers, wrap in [psgfn.HandlerFunc][T]
+// NewSkimmer binds a [psgfn.Handler] to the given [Wave] for
+// value+err dispatch during that Wave's drain. wave must be
+// non-nil. For closure-based handlers, wrap in [psgfn.HandlerFunc]
 // at the call site; struct implementations of Handler[T] support
 // the alloc-free hot path.
 func NewSkimmer[T any](
+	wave *Wave,
 	handler psgfn.Handler[T],
 ) Skimmer[T] {
+	if wave == nil {
+		panic("wave must be non-nil")
+	}
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
+	return Skimmer[T]{
+		wave:     wave,
+		handler:  handler,
+		workPool: omnipool.For[skimWork[T]](),
+	}
+}
+
+// newInternalSkimmer constructs a Skimmer used by the framework for
+// error-routing sinks owned by ops (Launcher, Funnel). It has no
+// Wave because the framework dispatches through it via the
+// lower-level submit() helper with an explicit target Pool rather
+// than the public Submit API. Must not be exposed to user code —
+// calling the public Submit / SubmitErr methods on it would
+// dereference a nil wave.
+func newInternalSkimmer[T any](
+	handler psgfn.Handler[T],
+) Skimmer[T] {
 	return Skimmer[T]{
 		handler:  handler,
 		workPool: omnipool.For[skimWork[T]](),
@@ -48,33 +69,28 @@ func NewSkimmer[T any](
 }
 
 // Submit posts a value to the Skimmer's queue for later dispatch via
-// the Wave's Skim / SkimAll. Convenience sugar for SubmitErr with
-// a nil error.
+// the bound Wave's Skim / SkimAll. Convenience sugar for SubmitErr
+// with a nil error.
 func (g Skimmer[T]) Submit(
 	ctx context.Context,
-	wave *Wave,
 	value T,
 ) error {
-	return g.SubmitErr(ctx, wave, value, nil)
+	return g.SubmitErr(ctx, value, nil)
 }
 
 // SubmitErr posts a (value, err) pair to the Skimmer's queue for
-// later dispatch by the Wave's Skim / SkimAll. err is delivered
-// to the skim handler alongside value; use nil when reporting a
-// successful result.
+// later dispatch by the bound Wave's Skim / SkimAll. err is
+// delivered to the skim handler alongside value; use nil when
+// reporting a successful result.
 func (g Skimmer[T]) SubmitErr(
 	ctx context.Context,
-	wave *Wave,
 	value T,
 	err error,
 ) error {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	traceRegion := "Skimmer.SubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := wave.pool
+	target := g.wave.pool
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
@@ -92,10 +108,9 @@ func (g Skimmer[T]) SubmitErr(
 func (g Skimmer[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
-	wave *Wave,
 	value T,
 ) (bool, error) {
-	return g.TrySubmitErr(ctx, deadline, wave, value, nil)
+	return g.TrySubmitErr(ctx, deadline, value, nil)
 }
 
 // TrySubmitErr attempts to SubmitErr without blocking past deadline.
@@ -103,17 +118,13 @@ func (g Skimmer[T]) TrySubmit(
 func (g Skimmer[T]) TrySubmitErr(
 	ctx context.Context,
 	deadline time.Time,
-	wave *Wave,
 	value T,
 	err error,
 ) (bool, error) {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	traceRegion := "Skimmer.TrySubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := wave.pool
+	target := g.wave.pool
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()

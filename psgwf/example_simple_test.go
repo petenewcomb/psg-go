@@ -23,7 +23,7 @@ func Example_simple() {
 	poolLimit := psg.NewSemaphore(10)
 
 	// Create a skim
-	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		} else {
@@ -36,11 +36,11 @@ func Example_simple() {
 	wf := psgwf.New(ctx)
 
 	// Start a task
-	runner := psgwf.NewGenericLauncher(skimmer, wf,
+	runner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
 		}, psg.WithLimits(poolLimit))
-	err := runner.Start(ctx, wave)
+	err := runner.Start(ctx)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}

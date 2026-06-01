@@ -33,7 +33,7 @@ func Example_scatterSkim() {
 	}
 
 	// Create a skim for collecting results
-	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("%3dms Error: %v\n", msSinceStart(), err)
 		} else {
@@ -49,14 +49,14 @@ func Example_scatterSkim() {
 	fmt.Printf("%3dms Starting tasks\n", msSinceStart())
 
 	// First task completes quickly
-	quickRunner := psgwf.NewGenericLauncher(skimmer, wf,
+	quickRunner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Quick task started\n", msSinceStart())
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms Quick task completed\n", msSinceStart())
 			return "Quick result", nil
 		}, psg.WithLimits(poolLimit))
-	err := quickRunner.Start(context.Background(), wave)
+	err := quickRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting quick task: %v\n", msSinceStart(), err)
 	}
@@ -65,7 +65,7 @@ func Example_scatterSkim() {
 	clock.Sleep(20 * time.Millisecond)
 
 	// Second task fails and cancels workflow
-	failingRunner := psgwf.NewGenericLauncher(skimmer, wf,
+	failingRunner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Failing task started\n", msSinceStart())
 			clock.Sleep(30 * time.Millisecond)
@@ -73,7 +73,7 @@ func Example_scatterSkim() {
 			wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 			return "", fmt.Errorf("task failed")
 		}, psg.WithLimits(poolLimit))
-	err = failingRunner.Start(context.Background(), wave)
+	err = failingRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting failing task: %v\n", msSinceStart(), err)
 	}
@@ -82,7 +82,7 @@ func Example_scatterSkim() {
 	clock.Sleep(10 * time.Millisecond)
 
 	// Third task should be cancelled
-	slowRunner := psgwf.NewGenericLauncher(skimmer, wf,
+	slowRunner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			fmt.Printf("%3dms Slow task started\n", msSinceStart())
 			select {
@@ -96,7 +96,7 @@ func Example_scatterSkim() {
 				return "", context.Canceled
 			}
 		}, psg.WithLimits(poolLimit))
-	err = slowRunner.Start(context.Background(), wave)
+	err = slowRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting slow task: %v\n", msSinceStart(), err)
 	}

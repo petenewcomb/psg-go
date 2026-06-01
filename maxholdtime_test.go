@@ -26,7 +26,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var flushCount atomic.Int32
 	var skimCount atomic.Int32
 
-	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[int](func(ctx context.Context, result int, err error) error {
+	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[int](func(ctx context.Context, result int, err error) error {
 		t.Logf("Skim called with result %d", result)
 		skimCount.Add(1)
 		chk.NoError(err)
@@ -43,27 +43,27 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 			},
 			FlushFn: func(ctx context.Context) error {
 				flushCount.Add(1)
-				return skimmer.Submit(ctx, wave, 42)
+				return skimmer.Submit(ctx, 42)
 			},
 		}
 	})
 	defer funnelOp.Close()
 
 	newRunner := func(value int) psg.Launcher0 {
-		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 			return funnelOp.Submit(ctx, value)
 		}))
 	}
 
 	// Send one input
-	err := newRunner(1).Start(ctx, wave)
+	err := newRunner(1).Start(ctx)
 	chk.NoError(err)
 
 	// Wait a bit to let the first task be processed
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a second input to potentially trigger timer checking
-	err = newRunner(2).Start(ctx, wave)
+	err = newRunner(2).Start(ctx)
 	chk.NoError(err)
 
 	// Wait for flush to happen due to maxHoldTime

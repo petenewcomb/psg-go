@@ -51,7 +51,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
 	newDigestSkimmer := func(path string) psg.Skimmer[[md5.Size]byte] {
-		return psg.NewSkimmer(psgfn.HandlerFunc[[md5.Size]byte](
+		return psg.NewSkimmer(wave, psgfn.HandlerFunc[[md5.Size]byte](
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
@@ -61,18 +61,18 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	newDigestingRunner := func(path string, data []byte) psg.Launcher0 {
 		skimmer := newDigestSkimmer(path)
-		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
-			return skimmer.Submit(ctx, wave, md5.Sum(data))
+			return skimmer.Submit(ctx, md5.Sum(data))
 		}), psg.WithLimits(digestLimit))
 	}
 
 	// Creates a skimmer for a reading task whose handler dispatches a
 	// digesting task with the bytes that were read.
 	newReadSkimmer := func(path string) psg.Skimmer[[]byte] {
-		return psg.NewSkimmer(psgfn.HandlerFunc[[]byte](
+		return psg.NewSkimmer(wave, psgfn.HandlerFunc[[]byte](
 			func(ctx context.Context, data []byte, err error) error {
-				return newDigestingRunner(path, data).Start(ctx, wave)
+				return newDigestingRunner(path, data).Start(ctx)
 			},
 		))
 	}
@@ -82,10 +82,10 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// the digesters.
 	newReadingRunner := func(path string) psg.Launcher0 {
 		skimmer := newReadSkimmer(path)
-		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
-			return skimmer.SubmitErr(ctx, wave, data, err)
+			return skimmer.SubmitErr(ctx, data, err)
 		}))
 	}
 
@@ -97,7 +97,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadingRunner(path).Start(ctx, wave)
+		return newReadingRunner(path).Start(ctx)
 	})
 	if err != nil {
 		return nil, err

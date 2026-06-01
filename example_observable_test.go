@@ -26,10 +26,14 @@ func Example_observable() {
 
 	ctx := context.Background()
 
+	// Create a scatter-gather wave
+	ctx, wave := psg.NewWave(ctx)
+	defer wave.CancelAndWait()
+
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Start and SkimAll.
 	var results []string
-	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[string](
+	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[string](
 		func(ctx context.Context, result string, err error) error {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   skimmed result %q\n", msSinceStart(), result)
@@ -40,17 +44,13 @@ func Example_observable() {
 		},
 	))
 
-	// Create a scatter-gather wave
-	ctx, wave := psg.NewWave(ctx)
-	defer wave.CancelAndWait()
-
 	// Limit dispatch concurrency to 2.
 	limit := psg.NewSemaphore(2)
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// Launcher. The task body Submits its result to the skimmer.
 	newRunner := func(taskName string) psg.Launcher0 {
-		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":
@@ -62,14 +62,14 @@ func Example_observable() {
 			}
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
-			return skimmer.Submit(ctx, wave, "result for task "+taskName)
+			return skimmer.Submit(ctx, "result for task "+taskName)
 		}), psg.WithLimits(limit))
 	}
 
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		err := newRunner(taskName).Start(ctx, wave)
+		err := newRunner(taskName).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

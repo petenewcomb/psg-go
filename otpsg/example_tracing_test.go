@@ -50,7 +50,7 @@ func Example_tracing() {
 	})
 
 	// Define a skim function that processes loaded data
-	dataSkim := otpsg.TracedSkim("handle-loaded-data",
+	dataSkim := otpsg.TracedSkim(wave, "handle-loaded-data",
 		func(ctx context.Context, data []int, err error) error {
 			if err != nil {
 				return err
@@ -59,7 +59,7 @@ func Example_tracing() {
 			fmt.Println("Handling loaded data:", data)
 
 			// Launch a processing task for the loaded data
-			processSkim := otpsg.TracedSkim("handle-processed-data",
+			processSkim := otpsg.TracedSkim(wave, "handle-processed-data",
 				func(ctx context.Context, result int, err error) error {
 					if err != nil {
 						return err
@@ -115,7 +115,7 @@ func Example_instrumentedTask() {
 			return sum, nil
 		})
 
-	skimmer := otpsg.InstrumentedSkim("handle-sum",
+	skimmer := otpsg.InstrumentedSkim(wave, "handle-sum",
 		func(ctx context.Context, sum int, err error) error {
 			fmt.Println("Sum:", sum)
 			return nil

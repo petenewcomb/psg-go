@@ -592,7 +592,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 							scatter = func(ctx context.Context, deadline time.Time, target psg.TaskPoolOrJob,
 								task psgfn.Task[benchmarkTaskResult]) (bool, error) {
 								// Tests to make sure that NewSkimmer does not incur allocation overhead
-								skimmer := psg.NewSkimmer(psgfn.HandlerFunc[benchmarkTaskResult](skimFnAdapter))
+								skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[benchmarkTaskResult](skimFnAdapter))
 								if deadline.IsZero() {
 									return true, skimmer.Start(ctx, target, task)
 								}
@@ -600,7 +600,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 							}
 						} else {
 							funnelPool := psg.NewFunnelPool(job, psgopt.WithMaxConcurrency(funnelLimit))
-							skimmer := psg.NewSkimmer(psgfn.HandlerFunc[benchmarkFunneldResult](skimFn))
+							skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[benchmarkFunneldResult](skimFn))
 							funnelFactory := func() psgfn.Accumulator[benchmarkTaskResult] {
 								return newBenchmarkFunnel(
 									&testStartTime,

@@ -54,7 +54,7 @@ func ExampleFunnel() {
 	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
 
 	// Define a result aggregation function and create a funneld skim/funnel operation
-	skimmer := psg.NewSkimmer(psgfn.HandlerFunc[map[string]int](skimFn))
+	skimmer := psg.NewSkimmer(wave, psgfn.HandlerFunc[map[string]int](skimFn))
 
 	// After Wave 2, the Accumulator factory captures the downstream
 	// skimmer in its closure and Submits the aggregated map from
@@ -75,7 +75,7 @@ func ExampleFunnel() {
 			},
 			FlushFn: func(ctx context.Context) error {
 				fmt.Printf("%3dms:   flushing result counts: %v\n", msSinceStart(), counts)
-				return skimmer.Submit(ctx, wave, counts)
+				return skimmer.Submit(ctx, counts)
 			},
 		}
 	}
@@ -88,7 +88,7 @@ func ExampleFunnel() {
 	// Build a Launcher factory: the task body submits its result to
 	// funnelOp from inside the task context.
 	newRunner := func(number int, delay time.Duration, result string) psg.Launcher0 {
-		return psg.NewLauncher0(psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
@@ -109,7 +109,7 @@ func ExampleFunnel() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, funnel at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, funnel at 100ms
 	} {
-		err := newRunner(i+1, spec.delay, spec.result).Start(ctx, wave)
+		err := newRunner(i+1, spec.delay, spec.result).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

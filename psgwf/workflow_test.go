@@ -48,15 +48,15 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 	// Create a simple task to ensure workflow is used
 	poolLimit := psg.NewSemaphore(1)
-	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	runner := psgwf.NewGenericLauncher(skimmer, wf,
+	runner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
 		}, psg.WithLimits(poolLimit))
-	err := runner.Start(context.Background(), wave)
+	err := runner.Start(context.Background())
 	assert.NoError(t, err)
 
 	// Close wave and skim all results
@@ -112,7 +112,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		// Create new workflow for new tasks
 		newWf := psgwf.New(ctx)
 
-		skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+		skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 			mu.Lock()
 			newTaskRan = true
 			mu.Unlock()
@@ -120,24 +120,24 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Start a new task from within the AfterFunc
-		runner := psgwf.NewGenericLauncher(skimmer, newWf,
+		runner := psgwf.NewGenericLauncher(wave, skimmer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
 			}, psg.WithLimits(poolLimit))
-		err := runner.Start(ctx, wave)
+		err := runner.Start(ctx)
 		assert.NoError(t, err)
 	})
 
 	// Run a simple task to use the workflow
-	skimmer := psgwf.NewSkimmer(func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	outerRunner := psgwf.NewGenericLauncher(skimmer, wf,
+	outerRunner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
 		}, psg.WithLimits(poolLimit))
-	err := outerRunner.Start(context.Background(), wave)
+	err := outerRunner.Start(context.Background())
 	assert.NoError(t, err)
 
 	// Close wave and skim all results

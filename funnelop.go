@@ -108,7 +108,7 @@ func NewFunnel[T any](
 	// Framework-owned error sink: Accumulator errors flow through this
 	// Skimmer[struct{}] whose handler returns err as-is, surfacing via
 	// the Pool's SkimAll path.
-	inner.errSink = NewSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
+	inner.errSink = newInternalSkimmer(psgfn.HandlerFunc[struct{}](func(ctx context.Context, _ struct{}, err error) error {
 		return err
 	}))
 	inner.funnelPool = funnelPool

@@ -50,6 +50,9 @@ func PropagateTask[T any](
 // PropagateSkim wraps a skim function to ensure trace context flows through.
 // The skim function receives a context with the propagated trace context properly
 // set, allowing spans created in the skim function to be properly parented.
+//
+// wave may be nil to defer wave binding to the dispatching ctx
+// (see [psg.NewSkimmer]).
 func PropagateSkim[T any](
 	wave *psg.Wave,
 	skimFn func(ctx context.Context, result T, err error) error,

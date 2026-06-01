@@ -30,6 +30,8 @@ func InstrumentedTask[T any](
 
 // InstrumentedSkim funnels tracing, metrics, and logging for skim functions into a single wrapper.
 // This provides a convenient way to apply all instrumentation at once.
+//
+// wave may be nil to defer wave binding to the dispatching ctx.
 func InstrumentedSkim[T any](
 	wave *psg.Wave,
 	operationName string,
@@ -65,22 +67,23 @@ func InstrumentedFunnel[T any](
 }
 
 // Scatter wraps the value-producing task in a one-shot [psg.Launcher0]
-// that submits the result to skim, and dispatches it on wave. Pass
-// psg op options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
+// that submits the result to skim, and dispatches it. The Launcher is
+// constructed with a nil wave and resolves the dispatching wave from
+// ctx at Start time (see [psg.NewLauncher0]). Pass psg op options
+// (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 //
 // Example:
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFn)
-//	skimmer := otpsg.InstrumentedSkim("handle-result", mySkimFn)
-//	err := otpsg.Scatter(ctx, wave, skimmer, task)
+//	skimmer := otpsg.InstrumentedSkim(wave, "handle-result", mySkimFn)
+//	err := otpsg.Scatter(ctx, skimmer, task)
 func Scatter[T any](
 	ctx context.Context,
-	wave *psg.Wave,
 	skim psg.Skimmer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewLauncher0(nil, psgfn.TaskFunc0(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitErr(ctx, result, err)
 	}), opts...)

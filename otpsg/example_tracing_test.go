@@ -68,11 +68,11 @@ func Example_tracing() {
 					return nil
 				})
 
-			return otpsg.Scatter(ctx, wave, processSkim, processDataTask)
+			return otpsg.Scatter(ctx, processSkim, processDataTask)
 		})
 
 	// Start the pipeline by loading data
-	if err := otpsg.Scatter(ctx, wave, dataSkim, loadDataTask); err != nil {
+	if err := otpsg.Scatter(ctx, dataSkim, loadDataTask); err != nil {
 		fmt.Println("Error:", err)
 	}
 
@@ -122,7 +122,7 @@ func Example_instrumentedTask() {
 		})
 
 	// Use convenience scatter function
-	err := otpsg.Scatter(ctx, wave, skimmer, task)
+	err := otpsg.Scatter(ctx, skimmer, task)
 	if err != nil {
 		fmt.Println("Error:", err)
 	}

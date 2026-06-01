@@ -31,10 +31,10 @@ type GenericLauncher[T, C any] struct {
 // default [Context] type. See [GenericLauncher] for semantics.
 type Launcher[T any] = GenericLauncher[T, Context]
 
-// NewGenericLauncher binds a workflow-aware task to the given
-// [psg.Wave]. The wrapped task is dispatched onto the Wave's Pool
-// when [GenericLauncher.Start] is called. Pass psg op options
-// (e.g. [psg.WithLimits]) via opts to throttle dispatch.
+// NewGenericLauncher binds a workflow-aware task to wave. wave may
+// be nil to defer wave binding to the dispatching ctx at
+// [GenericLauncher.Start] time (see [psg.NewLauncher0]). Pass psg op
+// options (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 func NewGenericLauncher[T, C any](
 	wave *psg.Wave,
 	sink GenericSkimOp[T, C],
@@ -47,10 +47,10 @@ func NewGenericLauncher[T, C any](
 	})
 }
 
-// NewGenericLauncherForFunnel binds a workflow-aware task to the
-// given [psg.Wave], forwarding results to the supplied Funnel sink.
-// Pass psg op options (e.g. [psg.WithLimits]) via opts to throttle
-// dispatch.
+// NewGenericLauncherForFunnel binds a workflow-aware task to wave,
+// forwarding results to the supplied Funnel sink. wave may be nil to
+// defer wave binding to the dispatching ctx. Pass psg op options
+// (e.g. [psg.WithLimits]) via opts to throttle dispatch.
 func NewGenericLauncherForFunnel[T, C any](
 	wave *psg.Wave,
 	sink GenericFunnelOp[T, C],

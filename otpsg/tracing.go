@@ -39,6 +39,8 @@ func TracedTask[T any](
 // TracedSkim adds spans with the given operation name to a skim function.
 // This builds on PropagateSkim, adding explicit span creation while maintaining
 // trace context propagation.
+//
+// wave may be nil to defer wave binding to the dispatching ctx.
 func TracedSkim[T any](
 	wave *psg.Wave,
 	operationName string,

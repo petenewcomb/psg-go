@@ -66,7 +66,7 @@ func InstrumentedFunnel[T any](
 	return TracedFunnel(funnelOpName, flushOpName, metricsFunnel)
 }
 
-// Scatter wraps the value-producing task in a one-shot [psg.Launcher0]
+// Scatter wraps the value-producing task in a one-shot [psg.Launcher[struct{}]]
 // that submits the result to skim, and dispatches it. The Launcher is
 // constructed with a nil wave and resolves the dispatching wave from
 // ctx at Start time (see [psg.NewLauncher0]). Pass psg op options
@@ -83,7 +83,7 @@ func Scatter[T any](
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewLauncher0(nil, psgfn.TaskFunc0(func(ctx context.Context) error {
+	runner := psg.NewLauncher(nil, psgfn.Task(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitErr(ctx, result, err)
 	}), opts...)

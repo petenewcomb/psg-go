@@ -71,10 +71,10 @@ type controller struct {
 	FunnelLimiters []psg.Limiter
 	Skimmers       []*psg.Skimmer[*simValue]
 	Funnels        []*psg.Funnel[*simValue]
-	// Launchers holds one psg.Launcher0 per Plan Launcher. The
+	// Launchers holds one psg.Launcher[struct{}] per Plan Launcher. The
 	// closure inside each runs the runner's Body Func, which Submits
 	// directly to downstream Skimmers/Funnels.
-	Launchers []psg.Launcher0
+	Launchers []psg.Launcher[struct{}]
 
 	limitersOnce sync.Once
 	combPoolOnce sync.Once
@@ -128,7 +128,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	// Alternate explicit-wave (even idx) vs nil-wave (odd idx) for
 	// Launchers too — same rationale as the Skimmer construction
 	// above.
-	c.Launchers = make([]psg.Launcher0, len(c.Plan.Launchers))
+	c.Launchers = make([]psg.Launcher[struct{}], len(c.Plan.Launchers))
 	for i, runner := range c.Plan.Launchers {
 		c.Launchers[i] = c.newLauncher(t, runner, i%2 == 0)
 	}
@@ -257,12 +257,12 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 	}
 }
 
-// newLauncher constructs the psg.Launcher0 that backs a Plan
+// newLauncher constructs the psg.Launcher[struct{}] that backs a Plan
 // Launcher. The task body walks the Plan's Body Func; Submits go
 // directly to downstream sinks (Funnels/Skimmers) via Submit, and
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
-func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) psg.Launcher0 {
+func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) psg.Launcher[struct{}] {
 	// Concurrency tracking: bump TaskLimiter counter on entry to the
 	// task body, decrement on exit. Used by the per-Limiter
 	// max-concurrency assertion in Run.
@@ -277,7 +277,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 			return func() { c.concurrencyByTaskLimit[limIdx].Add(-1) }
 		}
 	}
-	body := psgfn.TaskFunc0(func(ctx context.Context) error {
+	body := psgfn.Task(func(ctx context.Context) error {
 		defer trackEntry()()
 		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
 		if err := c.executeFuncInTask(ctx, t, runner.Body, v); err != nil {
@@ -292,7 +292,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	if bindWave {
 		w = c.Wave
 	}
-	return psg.NewLauncher0(w, body, opts...)
+	return psg.NewLauncher(w, body, opts...)
 }
 
 // startTask dispatches a Plan Launcher. The Launcher was pre-built

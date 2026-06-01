@@ -49,8 +49,8 @@ func Example_observable() {
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// Launcher. The task body Submits its result to the skimmer.
-	newRunner := func(taskName string) psg.Launcher0 {
-		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
+	newRunner := func(taskName string) psg.Launcher[struct{}] {
+		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":

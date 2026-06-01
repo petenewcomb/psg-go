@@ -57,10 +57,6 @@ func (f ErrHandler) Handle(ctx context.Context, _ struct{}, err error) error {
 	return f(ctx, err)
 }
 
-// NOTE: The destination API also provides a `Task` named func
-// adapter (`func(ctx) error` satisfying Handler[struct{}]) for the
-// no-input, no-err case. It can't be added here yet because the
-// existing psgfn.Task[T] interface (used by Launcher during the
-// arity-split phase) occupies that name. After Launcher collapses
-// to the single-type Handler-based shape (Step 3 of Thread A),
-// psgfn.Task[T] retires and the named Task adapter takes its place.
+// See [Task] for the no-input, no-err case: a named func adapter
+// (`func(ctx) error`) satisfying Handler[struct{}] with
+// short-circuit-on-err semantics.

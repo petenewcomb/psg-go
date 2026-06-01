@@ -24,7 +24,7 @@ import (
 // task's error attached, and unrefs in its handler).
 type GenericLauncher[T, C any] struct {
 	wf    *GenericWorkflow[C]
-	inner psg.Launcher0
+	inner psg.Launcher[struct{}]
 }
 
 // Launcher is the convenience alias for [GenericLauncher] over the
@@ -71,13 +71,13 @@ func newGenericLauncher[T, C any](
 	opts []psg.OpOption,
 	submitFn func(context.Context, T, error) error,
 ) GenericLauncher[T, C] {
-	body := psgfn.TaskFunc0(func(ctx context.Context) error {
+	body := psgfn.Task(func(ctx context.Context) error {
 		value, taskErr := taskFn(ctx, wf)
 		return submitFn(ctx, value, taskErr)
 	})
 	return GenericLauncher[T, C]{
 		wf:    wf,
-		inner: psg.NewLauncher0(wave, body, opts...),
+		inner: psg.NewLauncher(wave, body, opts...),
 	}
 }
 

@@ -59,9 +59,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		))
 	}
 
-	newDigestingRunner := func(path string, data []byte) psg.Launcher0 {
+	newDigestingRunner := func(path string, data []byte) psg.Launcher[struct{}] {
 		skimmer := newDigestSkimmer(path)
-		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return skimmer.Submit(ctx, md5.Sum(data))
 		}), psg.WithLimits(digestLimit))
@@ -80,9 +80,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// No need for a pool to limit how many file reading tasks run concurrently
 	// since they should be I/O-bound and will be subject to backpressure from
 	// the digesters.
-	newReadingRunner := func(path string) psg.Launcher0 {
+	newReadingRunner := func(path string) psg.Launcher[struct{}] {
 		skimmer := newReadSkimmer(path)
-		return psg.NewLauncher0(wave, psgfn.TaskFunc0(func(ctx context.Context) error {
+		return psg.NewLauncher(wave, psgfn.Task(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
 			return skimmer.SubmitErr(ctx, data, err)

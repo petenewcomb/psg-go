@@ -30,18 +30,27 @@ type Skimmer[T any] struct {
 	workPool *omnipool.Pool[skimWork[T]]
 }
 
-// NewSkimmer binds a [psgfn.Handler] to the given [Wave] for
-// value+err dispatch during that Wave's drain. wave must be
-// non-nil. For closure-based handlers, wrap in [psgfn.HandlerFunc]
-// at the call site; struct implementations of Handler[T] support
-// the alloc-free hot path.
+// NewSkimmer binds a [psgfn.Handler] to wave for value+err dispatch
+// during that Wave's drain. wave may be nil — in that case the
+// Skimmer is wave-independent and resolves the target wave at each
+// dispatch from the dispatching ctx (which must descend from a
+// [NewWave] call). This enables one Skimmer instance to be reused
+// across many waves.
+//
+// Limitation (Thread B follow-up): nil-wave dispatch currently
+// works only from a ctx returned by NewWave directly. Dispatching
+// from inside a task / skim / accumulate body panics because the
+// worker's ctx does not yet carry the dispatching wave. Sinks used
+// from inside op bodies must be constructed with an explicit wave
+// until the worker plumbing propagates the wave.
+//
+// For closure-based handlers, wrap in [psgfn.HandlerFunc] at the
+// call site; struct implementations of Handler[T] support the
+// alloc-free hot path.
 func NewSkimmer[T any](
 	wave *Wave,
 	handler psgfn.Handler[T],
 ) Skimmer[T] {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
@@ -90,7 +99,7 @@ func (g Skimmer[T]) SubmitErr(
 	traceRegion := "Skimmer.SubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := g.wave.pool
+	target := resolveWave(g.wave, ctx).pool
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
@@ -124,7 +133,7 @@ func (g Skimmer[T]) TrySubmitErr(
 	traceRegion := "Skimmer.TrySubmitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := g.wave.pool
+	target := resolveWave(g.wave, ctx).pool
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()

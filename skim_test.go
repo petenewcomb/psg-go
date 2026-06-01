@@ -32,6 +32,81 @@ func TestSkimScatterNilSkimPanic(t *testing.T) {
 	})
 }
 
+// Nil-sentinel resolution: a Skimmer constructed with nil wave is
+// wave-independent. At dispatch, the wave is resolved from the
+// ctx, which descends from a NewWave call.
+func TestSkimmerNilWaveResolvesFromCtx(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	var got int
+	skimmer := psg.NewSkimmer(nil, psgfn.HandlerFunc[int](
+		func(_ context.Context, v int, err error) error {
+			chk.NoError(err)
+			got = v
+			return nil
+		},
+	))
+	chk.NoError(skimmer.Submit(ctx, 42))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.Equal(42, got)
+}
+
+// Dispatching a nil-wave Skimmer on a ctx with no wave panics.
+func TestSkimmerNilWaveDispatchWithoutCtxWavePanics(t *testing.T) {
+	chk := assert.New(t)
+	skimmer := psg.NewSkimmer(nil, psgfn.HandlerFunc[int](
+		func(_ context.Context, _ int, _ error) error { return nil },
+	))
+	chk.PanicsWithValue(
+		"op constructed with nil wave dispatched from a ctx with no wave (call NewWave first)",
+		func() { _ = skimmer.Submit(context.Background(), 1) },
+	)
+}
+
+// Same nil-sentinel resolution for Launcher0.
+func TestLauncherNilWaveResolvesFromCtx(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	ran := false
+	runner := psg.NewLauncher0(nil, psgfn.TaskFunc0(func(_ context.Context) error {
+		ran = true
+		return nil
+	}))
+	chk.NoError(runner.Start(ctx))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.True(ran)
+}
+
+// Documents a known limitation: a nil-wave Skimmer dispatched from
+// inside a task body panics because the worker's ctx doesn't yet
+// carry the dispatching wave. The fix lives in the worker plumbing
+// (stamp the wave onto the task body's ctx) and is left for a
+// follow-up to Thread B. For now, sinks used from inside task /
+// skim / accumulate bodies must be constructed with an explicit
+// wave.
+func TestSkimmerNilWaveFromTaskBodyPanicsKnownLimitation(t *testing.T) {
+	chk := assert.New(t)
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	skimmer := psg.NewSkimmer(nil, psgfn.HandlerFunc[int](
+		func(_ context.Context, _ int, _ error) error { return nil },
+	))
+	runner := psg.NewLauncher0(wave, psgfn.TaskFunc0(func(taskCtx context.Context) error {
+		chk.PanicsWithValue(
+			"op constructed with nil wave dispatched from a ctx with no wave (call NewWave first)",
+			func() { _ = skimmer.Submit(taskCtx, 1) },
+		)
+		return nil
+	}))
+	chk.NoError(runner.Start(ctx))
+	chk.NoError(wave.CloseAndSkimAll(ctx))
+}
+
 func TestLauncherStartFromTaskPanic(t *testing.T) {
 	chk := assert.New(t)
 	ctx, wave := psg.NewWave(context.Background())

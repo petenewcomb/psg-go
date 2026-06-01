@@ -178,9 +178,9 @@ API_DESIGN.md updated with the trio rationale and a `considered & rejected` entr
 - **Step 4 (Submit family on Launcher)**: add the dispatch family per the resolved API_DESIGN spec — `Submit(v)` / `SubmitErr(err)` / `SubmitResult(v, err)` plus the three Try variants plus `Start` / `TryStart` sugars for the void-T case. `TrySubmitResult(ctx, deadline, v, err)` is the single primitive; the other five are layered sugars over it. Each name describes its args (value-only / err-only / both); the naming matches the empirical frequency ordering (value-only > err-only > both). The current code uses the older `Submit(v, err)` single-form; this step replaces it everywhere.
 - **Deferred adapter**: add `Task` named func adapter (`func(ctx) error` satisfying `Handler[struct{}]`) — currently can't because `psgfn.Task[T]` interface still occupies the name. After Step 3 retires the per-arity Task interfaces, this can land. Note in `psgfn/handler.go` flags it. Short-circuit-on-non-nil-err semantics are now nailed down in API_DESIGN.md; the implementation just needs to match the spec.
 
-### Threads B and C (queued)
+### Threads B and C
 
-- **Thread B**: wave-at-construction with nil-sentinel resolution in ctxMeta dispatch path. Internal plumbing change so ops constructed with `nil` Wave resolve their target via the dispatching ctx's wave at Submit time.
+- **Thread B (B.1 + B.2 landed)**: wave-at-construction with nil-sentinel resolution. B.1 moved wave to constructor (required); B.2 relaxed to nil-OK with ctx-based resolution via the existing `ctxMeta.wave` machinery. Known follow-up: nil-wave dispatch from *inside* task / skim / accumulate bodies panics because the worker's ctx does not yet carry the dispatching wave. Documented in `TestSkimmerNilWaveFromTaskBodyPanicsKnownLimitation` and in NewSkimmer / NewLauncher0 doc comments. Fix is worker-plumbing: stamp the dispatching wave onto the task body's ctx via the existing taskWork / exEnv path (analogous to how `exEnv.group` is set in job.go:794).
 - **Thread C**: introduce `Forever` sentinel; flip zero-deadline semantic from "block forever" to "attempt once". Atomic across all dispatch sites. Risky single-shot change per the impl survey.
 
 ### Naming-pass deferred items

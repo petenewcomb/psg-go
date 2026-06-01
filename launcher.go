@@ -40,15 +40,22 @@ type Launcher0 struct {
 	workPool *omnipool.Pool[launcherWork0]
 }
 
-// NewLauncher0 binds a [psgfn.Task0] to the given [Wave]. wave
-// must be non-nil. Pass [WithLimits] in opts to bind one or more
-// [Limiter]s that throttle dispatch. The framework manages an
-// internal error sink that surfaces unexpected errors returned by
-// Task.Run through the bound Wave's SkimAll path.
+// NewLauncher0 binds a [psgfn.Task0] to wave. wave may be nil — in
+// that case the Launcher is wave-independent and resolves the target
+// wave at each [Launcher0.Start] / [Launcher0.TryStart] call from
+// the dispatching ctx (which must descend from a [NewWave] call).
+// This enables one Launcher instance to be reused across many waves.
+//
+// Limitation (Thread B follow-up): nil-wave dispatch currently
+// works only from a ctx returned by NewWave directly. Dispatching
+// from inside a task / skim / accumulate body panics because the
+// worker's ctx does not yet carry the dispatching wave.
+//
+// Pass [WithLimits] in opts to bind one or more [Limiter]s that
+// throttle dispatch. The framework manages an internal error sink
+// that surfaces unexpected errors returned by Task.Run through the
+// dispatching Wave's SkimAll path.
 func NewLauncher0(wave *Wave, task psgfn.Task0, opts ...OpOption) Launcher0 {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
@@ -85,7 +92,7 @@ func (r Launcher0) Start(ctx context.Context) error {
 	traceRegion := "Launcher0.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := r.wave.pool
+	pool := resolveWave(r.wave, ctx).pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -109,7 +116,7 @@ func (r Launcher0) TryStart(ctx context.Context, deadline time.Time) (bool, erro
 	traceRegion := "Launcher0.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := r.wave.pool
+	pool := resolveWave(r.wave, ctx).pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -203,12 +210,9 @@ type Launcher[T any] struct {
 	workPool *omnipool.Pool[launcherWork[T]]
 }
 
-// NewLauncher binds a [psgfn.Task[T]] to the given [Wave]. wave
-// must be non-nil. See [NewLauncher0].
+// NewLauncher binds a [psgfn.Task[T]] to wave. wave may be nil to
+// defer wave resolution to dispatch ctx; see [NewLauncher0].
 func NewLauncher[T any](wave *Wave, task psgfn.Task[T], opts ...OpOption) Launcher[T] {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
@@ -229,7 +233,7 @@ func (r Launcher[T]) Start(ctx context.Context, arg T) error {
 	traceRegion := "Launcher.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := r.wave.pool
+	pool := resolveWave(r.wave, ctx).pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -248,7 +252,7 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time, arg T) (b
 	traceRegion := "Launcher.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := r.wave.pool
+	pool := resolveWave(r.wave, ctx).pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -346,12 +350,9 @@ type Launcher2[T1, T2 any] struct {
 	workPool *omnipool.Pool[launcherWork2[T1, T2]]
 }
 
-// NewLauncher2 binds a [psgfn.Task2[T1, T2]] to the given [Wave].
-// wave must be non-nil. See [NewLauncher0].
+// NewLauncher2 binds a [psgfn.Task2[T1, T2]] to wave. wave may be
+// nil to defer wave resolution to dispatch ctx; see [NewLauncher0].
 func NewLauncher2[T1, T2 any](wave *Wave, task psgfn.Task2[T1, T2], opts ...OpOption) Launcher2[T1, T2] {
-	if wave == nil {
-		panic("wave must be non-nil")
-	}
 	if task == nil {
 		panic("task must be non-nil")
 	}
@@ -371,7 +372,7 @@ func (r Launcher2[T1, T2]) Start(ctx context.Context, arg1 T1, arg2 T2) error {
 	traceRegion := "Launcher2.Start"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := r.wave.pool
+	pool := resolveWave(r.wave, ctx).pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()
@@ -392,7 +393,7 @@ func (r Launcher2[T1, T2]) TryStart(
 	traceRegion := "Launcher2.TryStart"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	pool := r.wave.pool
+	pool := resolveWave(r.wave, ctx).pool
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()

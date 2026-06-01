@@ -116,6 +116,26 @@ func (w *Wave) Pool() *Pool {
 	return w.pool
 }
 
+// resolveWave returns the op's bound wave if non-nil, otherwise
+// looks up the wave attached to ctx by [NewWave]. Panics if neither
+// is set — an op constructed with nil wave must be dispatched from a
+// ctx that descends from a NewWave call.
+//
+// This is the dispatch-side counterpart to nil-OK construction:
+// constructing with a specific *Wave locks dispatch to that wave;
+// constructing with nil defers the choice to the dispatching ctx,
+// letting one op instance be reused across many waves.
+func resolveWave(opWave *Wave, ctx context.Context) *Wave {
+	if opWave != nil {
+		return opWave
+	}
+	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	if !ok || meta.wave == nil {
+		panic("op constructed with nil wave dispatched from a ctx with no wave (call NewWave first)")
+	}
+	return meta.wave
+}
+
 // Cancel signals all work tagged with this Wave to terminate. When
 // the Wave owns its Pool (constructed via [NewWave] without
 // [WithPool]), this cancels the Pool's root context too.

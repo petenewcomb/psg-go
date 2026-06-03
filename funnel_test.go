@@ -125,11 +125,11 @@ func TestFunnelScatterFromTask(t *testing.T) {
 		newPassthroughTestFunnelFactory[int](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+	innerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
-	}))
-	outerRunner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+	})
+	outerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -137,7 +137,7 @@ func TestFunnelScatterFromTask(t *testing.T) {
 			},
 		)
 		return funnelOp.Submit(ctx, 0)
-	}))
+	})
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
@@ -163,7 +163,7 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
@@ -176,17 +176,17 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 				return nil
 			},
 		)
-		subRunner := psg.NewLauncher(subWave, psg.NewTask(func(ctx context.Context) error {
+		subRunner := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
-		}))
+		})
 		chk.NoError(subRunner.Start(subCtx))
 
 		// Skim all results in the sub-wave
 		chk.NoError(subWave.CloseAndSkimAll(subCtx))
 
 		return funnelOp.Submit(ctx, true)
-	}))
+	})
 
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))
@@ -213,11 +213,11 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	innerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.Fail("Should not get here - parent task pool task should not run")
 		return nil
-	}))
-	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	})
+	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -225,7 +225,7 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 			},
 		)
 		return funnelOp.Submit(ctx, true)
-	}))
+	})
 
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))

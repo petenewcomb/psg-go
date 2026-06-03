@@ -74,10 +74,10 @@ func TestLauncherNilWaveResolvesFromCtx(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	ran := false
-	runner := psg.NewLauncher(nil, psg.NewTask(func(_ context.Context) error {
+	runner := psg.NewTaskLauncher(nil, func(_ context.Context) error {
 		ran = true
 		return nil
-	}))
+	})
 	chk.NoError(runner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.True(ran)
@@ -100,9 +100,9 @@ func TestSkimmerNilWaveResolvesFromTaskBodyCtx(t *testing.T) {
 			return nil
 		},
 	)
-	runner := psg.NewLauncher(wave, psg.NewTask(func(taskCtx context.Context) error {
+	runner := psg.NewTaskLauncher(wave, func(taskCtx context.Context) error {
 		return skimmer.Submit(taskCtx, 99)
-	}))
+	})
 	chk.NoError(runner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.Equal(99, got)
@@ -150,18 +150,18 @@ func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 	limit := psg.NewSemaphore(1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
-	runner := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
 		close(blocking)
 		<-released
 		return nil
-	}), psg.WithLimits(limit))
+	}, psg.WithLimits(limit))
 	chk.NoError(runner.Start(ctx))
 	<-blocking // first task is now occupying the limiter permit
 
 	// Zero deadline → fail-fast.
-	contender := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+	contender := psg.NewTaskLauncher(wave, func(_ context.Context) error {
 		return nil
-	}), psg.WithLimits(limit))
+	}, psg.WithLimits(limit))
 	ok, err := contender.TryStart(ctx, time.Time{})
 	chk.False(ok, "TryStart with zero deadline should fail-fast when contended")
 	chk.NoError(err, "fail-fast should not return an error")
@@ -182,20 +182,20 @@ func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 	limit := psg.NewSemaphore(1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
-	runner := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
 		close(blocking)
 		<-released
 		return nil
-	}), psg.WithLimits(limit))
+	}, psg.WithLimits(limit))
 	chk.NoError(runner.Start(ctx))
 	<-blocking
 
 	contended := false
 	contenderRan := make(chan struct{})
 	go func() {
-		contender := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+		contender := psg.NewTaskLauncher(wave, func(_ context.Context) error {
 			return nil
-		}), psg.WithLimits(limit))
+		}, psg.WithLimits(limit))
 		err := contender.Start(ctx) // uses Forever internally
 		contended = err == nil
 		close(contenderRan)
@@ -294,10 +294,10 @@ func TestLauncherTaskShortCircuitsOnSubmitErr(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	bodyRan := false
-	runner := psg.NewLauncher(wave, psg.NewTask(func(_ context.Context) error {
+	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
 		bodyRan = true
 		return nil
-	}))
+	})
 	chk.NoError(runner.SubmitErr(ctx, errors.New("propagated")))
 	// CloseAndSkimAll should surface the propagated err.
 	err := wave.CloseAndSkimAll(ctx)
@@ -342,11 +342,11 @@ func TestLauncherStartFromTaskPanic(t *testing.T) {
 			return nil
 		},
 	)
-	innerRunner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+	innerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
-	}))
-	outerRunner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+	})
+	outerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -354,7 +354,7 @@ func TestLauncherStartFromTaskPanic(t *testing.T) {
 			},
 		)
 		return skimmer.Submit(ctx, 0)
-	}))
+	})
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
@@ -374,7 +374,7 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 			return nil
 		},
 	)
-	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
@@ -387,17 +387,17 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 				return nil
 			},
 		)
-		subRunner := psg.NewLauncher(subWave, psg.NewTask(func(ctx context.Context) error {
+		subRunner := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
-		}))
+		})
 		chk.NoError(subRunner.Start(subCtx))
 
 		// Skim all results in the sub-wave
 		chk.NoError(subWave.CloseAndSkimAll(subCtx))
 
 		return skimmer.Submit(ctx, true)
-	}))
+	})
 
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))
@@ -418,11 +418,11 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 			return nil
 		},
 	)
-	innerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	innerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.Fail("should not get here - parent pool task should not run")
 		return nil
-	}))
-	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	})
+	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -430,7 +430,7 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 			},
 		)
 		return skimmer.Submit(ctx, true)
-	}))
+	})
 
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))
@@ -448,12 +448,12 @@ func TestTaskCannotSkim(t *testing.T) {
 			return nil
 		},
 	)
-	runner := psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+	runner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.PanicsWithValue("Skim called from task context but allowed only by top-level or skim context", func() {
 			_, _ = wave.TrySkim(ctx)
 		})
 		return skimmer.Submit(ctx, true)
-	}))
+	})
 
 	chk.NoError(runner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
@@ -471,7 +471,7 @@ func TestTaskCannotSkimParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	outerRunner := psg.NewLauncher(parentWave, psg.NewTask(func(ctx context.Context) error {
+	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		subCtx, subWave := psg.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
@@ -482,16 +482,16 @@ func TestTaskCannotSkimParentJob(t *testing.T) {
 				return nil
 			},
 		)
-		subRunner := psg.NewLauncher(subWave, psg.NewTask(func(ctx context.Context) error {
+		subRunner := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
 			chk.PanicsWithValue("Context belongs to a child job", func() {
 				_, _ = parentWave.TrySkim(ctx)
 			})
 			return subSkimmer.Submit(ctx, true)
-		}))
+		})
 		chk.NoError(subRunner.Start(subCtx))
 		chk.NoError(subWave.CloseAndSkimAll(subCtx))
 		return skimmer.Submit(ctx, true)
-	}))
+	})
 
 	chk.NoError(outerRunner.Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))

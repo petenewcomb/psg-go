@@ -32,10 +32,10 @@ func Example_hello() {
 
 	// Bind a string to a task that submits it to the skimmer after a short delay.
 	newRunner := func(s string) psg.TaskLauncher {
-		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 			time.Sleep(1 * time.Millisecond)
 			return skimmer.Submit(ctx, s)
-		}))
+		})
 	}
 
 	newRunner("Hello").Start(ctx)

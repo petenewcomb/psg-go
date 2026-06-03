@@ -49,7 +49,7 @@ func Example_observable() {
 	// Define a factory to bind task-specific inputs and resources into a
 	// Launcher. The task body Submits its result to the skimmer.
 	newRunner := func(taskName string) psg.TaskLauncher {
-		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":
@@ -62,7 +62,7 @@ func Example_observable() {
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
 			return skimmer.Submit(ctx, "result for task "+taskName)
-		}), psg.WithLimits(limit))
+		}, psg.WithLimits(limit))
 	}
 
 	// Launch some tasks

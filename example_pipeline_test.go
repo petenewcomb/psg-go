@@ -60,10 +60,10 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	newDigestingRunner := func(path string, data []byte) psg.TaskLauncher {
 		skimmer := newDigestSkimmer(path)
-		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return skimmer.Submit(ctx, md5.Sum(data))
-		}), psg.WithLimits(digestLimit))
+		}, psg.WithLimits(digestLimit))
 	}
 
 	// Creates a skimmer for a reading task whose handler dispatches a
@@ -81,11 +81,11 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// the digesters.
 	newReadingRunner := func(path string) psg.TaskLauncher {
 		skimmer := newReadSkimmer(path)
-		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
 			return skimmer.SubmitResult(ctx, data, err)
-		}))
+		})
 	}
 
 	// Walk the tree and launch a reading task for each regular file.

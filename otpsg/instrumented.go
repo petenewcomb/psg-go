@@ -82,9 +82,9 @@ func Scatter[T any](
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...psg.OpOption,
 ) error {
-	runner := psg.NewLauncher(nil, psg.NewTask(func(ctx context.Context) error {
+	runner := psg.NewTaskLauncher(nil, func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitResult(ctx, result, err)
-	}), opts...)
+	}, opts...)
 	return runner.Start(ctx)
 }

@@ -26,12 +26,12 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var flushCount atomic.Int32
 	var skimCount atomic.Int32
 
-	skimmer := psg.NewSkimmer(wave, psg.NewHandler(func(ctx context.Context, result int, err error) error {
+	skimmer := psg.NewFnSkimmer(wave, func(ctx context.Context, result int, err error) error {
 		t.Logf("Skim called with result %d", result)
 		skimCount.Add(1)
 		chk.NoError(err)
 		return nil
-	}))
+	})
 
 	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
 
@@ -50,9 +50,9 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	defer funnelOp.Close()
 
 	newRunner := func(value int) psg.TaskLauncher {
-		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 			return funnelOp.Submit(ctx, value)
-		}))
+		})
 	}
 
 	// Send one input

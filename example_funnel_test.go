@@ -88,13 +88,13 @@ func ExampleFunnel() {
 	// Build a Launcher factory: the task body submits its result to
 	// funnelOp from inside the task context.
 	newRunner := func(number int, delay time.Duration, result string) psg.TaskLauncher {
-		return psg.NewLauncher(wave, psg.NewTask(func(ctx context.Context) error {
+		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
 			return funnelOp.Submit(ctx, result)
-		}), psg.WithLimits(taskLimit))
+		}, psg.WithLimits(taskLimit))
 	}
 
 	// Launch some tasks

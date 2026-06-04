@@ -205,18 +205,23 @@ The remaining Thread C work (Try* honoring non-zero non-Forever deadlines via bo
 
 The structural fix overlaps with the destination doc's **Pool consolidation** (merge TaskPool + FunnelPool into one Pool, rationalize the workq integration). Doing Thread C now would mean wrestling the same inconsistencies twice. Defer Thread C until after the pool consolidation pass; it will likely fall out naturally once `taskPostWork`, the `AddToListeners` signaling, and the `errBlockWaitSignaled` conflation are unified.
 
+### Wrap-pattern migration (landed `aab904c`)
+
+All `psg.NewLauncher(wave, psg.NewTask(fn))` / `psg.NewSkimmer(wave, psg.NewHandler(fn))` / `psg.NewSkimmer(wave, psg.NewErrHandler(fn))` wrap patterns in tests/examples migrated to the convenience constructors (`NewTaskLauncher` / `NewFnSkimmer` / `NewErrSkimmer`). Two intentional stragglers left: `psgwf/scatter.go` and `internal/sim/run.go` both have `body := psg.NewTask(...)` as a named intermediate variable — the Task value is constructed for downstream framework use rather than wrapped inline, so the convenience form doesn't fit.
+
 ### Naming-pass deferred items (still relevant)
 
 - `CombinerPool` → `FunnelPool` retained; goes away when Pool consolidates per the destination doc.
 - `psgwf.GenericTaskRunner` (and related psgwf wrappers) still use legacy names; rename or retire with the broader psgwf migration.
 - chartgen's bench-data parser still reads the historical metric name `combinerLimit`; legacy benchmark file emits `funnelLimit`. Re-align when `bench.txt` is regenerated post-rename.
-- Several `psg.NewLauncher(wave, psg.NewTask(fn))` and similar wrap-pattern call sites remain in tests/examples (perl-migration didn't catch multi-line ones). Not broken; just stylistically older. Migrate opportunistically to the New*Launcher convenience constructors.
 
-### Next session pickup
+### Next session pickup (in rough priority order)
 
-- **Thread C**: Forever sentinel + zero-deadline polarity flip. Single coherent change with API impact across all `Try*` methods.
-- **Opportunistic wrap-pattern migration**: replace remaining `NewSkimmer(..., NewHandler(fn))` and `NewLauncher(..., NewTask(fn))` with the `NewFn*` / `NewTask*` / `NewErr*` constructors. Low priority; cleanup.
-- **Pool consolidation**: retire CombinerPool/FunnelPool transitional name and merge with the worker Pool per the destination doc. Bigger architectural change.
+1. **Pool / workq consolidation** — the destination doc's merge of TaskPool + FunnelPool into one Pool, with workq integration rationalized. This is the bigger architectural change that dissolves the three inconsistencies blocking Thread C completion (see "Thread C — blocked on Pool/workq consolidation" above). Doing this first means Thread C falls out naturally instead of fighting the same inconsistencies twice.
+2. **Thread C completion** — Try* honoring non-zero non-Forever deadlines via bounded-wait. Falls out of the consolidation; pick up the `Forever` sentinel and `dispatch (bool, error)` foundation from `5dc49c7`.
+3. **psgwf legacy-name retirement** — `psgwf.GenericTaskRunner` and friends still use pre-rename vocabulary. Done as a stand-alone pass or rolled into a broader psgwf migration.
+4. **bench.txt regeneration + chartgen alignment** — re-run benchmarks under the new metric names (`funnelLimit` instead of `combinerLimit`), then update chartgen to parse the new names. Required before the legacy bench file can come back online for chart generation.
+5. **CombinerPool retirement** — once Pool consolidation lands, the CombinerPool→FunnelPool transitional name can go away. Stand-alone follow-up if not folded into the consolidation pass.
 
 ## Open issues
 

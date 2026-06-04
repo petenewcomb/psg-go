@@ -1,6 +1,19 @@
 # TODO
 
-## Combiner Branch Pre-Merge Tasks
+## Refactor status (2026-06)
+
+The combiner branch has progressed substantially beyond its original scope. See `WORKING_NOTES.md` for the live status of the in-flight reshape. Highlights of what's complete on the branch as of `aab904c`:
+
+- Thread A: Handler[T] unification + op trio rename (`Gather`→`Skim`, `Combiner`→`Funnel`, `TaskRunner`→`Launcher`) + Launcher arity collapse + Submit/SubmitErr/SubmitResult dispatch family.
+- Thread B: wave-at-construction with nil-sentinel resolution + worker plumbing so nil-wave ops dispatch correctly from inside any op body + factory pass through psgwf / otpsg wrappers.
+- psgfn folded into top-level psg; AccumulatorFactory is an interface with `Close() error`; full convenience constructor surface (`NewFn*` / `NewTask*` / `NewErr*`) per op; void-T type aliases.
+- Thread C v0.1: `Forever` sentinel + dispatch `(bool, error)` refactor. Full Try* honoring deadlines deferred pending Pool/workq consolidation.
+
+The next major piece is **Pool/workq consolidation** (merge TaskPool + FunnelPool into one Pool, rationalize workq integration). Thread C completion falls out of that pass.
+
+The sections below are the original pre-refactor TODO. Many items are now stale or superseded; treat them as historical reference and consult WORKING_NOTES + CHANGELOG for current scope.
+
+## Combiner Branch Pre-Merge Tasks (original list — partially stale)
 
 Items to complete before merging to main branch.
 

@@ -28,6 +28,7 @@ format.
 - Void-T type aliases for intent-naming: `Task`, `ErrHandler`, `ErrAccumulator`, `ErrAccumulatorFactory`, `TaskLauncher`, `ErrLauncher`, `ErrSkimmer`, `ErrFunnel`
 - `FuncErrAccumulator` and `FuncErrAccumulatorFactory` adapters: err-only direct-fn-storage adapters that avoid framework-added signature-adapter closures
 - `Submit` / `SubmitErr` / `SubmitResult` dispatch family with Try variants on all sinks; each name describes its args (frequency-ordered: value-only > err-only > both)
+- `psg.Forever` sentinel — `time.Time` value for "block until success" deadline semantics. Used internally by `Submit` / `SubmitErr` / `SubmitResult` non-Try sugars to make the intent explicit at the call site. `Pool.block` treats `Forever` the same as zero (no timer installation; block until ctx cancellation or notification). Full Try*-honoring-deadline behavior is deferred pending Pool/workq consolidation (see WORKING_NOTES "Thread C — blocked on Pool/workq consolidation")
 
 ### Changed
 

@@ -45,7 +45,7 @@ func newPassthroughTestFunnelFactory[T any](
 // Verifies that AccumulatorFactory.Close fires when the bound
 // Funnel's refcount hits zero (Funnel.Close on the last reference).
 // Note: this test exercises the unused-factory case (no Submits).
-// When Submits create halfBoundFunnels, the factory remains
+// When Submits create funnelInstances, the factory remains
 // referenced until those instances are fully flushed and freed —
 // see funnelOp.unref() for the refcount details.
 func TestFunnelFactoryCloseFires(t *testing.T) {

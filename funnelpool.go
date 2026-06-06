@@ -34,9 +34,9 @@ type FunnelPool struct {
 
 	funnelQueue workq.Pending
 
-	// flushQ holds halfBoundFunnel instances that have a pending flush
+	// flushQ holds funnelInstance instances that have a pending flush
 	// deadline. Any cpWorker can drive the timer + drain; the per-
-	// instance mu on each halfBoundFunnel makes parallel Flush calls
+	// instance mu on each funnelInstance makes parallel Flush calls
 	// safe.
 	flushQ delayq.Queue[funnelFlusher]
 

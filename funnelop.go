@@ -313,16 +313,16 @@ type funnelOp[T any] struct {
 	// completes.
 	limiter Limiter
 
-	innerPool           *omnipool.Pool[funnelOp[T]]
-	halfBoundFunnelPool *omnipool.Pool[halfBoundFunnel[T]]
-	funnelWorkPool      *omnipool.Pool[funnelWork[T]]
+	innerPool          *omnipool.Pool[funnelOp[T]]
+	funnelInstancePool *omnipool.Pool[funnelInstance[T]]
+	funnelWorkPool     *omnipool.Pool[funnelWork[T]]
 
 	instanceCount atomic.Int32
-	instanceQueue nbcq.Queue[*halfBoundFunnel[T]]
+	instanceQueue nbcq.Queue[*funnelInstance[T]]
 }
 
 func (c *funnelOp[T]) Init() {
-	c.halfBoundFunnelPool = omnipool.For[halfBoundFunnel[T]]()
+	c.funnelInstancePool = omnipool.For[funnelInstance[T]]()
 	c.funnelWorkPool = omnipool.For[funnelWork[T]]()
 	c.instanceQueue.Init()
 }
@@ -397,7 +397,7 @@ func (c *funnelOp[T]) unref() {
 	innerPool.Put(c)
 }
 
-type halfBoundFunnel[T any] struct {
+type funnelInstance[T any] struct {
 	id funnelInstanceID
 	op *funnelOp[T]
 
@@ -417,11 +417,11 @@ type halfBoundFunnel[T any] struct {
 	flushHeapPos int
 }
 
-func (c *halfBoundFunnel[T]) InstanceID() funnelInstanceID {
+func (c *funnelInstance[T]) InstanceID() funnelInstanceID {
 	return c.id
 }
 
-func (c *halfBoundFunnel[T]) InstanceCount() int {
+func (c *funnelInstance[T]) InstanceCount() int {
 	return int(c.op.instanceCount.Load())
 }
 
@@ -429,7 +429,7 @@ func (c *halfBoundFunnel[T]) InstanceCount() int {
 // delayq.mu so the read is consistent with the heap's own ordering;
 // concurrent writers come exclusively through SetPosition, which
 // synchronizes with funnel via c.mu.
-func (c *halfBoundFunnel[T]) Position() int { return c.flushHeapPos }
+func (c *funnelInstance[T]) Position() int { return c.flushHeapPos }
 
 // SetPosition implements [delayq.Item]. It is called by the delayq
 // heap under delayq.mu when an item is inserted, swapped, or removed.
@@ -442,7 +442,7 @@ func (c *halfBoundFunnel[T]) Position() int { return c.flushHeapPos }
 // Lock ordering: delayq.mu first (held by the heap operation), then
 // c.mu (taken here). funnel never takes delayq.mu while holding
 // c.mu, so no deadlock.
-func (c *halfBoundFunnel[T]) SetPosition(p int) {
+func (c *funnelInstance[T]) SetPosition(p int) {
 	c.mu.Lock()
 	c.flushHeapPos = p
 	if p == 0 {
@@ -452,7 +452,7 @@ func (c *halfBoundFunnel[T]) SetPosition(p int) {
 }
 
 // Must already be holding c.mu lock.
-func (c *halfBoundFunnel[T]) Ref() {
+func (c *funnelInstance[T]) Ref() {
 	if c.refCount < 1 {
 		panic("reference count underflow")
 	}
@@ -460,7 +460,7 @@ func (c *halfBoundFunnel[T]) Ref() {
 }
 
 // Must not be holding c.mu lock.
-func (c *halfBoundFunnel[T]) Unref() {
+func (c *funnelInstance[T]) Unref() {
 	c.mu.Lock()
 	finalRefDropped := c.unref()
 	c.mu.Unlock()
@@ -471,7 +471,7 @@ func (c *halfBoundFunnel[T]) Unref() {
 
 // Must already be holding c.mu lock.
 // Returns true if the final reference was dropped.
-func (c *halfBoundFunnel[T]) unref() bool {
+func (c *funnelInstance[T]) unref() bool {
 	// Must already be holding c.mu lock
 	if c.refCount < 1 {
 		panic("reference count underflow")
@@ -481,20 +481,20 @@ func (c *halfBoundFunnel[T]) unref() bool {
 }
 
 // A call to unref() must already have returned true
-func (c *halfBoundFunnel[T]) free() {
-	pool := c.op.halfBoundFunnelPool
+func (c *funnelInstance[T]) free() {
+	pool := c.op.funnelInstancePool
 	op := c.op
 	pool.Put(c)
 	op.instanceCount.Add(-1)
 	op.unref()
 }
 
-func (c *halfBoundFunnel[T]) allocate(
+func (c *funnelInstance[T]) allocate(
 	ctx context.Context,
 	newAccumulator AccumulatorFactory[T],
 	sender *rdvq.Sender,
 ) {
-	traceRegion := "halfBoundFunnel.allocate"
+	traceRegion := "funnelInstance.allocate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	panicked := true
@@ -520,8 +520,8 @@ func (c *halfBoundFunnel[T]) allocate(
 // Pool.SkimAll. Successful results are not surfaced this way — the
 // Accumulator body is expected to Submit those to user-owned downstream
 // sinks directly.
-func (c *halfBoundFunnel[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {
-	traceRegion := "halfBoundFunnel.emitErr"
+func (c *funnelInstance[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {
+	traceRegion := "funnelInstance.emitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	if accErr == nil {
@@ -536,7 +536,7 @@ func (c *halfBoundFunnel[T]) emitErr(ctx context.Context, sender *rdvq.Sender, a
 	_ = sender
 }
 
-func (c *halfBoundFunnel[T]) funnel(
+func (c *funnelInstance[T]) funnel(
 	ctx context.Context,
 	flushQ *delayq.Queue[funnelFlusher],
 	sender *rdvq.Sender,
@@ -544,7 +544,7 @@ func (c *halfBoundFunnel[T]) funnel(
 	inputErr error,
 ) {
 
-	traceRegion := "halfBoundFunnel.funnel"
+	traceRegion := "funnelInstance.funnel"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	didNotPanic := false
@@ -590,8 +590,8 @@ func (c *halfBoundFunnel[T]) funnel(
 }
 
 // Must not already hold c.mu
-func (c *halfBoundFunnel[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
-	traceRegion := "halfBoundFunnel.Flush"
+func (c *funnelInstance[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
+	traceRegion := "funnelInstance.Flush"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	c.mu.Lock()
@@ -606,8 +606,8 @@ func (c *halfBoundFunnel[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
 }
 
 // Must already hold c.mu
-func (c *halfBoundFunnel[T]) flush(ctx context.Context, sender *rdvq.Sender) {
-	traceRegion := "halfBoundFunnel.flush"
+func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) {
+	traceRegion := "funnelInstance.flush"
 
 	accumulator := c.accumulator
 	if accumulator == nil {
@@ -698,7 +698,7 @@ func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inpu
 }
 
 func (w *funnelWork[T]) Funnel(ctx context.Context, flushQ *delayq.Queue[funnelFlusher], sender *rdvq.Sender) {
-	var hbc *halfBoundFunnel[T]
+	var hbc *funnelInstance[T]
 	for {
 		hbc, _ = w.op.instanceQueue.TryPopFront()
 		if hbc == nil {
@@ -719,7 +719,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, flushQ *delayq.Queue[funnelF
 		}
 	}
 	if hbc == nil {
-		hbc = w.op.halfBoundFunnelPool.Get()
+		hbc = w.op.funnelInstancePool.Get()
 		hbc.mu.Lock()
 		hbc.refCount = 1
 		w.op.ref()

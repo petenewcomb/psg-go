@@ -33,11 +33,11 @@ type Accepted struct {
 	waiters   rdvq.Waiters
 	listener  rdvq.Listener
 
-	// timed holds [ScheduledWork] that is not yet due. Items whose
+	// scheduled holds [ScheduledWork] that is not yet due. Items whose
 	// deadline has arrived are drained into the fresh queue during work
 	// selection and then execute like any other work. The delayq wake
 	// hook nudges a parked worker when a sooner deadline is scheduled.
-	timed delayq.Queue[ScheduledWork]
+	scheduled delayq.Queue[ScheduledWork]
 
 	// unmetDemandFn is the pool's worker-spawn signal, fired (via
 	// waiters) when excess fresh work accumulates and no idle worker is
@@ -64,30 +64,31 @@ func (q *Accepted) Init(unmetDemandFn RenotifyFunc) {
 	q.postponed.Init()
 	q.waiters.Init()
 	q.listener.Notify = q.waiters.Notify
-	q.timed.Init(q.wakeTimed)
+	q.scheduled.Init(q.wakeScheduled)
 	q.unmetDemandFn = unmetDemandFn
 }
 
-// wakeTimed is the delayq wake hook: it nudges one parked worker so a
+// wakeScheduled is the delayq wake hook: it nudges one parked worker so a
 // newly scheduled earlier deadline is noticed and the worker re-arms
 // its wait for it.
-func (q *Accepted) wakeTimed() {
+func (q *Accepted) wakeScheduled() {
 	q.waiters.Notify(nil)
 }
 
-// Schedule hands w to the queue to become fresh work once deadline
-// arrives. Calling Schedule again on an already-scheduled w replaces
-// its deadline, so it doubles as reschedule. Safe for concurrent
-// callers.
-func (q *Accepted) Schedule(w ScheduledWork, deadline time.Time) {
-	q.timed.Schedule(w, deadline)
+// Schedule hands w to the queue to become fresh work at the given time.
+// Calling Schedule again on an already-scheduled w replaces its time, so
+// it doubles as reschedule. Safe for concurrent callers. See
+// [delayq.Queue.Schedule] for the at-vs-deadline naming and the zero-time
+// contract.
+func (q *Accepted) Schedule(w ScheduledWork, at time.Time) {
+	q.scheduled.Schedule(w, at)
 }
 
 // Remove cancels a previously [Accepted.Schedule]d w. Safe to call on a
 // w that was never scheduled or has already become due. Safe for
 // concurrent callers.
 func (q *Accepted) Remove(w ScheduledWork) {
-	q.timed.Remove(w)
+	q.scheduled.Remove(w)
 }
 
 // Expedite promotes an already-[Accepted.Schedule]d w straight into the
@@ -97,7 +98,7 @@ func (q *Accepted) Remove(w ScheduledWork) {
 // to call from any context, including outside the ExecuteOne flow
 // (e.g. an end-of-work force sweep).
 //
-// If w is not currently in the timed queue (never scheduled, already
+// If w is not currently in the scheduled queue (never scheduled, already
 // due-drained, already removed, or already expedited) Expedite is a
 // no-op: it does not re-enqueue w. A caller that force-flushes a set of
 // instances it believes are scheduled tolerates this — an item that
@@ -106,7 +107,7 @@ func (q *Accepted) Remove(w ScheduledWork) {
 //nolint:contextcheck // background context used only for tracing
 func (q *Accepted) Expedite(w ScheduledWork) {
 	traceRegion := "workq.Accepted.Expedite"
-	item, ok := q.timed.Expedite(w)
+	item, ok := q.scheduled.Expedite(w)
 	if !ok {
 		trace.Logf(context.Background(), traceRegion, "Accepted(%p) %v already drained, no-op", q, w)
 		return
@@ -120,19 +121,19 @@ func (q *Accepted) Expedite(w ScheduledWork) {
 	q.waiters.Notify(q.unmetDemandFn)
 }
 
-// drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllTimed]
+// drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllScheduled]
 // so every scheduled item — including far-future no-deadline placeholders —
 // is treated as due. Matches the funnel pool's no-deadline placeholder skew.
 const drainAllSkew = 24 * time.Hour
 
-// DrainAllTimed removes every scheduled work item regardless of its
+// DrainAllScheduled removes every scheduled work item regardless of its
 // deadline, appending them to dst and returning it. Unlike the per-deadline
 // draining inside ExecuteOne, the caller takes ownership of the returned
 // items and is responsible for running them — used at end-of-work to flush
 // instances whose deadline has not yet arrived. Safe for concurrent callers
 // (delayq.Drain serializes internally).
-func (q *Accepted) DrainAllTimed(dst []ScheduledWork) []ScheduledWork {
-	due, _ := q.timed.Drain(time.Now().Add(drainAllSkew), dst)
+func (q *Accepted) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
+	due, _ := q.scheduled.Drain(time.Now().Add(drainAllSkew), dst)
 	return due
 }
 
@@ -141,9 +142,9 @@ func (q *Accepted) DrainAllTimed(dst []ScheduledWork) []ScheduledWork {
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be
 // called for each work item accepted.
 //
-// timedCh, when non-nil, fires when the queue's next scheduled-work deadline
+// deadlineCh, when non-nil, fires when the queue's next scheduled-work deadline
 // arrives; a blocking AddWorkFunc must include it in its select and return
-// (without work) when it fires, so the queue re-drains the now-due timed work.
+// (without work) when it fires, so the queue re-drains the now-due scheduled work.
 // It is nil whenever there is no pending deadline. Returns the RenotifyFunc the
 // wait observed, or nil.
 type AddWorkFunc func(
@@ -151,7 +152,7 @@ type AddWorkFunc func(
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-	timedCh <-chan time.Time,
+	deadlineCh <-chan time.Time,
 ) (RenotifyFunc, error)
 
 type RenotifyFunc = rdvq.RenotifyFunc
@@ -249,7 +250,7 @@ func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) 
 	c.tryAddWorkFn = addWorkFn
 	defer c.Free()
 
-	c.drainTimed()
+	c.drainScheduled()
 
 	// Try accepted work first
 	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
@@ -297,9 +298,9 @@ type controller struct {
 	workWasPostponed         bool
 	endOfWorkErr             error
 
-	timedScratch       []ScheduledWork // reusable Drain buffer
-	nextTimedDeadline  time.Time       // earliest not-yet-due deadline, set by drainTimed
-	armedTimedDeadline time.Time       // deadline WaitForNew armed its wake timer for
+	scheduledScratch []ScheduledWork // reusable Drain buffer
+	nextDeadline     time.Time       // earliest not-yet-due deadline, set by drainScheduled
+	armedDeadline    time.Time       // deadline WaitForNew armed its wake timer for
 
 	ex Execution // avoid closure reallocations
 
@@ -331,7 +332,7 @@ func (c *controller) Reset() {
 	// Clear all but reusable allocations
 	*c = controller{
 		buffer:            c.buffer[:0],
-		timedScratch:      c.timedScratch[:0],
+		scheduledScratch:  c.scheduledScratch[:0],
 		ex:                c.ex,
 		queueFreshFn:      c.queueFreshFn,
 		shouldStillWaitFn: c.shouldStillWaitFn,
@@ -348,7 +349,7 @@ func newController(q *Accepted) *controller {
 
 func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 
-	c.drainTimed()
+	c.drainScheduled()
 
 	var err error
 	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
@@ -384,7 +385,7 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 	return false, err
 }
 
-// drainTimed moves any scheduled work whose deadline has arrived into
+// drainScheduled moves any scheduled work whose deadline has arrived into
 // the fresh queue, where it will be picked up and executed like any
 // other work, and records the earliest remaining deadline so
 // [controller.WaitForNew] can arm a wake timer for it.
@@ -394,10 +395,10 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 // work: a batch of newly-due flushes can trip unmetDemandFn and spawn
 // additional workers, letting the sweep run in parallel rather than
 // serializing on whichever worker happened to drain it.
-func (c *controller) drainTimed() {
+func (c *controller) drainScheduled() {
 	var due []ScheduledWork
-	due, c.nextTimedDeadline = c.q.timed.Drain(time.Now(), c.timedScratch[:0])
-	c.timedScratch = due
+	due, c.nextDeadline = c.q.scheduled.Drain(time.Now(), c.scheduledScratch[:0])
+	c.scheduledScratch = due
 	for _, w := range due {
 		c.queueFresh(w)
 	}
@@ -480,17 +481,17 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 	// When a scheduled-work deadline is pending, arm a pooled timer and hand
 	// its channel to addWorkFn so the worker's own select wakes when the
 	// deadline arrives, re-entering ExecuteOne to drain the now-due item. No
-	// goroutine is spawned; nil timedCh means no pending deadline.
-	var timedCh <-chan time.Time
-	c.armedTimedDeadline = c.nextTimedDeadline
-	if !c.nextTimedDeadline.IsZero() {
-		d := time.Until(c.nextTimedDeadline)
+	// goroutine is spawned; nil deadlineCh means no pending deadline.
+	var deadlineCh <-chan time.Time
+	c.armedDeadline = c.nextDeadline
+	if !c.nextDeadline.IsZero() {
+		d := time.Until(c.nextDeadline)
 		if d < 0 {
 			d = 0
 		}
 		timer := timerp.Get()
 		timerp.Reset(timer, d)
-		timedCh = timer.C
+		deadlineCh = timer.C
 		defer func() {
 			timerp.Stop(timer)
 			timerp.Put(timer)
@@ -498,7 +499,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 	}
 
 	var err error
-	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn, timedCh)
+	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn, deadlineCh)
 	if err == nil {
 		err = c.shouldStillWaitErr
 	} else if c.shouldStillWaitErr != nil {
@@ -633,14 +634,14 @@ func (c *controller) shouldStillWait() bool {
 		}
 	}
 
-	// Re-drain timed work: a Schedule that landed after the ExecuteOne
-	// drainTimed but before we registered as a waiter may have produced
+	// Re-drain scheduled work: a Schedule that landed after the ExecuteOne
+	// drainScheduled but before we registered as a waiter may have produced
 	// now-due work or lowered the next deadline below the one WaitForNew
 	// armed its wake timer for. Draining promotes due items into fresh
 	// (caught by the TryAccepted below); the deadline check afterward
 	// aborts the wait so the loop re-arms for the sooner deadline rather
 	// than oversleeping it.
-	c.drainTimed()
+	c.drainScheduled()
 
 	// Check to make sure nothing else accumulated before we registered as a
 	// waiter.
@@ -650,8 +651,8 @@ func (c *controller) shouldStillWait() bool {
 
 	// Abort the wait if a sooner deadline appeared than the armed timer
 	// covers; WaitForNew will re-arm on the next loop iteration.
-	if !c.nextTimedDeadline.IsZero() &&
-		(c.armedTimedDeadline.IsZero() || c.nextTimedDeadline.Before(c.armedTimedDeadline)) {
+	if !c.nextDeadline.IsZero() &&
+		(c.armedDeadline.IsZero() || c.nextDeadline.Before(c.armedDeadline)) {
 		return false
 	}
 

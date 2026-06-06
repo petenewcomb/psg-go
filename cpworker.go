@@ -51,7 +51,7 @@ func (cw *cpWorker) AddWork(
 	queueFn workq.QueueWorkFunc,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
-	timedCh <-chan time.Time, // fires when the next scheduled flush deadline arrives
+	deadlineCh <-chan time.Time, // fires when the next scheduled flush deadline arrives
 ) (workq.RenotifyFunc, error) {
 	cw.PushQueueFunc(queueFn)
 	defer cw.PopQueueFunc()
@@ -93,7 +93,7 @@ func (cw *cpWorker) AddWork(
 		func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			work, ok := cw.cp.funnelQueue.PopFrontFunc(cw.Receiver(),
 				func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
-					return cw.popSelect(ctx, inboxCh, outboxWaitCh, workWaitCh, timedCh)
+					return cw.popSelect(ctx, inboxCh, outboxWaitCh, workWaitCh, deadlineCh)
 				},
 			)
 			if ok {
@@ -125,14 +125,14 @@ func (cw *cpWorker) popSelect(
 	inboxCh <-chan workq.Work,
 	outboxWaitCh <-chan rdvq.RenotifyFunc,
 	workWaitCh <-chan rdvq.RenotifyFunc,
-	timedCh <-chan time.Time,
+	deadlineCh <-chan time.Time,
 ) (result rdvq.PopSelectResult[workq.Work]) {
 	traceRegion := "cpWorker.popSelect"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	trace.Logf(ctx, traceRegion,
-		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, timedCh=%p, nextJobFlushCh=%p",
-		inboxCh, outboxWaitCh, workWaitCh, timedCh, cw.nextJobFlushCh)
+		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, deadlineCh=%p, nextJobFlushCh=%p",
+		inboxCh, outboxWaitCh, workWaitCh, deadlineCh, cw.nextJobFlushCh)
 	select {
 	case work := <-inboxCh:
 		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
@@ -142,9 +142,9 @@ func (cw *cpWorker) popSelect(
 		result.OutboxReady(renotifyFn)
 	case cw.workRenotifyFn = <-workWaitCh:
 		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitCh=%p", workWaitCh)
-	case <-timedCh:
+	case <-deadlineCh:
 		// A scheduled flush deadline arrived; return so ExecuteOne re-drains
-		// the now-due timed work into the fresh queue.
+		// the now-due scheduled work into the fresh queue.
 		trace.Logf(ctx, traceRegion, "received flush deadline signal")
 	case <-cw.idleTimerCh:
 		trace.Logf(ctx, traceRegion, "received idle timer signal")
@@ -166,15 +166,15 @@ func (cw *cpWorker) popSelect(
 	return
 }
 
-// timedFlusher is the end-of-work view of a scheduled flush item: a
+// scheduledFlusher is the end-of-work view of a scheduled flush item: a
 // funnelInstance satisfies it. flushAll runs these synchronously rather
 // than routing them back through ExecuteOne, so a flush is never left
 // queued when the last goroutine decides to exit.
-type timedFlusher interface {
+type scheduledFlusher interface {
 	Flush(ctx context.Context, sender *rdvq.Sender)
 }
 
-// flushAll drains every still-pending scheduled flush from the timed work
+// flushAll drains every still-pending scheduled flush from the scheduled work
 // queue and flushes each synchronously, then drops this worker's flush-signal
 // subscription. Used at job-end to deliver final flushes for not-yet-due
 // instances. Returns false only when this worker is not subscribed.
@@ -184,8 +184,8 @@ func (cw *cpWorker) flushAll(ctx context.Context) bool {
 	if cw.nextJobFlushCh == nil {
 		return false
 	}
-	for _, w := range cw.cp.workQueue.DrainAllTimed(nil) {
-		w.(timedFlusher).Flush(ctx, cw.Sender())
+	for _, w := range cw.cp.workQueue.DrainAllScheduled(nil) {
+		w.(scheduledFlusher).Flush(ctx, cw.Sender())
 	}
 	cw.nextJobFlushCh = nil
 	return true

@@ -33,7 +33,7 @@ type FunnelPool struct {
 
 	funnelQueue workq.Pending
 
-	// Pending flushes live on workQueue as scheduled (timed) work: a
+	// Pending flushes live on workQueue as scheduled work: a
 	// funnelInstance with a future deadline is workQueue.Schedule'd and,
 	// once due, surfaces as fresh work whose Execute runs the flush. Any
 	// worker drives it; the per-instance mu makes parallel Flush safe.
@@ -203,7 +203,7 @@ func (cp *FunnelPool) goroutine() {
 				trace.Logf(ctx, traceRegion, "goroutine exiting")
 				// No timer-holder handoff needed: remaining workers each arm
 				// their own deadline timer in workq's WaitForNew, and a flush
-				// scheduled while they are parked wakes them via the timed
+				// scheduled while they are parked wakes them via the scheduled-work
 				// queue's wake hook.
 				// The flush-signal subscription holds no reference, so
 				// there is nothing to release on exit.

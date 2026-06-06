@@ -450,3 +450,12 @@ func TestExpediteUpdatesNextDeadline(t *testing.T) {
 	assert.Empty(t, ready, "b is not yet due at t=50")
 	assertTime(t, at(90), next)
 }
+
+// TestScheduleZeroPanics verifies the defensive contract: the zero Time
+// is the queue's "none" sentinel, so scheduling with it is a programming
+// error.
+func TestScheduleZeroPanics(t *testing.T) {
+	var q delayq.Queue[*testItem]
+	q.Init(nil)
+	assert.Panics(t, func() { q.Schedule(&testItem{id: 1}, time.Time{}) })
+}

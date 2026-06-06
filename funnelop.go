@@ -416,7 +416,7 @@ type funnelInstance[T any] struct {
 	accumulator   Accumulator[T]
 
 	// queued reports whether this instance currently has a Ref held on
-	// behalf of an in-flight Schedule on the funnel pool's timed work
+	// behalf of an in-flight Schedule on the funnel pool's scheduled work
 	// queue. Mutated only under c.mu.
 	//
 	// It is deliberately distinct from flushHeapPos. flushHeapPos tracks
@@ -429,7 +429,7 @@ type funnelInstance[T any] struct {
 	// flushHeapPos check could not, since it would still read 0.
 	queued bool
 
-	// flushHeapPos is this instance's position in the timed work queue's
+	// flushHeapPos is this instance's position in the scheduled work queue's
 	// deadline structure, mutated only by the queue (under delayq.mu, via
 	// SetPosition): 0 = never scheduled, >0 = the 1-based heap index,
 	// <0 = previously scheduled and since removed/drained. See queued for
@@ -444,7 +444,7 @@ func (c *funnelInstance[T]) ID() workq.WorkID { return c.workID }
 func (c *funnelInstance[T]) Group() workq.GroupID { return c.flushGroup }
 
 // Execute implements [workq.Work]: it runs the scheduled flush once the
-// instance's deadline has come due and the timed queue has surfaced it
+// instance's deadline has come due and the scheduled-work queue has surfaced it
 // as fresh work. The Sender comes from the executing worker's
 // environment (as in funnelWork.executeInner); any funnel worker may run
 // it. The companion unref of the queued reference happens in Free.
@@ -618,7 +618,7 @@ func (c *funnelInstance[T]) funnel(
 		// Either a future deadline or no deadline (zero). In the
 		// no-deadline case the accumulator stays alive until the
 		// pool's job-end flush sweep picks it up; we still schedule
-		// the instance on the timed work queue — with a far-future
+		// the instance on the scheduled work queue — with a far-future
 		// placeholder deadline — so that sweep finds it.
 		deadline := newFlushDeadline
 		if deadline.IsZero() {
@@ -786,7 +786,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 		hbc.workID = workq.NewWorkID()
 		hbc.earliestGroup = w.Group()
 		hbc.flushGroup = w.Group()
-		// Reset the timed-queue position to the never-scheduled state. A
+		// Reset the scheduled-queue position to the never-scheduled state. A
 		// reused instance retains the negative removed sentinel from its
 		// previous life; clearing it keeps Position's tri-state honest so
 		// a stray Expedite of a fresh instance is caught (see delayq.Item).

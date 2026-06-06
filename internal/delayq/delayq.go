@@ -4,17 +4,19 @@
 // Package delayq implements a deadline-ordered queue intended for a
 // model where multiple worker goroutines collectively service
 // deadline-driven work without any single goroutine owning the
-// timer-watching duty. Callers Schedule items with deadlines, Drain
-// returns whichever have expired plus the next pending deadline, and
-// a wake hook nudges parked workers when a newly scheduled deadline
-// beats the current earliest.
+// timer-watching duty. Callers Schedule each item to become ready at a
+// given time, Drain returns whichever have become ready plus the next
+// pending time, and a wake hook nudges parked workers when a newly
+// scheduled time beats the current earliest.
 //
-// The deadline is supplied to [Queue.Schedule] and owned by the queue;
-// the item type T need not expose a deadline of its own, so item state
-// visible to user code cannot drift out of sync with the ordering the
-// queue uses. The item is required only to track its heap position via
-// the [Item] interface, which user code should treat as opaque queue
-// bookkeeping.
+// The time is supplied to [Queue.Schedule] as its "at" parameter
+// (reading "schedule item at T") and owned by the queue, which stores it
+// as the item's deadline — the time by which the queue must release the
+// item to honor the request. The item type T need not expose a time of
+// its own, so item state visible to user code cannot drift out of sync
+// with the ordering the queue uses; the item is required only to track
+// its heap position via the [Item] interface, which user code should
+// treat as opaque queue bookkeeping.
 //
 // Typical use:
 //
@@ -22,7 +24,7 @@
 //	q.Init(wakeIdleWorker)
 //
 //	// Producer side
-//	q.Schedule(item, deadline)
+//	q.Schedule(item, at)
 //
 //	// Consumer side
 //	ready, next := q.Drain(time.Now(), ready[:0])
@@ -135,13 +137,24 @@ func (q *Queue[T]) Init(wake func()) {
 	q.wake = wake
 }
 
-// Schedule records that item should be returned by a [Queue.Drain]
-// once now reaches deadline. Calling Schedule again on an item
-// already in the queue replaces its deadline. Safe for concurrent
+// Schedule records that item should be returned by a [Queue.Drain] once
+// now reaches at. Calling Schedule again on an item already in the queue
+// replaces its time, so it doubles as reschedule. Safe for concurrent
 // callers.
-func (q *Queue[T]) Schedule(item T, deadline time.Time) {
-	q.updates.PushBack(update[T]{item: item, deadline: deadline})
-	q.lowerDeadline(nanosSinceEpoch(deadline))
+//
+// The parameter is named for the call site ("schedule item at T"); the
+// queue stores it as the item's deadline — the time by which the queue
+// must release it to honor the request. at must be non-zero: the zero
+// Time is the queue's "none" sentinel (an empty queue, a no-op Drain
+// result), so scheduling with it is a programming error and panics. A
+// caller wanting "ready now" passes time.Now(); a caller with no
+// specific time supplies its own far-future placeholder.
+func (q *Queue[T]) Schedule(item T, at time.Time) {
+	if at.IsZero() {
+		panic("delayq: Schedule with zero time")
+	}
+	q.updates.PushBack(update[T]{item: item, deadline: at})
+	q.lowerDeadline(nanosSinceEpoch(at))
 }
 
 // Remove drops item from the queue. Use this when the caller intends

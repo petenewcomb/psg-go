@@ -519,9 +519,40 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   - Drop the `flushQ` param from `funnelWork.Funnel` / `boundFunnelWork`.
   - Validate `TestBySimulation` (`-short`, full, `-race`) + `TestMaxHoldTime*` +
     funnel/skim, and goroutine/no-leak behavior at end-of-work.
-- **1c** — Relocate flush *policy* to Wave: force-flush (Remove+run its handles),
-  drain barrier (timed item = outstanding work; collapse `RegisterFlusher`/
-  `nextFlushChan` where possible), `WithFlushListener` → Wave. The semantic move.
+- **1c** — Relocate flush *policy* to Wave AND parallelize the end-of-work sweep.
+  Two coupled deliverables:
+
+  1. **Unified drain barrier: a pending timed item *is* outstanding work.**
+     Replace the bespoke `confirmEndOfWork` dance + `RegisterFlusher`/
+     `nextFlushChan` with a single accounting where outstanding = regular work +
+     pending timed (flush) items; `Done` ⟺ outstanding == 0. This is the
+     keystone: it makes `Done` wait for every flush regardless of which worker
+     runs it, and ensures **no worker exits while forced flushes remain**.
+
+  2. **Parallel end-of-work sweep (retire the serial `flushAll`).** The current
+     synchronous `flushAll` serially calls an *unbounded* number of user
+     `accumulator.Flush` functions on one goroutine — a tail-latency landmine
+     (pre-existing; 1b-ii preserved it). With barrier (1) in place, the
+     async-to-`fresh` direction reverted in 1b-ii becomes *safe*: at quiescence
+     of regular work (Wave Closed, no in-flight regular work), **force all
+     pending timed instances due** (lower deadlines in place / drain-to-fresh)
+     so they flow through the normal parallel `drainTimed → fresh → Execute`
+     path, fanned out across the whole pool instead of serialized. The
+     deadline-driven path is already parallel; this brings the forced sweep in
+     line.
+
+  **Multi-cycle flushing is intrinsic and stays.** A flush can emit downstream
+  and create new funnel input (cross-hop / recursive), which creates new
+  accumulator state needing its own flush. So flushing is a fixpoint: force →
+  flush → maybe new work → drain → force again, until outstanding (work +
+  pending flushes) hits zero. 1c doesn't remove this; it makes it fall out of
+  the unified barrier (refcount→0) rather than the re-confirm loop. Cycles are
+  bounded by dataflow depth; terminates iff the user dataflow terminates (same
+  as today).
+
+  Plus the ownership move: `WithFlushListener` → Wave; force-flush ownership
+  (Remove + run handles) on Wave. The synchronous `flushAll` (b9dbf2d) is the
+  correct *interim*; 1c is the destination.
 
 **Open design question for checkpoint 3**: the post-cap-deletion funnel spawn
 policy. Funnel wants *minimum* goroutines, so it can't adopt the task pool's

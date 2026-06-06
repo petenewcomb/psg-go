@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/cerr"
+	"github.com/petenewcomb/psg-go/internal/delayq"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
@@ -29,6 +31,12 @@ type Accepted struct {
 	postponed nbcq.Queue[Work]
 	waiters   rdvq.Waiters
 	listener  rdvq.Listener
+
+	// timed holds [ScheduledWork] that is not yet due. Items whose
+	// deadline has arrived are drained into the fresh queue during work
+	// selection and then execute like any other work. The delayq wake
+	// hook nudges a parked worker when a sooner deadline is scheduled.
+	timed delayq.Queue[ScheduledWork]
 }
 
 // Init initializes the work queue using the global pool.
@@ -45,6 +53,29 @@ func (q *Accepted) Init() {
 	q.postponed.Init()
 	q.waiters.Init()
 	q.listener.Notify = q.waiters.Notify
+	q.timed.Init(q.wakeTimed)
+}
+
+// wakeTimed is the delayq wake hook: it nudges one parked worker so a
+// newly scheduled earlier deadline is noticed and the worker re-arms
+// its wait for it.
+func (q *Accepted) wakeTimed() {
+	q.waiters.Notify(nil)
+}
+
+// Schedule hands w to the queue to become fresh work once deadline
+// arrives. Calling Schedule again on an already-scheduled w replaces
+// its deadline, so it doubles as reschedule. Safe for concurrent
+// callers.
+func (q *Accepted) Schedule(w ScheduledWork, deadline time.Time) {
+	q.timed.Schedule(w, deadline)
+}
+
+// Remove cancels a previously [Accepted.Schedule]d w. Safe to call on a
+// w that was never scheduled or has already become due. Safe for
+// concurrent callers.
+func (q *Accepted) Remove(w ScheduledWork) {
+	q.timed.Remove(w)
 }
 
 // AddWorkFunc provides new work to the queue processor. It is called with a
@@ -155,6 +186,8 @@ func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) 
 	c.tryAddWorkFn = addWorkFn
 	defer c.Free()
 
+	c.drainTimed()
+
 	// Try accepted work first
 	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
 		return c.ex.Started(), err
@@ -202,6 +235,9 @@ type controller struct {
 	workWasPostponed         bool
 	endOfWorkErr             error
 
+	timedScratch      []ScheduledWork // reusable Drain buffer
+	nextTimedDeadline time.Time       // earliest not-yet-due deadline, set by drainTimed
+
 	ex Execution // avoid closure reallocations
 
 	queueFreshFn QueueWorkFunc // avoid closure reallocations
@@ -232,6 +268,7 @@ func (c *controller) Reset() {
 	// Clear all but reusable allocations
 	*c = controller{
 		buffer:            c.buffer[:0],
+		timedScratch:      c.timedScratch[:0],
 		ex:                c.ex,
 		queueFreshFn:      c.queueFreshFn,
 		shouldStillWaitFn: c.shouldStillWaitFn,
@@ -247,6 +284,8 @@ func newController(q *Accepted) *controller {
 }
 
 func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
+
+	c.drainTimed()
 
 	var err error
 	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
@@ -280,6 +319,19 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// drainTimed moves any scheduled work whose deadline has arrived into
+// the fresh queue, where it will be picked up and executed like any
+// other work, and records the earliest remaining deadline so
+// [controller.WaitForNew] can arm a wake timer for it.
+func (c *controller) drainTimed() {
+	var due []ScheduledWork
+	due, c.nextTimedDeadline = c.q.timed.Drain(time.Now(), c.timedScratch[:0])
+	c.timedScratch = due
+	for _, w := range due {
+		c.q.fresh.PushBack(w)
+	}
 }
 
 // TryAccepted attempts to execute work from both accepted queues.
@@ -355,6 +407,24 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 		c.shouldStillWaitCtx = nil
 		c.shouldStillWaitErr = nil
 	}()
+
+	if !c.nextTimedDeadline.IsZero() {
+		// Wake a parked worker when the next scheduled deadline arrives so
+		// it re-enters ExecuteOne and drains the now-due item. AfterFunc
+		// spawns a goroutine only when it actually fires; it is cancelled
+		// below if other work arrives first.
+		//
+		// TODO(checkpoint-1b): once the worker's own select is reworked for
+		// the funnel migration, thread this deadline through AddWorkFunc so
+		// the worker watches a pooled timer directly, avoiding the per-fire
+		// goroutine. See WORKING_NOTES "Checkpoint 1 design".
+		d := time.Until(c.nextTimedDeadline)
+		if d < 0 {
+			d = 0
+		}
+		wakeTimer := time.AfterFunc(d, func() { c.q.waiters.Notify(nil) })
+		defer wakeTimer.Stop()
+	}
 
 	var err error
 	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)

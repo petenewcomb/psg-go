@@ -474,10 +474,23 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   `cp.flushQ`). Behavior-neutral; suite + `-race` green.
 - **Rename DONE (`18295ab`).** `halfBoundFunnel` → `funnelInstance` (the
   "half-bound" term was a remnant of the dropped `Combiner[I,O]` output type).
-- **1b-ii — NEXT (the behavior-sensitive core).** Make `funnelInstance` a
-  `workq.ScheduledWork`; route funnel flush through `cp.workQueue.Schedule`/
-  `Remove`, retiring `cp.flushQ`, `cpWorker.flushToNextDeadline`, and the
-  `funnelFlusher` interface. Worked-out details (don't re-derive):
+- **1b-ii — DONE (`b9dbf2d`).** `funnelInstance` implements
+  `workq.ScheduledWork`; funnel flush routes through `cp.workQueue.Schedule`/
+  `Remove`; retired `cp.flushQ`, `cpWorker.flushToNextDeadline`/flush timer, the
+  `funnelFlusher` interface (funnelmap.go deleted), and `FunnelPool` Yield. Net
+  −25 lines. **Key learning:** an async end-of-work sweep (flushAll draining to
+  `fresh` for ExecuteOne to run) *lost flushes* when the last goroutine exited
+  before executing them — the sim caught it (variable undercounts). Reverted to a
+  **synchronous** flushAll: `Accepted.DrainAllTimed(dst)` returns all pending
+  timed items and flushAll flushes each via the instance's `Flush` (flush+unref),
+  preserving the known-good end-of-work dance. Deadline-driven flush stays async
+  (drainTimed→fresh→Execute). `funnelInstance` keeps both `Flush` (combined,
+  end-of-work) and `Execute`+`Free` (split, deadline path); an instance is
+  drained exactly once so only one path runs per instance. Full suite + full sim
+  + `-race` (funnel/skim/maxholdtime/workq/sim) green; lint 0. Minor leftover:
+  `funnelOp.instanceCount` is now write-only (InstanceCount() removed) — harmless,
+  lint-clean; drop in a later cleanup.
+  Original worked-out details (kept for reference):
   - `funnelInstance` already has `Position`/`SetPosition` (was for `funnelFlusher`'s
     `delayq.Item`); workQueue's internal delayq calls them identically, so the
     `queued`/`SetPosition(0)`-flips-`queued` coordination + lock ordering

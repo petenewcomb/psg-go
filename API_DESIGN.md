@@ -46,6 +46,31 @@ These guided every naming and shape decision below.
    can run allocation-free on the hot path. This is psg-go's
    defensible technical differentiator.
 
+7. **The trust boundary is the callback, not the package.** The
+   foundational packages (rdvq, workq, delayq) maintain a notification
+   conservation invariant that is *inductive over the set of
+   participating nodes*: it holds only if every node discharges its
+   "if I don't consume a wakeup, I re-propagate it" obligation. That
+   induction closes only because the node set is finite, known, and
+   single-authored — which is why these packages are `internal` and
+   must never be exposed for extension. But hiding the packages is
+   necessary, not sufficient: every user callback (Task, Handler,
+   Skimmer, Funnel/accumulator, Recycler, and any lifecycle/metrics
+   hook) runs *on a node's goroutine while that node's invariant is
+   mid-flight*. So the rule for the API surface is: **every user
+   callback must be a bracketed leaf** — it carries *zero* propagation
+   duty (a leaf, never asked to re-notify), and the surrounding node
+   discharges its conservation obligation *regardless of what the
+   callback does* (blocks, panics, re-enters, spawns). The existing
+   reentrancy constraints (task-to-task scatter prohibition,
+   `ctxmeta.ShouldBlock` returning nil for task contexts, skim being
+   queued-not-recursive) are exactly this defense. Any future plug-in
+   point — especially blocking-capable hooks — must pass the
+   bracketed-leaf test or it punches a hole in conservation, no matter
+   that the foundational types stay hidden. (This entry is a summary;
+   the full treatment is a TODO — see TODO.md "Formal verification &
+   foundations".)
+
 ---
 
 ## The three-type model

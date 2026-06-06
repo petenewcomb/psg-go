@@ -467,11 +467,45 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   goroutine by using the worker's own pooled-timer select) is **deferred to 1b**,
   where `cpWorker`'s select is reworked anyway — see the `TODO(checkpoint-1b)`
   in `accepted.go` `WaitForNew`.
-- **1b** — Make funnel flush a first-class `Work` (a `flushWork`, or
-  `halfBoundFunnel` implementing `ScheduledWork`+`Execute`=flush); route funnel
-  scheduling through `workQueue.Schedule`/`Remove` instead of
-  `FunnelPool.flushQ` + `cpWorker.flushToNextDeadline`. Behavior-identical.
-  Validate `TestBySimulation` (`-short`, full, `-race`) + `TestMaxHoldTime*`.
+- **1b-i — DONE (`942c3aa`).** Threaded the next-deadline through `AddWorkFunc`
+  (trailing `timedCh <-chan time.Time`); `WaitForNew` arms a pooled timer and
+  passes its channel, replacing 1a's `AfterFunc`. Implementers accept it;
+  inert until 1b-ii (skim never schedules timed work; funnel flush still on
+  `cp.flushQ`). Behavior-neutral; suite + `-race` green.
+- **Rename DONE (`18295ab`).** `halfBoundFunnel` → `funnelInstance` (the
+  "half-bound" term was a remnant of the dropped `Combiner[I,O]` output type).
+- **1b-ii — NEXT (the behavior-sensitive core).** Make `funnelInstance` a
+  `workq.ScheduledWork`; route funnel flush through `cp.workQueue.Schedule`/
+  `Remove`, retiring `cp.flushQ`, `cpWorker.flushToNextDeadline`, and the
+  `funnelFlusher` interface. Worked-out details (don't re-derive):
+  - `funnelInstance` already has `Position`/`SetPosition` (was for `funnelFlusher`'s
+    `delayq.Item`); workQueue's internal delayq calls them identically, so the
+    `queued`/`SetPosition(0)`-flips-`queued` coordination + lock ordering
+    (delayq.mu → c.mu) carry over unchanged.
+  - Add `Work` methods: **`ID()` must use `workq.NewWorkID()`** (a fresh field
+    set at allocate), NOT `funnelInstanceID` — the latter is a separate counter
+    and could collide with a `WorkItem` ID, tripping `requeueBuffer`'s
+    "unexpected equal IDs" panic. `Group()` = `earliestGroup`. **`Execute`** =
+    `ex.Starting()` then flush, acquiring the worker's `Sender` from the ctx
+    exec env exactly like `funnelWork.executeInner` (`meta.executionEnvironment.(*cpWorker).Sender()`).
+    **`Free`** = `Unref` (drop the ref held while queued). So the existing
+    refcount lifecycle maps: Execute=flush, Free=Unref; do NOT embed `WorkItem`
+    (its `IncrementWork`/`DecrementWork` would double-count against job state).
+  - `funnel()` schedules into `cp.workQueue` (future) / keeps inline flush for
+    already-past deadline; `Remove` on re-flush.
+  - `cpWorker`: drop the `flushDeadlineTimerCh` driving + `flushToNextDeadline`;
+    wire the 1b-i `timedCh` param into `popSelect` (re-drain on fire). Due
+    flushes now surface via workq `drainTimed` → fresh → `funnelInstance.Execute`.
+  - **End-of-work sweep**: `flushAll` must force ALL pending timed work out of
+    `workQueue.timed` regardless of deadline. Add a workq capability (e.g.
+    `Accepted.DrainAllTimed`, building on `delayq.Yield`/a far-future Drain) and
+    invoke it on the `nextJobFlushCh` signal. Keep `RegisterFlusher`/
+    `nextFlushChan` drain-barrier in job-state for 1b-ii (Wave relocation is 1c).
+    No-deadline instances still get a far-future placeholder so the sweep finds
+    them.
+  - Drop the `flushQ` param from `funnelWork.Funnel` / `boundFunnelWork`.
+  - Validate `TestBySimulation` (`-short`, full, `-race`) + `TestMaxHoldTime*` +
+    funnel/skim, and goroutine/no-leak behavior at end-of-work.
 - **1c** — Relocate flush *policy* to Wave: force-flush (Remove+run its handles),
   drain barrier (timed item = outstanding work; collapse `RegisterFlusher`/
   `nextFlushChan` where possible), `WithFlushListener` → Wave. The semantic move.

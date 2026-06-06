@@ -554,6 +554,56 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   (Remove + run handles) on Wave. The synchronous `flushAll` (b9dbf2d) is the
   correct *interim*; 1c is the destination.
 
+  **1c implementation design (ref accounting — PN's simpler per-instance scheme):**
+  - **Per-instance-lifetime wave reference (NOT per-schedule).** A
+    `funnelInstance` holds exactly one wave/job reference for its whole life as
+    a live accumulator: from creation until its flush function returns.
+    - **Acquire** in `funnelWork.Funnel`'s new-instance branch (next to
+      `op.ref()` / `instanceCount++`): `job.state.IncrementReference()`
+      (totalReferences++).
+    - **Release** in `funnelInstance.flush()` after the real `accumulator.Flush`
+      returns — via `defer` so a panicking Flush still releases. NOT in
+      `free()`: `free()` is lazy (a spent instance lingers in instanceQueue
+      until the next pop, which may never happen → would hang). `flush()` is the
+      single chokepoint for all flush paths (inline / deadline Execute / forced
+      end-of-work) and its `accumulator==nil` early-return makes the real flush
+      run exactly once → release exactly once.
+    This wholly replaces `RegisterFlusher`'s per-goroutine barrier ref. Barrier
+    is purely per-instance: `Done ⟺ Closed ∧ totalReferences==0` (regular work
+    refs via IncrementWork + live-instance refs). No queued/schedule coupling,
+    no double-ref edge. Balances on normal completion (every instance flushes
+    once); on cancel refs leak but doneChan isn't the cancel sync point (Cancel
+    waits on ctx + WaitGroup) — consistent with today's flusher refs.
+  - **Ordering (avoids premature Done):** the flush's emit acquires its work ref
+    *inside* `accumulator.Flush` (Submit → IncrementWork) before the instance
+    ref is released after Flush returns — so totalReferences can't transiently
+    hit zero across an emitting flush.
+  - **Force trigger.** When the funnel pool quiesces (the existing
+    `confirmEndOfWork` dance / the flush signal), force pending timed instances
+    due via a new `workQueue.DueAllTimed()` (lower all timed deadlines to now /
+    drain-to-fresh) so they run through the normal parallel
+    `drainTimed → fresh → Execute` path across live workers — NOT the serial
+    `flushAll`. Full parallelism scales with live workers (improves with
+    checkpoint 2/3 demand-driven spawning).
+  - **Retire** `funnelInstance.Flush` (synchronous combined) and the synchronous
+    `cpWorker.flushAll`; the single flush path is `Execute`(flush)+`Free`(Unref).
+    flush-Execute is not a poolWork, so it doesn't touch inFlightWork — the
+    per-instance ref is what holds the barrier.
+  - **Decision (PN): option (a).** Land 1c as the correct per-instance barrier +
+    force-via-normal-path now; full sweep parallelism arrives with the pool
+    consolidation (demand-driven spawning, checkpoint 2/3). Structure-for-parallel
+    is the goal, not immediate fan-out.
+  - **Minimal structural change:** keep the trigger machinery as-is (the
+    `confirmEndOfWork` dance + the job flush signal `nextFlushChan`; `noMoreWork`
+    already re-fires the signal each time `inFlightWork` returns to zero, so
+    multi-cycle works). Swap only: (1) action — `flushAll` becomes
+    `workQueue.DueAllTimed()` (drain all timed → fresh) and the dance `continue`s
+    to pump the freshly-forced flushes (the forcing goroutine executes them, so
+    no hang; others help when alive); (2) barrier — `RegisterFlusher` becomes
+    signal-only (no totalReferences ref), replaced by per-instance
+    Increment/DecrementReference. Per-instance refs subsume RegisterFlusher's
+    coarse barrier precisely.
+
 **Open design question for checkpoint 3**: the post-cap-deletion funnel spawn
 policy. Funnel wants *minimum* goroutines, so it can't adopt the task pool's
 aggressive chain verbatim. Candidate: keep "ensure ≥1 goroutine on post" (the

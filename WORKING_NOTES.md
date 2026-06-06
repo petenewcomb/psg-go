@@ -554,55 +554,119 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   (Remove + run handles) on Wave. The synchronous `flushAll` (b9dbf2d) is the
   correct *interim*; 1c is the destination.
 
-  **1c implementation design (ref accounting — PN's simpler per-instance scheme):**
-  - **Per-instance-lifetime wave reference (NOT per-schedule).** A
-    `funnelInstance` holds exactly one wave/job reference for its whole life as
-    a live accumulator: from creation until its flush function returns.
-    - **Acquire** in `funnelWork.Funnel`'s new-instance branch (next to
-      `op.ref()` / `instanceCount++`): `job.state.IncrementReference()`
-      (totalReferences++).
-    - **Release** in `funnelInstance.flush()` after the real `accumulator.Flush`
-      returns — via `defer` so a panicking Flush still releases. NOT in
-      `free()`: `free()` is lazy (a spent instance lingers in instanceQueue
-      until the next pop, which may never happen → would hang). `flush()` is the
-      single chokepoint for all flush paths (inline / deadline Execute / forced
-      end-of-work) and its `accumulator==nil` early-return makes the real flush
-      run exactly once → release exactly once.
-    This wholly replaces `RegisterFlusher`'s per-goroutine barrier ref. Barrier
-    is purely per-instance: `Done ⟺ Closed ∧ totalReferences==0` (regular work
-    refs via IncrementWork + live-instance refs). No queued/schedule coupling,
-    no double-ref edge. Balances on normal completion (every instance flushes
-    once); on cancel refs leak but doneChan isn't the cancel sync point (Cancel
-    waits on ctx + WaitGroup) — consistent with today's flusher refs.
-  - **Ordering (avoids premature Done):** the flush's emit acquires its work ref
-    *inside* `accumulator.Flush` (Submit → IncrementWork) before the instance
-    ref is released after Flush returns — so totalReferences can't transiently
-    hit zero across an emitting flush.
-  - **Force trigger.** When the funnel pool quiesces (the existing
-    `confirmEndOfWork` dance / the flush signal), force pending timed instances
-    due via a new `workQueue.DueAllTimed()` (lower all timed deadlines to now /
-    drain-to-fresh) so they run through the normal parallel
-    `drainTimed → fresh → Execute` path across live workers — NOT the serial
-    `flushAll`. Full parallelism scales with live workers (improves with
-    checkpoint 2/3 demand-driven spawning).
-  - **Retire** `funnelInstance.Flush` (synchronous combined) and the synchronous
-    `cpWorker.flushAll`; the single flush path is `Execute`(flush)+`Free`(Unref).
-    flush-Execute is not a poolWork, so it doesn't touch inFlightWork — the
-    per-instance ref is what holds the barrier.
-  - **Decision (PN): option (a).** Land 1c as the correct per-instance barrier +
-    force-via-normal-path now; full sweep parallelism arrives with the pool
-    consolidation (demand-driven spawning, checkpoint 2/3). Structure-for-parallel
-    is the goal, not immediate fan-out.
-  - **Minimal structural change:** keep the trigger machinery as-is (the
-    `confirmEndOfWork` dance + the job flush signal `nextFlushChan`; `noMoreWork`
-    already re-fires the signal each time `inFlightWork` returns to zero, so
-    multi-cycle works). Swap only: (1) action — `flushAll` becomes
-    `workQueue.DueAllTimed()` (drain all timed → fresh) and the dance `continue`s
-    to pump the freshly-forced flushes (the forcing goroutine executes them, so
-    no hang; others help when alive); (2) barrier — `RegisterFlusher` becomes
-    signal-only (no totalReferences ref), replaced by per-instance
-    Increment/DecrementReference. Per-instance refs subsume RegisterFlusher's
-    coarse barrier precisely.
+  **1c implementation design — REFINED, fresh-session-ready (PN, 2026-06-06).**
+  Decision (a): land the correct per-instance barrier + force-via-normal-path
+  now; full sweep parallelism arrives with checkpoint 2/3 demand-driven
+  spawning. Structure-for-parallel is the goal. The first 1c attempt was reset
+  (back to `b9dbf2d` code) because three nuances reshaped it mid-flight; they're
+  all captured below so a fresh session can implement it in one clean pass.
+
+  **(i) Per-instance-lifetime barrier reference.** A `funnelInstance` holds one
+  job/Wave reference for its whole life as a live accumulator: creation →
+  flush. Acquire in `funnelWork.Funnel`'s new-instance branch (next to
+  `op.ref()`): `job.state.IncrementReference()`. Release in
+  `funnelInstance.flush()` after the real `accumulator.Flush` returns, via
+  `defer` (so a panicking Flush still releases). NOT in `free()` — `free()` is
+  lazy (a spent instance lingers in instanceQueue until a next pop that may
+  never come → would hang). `flush()`'s `accumulator==nil` early-return makes
+  the real flush (and the release) run exactly once. This replaces
+  `RegisterFlusher`'s per-goroutine ref entirely; barrier is purely per-instance:
+  `Done ⟺ Closed ∧ totalReferences==0` (work refs via IncrementWork +
+  live-instance refs). Ordering: the flush's emit acquires its work ref *inside*
+  `accumulator.Flush` (Submit→IncrementWork) before the instance ref releases,
+  so totalReferences can't transiently hit zero across an emitting flush. On
+  cancel refs leak, but doneChan isn't the cancel sync point — consistent with
+  today's flusher refs. (jobstate: add `IncrementReference`/`DecrementReference`;
+  make the flush signal a no-ref `FlushChan()`; drop `RegisterFlusher`.)
+
+  **(ii) Wave-held live-instance set (force enumeration).** `FunnelPool` holds
+  the set of its live (unflushed) instances — exactly the funnels it may force
+  at end-of-work. Add at creation, remove in `flush()`. Reasons (PN): avoids
+  scanning every Wave's funnels to flush a few, and keeps `workq` ignorant of
+  the Wave/grouping concept. Generics wrinkle: `funnelInstance[T]` is generic but
+  `FunnelPool` isn't, so the set holds the non-generic `workq.ScheduledWork`
+  (start with `map[ScheduledWork]struct{}`+mutex; an intrusive list is the later
+  allocation optimization — but note the lock-order/lifecycle care: snapshot or
+  hold the set lock across the force loop, and force only calls Expedite which
+  takes no instance lock).
+
+  **(iii) Schedule vs Expedite — the backpressure split (KEY).** Two distinct
+  timed-queue operations with different rules:
+  - **`Schedule` (admit NEW timed work)** can grow outstanding work, so it MUST
+    be backpressure-controlled: available only *within the controlled ExecuteOne
+    flow*, never an exported `Accepted` method. Exporting it is a backdoor —
+    arbitrary code could inject unbounded work past the governor. Grant it like
+    `queueFn` (a capability, not a public method).
+  - **`Expedite` (re-prioritize EXISTING work to now)** admits nothing new; it
+    only pulls forward an item that already passed admission. Backpressure-neutral
+    ⇒ safe to call anywhere, including `forceAll` from the dance (outside
+    `AddWork`). May be a public method.
+  - **`Expedite` PANICS if the item was never scheduled (or is scheduled-and-done)**
+    — a defensive contract assertion (catches misuse / use-after-life), not a
+    silent no-op. Subtlety: a worker can *concurrently drain* an item between
+    `forceAll` selecting it and `Expedite` running, so a strict "panic if not in
+    the heap" would fire spuriously on that benign race. So distinguish: never
+    scheduled / already flushed → **panic**; scheduled-but-just-drained → benign
+    no-op (it's already on its way to flushing). This needs a per-instance
+    "scheduled" indicator (force-set membership or a flag), not just heap-presence.
+    The force set holds only *currently-scheduled* instances (add on `Schedule`,
+    remove on drain/remove), so `forceAll` never intends to expedite a
+    never-scheduled item and the panic only ever catches real bugs. Respect the
+    `delayq.mu → c.mu` lock order: `Expedite` must not be called holding the
+    instance lock; the `forceAll`↔drain serialization for the set is the
+    implementation detail to nail (note the cycle risk: drain removes from the
+    set under `delayq.mu→c.mu`, so `forceAll` must not hold the set lock while
+    calling `Expedite`/a delayq op).
+  - `forceAll` = `Expedite(c, now)` over the Wave's currently-scheduled set.
+  - `delayq` split: `Schedule` = add/replace (admission); `Expedite` =
+    lower-deadline-if-present, **panic-if-never-scheduled** (re-prioritize).
+
+  **(iv) Schedule-capability context (the forceAll-not-in-AddWork nuance).**
+  `forceAll` is reached from TWO contexts: the `confirmEndOfWork` dance (loop
+  body, *outside* `AddWork`) and the popSelect signal-followup (*inside*
+  `AddWork`). Expedite is safe in both (no admission). But `Schedule` (admission)
+  must be within the controlled flow — and funnel flush-scheduling happens during
+  the funnel work's *Execute* (accumulate→deadline), which is within `ExecuteOne`
+  but NOT literally `AddWork`. So grant the Schedule capability for the
+  controlled `ExecuteOne` flow (AddWork + Execute, e.g. via the `Execution` /
+  exec-env), not as a bare `AddWorkFunc` parameter (which wouldn't reach Execute
+  or the dance). The capability itself is stateless (Schedule just enqueues to
+  the timed delayq; backpressure is the governor wrapping `ExecuteOne`).
+
+  **(v) Promote timed→fresh through `queueFresh` (parallelization key + the real
+  backdoor).** `drainTimed` must promote due items via the controller's
+  `queueFresh` (which bumps `workAddedCount` → fires `unmetDemandFn` to spawn a
+  worker), NOT a direct `q.fresh.PushBack`. The direct push was the actual
+  admission backdoor: it bypassed the spawn-trigger bookkeeping, so forced
+  flushes would never spawn workers — defeating decision-(a)'s parallel sweep.
+
+  **(vi) Lost-wakeup race — `shouldStillWait` must re-check timed.**
+  `Waiters.Notify` drops the wake if no inbox is parked (`TryPushBack`→false,
+  verified), so a `Schedule`/`Expedite` that races a worker entering its wait
+  loses its notification. The confirm-protocol backstop (`shouldStillWait`)
+  currently re-checks only fresh/postponed — so timed work added in that window
+  is missed → potential hang. Fix: `shouldStillWait` also re-drains timed (due
+  items → fresh, caught by its existing `TryAccepted`) and aborts the wait if the
+  next deadline is now sooner than what the wait's timer was armed for (add
+  `controller.armedTimedDeadline`, set in `WaitForNew`). Mirrors the fresh-work
+  backstop.
+
+  **(vii) Retire** synchronous `cpWorker.flushAll` + `funnelInstance.Flush`
+  (uppercase combined). Single flush path = `Execute`(flush)+`Free`(unref);
+  `flush()` also removes from the live set + releases the barrier ref.
+  flush-Execute is not a poolWork → doesn't touch inFlightWork; the per-instance
+  ref holds the barrier.
+
+  **(viii) Goroutine loop / triggers.** Keep the `confirmEndOfWork` dance and the
+  job flush signal (`noMoreWork` already re-fires it each time `inFlightWork`
+  returns to zero → multi-cycle works). Swap actions: dance → `forceAll`
+  (Expedite each live instance) then `continue` to pump the now-due flushes;
+  signal-followup → `forceAll`; `executeFunnel` subscribes via the no-ref
+  `FlushChan()`.
+
+  **Validation:** `TestBySimulation` (`-short`, full, `-race`) is the safety net
+  for the barrier/force — it caught the 1b-ii async-sweep lost-flush bug. Also
+  `TestMaxHoldTime*`, funnel/skim, end-of-work no-leak.
 
 **Open design question for checkpoint 3**: the post-cap-deletion funnel spawn
 policy. Funnel wants *minimum* goroutines, so it can't adopt the task pool's
@@ -615,10 +679,17 @@ can't hand off AND queue depth exceeds live goroutines. Needs validation against
 ### Next session pickup (in rough priority order)
 
 1. **Pool / workq consolidation** — see "Pool consolidation — foundational
-   analysis (2026-06-06)" above for the settled direction, the three seams, the
-   funnel spawn subtleties, and the sequenced checkpoints. Start at checkpoint 1
-   (timed work in workq — the highest-leverage merge-enabler; relocates flush
-   ownership to Wave) per the analysis.
+   analysis (2026-06-06)" above. Checkpoint 1 progress: **1a, 1b-i, 1b-ii, and
+   the `halfBoundFunnel`→`funnelInstance` rename are DONE** (committed; full
+   suite + sim + `-race` green). **NEXT = checkpoint 1c**, whose design was fully
+   refined this session — implement from "1c implementation design — REFINED,
+   fresh-session-ready" (per-instance barrier ref; Wave-held live set;
+   Schedule[admit, gated]/Expedite[re-prioritize, safe] split; promote
+   timed→fresh via `queueFresh`; `shouldStillWait` timed re-check for the
+   lost-wakeup race; retire synchronous flushAll/Flush). The first 1c coding
+   attempt was reset to `b9dbf2d` code; redo cleanly per the refined design.
+   After 1c: checkpoint 2 (delete funnel `maxConcurrency` → demand-driven) then
+   3/4/5.
 2. **Thread C completion** — Try* honoring non-zero non-Forever deadlines via bounded-wait. Falls out of the consolidation; pick up the `Forever` sentinel and `dispatch (bool, error)` foundation from `5dc49c7`.
 3. **psgwf legacy-name retirement** — `psgwf.GenericTaskRunner` and friends still use pre-rename vocabulary. Done as a stand-alone pass or rolled into a broader psgwf migration.
 4. **bench.txt regeneration + chartgen alignment** — re-run benchmarks under the new metric names (`funnelLimit` instead of `combinerLimit`), then update chartgen to parse the new names. Required before the legacy bench file can come back online for chart generation.

@@ -215,9 +215,204 @@ All `psg.NewLauncher(wave, psg.NewTask(fn))` / `psg.NewSkimmer(wave, psg.NewHand
 - `psgwf.GenericTaskRunner` (and related psgwf wrappers) still use legacy names; rename or retire with the broader psgwf migration.
 - chartgen's bench-data parser still reads the historical metric name `combinerLimit`; legacy benchmark file emits `funnelLimit`. Re-align when `bench.txt` is regenerated post-rename.
 
+## Pool consolidation — foundational analysis (2026-06-06)
+
+Design pass for the TaskPool (`Pool`, job.go) + FunnelPool merge. **Settled
+direction** (confirmed with PN): the two pools become **one demand-driven,
+uncapped worker pool**; per-op `Limiter` is the *only* concurrency control.
+Approach: upgrade the foundational internal packages (`workq` / `delayq` /
+`*state`) into usefully-abstracted shared building blocks *first*, so the pool
+usage simplifies and collapses naturally — wrestle each seam once, in the
+foundation, where each integration change should be a simplification or no-op.
+Checkpoint at stable (green) states along the way.
+
+### The three foundational seams (why the merge is hard today)
+
+1. **Worker-state accounting is implemented twice, in two styles, with
+   different spawn policies.** Funnel pool uses `internal/cpstate.FunnelPoolState`
+   (`spawnedGoroutineCount`/`liveGoroutineCount`, `ShouldSpawn{First,}Goroutine`
+   capped at `maxConcurrency`, `TryIdleExit`, idle timeout/jitter,
+   `spawnNotifier`). Task pool open-codes the same concerns inline in job.go
+   (`taskWorkerDemand`, `taskWorkersSpawning`, `taskWorkerIdleTimeout/Jitter`,
+   `latestTaskWorkerIdleExit`, `trySpawnTaskWorker`). Policies *differ*: task =
+   demand-driven, uncapped, **scale-up aggressively** via a self-propagating
+   spawn chain (job.go:801-808: a worker that secures its first task spawns the
+   next iff demand remains); funnel = **minimize goroutines** (each goroutine is
+   a separate accumulator instance → more partial aggregates to flush;
+   funnelpool.go:30) and caps at `maxConcurrency`.
+
+2. **Blocking path conflates two signals.** `Pool.skimSelect` sets
+   `errBlockWaitSignaled` for BOTH "block-deadline timer fired" (give up) and
+   "block-wait notification arrived" (re-check) — job.go:483-488 — and
+   `Pool.block` flattens both to nil (job.go:332). `ExecuteOrWait` can't
+   distinguish them. (Thread-C blocker #3.)
+
+3. **Two "should-block" signaling conventions + dropped deadline.**
+   `ExecuteNowOrQueue` sets a panicking `AddToListeners`; `TryExecuteNow` leaves
+   it nil (`execution.go:24` `ShouldBlockOrPostpone`). And `newTaskPostWork`
+   takes a `deadline` it never stores/uses (job.go:1012); the blocking post uses
+   `rdvq.BasicPushSelect` (job.go:951) which watches only ctx + outbox, no timer.
+   (Thread-C blockers #1, #2.)
+
+### Funnel dual-concurrency finding (key)
+
+FunnelPool has **two independent** concurrency controls today:
+- pool-wide goroutine cap (`cpstate.maxConcurrency` via `ShouldSpawnGoroutine`,
+  funnelpool.go:254,323) — the legacy CombinerPool limit; and
+- per-op `Limiter` (`funnelWork.Execute`, funnelop.go:750-772), independent of
+  goroutine count.
+The destination keeps only the per-op Limiter, so the goroutine cap is deleted.
+maxConcurrency is already *loosely* enforced (the receiving-side `unmetDemandFn`
+spawn bypasses it), default is -1 (unlimited), so deletion is low-risk on
+enforcement — but see the spawn-policy subtleties below.
+
+### Subtleties uncovered (don't re-derive these)
+
+- **`unmetDemandFn` effectively never fires for the funnel pool.** It triggers
+  only when `workAddedCount > 1` within one `Accepted.ExecuteOne`
+  (accepted.go:315), but `cpWorker.AddWork` queues at most one item per call.
+  So funnel scale-up is driven *entirely* by the posting-side
+  `ShouldSpawnGoroutine`, NOT by `unmetDemandFn`. ⇒ "delete the cap and lean on
+  unmetDemandFn" would pin the pool at one goroutine. A real replacement spawn
+  policy is required.
+- With the **default unlimited cap, `ShouldSpawnGoroutine` always returns
+  true**, so every *buffered* post currently spawns a goroutine. Deletion must
+  pair with a deliberate spawn policy, not bare removal.
+- **`spawnedGoroutineCount` vs `liveGoroutineCount` are inconsistent across the
+  two spawn paths** (posting-side increments `spawnedGoroutineCount`;
+  `unmetDemandFn`/`spawnNewGoroutine` increments only `liveGoroutineCount` via
+  `GoroutineStarted`), reconciled by `GoroutineRestarted`. Confusing-by-accident;
+  the consolidation should collapse to one clean source of truth.
+- Funnel goroutine accounting serves **two roles**: (a) the cap [DELETE], and
+  (b) **last-goroutine detection** — `GoroutineExiting()==true` drives the
+  end-of-work `confirmEndOfWork` dance + final `flushAll` (funnelpool.go:188-215)
+  [PRESERVE].
+
+### Flush ownership constraint (PN, 2026-06-06)
+
+**Flush mechanics must end up living with `Wave`, not `Pool` or `Funnel`.**
+Flush is a per-batch-of-work concern, so in the three-type model it belongs to
+Wave (batch lifecycle + drain), not the fungible worker Pool and not scattered
+across the Funnel op. Today flush is split across the wrong owners:
+
+- `FunnelPool.flushQ` (`delayq` of pending deadlines) + the deadline-timer
+  driving in `cpWorker` (`flushToNextDeadline`/`flushAll`, cpworker.go) live on
+  the *funnel pool*.
+- End-of-work flush coordination — `jobstate.JobState.RegisterFlusher()`,
+  `nextFlushChan`, `flushListener`, the `Closed→Flushing→Done` transitions —
+  lives on the *Pool's state*.
+
+Destination: a worker *drives* a flush but does NOT *own* it; the Flushing-stage
+coordination and `flushListener` move to **Wave**; the Funnel op only *registers*
+deadlines. Consistent with REFACTOR_PLAN Wave 5 ("migrate op-ownership + drain
+machinery from Pool to Wave").
+
+#### Refined decision (PN concurred, 2026-06-06): timed work in workq
+
+The `flushQ` itself is best modeled as a **generic "timed work" facility built
+into `workq`, instantiated per-pool** — NOT a bespoke per-Wave queue. Rationale:
+draining is a worker-level task and workers span Waves, so one pool-level merged
+delay queue (a single worker drives one timer for the soonest deadline across
+all Waves) is correct and strictly more efficient than per-Wave queues (which
+force a worker to select across N timers). A flush is just *a unit of work that
+becomes ready at deadline T*; `workq` already selects fresh → postponed →
+wait-with-timer, so "ready at T" is a natural third source folded into the same
+`ExecuteOne` wait/select (the worker's select already watches the idle timer —
+adding a next-deadline timer is incremental).
+
+**Why early / why it matters for the merge:** the bespoke flush machinery in
+`cpWorker` (`flushDeadlineTimer`, `flushToNextDeadline`, the extra select cases)
+is the single biggest reason the funnel worker loop differs from the task worker
+loop. Making timed work native to `workq` dissolves that specialness — both
+loops just run `ExecuteOne`, delay queue transparent — shrinking the eventual
+worker-loop merge surface. Hence this becomes checkpoint 1.
+
+**Ownership = mechanism vs policy:**
+- `workq` (per-pool) owns the *mechanism*: schedule a `Work` ready at T, arm one
+  timer, promote due items to fresh work. Generic, not flush-specific (task-side
+  backoff/retry could reuse it later). Keep this concern cleanly separated —
+  composed into the worker's wait, NOT tangled into Accepted's fresh/postponed
+  logic — to avoid scope-creeping workq.
+- **Wave** owns the *policy/lifecycle*: it scheduled its accumulators' flushes so
+  it holds references to them; **force-flush = expedite/`Remove` its own
+  entries**; **drain barrier** = Wave is Done only when its flushes have fired;
+  `WithFlushListener` (today a Pool option via `JobState`, psgopt/job.go:89)
+  relocates here.
+- **Funnel op** just schedules "flush this accumulator at T" against its Wave.
+
+**Verified enablers:**
+- Flush is idempotent — `halfBoundFunnel.flush` has an "already flushed, ignore"
+  guard under `c.mu` (funnelop.go:609-614) — so Wave force-flush racing a natural
+  deadline firing is safe (no double-emit).
+- `delayq.Remove(item)` is O(log n) — each `Item` tracks its heap position
+  (delayq.go:149) — so a Wave expedites/cancels its entries directly via held
+  references, no scan, no new per-Wave index. Sight-line: this drops to **O(1)**
+  if `delayq` shifts from a binary heap to a **hierarchical timing wheel**
+  (already a TODO.md item — "avoid O(log n) heap overhead … esp. for Flush").
+  Designing the timed-work facility around the `Item`/`Schedule`/`Remove`/`Drain`
+  interface (not heap internals) keeps that swap a `delayq`-internal change.
+- `delayq.Init(wake func())` already has a wake hook — the seam to re-arm a
+  worker's timer when the next deadline lowers.
+
+**Likely bonus simplification:** a pending timed item *is* outstanding work, so
+the Wave's normal drain accounting can subsume it, collapsing the end-of-work
+`flushAll` (far-future `now`) + `RegisterFlusher`/`nextFlushChan` channel dance
+into "expedite my timed entries, then drain as usual."
+
+**Risk to validate:** converting flush from out-of-band worker-driven calls
+(`cpWorker.flushToNextDeadline`) into a first-class `Work` item flowing through
+`Accepted` (fresh/postponed/governor) changes contention/ordering. Arguably
+better (flushes become governed, first-class work) but must be proven against
+`TestBySimulation` (`-short`, full, and `-race`).
+
+### Sequenced checkpoints (plan, revised 2026-06-06)
+
+1. **Timed work in workq** (flush → workq mechanism + Wave policy) — add a
+   generic per-pool "work ready at deadline T" facility to `workq`, folded into
+   the `ExecuteOne` wait/select; migrate funnel flush onto it. Relocates flush
+   ownership per the "Flush ownership constraint" section: mechanism in
+   workq/Pool, policy (force-flush, drain barrier, `WithFlushListener`) on Wave.
+   Dissolves the `cpWorker` flush-timer divergence (biggest worker-loop
+   difference), so it's the highest-leverage merge-enabler. Validate against
+   `TestBySimulation` (`-short`, full, `-race`).
+2. **workq block-path rationalization** — split `errBlockWaitSignaled` into
+   distinct deadline-reached vs notify-received signals; unify the
+   `AddToListeners` should-block convention; thread `taskPostWork`'s dropped
+   deadline. Behavior-neutral (only currently-unreachable deadline paths
+   change). Dissolves all three Thread-C blockers. *(Bounded; sim-covered.)*
+3. **Delete funnel `maxConcurrency`** — convert funnel spawning to a deliberate
+   demand-driven policy (NOT bare removal; see subtleties), delete the cap +
+   `spawnNotifier`/spawn-slot-wait machinery + `ShouldSpawnGoroutine`, preserve
+   live-goroutine/last-goroutine accounting + idle-exit. Update
+   `maxholdtime_test.go` (uses `WithMaxConcurrency(1)` to force one goroutine —
+   re-express via a per-op Semaphore Limiter or natural light-load behavior).
+   `funnel_legacy_bench_test.go` is build-tagged `psg_wave3_legacy_bench` (not
+   in normal builds). Remove `psgopt.WithMaxConcurrency` + `opts.MaxConcurrency`.
+4. **Worker-state unification** — with both pools demand-driven/uncapped, extract
+   the shared spawn (demand counter + bounded spawning counter + chain-on-secure
+   + idle-exit throttle) into one building block both pools use; collapse
+   `cpstate` + the task-pool inline state onto it.
+5. **Posting-path convergence** — `taskPostWork`/`funnelPostWork` onto a shared
+   `ExecuteOrWait`-based shape; then the actual Pool/FunnelPool merge falls out.
+
+Checkpoints 1–3 are largely independent and can be sequenced by appetite;
+4–5 depend on the demand-driven convergence from 3.
+
+**Open design question for checkpoint 3**: the post-cap-deletion funnel spawn
+policy. Funnel wants *minimum* goroutines, so it can't adopt the task pool's
+aggressive chain verbatim. Candidate: keep "ensure ≥1 goroutine on post" (the
+`ShouldSpawnFirstGoroutine` role) as the floor, and add a genuine excess-work
+scale-up trigger (since `unmetDemandFn` doesn't fire) — e.g. spawn when a post
+can't hand off AND queue depth exceeds live goroutines. Needs validation against
+`TestBySimulation` (run both `-short` and full, plus `-race`).
+
 ### Next session pickup (in rough priority order)
 
-1. **Pool / workq consolidation** — the destination doc's merge of TaskPool + FunnelPool into one Pool, with workq integration rationalized. This is the bigger architectural change that dissolves the three inconsistencies blocking Thread C completion (see "Thread C — blocked on Pool/workq consolidation" above). Doing this first means Thread C falls out naturally instead of fighting the same inconsistencies twice.
+1. **Pool / workq consolidation** — see "Pool consolidation — foundational
+   analysis (2026-06-06)" above for the settled direction, the three seams, the
+   funnel spawn subtleties, and the sequenced checkpoints. Start at checkpoint 1
+   (timed work in workq — the highest-leverage merge-enabler; relocates flush
+   ownership to Wave) per the analysis.
 2. **Thread C completion** — Try* honoring non-zero non-Forever deadlines via bounded-wait. Falls out of the consolidation; pick up the `Forever` sentinel and `dispatch (bool, error)` foundation from `5dc49c7`.
 3. **psgwf legacy-name retirement** — `psgwf.GenericTaskRunner` and friends still use pre-rename vocabulary. Done as a stand-alone pass or rolled into a broader psgwf migration.
 4. **bench.txt regeneration + chartgen alignment** — re-run benchmarks under the new metric names (`funnelLimit` instead of `combinerLimit`), then update chartgen to parse the new names. Required before the legacy bench file can come back online for chart generation.

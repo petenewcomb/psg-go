@@ -347,10 +347,32 @@ worker-loop merge surface. Hence this becomes checkpoint 1.
 - `delayq.Remove(item)` is O(log n) — each `Item` tracks its heap position
   (delayq.go:149) — so a Wave expedites/cancels its entries directly via held
   references, no scan, no new per-Wave index. Sight-line: this drops to **O(1)**
-  if `delayq` shifts from a binary heap to a **hierarchical timing wheel**
-  (already a TODO.md item — "avoid O(log n) heap overhead … esp. for Flush").
-  Designing the timed-work facility around the `Item`/`Schedule`/`Remove`/`Drain`
-  interface (not heap internals) keeps that swap a `delayq`-internal change.
+  if `delayq` shifts from a binary heap to a timing wheel (TODO.md item — "avoid
+  O(log n) heap overhead … esp. for Flush"). See "delayq optimization target"
+  below. Coding the timed-work facility against `delayq`'s interface
+  (`Schedule`/`Remove`/`Drain→(ready,next)`/`wake`/`Item`), not heap internals,
+  keeps that swap a `delayq`-plus-`Item`-helper change.
+
+  **delayq optimization target (derived with PN, 2026-06-06):** a *bucketed,
+  tickless timing wheel*. The ordering structure holds **buckets, not individual
+  items**, so its cardinality is decoupled from timer count (a million timers in
+  one window = one bucket); the finest bucket width is set at **scheduler noise
+  (~10ms)**, which makes the quantization lossless in practice — Go timer /
+  goroutine / OS jitter already sit above that floor, so the "exact firing" a
+  per-item heap preserves is illusory precision below the noise floor. Timer ops
+  become uniformly O(1) (compute slot, append/unlink a list node). Two variants:
+  *heap-of-buckets* (Kafka-style: next bucket via heap root, O(log B) on
+  bucket create/destroy) or *wheel + occupancy bitmap* (next-non-empty via
+  find-first-set, **true O(1) reschedule** — preferred for our flush churn,
+  where every `Accumulate` pushes the deadline out). Hierarchy gives unbounded
+  range. This is the standard high-perf tickless timer (Kafka hierarchical
+  timing wheel + delay-queue-of-buckets; tickless cousin of Netty
+  `HashedWheelTimer`). Stays behind the `delayq` interface; only the `Item`
+  helper's internals change (slot/list-node instead of heap position). Optional
+  worst-case refinement (likely unnecessary for flushes, since worker
+  parallelism, not the heap, bounds flush throughput): partial bucket admission
+  to hard-cap the ordered set. **Baseline for now stays the current binary
+  heap** — all of the above is the deferred path behind the stable interface.
 - `delayq.Init(wake func())` already has a wake hook — the seam to re-arm a
   worker's timer when the next deadline lowers.
 
@@ -397,6 +419,55 @@ better (flushes become governed, first-class work) but must be proven against
 
 Checkpoints 1–3 are largely independent and can be sequenced by appetite;
 4–5 depend on the demand-driven convergence from 3.
+
+#### Checkpoint 1 design (settled with PN, 2026-06-06)
+
+**`delayq` is subsumed *inside* the workq executable-work queue (`Accepted`),
+not wrapped beside it.** Public surface added: exactly `Schedule(w, deadline)`
+and `Remove(w)`. Everything else is internal to `Accepted`: draining due items
+into the fresh source within `ExecuteOne`, the deadline timer, and wiring
+`delayq.wake → q.waiters.Notify`.
+
+- **Handle is the `Work` itself** — no separate handle object, no allocation, no
+  pooling. Schedulable work = **option A**: a `ScheduledWork` interface
+  (`Work` + `Position() int` + `SetPosition(int)`); the heap position lives in
+  the work object via a tiny embeddable helper (mirrors how `WorkItem` supplies
+  `ID`/`Group`/`Free`). This is the same pattern `halfBoundFunnel` already uses
+  (`flushHeapPos`, funnelop.go:432,445), generalized.
+- **No `Reschedule` method.** `delayq.Schedule` is idempotent-replace
+  (delayq.go:138), and because the handle is the stable work object,
+  `Schedule(w, laterDeadline)` *is* reschedule. The funnel needs this on every
+  `Accumulate`; it falls out for free. Surface stays exactly Schedule + Remove.
+- Once a timed item is **drained** into fresh it is stored as plain `Work`; its
+  `Item`-ness is dormant until rescheduled. `delayq.Remove` is safe on
+  already-drained/never-scheduled items, so a Wave force-flushing an entry that
+  just fired naturally is a harmless no-op (consistent with the idempotent-flush
+  guard).
+- **Timer (internal):** wire `delayq.wake → q.waiters.Notify` so a *sooner*
+  newly-scheduled deadline nudges a parked worker. For a deadline simply
+  arriving, thread the current `next` deadline through the internal
+  `AddWorkFunc` contract so the worker's existing select watches a
+  workq-provided timer (efficient pooled timer, no goroutine-per-block); on fire
+  the worker re-enters `ExecuteOne` and drains due items. `AddWorkFunc` is
+  workq-internal, so the public surface is unaffected. (Fully inverting select
+  ownership into workq is the eventual merge end state, out of scope here.)
+
+#### Checkpoint 1 sub-steps (each independently green)
+
+- **1a** — In `internal/workq`: add the `ScheduledWork` interface + embeddable
+  position helper; subsume `delayq` into `Accepted` (unexported field +
+  `Schedule`/`Remove`; due-drain folded into `ExecuteOne`; `wake → waiters`;
+  next-deadline threaded into `AddWorkFunc`). Additive — no psg caller yet;
+  existing tests stay green; add a focused workq unit test (schedule → surfaces
+  as fresh work when due; remove cancels; reschedule replaces deadline).
+- **1b** — Make funnel flush a first-class `Work` (a `flushWork`, or
+  `halfBoundFunnel` implementing `ScheduledWork`+`Execute`=flush); route funnel
+  scheduling through `workQueue.Schedule`/`Remove` instead of
+  `FunnelPool.flushQ` + `cpWorker.flushToNextDeadline`. Behavior-identical.
+  Validate `TestBySimulation` (`-short`, full, `-race`) + `TestMaxHoldTime*`.
+- **1c** — Relocate flush *policy* to Wave: force-flush (Remove+run its handles),
+  drain barrier (timed item = outstanding work; collapse `RegisterFlusher`/
+  `nextFlushChan` where possible), `WithFlushListener` → Wave. The semantic move.
 
 **Open design question for checkpoint 3**: the post-cap-deletion funnel spawn
 policy. Funnel wants *minimum* goroutines, so it can't adopt the task pool's

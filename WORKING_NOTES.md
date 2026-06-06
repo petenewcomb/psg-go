@@ -341,7 +341,7 @@ worker-loop merge surface. Hence this becomes checkpoint 1.
 - **Funnel op** just schedules "flush this accumulator at T" against its Wave.
 
 **Verified enablers:**
-- Flush is idempotent — `halfBoundFunnel.flush` has an "already flushed, ignore"
+- Flush is idempotent — `funnelInstance.flush` has an "already flushed, ignore"
   guard under `c.mu` (funnelop.go:609-614) — so Wave force-flush racing a natural
   deadline firing is safe (no double-emit).
 - `delayq.Remove(item)` is O(log n) — each `Item` tracks its heap position
@@ -432,7 +432,7 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   pooling. Schedulable work = **option A**: a `ScheduledWork` interface
   (`Work` + `Position() int` + `SetPosition(int)`); the heap position lives in
   the work object via a tiny embeddable helper (mirrors how `WorkItem` supplies
-  `ID`/`Group`/`Free`). This is the same pattern `halfBoundFunnel` already uses
+  `ID`/`Group`/`Free`). This is the same pattern `funnelInstance` already uses
   (`flushHeapPos`, funnelop.go:432,445), generalized.
 - **No `Reschedule` method.** `delayq.Schedule` is idempotent-replace
   (delayq.go:138), and because the handle is the stable work object,
@@ -534,12 +534,12 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
      `accumulator.Flush` functions on one goroutine — a tail-latency landmine
      (pre-existing; 1b-ii preserved it). With barrier (1) in place, the
      async-to-`fresh` direction reverted in 1b-ii becomes *safe*: at quiescence
-     of regular work (Wave Closed, no in-flight regular work), **force all
-     pending timed instances due** (lower deadlines in place / drain-to-fresh)
-     so they flow through the normal parallel `drainTimed → fresh → Execute`
-     path, fanned out across the whole pool instead of serialized. The
-     deadline-driven path is already parallel; this brings the forced sweep in
-     line.
+     of regular work (Wave Closed, no in-flight regular work), **`forceAll`
+     Expedites the Wave's pending instances** (queues each as ready now — see the
+     Schedule/Expedite split below) so they run through the normal parallel
+     ready→`Execute` path, fanned out across the whole pool instead of
+     serialized. The deadline-driven path is already parallel; this brings the
+     forced sweep in line.
 
   **Multi-cycle flushing is intrinsic and stays.** A flush can emit downstream
   and create new funnel input (cross-hop / recursive), which creates new
@@ -597,29 +597,36 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
     flow*, never an exported `Accepted` method. Exporting it is a backdoor —
     arbitrary code could inject unbounded work past the governor. Grant it like
     `queueFn` (a capability, not a public method).
-  - **`Expedite` (re-prioritize EXISTING work to now)** admits nothing new; it
-    only pulls forward an item that already passed admission. Backpressure-neutral
-    ⇒ safe to call anywhere, including `forceAll` from the dance (outside
-    `AddWork`). May be a public method.
-  - **`Expedite` PANICS if the item was never scheduled (or is scheduled-and-done)**
-    — a defensive contract assertion (catches misuse / use-after-life), not a
-    silent no-op. Subtlety: a worker can *concurrently drain* an item between
-    `forceAll` selecting it and `Expedite` running, so a strict "panic if not in
-    the heap" would fire spuriously on that benign race. So distinguish: never
-    scheduled / already flushed → **panic**; scheduled-but-just-drained → benign
-    no-op (it's already on its way to flushing). This needs a per-instance
-    "scheduled" indicator (force-set membership or a flag), not just heap-presence.
-    The force set holds only *currently-scheduled* instances (add on `Schedule`,
-    remove on drain/remove), so `forceAll` never intends to expedite a
-    never-scheduled item and the panic only ever catches real bugs. Respect the
-    `delayq.mu → c.mu` lock order: `Expedite` must not be called holding the
-    instance lock; the `forceAll`↔drain serialization for the set is the
-    implementation detail to nail (note the cycle risk: drain removes from the
-    set under `delayq.mu→c.mu`, so `forceAll` must not hold the set lock while
-    calling `Expedite`/a delayq op).
-  - `forceAll` = `Expedite(c, now)` over the Wave's currently-scheduled set.
-  - `delayq` split: `Schedule` = add/replace (admission); `Expedite` =
-    lower-deadline-if-present, **panic-if-never-scheduled** (re-prioritize).
+  - **`Expedite` (queue an already-scheduled item as ready NOW)** — it does NOT
+    lower the item's deadline (that would still wait for a drain pass). It
+    *removes* the item from the timed queue and hands it to the **ready (fresh)
+    queue immediately**, so the next worker runs it. Admits nothing new (the
+    item already passed admission at `Schedule`) ⇒ backpressure-neutral ⇒ safe to
+    call anywhere, including `forceAll` from the dance (outside `AddWork`). May be
+    a public method.
+  - **`Expedite` PANICS if the item was never scheduled / already done** — a
+    defensive contract assertion, not a silent no-op. Subtlety: a worker can
+    *concurrently drain* the item (timed→ready via `drainTimed`) between
+    `forceAll` selecting it and `Expedite` running; that's benign (it's already
+    on its way) and must NOT double-enqueue or panic. So distinguish: never
+    scheduled / already flushed → **panic**; scheduled-but-just-drained → no-op.
+    Needs an atomic check-and-move against the timed structure plus a per-instance
+    "scheduled" indicator (the currently-scheduled set membership, not mere
+    heap-presence). Respect the `delayq.mu → c.mu` order (`Expedite` not called
+    under the instance lock; `forceAll` not holding the set lock while calling a
+    delayq op — drain removes under `delayq.mu→c.mu`, so that ordering would
+    cycle).
+  - **Ready-enqueue must carry the same spawn/bookkeeping** the controller's
+    `drainTimed` promotion uses (push via `queueFresh` so `workAddedCount` →
+    `unmetDemandFn` spawns a worker → parallel sweep). Reconciling that with
+    `forceAll` running *outside* the controller (no live `queueFresh`) is an open
+    implementation point — e.g. `Expedite` fires the pool's spawn notify itself,
+    or hands ready items off through a controlled path.
+  - `forceAll` = `Expedite(c)` over the Wave's currently-scheduled set.
+  - delayq roles: `Schedule` = add/replace (admission); `Remove` =
+    drop-if-present. `Expedite` is an `Accepted`-level op = confirm-scheduled
+    (panic if never) + `delayq.Remove` + ready-enqueue — NOT a delayq deadline
+    mutation.
 
   **(iv) Schedule-capability context (the forceAll-not-in-AddWork nuance).**
   `forceAll` is reached from TWO contexts: the `confirmEndOfWork` dance (loop

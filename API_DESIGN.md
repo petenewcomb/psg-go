@@ -1262,8 +1262,8 @@ These are real and need answers before implementation locks in.
    - Subsequent work with no free instance triggers a fresh factory
      call with fresh state.
 
-   Implementation reference: `combineop.go:712-755` (`combineWork.Combine`)
-   and `combineop.go:433-457` (`halfBoundFunnel.allocate`).
+   Implementation reference: `funnelop.go` (`funnelWork.Funnel`)
+   and `funnelop.go` (`funnelInstance.allocate`).
 
 5. ~~**GatherFunc error handling.**~~ **Resolved (2026-05-24):** All
    downstream-facing signatures take `(value T, err error)` —

@@ -61,6 +61,7 @@ func (cw *cpWorker) AddWork(
 	queueFn workq.QueueWorkFunc,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
+	_ <-chan time.Time, // wired in checkpoint 1b-ii; funnel flush still uses cp.flushQ
 ) (workq.RenotifyFunc, error) {
 	cw.PushQueueFunc(queueFn)
 	defer cw.PopQueueFunc()

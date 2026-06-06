@@ -6,6 +6,7 @@ package workq
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/stretchr/testify/assert"
@@ -117,6 +118,7 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 		queueFn QueueWorkFunc,
 		waiters *rdvq.Waiters,
 		confirmWaitFn func() bool,
+		_ <-chan time.Time,
 	) (RenotifyFunc, error) {
 		queueFn(work)
 		return nil, nil
@@ -291,6 +293,7 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 		queueFn QueueWorkFunc,
 		waiters *rdvq.Waiters,
 		confirmWaitFn func() bool,
+		_ <-chan time.Time,
 	) (RenotifyFunc, error) {
 		if tryCount == 0 {
 			queueFn(work)

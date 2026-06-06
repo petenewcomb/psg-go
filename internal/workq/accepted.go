@@ -16,6 +16,7 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/psg-go/internal/timerp"
 )
 
 // Queue manages work items with single-item processing logic using a two-queue
@@ -79,15 +80,21 @@ func (q *Accepted) Remove(w ScheduledWork) {
 }
 
 // AddWorkFunc provides new work to the queue processor. It is called with a
-// waitCh that signals when there is postponed work ready to process. If waitCh
+// waitCh that signals when there is postponed work ready to process. If waiters
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be
-// called for each work item accepted. Returns whether the waitCh was signaled
-// or not.
+// called for each work item accepted.
+//
+// timedCh, when non-nil, fires when the queue's next scheduled-work deadline
+// arrives; a blocking AddWorkFunc must include it in its select and return
+// (without work) when it fires, so the queue re-drains the now-due timed work.
+// It is nil whenever there is no pending deadline. Returns the RenotifyFunc the
+// wait observed, or nil.
 type AddWorkFunc func(
 	ctx context.Context,
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
+	timedCh <-chan time.Time,
 ) (RenotifyFunc, error)
 
 type RenotifyFunc = rdvq.RenotifyFunc
@@ -386,7 +393,7 @@ func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
 	if c.tryAddWorkFn != nil {
 		err = c.tryAddWorkFn(ctx, c.queueFreshFn)
 	} else {
-		_, err = c.addWorkFn(ctx, c.queueFreshFn, nil, nil)
+		_, err = c.addWorkFn(ctx, c.queueFreshFn, nil, nil, nil)
 	}
 	workWasAdded := c.workAddedCount > 0
 	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", workWasAdded, err)
@@ -408,26 +415,27 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 		c.shouldStillWaitErr = nil
 	}()
 
+	// When a scheduled-work deadline is pending, arm a pooled timer and hand
+	// its channel to addWorkFn so the worker's own select wakes when the
+	// deadline arrives, re-entering ExecuteOne to drain the now-due item. No
+	// goroutine is spawned; nil timedCh means no pending deadline.
+	var timedCh <-chan time.Time
 	if !c.nextTimedDeadline.IsZero() {
-		// Wake a parked worker when the next scheduled deadline arrives so
-		// it re-enters ExecuteOne and drains the now-due item. AfterFunc
-		// spawns a goroutine only when it actually fires; it is cancelled
-		// below if other work arrives first.
-		//
-		// TODO(checkpoint-1b): once the worker's own select is reworked for
-		// the funnel migration, thread this deadline through AddWorkFunc so
-		// the worker watches a pooled timer directly, avoiding the per-fire
-		// goroutine. See WORKING_NOTES "Checkpoint 1 design".
 		d := time.Until(c.nextTimedDeadline)
 		if d < 0 {
 			d = 0
 		}
-		wakeTimer := time.AfterFunc(d, func() { c.q.waiters.Notify(nil) })
-		defer wakeTimer.Stop()
+		timer := timerp.Get()
+		timerp.Reset(timer, d)
+		timedCh = timer.C
+		defer func() {
+			timerp.Stop(timer)
+			timerp.Put(timer)
+		}()
 	}
 
 	var err error
-	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)
+	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn, timedCh)
 	if err == nil {
 		err = c.shouldStillWaitErr
 	} else if c.shouldStillWaitErr != nil {

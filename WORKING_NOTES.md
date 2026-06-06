@@ -454,12 +454,19 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
 
 #### Checkpoint 1 sub-steps (each independently green)
 
-- **1a** — In `internal/workq`: add the `ScheduledWork` interface + embeddable
-  position helper; subsume `delayq` into `Accepted` (unexported field +
-  `Schedule`/`Remove`; due-drain folded into `ExecuteOne`; `wake → waiters`;
-  next-deadline threaded into `AddWorkFunc`). Additive — no psg caller yet;
-  existing tests stay green; add a focused workq unit test (schedule → surfaces
-  as fresh work when due; remove cancels; reschedule replaces deadline).
+- **1a — DONE (`357c39a`).** `internal/workq`: `ScheduledWork` interface +
+  embeddable `Scheduled` helper; `delayq` subsumed into `Accepted` (internal
+  field + public `Schedule`/`Remove`; due-drain folded into
+  `ExecuteOne`/`TryExecuteOne` via `controller.drainTimed`; `wake → waiters`).
+  Additive — no psg caller schedules timed work yet; full suite + `-race`
+  green; workq unit tests cover immediate-due / remove / in-place reschedule /
+  future-deadline parked-worker wake. **Deviation from the plan:** the
+  next-deadline wake uses an internal `time.AfterFunc` armed in `WaitForNew`
+  (keeps 1a entirely within workq, zero psg changes) rather than threading the
+  deadline through `AddWorkFunc`. That threading (to drop the per-fire
+  goroutine by using the worker's own pooled-timer select) is **deferred to 1b**,
+  where `cpWorker`'s select is reworked anyway — see the `TODO(checkpoint-1b)`
+  in `accepted.go` `WaitForNew`.
 - **1b** — Make funnel flush a first-class `Work` (a `flushWork`, or
   `halfBoundFunnel` implementing `ScheduledWork`+`Execute`=flush); route funnel
   scheduling through `workQueue.Schedule`/`Remove` instead of

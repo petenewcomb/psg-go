@@ -22,13 +22,12 @@ type cpWorker struct {
 	doneCh    <-chan struct{}
 	doneErr   func() error
 
-	idleTimerCh            <-chan time.Time
-	nextJobFlushCh         <-chan struct{}
-	unregisterAsJobFlusher func()
-	followupFn             func(context.Context)
-	workRenotifyFn         workq.RenotifyFunc
-	newWork                workq.Work
-	err                    error
+	idleTimerCh    <-chan time.Time
+	nextJobFlushCh <-chan struct{}
+	followupFn     func(context.Context)
+	workRenotifyFn workq.RenotifyFunc
+	newWork        workq.Work
+	err            error
 }
 
 func (cw *cpWorker) Lock() {}
@@ -176,9 +175,9 @@ type timedFlusher interface {
 }
 
 // flushAll drains every still-pending scheduled flush from the timed work
-// queue and flushes each synchronously, then unregisters this worker as a
-// job flusher. Used at job-end to deliver final flushes for not-yet-due
-// instances. Returns false only when this worker is not registered.
+// queue and flushes each synchronously, then drops this worker's flush-signal
+// subscription. Used at job-end to deliver final flushes for not-yet-due
+// instances. Returns false only when this worker is not subscribed.
 func (cw *cpWorker) flushAll(ctx context.Context) bool {
 	traceRegion := "cpWorker.flushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -189,7 +188,6 @@ func (cw *cpWorker) flushAll(ctx context.Context) bool {
 		w.(timedFlusher).Flush(ctx, cw.Sender())
 	}
 	cw.nextJobFlushCh = nil
-	cw.unregisterAsJobFlusher()
 	return true
 }
 
@@ -203,8 +201,11 @@ func (cw *cpWorker) executeFunnel(ctx context.Context, bc boundFunnelWork) {
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "cpWorker=%p", cw)
 	if cw.nextJobFlushCh == nil {
-		// Make sure the job won't terminate before the funnel is flushed
-		cw.nextJobFlushCh, cw.unregisterAsJobFlusher = cw.cp.job.state.RegisterFlusher()
+		// Subscribe to the job's flush signal so this worker wakes to run
+		// the end-of-work flush sweep. No reference is taken here; the
+		// flush barrier is carried per-instance (see funnelInstance flush
+		// barrier), so the subscription is purely a wake-up channel.
+		cw.nextJobFlushCh = cw.cp.job.state.FlushChan()
 	}
 	bc.Funnel(ctx, cw.Sender())
 	cw.cp.state.IncrementCompleted()

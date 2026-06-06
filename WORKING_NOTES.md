@@ -519,6 +519,31 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   - Drop the `flushQ` param from `funnelWork.Funnel` / `boundFunnelWork`.
   - Validate `TestBySimulation` (`-short`, full, `-race`) + `TestMaxHoldTime*` +
     funnel/skim, and goroutine/no-leak behavior at end-of-work.
+- **1c-i — DONE.** Per-instance flush-barrier reference (design (i)),
+  implemented as its own green checkpoint independent of the force mechanism.
+  `jobstate`: `RegisterFlusher` (per-goroutine ref + channel) replaced by
+  `IncrementReference`/`DecrementReference` (bare `totalReferences` ±, the
+  latter advancing to Done on last) plus a no-ref `FlushChan()` (current
+  rotating flush-signal channel). `funnelWork.Funnel` new-accumulator branch
+  acquires one ref next to `op.ref()`; `funnelInstance.flush()` releases it via
+  `defer` after `accumulator.Flush` (panic-safe; ordered so an emitting flush's
+  Submit takes its work ref before the instance ref drops). `cpWorker`
+  subscribes via `FlushChan()` (no ref, no unregister); dropped the
+  `unregisterAsJobFlusher` field + all unregister calls. Synchronous `flushAll`
+  + `funnelInstance.Flush` (uppercase) + `timedFlusher` retained for 1c-ii.
+  Barrier is now purely per-instance: `Done ⟺ Closed ∧ totalReferences==0`
+  where outstanding = work refs (via IncrementWork) + live-instance refs.
+  Flushing-stage entry still driven by `inFlightWork→0` (instance refs don't
+  touch inFlightWork), so a live-but-idle instance can't keep the job out of
+  Flushing. Validated: full short suite + workq + `TestBySimulation`
+  (`-short -race -count=3`) + full non-short `TestBySimulation -race` (45s) +
+  funnel/skim/maxholdtime; lint 0.
+- **1c-ii — NEXT.** Live-set + `Accepted.Expedite` + `queueFresh` timed→fresh
+  promotion + lost-wakeup (`shouldStillWait` timed re-check); retire synchronous
+  `flushAll`/`Flush`/`timedFlusher`. PN decision (this session): build the full
+  doc-as-written scaffolding now (not the minimal `DrainAllTimed→fresh`) so
+  checkpoint 2/3 won't reshape it. Open point to resolve: spawn/bookkeeping when
+  `forceAll` runs outside the controller (no live `queueFresh`).
 - **1c** — Relocate flush *policy* to Wave AND parallelize the end-of-work sweep.
   Two coupled deliverables:
 

@@ -205,10 +205,9 @@ func (cp *FunnelPool) goroutine() {
 				// their own deadline timer in workq's WaitForNew, and a flush
 				// scheduled while they are parked wakes them via the timed
 				// queue's wake hook.
-				if worker.nextJobFlushCh != nil {
-					worker.nextJobFlushCh = nil
-					worker.unregisterAsJobFlusher()
-				}
+				// The flush-signal subscription holds no reference, so
+				// there is nothing to release on exit.
+				worker.nextJobFlushCh = nil
 				return
 			}
 		case errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded):

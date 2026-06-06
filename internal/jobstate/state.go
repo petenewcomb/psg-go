@@ -97,21 +97,44 @@ func (js *JobState) DecrementWork() {
 	}
 }
 
+// IncrementReference adds a non-work reference to the job. A funnel
+// instance holds exactly one such reference for its live lifetime
+// (from accumulator allocation until flush) so the job cannot
+// transition to Done while any accumulator is still unflushed —
+// independent of which worker ultimately runs the flush. Unlike
+// [JobState.IncrementWork] it does not touch the in-flight-work
+// counter, so it does not gate the Closed → Flushing transition (a
+// live-but-idle instance must not keep the job out of Flushing; only
+// genuine in-flight work does).
+func (js *JobState) IncrementReference() {
+	js.totalReferences.Increment()
+}
+
+// DecrementReference drops a reference added by [JobState.IncrementReference],
+// advancing the job to Done if it was the last outstanding reference.
+//
 //nolint:contextcheck // background context used only for tracing
-func (js *JobState) RegisterFlusher() (nextFlush <-chan struct{}, unregister func()) {
-	traceRegion := "JobState.RegisterFlusher"
+func (js *JobState) DecrementReference() {
+	traceRegion := "JobState.DecrementReference"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "JobState=%p", js)
 
-	js.totalReferences.Increment()
-
-	return js.nextFlushChan.Load().(chan struct{}), func() {
-		// Check if all references are done for Flushing → Done transition
-		if js.totalReferences.Decrement() {
-			// Last reference just completed (work or funnel)
-			js.noMoreReferences()
-		}
+	if js.totalReferences.Decrement() {
+		// Last reference just completed (work or funnel instance)
+		js.noMoreReferences()
 	}
+}
+
+// FlushChan returns the channel that is closed the next time all
+// in-flight work drains to zero and the job enters (or re-enters) the
+// Flushing stage — the signal for funnel workers to force their
+// pending flushes. It adds no reference: the flush barrier is carried
+// per-instance via [JobState.IncrementReference] /
+// [JobState.DecrementReference]. The channel is rotated on each
+// Flushing cycle (see [JobState.noMoreWork]), so a worker re-reads it
+// after handling a signal to wait for the next cycle.
+func (js *JobState) FlushChan() <-chan struct{} {
+	return js.nextFlushChan.Load().(chan struct{})
 }
 
 // Close attempts to transition from Open to Closed.

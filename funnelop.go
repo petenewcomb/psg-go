@@ -647,6 +647,14 @@ func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) {
 	}
 	c.accumulator = nil
 
+	// Release the per-instance flush barrier reference acquired at
+	// allocation. Deferred so a panicking Flush still releases it, and
+	// ordered after the accumulator.Flush body below so that any
+	// downstream Submit performed by Flush takes its work reference
+	// before this reference drops — totalReferences cannot transiently
+	// reach zero across an emitting flush.
+	defer c.op.funnelPool.job.state.DecrementReference()
+
 	panicked := true // Assume the worst
 	defer func() {
 		if panicked {
@@ -754,6 +762,12 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 		hbc.mu.Lock()
 		hbc.refCount = 1
 		w.op.ref()
+		// Per-instance flush barrier: hold one job reference for the
+		// instance's whole live lifetime (here until flush() runs). This
+		// keeps the job out of Done while the accumulator is unflushed,
+		// regardless of which worker eventually flushes it. Released in
+		// flush().
+		w.op.funnelPool.job.state.IncrementReference()
 		w.op.instanceCount.Add(1)
 		hbc.op = w.op
 		hbc.id = funnelInstanceID(funnelInstanceCounter.Add(1))

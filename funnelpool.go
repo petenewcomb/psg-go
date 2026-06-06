@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/petenewcomb/psg-go/internal/delayq"
 	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -34,11 +33,10 @@ type FunnelPool struct {
 
 	funnelQueue workq.Pending
 
-	// flushQ holds funnelInstance instances that have a pending flush
-	// deadline. Any cpWorker can drive the timer + drain; the per-
-	// instance mu on each funnelInstance makes parallel Flush calls
-	// safe.
-	flushQ delayq.Queue[funnelFlusher]
+	// Pending flushes live on workQueue as scheduled (timed) work: a
+	// funnelInstance with a future deadline is workQueue.Schedule'd and,
+	// once due, surfaces as fresh work whose Execute runs the flush. Any
+	// worker drives it; the per-instance mu makes parallel Flush safe.
 
 	// If there are tasks waiting to post work to funnelQueue, the governor
 	// will block new top-level scatters, thereby applying backpressure to
@@ -75,7 +73,6 @@ func NewFunnelPool(job *Pool, options ...psgopt.FunnelPoolOption) *FunnelPool {
 		cp, job, &cp.state, &cp.funnelQueue, &cp.governor, &cp.workQueue)
 
 	cp.funnelQueue.Init()
-	cp.flushQ.Init(nil)
 	cp.governor.Init()
 	cp.workQueue.Init()
 	cp.state.Init()
@@ -168,7 +165,7 @@ func (cp *FunnelPool) goroutine() {
 		close(doneCh)
 	}()
 
-	trace.Logf(ctx, traceRegion, "cpWorker=%p, flushQ=%p", worker, &cp.flushQ)
+	trace.Logf(ctx, traceRegion, "cpWorker=%p", worker)
 
 	worker.idleTimer = timerp.Get()
 	defer timerp.Put(worker.idleTimer)
@@ -204,9 +201,10 @@ func (cp *FunnelPool) goroutine() {
 				confirmEndOfWork = cp.inFlight.IsZero()
 			} else {
 				trace.Logf(ctx, traceRegion, "goroutine exiting")
-				// Yield the timer-holder role: the flushQ wakes another
-				// worker (if any) so the pending deadlines keep moving.
-				cp.flushQ.Yield()
+				// No timer-holder handoff needed: remaining workers each arm
+				// their own deadline timer in workq's WaitForNew, and a flush
+				// scheduled while they are parked wakes them via the timed
+				// queue's wake hook.
 				if worker.nextJobFlushCh != nil {
 					worker.nextJobFlushCh = nil
 					worker.unregisterAsJobFlusher()

@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/delayq"
 	"github.com/petenewcomb/psg-go/internal/leakguard"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
@@ -401,28 +400,60 @@ type funnelInstance[T any] struct {
 	id funnelInstanceID
 	op *funnelOp[T]
 
+	// workID and flushGroup are the immutable [workq.Work] identity for
+	// this instance when it is scheduled as a flush. Set once at creation
+	// and never mutated, so the controller can read ID()/Group() without
+	// holding c.mu (it sorts buffered work by group then ID). workID uses
+	// the shared work-ID counter — funnelInstanceID is a separate counter
+	// that could collide with other work and trip requeueBuffer's
+	// equal-ID panic.
+	workID     workq.WorkID
+	flushGroup workq.GroupID
+
 	mu            sync.Mutex
 	refCount      int
 	earliestGroup workq.GroupID
 	accumulator   Accumulator[T]
 
 	// queued reports whether this instance currently has a Ref held on
-	// behalf of an in-flight Schedule on the FunnelPool's flushQ.
-	// Mutated only under c.mu.
+	// behalf of an in-flight Schedule on the funnel pool's timed work
+	// queue. Mutated only under c.mu.
 	queued bool
 
-	// flushHeapPos is the 1-based position of this instance in the
-	// FunnelPool's flush deadline queue (0 means not in the queue).
+	// flushHeapPos is the 1-based position of this instance in the timed
+	// work queue's deadline structure (0 means not in the queue).
 	// Mutated only by the queue.
 	flushHeapPos int
 }
 
-func (c *funnelInstance[T]) InstanceID() funnelInstanceID {
-	return c.id
+// ID implements [workq.Work]. See workID.
+func (c *funnelInstance[T]) ID() workq.WorkID { return c.workID }
+
+// Group implements [workq.Work]. See flushGroup.
+func (c *funnelInstance[T]) Group() workq.GroupID { return c.flushGroup }
+
+// Execute implements [workq.Work]: it runs the scheduled flush once the
+// instance's deadline has come due and the timed queue has surfaced it
+// as fresh work. The Sender comes from the executing worker's
+// environment (as in funnelWork.executeInner); any funnel worker may run
+// it. The companion unref of the queued reference happens in Free.
+func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
+	ex.Starting()
+	workerCtx, meta := c.op.funnelPool.job.ctxMeta(ctx)
+	cw := meta.executionEnvironment.(*cpWorker)
+	c.mu.Lock()
+	c.flush(workerCtx, cw.Sender())
+	c.mu.Unlock()
+	return nil
 }
 
-func (c *funnelInstance[T]) InstanceCount() int {
-	return int(c.op.instanceCount.Load())
+// Free implements [workq.Work]: it drops the reference held while the
+// instance was queued for flushing (freeing the instance if it was the
+// last). The flush itself ran in Execute; Free is the unref half of the
+// old Flush, deferred to here so the controller never touches a recycled
+// instance mid-buffer.
+func (c *funnelInstance[T]) Free() {
+	c.Unref()
 }
 
 // Position implements [delayq.Item]. The heap reads positions under
@@ -538,7 +569,6 @@ func (c *funnelInstance[T]) emitErr(ctx context.Context, sender *rdvq.Sender, ac
 
 func (c *funnelInstance[T]) funnel(
 	ctx context.Context,
-	flushQ *delayq.Queue[funnelFlusher],
 	sender *rdvq.Sender,
 	input T,
 	inputErr error,
@@ -563,19 +593,20 @@ func (c *funnelInstance[T]) funnel(
 		c.emitErr(ctx, sender, err)
 	}
 
+	workQueue := &c.op.funnelPool.workQueue
 	switch {
 	case !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0:
 		// Already-past deadline — flush inline.
 		if c.queued {
-			flushQ.Remove(c)
+			workQueue.Remove(c)
 			c.queued = false
 		}
 		c.flush(ctx, sender)
 	default:
 		// Either a future deadline or no deadline (zero). In the
 		// no-deadline case the accumulator stays alive until the
-		// FunnelPool's job-end flush sweep picks it up; we still
-		// place the instance in the flushQ — with a far-future
+		// pool's job-end flush sweep picks it up; we still schedule
+		// the instance on the timed work queue — with a far-future
 		// placeholder deadline — so that sweep finds it.
 		deadline := newFlushDeadline
 		if deadline.IsZero() {
@@ -585,7 +616,7 @@ func (c *funnelInstance[T]) funnel(
 			c.Ref()
 			c.queued = true
 		}
-		flushQ.Schedule(c, deadline)
+		workQueue.Schedule(c, deadline)
 	}
 }
 
@@ -665,7 +696,7 @@ func (c *funnelOp[T]) trySubmit(
 // boundFunnelWork interface allows type erasure for funnelWork instances
 type boundFunnelWork interface {
 	workq.Work
-	Funnel(ctx context.Context, flushQ *delayq.Queue[funnelFlusher], sender *rdvq.Sender)
+	Funnel(ctx context.Context, sender *rdvq.Sender)
 	Waiting(*workq.Governor)
 }
 
@@ -697,7 +728,7 @@ func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inpu
 	op.ref() // Add reference for the funnel work
 }
 
-func (w *funnelWork[T]) Funnel(ctx context.Context, flushQ *delayq.Queue[funnelFlusher], sender *rdvq.Sender) {
+func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 	var hbc *funnelInstance[T]
 	for {
 		hbc, _ = w.op.instanceQueue.TryPopFront()
@@ -726,7 +757,9 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, flushQ *delayq.Queue[funnelF
 		w.op.instanceCount.Add(1)
 		hbc.op = w.op
 		hbc.id = funnelInstanceID(funnelInstanceCounter.Add(1))
+		hbc.workID = workq.NewWorkID()
 		hbc.earliestGroup = w.Group()
+		hbc.flushGroup = w.Group()
 		hbc.allocate(ctx, w.op.funnelFactory, sender)
 	}
 	defer func() {
@@ -739,7 +772,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, flushQ *delayq.Queue[funnelF
 			hbc.free()
 		}
 	}()
-	hbc.funnel(ctx, flushQ, sender, w.input, w.inputErr)
+	hbc.funnel(ctx, sender, w.input, w.inputErr)
 }
 
 func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {

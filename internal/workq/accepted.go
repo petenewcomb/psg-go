@@ -79,6 +79,22 @@ func (q *Accepted) Remove(w ScheduledWork) {
 	q.timed.Remove(w)
 }
 
+// drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllTimed]
+// so every scheduled item — including far-future no-deadline placeholders —
+// is treated as due. Matches the funnel pool's no-deadline placeholder skew.
+const drainAllSkew = 24 * time.Hour
+
+// DrainAllTimed removes every scheduled work item regardless of its
+// deadline, appending them to dst and returning it. Unlike the per-deadline
+// draining inside ExecuteOne, the caller takes ownership of the returned
+// items and is responsible for running them — used at end-of-work to flush
+// instances whose deadline has not yet arrived. Safe for concurrent callers
+// (delayq.Drain serializes internally).
+func (q *Accepted) DrainAllTimed(dst []ScheduledWork) []ScheduledWork {
+	due, _ := q.timed.Drain(time.Now().Add(drainAllSkew), dst)
+	return due
+}
+
 // AddWorkFunc provides new work to the queue processor. It is called with a
 // waitCh that signals when there is postponed work ready to process. If waiters
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be

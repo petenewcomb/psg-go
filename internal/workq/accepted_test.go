@@ -34,7 +34,7 @@ func (wi *workFuncItem) Execute(ctx context.Context, ex Execution) error {
 
 func TestAccepted_ExecuteOne_NoWork(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	// TryAddWorkFunc that provides no work
 	addWorkFn := func(context.Context, QueueWorkFunc) error {
@@ -49,7 +49,7 @@ func TestAccepted_ExecuteOne_NoWork(t *testing.T) {
 
 func TestAccepted_ExecuteOne_EndOfWork(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	// TryAddWorkFunc that provides no work
 	addWorkFn := func(context.Context, QueueWorkFunc) error {
@@ -70,7 +70,7 @@ func TestAccepted_ExecuteOne_EndOfWork(t *testing.T) {
 
 func TestAccepted_ExecuteOne_NewWork_Success(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	executed := false
 	work := newWorkItem(func(ctx context.Context, ex Execution) error {
@@ -96,7 +96,7 @@ func TestAccepted_ExecuteOne_NewWork_Success(t *testing.T) {
 
 func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	tryCount := 0
 	executed := false
@@ -124,7 +124,7 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 		return nil, nil
 	}
 
-	_ = q.ExecuteOne(context.Background(), addWorkFn, nil) // blocking to retry deferred work
+	_ = q.ExecuteOne(context.Background(), addWorkFn) // blocking to retry deferred work
 	if !executed {
 		t.Error("Expected work to be executed")
 	}
@@ -135,7 +135,7 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 
 func TestAccepted_ExecuteOne_MultipleNewWork_OneSucceeds(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	work1Executed := false
 	work1 := newWorkItem(func(ctx context.Context, ex Execution) error {
@@ -180,7 +180,7 @@ func TestAccepted_ExecuteOne_MultipleNewWork_OneSucceeds(t *testing.T) {
 
 func TestAccepted_ExecuteOne_DeferredWork_Priority(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	// First, add work that will become deferred
 	deferredExecuted := false
@@ -226,7 +226,7 @@ func TestAccepted_ExecuteOne_DeferredWork_Priority(t *testing.T) {
 
 func TestAccepted_ExecuteOne_NoNewWork_ProcessesDeferred(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	// First, add work that is not ready and will become deferred
 	deferredTryCount := 0
@@ -268,7 +268,7 @@ func TestAccepted_ExecuteOne_NoNewWork_ProcessesDeferred(t *testing.T) {
 
 func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 	q := Accepted{}
-	q.Init()
+	q.Init(nil)
 
 	tryCount := 0
 	notifyReceived := false
@@ -305,7 +305,7 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 		return nil, nil // No new work on subsequent calls
 	}
 
-	_ = q.ExecuteOne(context.Background(), addWorkFn, nil) // blocking
+	_ = q.ExecuteOne(context.Background(), addWorkFn) // blocking
 	if !notifyReceived {
 		t.Error("Expected notification function to be called")
 	}

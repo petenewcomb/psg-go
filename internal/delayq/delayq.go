@@ -45,9 +45,13 @@ import (
 )
 
 // Item is the contract for an entry stored in a [Queue]. The Position
-// / SetPosition pair is opaque queue bookkeeping: implementations
-// store an int field and surface it through these methods; only the
-// queue ever mutates it.
+// / SetPosition pair is queue bookkeeping: implementations store an int
+// field and surface it through these methods; only the queue ever
+// mutates it. Its tri-state lets [Queue.Expedite] tell a never-scheduled
+// item from one that was scheduled and has since drained:
+//   - zero: never scheduled;
+//   - positive: currently queued;
+//   - negative: previously queued, since drained or removed.
 type Item interface {
 	Position() int
 	SetPosition(int)
@@ -187,10 +191,65 @@ func (q *Queue[T]) Drain(now time.Time, ready []T) (drained []T, next time.Time)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// Fold queued updates into the heap. heap.Push handles both fresh
-	// inserts and in-place updates: it reads the item's Position and
-	// either pushes a new entry or overwrites the slot at p-1 and
-	// calls Fix.
+	q.foldUpdates()
+
+	nowNanos := nanosSinceEpoch(now)
+
+	for q.h.Len() > 0 {
+		if nanosSinceEpoch(q.h.Peek().deadline) > nowNanos {
+			break
+		}
+		ready = append(ready, q.h.Pop().item)
+	}
+
+	return ready, q.republishNext(pre)
+}
+
+// Expedite removes item from the queue and returns it so the caller can
+// process it immediately, regardless of its deadline. It folds any
+// pending Schedule/Remove updates first, so an item whose Schedule has
+// not yet reached the heap is still found. Safe for concurrent callers;
+// one heap mutation runs at a time.
+//
+// The outcome turns on item's tri-state position (see [Item]):
+//   - currently queued: removed and returned as (item, true);
+//   - previously queued, already drained or removed: a benign no-op,
+//     returned as (zero, false) — the item is already on its way out;
+//   - never scheduled: a programming error, so Expedite panics.
+//
+// Unlike [Queue.Remove] (which defers to the next Drain), Expedite acts
+// synchronously: on return a found item is no longer in the heap, so the
+// caller may hand it onward without risk of a later Drain also returning
+// it.
+func (q *Queue[T]) Expedite(item T) (T, bool) {
+	pre := q.nextDeadline.Load()
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.foldUpdates()
+
+	p := item.Position()
+	if p == 0 {
+		panic("delayq: Expedite of a never-scheduled item")
+	}
+
+	found := q.h.Remove(entry[T]{item: item})
+
+	q.republishNext(pre)
+
+	if !found {
+		// p < 0: previously queued, already drained or removed.
+		return *new(T), false
+	}
+	return item, true
+}
+
+// foldUpdates drains the pending-update nbcq into the heap. Must be
+// called with q.mu held. heap.Push handles both fresh inserts and
+// in-place updates: it reads the item's Position and either pushes a
+// new entry or overwrites the slot at p-1 and calls Fix.
+func (q *Queue[T]) foldUpdates() {
 	for {
 		op, ok := q.updates.TryPopFront()
 		if !ok {
@@ -202,28 +261,21 @@ func (q *Queue[T]) Drain(now time.Time, ready []T) (drained []T, next time.Time)
 		}
 		q.h.Push(entry[T]{item: op.item, deadline: op.deadline})
 	}
+}
 
-	nowNanos := nanosSinceEpoch(now)
-
-	for q.h.Len() > 0 {
-		if nanosSinceEpoch(q.h.Peek().deadline) > nowNanos {
-			break
-		}
-		ready = append(ready, q.h.Pop().item)
-	}
-
-	// Publish the new earliest deadline via a single CAS against the
-	// pre-drain snapshot. If a concurrent Schedule changed the atomic
-	// while Drain ran, the CAS fails — Schedule's lower value stands,
-	// and its item (now in the updates nbcq) will surface on the next
-	// Drain.
+// republishNext publishes the new earliest deadline via a single CAS
+// against the pre-operation snapshot and returns it (the zero Time when
+// the queue is empty). Must be called with q.mu held. If a concurrent
+// Schedule changed the atomic while the heap was mutated, the CAS fails
+// — Schedule's lower value stands, and its item (now in the updates
+// nbcq) will surface on the next fold.
+func (q *Queue[T]) republishNext(pre int64) time.Time {
 	newNext := noDeadline
 	if q.h.Len() > 0 {
 		newNext = nanosSinceEpoch(q.h.Peek().deadline)
 	}
 	q.nextDeadline.CompareAndSwap(pre, newNext)
-
-	return ready, timeFromNanos(newNext)
+	return timeFromNanos(newNext)
 }
 
 // Yield fires the wake hook and forces the next [Queue.Drain] to

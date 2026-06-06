@@ -74,7 +74,7 @@ func NewFunnelPool(job *Pool, options ...psgopt.FunnelPoolOption) *FunnelPool {
 
 	cp.funnelQueue.Init()
 	cp.governor.Init()
-	cp.workQueue.Init()
+	cp.workQueue.Init(cp.unmetDemandFn)
 	cp.state.Init()
 
 	// Apply default configuration
@@ -179,7 +179,7 @@ func (cp *FunnelPool) goroutine() {
 		confirmingEndOfWork := confirmEndOfWork
 		confirmEndOfWork = false
 
-		err := cp.workQueue.ExecuteOne(ctx, addWorkFn, cp.unmetDemandFn)
+		err := cp.workQueue.ExecuteOne(ctx, addWorkFn)
 		switch {
 		case err == nil:
 		case errors.Is(err, workq.ErrEndOfWork):

@@ -353,3 +353,100 @@ func TestDrainReturnsInDeadlineOrder(t *testing.T) {
 	sort.Slice(wantMs, func(i, j int) bool { return wantMs[i] < wantMs[j] })
 	assert.Equal(t, wantMs, gotMs)
 }
+
+// TestExpediteRemovesScheduledItem verifies that Expedite pulls a
+// not-yet-due item out of the queue and that a later Drain no longer
+// returns it.
+func TestExpediteRemovesScheduledItem(t *testing.T) {
+	var q delayq.Queue[*testItem]
+	q.Init(nil)
+
+	a := &testItem{id: 1}
+	b := &testItem{id: 2}
+	q.Schedule(a, at(50))
+	q.Schedule(b, at(60))
+
+	got, ok := q.Expedite(a)
+	assert.True(t, ok)
+	assert.Equal(t, a, got)
+	assert.Negative(t, a.Position(), "expedited item should report a removed (negative) position")
+
+	// Draining well past both deadlines must return only b.
+	ready, next := q.Drain(at(100), nil)
+	assert.Equal(t, []int{2}, ids(ready))
+	assert.True(t, next.IsZero())
+}
+
+// TestExpediteFoldsPendingSchedule verifies that Expedite folds a
+// Schedule that has not yet reached the heap, so an item scheduled and
+// immediately expedited is still found.
+func TestExpediteFoldsPendingSchedule(t *testing.T) {
+	var q delayq.Queue[*testItem]
+	q.Init(nil)
+
+	a := &testItem{id: 1}
+	q.Schedule(a, at(50)) // pending in the update nbcq, not yet folded
+
+	got, ok := q.Expedite(a)
+	assert.True(t, ok)
+	assert.Equal(t, a, got)
+
+	ready, next := q.Drain(at(100), nil)
+	assert.Empty(t, ready)
+	assert.True(t, next.IsZero())
+}
+
+// TestExpediteAlreadyGoneIsNoop verifies the benign no-op contract for
+// items that were scheduled but have since left the queue: already
+// drained, and already expedited.
+func TestExpediteAlreadyGoneIsNoop(t *testing.T) {
+	var q delayq.Queue[*testItem]
+	q.Init(nil)
+
+	// Already drained.
+	drained := &testItem{id: 2}
+	q.Schedule(drained, at(10))
+	ready, _ := q.Drain(at(100), nil)
+	assert.Equal(t, []int{2}, ids(ready))
+	_, ok := q.Expedite(drained)
+	assert.False(t, ok)
+
+	// Already expedited.
+	once := &testItem{id: 3}
+	q.Schedule(once, at(50))
+	_, ok = q.Expedite(once)
+	assert.True(t, ok)
+	_, ok = q.Expedite(once)
+	assert.False(t, ok)
+}
+
+// TestExpediteNeverScheduledPanics verifies the defensive contract: a
+// never-scheduled item (Position zero) is a programming error.
+func TestExpediteNeverScheduledPanics(t *testing.T) {
+	var q delayq.Queue[*testItem]
+	q.Init(nil)
+
+	never := &testItem{id: 1}
+	assert.Zero(t, never.Position())
+	assert.Panics(t, func() { q.Expedite(never) })
+}
+
+// TestExpediteUpdatesNextDeadline verifies that expediting the earliest
+// item republishes the next-deadline reported by Drain.
+func TestExpediteUpdatesNextDeadline(t *testing.T) {
+	var q delayq.Queue[*testItem]
+	q.Init(nil)
+
+	a := &testItem{id: 1}
+	b := &testItem{id: 2}
+	q.Schedule(a, at(10))
+	q.Schedule(b, at(90))
+
+	// Expedite the earliest; the queue's next due item is now b.
+	_, ok := q.Expedite(a)
+	assert.True(t, ok)
+
+	ready, next := q.Drain(at(50), nil)
+	assert.Empty(t, ready, "b is not yet due at t=50")
+	assertTime(t, at(90), next)
+}

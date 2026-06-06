@@ -38,12 +38,22 @@ type Accepted struct {
 	// selection and then execute like any other work. The delayq wake
 	// hook nudges a parked worker when a sooner deadline is scheduled.
 	timed delayq.Queue[ScheduledWork]
+
+	// unmetDemandFn is the pool's worker-spawn signal, fired (via
+	// waiters) when excess fresh work accumulates and no idle worker is
+	// available — both when a batch of work is promoted to fresh
+	// (queueFresh) and when a scheduled item is forced (Expedite). Nil
+	// for queues whose pool does not spawn on demand (e.g. the task
+	// pool, which drives its own spawning).
+	unmetDemandFn RenotifyFunc
 }
 
-// Init initializes the work queue using the global pool.
+// Init initializes the work queue. unmetDemandFn is the demand-spawn
+// signal (see the field); pass nil for queues that do not spawn on
+// demand.
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Accepted) Init() {
+func (q *Accepted) Init(unmetDemandFn RenotifyFunc) {
 	traceRegion := "workq.Accepted.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion,
@@ -55,6 +65,7 @@ func (q *Accepted) Init() {
 	q.waiters.Init()
 	q.listener.Notify = q.waiters.Notify
 	q.timed.Init(q.wakeTimed)
+	q.unmetDemandFn = unmetDemandFn
 }
 
 // wakeTimed is the delayq wake hook: it nudges one parked worker so a
@@ -77,6 +88,36 @@ func (q *Accepted) Schedule(w ScheduledWork, deadline time.Time) {
 // concurrent callers.
 func (q *Accepted) Remove(w ScheduledWork) {
 	q.timed.Remove(w)
+}
+
+// Expedite promotes an already-[Accepted.Schedule]d w straight into the
+// fresh queue so the next worker runs it now, regardless of its
+// deadline. It is backpressure-neutral — w already passed admission at
+// Schedule, so this adds no new outstanding work — and therefore safe
+// to call from any context, including outside the ExecuteOne flow
+// (e.g. an end-of-work force sweep).
+//
+// If w is not currently in the timed queue (never scheduled, already
+// due-drained, already removed, or already expedited) Expedite is a
+// no-op: it does not re-enqueue w. A caller that force-flushes a set of
+// instances it believes are scheduled tolerates this — an item that
+// just drained on its deadline is already on its way through fresh.
+//
+//nolint:contextcheck // background context used only for tracing
+func (q *Accepted) Expedite(w ScheduledWork) {
+	traceRegion := "workq.Accepted.Expedite"
+	item, ok := q.timed.Expedite(w)
+	if !ok {
+		trace.Logf(context.Background(), traceRegion, "Accepted(%p) %v already drained, no-op", q, w)
+		return
+	}
+	trace.Logf(context.Background(), traceRegion, "Accepted(%p) promoting %v to fresh", q, item)
+	q.fresh.PushBack(item)
+	// Signal demand for the promoted item, matching queueFresh: with a
+	// spawn fn this can start a worker to run it; with none it falls back
+	// to nudging a parked worker. Forced items always signal (there is no
+	// running controller to absorb one on the current worker).
+	q.waiters.Notify(q.unmetDemandFn)
 }
 
 // drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllTimed]
@@ -146,14 +187,14 @@ func (q *Accepted) ExecuteNowOrQueue(
 //
 // Priority order: fresh → postponed → new work
 //
-// The unmetDemandFn is called when excess fresh work accumulates (count > 1) and
-// no idle workers are available. This enables spawning new workers when needed.
-// Pass nil if worker spawning is not applicable for this queue.
+// The queue's demand-spawn signal (see [Accepted.Init]) is fired when
+// excess fresh work accumulates (count > 1) and no idle worker is
+// available, enabling new workers to be spawned when needed.
 //
 // Returns the error value from the work item if one was executed, the error
 // value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
 // been called but was nil.
-func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc, unmetDemandFn RenotifyFunc) error {
+func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error {
 	traceRegion := "workq.Accepted.ExecuteOne"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Accepted=%p", q)
@@ -165,7 +206,6 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc, unmetD
 
 	c := newController(q)
 	c.addWorkFn = addWorkFn
-	c.unmetDemandFn = unmetDemandFn
 	defer c.Free()
 
 	for {
@@ -252,14 +292,14 @@ type controller struct {
 	addWorkFn                AddWorkFunc
 	tryAddWorkFn             TryAddWorkFunc
 	renotifyFn               RenotifyFunc
-	unmetDemandFn            RenotifyFunc
 	workAddedCount           int
 	postponedWorkWasExecuted bool
 	workWasPostponed         bool
 	endOfWorkErr             error
 
-	timedScratch      []ScheduledWork // reusable Drain buffer
-	nextTimedDeadline time.Time       // earliest not-yet-due deadline, set by drainTimed
+	timedScratch       []ScheduledWork // reusable Drain buffer
+	nextTimedDeadline  time.Time       // earliest not-yet-due deadline, set by drainTimed
+	armedTimedDeadline time.Time       // deadline WaitForNew armed its wake timer for
 
 	ex Execution // avoid closure reallocations
 
@@ -348,12 +388,18 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 // the fresh queue, where it will be picked up and executed like any
 // other work, and records the earliest remaining deadline so
 // [controller.WaitForNew] can arm a wake timer for it.
+//
+// Due items are promoted through queueFresh (not a bare fresh PushBack)
+// so they carry the same excess-work bookkeeping as any other accepted
+// work: a batch of newly-due flushes can trip unmetDemandFn and spawn
+// additional workers, letting the sweep run in parallel rather than
+// serializing on whichever worker happened to drain it.
 func (c *controller) drainTimed() {
 	var due []ScheduledWork
 	due, c.nextTimedDeadline = c.q.timed.Drain(time.Now(), c.timedScratch[:0])
 	c.timedScratch = due
 	for _, w := range due {
-		c.q.fresh.PushBack(w)
+		c.queueFresh(w)
 	}
 }
 
@@ -387,8 +433,8 @@ func (c *controller) queueFresh(work Work) {
 	trace.Logf(context.Background(), traceRegion, "Accepted(%p) adding fresh %v", c.q, work)
 	c.q.fresh.PushBack(work)
 	c.workAddedCount++
-	if c.workAddedCount > 1 && c.unmetDemandFn != nil {
-		c.q.waiters.Notify(c.unmetDemandFn)
+	if c.workAddedCount > 1 && c.q.unmetDemandFn != nil {
+		c.q.waiters.Notify(c.q.unmetDemandFn)
 	}
 }
 
@@ -436,6 +482,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 	// deadline arrives, re-entering ExecuteOne to drain the now-due item. No
 	// goroutine is spawned; nil timedCh means no pending deadline.
 	var timedCh <-chan time.Time
+	c.armedTimedDeadline = c.nextTimedDeadline
 	if !c.nextTimedDeadline.IsZero() {
 		d := time.Until(c.nextTimedDeadline)
 		if d < 0 {
@@ -586,9 +633,25 @@ func (c *controller) shouldStillWait() bool {
 		}
 	}
 
+	// Re-drain timed work: a Schedule that landed after the ExecuteOne
+	// drainTimed but before we registered as a waiter may have produced
+	// now-due work or lowered the next deadline below the one WaitForNew
+	// armed its wake timer for. Draining promotes due items into fresh
+	// (caught by the TryAccepted below); the deadline check afterward
+	// aborts the wait so the loop re-arms for the sooner deadline rather
+	// than oversleeping it.
+	c.drainTimed()
+
 	// Check to make sure nothing else accumulated before we registered as a
 	// waiter.
 	if c.shouldStillWaitErr = c.TryAccepted(c.shouldStillWaitCtx, true); c.ex.Started() || c.shouldStillWaitErr != nil {
+		return false
+	}
+
+	// Abort the wait if a sooner deadline appeared than the armed timer
+	// covers; WaitForNew will re-arm on the next loop iteration.
+	if !c.nextTimedDeadline.IsZero() &&
+		(c.armedTimedDeadline.IsZero() || c.nextTimedDeadline.Before(c.armedTimedDeadline)) {
 		return false
 	}
 

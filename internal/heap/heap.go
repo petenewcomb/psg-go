@@ -9,15 +9,31 @@ import (
 )
 
 // Item is the interface for items stored in the heap.
+//
+// Position is a small tri-state used both by the heap (to find an item
+// for in-place update or removal) and by callers (to tell an item's
+// history apart):
+//   - zero: never added to the heap;
+//   - positive: the item's current 1-based index in the heap;
+//   - negative: previously in the heap, since removed (by Pop or Remove).
+//
+// Re-adding a removed item via [Heap.Push] is supported — Push treats any
+// non-positive position as "not currently present" and inserts afresh.
 type Item[T any] interface {
 	// Less returns true if this item should be ordered before the other item.
 	Less(other T) bool
-	// SetPosition is called when the item's position in the heap changes. Valid
-	// positions are greater than zero; zero means not in the heap.
+	// SetPosition is called by the heap whenever the item's position
+	// changes: a positive 1-based index while in the heap, or a negative
+	// sentinel when removed. Callers never call it directly.
 	SetPosition(index int)
-	// Position returns the item's current index in the heap.
+	// Position returns the item's current position per the tri-state above.
 	Position() int
 }
+
+// removedPosition is the sentinel [Heap.Pop] assigns to an item on
+// removal so callers can distinguish "previously in the heap" (negative)
+// from "never added" (zero).
+const removedPosition = -1
 
 // Heap is a generic min-heap that stores items that implement the Item interface.
 // The zero value is an empty heap ready to use without initialization.
@@ -44,10 +60,10 @@ func (h *Heap[T]) Len() int {
 // the new value before Fix re-evaluates Less.
 func (h *Heap[T]) Push(item T) {
 	p := item.Position()
-	if p < 0 {
-		panic("item reports invalid position")
-	}
-	if p == 0 {
+	if p <= 0 {
+		// Not currently present (never added, or removed since): insert
+		// afresh. A negative position from a prior removal is treated the
+		// same as a never-added zero.
 		heap.Push(&h.impl, item)
 	} else {
 		h.impl.items[p-1] = item
@@ -73,10 +89,8 @@ func (h *Heap[T]) Peek() T {
 // false if it was not in the heap.
 func (h *Heap[T]) Remove(item T) bool {
 	p := item.Position()
-	if p < 0 {
-		panic("item reports invalid position")
-	}
-	if p == 0 {
+	if p <= 0 {
+		// Never added or already removed.
 		return false
 	}
 	heap.Remove(&h.impl, p-1)
@@ -117,6 +131,6 @@ func (h *heapImpl[T]) Pop() interface{} {
 	item := old[n-1]
 	old[n-1] = *new(T) // avoid memory leak
 	h.items = old[0 : n-1]
-	item.SetPosition(0)
+	item.SetPosition(removedPosition)
 	return item
 }

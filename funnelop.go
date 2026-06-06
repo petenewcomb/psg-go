@@ -418,11 +418,22 @@ type funnelInstance[T any] struct {
 	// queued reports whether this instance currently has a Ref held on
 	// behalf of an in-flight Schedule on the funnel pool's timed work
 	// queue. Mutated only under c.mu.
+	//
+	// It is deliberately distinct from flushHeapPos. flushHeapPos tracks
+	// the queue's *heap* state, but delayq updates are deferred: a
+	// Schedule only becomes a positive heap position once a later Drain
+	// folds it in. queued records the Ref synchronously at Schedule time,
+	// so a reschedule that races the fold (e.g. another worker reuses
+	// this instance before the first Schedule folds) correctly observes
+	// "already Ref'd" via queued and avoids a double Ref — which a
+	// flushHeapPos check could not, since it would still read 0.
 	queued bool
 
-	// flushHeapPos is the 1-based position of this instance in the timed
-	// work queue's deadline structure (0 means not in the queue).
-	// Mutated only by the queue.
+	// flushHeapPos is this instance's position in the timed work queue's
+	// deadline structure, mutated only by the queue (under delayq.mu, via
+	// SetPosition): 0 = never scheduled, >0 = the 1-based heap index,
+	// <0 = previously scheduled and since removed/drained. See queued for
+	// why heap position alone is insufficient for Ref bookkeeping.
 	flushHeapPos int
 }
 
@@ -465,10 +476,11 @@ func (c *funnelInstance[T]) Position() int { return c.flushHeapPos }
 // SetPosition implements [delayq.Item]. It is called by the delayq
 // heap under delayq.mu when an item is inserted, swapped, or removed.
 // We take c.mu so funnel's read of c.queued and c.flushHeapPos
-// stays consistent with the heap's view: when delayq's Drain pops c
-// (p == 0), the queued flag flips false here, ensuring a concurrent
-// funnel that subsequently acquires c.mu correctly observes "no Ref
-// outstanding" and Refs for its new Schedule.
+// stays consistent with the heap's view: when delayq removes c (a
+// non-positive p — zero never occurs from the heap, but a negative
+// removed sentinel does), the queued flag flips false here, ensuring a
+// concurrent funnel that subsequently acquires c.mu correctly observes
+// "no Ref outstanding" and Refs for its new Schedule.
 //
 // Lock ordering: delayq.mu first (held by the heap operation), then
 // c.mu (taken here). funnel never takes delayq.mu while holding
@@ -476,7 +488,7 @@ func (c *funnelInstance[T]) Position() int { return c.flushHeapPos }
 func (c *funnelInstance[T]) SetPosition(p int) {
 	c.mu.Lock()
 	c.flushHeapPos = p
-	if p == 0 {
+	if p <= 0 {
 		c.queued = false
 	}
 	c.mu.Unlock()
@@ -774,6 +786,11 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 		hbc.workID = workq.NewWorkID()
 		hbc.earliestGroup = w.Group()
 		hbc.flushGroup = w.Group()
+		// Reset the timed-queue position to the never-scheduled state. A
+		// reused instance retains the negative removed sentinel from its
+		// previous life; clearing it keeps Position's tri-state honest so
+		// a stray Expedite of a fresh instance is caught (see delayq.Item).
+		hbc.flushHeapPos = 0
 		hbc.allocate(ctx, w.op.funnelFactory, sender)
 	}
 	defer func() {

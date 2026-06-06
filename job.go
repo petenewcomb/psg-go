@@ -170,7 +170,7 @@ func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
 	j.state.Init()
 	j.skimQueue.Init()
 	j.governor.Init()
-	j.workQueue.Init()
+	j.workQueue.Init(nil)
 	j.taskQueue.Init()
 	// taskWorkersSpawning zero-value ready, no init needed
 	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
@@ -275,7 +275,7 @@ func (j *Pool) trySkim(ctx context.Context, _ *ctxMeta) (bool, error) {
 }
 
 func (j *Pool) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
-	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn, nil)
+	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn)
 }
 
 // This function is designed to be called before scattering a new task to
@@ -328,7 +328,7 @@ func (j *Pool) block(
 	adder.blockWaiters = blockWaiters
 	adder.confirmBlockWaitFn = confirmBlockWaitFn
 
-	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn, nil)
+	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn)
 	if errors.Is(err, errBlockWaitSignaled) {
 		err = nil
 	}

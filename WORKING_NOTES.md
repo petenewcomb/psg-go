@@ -684,7 +684,71 @@ legitimately can be, since the design fixes the pre-existing deadlock. Plus
 the reduced-variability sim config + `PSGTRACEINTERNALS` if anything
 regresses.
 
-**Suggested sub-step order (each independently green):**
+#### concern (c) RESOLVED — lifetime model pinned down (2026-06-07)
+
+Tracing the code to start sub-step 1 surfaced two facts that revise the
+plan:
+
+- **Sub-steps 1, 2 and 4 are inseparable.** Swapping `delayq.Item` to
+  `ScheduledState() *ScheduledState` makes the heap write `state.position`
+  directly under `delayq.mu`, which structurally removes
+  `funnelInstance.SetPosition` — but that override's `if p<=0 { queued=false }`
+  is the *only* drain-signal clearing `queued` today, and `queued`'s clean
+  removal *is* the new lifetime model. So the interface swap, the deadlock
+  fix, and the lifetime model land as **one** change; none is green alone.
+- **The validation gate is flaky until the deadlock is fixed**, so trust the
+  `-race` sim only *after* the combined change lands.
+
+**Parties holding an instance pointer:** A = in `instanceQueue` (reuse
+cache); C = being processed by a `funnelWork` (Accumulate, holds `c.mu`);
+B = a `delayq` heap entry; D = drained-from-heap, running
+`funnelInstance.Execute` (deadline flush, holds `c.mu`). A and C are one
+lineage (an instance is in the queue *or* being processed, never both); B
+and D are the delayq lineage.
+
+**Two rules make the model safe without a per-instance refcount:**
+- **R1** — C never flushes/reschedules an instance whose `Position ==
+  removed(-1)` (D already drained it); C accumulates and pushes back **live**,
+  letting D's pending `Execute` flush the freshly-accumulated data. Because
+  C's synchronous `Remove` and D's `Drain` serialize on `delayq.mu`, exactly
+  one of them claims the flush — never both.
+- **R2** — D captures `op := c.op` under `c.mu` and **never touches the
+  instance object after `c.mu.Unlock`** (only op-level atomics). An owner
+  reuse-pop can then recycle the spent shell concurrently with D finishing,
+  race-free.
+
+**Answers to the four questions:**
+1. **`refCount` does NOT survive** — the per-instance `refCount` integer and
+   the `queued` flag are both eliminated. Liveness = `accumulator != nil`;
+   the design's "one ref" is the op-level `op.ref()` taken at creation,
+   dropped at flush (op-liveness).
+2. **Recycle (`pool.Put`) is owner-only, exactly once:** reuse-pop (spent
+   shell from `instanceQueue`) or teardown (`funnelOp.unref` drains
+   `instanceQueue`). Single nbcq popper guarantees once. D never recycles.
+3. **The Drain-pop vs re-funnel double-unref is unreachable** in the new
+   model: synchronous delayq ops give C-remove/D-drain mutual exclusion, R1
+   makes C defer when D won, and with no per-instance refcount there is
+   nothing to double-drop.
+4. **Reschedule-check** = a synchronous `delayq` method (`Reschedule(item,
+   at) (added bool)` + admit/remove variants) run under `delayq.mu` while
+   holding `c.mu`; folds updates, reads the authoritative tri-state
+   `Position` (0 = admitted/never-heaped, >0 = heaped, -1 = drained), re-adds
+   only if not drained. Sole cross-order `c.mu→delayq.mu`, acyclic.
+
+**Revised sub-step order:**
+1. **Combined foundation + deadlock fix + lifetime** (was 1+2+4): introduce
+   `ScheduledState` and swap the interface; remove `funnelInstance.SetPosition`
+   (position is `delayq.mu`-only — the deadlock fix); retire `queued` and the
+   per-instance `refCount`; one creation `op.ref()` dropped at flush;
+   synchronous `Reschedule`/`Remove` under `delayq.mu` with R1/R2;
+   `funnelOp.unref` drains `instanceQueue`. **Gate: full `-race` sim green.**
+2. (b) `admitted` atomic + `Schedule(w,0)` indefinite + `Expedite` admission
+   check; reverse the zero-`at` panic; delete the placeholder + skew consts.
+3. live set + `forceAll` (Expedite over the set); retire synchronous
+   `flushAll`/`Flush`/`scheduledFlusher`/`DrainAllScheduled`.
+4. naming: `accumulate()` / `*Work.Dispatch`.
+
+**Original sub-step order (superseded by the above; kept for history):**
 1. `ScheduledState` + `ScheduledState()` interface swap (workq/delayq/heap);
    embed in `funnelInstance` (extends the WIP embed). Behavior-neutral.
 2. (a) `SetPosition`/position → `delayq.mu`-only; drop `queued`'s

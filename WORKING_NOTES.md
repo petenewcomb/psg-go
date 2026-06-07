@@ -538,12 +538,166 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   Flushing. Validated: full short suite + workq + `TestBySimulation`
   (`-short -race -count=3`) + full non-short `TestBySimulation -race` (45s) +
   funnel/skim/maxholdtime; lint 0.
-- **1c-ii — NEXT.** Live-set + `Accepted.Expedite` + `queueFresh` timed→fresh
-  promotion + lost-wakeup (`shouldStillWait` timed re-check); retire synchronous
-  `flushAll`/`Flush`/`timedFlusher`. PN decision (this session): build the full
-  doc-as-written scaffolding now (not the minimal `DrainAllTimed→fresh`) so
-  checkpoint 2/3 won't reshape it. Open point to resolve: spawn/bookkeeping when
-  `forceAll` runs outside the controller (no live `queueFresh`).
+- **1c-ii — NEXT.** See "**1c-ii CONSOLIDATED DESIGN (2026-06-07)**" below
+  for the agreed plan (three orthogonal concerns: heap-position under
+  `delayq.mu`; atomic `admitted`; per-instance lifetime ref + op-liveness-
+  at-flush). It supersedes the earlier scaffolding sketch and the
+  "1c implementation design — REFINED" section. The earlier framing
+  (live-set + `Accepted.Expedite` + `queueFresh` promotion + a foundation
+  `Expedite` already committed in `6df4218`) was developed *before* the
+  pre-existing deadlock was discovered/bisected; the consolidated design
+  reframes it around the deadlock fix.
+### Pre-existing latent deadlock: instance lock held across user callback (BISECTED 2026-06-06)
+
+`TestBySimulation` (full, `-race`) hangs intermittently (~30–50% of full
+runs) — a **pre-existing, long-standing** deadlock, NOT a regression from
+the 1c work. `git bisect` (good=`b6641cc`, bad=`33a6cd9`, hang=10-min
+timeout) pins the first hang to **`63a4d57` "sim: rewrite for
+Pool/Wave/Flow vocabulary"** — a **test-only** commit (`internal/sim/*` +
+`example_combiner_test.go`, zero production code). So the rewritten sim
+merely began *exercising* a latent production bug; the bug itself is
+older still.
+
+**Root cause:** `funnelInstance.funnel()`/`flush()` hold the per-instance
+`c.mu` across the user `Accumulate`/`Flush` callback. When that callback
+re-enters the framework and blocks — `Submit`/`Start` backpressure, or a
+nested `CloseAndGatherAll`/`CloseAndSkimAll` draining a sub-job — `c.mu`
+stays held; meanwhile a concurrent `delayq.Drain` holding `delayq.mu`
+calls `SetPosition`→`c.mu` on that instance and blocks, and the sub-job's
+progress needs that drain, so the wait is circular. Baseline `665fd1f`
+dump: goroutine in `Accumulate`→`CloseAndSkimAll` holds the instance
+`c.mu` 8 min; `funnelInstance.SetPosition` blocked on it 8 min. The
+`SetPosition`-on-`c.mu` shape is *this* era's manifestation (delayq
+flush); pre-delayq it manifested differently, but the lock-across-user-
+callback core is the same and predates the `Job→Pool` rename.
+
+**Implication:** the full-race sim was never reliably green (prior
+"green" claims rested on too few samples — 1–2 lucky runs). It cannot be
+a green gate for the 1c work until this is fixed. Candidate fixes (PN's
+design domain — concurrency-critical): don't hold `c.mu` across the user
+callback, or split a position-bookkeeping lock from the accumulator lock.
+
+**Separately — a 1c-i flush-orphan hang (distinct, FIXED in WIP):** the
+1c-i per-instance barrier ref turned an *orphaned* end-of-work flush into
+a *hang* (12-goroutine signature, vs the 34-goroutine mutex-deadlock
+above). Cause: `cpWorker.flushAll`'s `if nextJobFlushCh==nil return false`
+guard (load-bearing only for the retired per-goroutine
+`unregisterAsJobFlusher`) let an unsubscribed last goroutine exit without
+flushing live instances → their barrier refs never drop → Done hangs.
+WIP fix: `flushAll` always drains the shared scheduled queue and flushes
+(any worker can; each flush drops the instance's own barrier ref).
+
+**Uncommitted WIP (not yet committed):**
+(a) `ScheduledWorkItem` embed refactor — `funnelInstance` embeds
+`workq.ScheduledWorkItem` (WorkItem+Scheduled), dropping hand-rolled
+`workID`/`flushGroup`/`flushHeapPos`/`id`+`funnelInstanceID`; overrides
+`SetPosition`/`Free`, adds `Execute`. (b) the `flushAll` orphan-hang fix.
+Both pass `-short`+targeted+workq/delayq unit tests + lint; they cannot
+be validated against the full-race sim until the pre-existing deadlock is
+resolved.
+
+### 1c-ii CONSOLIDATED DESIGN (settled with PN, 2026-06-07) — supersedes the older "1c implementation design — REFINED" and "1c-ii — NEXT" notes below
+
+This is the agreed design. It resolves the pre-existing deadlock *and*
+the flush/lifetime tangle by replacing the overloaded `queued` flag with
+**three orthogonal concerns**, and it removes the far-future-placeholder
+hack and a latent op-leak along the way.
+
+**The three things `queued` was conflating (PN's decomposition):**
+
+- **(a) heap membership + position** — touched *only* under `delayq.mu`
+  (the heap's own lock). `SetPosition` becomes pure position bookkeeping
+  and **never takes `c.mu`**. *This is the deadlock fix*: a `delayq.Drain`
+  can no longer wait on a `c.mu` held across user `Accumulate`/`Flush`, so
+  user code can never freeze the delay queue. No leaf lock needed.
+- **(b) work-queue admission** — an `atomic.Bool` owned by
+  `workq.Accepted`. `Schedule` sets it; `Expedite`/`forceAll` read it.
+  This is the admission check that keeps `Expedite` from being a backdoor:
+  `Expedite` only *re-prioritizes already-admitted* work, never injects
+  new work past the governor. PN's rule: **`c.mu` (or rather the writer)
+  gates *changes* to admitted, reads are lock-free.**
+- **(c) instance liveness + object lifetime** — see the lifetime model
+  below; the single per-instance ref, taken at creation, plus op-liveness
+  dropped at flush.
+
+**`ScheduledState`** (new): a struct `{ admitted atomic.Bool; position int }`
+encapsulating (a)+(b) with the fields unexported. `ScheduledWork` /
+`delayq.Item` expose `ScheduledState() *ScheduledState` *instead of*
+`Position()/SetPosition(int)`; the embeddable `Scheduled`/`ScheduledWorkItem`
+just hold one. `position` is delayq-owned (only mutated under `delayq.mu`);
+`admitted` is atomic. The work type embeds it and never touches the fields
+directly, so it *structurally cannot* hold a heap lock across user code.
+
+**`Schedule(w, at)` with `at == 0` = indefinite (admitted, not heaped).**
+Reverses the zero-`at` panic added in `2759116`. `Schedule` always sets
+`admitted=true`; a non-zero `at` also creates the heap entry, a zero `at`
+does not. This is the proper replacement for the `maxFlushAllSkew`/
+`drainAllSkew` 24h placeholder — no fake deadlines, no heap churn for
+no-deadline accumulators, smaller heap (= smaller contention surface).
+`Expedite(w)`: read `admitted` (panic if never admitted); if it has a heap
+entry, remove it; push to `fresh`. `forceAll` = `Expedite` over the live
+set, heaped or indefinite alike. The far-future placeholder, `DrainAllScheduled`,
+and the whole-queue end-of-work sweep all go away.
+
+**(c) lifetime model — the spine.** Today `queued` doubles as the
+"heap-membership ref held?" gate, the ref-drop is deferred to `Free`, and
+`funnelInstance.free()` couples object-recycle with `op.instanceCount--` +
+`op.unref()` at the *discard-pop*. That coupling is the bug: a flushed
+**spent shell** lingers in `instanceQueue` (an nbcq — no mid-queue removal)
+holding the creation `op.ref()`, so the op's refcount never reaches 0 and
+the op **silently leaks** (`factory.Close()` never runs); nothing is
+guaranteed to pop it after the last `flushAll`. New model:
+- **One ref per instance, taken right after the factory call** (creation).
+  No conditional schedule-time `Ref`, no per-heap-entry ref → nothing for a
+  reschedule-vs-drain race to double-drop. The `queued` flag disappears.
+- **Op-liveness (`instanceCount` + `op.unref()`) drops at flush**, not at
+  discard-pop — flush is when the instance stops being a live accumulator.
+  So the op can reach teardown even with spent shells still cached.
+- **Object recycle (`pool.Put`)** happens on reuse-pop *or* at teardown.
+- **`funnelOp.unref()` (op teardown) DRAINS `instanceQueue`** — pop all,
+  assert each `accumulator == nil` (spent), drop them — instead of
+  asserting the queue empty. The queue is a reuse *cache* the op cleans up,
+  not a refcount the world must drain.
+- **Reschedule check under `delayq.mu`** so no heap entry lingers: funnel's
+  reschedule, after `Accumulate` returns, takes `delayq.mu` and re-adds
+  only if the instance is still schedulable; if it was already drained, it
+  skips the re-add (the accumulated data flushes via the pending `Execute`).
+  This is safe now precisely because (a) makes `c.mu → delayq.mu` the only
+  cross-order (nothing takes `delayq.mu → c.mu`), so it's acyclic. (The
+  alternative — a generation/`ID` weak-ref guard on pooled-instance reuse,
+  per the omnipool TODO — is the fallback if the synchronous reschedule's
+  `delayq.mu` contention proves costly; reschedule-check is the default.)
+
+**Naming (this session):** `funnelInstance.funnel()` → `accumulate()`;
+`*Work.Funnel`/`boundFunnelWork.Funnel` → `Dispatch`. Defer the broader
+combiner-era renames (`executeFunnel`, the `cp`/`cw`/`c*` "combiner"
+prefixes, etc.) to a final name-reconciliation pass.
+
+**Already in WIP toward this:** the `ScheduledWorkItem` embed (a step to
+`ScheduledState`) and the `flushAll` orphan-hang fix. Both stay; the embed
+evolves into `ScheduledState`.
+
+**Validation gate:** full `TestBySimulation -race`, run *many* times (the
+bug is intermittent), must be **green** — this is the first time it
+legitimately can be, since the design fixes the pre-existing deadlock. Plus
+`-short -race`, maxholdtime/funnel/skim, and no-leak at end-of-work. Use
+the reduced-variability sim config + `PSGTRACEINTERNALS` if anything
+regresses.
+
+**Suggested sub-step order (each independently green):**
+1. `ScheduledState` + `ScheduledState()` interface swap (workq/delayq/heap);
+   embed in `funnelInstance` (extends the WIP embed). Behavior-neutral.
+2. (a) `SetPosition`/position → `delayq.mu`-only; drop `queued`'s
+   drain-signal role. *Deadlock fix* — validate hard against full `-race`.
+3. (b) `admitted` atomic + `Schedule(w,0)` indefinite + `Expedite` admission
+   check; reverse the zero-`at` panic; delete the placeholder + skew consts.
+4. (c) lifetime: one creation ref, op-liveness-at-flush, `funnelOp.unref`
+   drains `instanceQueue`, reschedule-check under `delayq.mu`. Retire the
+   `queued` flag entirely.
+5. live set + `forceAll` (Expedite over the set); retire synchronous
+   `flushAll`/`Flush`/`scheduledFlusher`/`DrainAllScheduled`.
+6. naming: `accumulate()` / `*Work.Dispatch`.
+
 - **1c** — Relocate flush *policy* to Wave AND parallelize the end-of-work sweep.
   Two coupled deliverables:
 
@@ -580,6 +734,10 @@ into the fresh source within `ExecuteOne`, the deadline timer, and wiring
   correct *interim*; 1c is the destination.
 
   **1c implementation design — REFINED, fresh-session-ready (PN, 2026-06-06).**
+  **[SUPERSEDED 2026-06-07 by "1c-ii CONSOLIDATED DESIGN" above — kept for
+  history. This predates the pre-existing-deadlock discovery; its live-set/
+  `Expedite`/`queueFresh`/per-instance-barrier framing is reframed there
+  around the deadlock fix and the three-orthogonal-concerns decomposition.]**
   Decision (a): land the correct per-instance barrier + force-via-normal-path
   now; full sweep parallelism arrives with checkpoint 2/3 demand-driven
   spawning. Structure-for-parallel is the goal. The first 1c attempt was reset
@@ -711,15 +869,20 @@ can't hand off AND queue depth exceeds live goroutines. Needs validation against
 ### Next session pickup (in rough priority order)
 
 1. **Pool / workq consolidation** — see "Pool consolidation — foundational
-   analysis (2026-06-06)" above. Checkpoint 1 progress: **1a, 1b-i, 1b-ii, and
-   the `halfBoundFunnel`→`funnelInstance` rename are DONE** (committed; full
-   suite + sim + `-race` green). **NEXT = checkpoint 1c**, whose design was fully
-   refined this session — implement from "1c implementation design — REFINED,
-   fresh-session-ready" (per-instance barrier ref; Wave-held live set;
-   Schedule[admit, gated]/Expedite[re-prioritize, safe] split; promote
-   timed→fresh via `queueFresh`; `shouldStillWait` timed re-check for the
-   lost-wakeup race; retire synchronous flushAll/Flush). The first 1c coding
-   attempt was reset to `b9dbf2d` code; redo cleanly per the refined design.
+   analysis (2026-06-06)" above. Checkpoint 1 progress: **1a, 1b-i, 1b-ii,
+   rename, and 1c-i (per-instance barrier ref) are DONE** (committed). 1c-ii
+   foundation (`6df4218`) + `delayUntil→at`/`timed→scheduled` rename (`2759116`)
+   committed. **NEXT = finish 1c-ii per the "1c-ii CONSOLIDATED DESIGN
+   (2026-06-07)" section above** — the design that fixes the **pre-existing
+   deadlock** (bisected to `63a4d57`, a test-only sim commit) via three
+   orthogonal concerns: heap-position under `delayq.mu`; atomic `admitted`
+   (+ `Schedule(w,0)` indefinite, reversing the zero-`at` panic); per-instance
+   lifetime ref with op-liveness-dropped-at-flush + `funnelOp.unref` draining
+   `instanceQueue`; then live-set/`forceAll`; then `accumulate()`/`Dispatch`
+   renames. **CAUTION:** the full `-race` sim was never reliably green
+   (intermittent pre-existing hang); it becomes the gate only after the
+   deadlock fix. Uncommitted WIP in the tree (`ScheduledWorkItem` embed +
+   `flushAll` orphan-hang fix) folds into sub-steps 1 and 5.
    After 1c: checkpoint 2 (delete funnel `maxConcurrency` → demand-driven) then
    3/4/5.
 2. **Thread C completion** — Try* honoring non-zero non-Forever deadlines via bounded-wait. Falls out of the consolidation; pick up the `Forever` sentinel and `dispatch (bool, error)` foundation from `5dc49c7`.

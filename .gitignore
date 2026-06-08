@@ -1,5 +1,6 @@
 testdata/
 go.work
 go.work.sum
-/.claude
+/.claude/*
+!/.claude/skills/
 /internal/bin

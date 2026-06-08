@@ -4,6 +4,85 @@ This document contains working notes and context for development on the `combine
 
 Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
 
+## TestBySimulation `-race` hang ROOT-CAUSED: limiter held across a blocking gather (2026-06-07)
+
+**This is the actual gate-blocking bug** — pre-existing, in core backpressure/limiter code,
+**orthogonal to the 1c-ii funnel rewrite** that this session started on. The 1c-ii work was
+aimed at a theorized funnel `c.mu`/`SetPosition` deadlock that is **not** what fails the gate.
+
+**Symptom:** intermittent `TestBySimulation` hang. Across ~20 captured hangs (baseline + WIP,
+race + non-race) there were **zero mutex/sema waiters** — it is a **busy-spin livelock**, not a
+blocking deadlock. Baseline (old code) reproduces it, so it is pre-existing.
+
+**Root cause (trace-confirmed):** an op (a Funnel instance, or a Launcher task) holds a `limit=1`
+concurrency **limiter permit** while it is **blocked in a gather** (`Skim`/`SkimAll`/
+`CloseAndSkimAll` — e.g. a Funnel `Accumulate` that synchronously runs a subjob via
+`runSubjob → sim.Run → Wave.CloseAndSkimAll`). Other work **in the same (sub)job** that needs the
+same single-permit limiter can never acquire it (the holder is parked, not releasing), so the
+backpressure **block-and-help** path (`Pool.block → ExecuteOne → addWorkWhileMaybeBlocking →
+rdvq.Waiters.WaitFunc`) spins forever (the rdvq item counter climbed to ~920k in the captured
+trace). The sim builds **fresh** limiters per (sub)job (`sim.Run` → new controller + `NewWave` +
+`NewSemaphore`), so this is within-one-(sub)job contention, telescoped by recursion — NOT
+cross-job reuse. Decisive confirmation: making all limiters unlimited → **0 hangs / 250** (vs
+~1/25 with limiters).
+
+**THE FIX (agreed with PN): a limiter suspend/resume protocol.** A permit gates *active
+computation*, not *blocked-waiting*. The framework suspends the held permit at **every point
+where the holder blocks waiting on other work** — gathers AND the block-and-help wait on a
+backpressured Submit — and reacquires (blocking) on return. The **limiter arbitrates** what
+suspend/resume mean:
+- `limiterImpl` gains `suspend() bool` + `resume(ctx) error` (distinct from `tryAcquire`/`release`
+  — you can't reuse acquire/release because for a rate limiter `resume`/reacquire would wrongly
+  *re-pay the rate*).
+- **Semaphore:** `suspend` = give back the concurrency slot (`inFlight--`, notify); `resume` =
+  block until a slot is free (`inFlight++`, wait on the notifier). (Re-takes a *concurrency* slot,
+  not a new admission.)
+- **Rate limiter:** `suspend`/`resume` = **no-op** (admission paid once at start; nothing held
+  during the op; no deadlock to dissolve, nothing to re-pay).
+- **Combined:** suspend the concurrency dimension, leave the rate dimension.
+
+**Implementation sketch:**
+- A `*heldPermit{ impl limiterImpl; suspended bool; mu }` carried as a **ctx value** (NOT
+  `ctxMeta` — it must survive the subjob's `NewWave` so the subjob's `CloseAndSkimAll` sees the
+  parent's hold). Set when an op runs its body under a limiter (task dispatch + `funnelWork.Execute`).
+- `Skim`/`SkimAll`/`CloseAndSkimAll` (and the block-and-help wait point): on entry, if a
+  `heldPermit` is present and not already suspended, `suspend()` it; `defer` a **blocking**
+  `resume(ctx)`. The `suspended` flag makes nested gathers no-ops (re-entrant safe).
+- `completedFn`/`funnelWork` release at op-completion must consult the `heldPermit` so a
+  cancellation mid-gather (suspended) does not double-release.
+
+**Why it telescopes over arbitrarily-nested subjobs:** a subjob is only ever entered *through* a
+gather (`CloseAndSkimAll`). Level *k*'s op holds `Lₖ`; to run level *k+1* it must gather → that
+suspends `Lₖ` for the whole child → level *k+1* holds/suspends `Lₖ₊₁` at *its* gathers, etc. So no
+`Lₖ` is ever held across the wait for level *k+1* at any depth. Any subjob code is either (a) on a
+different goroutine with its own holds/gathers, or (b) synchronous on the parent's goroutine —
+which is *by definition* inside the parent's gather (permit already suspended). No third case.
+
+**Invariant to preserve:** *the only points where a permit-holder blocks-waiting or synchronously
+runs other work on its own goroutine are the gather calls (and block-and-help submit points,
+which fold under the same suspend rule).* Today block-and-help drains the **skim** queue (gated by
+*different* limiters than the holder's scatter-side permit), and funnels postpone rather than
+block-and-help — so a holder never synchronously runs work needing its own permit, and
+gather-suspend alone is already sufficient. Suspending at the submit block-and-help point too is
+the airtight/uniform rule (and frees the slot during the wait — strictly better concurrency).
+
+**Rejected alternative:** "demote subjob submits to non-top-level so they postpone." Wrong lever
+— the cause is the *held permit across a wait*, not the *top-level label*; a subjob's
+`controller.Run` is a legitimate driver that should block-and-help; and it tangles with the
+dispatch contract (the `ctxMeta.ExecuteNowOrQueue` `AddToListeners` panic-stub requires
+`blockFn != nil` when `ShouldBlock()` — nilling `shouldBlock` for subjobs panics; tried, reverted).
+
+**Sim trace-debugging toolkit (used to find this; has stale markers to fix):**
+`PSGTRACEINTERNALS= go test -trace=/tmp/trace.out -rapid.checks=1` (loop until a `-timeout` hang
+leaves a usable trace), then `internal/sim/analyze-sim-trace.sh` → `fmttrace`
+(`internal/cmd/fmttrace`, separate module) → plan/started/completed/`incomplete.txt`;
+`internal/cmd/fmttrace/{find,extract}-goroutine*.sh` to drill into a goroutine. **Stale (combiner
+rename):** `extract-sim-trace.sh` greps `sim.Run: Test plan:` but the sim now logs the plan as
+`%v` (`Plan#N…`); `extract-sim-completed.sh` greps `step M/M: done` but the sim logs `… ends at`.
+Fix either the scripts or restore the markers in `internal/sim/run.go`. (Worth a reusable
+debugging skill.)
+
+
 ## Architecture Highlights (Completed)
 
 **Core Infrastructure:**

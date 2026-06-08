@@ -677,6 +677,20 @@ resolved.
 
 ### 1c-ii CONSOLIDATED DESIGN (settled with PN, 2026-06-07) — supersedes the older "1c implementation design — REFINED" and "1c-ii — NEXT" notes below
 
+> **TODO (REVIEW, 2026-06-07):** The 1c-ii implementation (committed:
+> `ScheduledState` interface swap in delayq/workq, synchronous
+> `Reschedule`/`ClaimForFlush`, and the funnelInstance lifetime rewrite —
+> no per-instance refcount, op-liveness-at-flush, R1/R2) is considered
+> independently valid and necessary, but **PN has not fully reviewed it**
+> and it **may be more complex than necessary** — revisit for
+> simplification. Note: it was implemented to fix a theorized funnel
+> `c.mu`/`SetPosition` deadlock that turned out NOT to be what fails the
+> `TestBySimulation -race` gate (see the limiter-held-across-gather
+> root-cause section at the top of this file). So it is **unvalidated
+> against a green gate** — the gate can't go green until the limiter
+> suspend/resume fix lands. Re-validate (full `-race` sim, many runs)
+> once that fix is in.
+
 This is the agreed design. It resolves the pre-existing deadlock *and*
 the flush/lifetime tangle by replacing the overloaded `queued` flag with
 **three orthogonal concerns**, and it removes the far-future-placeholder

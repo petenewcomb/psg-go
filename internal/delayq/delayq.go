@@ -46,18 +46,35 @@ import (
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 )
 
-// Item is the contract for an entry stored in a [Queue]. The Position
-// / SetPosition pair is queue bookkeeping: implementations store an int
-// field and surface it through these methods; only the queue ever
-// mutates it. Its tri-state lets [Queue.Expedite] tell a never-scheduled
-// item from one that was scheduled and has since drained:
-//   - zero: never scheduled;
-//   - positive: currently queued;
-//   - negative: previously queued, since drained or removed.
+// Item is the contract for an entry stored in a [Queue]. An item exposes
+// a pointer to its [ScheduledState] — the queue's per-item bookkeeping —
+// and never touches that state's fields itself. Routing all position
+// access through the queue (which mutates it only under q.mu) means the
+// item type structurally cannot take its own lock during a heap
+// operation, which is what keeps the queue's mutex from waiting on
+// caller-held locks. See [ScheduledState].
 type Item interface {
-	Position() int
-	SetPosition(int)
+	ScheduledState() *ScheduledState
 }
+
+// ScheduledState is the per-item bookkeeping a [Queue] keeps for an entry.
+// An [Item] embeds one (typically via an embeddable helper) and surfaces
+// a pointer to it through [Item.ScheduledState]; only the queue reads or
+// writes its fields, and only under q.mu.
+//
+// position is a tri-state, read by [Queue.Expedite], [Queue.Reschedule],
+// and [Queue.ClaimForFlush] to tell an item's history apart:
+//   - zero: never scheduled;
+//   - positive: currently queued (1-based heap index);
+//   - negative: previously queued, since drained or removed.
+type ScheduledState struct {
+	position int
+}
+
+// Position reports the item's tri-state position (see [ScheduledState]).
+// It is a read-only query for callers that want to inspect an item's
+// queue history; the queue itself mutates the position only under q.mu.
+func (s *ScheduledState) Position() int { return s.position }
 
 // noDeadline is the atomic sentinel for an empty queue.
 const noDeadline int64 = math.MaxInt64
@@ -98,8 +115,8 @@ type entry[T Item] struct {
 }
 
 func (e entry[T]) Less(other entry[T]) bool { return e.deadline.Before(other.deadline) }
-func (e entry[T]) Position() int            { return e.item.Position() }
-func (e entry[T]) SetPosition(p int)        { e.item.SetPosition(p) }
+func (e entry[T]) Position() int            { return e.item.ScheduledState().position }
+func (e entry[T]) SetPosition(p int)        { e.item.ScheduledState().position = p }
 
 // update records a Schedule or Remove request from outside the
 // mutex. Drain folds these into the heap.
@@ -242,7 +259,7 @@ func (q *Queue[T]) Expedite(item T) (T, bool) {
 
 	q.foldUpdates()
 
-	p := item.Position()
+	p := item.ScheduledState().position
 	if p == 0 {
 		panic("delayq: Expedite of a never-scheduled item")
 	}
@@ -256,6 +273,78 @@ func (q *Queue[T]) Expedite(item T) (T, bool) {
 		return *new(T), false
 	}
 	return item, true
+}
+
+// Reschedule synchronously ensures item is queued to become due at at,
+// returning whether it did so. Unlike [Queue.Schedule] (which defers the
+// heap mutation to the next Drain), Reschedule folds pending updates and
+// mutates the heap under q.mu so the caller learns, atomically with the
+// heap state, whether the item is still schedulable:
+//   - if item was already drained or removed (negative position), a flush
+//     for it is already in flight elsewhere, so Reschedule is a no-op and
+//     returns false;
+//   - otherwise item is inserted afresh (zero position) or updated in
+//     place (positive position) to become due at at, and returns true.
+//
+// Callers hold their own per-item lock across the schedulable decision, so
+// the only resulting lock order is caller-lock → q.mu. Safe for
+// concurrent callers; one heap mutation runs at a time.
+func (q *Queue[T]) Reschedule(item T, at time.Time) bool {
+	pre := q.nextDeadline.Load()
+
+	rescheduled, lowered := q.reschedule(item, at, pre)
+	// Wake outside q.mu (as the Schedule path does): if our insertion made
+	// at the earliest deadline, nudge a parked worker so it notices.
+	if rescheduled && lowered && q.wake != nil {
+		q.wake()
+	}
+	return rescheduled
+}
+
+func (q *Queue[T]) reschedule(item T, at time.Time, pre int64) (rescheduled, lowered bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.foldUpdates()
+
+	if item.ScheduledState().position < 0 {
+		q.republishNext(pre)
+		return false, false
+	}
+
+	q.h.Push(entry[T]{item: item, deadline: at})
+	q.republishNext(pre)
+	return true, nanosSinceEpoch(at) < pre
+}
+
+// ClaimForFlush atomically arbitrates whether the caller may flush item
+// out-of-band, returning true if so. It folds pending updates, then:
+//   - if item was already drained or removed (negative position), a flush
+//     is already in flight elsewhere, so ClaimForFlush returns false and
+//     the caller must not flush it;
+//   - otherwise it removes item from the heap (a no-op if item was never
+//     queued) and returns true, granting the caller the sole flush.
+//
+// Because a concurrent [Queue.Drain] and a ClaimForFlush serialize on
+// q.mu and exactly one observes item as still-queued, at most one party
+// ever flushes a given item. Lock order caller-lock → q.mu, as for
+// [Queue.Reschedule]. Safe for concurrent callers.
+func (q *Queue[T]) ClaimForFlush(item T) bool {
+	pre := q.nextDeadline.Load()
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.foldUpdates()
+
+	if item.ScheduledState().position < 0 {
+		q.republishNext(pre)
+		return false
+	}
+
+	q.h.Remove(entry[T]{item: item})
+	q.republishNext(pre)
+	return true
 }
 
 // foldUpdates drains the pending-update nbcq into the heap. Must be

@@ -91,6 +91,25 @@ func (q *Accepted) Remove(w ScheduledWork) {
 	q.scheduled.Remove(w)
 }
 
+// Reschedule synchronously ensures w is scheduled to become fresh at at,
+// returning whether it did so (false if w was already drained or
+// removed, meaning a flush for it is already in flight). See
+// [delayq.Queue.Reschedule]. Unlike [Accepted.Schedule] it lets a caller
+// holding its own per-item lock learn, atomically with the queue state,
+// whether w is still schedulable.
+func (q *Accepted) Reschedule(w ScheduledWork, at time.Time) bool {
+	return q.scheduled.Reschedule(w, at)
+}
+
+// ClaimForFlush arbitrates whether the caller may flush w out-of-band,
+// returning true if so (false if w was already drained, i.e. some
+// deadline-driven execution already claimed it). It removes any pending
+// scheduled entry for w when granting the claim. See
+// [delayq.Queue.ClaimForFlush].
+func (q *Accepted) ClaimForFlush(w ScheduledWork) bool {
+	return q.scheduled.ClaimForFlush(w)
+}
+
 // Expedite promotes an already-[Accepted.Schedule]d w straight into the
 // fresh queue so the next worker runs it now, regardless of its
 // deadline. It is backpressure-neutral — w already passed admission at

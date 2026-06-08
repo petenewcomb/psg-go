@@ -18,12 +18,14 @@ import (
 // testItem is the standard test fixture: a pointer-identity item that
 // only tracks its heap position. The queue owns the deadline.
 type testItem struct {
-	id  int
-	pos int
+	id    int
+	state delayq.ScheduledState
 }
 
-func (it *testItem) Position() int     { return it.pos }
-func (it *testItem) SetPosition(p int) { it.pos = p }
+func (it *testItem) ScheduledState() *delayq.ScheduledState { return &it.state }
+
+// Position is a test helper surfacing the queue-owned tri-state position.
+func (it *testItem) Position() int { return it.state.Position() }
 
 // epoch is a fixed reference point so deadlines in tests are easy to
 // reason about regardless of wall time.

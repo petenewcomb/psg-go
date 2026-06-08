@@ -185,14 +185,11 @@ func (cp *FunnelPool) goroutine() {
 		case errors.Is(err, workq.ErrEndOfWork):
 			if confirmingEndOfWork {
 				trace.Logf(ctx, traceRegion, "last goroutine at end of work, flushing funnels")
-				if !worker.flushAll(ctx) {
-					if cp.state.GoroutineExiting() {
-						trace.Logf(ctx, traceRegion, "last goroutine exiting")
-					} else {
-						trace.Logf(ctx, traceRegion, "no-longer-last goroutine exiting")
-					}
-					return
-				}
+				// Flush every pending instance through the shared scheduled
+				// queue. Any worker can do this (see flushAll); a worker that
+				// never ran a funnel must still flush so live instances'
+				// barrier references drop and the job can reach Done.
+				worker.flushAll(ctx)
 			}
 			if cp.state.GoroutineExiting() {
 				// This is the last goroutine running. Keep running a bit longer

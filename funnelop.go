@@ -293,10 +293,6 @@ func (c *Funnel[T]) refInner() *funnelOp[T] {
 	return inner
 }
 
-type funnelInstanceID int64
-
-var funnelInstanceCounter atomic.Int64
-
 type funnelOp[T any] struct {
 	refCount atomic.Int64
 
@@ -342,6 +338,16 @@ func (c *funnelOp[T]) ref() {
 	}
 }
 
+// dropInstanceLiveness drops the op-liveness reference an instance holds
+// from creation until its flush: it decrements the live-instance count
+// and unrefs the op. Called by the party that performs an instance's
+// flush, after releasing that instance's c.mu (so a teardown it triggers
+// never recycles an instance whose c.mu is still held).
+func (c *funnelOp[T]) dropInstanceLiveness() {
+	c.instanceCount.Add(-1)
+	c.unref()
+}
+
 // unref is called by leakguard when a handle is closed.
 // It decrements refCount and cleans up if this was the last reference.
 //
@@ -356,14 +362,27 @@ func (c *funnelOp[T]) unref() {
 		return
 	}
 
-	// Last reference - we now have exclusive access, no mutex needed
-
-	// Validate cleanup invariants
+	// Last reference - we now have exclusive access, no mutex needed.
+	// op-liveness drops at flush, so by now every instance has flushed.
 	if c.instanceCount.Load() != 0 {
 		panic("instance count is not zero")
 	}
-	if _, ok := c.instanceQueue.TryPopFront(); ok {
-		panic("instance queue was not empty")
+
+	// Drain the reuse cache: spent shells linger in instanceQueue (an nbcq
+	// has no mid-queue removal) after their flush dropped op-liveness, so
+	// the op can reach teardown with them still cached. Return them to the
+	// pool here — pure cache cleanup, since they hold no live references.
+	// No instance c.mu can be held now: any active funnelWork would hold an
+	// op reference, so refCount would not have reached zero.
+	for {
+		inst, ok := c.instanceQueue.TryPopFront()
+		if !ok {
+			break
+		}
+		if inst.accumulator != nil {
+			panic("live instance in queue at op teardown")
+		}
+		c.funnelInstancePool.Put(inst)
 	}
 
 	// Call factory.Close() to release factory-level state. Errors
@@ -397,139 +416,71 @@ func (c *funnelOp[T]) unref() {
 }
 
 type funnelInstance[T any] struct {
-	id funnelInstanceID
+	// ScheduledWorkItem supplies the immutable [workq.Work] identity
+	// (ID/Group, Init'd once at creation) and the scheduled-queue
+	// position bookkeeping. The identity is never mutated after Init, so
+	// the controller can read ID()/Group() without holding c.mu (it sorts
+	// buffered work by group then ID). Group is the instance's flush group
+	// — distinct from earliestGroup below, which tracks the lowest input
+	// group seen. Free is overridden (see below); the scheduled-queue
+	// position is owned entirely by delayq (mutated only under its mutex),
+	// so this type never hooks position changes — which is what keeps
+	// delayq's mutex from ever waiting on c.mu (the deadlock fix).
+	workq.ScheduledWorkItem
+
 	op *funnelOp[T]
 
-	// workID and flushGroup are the immutable [workq.Work] identity for
-	// this instance when it is scheduled as a flush. Set once at creation
-	// and never mutated, so the controller can read ID()/Group() without
-	// holding c.mu (it sorts buffered work by group then ID). workID uses
-	// the shared work-ID counter — funnelInstanceID is a separate counter
-	// that could collide with other work and trip requeueBuffer's
-	// equal-ID panic.
-	workID     workq.WorkID
-	flushGroup workq.GroupID
-
 	mu            sync.Mutex
-	refCount      int
 	earliestGroup workq.GroupID
-	accumulator   Accumulator[T]
 
-	// queued reports whether this instance currently has a Ref held on
-	// behalf of an in-flight Schedule on the funnel pool's scheduled work
-	// queue. Mutated only under c.mu.
-	//
-	// It is deliberately distinct from flushHeapPos. flushHeapPos tracks
-	// the queue's *heap* state, but delayq updates are deferred: a
-	// Schedule only becomes a positive heap position once a later Drain
-	// folds it in. queued records the Ref synchronously at Schedule time,
-	// so a reschedule that races the fold (e.g. another worker reuses
-	// this instance before the first Schedule folds) correctly observes
-	// "already Ref'd" via queued and avoids a double Ref — which a
-	// flushHeapPos check could not, since it would still read 0.
-	queued bool
-
-	// flushHeapPos is this instance's position in the scheduled work queue's
-	// deadline structure, mutated only by the queue (under delayq.mu, via
-	// SetPosition): 0 = never scheduled, >0 = the 1-based heap index,
-	// <0 = previously scheduled and since removed/drained. See queued for
-	// why heap position alone is insufficient for Ref bookkeeping.
-	flushHeapPos int
+	// accumulator is the live user state. Non-nil means the instance is
+	// live; flush sets it nil exactly once, which is the sole liveness
+	// signal — there is no per-instance reference count. Mutated only
+	// under mu.
+	accumulator Accumulator[T]
 }
 
-// ID implements [workq.Work]. See workID.
-func (c *funnelInstance[T]) ID() workq.WorkID { return c.workID }
-
-// Group implements [workq.Work]. See flushGroup.
-func (c *funnelInstance[T]) Group() workq.GroupID { return c.flushGroup }
-
 // Execute implements [workq.Work]: it runs the scheduled flush once the
-// instance's deadline has come due and the scheduled-work queue has surfaced it
-// as fresh work. The Sender comes from the executing worker's
-// environment (as in funnelWork.executeInner); any funnel worker may run
-// it. The companion unref of the queued reference happens in Free.
+// instance's deadline has come due and the scheduled-work queue has
+// surfaced it as fresh work. Any funnel worker may run it; the Sender
+// comes from the executing worker's environment. This is party "D" in the
+// lifetime model: it flushes and drops op-liveness, then never touches
+// the instance again (see [funnelInstance.forceFlush]), so an owner
+// reuse-pop is free to recycle the spent shell the instant Execute
+// releases c.mu.
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	workerCtx, meta := c.op.funnelPool.job.ctxMeta(ctx)
 	cw := meta.executionEnvironment.(*cpWorker)
-	c.mu.Lock()
-	c.flush(workerCtx, cw.Sender())
-	c.mu.Unlock()
+	c.forceFlush(workerCtx, cw.Sender())
 	return nil
 }
 
-// Free implements [workq.Work]: it drops the reference held while the
-// instance was queued for flushing (freeing the instance if it was the
-// last). The flush itself ran in Execute; Free is the unref half of the
-// old Flush, deferred to here so the controller never touches a recycled
-// instance mid-buffer.
-func (c *funnelInstance[T]) Free() {
-	c.Unref()
-}
+// Free implements [workq.Work] as a no-op. A deadline-driven flush
+// completes everything it needs — the user flush, the job barrier, and
+// op-liveness — inside [funnelInstance.Execute] before releasing c.mu and
+// never touches the instance again. Because an owner reuse-pop may recycle
+// the spent shell the instant c.mu is released (before the controller
+// gets here to call Free), Free must not read any instance field.
+func (c *funnelInstance[T]) Free() {}
 
-// Position implements [delayq.Item]. The heap reads positions under
-// delayq.mu so the read is consistent with the heap's own ordering;
-// concurrent writers come exclusively through SetPosition, which
-// synchronizes with funnel via c.mu.
-func (c *funnelInstance[T]) Position() int { return c.flushHeapPos }
-
-// SetPosition implements [delayq.Item]. It is called by the delayq
-// heap under delayq.mu when an item is inserted, swapped, or removed.
-// We take c.mu so funnel's read of c.queued and c.flushHeapPos
-// stays consistent with the heap's view: when delayq removes c (a
-// non-positive p — zero never occurs from the heap, but a negative
-// removed sentinel does), the queued flag flips false here, ensuring a
-// concurrent funnel that subsequently acquires c.mu correctly observes
-// "no Ref outstanding" and Refs for its new Schedule.
-//
-// Lock ordering: delayq.mu first (held by the heap operation), then
-// c.mu (taken here). funnel never takes delayq.mu while holding
-// c.mu, so no deadlock.
-func (c *funnelInstance[T]) SetPosition(p int) {
-	c.mu.Lock()
-	c.flushHeapPos = p
-	if p <= 0 {
-		c.queued = false
-	}
-	c.mu.Unlock()
-}
-
-// Must already be holding c.mu lock.
-func (c *funnelInstance[T]) Ref() {
-	if c.refCount < 1 {
-		panic("reference count underflow")
-	}
-	c.refCount++
-}
-
-// Must not be holding c.mu lock.
-func (c *funnelInstance[T]) Unref() {
-	c.mu.Lock()
-	finalRefDropped := c.unref()
-	c.mu.Unlock()
-	if finalRefDropped {
-		c.free()
-	}
-}
-
-// Must already be holding c.mu lock.
-// Returns true if the final reference was dropped.
-func (c *funnelInstance[T]) unref() bool {
-	// Must already be holding c.mu lock
-	if c.refCount < 1 {
-		panic("reference count underflow")
-	}
-	c.refCount--
-	return c.refCount == 0
-}
-
-// A call to unref() must already have returned true
-func (c *funnelInstance[T]) free() {
-	pool := c.op.funnelInstancePool
+// forceFlush flushes the instance out-of-band — for a deadline-driven
+// [funnelInstance.Execute] or the end-of-work sweep — and, if this call
+// performed the flush, drops op-liveness. It captures op before taking
+// c.mu and uses only that local afterward, so it never touches the
+// instance object once c.mu is released (rule R2): the spent shell is
+// then safe for an owner reuse-pop to recycle concurrently.
+func (c *funnelInstance[T]) forceFlush(ctx context.Context, sender *rdvq.Sender) {
 	op := c.op
-	pool.Put(c)
-	op.instanceCount.Add(-1)
-	op.unref()
+	var didFlush bool
+	func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		didFlush = c.flush(ctx, sender)
+	}()
+	if didFlush {
+		op.dropInstanceLiveness()
+	}
 }
 
 func (c *funnelInstance[T]) allocate(
@@ -608,54 +559,45 @@ func (c *funnelInstance[T]) funnel(
 	workQueue := &c.op.funnelPool.workQueue
 	switch {
 	case !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0:
-		// Already-past deadline — flush inline.
-		if c.queued {
-			workQueue.Remove(c)
-			c.queued = false
+		// Already-past deadline — flush inline, but only if no
+		// deadline-driven Execute has already claimed this instance.
+		// ClaimForFlush removes any pending heap entry and grants the
+		// flush; if it returns false the instance was already drained, so
+		// its pending Execute will flush the data just accumulated and we
+		// leave the accumulator live (rule R1).
+		if workQueue.ClaimForFlush(c) {
+			c.flush(ctx, sender)
 		}
-		c.flush(ctx, sender)
 	default:
 		// Either a future deadline or no deadline (zero). In the
 		// no-deadline case the accumulator stays alive until the
 		// pool's job-end flush sweep picks it up; we still schedule
 		// the instance on the scheduled work queue — with a far-future
 		// placeholder deadline — so that sweep finds it.
+		//
+		// Reschedule re-adds (or updates) the heap entry unless the
+		// instance was already drained, in which case it returns false and
+		// we leave it to the pending Execute (rule R1).
 		deadline := newFlushDeadline
 		if deadline.IsZero() {
 			deadline = time.Now().Add(maxFlushAllSkew)
 		}
-		if !c.queued {
-			c.Ref()
-			c.queued = true
-		}
-		workQueue.Schedule(c, deadline)
+		workQueue.Reschedule(c, deadline)
 	}
 }
 
-// Must not already hold c.mu
-func (c *funnelInstance[T]) Flush(ctx context.Context, sender *rdvq.Sender) {
-	traceRegion := "funnelInstance.Flush"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	c.mu.Lock()
-	defer func() {
-		finalRefDropped := c.unref()
-		c.mu.Unlock()
-		if finalRefDropped {
-			c.free()
-		}
-	}()
-	c.flush(ctx, sender)
-}
-
-// Must already hold c.mu
-func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) {
+// Must already hold c.mu. Returns whether this call performed the flush
+// (false if the instance was already flushed). Drops the per-instance job
+// barrier reference, but NOT op-liveness or the pooled object — the caller
+// does that after releasing c.mu (the flusher drops op-liveness; the owner
+// lineage recycles).
+func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) bool {
 	traceRegion := "funnelInstance.flush"
 
 	accumulator := c.accumulator
 	if accumulator == nil {
 		// already flushed, ignore
-		return
+		return false
 	}
 	c.accumulator = nil
 
@@ -681,6 +623,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) {
 	if err != nil {
 		c.emitErr(ctx, sender, err)
 	}
+	return true
 }
 
 func (c *funnelOp[T]) submit(
@@ -749,6 +692,8 @@ func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inpu
 }
 
 func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
+	// This is the owner lineage ("A"/"C"): an instance is either cached in
+	// instanceQueue or being processed here, never both.
 	var hbc *funnelInstance[T]
 	for {
 		hbc, _ = w.op.instanceQueue.TryPopFront()
@@ -760,47 +705,53 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 			if w.Group() < hbc.earliestGroup {
 				hbc.earliestGroup = w.Group()
 			}
-			break // still holding hbc.mu lock
+			break // still holding hbc.mu lock — reuse this live instance
 		}
-		// Was flushed, so unref
-		finalRefDropped := hbc.unref()
+		// Spent shell: a deadline-driven Execute already flushed it (which
+		// dropped op-liveness and the barrier) and left it cached here. As
+		// the owner, recycle it and keep looking for a live instance.
+		op := hbc.op
 		hbc.mu.Unlock()
-		if finalRefDropped {
-			hbc.free()
-		}
+		op.funnelInstancePool.Put(hbc)
 	}
 	if hbc == nil {
 		hbc = w.op.funnelInstancePool.Get()
 		hbc.mu.Lock()
-		hbc.refCount = 1
+		// op-liveness: one reference per instance, taken at creation and
+		// dropped at flush (see [funnelOp.dropInstanceLiveness]).
 		w.op.ref()
 		// Per-instance flush barrier: hold one job reference for the
-		// instance's whole live lifetime (here until flush() runs). This
-		// keeps the job out of Done while the accumulator is unflushed,
+		// instance's whole live lifetime (until flush() runs). This keeps
+		// the job out of Done while the accumulator is unflushed,
 		// regardless of which worker eventually flushes it. Released in
 		// flush().
 		w.op.funnelPool.job.state.IncrementReference()
 		w.op.instanceCount.Add(1)
 		hbc.op = w.op
-		hbc.id = funnelInstanceID(funnelInstanceCounter.Add(1))
-		hbc.workID = workq.NewWorkID()
+		// Reset and re-Init the embedded work item: a fresh work ID, the
+		// flush group, and a zeroed (never-scheduled) heap position. The
+		// reset matters for reuse — a pooled instance retains the negative
+		// removed sentinel from its previous life, and clearing it keeps
+		// the position tri-state honest so a stray Expedite of a fresh
+		// instance is caught (see delayq.Item).
+		hbc.ScheduledWorkItem = workq.ScheduledWorkItem{}
+		hbc.Init(w.Group())
 		hbc.earliestGroup = w.Group()
-		hbc.flushGroup = w.Group()
-		// Reset the scheduled-queue position to the never-scheduled state. A
-		// reused instance retains the negative removed sentinel from its
-		// previous life; clearing it keeps Position's tri-state honest so
-		// a stray Expedite of a fresh instance is caught (see delayq.Item).
-		hbc.flushHeapPos = 0
 		hbc.allocate(ctx, w.op.funnelFactory, sender)
 	}
 	defer func() {
-		flushed := hbc.accumulator == nil
-		finalRefDropped := flushed && hbc.unref()
+		// If funnel() flushed inline, it did so via ClaimForFlush, which
+		// guarantees no deadline-driven Execute also holds this instance —
+		// so this lineage owns the spent shell outright: drop op-liveness
+		// and recycle. Otherwise the instance is still live; cache it.
+		spent := hbc.accumulator == nil
+		op := hbc.op
 		hbc.mu.Unlock()
-		if !flushed {
-			w.op.instanceQueue.PushBack(hbc)
-		} else if finalRefDropped {
-			hbc.free()
+		if spent {
+			op.dropInstanceLiveness()
+			op.funnelInstancePool.Put(hbc)
+		} else {
+			op.instanceQueue.PushBack(hbc)
 		}
 	}()
 	hbc.funnel(ctx, sender, w.input, w.inputErr)

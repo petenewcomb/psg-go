@@ -169,26 +169,32 @@ func (cw *cpWorker) popSelect(
 // scheduledFlusher is the end-of-work view of a scheduled flush item: a
 // funnelInstance satisfies it. flushAll runs these synchronously rather
 // than routing them back through ExecuteOne, so a flush is never left
-// queued when the last goroutine decides to exit.
+// queued when the last goroutine decides to exit. forceFlush flushes the
+// instance and drops its op-liveness, matching the deadline-driven
+// Execute path.
 type scheduledFlusher interface {
-	Flush(ctx context.Context, sender *rdvq.Sender)
+	forceFlush(ctx context.Context, sender *rdvq.Sender)
 }
 
-// flushAll drains every still-pending scheduled flush from the scheduled work
-// queue and flushes each synchronously, then drops this worker's flush-signal
-// subscription. Used at job-end to deliver final flushes for not-yet-due
-// instances. Returns false only when this worker is not subscribed.
-func (cw *cpWorker) flushAll(ctx context.Context) bool {
+// flushAll drains every still-pending scheduled flush from the shared
+// scheduled work queue and flushes each synchronously, then drops this
+// worker's flush-signal subscription. Used at job-end to deliver final
+// flushes for not-yet-due instances.
+//
+// It flushes regardless of whether this worker is subscribed: the
+// scheduled queue is shared, so any worker may drain it, and each flush
+// drops the instance's own per-instance barrier reference (in flush()),
+// so the accounting is correct no matter which worker runs it. A worker
+// that never ran a funnel — hence never subscribed — can still be the
+// last goroutine; it must flush the pending instances or their barrier
+// references would never drop and the job would never reach Done.
+func (cw *cpWorker) flushAll(ctx context.Context) {
 	traceRegion := "cpWorker.flushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	if cw.nextJobFlushCh == nil {
-		return false
-	}
 	for _, w := range cw.cp.workQueue.DrainAllScheduled(nil) {
-		w.(scheduledFlusher).Flush(ctx, cw.Sender())
+		w.(scheduledFlusher).forceFlush(ctx, cw.Sender())
 	}
 	cw.nextJobFlushCh = nil
-	return true
 }
 
 // maxFlushAllSkew is the offset added to time.Now() for the no-deadline

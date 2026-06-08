@@ -12,11 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// scheduledWorkItem is a test [ScheduledWork]: a work item carrying a
-// position (via embedded [Scheduled]) whose Execute records that it ran.
+// scheduledWorkItem is a test [ScheduledWork] built on the embeddable
+// [ScheduledWorkItem] base, adding only an Execute that records that it ran.
 type scheduledWorkItem struct {
-	WorkItem
-	Scheduled
+	ScheduledWorkItem
 	executed bool
 }
 

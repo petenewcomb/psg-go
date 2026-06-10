@@ -89,6 +89,7 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - debug mode that runs everything in a way that makes logic easy to debug, ideally in a single goroutine
 - consider publishing generally-useful internal packages as standalone projects
 - consider adding environment variable-based configuration of PSG default tuning parameters 
+- consider adding https://github.com/glycerine/gown annotations and supporting Gown analysis of application code
 
 ### Additional Tests and Examples
 - Investigate and fix workflow cancellation test flakiness in psgwf (observed timing-dependent failures in example tests)

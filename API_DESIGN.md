@@ -223,30 +223,44 @@ type FlowOption interface { /* ... */ }
 func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
 
 // ===== Limiters =====
-
-// Limiter is the user-facing concurrency-control primitive. Limiters
-// compose: an op can bind multiple Limiters, all of which must permit a
-// dispatch before it proceeds. Users obtain Limiter values from
-// framework constructors (NewSemaphore, NewRateLimit, etc.) and pass
+//
+// Full design: docs/limiter-suspend-resume.md (the source of truth). Summary:
+//
+// Limiter is the user-facing concurrency-control primitive. Limiters compose:
+// an op can bind multiple Limiters, all of which must permit a dispatch before
+// it proceeds. Users obtain Limiter values from framework constructors and pass
 // them to WithLimits.
 //
-// In v0.x the internal contract is closed — users cannot implement
-// their own Limiter types. This keeps the framework free to evolve the
-// internal acquire/notify machinery without breaking users. Custom
-// concurrency logic that doesn't fit the built-ins should live inside
-// the user's Handler / Accumulator body, calling whatever blocking
-// primitive (rate.Limiter.Wait, semaphore.Weighted.Acquire, custom) is
-// appropriate.
+// Each Limiter binds to a *scheduler* at construction — the scheduler's first
+// argument, nil for self-scheduled (standalone). The scheduler is what actually
+// implements the framework contract; a Limiter is a resource bound to one.
+//   - Schedulers are the closed/sealed set (framework-provided): a direct
+//     scheduler (the nil/self case), and later OrderedScheduler /
+//     PriorityScheduler(prioritizer) for joint multi-limiter admission and
+//     cross-op prioritization. They carry all the lifecycle/suspend-resume/
+//     routing machinery.
+//   - Resources are the OPEN extension point: pure accounting (demand / acquire /
+//     release / suspendable / capacity-grew signal). A Semaphore is ~10 lines;
+//     memory/rate/weighted/user-defined resources are just as small.
+//
+// WithLimits requires all of its Limiters to resolve to the SAME scheduler
+// (a nil-scheduler limiter is its own self-scheduler), validated at op
+// construction. A Semaphore caps ACTIVE concurrency, not in-flight: a body
+// parked in a skim (e.g. driving a subwave) relinquishes its permit for the
+// duration and reclaims it on return (suspend/resume), which is what dissolves
+// the held-across-a-skim livelock.
 type Limiter struct {
-    impl limiterImpl  // unexported; sealed against external implementations
+    impl limiterImpl  // unexported; the scheduler — sealed against external implementations
 }
 
-func NewSemaphore(n int) Limiter           // generalization of TaskPool's mechanism
-func NewRateLimit(n int, d time.Duration) Limiter   // wraps x/time/rate; signals replenishment via timer
+type Scheduler …  // sealed; nil (self-scheduled) is the only value usable in v0.x so far
 
-// Future: NewAdaptive(...) for GC/load-aware backpressure, when ready.
-// Future: opening the interface for external implementations once the
-// contract is stable.
+func NewSemaphore(scheduler Scheduler, n int) Limiter            // active-concurrency cap; pass nil
+func NewRateLimit(scheduler Scheduler, n int, d time.Duration) Limiter  // (future) wraps x/time/rate
+
+// Future (additive, behind the same handle): OrderedScheduler / PriorityScheduler
+// constructors; NewMemoryLimiter etc.; an exported Resource interface +
+// NewLimiter(scheduler, resource) for user-defined resources; NewAdaptive(...).
 
 // ===== User-supplied interfaces =====
 //
@@ -477,7 +491,7 @@ type ErrFunnel             = Funnel[struct{}]
 // limiter:
 //
 //   ordered := streampool.NewFunnel(funnelPool, factory,
-//       streampool.WithLimits(streampool.NewSemaphore(1)),
+//       streampool.WithLimits(streampool.NewSemaphore(nil, 1)),
 //   )
 
 // ===== Wave binding =====
@@ -777,18 +791,34 @@ signature (`Handle(ctx, _ struct{}, _ error) error`).
 
 ## With limiters
 
+A single limiter is self-scheduled (pass `nil`):
+
 ```go
-slowAPI := streampool.NewSemaphore(5)
-apiRate := streampool.NewRateLimit(100, time.Second)
+slowAPI := streampool.NewSemaphore(nil, 5)
 
 fetch := streampool.NewLauncher(wave, fetchFn,
-    streampool.WithLimits(slowAPI, apiRate),
+    streampool.WithLimits(slowAPI),
 )
 ```
 
-Limiters compose with AND semantics: a dispatch proceeds only when all
-attached limiters permit. The same `Limiter` instance can be shared
-across multiple ops, expressing "these collectively cap at N concurrent
+Composing *multiple* limiters on one op requires a shared scheduler to
+coordinate their joint admission (deadlock-free), so they're bound to one at
+construction (`OrderedScheduler` shown; future):
+
+```go
+sched := streampool.NewOrderedScheduler()
+slowAPI := streampool.NewSemaphore(sched, 5)
+apiRate := streampool.NewRateLimit(sched, 100, time.Second)
+
+fetch := streampool.NewLauncher(wave, fetchFn,
+    streampool.WithLimits(slowAPI, apiRate), // both resolve to sched
+)
+```
+
+Limiters compose with AND semantics: a dispatch proceeds only when all attached
+limiters permit, and `WithLimits` requires them all to resolve to the same
+scheduler (validated at op construction). The same `Limiter` instance can be
+shared across multiple ops, expressing "these collectively cap at N concurrent
 operations."
 
 ## Deferred wave binding (nil at construction)
@@ -862,7 +892,7 @@ body running in a wave.
 | No `.To(sink)` wiring | Function bodies call `sink.Submit(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Funnel. |
 | No `Sink[T]` in public API | Not exported | Nothing in the framework's own API consumes a Sink type. User code that wants polymorphism over "things you can Submit to" defines a one-method interface locally; Go's structural typing makes that work without a published contract. |
 | Funnel state | Via `AccumulatorFactory[T]` interface (NewAccumulator + Close) returning `Accumulator[T]` instances | Factory creates per-instance Accumulators (each with closure state); framework calls each instance's `Accumulate` per input and `Flush` on Close. The factory's `Close()` fires once when the bound Funnel's refcount hits zero — releases factory-level state (shared connections, registries, etc.). For closure-based factories with no cleanup, `AccumulatorFactoryFunc[T]` is a bare-func adapter with no-op Close; for cleanup, `FuncAccumulatorFactory[T]` (struct) or `NewAccumulatorFactory[T](fn, closeFn)` (inference-friendly constructor). |
-| Serial accumulation ("reducer") | Funnel with `WithLimits(NewSemaphore(1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
+| Serial accumulation ("reducer") | Funnel with `WithLimits(NewSemaphore(nil, 1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
 | Launcher.Close | Not present | The framework can't deduce what sinks a task body will Submit to, so closing the Launcher tells the framework nothing useful. Resources release via leakguard finalizer when the value falls out of scope. |
 | Funnel.Close | Present | Funnel has refcounted Accumulator instances that need final Flush on end-of-input. Close releases the user's reference; the framework's per-work-item refs unwind through SkimAll. |
 | Skimmer.Close / .Dup | Absent | Skimmer's Handler is stateless from the framework's perspective; SkimAll completion is driven by in-flight tracking, not by an explicit end-of-input signal. No Dup either — sharing across handlers needs no lifecycle ceremony. |

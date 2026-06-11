@@ -41,7 +41,9 @@ one:
 - **Hold-through** (a hypothetical memory/resource limiter): the resource stays
   occupied while the holder is parked — suspending it would let other work
   overcommit the real resource. For this kind, suspend/resume are no-ops; the
-  permit is held continuously from acquire to release.
+  permit is held continuously from acquire to release. (Exception: a POSTPONED
+  request — granted but never started — returns even a hold-through
+  reservation; nothing has materialized. See "The POSTPONED state.")
 
 The same mechanism (a semaphore) could back either; the kind is intent. The
 protocol below is uniform across both — the framework always drives the same
@@ -66,14 +68,41 @@ type limiterImpl interface {
     newRequest(a applicant) request // allocate the handle (state PENDING); poolable
 }
 
-type request interface { // limiter-owned; one small state machine PENDING -> HELD <-> SUSPENDED -> DONE
-    tryAcquire() bool          // PENDING   -> HELD       (false: still PENDING)
-    suspend() bool             // HELD      -> SUSPENDED   (true if it transitioned; false if already SUSPENDED)
-    tryResume() bool           // SUSPENDED -> HELD        (false: still SUSPENDED)
-    release()                  // any state -> DONE        (give back / abandon / discard, by state; idempotent)
-    notifier() *workq.Notifier // wait/notify target for the current phase (acquire vs reclaim); limiter-chosen
+type request interface { // limiter-owned; one small state machine (illegal transitions PANIC)
+    tryAcquire() bool             // PENDING -> HELD (acquire) | POSTPONED -> HELD (re-grant); false: unchanged
+    postpone()                 // HELD -> POSTPONED         (grant yielded: gated work couldn't start)
+    suspend() bool             // HELD -> SUSPENDED (true)  | SUSPENDED: no-op, false (re-entrant brackets)
+    tryResume() bool           // SUSPENDED -> HELD         (reclaim; false: still SUSPENDED)
+    release()                  // any state -> DONE         (give back / abandon / discard, by state; idempotent)
+    notifier() *workq.Notifier // wait/notify target for the current phase; limiter-chosen; never nil
 }
 ```
+
+The state machine:
+
+```
+PENDING ──tryAcquire──► HELD
+HELD    ──suspend──► SUSPENDED ──tryResume──► HELD     (mid-body park)
+HELD    ──postpone─► POSTPONED ──tryAcquire────► HELD     (pre-body yield)
+any     ──release──► DONE                              (idempotent)
+```
+
+**Illegal transitions panic — framework bugs fail loud.** The one deliberate
+silent case is `suspend()` on an already-SUSPENDED handle (returns false):
+that is the re-entrancy mechanism for nested brackets, by design. `release()`
+on DONE is a no-op by design too — a safety property of the by-state cleanup,
+not bug-masking. Everything else off the table above (e.g. `postpone()` from
+anything but HELD, `tryAcquire()` from HELD — a retry can legally find only
+PENDING or POSTPONED, because a prior invocation either started the work, ending
+in DONE + freed, or postponed it) panics at the mis-wired integration point.
+
+**Notification discipline:** every transition that *returns capacity* triggers
+the scheduler's availability-wakeup — `suspend()`, `postpone()`, and
+`release()` from HELD. State-discarding transitions (`release()` from
+SUSPENDED/POSTPONED — the give-back already happened) notify nothing and credit
+nothing: double-notify is not a correctness bug (spurious wakeups re-check and
+re-park) but it is renotify-storm fuel and a "no inflation" conservation soft
+spot.
 
 `limiterImpl` is implemented by a **scheduler** — a *direct* scheduler over one
 resource, or one coordinating a group of resources bound to it (see "Multiple
@@ -87,27 +116,64 @@ The handle being a state machine is what makes everything else fall out:
   it's a per-call value (a stack wrapper over the work's accessors), with no
   identity across calls.
 - **No token threading, no framework-side state machine.** `PENDING/HELD/
-  SUSPENDED` lives in the handle, not spread across the integration points as
-  `permitToken`/`suspendToken` juggling.
+  SUSPENDED/POSTPONED` lives in the handle, not spread across the integration
+  points as `permitToken`/`suspendToken` juggling. `tryAcquire()` is the one
+  state-aware entry the routing needs — acquire or re-grant by state — so the
+  framework never inspects state itself.
 - **Cleanup is one idempotent call.** `release()` does the right thing by state —
   give the slot back (HELD), abandon a pending request (PENDING), discard a
-  suspended one (SUSPENDED). So every integration point is just
-  `defer req.release()` and *can't* mis-sequence or forget the give-up/teardown
-  signal, and there is no abandon-before-recycle ordering puzzle (the handle owns
-  its own recycle). The limiter still distinguishes the three cases internally
-  (it switches on its own state); they're simply not three methods the framework
-  must choose correctly among.
+  suspended or postponed one (SUSPENDED/POSTPONED — the give-back already
+  happened at suspend/postpone time, so release credits and notifies nothing).
+  So every integration point is one release call at its cleanup point (a defer,
+  or the work's completion callback) and *can't* mis-sequence or forget the
+  give-up/teardown signal, and there is no abandon-before-recycle ordering
+  puzzle (the handle owns its own recycle). The limiter still distinguishes the
+  cases internally (it switches on its own state); they're simply not separate
+  methods the framework must choose correctly among.
 - **The limiter owns notification routing.** `notifier()` returns the wait/notify
-  target for the handle's *current phase*, so the limiter — not the framework —
-  decides whether acquirers and reclaimers share a notifier or get separate
-  ones, and in what order they wake. Reclaim-prioritization and sizing become
-  internal limiter concerns; there are no separate acquire/resume notifier
-  methods on the contract.
+  target for the handle's *current phase* — acquire (PENDING), re-grant
+  (POSTPONED), reclaim (SUSPENDED) — so the limiter, not the framework, decides
+  whether those three waiter populations share a notifier or get separate ones,
+  and in what order they wake. The direct scheduler returns one notifier for
+  all three; a prioritized scheduler can wake reclaimers ahead of re-grants
+  ahead of fresh acquires. Reclaim-prioritization and sizing become internal
+  limiter concerns; there are no separate per-phase notifier methods on the
+  contract, and `notifier()` is never nil (the unlimited semaphore returns its
+  real notifier; callers stay branch-free).
 - **`applicant` accessors box lazily.** The `applicant` is the already-allocated
   work item behind an interface; `Value()`/`Processor()` box `T->any` only when a
   limiter actually reads them, so the count-based semaphore allocates nothing.
   It's in the contract from the start so the gating layer must surface the work —
   see "Blocking," below — rather than leaving a one-way door.
+
+### The POSTPONED state: granted, then yielded
+
+A request can be granted before its body can start: on the postpone dispatch
+path (skim/funnel contexts), the limiter gate acquires and only then discovers
+the gated work cannot proceed — e.g. the downstream task queue is full — so
+the work registers a listener and returns not-started, to be re-invoked later.
+The grant must not sit idle on work parked in the postponed queue (that is
+"held while not computing," the exact thing this design eliminates), and the
+pre-handle code already released-and-reacquired here. POSTPONED preserves that
+behavior *and* the request's stable identity across the retry:
+
+- `postpone()` returns the held capacity; the retry's `tryAcquire()` re-grants
+  without re-paying — see the per-resource rule below.
+- **Per-resource divergence (why this is a distinct state, not SUSPENDED with
+  a flag):** concurrency — both states give the slot back; hold-through memory
+  — SUSPENDED *keeps* the reservation (the parked body has live allocations)
+  but POSTPONED *releases* it (nothing materialized; the body never started);
+  rate — never re-paid in either, mechanically: the scheduler re-takes exactly
+  the dimensions it released for that state, and rate held nothing
+  post-admission, so nothing is re-taken. No special case.
+- **The pre-body/mid-body line:** POSTPONED yields a *pre-body* grant; the
+  hold-through rule (see "Where suspend fires") keeps a *mid-body* grant
+  across capacity stalls. The line in both is "has the body started."
+- **Terminology caveat:** workq "postponed" is wider — a work item postpones
+  whenever it can't start, including while its request is still PENDING
+  (acquire failed, listener registered). *Work postponed* does NOT imply
+  *request POSTPONED*; the state means specifically "granted, then yielded the
+  grant because the gated work couldn't proceed."
 
 ### Resources: the open layer
 
@@ -117,32 +183,43 @@ no handle, lifecycle, or notification routing:
 
 ```go
 type resource interface {
-    demand(a applicant) amount          // sizing: how much this applicant needs (1 for a semaphore; bytes for memory)
-    tryAcquire(amount) bool             // deduct if it fits
-    release(amount)                     // restore (a completion give-back or a suspend's) — pure accounting, no notify
-    suspendable() bool                  // relinquished while the holder is parked? (concurrency: yes; memory: no)
-    capacityIncreased() <-chan struct{} // signaled on out-of-band capacity *growth* (e.g. SetMaxConcurrency); nil if fixed-size
+    demand(a applicant) amount               // sizing: how much this applicant needs (1 for a semaphore; bytes for memory)
+    tryAcquire(amount) bool                  // deduct if it fits
+    release(amount)                          // restore (a completion, suspend, or postpone give-back) — pure accounting, no notify
+    suspendable() bool                       // relinquished while the holder is parked mid-body? (concurrency: yes; memory: no)
+    setCapacityChangedFn(fn func(delta int)) // bind-time hook for out-of-band capacity *growth*; nil/ignored for fixed-size
 }
 ```
 
-The capacity signal is a plain `<-chan struct{}` — not the internal `Notifier` —
-because resources are user-implementable and this is the one place a resource
-must hand the framework a wake source. A bare (coalescing/buffered-1) channel is
-trivial to expose and pings only on out-of-band *growth*; it is consulted only in
-the blocking path (to wake a parked waiter when a resize raises the ceiling), is
-`nil` for a fixed-size resource, and never touches the hot acquire/release path.
-The scheduler's *own* waiter set keeps using the internal `Notifier` (release-
-wakeup, routing) where the richer semantics earn their keep; `Notifier` is not
-exposed. A *direct* scheduler selects on one such channel; only the future
-*prioritized* scheduler must wake on any of N, which it handles internally with a
-small forwarder goroutine per growable resource (rare; cold path) — invisible to
-the resource author.
+The capacity signal is a **bind-time callback** — not a channel, and not the
+internal `Notifier`. The scheduler installs the hook when the resource is
+bound; the resource author's whole obligation is one line: after raising
+capacity out-of-band (e.g. `SetMaxConcurrency`), call the hook, if non-nil,
+with the delta. The hook is the scheduler's availability-wakeup entry — wake
+per freed slot, wake-all on unlimited — routed to the scheduler's *full*
+waiter set: parked (blocking) waiters AND postponed/registered listeners. It
+must be safe to call from any goroutine (the framework's implementation is a
+notifier poke); resource authors should avoid invoking it while holding their
+own locks. Fixed-size resources never call it; the hot acquire/release path
+never touches it. The scheduler's own waiter set keeps using the internal
+`Notifier` (release-wakeup, phase routing) where the richer semantics earn
+their keep; `Notifier` is not exposed.
+
+(A `capacityIncreased() <-chan struct{}` channel was rejected: a ping with no
+consumer parked sits unconsumed — postponed listeners would starve on a `0→n`
+resize that happens while nobody is blocked; a unary ping cannot carry the
+delta, which a `0→n` resize needs to wake n waiters; and multi-resource
+schedulers would need forwarder goroutines just to consume it.)
 
 The scheduler maps the handle lifecycle onto its resources: `tryAcquire` takes
 each demand (per its discipline), `suspend` releases the suspendable ones,
-`tryResume` re-takes them, `release` restores whatever's held by state. The handle
-carries the per-request demand amounts; resources are just shared, thread-safe
-counters.
+`postpone` releases *everything currently held* (pre-body, nothing has
+materialized — even a hold-through reservation returns; a rate resource holds
+nothing post-admission, so it is naturally exempt), `tryResume`/re-grant
+re-take exactly the dimensions released for that state (which is why rate is
+never re-paid — no special case), and `release` restores whatever's held by
+state. The handle carries the per-request demand amounts and the per-resource
+held/released bookkeeping; resources are just shared, thread-safe counters.
 
 This is where the sealing **inverts**: schedulers are the *closed* set
 (framework-provided — direct, ordered, prioritized — carrying all the
@@ -159,11 +236,14 @@ Two consequences worth stating:
   grants under the evaluate-lock it already needs for the priority decision, so
   the multi-resource deduction is atomic there for free; the direct scheduler is
   a single resource. Resources are strictly single-resource.
-- **`release` does not notify.** Availability-wakeup is the scheduler's job — it
-  called `release`, owns the waiter set, and knows the routing. The resource's
-  `capacityIncreased()` channel is only for *out-of-band* growth the scheduler
-  can't observe through its own acquire/release flow (a `SetMaxConcurrency`
-  raising the ceiling), and is `nil` for a fixed-size resource.
+- **`release` does not notify — the scheduler does, on exactly the
+  capacity-returning transitions.** Availability-wakeup is the scheduler's job —
+  it owns the waiter set and the routing. The rule (see "Notification
+  discipline" above): `suspend`/`postpone`/HELD-`release` notify;
+  SUSPENDED/POSTPONED-`release` (state-discarding) do not. The resource's
+  capacity hook is only for *out-of-band* growth the scheduler can't observe
+  through its own acquire/release flow (a `SetMaxConcurrency` raising the
+  ceiling); fixed-size resources never call it.
 
 The minimal case is a **direct scheduler over one semaphore resource**: the
 resource is a count with `tryAcquire`/`release` over `IncrementIfUnder`/
@@ -179,13 +259,18 @@ limiter's). Instead `ExecuteOrWait` shrinks to **routing**, and the one genuinel
 blocking case runs a shared helper:
 
 ```go
-// routing (this is what ExecuteOrWait becomes)
+// routing (this is what ExecuteOrWait becomes). tryAcquire is state-aware:
+// a first invocation finds PENDING (acquire); a retry finds POSTPONED
+// (re-grant). HELD at entry is impossible (a prior invocation either started
+// the work — DONE + freed — or postponed it) and panics.
 switch /* from ex.ShouldBlockOrPostpone() + ShouldBlock(ctx) */ {
-case oneShot:  if !req.tryAcquire() { return notAcquired }                     // defer release() abandons
-case postpone: if !req.tryAcquire() { ex.AddToListeners(&req.notifier().Listeners); return } // re-invoked later
-case block:    if err := blockingAcquire(ctx, req, helpSelectFn); err != nil { return err }
+case oneShot:    if !req.tryAcquire() { return notAcquired }                     // defer release() abandons
+case postponing: if !req.tryAcquire() { ex.AddToListeners(&req.notifier().Listeners); return } // re-invoked later
+case block:      if err := blockingAcquire(ctx, req, helpSelectFn); err != nil { return err }
 }
-return workFn(...)
+err := workFn(...)
+if !ex.Started() { req.postpone() } // grant yielded while the work waits elsewhere; see "The POSTPONED state"
+return err
 
 // shared helper: loop + automatic abandonment
 func blockingAcquire(ctx, req, helpSelectFn) error {
@@ -208,61 +293,160 @@ func blockingAcquire(ctx, req, helpSelectFn) error {
   re-invoked," and the funnel/task contexts use exactly that, so those paths are
   not — and need not be — inverted.
 
-Reclaim is the same shape with `tryResume`:
-`for !req.tryResume() { helpSelectFn(req.notifier()) }`.
+### Reclaim is help-shaped
 
-## Where suspend fires
+Reclaim is the same loop with `tryResume`:
+`for !req.tryResume() { helpSelectFn(req.notifier()) }` — and the help is
+**load-bearing, not an optimization**. The principle: *any wait on a goroutine
+that currently has a driving duty must help its driven domain* — including
+reclaim waits. (The same deep rule that makes top-level acquire-blocking
+help-shaped.) The help domain is **the pool whose skim context the goroutine
+currently occupies** — during a subwave drive, the subjob — not the handle's
+owning pool (a body goroutine has no `Receiver` for its parent pool and cannot
+help it); the wake source is the request's notifier. This cross-pool
+composition (help one pool, wake on another's limiter) is deliberate.
 
-The rule is uniform: **the framework suspends a held permit whenever it parks the
-holder, and reclaims it on return** — rather than enumerating which parking
-points are "the dangerous ones." Earlier analysis (and prior notes) repeatedly
-mis-identified the minimal sufficient set; a uniform rule removes that fragility
-and matches PSG's "make the unintended impossible" stance.
+Plain-wait reclaim deadlocks. Witness: a parent body holds a shared `limit=1`
+Limiter L (shared with an op inside the subwave it drives); a mid-drive `Skim`
+suspends L; subjob body **B** acquires L and runs; the parent's `Skim` returns
+and its reclaim plain-waits for L; B blocks posting its result into the
+subjob's full skim queue — a hold-through capacity wait (see "Where suspend
+fires"), so B keeps L; the only consumer of that skim queue is the parent
+goroutine. Cycle: reclaim(L) ← B completes ← B's post drains ← parent skims ←
+reclaim(L). The deadlock arises from the *interaction* of hold-through with
+plain-wait reclaim — neither alone is wrong. Help-shaped reclaim drains B's
+post, B completes, L frees.
 
-Concretely the framework brackets each blocking *episode* — the public skim
-methods (`Skim`/`SkimAll`, hence `CloseAndSkimAll`), the block-and-help submit
-point (`Pool.block`), and the scheduled-flush wait:
+`CloseAndSkimAll`'s reclaim is the same composition, vacuously plain: the
+subjob is drained, so the help domain is empty. No special case.
+
+## Where suspend fires: the two-class rule
+
+The rule is principled, not a site list: **classify every framework park by
+the kind of wait.** (Earlier analysis repeatedly mis-identified a "minimal
+sufficient set" of dangerous sites; a structural criterion removes that
+fragility. A blanket suspend-everywhere rule was also rejected — see
+"Rejected alternatives" — because at capacity waits it is *anti*-backpressure.)
+
+- **Suspend class — parks that wait on, or synchronously run, other
+  framework-gated work.** The gathers (public skim methods: `Skim`/`SkimAll`,
+  hence `CloseAndSkimAll`) and the block-and-help waits (today `Pool.block`;
+  named here by episode class because the destination architecture migrates
+  drain machinery from Pool to Wave). Resolution of these waits can depend on
+  permit availability, so holding across them risks circular waits —
+  suspension is **correctness-required**. Two witnesses:
+  - the original livelock: a permit held across a subwave skim starves a
+    sibling unit needing the same permit;
+  - shared-limiter self-deadlock at the block-and-help wait: a parent op and
+    an op inside the subwave it drives share a `limit=1` Limiter; the
+    subjob-top-level dispatch enters `blockingAcquire` on a permit held by the
+    *same goroutine's* parent body — an infinite block-and-help spin unless
+    the bracket suspends the parent's handle. (This upgrades bracketing the
+    block-and-help wait from "airtight bonus" to required.)
+- **Hold-through class — pure capacity waits.** The task-context blocking
+  posts (`taskPostWork`'s blocking push; the funnel submit's blocking branch):
+  a mid-body Submit parked on a full downstream queue **keeps its permit**.
+  Safe, by the invariant **"a permit wait never occupies bounded queue
+  capacity"** — a consumer that can't acquire its permit *postpones*, vacating
+  its queue slot, so queue drain never depends on permits (this holds even
+  under adversarial limiter sharing between producer and consumer ops). And
+  *desirable*: the held permit is the limiter's backpressure-propagation
+  mechanism — suspending at capacity waits would admit sibling after sibling
+  into the same full pipe, piling up unboundedly many half-done parked bodies.
+
+(The scheduled-flush wait is a park with no holder — a worker between bodies —
+so it belongs to neither class; a bracket there finds no handle.)
+
+**Every future parking point must be classified into one of the two classes
+when introduced; the classification, not a site list, is the contract.** Two
+structural commitments keep the classification sound:
+
+- **Skimmers (drain-side ops) never take `WithLimits`.** Not a missing
+  feature — load-bearing: the hold-through class is safe because queue drain
+  is permit-free, and skim handlers *are* the drain. Permit-gating them would
+  make capacity waits permit-dependent, recreating the cycle class this design
+  dissolves. Users who need to throttle expensive skim-handler work do it
+  inside the handler with their own primitives.
+- POSTPONED yields *pre-body* grants; hold-through keeps *mid-body* grants
+  across capacity stalls (see "The POSTPONED state").
+
+The suspend-class bracket:
 
 ```go
 if r := meta.currentHeldRequest(); r != nil && r.suspend() {
-    defer reclaim(ctx, r) // for !r.tryResume() { helpSelectFn(r.notifier()) }
+    defer reclaim(ctx, r) // for !r.tryResume() { helpSelectFn(r.notifier()) } — help-shaped; see above
 }
 ```
 
-`suspend()` returns false on an already-SUSPENDED handle, so nested same-episode
-skims are no-ops and the slot is freed once per episode and reclaimed once on
-return. A reclaim canceled mid-flight leaves the handle SUSPENDED, so the body's
-`defer req.release()` discards it correctly (no double give-back).
+`suspend()` returns false on an already-SUSPENDED handle, so nested
+same-episode brackets are no-ops: the slot is freed once per episode and
+reclaimed once on return. In help-execution nesting, an inner bracket that
+finds the *enclosing* body's already-SUSPENDED handle correctly installs no
+reclaim — the reclaim belongs to the episode that suspended it. A reclaim
+canceled mid-flight leaves the handle SUSPENDED, so the body's completion
+`release` discards it correctly (no double give-back).
 
-This covers only **framework-mediated** blocking. The framework cannot intercept
-user code that blocks on its own channel, mutex, or syscall inside a body; that
-remains the user's concern. The livelock being fixed is entirely
-framework-mediated (subwave skims), so this is sufficient.
+This covers only **framework-mediated** blocking. The framework cannot
+intercept user code that blocks on its own channel, mutex, or syscall inside a
+body; that remains the user's concern. The livelock being fixed is entirely
+framework-mediated, so this is sufficient.
 
-## Single-goroutine scoping
+## Serialization and scoping
 
-Each request handle's `tryAcquire`/`suspend`/`tryResume`/`release` happens on one
-goroutine — the one running the body that holds it — so the handle needs no
-internal synchronization. Two facts make this hold:
+The handle needs no internal synchronization — not because it lives on one
+goroutine (it doesn't), but because it is **externally serialized**: never
+touched concurrently, with every cross-goroutine hand-off carrying a
+happens-before edge through the queue or notifier it travels on. The lifecycle
+touches up to four goroutine roles:
 
-1. The handle is stamped on the body's per-worker `ctxMeta` at body entry (like
-   the dispatching `wave` is stamped). A worker runs one body at a time, so it's
-   goroutine-local. (For the task path the handle is created at dispatch and
-   travels across the queue hand-off to the body as one opaque value — still no
-   token threading.)
+1. **acquire** — the dispatching goroutine, or whichever worker re-invokes
+   postponed work (retries can hop workers);
+2. **postpone/re-grant** — the goroutine whose Execute failed to start the
+   inner work; then whatever goroutine the listener notification wakes;
+3. **suspend/resume** — the body's worker goroutine;
+4. **release** — completion (`completedFn`) or a shutdown-path `Free`.
 
-2. A skim running synchronously on the holder's goroutine must reach that handle
-   even though the subwave runs on a *different* `Pool` with its own `ctxMeta`.
-   `ctxMeta` gains a `parent *ctxMeta` link along synchronous, same-goroutine
-   derivations (top-level->skim, body->`NewWave`->subwave-skim), so a skim walks
-   `parent` up to the body's handle. **A subwave's worker contexts are fresh
-   permit-roots (`parent == nil`)** — even though they still record the parent
-   *wave* in `parentJobs`. That keeps the walk inside the calling goroutine: a
-   worker only ever finds its *own* handle, never the spawning parent's. ("Other
-   goroutines acquire their own permits anyway.")
+The HB edges, as verification obligations (covered empirically by the
+non-short `-race` sim loop): dispatch→queue→worker; postponed-set→retry;
+listener→notify→waiter→re-grant; body→completion. Any future change that adds
+a hand-off owes its edge to this list. (Rejected: a debug owner-assertion on
+the handle — the owner legitimately changes across phases, so it would need
+the full phase model to avoid false positives; `-race` covers the risk.)
 
-So `currentHeldRequest` walks `parent` and finds at most one handle (one body per
-goroutine).
+Scoping — how a parking point finds the handle:
+
+1. The handle is stamped on the body's per-worker `ctxMeta` at body entry,
+   with the same save/restore stack discipline as the dispatching `wave` stamp
+   (stamp on entry, restore the prior value on exit; same caveat about user
+   code capturing ctx into goroutines that outlive the body). For the task
+   path the handle is created at dispatch and travels across the queue
+   hand-off to the body as one opaque value — still no token threading.
+
+2. `ctxMeta` gains a `parent *ctxMeta` link along synchronous, same-goroutine
+   derivations (top-level->skim, body->`NewWave`->subwave contexts), so a park
+   inside a subwave walks `parent` up to the body's handle. **Worker contexts
+   are fresh permit-roots (`parent == nil`)** — explicitly *severed* at
+   task/funnel worker-context creation, because the body ctx derives from the
+   dispatcher's ctx: fresh-rootness is enforced, not inherited — even though
+   they still record the parent *wave* in `parentJobs`.
+
+`currentHeldRequest` walks `parent` from the current context and **stops at
+the first stamped handle**. Structurally there is at most one per chain: with
+skimmers limiter-free (see the two-class rule's commitments), no limiter-gated
+body is ever help-executed, so every stamp site is a chain root. This is
+pinned by a free, always-on assertion at stamp time — `assert(meta.parent ==
+nil)`, one pointer compare on the hot path — so any future non-root stamp site
+(e.g. skimmer limiters) panics at first stamp, immediately and located. The
+bracket-side walk runs only at parking points (cold; the goroutine is about to
+park), with depth bounded by the synchronous-nesting depth.
+
+Invariant: **a stamped handle is only ever HELD or SUSPENDED.** POSTPONED is
+pre-body (the stamp happens at body entry, after the grant); DONE is
+post-unstamp (body exit restores the stamp before completion releases). The
+walk can never encounter PENDING/POSTPONED/DONE on a chain, so the bracket
+contract stays exactly `r != nil && r.suspend()` — no state checks at call
+sites: finding the *enclosing* episode's SUSPENDED handle no-ops; finding the
+current body's HELD handle suspends it.
 
 ## Measuring concurrency under suspension
 
@@ -278,6 +462,25 @@ permit) and restored on return. Measuring in-flight bodies would spuriously
 observe `> N` precisely in the scenario the fix enables. (A hold-through limiter,
 when one exists, keeps the stricter in-flight bound — its permit is never
 suspended.)
+
+Implementation: the drop lives inside the sim's Func-walker at the `runSubjob`
+step (entry: decrement; return: restore) — one point covers every body kind
+that can drive a subwave (Launcher bodies, Accumulate, Flush, and skim
+handlers executed via block-and-help), and the span subsumes the subjob's
+internal block-and-help suspensions. **No drop around blocking submits** —
+those are hold-through: the permit is genuinely held, siblings genuinely can't
+enter. Both measurement edges skew toward under-counting (the sim drops before
+the framework actually suspends, restores after the reclaim completes), so
+`observed ≤ permits` stays sound — which also makes the measurement change
+safe to land *before* the suspend brackets (implementation order: measurement
+first, brackets after; see WORKING_NOTES).
+
+The sim must also generate **limiter sharing across waves/subjobs** — its
+fresh-limiter-per-(sub)job structure is a legacy holdover, and both deadlock
+witnesses in this note live in exactly that blind spot. When one limiter is
+shared across nesting depths, its concurrency counter must be shared along
+with it: split counters would each assert `observed ≤ permits` on a subset and
+could miss a joint violation.
 
 ## Multiple limiters: the scheduler
 
@@ -335,24 +538,29 @@ integration boundary, and potentially a user choice per domain. Two are in view
   a central serialization point — a reach-for-it-when-needed discipline.
 
 A scheduler's members are **resources** (see "Resources: the open layer").
-**suspend/reclaim/release fan out per resource kind**: in a skim the scheduler
-releases each `suspendable()` resource, re-takes them on reclaim, and `release`
-cleans up all by state — a semaphore relinquishes, a memory resource (not
-suspendable) stays held. A richer resource just reports a larger `demand`; no
+**suspend/postpone/reclaim/release fan out per resource kind**: in a skim the
+scheduler releases each `suspendable()` resource and re-takes them on reclaim
+(a semaphore relinquishes; a memory resource — not suspendable — stays held);
+on postpone it releases *all* held amounts (pre-body, nothing materialized);
+`release` cleans up by state. A richer resource just reports a larger `demand`; no
 cross-resource commit protocol is involved (atomicity, where needed, comes from
 the prioritized scheduler's evaluate-lock). All of this lives between the
 scheduler and its resources; the framework-facing handle is unchanged.
 
 ## Scope: shipped now vs designed-for-later
 
-**Shipped.** The suspend-on-block [Semaphore] behind the handle, constructed
+**Shipped.** The suspend-on-block [Semaphore] behind the handle (full state
+machine including POSTPONED; illegal-transition panics), constructed
 `NewSemaphore(nil, n)` — the scheduler argument lands now (the role made visible
 at construction) but only `nil` (self-scheduled) is supported; `ExecuteOrWait`
-split into routing + the shared `blockingAcquire`; uniform episode-suspend at
-framework parking points; the single-goroutine `ctxMeta` scoping; the sim's
-active-concurrency measurement. No non-nil scheduler, no prioritization — the
-semaphore's request is trivial and the sibling-contention livelock's liveness
-already holds through the existing renotify chain.
+split into routing + the shared `blockingAcquire`; the two-class park rule
+(suspend-class brackets with help-shaped reclaim; hold-through at capacity
+waits); the externally-serialized `ctxMeta` scoping with the root-stamp
+assertion; the capacity-changed hook wired to `SetMaxConcurrency`; the sim's
+active-concurrency measurement and cross-wave limiter sharing. No non-nil
+scheduler, no prioritization — the semaphore's request is trivial and the
+sibling-contention livelock's liveness already holds through the existing
+renotify chain.
 
 **Deferred (reachable without changing the framework-facing handle):**
 
@@ -406,3 +614,19 @@ already holds through the existing renotify chain.
   as an acquired one is), so multi-limiter all-or-nothing is just *ordered
   acquire*; the only genuine "reservation" is a single limiter's internal
   accumulation policy (above), which needs no cross-limiter commit protocol.
+- **Uniform suspend at every framework park** (including capacity waits).
+  Anti-backpressure: a body parked on a full downstream queue that gives up
+  its permit lets siblings pile into the same full pipe — unboundedly many
+  half-done parked bodies. Holding there is the limiter *propagating*
+  backpressure; the two-class rule keeps suspension where it is
+  correctness-required and nowhere else.
+- **Plain-wait reclaim** (reclaim without block-and-help). Deadlocks under
+  shared limiters — see the witness in "Reclaim is help-shaped": hold-through
+  capacity waits plus a plain-waiting driver close a cycle through the
+  subjob's skim queue. Any wait on a goroutine with driving duties must help
+  its driven domain.
+- **`capacityIncreased() <-chan struct{}` on the resource contract.** A ping
+  with no consumer parked sits unconsumed (postponed listeners starve on a
+  `0→n` resize), a unary ping can't carry the delta, and multi-resource
+  schedulers would need forwarder goroutines just to consume it. Superseded by
+  the bind-time `setCapacityChangedFn` hook.

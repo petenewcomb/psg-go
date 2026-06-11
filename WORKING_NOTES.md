@@ -4,13 +4,15 @@ This document contains working notes and context for development on the `combine
 
 Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
 
-## Limiter suspend/resume — DESIGN SETTLED, ready to implement (2026-06-10)
+## Limiter suspend/resume — DESIGN SETTLED + REVIEWED, ready to implement (2026-06-11)
 
 **The design is finalized and written up in `docs/limiter-suspend-resume.md` —
-that note is the source of truth.** This section is the working summary; the
-older "ROOT-CAUSED" section below is accurate *background* on the bug, but its
-fix sketch (a `heldPermit` carried as a ctx value) is **superseded** by the
-handle/scheduler/resource design in the note.
+that note is the source of truth — and has passed a full design review:
+`REVIEW_FINDINGS.md` (all 9 findings resolved, 2026-06-10/11) is the review
+record, with every resolution folded back into the note.** This section is the
+working summary; the older "ROOT-CAUSED" section below is accurate *background*
+on the bug, but its fix sketch (a `heldPermit` carried as a ctx value) is
+**superseded** by the handle/scheduler/resource design in the note.
 
 **The bug (confirmed):** intermittent `TestBySimulation -race` busy-spin
 livelock — a concurrency permit held across a blocking skim (a body driving a
@@ -25,20 +27,32 @@ non-short `-race` checks). Build the loop with
 in a loop, treating a `-timeout` panic as a hang.
 
 **The fix (design):** a concurrency permit gates *active computation*, not
-*blocked-waiting*; the framework suspends a held permit whenever it parks the
-holder (skims, block-and-help) and reclaims it on return. Mechanism:
-- A limiter is driven by the framework through a **request handle** (a
-  `PENDING/HELD/SUSPENDED` state machine) with `tryAcquire`/`suspend`/`tryResume`/
-  one idempotent state-aware `release` + `notifier`.
+*blocked-waiting*. **Two-class park rule:** suspend at delegation-shaped waits
+(gathers + block-and-help — both have deadlock witnesses in the note); hold
+through pure capacity waits (blocking posts — the held permit IS backpressure
+propagation; safe by "a permit wait never occupies bounded queue capacity").
+Mechanism:
+- A limiter is driven by the framework through a **request handle** (state
+  machine `PENDING → HELD ⇄ SUSPENDED → DONE` plus `HELD ⇄ POSTPONED` for
+  granted-then-yielded pre-body grants) with `tryAcquire`/`postpone`/`suspend`/
+  `tryResume`/idempotent `release` + phase-routed `notifier` (never nil).
+  Illegal transitions **panic**; capacity-returning transitions (suspend,
+  postpone, HELD-release) notify, state-discarding ones don't.
 - `limiterImpl` is implemented by a **scheduler** (sealed, few): a *direct*
   scheduler over one resource now; *ordered*/*prioritized* later. The scheduler
   owns all lifecycle/routing/discipline.
 - A **resource** (open extension point) is pure accounting: `demand(applicant)` /
   `tryAcquire(amount)` / `release(amount)` / `suspendable()` /
-  `capacityIncreased() <-chan struct{}`. The semaphore is a ~10-line resource.
-- `ExecuteOrWait` splits into **routing + a shared `blockingAcquire`**.
-- Single-goroutine permit scoping via `ctxMeta.parent` + **fresh-root worker
-  contexts** (each goroutine finds only its own permit).
+  `setCapacityChangedFn(func(delta int))` (bind-time growth hook; channel
+  rejected — unconsumed-ping hole). The semaphore is a ~10-line resource.
+- `ExecuteOrWait` splits into **routing + a shared `blockingAcquire`**;
+  **reclaim is help-shaped** (plain-wait reclaim deadlocks — witness in the
+  note); help domain = the pool whose skim context the goroutine occupies.
+- Externally-serialized permit scoping via `ctxMeta.parent` + **fresh-root
+  worker contexts** (explicitly severed at worker-context creation) + always-on
+  `assert(meta.parent == nil)` at handle-stamp time. **Skimmers stay
+  limiter-free** — load-bearing for the hold-through class (skim handlers are
+  the drain; drain must stay permit-free).
 
 **User-facing API delta (now):** `NewSemaphore(nil, n)` (scheduler is the
 mandatory first arg, nil = self-scheduled; only nil supported yet). The
@@ -46,30 +60,49 @@ Semaphore now caps **active** concurrency, not in-flight — needs a CHANGELOG
 entry + a doc update on `Semaphore`. Everything else (scheduler/resource
 constructors, exported `Resource`, `NewLimiter`) is additive/deferred.
 
-**Implementation plan (tasks #1–#6):**
-1. Limiter core: `resource` iface + semaphore resource + direct scheduler + the
-   handle + the `ExecuteOrWait` routing/`blockingAcquire` split. (`limiter.go` is
-   clean/reverted — implement the note from scratch, don't look for partial
-   edits.)
-2. `ctxMeta` permit scoping (`parent` link; worker contexts fresh-root;
-   `currentHeldRequest`).
-3. Wire funnel + task dispatch paths (stamp the handle at body entry; the task
-   path threads it across the queue hand-off; `applicant` at the gate).
-4. Bracket skim/`block` episodes with suspend + reclaim (re-entrant via the
-   handle's already-SUSPENDED no-op; cancellation leaves it SUSPENDED so
-   completion `release` discards).
-5. Switch the sim to **active-concurrency** measurement (drop a body's
-   contribution while it drives a subwave) — else the `observed ≤ permits`
-   assertion in `internal/sim/run.go` spuriously fires once the fix lands.
-6. Verify: `go vet`, `go test -short`, `.githooks/pre-commit`, then the non-short
-   `-race` loop → target 0 hangs over a large sample, no concurrency-assertion
-   failures, no permit-accounting panics.
+**Implementation plan — execution order #1, #2, #3, #5, #4, #6** (each
+checkpoint independently green; the hang baseline persists until #4 lands —
+expected):
+- **#1** Limiter core: `resource` iface (with `setCapacityChangedFn` hook) +
+  semaphore resource + direct scheduler + the handle (full state machine incl.
+  POSTPONED; illegal transitions panic) + the `ExecuteOrWait`
+  routing/`blockingAcquire` split. (`limiter.go` is clean/reverted — implement
+  the note from scratch, don't look for partial edits.) Unit tests pin:
+  notify on suspend/postpone/HELD-release and NOT on SUSPENDED/POSTPONED-
+  release (wake exactly once); no double-credit (acquire→suspend→release ==
+  acquire→release); legality panics; `SetMaxConcurrency` growth wakes
+  postponed listeners (the previously-uncovered hole).
+- **#2** `ctxMeta` permit scoping (`parent` link; worker contexts fresh-root —
+  explicitly severed at task/funnel worker-context creation;
+  `currentHeldRequest` stops at the first stamped handle).
+- **#3** Wire funnel + task dispatch paths (stamp the handle at body entry with
+  prevWave-style save/restore + `assert(meta.parent == nil)`; `postpone()` on
+  a not-started return after grant; the task path threads the handle across
+  the queue hand-off; `applicant` at the gate).
+- **#5** *(deliberately before #4)* Switch the sim to **active-concurrency**
+  measurement: drop the body's contribution inside the Func-walker at the
+  `runSubjob` step (no drop around blocking submits — those are hold-through).
+  Under-counts under old behavior, so green pre-brackets. Also extend the sim
+  to **share limiters across waves/subjobs** (fresh-limiter-per-(sub)job is a
+  legacy holdover) with the concurrency counter shared along with the limiter.
+- **#4** Bracket suspend-class episodes (skim methods + the block-and-help
+  wait) with suspend + **help-shaped** reclaim (re-entrant via the already-
+  SUSPENDED no-op; cancellation leaves SUSPENDED so completion `release`
+  discards; help domain = the current pool's skim context).
+- **#6** Verify: `go vet`, `go test -short`, `.githooks/pre-commit`, then the
+  non-short `-race` loop → target 0 hangs over a large sample (now including
+  the shared-limiter topologies), no concurrency-assertion failures, no
+  permit-accounting panics.
 
-**Key invariants to preserve:** single-goroutine permit scoping (fresh-root
-workers); suspend at *all* framework parking points (uniform, not a hand-picked
-set); active-concurrency measurement in the sim. See the note's "Rejected
-alternatives" for dead-ends already explored (flat tokens, selectFn inversion,
-2PC reservation, counted-suspend barrier).
+**Key invariants to preserve:** externally-serialized handles (never touched
+concurrently; HB edges via queues/notifiers — listed in the note); the
+two-class park rule (suspend at delegation waits, hold through capacity
+waits — the *classification* is the contract, not a site list); stamped
+handles only ever HELD/SUSPENDED; skimmers limiter-free; active-concurrency
+measurement in the sim. See the note's "Rejected alternatives" for dead-ends
+already explored (flat tokens, selectFn inversion, 2PC reservation,
+counted-suspend barrier, uniform-suspend-everywhere, plain-wait reclaim,
+capacity-growth channel).
 
 ## TestBySimulation `-race` hang ROOT-CAUSED: limiter held across a blocking gather (2026-06-07)
 

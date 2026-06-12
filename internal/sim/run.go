@@ -30,6 +30,13 @@ import (
 // Steps beyond the basic ReturnErrorProb support, no Subjob).
 // Enrichment lands in follow-up commits.
 func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
+	return run(ctx, t, plan, nil)
+}
+
+// run executes a Plan; parent is the enclosing controller when plan is a
+// Subjob's nested Plan (enables cross-subjob limiter inheritance), nil at
+// top level.
+func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller) error {
 	traceRegion := "sim.Run"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
@@ -37,21 +44,46 @@ func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	ctx, wave := psg.NewWave(ctx)
 	defer wave.CancelAndWait()
 
-	c := &controller{
-		Plan:                      plan,
-		Wave:                      wave,
-		TaskLimiters:              make([]psg.Limiter, len(plan.TaskLimiters)),
-		FunnelPool:                nil, // lazily constructed in ensurePools
-		FunnelLimiters:            make([]psg.Limiter, len(plan.FunnelLimiters)),
-		Skimmers:                  make([]*psg.Skimmer[*simValue], len(plan.Skimmers)),
-		Funnels:                   make([]*psg.Funnel[*simValue], len(plan.Funnels)),
-		concurrencyByTaskLimit:    make([]atomic.Int64, len(plan.TaskLimiters)),
-		maxConcurrencyByTaskLimit: make([]atomicMaxInt64, len(plan.TaskLimiters)),
-		concurrencyByCombLimit:    make([]atomic.Int64, len(plan.FunnelLimiters)),
-		maxConcurrencyByCombLimit: make([]atomicMaxInt64, len(plan.FunnelLimiters)),
-		skimmerInvocations:        make([]atomic.Int64, len(plan.Skimmers)),
+	return newController(plan, wave, parent).Run(ctx, t)
+}
+
+// newController builds the per-Plan runtime adapter state. parent is the
+// enclosing controller for a Subjob's nested Plan, nil at top level.
+func newController(plan *Plan, wave *psg.Wave, parent *controller) *controller {
+	return &controller{
+		Plan:                  plan,
+		Wave:                  wave,
+		parent:                parent,
+		TaskLimiters:          make([]psg.Limiter, len(plan.TaskLimiters)),
+		FunnelPool:            nil, // lazily constructed in ensurePools
+		FunnelLimiters:        make([]psg.Limiter, len(plan.FunnelLimiters)),
+		Skimmers:              make([]*psg.Skimmer[*simValue], len(plan.Skimmers)),
+		Funnels:               make([]*psg.Funnel[*simValue], len(plan.Funnels)),
+		taskLimiterTrackers:   make([]*limiterTracker, len(plan.TaskLimiters)),
+		funnelLimiterTrackers: make([]*limiterTracker, len(plan.FunnelLimiters)),
+		skimmerInvocations:    make([]atomic.Int64, len(plan.Skimmers)),
 	}
-	return c.Run(ctx, t)
+}
+
+// limiterTracker measures observed *active* concurrency for one Plan
+// limiter: bodies enter() at start and exit() at end, and additionally
+// exit()/enter() around driving a subwave — the span over which the
+// framework suspends the body's permit (docs/limiter-suspend-resume.md,
+// "Measuring concurrency under suspension"). Shared by pointer with
+// subjob controllers when the underlying limiter is inherited, so the
+// observed-max assertion covers the joint topology (split counters would
+// each check a subset and could miss a joint violation).
+type limiterTracker struct {
+	cur atomic.Int64
+	max atomicMaxInt64
+}
+
+func (lt *limiterTracker) enter() {
+	lt.max.UpdateMax(lt.cur.Add(1))
+}
+
+func (lt *limiterTracker) exit() {
+	lt.cur.Add(-1)
 }
 
 // simValue is the uniform value type that flows through all sim ops.
@@ -79,12 +111,15 @@ type controller struct {
 	limitersOnce sync.Once
 	combPoolOnce sync.Once
 
-	concurrencyByTaskLimit    []atomic.Int64
-	maxConcurrencyByTaskLimit []atomicMaxInt64
-	concurrencyByCombLimit    []atomic.Int64
-	maxConcurrencyByCombLimit []atomicMaxInt64
-	skimmerInvocations        []atomic.Int64
-	StartTime                 time.Time
+	// parent is the enclosing controller when this Plan runs as a
+	// Subjob; nil at top level. Read-only after construction; used by
+	// ensurePools to alias inherited limiters and trackers.
+	parent *controller
+
+	taskLimiterTrackers   []*limiterTracker
+	funnelLimiterTrackers []*limiterTracker
+	skimmerInvocations    []atomic.Int64
+	StartTime             time.Time
 }
 
 func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
@@ -169,14 +204,22 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 			c.Plan.ID, c.Plan.Skimmers[i].ID, got, want)
 	}
 	// Per-Limiter aggregate concurrency: observed max must not exceed
-	// configured permits.
+	// configured permits. Inherited limiters are skipped — the tracker
+	// is shared with (and asserted by) the owning ancestor plan, whose
+	// run encloses this one.
 	for i, lim := range c.Plan.TaskLimiters {
-		observed := c.maxConcurrencyByTaskLimit[i].Load()
+		if lim.InheritFromParent >= 0 {
+			continue
+		}
+		observed := c.taskLimiterTrackers[i].max.Load()
 		chk.LessOrEqualf(observed, int64(lim.Permits),
 			"TaskLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
 	}
 	for i, lim := range c.Plan.FunnelLimiters {
-		observed := c.maxConcurrencyByCombLimit[i].Load()
+		if lim.InheritFromParent >= 0 {
+			continue
+		}
+		observed := c.funnelLimiterTrackers[i].max.Load()
 		chk.LessOrEqualf(observed, int64(lim.Permits),
 			"FunnelLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
 	}
@@ -203,10 +246,25 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 func (c *controller) ensurePools() {
 	c.limitersOnce.Do(func() {
 		for i, lim := range c.Plan.TaskLimiters {
+			if c.parent != nil && lim.InheritFromParent >= 0 {
+				// Shared limiter across the subjob boundary: alias the
+				// parent's psg.Limiter AND its tracker so permits and the
+				// observed-max assertion both cover the joint topology.
+				c.TaskLimiters[i] = c.parent.TaskLimiters[lim.InheritFromParent]
+				c.taskLimiterTrackers[i] = c.parent.taskLimiterTrackers[lim.InheritFromParent]
+				continue
+			}
 			c.TaskLimiters[i] = psg.NewSemaphore(nil, lim.Permits)
+			c.taskLimiterTrackers[i] = &limiterTracker{}
 		}
 		for i, lim := range c.Plan.FunnelLimiters {
+			if c.parent != nil && lim.InheritFromParent >= 0 {
+				c.FunnelLimiters[i] = c.parent.FunnelLimiters[lim.InheritFromParent]
+				c.funnelLimiterTrackers[i] = c.parent.funnelLimiterTrackers[lim.InheritFromParent]
+				continue
+			}
 			c.FunnelLimiters[i] = psg.NewSemaphore(nil, lim.Permits)
+			c.funnelLimiterTrackers[i] = &limiterTracker{}
 		}
 	})
 	c.combPoolOnce.Do(func() {
@@ -250,7 +308,7 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 	if !c.rollProb(s.Prob) {
 		return
 	}
-	err := Run(ctx, t, s.Plan)
+	err := run(ctx, t, s.Plan, c)
 	var expectedErr ExpectedHandlerError
 	if err != nil && !errors.As(err, &expectedErr) {
 		assert.New(t).NoError(err)
@@ -263,24 +321,25 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
 func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) psg.TaskLauncher {
-	// Concurrency tracking: bump TaskLimiter counter on entry to the
-	// task body, decrement on exit. Used by the per-Limiter
-	// max-concurrency assertion in Run.
-	trackEntry := func() func() { return func() {} }
+	// Concurrency tracking: bump the TaskLimiter tracker on entry to the
+	// task body, decrement on exit; the tracker also rides down the Func
+	// walk so Subjob steps can drop the contribution while the body
+	// drives the subwave. Used by the per-Limiter max-concurrency
+	// assertion in Run.
+	var tracker *limiterTracker
 	var opts []psg.OpOption
 	if len(runner.LimiterIndexes) > 0 {
 		limIdx := runner.LimiterIndexes[0]
 		opts = append(opts, psg.WithLimits(c.TaskLimiters[limIdx]))
-		trackEntry = func() func() {
-			cur := c.concurrencyByTaskLimit[limIdx].Add(1)
-			c.maxConcurrencyByTaskLimit[limIdx].UpdateMax(cur)
-			return func() { c.concurrencyByTaskLimit[limIdx].Add(-1) }
-		}
+		tracker = c.taskLimiterTrackers[limIdx]
 	}
 	body := psg.NewTask(func(ctx context.Context) error {
-		defer trackEntry()()
+		if tracker != nil {
+			tracker.enter()
+			defer tracker.exit()
+		}
 		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
-		if err := c.executeFuncInTask(ctx, t, runner.Body, v); err != nil {
+		if err := c.executeFuncInTask(ctx, t, runner.Body, v, tracker); err != nil {
 			return err
 		}
 		if c.shouldReturnError(runner.Body) {
@@ -368,7 +427,10 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) p
 		_ = valErr
 		_ = v
 		c.skimmerInvocations[idx].Add(1)
-		if err := c.executeFunc(ctx, t, g.Handle, v); err != nil {
+		// Skimmers are deliberately limiter-free (drain must stay
+		// permit-free — see docs/limiter-suspend-resume.md), so no
+		// tracker rides this walk.
+		if err := c.executeFunc(ctx, t, g.Handle, v, nil); err != nil {
 			return ExpectedHandlerError{OpKind: opNameSkimmer, OpID: g.ID, Err: err}
 		}
 		if c.shouldReturnError(g.Handle) {
@@ -386,22 +448,22 @@ func (c *controller) newFunnelFactory(
 	t assert.TestingT, cmb *Funnel, idx int,
 ) psg.AccumulatorFactory[*simValue] {
 	_ = idx
-	// Concurrency tracking: bump FunnelLimiter counter on entry to
-	// Accumulate or Flush, decrement on exit.
-	trackEntry := func() func() { return func() {} }
+	// Concurrency tracking: bump the FunnelLimiter tracker on entry to
+	// Accumulate or Flush, decrement on exit; the tracker also rides
+	// down the Func walk so Subjob steps can drop the contribution while
+	// the body drives the subwave.
+	var tracker *limiterTracker
 	if len(cmb.LimiterIndexes) > 0 {
-		limIdx := cmb.LimiterIndexes[0]
-		trackEntry = func() func() {
-			cur := c.concurrencyByCombLimit[limIdx].Add(1)
-			c.maxConcurrencyByCombLimit[limIdx].UpdateMax(cur)
-			return func() { c.concurrencyByCombLimit[limIdx].Add(-1) }
-		}
+		tracker = c.funnelLimiterTrackers[cmb.LimiterIndexes[0]]
 	}
 	return psg.NewAccumulatorFactory(func() psg.Accumulator[*simValue] {
 		return psg.FuncAccumulator[*simValue]{
 			AccumulateFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
-				defer trackEntry()()
-				err := c.executeFunc(ctx, t, cmb.Accumulate, v)
+				if tracker != nil {
+					tracker.enter()
+					defer tracker.exit()
+				}
+				err := c.executeFunc(ctx, t, cmb.Accumulate, v, tracker)
 				if err == nil && c.shouldReturnError(cmb.Accumulate) {
 					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}
@@ -410,9 +472,12 @@ func (c *controller) newFunnelFactory(
 				return time.Time{}, err
 			},
 			FlushFn: func(ctx context.Context) error {
-				defer trackEntry()()
+				if tracker != nil {
+					tracker.enter()
+					defer tracker.exit()
+				}
 				v := &simValue{DispatchTime: time.Now()}
-				err := c.executeFunc(ctx, t, cmb.Flush, v)
+				err := c.executeFunc(ctx, t, cmb.Flush, v, tracker)
 				if err == nil && c.shouldReturnError(cmb.Flush) {
 					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}
@@ -426,19 +491,27 @@ func (c *controller) newFunnelFactory(
 // be started (skim/funnel handler bodies, top-level dispatch).
 // SelfTime sleeps for the drawn duration; Submit routes to the target
 // sink; StartTask dispatches a runner; Subjob spawns a nested Pool.
-func (c *controller) executeFunc(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
-	return c.executeFuncBody(ctx, t, fn, v, true)
+// active is the enclosing body's concurrency tracker (nil when the body
+// is not limiter-bound), threaded down so Subjob steps can drop the
+// body's contribution while it drives the subwave.
+func (c *controller) executeFunc(
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active *limiterTracker,
+) error {
+	return c.executeFuncBody(ctx, t, fn, v, true, active)
 }
 
 // executeFuncInTask walks a Func's Steps from a task body. StartTask
 // is skipped because the current psg API forbids dispatching new work
 // from a task context (post-Wave-5 will relax this).
-func (c *controller) executeFuncInTask(ctx context.Context, t assert.TestingT, fn *Func, v *simValue) error {
-	return c.executeFuncBody(ctx, t, fn, v, false)
+func (c *controller) executeFuncInTask(
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active *limiterTracker,
+) error {
+	return c.executeFuncBody(ctx, t, fn, v, false, active)
 }
 
 func (c *controller) executeFuncBody(
 	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, allowStartTask bool,
+	active *limiterTracker,
 ) error {
 	chk := assert.New(t)
 	timer := timerp.Get()
@@ -469,7 +542,21 @@ func (c *controller) executeFuncBody(
 			}
 			c.startTask(ctx, t, s.RunnerIndex)
 		case Subjob:
+			// Active-concurrency measurement: drop this body's
+			// contribution while it drives the subwave — the span over
+			// which the framework suspends the body's permit. Dropping
+			// before the actual suspend and restoring after the reclaim
+			// completes means both edges skew toward under-counting,
+			// keeping the `observed ≤ permits` assertion sound (and
+			// making this change safe to land before the suspend
+			// brackets do).
+			if active != nil {
+				active.exit()
+			}
 			c.runSubjob(ctx, t, s)
+			if active != nil {
+				active.enter()
+			}
 		default:
 			chk.Fail(fmt.Sprintf("unknown Step type %T", step))
 		}

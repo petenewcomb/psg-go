@@ -11,6 +11,13 @@ import (
 var defaultLimiterConfig = LimiterConfig{
 	Count:   BiasedIntConfig{Min: 1, Med: 3, Max: 10},
 	Permits: BiasedIntConfig{Min: 1, Med: 3, Max: 10},
+	// TODO(suspend-resume task #4): raise to a meaningful probability
+	// (~0.25) in the same commit that lands the suspend brackets.
+	// Cross-subjob limiter sharing makes the shared-limiter deadlock
+	// witnesses (docs/limiter-suspend-resume.md) reachable, and until
+	// the brackets dissolve them, enabling it would make even the
+	// -short suite hang-prone.
+	Inherit: BiasedBoolConfig{Probability: 0},
 }
 
 // LimiterConfig controls generation of a kind of Limiter (task-bound or
@@ -22,6 +29,12 @@ var defaultLimiterConfig = LimiterConfig{
 type LimiterConfig struct {
 	Count   BiasedIntConfig
 	Permits BiasedIntConfig
+	// Inherit is the probability that a limiter generated for a nested
+	// (subjob) Plan aliases a same-kind limiter of the parent Plan
+	// instead of being fresh — sharing the parent's psg.Limiter and
+	// concurrency tracker across the subjob boundary. Ignored at top
+	// level.
+	Inherit BiasedBoolConfig
 }
 
 // Limiter represents a sim-level semaphore-style concurrency limiter
@@ -29,6 +42,14 @@ type LimiterConfig struct {
 type Limiter struct {
 	ID      int
 	Permits int
+	// InheritFromParent, when >= 0, marks this entry as an alias of the
+	// parent Plan's same-kind limiter at that index: the runtime shares
+	// the parent's psg.Limiter and its concurrency tracker instead of
+	// constructing fresh ones, exercising permit-holding across the
+	// subjob boundary (the shared-limiter deadlock witnesses in
+	// docs/limiter-suspend-resume.md). -1 means fresh. ID and Permits
+	// mirror the parent entry for Dump clarity.
+	InheritFromParent int
 }
 
 // Format implements fmt.Formatter for pretty-printing.
@@ -37,7 +58,12 @@ func (l *Limiter) Format(f fmt.State, verb rune) {
 		panic("unsupported verb")
 	}
 	if f.Flag('#') {
-		_, _ = fmt.Fprintf(f, "Limiter#%d: permits=%d", l.ID, l.Permits)
+		if l.InheritFromParent >= 0 {
+			_, _ = fmt.Fprintf(f, "Limiter#%d: permits=%d (inherits parent[%d])",
+				l.ID, l.Permits, l.InheritFromParent)
+		} else {
+			_, _ = fmt.Fprintf(f, "Limiter#%d: permits=%d", l.ID, l.Permits)
+		}
 	} else {
 		_, _ = fmt.Fprintf(f, "Limiter#%d", l.ID)
 	}

@@ -58,7 +58,7 @@ type Plan struct {
 // NewPlan generates a new Plan for property-based testing.
 func NewPlan(t *rapid.T, config *Config) *Plan {
 	var nextIDs idCounters
-	return newPlan(t, config, &nextIDs)
+	return newPlan(t, config, &nextIDs, nil)
 }
 
 type idCounters struct {
@@ -73,8 +73,11 @@ type idCounters struct {
 // The generator is dense by nature; refactoring into helpers obscures
 // the path-construction flow.
 //
+// parentPlan is non-nil when generating a nested (subjob) Plan; it
+// enables cross-subjob limiter inheritance (see Limiter.InheritFromParent).
+//
 //nolint:gocognit,funlen // see above
-func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
+func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) *Plan {
 	planID := nextIDs.Plan
 	nextIDs.Plan++
 	planName := fmt.Sprintf("Plan#%d", planID)
@@ -83,25 +86,40 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters) *Plan {
 	nextIDsOrigin := *nextIDs
 
 	// === Limiters ===
+	// genLimiter draws one limiter, possibly aliasing a same-kind parent
+	// limiter (subjob plans only).
+	genLimiter := func(
+		kind string, i int, cfg *LimiterConfig, parentLimiters []Limiter, nextID *int,
+	) Limiter {
+		if parentPlan != nil && len(parentLimiters) > 0 &&
+			cfg.Inherit.Draw(t, fmt.Sprintf("%s.%sLimiters[%d].Inherit", planName, kind, i)) {
+			k := rapid.IntRange(0, len(parentLimiters)-1).Draw(t,
+				fmt.Sprintf("%s.%sLimiters[%d].InheritFrom", planName, kind, i))
+			parent := parentLimiters[k]
+			return Limiter{ID: parent.ID, Permits: parent.Permits, InheritFromParent: k}
+		}
+		id := *nextID
+		*nextID++
+		return Limiter{
+			ID:                id,
+			Permits:           cfg.Permits.Draw(t, fmt.Sprintf("%sLimiter#%d.Permits", kind, id)),
+			InheritFromParent: -1,
+		}
+	}
+	var parentTaskLimiters, parentFunnelLimiters []Limiter
+	if parentPlan != nil {
+		parentTaskLimiters = parentPlan.TaskLimiters
+		parentFunnelLimiters = parentPlan.FunnelLimiters
+	}
 	taskLimiterCount := config.TaskLimiter.Count.Draw(t, planName+".TaskLimiterCount")
 	plan.TaskLimiters = make([]Limiter, taskLimiterCount)
 	for i := range plan.TaskLimiters {
-		id := nextIDs.TaskLimiter
-		nextIDs.TaskLimiter++
-		plan.TaskLimiters[i] = Limiter{
-			ID:      id,
-			Permits: config.TaskLimiter.Permits.Draw(t, fmt.Sprintf("TaskLimiter#%d.Permits", id)),
-		}
+		plan.TaskLimiters[i] = genLimiter("Task", i, &config.TaskLimiter, parentTaskLimiters, &nextIDs.TaskLimiter)
 	}
 	combLimiterCount := config.FunnelLimiter.Count.Draw(t, planName+".FunnelLimiterCount")
 	plan.FunnelLimiters = make([]Limiter, combLimiterCount)
 	for i := range plan.FunnelLimiters {
-		id := nextIDs.CombLimiter
-		nextIDs.CombLimiter++
-		plan.FunnelLimiters[i] = Limiter{
-			ID:      id,
-			Permits: config.FunnelLimiter.Permits.Draw(t, fmt.Sprintf("FunnelLimiter#%d.Permits", id)),
-		}
+		plan.FunnelLimiters[i] = genLimiter("Funnel", i, &config.FunnelLimiter, parentFunnelLimiters, &nextIDs.CombLimiter)
 	}
 
 	// === Skimmers, layered by depth across [0, MaxDepth]. Skimmers
@@ -447,7 +465,7 @@ func newFunc(
 		subConfig.Subjob.MaxDepth--
 		const subjobPathShrinkDivisor = 2
 		subConfig.Path.Length.Med = max(subConfig.Path.Length.Min, subConfig.Path.Length.Med/subjobPathShrinkDivisor)
-		subPlan := newPlan(t, &subConfig, nextIDs)
+		subPlan := newPlan(t, &subConfig, nextIDs, plan)
 		plan.SubjobTaskCount += len(subPlan.Launchers) + subPlan.SubjobTaskCount
 		fn.Steps = append(fn.Steps, Subjob{Prob: probValue(config, 1.0), Plan: subPlan})
 	}

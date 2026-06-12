@@ -87,10 +87,18 @@ expected):
   funnel). Note: psgwf `Example_clientTimeout` flaked once during
   validation — the known pre-existing timing flake (TODO.md), passes 7/7 on
   re-run; not related.
-- **#3** Wire funnel + task dispatch paths (stamp the handle at body entry with
-  prevWave-style save/restore + `assert(meta.parent == nil)`; `postpone()` on
-  a not-started return after grant; the task path threads the handle across
-  the queue hand-off; `applicant` at the gate).
+- **#3 — DONE (`2f27619`).** Gates drive request handles; legacy shim +
+  `limiterCompletedFn` deleted. `acquireOrWait` (+ pooled `requestBlocker`
+  latch) is the routing/blockingAcquire split, in `limiter.go`. Task path:
+  request created at dispatch (applicant = `launcherWork`), gate in
+  `limiterScatterWork` (`postpone()` on granted-but-not-started), handle
+  travels in `taskWork` (stamp in Execute w/ root assert; release at
+  completion via `completedFn`; idempotent backstop + recycle in Free).
+  Funnel path: lazy request in `funnelWork` (persists across postponed
+  retries), stamp in executeInner, release at body end, backstop in Free.
+  Handles pooled (`directRequestPool`; single recycle point = owning work's
+  Free). End-to-end test pins subwave-finds-body-handle via parent walk.
+  Baseline hang observed 1/3 full-suite runs — expected until #4.
 - **#5** *(deliberately before #4)* Switch the sim to **active-concurrency**
   measurement: drop the body's contribution inside the Func-walker at the
   `runSubjob` step (no drop around blocking submits — those are hold-through).

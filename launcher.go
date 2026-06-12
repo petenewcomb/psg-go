@@ -221,16 +221,20 @@ func (r Launcher[T]) newScatterWork(
 	pool *Pool, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
 ) *launcherScatterWork {
 	inner := r.newTask(pool, group, value, callerErr)
-	taskWork := pool.newTaskWork(group, inner, limiterCompletedFn(r.limiter), wave)
+	var req request
+	if r.limiter.impl != nil {
+		req = r.limiter.impl.newRequest(inner)
+	}
+	taskWork := pool.newTaskWork(group, inner, req, wave)
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
-	if r.limiter.impl != nil {
-		gated = newLimiterScatterWork(pool, deadline, gated, r.limiter)
+	if req != nil {
+		gated = newLimiterScatterWork(pool, deadline, gated, req)
 	}
 	return newLauncherScatterWork(pool, deadline, gated)
 }
 
-func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, value T, callerErr error) boundTask {
+func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
 	w := r.workPool.Get()
 	w.pool = r.workPool
 	w.job = pool
@@ -289,6 +293,20 @@ func (w *launcherWork[T]) Free() {
 	w.value = zero
 	w.callerErr = nil
 	w.pool.Put(w)
+}
+
+// launcherWork is the applicant its Limiter request is opened for:
+// accessors box lazily, only when a sizing limiter actually reads them.
+func (w *launcherWork[T]) Processor() any {
+	return w.handler
+}
+
+func (w *launcherWork[T]) Value() any {
+	return w.value
+}
+
+func (w *launcherWork[T]) Err() error {
+	return w.callerErr
 }
 
 // newTaskErrSink returns an ErrSkimmer whose handler returns the

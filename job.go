@@ -62,13 +62,18 @@ type Pool struct {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, completedFn func(), wave *Wave) *taskWork {
+func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, req request, wave *Wave) *taskWork {
 	traceRegion := "Pool.newTaskWork"
 
 	w := taskWorkPool.Get()
 	w.Init(group, j)
 	w.task = task
-	w.completedFn = completedFn
+	w.req = req
+	if req != nil {
+		// Stored once so the per-execution completion callback doesn't
+		// allocate a fresh method value.
+		w.completedFn = req.release
+	}
 	w.wave = wave
 
 	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
@@ -77,8 +82,14 @@ func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, completedFn func
 
 type taskWork struct {
 	poolWork
-	task        boundTask
-	completedFn func()
+	task boundTask
+	// req is the Limiter request handle this task's admission was granted
+	// through; nil for unlimited ops. The taskWork owns the handle's
+	// lifecycle: stamped on the worker's ctxMeta during Execute, released
+	// at body completion (completedFn) or in Free (idempotent), recycled
+	// in Free.
+	req         request
+	completedFn func() // req.release, captured once at creation
 	// wave is the dispatching Wave; stamped onto the worker's
 	// ctxMeta during Execute so nil-wave op dispatches from the task
 	// body can resolve it.
@@ -93,6 +104,7 @@ func (w *taskWork) Reset() {
 	}
 	w.poolWork = poolWork{}
 	w.task = nil
+	w.req = nil
 	w.completedFn = nil
 	w.wave = nil
 	if w.demandRegistered.Load() {
@@ -113,6 +125,17 @@ func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
 		prev := meta.wave
 		meta.wave = w.wave
 		defer func() { meta.wave = prev }()
+		if w.req != nil {
+			// Stamp the held limiter request so framework parking points
+			// inside the body can suspend it (currentHeldRequest). Stamp
+			// sites must be chain roots — see ctxMeta.parent.
+			if meta.parent != nil {
+				panic("limiter request stamped on non-root ctxMeta; worker contexts must be fresh permit-roots")
+			}
+			prevReq := meta.heldRequest
+			meta.heldRequest = w.req
+			defer func() { meta.heldRequest = prevReq }()
+		}
 	}
 
 	w.task.Execute(ctx, w.Group(), w.completedFn, taskWorkerSender)
@@ -125,6 +148,15 @@ func (w *taskWork) Free(job *Pool) {
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
 	w.task.Free()
+	if w.req != nil {
+		// Normal completion already released (completedFn); release here
+		// is the idempotent backstop for tasks freed without executing
+		// (dispatch failure, cancellation drain) — by-state: abandon a
+		// PENDING request, discard a POSTPONED one, give back a HELD one.
+		w.req.release()
+		freeRequest(w.req)
+		w.req = nil
+	}
 	// If demand was registered but task never picked up, decrement the counter
 	if w.demandRegistered.CompareAndSwap(true, false) {
 		if trace.IsEnabled() {

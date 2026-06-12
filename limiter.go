@@ -58,14 +58,6 @@ type limiterImpl interface {
 	// newRequest allocates a request handle (state PENDING) for one
 	// admission of the given applicant.
 	newRequest(a applicant) request
-
-	// Legacy acquire/release surface, used by the pre-handle gates in
-	// limiterScatterWork and funnelWork.Execute.
-	// TODO(suspend-resume task #3): delete once the gates drive request
-	// handles instead.
-	tryAcquire() bool
-	release()
-	notifier() *workq.Notifier
 }
 
 // applicant gives a limiter lazy access to the work it is being asked to
@@ -191,9 +183,18 @@ func newDirectScheduler(res resource) *directScheduler {
 }
 
 func (s *directScheduler) newRequest(a applicant) request {
-	return &directRequest{
-		sched:  s,
-		amount: s.res.demand(a),
+	r := directRequestPool.Get()
+	r.sched = s
+	r.amount = s.res.demand(a)
+	return r
+}
+
+// freeRequest recycles a finished request handle. Must be called exactly
+// once, by the work that owns the handle's lifecycle, after the final
+// release() — never while any other reference might still drive it.
+func freeRequest(req request) {
+	if r, ok := req.(*directRequest); ok {
+		directRequestPool.Put(r)
 	}
 }
 
@@ -216,25 +217,6 @@ func (s *directScheduler) capacityChanged(delta int) {
 		return
 	}
 	s.notifyAvailable(delta)
-}
-
-// Legacy acquire/release surface for the pre-handle gates.
-// TODO(suspend-resume task #3): delete along with limiterImpl's legacy
-// methods. Release notifies unconditionally (the new contract's
-// HELD-release rule); the old "only if now under limit" check differed
-// only while draining after a SetMaxConcurrency shrink, where the extra
-// wakes are benign.
-func (s *directScheduler) tryAcquire() bool {
-	return s.res.tryAcquire(1)
-}
-
-func (s *directScheduler) release() {
-	s.res.release(1)
-	s.notifyAvailable(1)
-}
-
-func (s *directScheduler) notifier() *workq.Notifier {
-	return &s.notify
 }
 
 // directRequest is the direct scheduler's request handle. Externally
@@ -347,6 +329,111 @@ func (r *directRequest) notifier() *workq.Notifier {
 	return &r.sched.notify
 }
 
+// Reset implements omnipool.Resetter.
+func (r *directRequest) Reset() {
+	*r = directRequest{}
+}
+
+var directRequestPool = omnipool.For[directRequest]()
+
+// acquireOrWait drives a request handle toward HELD under the dispatch
+// context's discipline — the routing-plus-blockingAcquire split of what
+// workq.ExecuteOrWait did for the pre-handle gates:
+//
+//   - one-shot (ex.AddToListeners nil): a single tryAcquire attempt;
+//   - postpone (no blockFn for this ctx): subscribe to the request's
+//     current-phase notifier, recheck, and return — the work is re-invoked
+//     on wake, and the subscription survives a false return;
+//   - block (top-level): loop tryAcquire under the block-and-help blockFn,
+//     re-propagating any unconsumed wake (renotify conservation).
+//
+// Returns whether the request is HELD on return. tryAcquire is state-aware
+// (acquire from PENDING, re-grant from POSTPONED), so retries after a
+// postpone() route through here unchanged.
+func acquireOrWait(
+	ctx context.Context,
+	ex workq.Execution,
+	deadline time.Time,
+	bb workq.BlockBehavior,
+	req request,
+) (bool, error) {
+	if req.tryAcquire() {
+		return true, nil
+	}
+	if !ex.ShouldBlockOrPostpone() {
+		return false, nil
+	}
+	blockFn := bb.ShouldBlock(ctx)
+	if blockFn == nil {
+		ex.AddToListeners(&req.notifier().Listeners)
+		// Recheck in case capacity freed before the subscription was
+		// registered and could receive the notification.
+		return req.tryAcquire(), nil
+	}
+
+	b := requestBlockerPool.Get()
+	defer requestBlockerPool.Put(b)
+	b.req = req
+	b.ex = ex
+
+	var renotifyFn workq.RenotifyFunc
+	for !b.advance() {
+		if renotifyFn != nil {
+			// Can't productively use the notification received, so pass
+			// it along.
+			renotifyFn()
+		}
+		var err error
+		renotifyFn, err = blockFn(ctx, deadline, &req.notifier().Waiters, b.confirmFn)
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// requestBlocker latches the acquire across the blocking loop's
+// confirm/advance calls — once HELD, further tryAcquire calls would be
+// illegal, so the latch is what keeps the loop state-legal.
+type requestBlocker struct {
+	req            request
+	ex             workq.Execution
+	held           bool
+	blockingCalled bool
+
+	confirmFn func() bool // avoid reallocating closure
+}
+
+func (b *requestBlocker) Init() {
+	b.confirmFn = b.confirm
+}
+
+func (b *requestBlocker) Reset() {
+	*b = requestBlocker{
+		confirmFn: b.confirmFn,
+	}
+}
+
+func (b *requestBlocker) advance() bool {
+	if !b.held {
+		b.held = b.req.tryAcquire()
+	}
+	return b.held
+}
+
+func (b *requestBlocker) confirm() bool {
+	if b.advance() {
+		return false
+	}
+	if !b.blockingCalled {
+		b.blockingCalled = true
+		b.ex.Blocking()
+	}
+	return true
+}
+
+var requestBlockerPool = omnipool.For[requestBlocker]()
+
 // SetMaxConcurrency adjusts the maximum number of simultaneously-held
 // permits on a [Semaphore]-backed Limiter. Use n < 0 for unlimited.
 // Panics if l is not Semaphore-backed.
@@ -458,70 +545,51 @@ func (s *semaphoreResource) setMaxConcurrency(limit int) {
 	}
 }
 
-// limiterScatterWork wraps an inner workq.Work with a Limiter
-// acquire-on-enter / release-on-completion gate. Replaces the
-// pre-Wave-4 taskPoolScatterWork, which was hard-coded to TaskPool's
-// in-flight semaphore.
+// limiterScatterWork gates an inner workq.Work behind a Limiter request
+// handle. It drives the handle only through the gate phase
+// (acquire/re-grant, and postpone when the gated work can't start); the
+// handle's lifecycle — release at completion, recycle — is owned by the
+// taskWork the request travels with across the queue hand-off.
 type limiterScatterWork struct {
 	workq.Work
 	job      *Pool
-	limiter  Limiter
+	req      request
 	deadline time.Time
-	acquired bool
 }
 
 func newLimiterScatterWork(
-	job *Pool, deadline time.Time, inner workq.Work, limiter Limiter,
+	job *Pool, deadline time.Time, inner workq.Work, req request,
 ) *limiterScatterWork {
 	w := limiterScatterWorkPool.Get()
 	w.Work = inner
 	w.job = job
-	w.limiter = limiter
+	w.req = req
 	w.deadline = deadline
-	w.acquired = false
 	return w
 }
 
 func (w *limiterScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
-	wb := workq.WaitBehavior{
-		BlockBehavior: w.job.protoBB,
-		ShouldWait: func() bool {
-			if w.acquired {
-				return false
-			}
-			w.acquired = w.limiter.impl.tryAcquire()
-			return !w.acquired
-		},
+	held, err := acquireOrWait(ctx, ex, w.deadline, w.job.protoBB, w.req)
+	if err != nil || !held {
+		return err
 	}
-
-	defer func() {
-		// If the work didn't start, release the permit we reserved.
-		if !ex.Started() && w.acquired {
-			w.limiter.impl.release()
-			w.acquired = false
-		}
-	}()
-
-	return workq.ExecuteOrWait(ctx, ex, w.deadline, w.limiter.impl.notifier(), wb,
-		func(ctx context.Context, ex workq.Execution) error {
-			return w.Work.Execute(ctx, ex)
-		})
+	err = w.Work.Execute(ctx, ex)
+	if !ex.Started() {
+		// Granted, but the inner post couldn't start (downstream queue
+		// full under postpone discipline): yield the grant while the work
+		// waits for queue space, keeping the request's identity for the
+		// re-grant on retry. See "The POSTPONED state" in
+		// docs/limiter-suspend-resume.md.
+		w.req.postpone()
+	}
+	return err
 }
 
 func (w *limiterScatterWork) Free() {
 	w.Work.Free()
+	// w.req is owned by the taskWork (released and recycled in
+	// taskWork.Free); just drop the reference via the pool's zeroing Put.
 	limiterScatterWorkPool.Put(w)
 }
 
 var limiterScatterWorkPool = omnipool.For[limiterScatterWork]()
-
-// limiterCompletedFn returns the per-task completion callback that
-// releases this Limiter's permit. Wired into the task work's
-// completedFn so the permit returns at the moment the worker finishes
-// executing the user body. Returns nil if l has no impl.
-func limiterCompletedFn(l Limiter) func() {
-	if l.impl == nil {
-		return nil
-	}
-	return l.impl.release
-}

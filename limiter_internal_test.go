@@ -35,7 +35,7 @@ func (w *wakeCounter) register(s *directScheduler, n int) {
 			w.count++
 			return true
 		}
-		l.AddTo(&s.notifier().Listeners)
+		l.AddTo(&s.notify.Listeners)
 		w.listeners = append(w.listeners, l)
 	}
 }

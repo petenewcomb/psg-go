@@ -106,6 +106,61 @@ func TestPermitScopingChains(t *testing.T) {
 		"no handle stamped yet anywhere on the chain")
 }
 
+// TestHeldRequestStampedDuringBodies pins the #2+#3 end-to-end property:
+// a limited body's request handle is stamped on the worker meta, and a
+// subwave context inside that body finds the SAME handle via the parent
+// walk — exactly what the suspend brackets (#4) will rely on.
+func TestHeldRequestStampedDuringBodies(t *testing.T) {
+	ctx, wave := NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	var bodyReq, subwaveSeenReq request
+	limited := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
+		_, bodyMeta := wave.pool.ctxMeta(bodyCtx)
+		bodyReq = bodyMeta.currentHeldRequest()
+
+		subCtx, subWave := NewWave(bodyCtx)
+		_, subTopMeta := subWave.pool.ctxMeta(subCtx)
+		subwaveSeenReq = subTopMeta.currentHeldRequest()
+		return subWave.CloseAndSkimAll(subCtx)
+	}, WithLimits(NewSemaphore(nil, 1)))
+	require.NoError(t, limited.Start(ctx))
+
+	var unlimitedReq request = &directRequest{} // sentinel, overwritten
+	unlimited := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
+		_, bodyMeta := wave.pool.ctxMeta(bodyCtx)
+		unlimitedReq = bodyMeta.currentHeldRequest()
+		return nil
+	})
+	require.NoError(t, unlimited.Start(ctx))
+
+	require.NoError(t, wave.CloseAndSkimAll(ctx))
+
+	require.NotNil(t, bodyReq, "limited body must see its stamped handle")
+	require.Same(t, bodyReq, subwaveSeenReq,
+		"a subwave context inside the body must find the body's handle via the parent walk")
+	require.Nil(t, unlimitedReq, "unlimited body must see no handle")
+
+	var funnelReq request
+	ctx2, wave2 := NewWave(context.Background())
+	defer wave2.CancelAndWait()
+	fp := NewFunnelPool(wave2.Pool())
+	f := NewFnFunnel(fp, func() Accumulator[int] {
+		return FuncAccumulator[int]{
+			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
+				_, m := wave2.pool.ctxMeta(fctx)
+				funnelReq = m.currentHeldRequest()
+				return time.Time{}, nil
+			},
+			FlushFn: func(context.Context) error { return nil },
+		}
+	}, nil, WithLimits(NewSemaphore(nil, 1)))
+	defer f.Close()
+	require.NoError(t, f.Submit(ctx2, 1))
+	require.NoError(t, wave2.CloseAndSkimAll(ctx2))
+	require.NotNil(t, funnelReq, "limited Accumulate body must see its stamped handle")
+}
+
 func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	ctx, wave := NewWave(context.Background())
 	defer wave.CancelAndWait()

@@ -669,10 +669,30 @@ type funnelWork[T any] struct {
 	op       *funnelOp[T]
 	input    T
 	inputErr error
+	// req is the Limiter request handle this work's admission runs
+	// through; nil for unlimited ops, created lazily at the first gate
+	// attempt and persisting across postponed retries (stable identity).
+	// The funnelWork owns its lifecycle: released at body end in Execute
+	// (or idempotently in Free for never-executed work), recycled in Free.
+	req request
 	// wave is the dispatching wave; stamped onto the funnel worker's
 	// ctxMeta during executeInner so nil-wave op dispatches from the
 	// Accumulate / Flush body can resolve it.
 	wave *Wave
+}
+
+// funnelWork is the applicant its Limiter request is opened for:
+// accessors box lazily, only when a sizing limiter actually reads them.
+func (w *funnelWork[T]) Processor() any {
+	return w.op.funnelFactory
+}
+
+func (w *funnelWork[T]) Value() any {
+	return w.input
+}
+
+func (w *funnelWork[T]) Err() error {
+	return w.inputErr
 }
 
 func (c *funnelOp[T]) newFunnelWork(group workq.GroupID, value T, err error, wave *Wave) *funnelWork[T] {
@@ -766,25 +786,19 @@ func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 		return w.executeInner(ctx, ex)
 	}
 
-	limiter := w.op.limiter
-	acquired := false
-	defer func() {
-		if acquired {
-			limiter.impl.release()
-		}
-	}()
-	wb := workq.WaitBehavior{
-		BlockBehavior: w.op.funnelPool.job.protoBB,
-		ShouldWait: func() bool {
-			if acquired {
-				return false
-			}
-			acquired = limiter.impl.tryAcquire()
-			return !acquired
-		},
+	if w.req == nil {
+		w.req = w.op.limiter.impl.newRequest(w)
 	}
-	return workq.ExecuteOrWait(ctx, ex, time.Time{}, limiter.impl.notifier(), wb,
-		w.executeInner)
+	held, err := acquireOrWait(ctx, ex, time.Time{}, w.op.funnelPool.job.protoBB, w.req)
+	if err != nil || !held {
+		return err
+	}
+	// The funnel permit scopes exactly the body run: executeInner always
+	// starts, so the postpone-after-grant case doesn't arise here.
+	// Released on return (panic-inclusive); Free's release is then an
+	// idempotent no-op before the recycle.
+	defer w.req.release()
+	return w.executeInner(ctx, ex)
 }
 
 func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
@@ -802,6 +816,17 @@ func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) er
 	prevWave := meta.wave
 	meta.wave = w.wave
 	defer func() { meta.wave = prevWave }()
+	if w.req != nil {
+		// Stamp the held limiter request so framework parking points
+		// inside the Accumulate body can suspend it (currentHeldRequest).
+		// Stamp sites must be chain roots — see ctxMeta.parent.
+		if meta.parent != nil {
+			panic("limiter request stamped on non-root ctxMeta; worker contexts must be fresh permit-roots")
+		}
+		prevReq := meta.heldRequest
+		meta.heldRequest = w.req
+		defer func() { meta.heldRequest = prevReq }()
+	}
 	cw.executeFunnel(workerCtx, w)
 	return nil
 }
@@ -812,6 +837,16 @@ func (w *funnelWork[T]) Free() {
 	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", w, w)
 
 	w.op.funnelPool.inFlight.Decrement()
+
+	if w.req != nil {
+		// Normal completion already released at body end; this is the
+		// idempotent backstop for work freed without executing
+		// (cancellation drain) — by-state: abandon PENDING / give back
+		// HELD.
+		w.req.release()
+		freeRequest(w.req)
+		w.req = nil
+	}
 
 	w.DownstreamWork.Close()
 	w.poolWork.Close(w.op.funnelPool.job)

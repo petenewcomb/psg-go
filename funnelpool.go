@@ -141,6 +141,11 @@ func (cp *FunnelPool) goroutine() {
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			meta.ctxType = funnelContext
 			meta.executionEnvironment = worker
+			// Worker contexts are fresh permit-roots: for a subjob, j.ctx
+			// carries the dispatching body's meta from a foreign pool, and
+			// inheriting the parent link would let this worker find that
+			// body's held limiter permit across the goroutine boundary.
+			meta.parent = nil
 			return ctx
 		},
 	)

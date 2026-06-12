@@ -768,6 +768,11 @@ func (j *Pool) runTasks() {
 			meta.ctxType = taskContext
 			// Create execution environment with access to outboxes
 			meta.executionEnvironment = &exEnv
+			// Worker contexts are fresh permit-roots: for a subjob, j.ctx
+			// carries the dispatching body's meta from a foreign pool, and
+			// inheriting the parent link would let this worker find that
+			// body's held limiter permit across the goroutine boundary.
+			meta.parent = nil
 			return ctx
 		},
 	)

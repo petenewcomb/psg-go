@@ -29,11 +29,43 @@ const (
 )
 
 type ctxMeta struct {
-	job        *Pool
-	wave       *Wave // set by NewWave; nil for ctxs not derived through a Wave
-	parentJobs map[*Pool]struct{}
-	ctxType    contextType
+	job  *Pool
+	wave *Wave // set by NewWave; nil for ctxs not derived through a Wave
+	// parent links to the ctxMeta this one was derived from along the
+	// context value chain — the synchronous, same-goroutine derivations
+	// (top-level→skim, body→NewWave→subwave contexts) that
+	// currentHeldRequest walks to find a held limiter permit. Worker
+	// contexts are fresh permit-roots (parent == nil), severed
+	// explicitly at creation: the pool's base ctx may carry a foreign
+	// pool's meta (a subjob created inside a body), and inheriting the
+	// link there would let a worker find its dispatcher's permit across
+	// the goroutine boundary. See docs/limiter-suspend-resume.md,
+	// "Serialization and scoping".
+	parent *ctxMeta
+	// heldRequest is the limiter request handle stamped at body entry
+	// (prevWave-style save/restore) and found via currentHeldRequest at
+	// framework parking points. A stamped handle is only ever HELD or
+	// SUSPENDED: POSTPONED is pre-body, DONE is post-unstamp.
+	heldRequest request
+	parentJobs  map[*Pool]struct{}
+	ctxType     contextType
 	executionEnvironment
+}
+
+// currentHeldRequest returns the limiter request handle held by the body
+// this context is synchronously nested under, walking parent links and
+// stopping at the first stamped handle. Structurally there is at most one
+// per chain (every stamp site is a chain root — see the heldRequest field
+// doc); under help-execution nesting the first handle found is the
+// enclosing episode's, already SUSPENDED, so the suspend bracket's
+// `r != nil && r.suspend()` contract needs no state checks here.
+func (cm *ctxMeta) currentHeldRequest() request {
+	for m := cm; m != nil; m = m.parent {
+		if m.heldRequest != nil {
+			return m.heldRequest
+		}
+	}
+	return nil
 }
 
 func (cm *ctxMeta) String() string {
@@ -400,6 +432,7 @@ func (j *Pool) ensureCtxMeta(
 
 			meta := &ctxMeta{
 				job:                  j,
+				parent:               sourceMeta,
 				parentJobs:           parentJobs,
 				ctxType:              ctxType,
 				executionEnvironment: exEnv,

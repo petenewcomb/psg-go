@@ -63,15 +63,21 @@ constructors, exported `Resource`, `NewLimiter`) is additive/deferred.
 **Implementation plan — execution order #1, #2, #3, #5, #4, #6** (each
 checkpoint independently green; the hang baseline persists until #4 lands —
 expected):
-- **#1** Limiter core: `resource` iface (with `setCapacityChangedFn` hook) +
-  semaphore resource + direct scheduler + the handle (full state machine incl.
-  POSTPONED; illegal transitions panic) + the `ExecuteOrWait`
-  routing/`blockingAcquire` split. (`limiter.go` is clean/reverted — implement
-  the note from scratch, don't look for partial edits.) Unit tests pin:
-  notify on suspend/postpone/HELD-release and NOT on SUSPENDED/POSTPONED-
-  release (wake exactly once); no double-credit (acquire→suspend→release ==
-  acquire→release); legality panics; `SetMaxConcurrency` growth wakes
-  postponed listeners (the previously-uncovered hole).
+- **#1 — DONE (`c96db84`).** Limiter core: `resource` iface (with
+  `setCapacityChangedFn` hook) + semaphore resource + direct scheduler + the
+  handle (full state machine incl. POSTPONED; illegal transitions panic).
+  Unit tests pin: notify discipline (wake exactly once; discards silent);
+  no double-credit; legality panics; suspend-frees-slot; growth wakes
+  postponed listeners. **Deviations:** (a) the `ExecuteOrWait`
+  routing/`blockingAcquire` split is deferred to #3 — it has no consumer
+  until the gates drive handles, and landing it dead would only draw lint;
+  (b) a legacy `tryAcquire`/`release`/`notifier` shim remains on
+  `limiterImpl` so the existing `limiterScatterWork`/`funnelWork` gates stay
+  behavior-identical until #3 deletes it (legacy release now notifies
+  unconditionally per the new HELD-release rule; differs from the old
+  under-limit check only while draining a `SetMaxConcurrency` shrink —
+  benign extra wakes); (c) request handles are not pooled yet — add
+  pooling in #3 when the gates own the lifecycle.
 - **#2** `ctxMeta` permit scoping (`parent` link; worker contexts fresh-root —
   explicitly severed at task/funnel worker-context creation;
   `currentHeldRequest` stops at the first stamped handle).

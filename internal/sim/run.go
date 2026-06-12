@@ -203,10 +203,10 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 func (c *controller) ensurePools() {
 	c.limitersOnce.Do(func() {
 		for i, lim := range c.Plan.TaskLimiters {
-			c.TaskLimiters[i] = psg.NewSemaphore(lim.Permits)
+			c.TaskLimiters[i] = psg.NewSemaphore(nil, lim.Permits)
 		}
 		for i, lim := range c.Plan.FunnelLimiters {
-			c.FunnelLimiters[i] = psg.NewSemaphore(lim.Permits)
+			c.FunnelLimiters[i] = psg.NewSemaphore(nil, lim.Permits)
 		}
 	})
 	c.combPoolOnce.Do(func() {

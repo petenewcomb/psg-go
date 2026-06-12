@@ -23,7 +23,7 @@ func Example() {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := psg.NewSemaphore(10)
+	poolLimit := psg.NewSemaphore(nil, 10)
 	_ = ctx
 
 	// Track completed operations for ordered output

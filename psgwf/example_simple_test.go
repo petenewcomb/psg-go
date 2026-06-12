@@ -20,7 +20,7 @@ func Example_simple() {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := psg.NewSemaphore(10)
+	poolLimit := psg.NewSemaphore(nil, 10)
 
 	// Create a skim
 	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {

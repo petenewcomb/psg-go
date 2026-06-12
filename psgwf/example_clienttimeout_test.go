@@ -24,7 +24,7 @@ func Example_clientTimeout() {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := psg.NewSemaphore(10)
+	poolLimit := psg.NewSemaphore(nil, 10)
 
 	var clock exmpclk.ExampleClock
 	clock.Start()

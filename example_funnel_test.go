@@ -48,7 +48,7 @@ func ExampleFunnel() {
 	defer wave.CancelAndWait()
 
 	// Limit concurrent tasks to 2.
-	taskLimit := psg.NewSemaphore(2)
+	taskLimit := psg.NewSemaphore(nil, 2)
 
 	// Create a funnel pool and disable the idle timeout
 	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithIdleTimeout(-1))

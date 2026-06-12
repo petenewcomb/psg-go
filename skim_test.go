@@ -147,7 +147,7 @@ func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 
 	// Saturate a limiter so the next TrySubmit can't dispatch
 	// immediately.
-	limit := psg.NewSemaphore(1)
+	limit := psg.NewSemaphore(nil, 1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
 	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
@@ -179,7 +179,7 @@ func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	limit := psg.NewSemaphore(1)
+	limit := psg.NewSemaphore(nil, 1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
 	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {

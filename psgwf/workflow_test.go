@@ -47,7 +47,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	}
 
 	// Create a simple task to ensure workflow is used
-	poolLimit := psg.NewSemaphore(1)
+	poolLimit := psg.NewSemaphore(nil, 1)
 	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
@@ -94,7 +94,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 	_ = ctx
-	poolLimit := psg.NewSemaphore(2)
+	poolLimit := psg.NewSemaphore(nil, 2)
 
 	// Track execution
 	var afterFuncRan, newTaskRan bool

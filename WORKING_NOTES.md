@@ -99,12 +99,18 @@ expected):
   Handles pooled (`directRequestPool`; single recycle point = owning work's
   Free). End-to-end test pins subwave-finds-body-handle via parent walk.
   Baseline hang observed 1/3 full-suite runs — expected until #4.
-- **#5** *(deliberately before #4)* Switch the sim to **active-concurrency**
-  measurement: drop the body's contribution inside the Func-walker at the
-  `runSubjob` step (no drop around blocking submits — those are hold-through).
-  Under-counts under old behavior, so green pre-brackets. Also extend the sim
-  to **share limiters across waves/subjobs** (fresh-limiter-per-(sub)job is a
-  legacy holdover) with the concurrency counter shared along with the limiter.
+- **#5 — DONE (`bbe4211`).** Sim active-concurrency measurement
+  (`limiterTracker` threaded down the Func walk; Subjob step drops/restores
+  the body's contribution — under-counts pre-brackets, so green) +
+  cross-subjob limiter sharing (`Limiter.InheritFromParent` /
+  `LimiterConfig.Inherit`; controller aliases the parent's `psg.Limiter` AND
+  tracker; child skips the assertion the owning ancestor performs).
+  **Deviation:** the generator's default `Inherit` probability ships as **0**
+  and must be **flipped to ~0.25 in the #4 commit** — enabling it before the
+  brackets land makes the shared-limiter deadlock witnesses reachable and
+  would make even the `-short` suite (pre-commit gate) hang-prone. Machinery
+  is fully tested meanwhile (controller-aliasing unit test + hand-built
+  two-level inherited-limiter plan at permits=2, contention-free).
 - **#4** Bracket suspend-class episodes (skim methods + the block-and-help
   wait) with suspend + **help-shaped** reclaim (re-entrant via the already-
   SUSPENDED no-op; cancellation leaves SUSPENDED so completion `release`

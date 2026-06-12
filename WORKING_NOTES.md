@@ -78,9 +78,15 @@ expected):
   under-limit check only while draining a `SetMaxConcurrency` shrink —
   benign extra wakes); (c) request handles are not pooled yet — add
   pooling in #3 when the gates own the lifecycle.
-- **#2** `ctxMeta` permit scoping (`parent` link; worker contexts fresh-root —
-  explicitly severed at task/funnel worker-context creation;
-  `currentHeldRequest` stops at the first stamped handle).
+- **#2 — DONE (`2397419`).** `ctxMeta` permit scoping: `parent` link (set to
+  `sourceMeta` at creation in `ensureCtxMeta`) + `heldRequest` field (stamped
+  in #3); task/funnel worker contexts explicitly sever `parent` at creation
+  (subjob `j.ctx` carries the dispatching body's foreign-pool meta);
+  `currentHeldRequest` walks parent, stops at first stamped handle. Tests pin
+  walk semantics + chain topology through real flows (task/subwave/skim/
+  funnel). Note: psgwf `Example_clientTimeout` flaked once during
+  validation — the known pre-existing timing flake (TODO.md), passes 7/7 on
+  re-run; not related.
 - **#3** Wire funnel + task dispatch paths (stamp the handle at body entry with
   prevWave-style save/restore + `assert(meta.parent == nil)`; `postpone()` on
   a not-started return after grant; the task path threads the handle across

@@ -483,44 +483,67 @@ subject to limiters, it scales by adding goroutines (and, for funnels,
 accumulator instances).
 
 In that picture the Governor's real job is sharper than "translate congestion
-across a boundary": it is a **scaling brake**. Scaling an elastic op into a
-skimmer bottleneck is pointless — it manufactures stuck goroutines and partial
-aggregates with no throughput gain. So the contract is: **while a downstream
-skim is blocked, the Pool creates no new goroutines.** That one lever bounds the
-whole system:
+across a boundary," and it is **not a pool mechanism at all** — it is a
+**per-wave admission gate**. The contract is: **while a wave's downstream skim
+is blocked, that wave admits no new work — its `Start`/`Submit` are gated —
+regardless of how many goroutines the pool currently has.** Other waves sharing
+the same fungible pool are unaffected.
 
-- *Goroutines* — bounded directly by the spawn-brake.
-- *Intake and memory* — bounded by the existing queue-full backpressure
-  (bounded rdvq outboxes): with no new workers, the task/funnel queues fill and
-  `Submit`/`Start` block on the full queue, so intake backpressure falls out
-  without a separate block on the dispatch path.
-- *Accumulator instances* (partial-aggregate memory) — bounded for free:
-  instances are concurrency-demanded, so braking goroutine creation brakes
-  instance creation. An unlimited funnel grows instances only as fast as the
-  skimmer drains. (See `limiter-suspend-resume.md`, "Intake vs drain.")
+The gate must sit on *admission*, not on *spawning*, because the pool is
+fungible. Two facts force it:
 
-So the Governor reduces to a **pool-level "is a downstream skim blocked?" flag,
-consulted at the one spawn decision** (gating task- and funnel-worker creation
-alike). The `downstream` counter it already maintains *is* that flag; the
-generalization just also reads it at the spawn gate, not only on the upstream
-scatter path.
+- Goroutines that expanded to serve a *healthy* wave will happily pick up a
+  *saturated* wave's already-admitted work — so braking goroutine *creation*
+  does nothing to brake the saturated wave.
+- Conversely, the saturated wave must not launch into those goroutines in the
+  first place.
+
+So the lever is the wave's launch point, keyed by the wave's downstream
+saturation and independent of goroutine availability. The right shape already
+exists: `launcherScatterWork.Execute` gating the scatter on a governor *is* a
+launch-gate. The generalization is only (1) make the flag **per-wave**
+(Wave-owned) rather than per-pool `job.governor`, and (2) apply the same gate to
+**funnel intake** (`Submit`), which has none today. The spawn decisions
+(`trySpawnTaskWorker`/`maybeSpawn`) stay pure demand-driven — they are *not* a
+backpressure point.
+
+What this single per-wave gate bounds:
+
+- *The saturated wave's elasticity* — directly: no new work admitted, so its
+  in-flight drains and its skimmer catches up, then it unblocks.
+- *Goroutines* — for free: a wave that can't admit generates no demand, so the
+  pool spawns nothing for it; the pool's goroutine count tracks aggregate
+  *healthy*-wave demand. (So no separate spawn-brake — it was neither necessary
+  nor sufficient.)
+- *Accumulator instances / partial-aggregate memory* — for free: instances are
+  concurrency-demanded, and a gated wave generates no accumulate demand. An
+  unlimited funnel grows instances only as fast as its skimmer drains. (See
+  `limiter-suspend-resume.md`, "Intake vs drain.")
+
+**Why per-wave (not per-pool).** The destination is one fungible worker pool
+serving many waves; a pool-wide brake would let one saturated wave throttle
+unrelated healthy waves. Today the distinction is invisible only because
+`NewWave` mints its own pool (pool ≈ wave); the consolidation breaks that
+coincidence. The flag belongs with **Wave**, alongside the flush/drain ownership
+the plan already migrates Pool → Wave.
 
 **Current gap.** Only the launcher half is wired, by historical accident: flush
 used to emit implicitly to a skimmer, so a backed-up flush registered on
-`job.governor` and throttled launcher scatter (`launcherScatterWork.Execute`).
-The funnel pool's own governor (`cp.governor`) is incremented when funnel intake
+`job.governor` and gated launcher scatter (`launcherScatterWork.Execute`). The
+funnel pool's own governor (`cp.governor`) is incremented when funnel intake
 cannot post (`funnelPostWork.Waiting`) but is **never consulted** — there is no
-`cp.governor.Execute`, and `maybeSpawn` ignores it. So funnel elasticity
-currently scales regardless of downstream blockage; this matters most for
-*unlimited* funnels (a limiter already caps scaling).
+`cp.governor.Execute`, and funnel intake has no launch-gate. So funnel intake is
+not gated on downstream blockage today; this matters most for *unlimited*
+funnels (a limiter already caps scaling).
 
 **Home and safety.** The clean form is the Pool/FunnelPool consolidation: one
-merged pool → one downstream-blocked flag → one spawn gate, dissolving the
+fungible pool, **per-wave** downstream-blocked flags (Wave-owned), and a launch
+gate on `Start`/`Submit` that pauses only the saturated waves — dissolving the
 `job.governor`-read-by-launchers + `cp.governor`-write-only split. It is
 deadlock-free because the skimmer always drains — a skimmer's sole serial driver
 can never be monopolized, since skim handlers are forbidden from driving gathers
 (see `limiter-suspend-resume.md`, "Intake vs drain: ... the skim-gather
-prohibition"). The brake pauses elasticity; it never strands it.
+prohibition"). The gate pauses admission; it never strands it.
 
 ## Notification Conservation and Cross-System Backpressure
 

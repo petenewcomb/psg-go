@@ -58,17 +58,13 @@ func TestInheritedLimiterAliasing(t *testing.T) {
 		"inherited funnel limiter must share the parent's tracker")
 }
 
-// TestSubjobLimiterInheritanceEndToEnd runs a hand-built two-level plan
-// in which the subjob's launcher shares the parent launcher's limiter,
-// exercising run→runSubjob parent threading, the inherited-limiter
-// aliasing, the Subjob-step active-concurrency drop, and the
-// skip-inherited assertion path. Permits=2 so the topology is
-// contention-free pre-suspend-brackets (the limit=1 shared topologies
-// are enabled in the generator together with the brackets).
-func TestSubjobLimiterInheritanceEndToEnd(t *testing.T) {
+// twoLevelSharedLimiterPlan builds a parent plan whose single launcher
+// (bound to a task limiter with the given permits) drives a subjob whose
+// own launcher shares that limiter via inheritance.
+func twoLevelSharedLimiterPlan(permits int) *Plan {
 	subPlan := &Plan{
 		ID:           1,
-		TaskLimiters: []Limiter{{ID: 0, Permits: 2, InheritFromParent: 0}},
+		TaskLimiters: []Limiter{{ID: 0, Permits: permits, InheritFromParent: 0}},
 		Skimmers: []*Skimmer{{
 			ID:     1,
 			Handle: &Func{},
@@ -83,9 +79,9 @@ func TestSubjobLimiterInheritanceEndToEnd(t *testing.T) {
 		}},
 		Steps: []Step{StartTask{Prob: 1.0, RunnerIndex: 0}},
 	}
-	plan := &Plan{
+	return &Plan{
 		ID:           0,
-		TaskLimiters: []Limiter{{ID: 0, Permits: 2, InheritFromParent: -1}},
+		TaskLimiters: []Limiter{{ID: 0, Permits: permits, InheritFromParent: -1}},
 		Skimmers: []*Skimmer{{
 			ID:     0,
 			Handle: &Func{},
@@ -101,6 +97,24 @@ func TestSubjobLimiterInheritanceEndToEnd(t *testing.T) {
 		}},
 		Steps: []Step{StartTask{Prob: 1.0, RunnerIndex: 0}},
 	}
+}
 
-	require.NoError(t, Run(context.Background(), t, plan))
+// TestSubjobLimiterInheritanceEndToEnd runs the two-level shared-limiter
+// plan at permits=2 (contention-free), exercising run→runSubjob parent
+// threading, the inherited-limiter aliasing, the Subjob-step
+// active-concurrency drop, and the skip-inherited assertion path.
+func TestSubjobLimiterInheritanceEndToEnd(t *testing.T) {
+	require.NoError(t, Run(context.Background(), t, twoLevelSharedLimiterPlan(2)))
+}
+
+// TestSharedLimiterSelfDeadlockWitness is the shared-limiter
+// self-deadlock witness from docs/limiter-suspend-resume.md ("Where
+// suspend fires") as a deterministic regression test: a parent body
+// holds the ONLY permit of limiter L while it drives a subwave whose
+// launcher shares L. The subjob-top-level dispatch must blockingAcquire
+// L on the same goroutine that holds it — without the block-and-help
+// suspend bracket this spins forever; with it, the parent's handle
+// suspends, the subjob acquires, completes, and the parent reclaims.
+func TestSharedLimiterSelfDeadlockWitness(t *testing.T) {
+	require.NoError(t, Run(context.Background(), t, twoLevelSharedLimiterPlan(1)))
 }

@@ -5,6 +5,7 @@ package psg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync/atomic"
@@ -371,6 +372,13 @@ func acquireOrWait(
 		return req.tryAcquire(), nil
 	}
 
+	// NOTE: no suspend bracket here. The blocking branch only ever runs
+	// inside a top-level dispatch, whose WHOLE span — through the inner
+	// post — is one suspend episode bracketed in ctxMeta.ExecuteNowOrQueue.
+	// Bracketing just this loop deadlocks on self-acquisition: the
+	// deferred reclaim would run after the grant but before the gated
+	// work is posted, waiting forever on a task that isn't queued yet.
+
 	b := requestBlockerPool.Get()
 	defer requestBlockerPool.Put(b)
 	b.req = req
@@ -392,12 +400,69 @@ func acquireOrWait(
 	return true, nil
 }
 
-// requestBlocker latches the acquire across the blocking loop's
-// confirm/advance calls — once HELD, further tryAcquire calls would be
-// illegal, so the latch is what keeps the loop state-legal.
+// reclaimRequest drives a SUSPENDED request back to HELD at the end of a
+// suspend-class episode. It is help-shaped: blockFn is the pool's
+// block-and-help wait, so the goroutine keeps draining the skim domain it
+// currently drives while waiting for its slot — plain-wait reclaim
+// deadlocks under shared limiters (see "Reclaim is help-shaped" in
+// docs/limiter-suspend-resume.md). On cancellation it returns with the
+// handle still SUSPENDED; the body's completion release discards it (no
+// double give-back).
+func reclaimRequest(ctx context.Context, blockFn workq.BlockFunc, req request) {
+	b := requestBlockerPool.Get()
+	defer requestBlockerPool.Put(b)
+	b.req = req
+	b.resume = true
+
+	helping := true
+	var waiter workq.Waiter
+	defer waiter.Release()
+
+	var renotifyFn workq.RenotifyFunc
+	for !b.advance() {
+		if renotifyFn != nil {
+			// Can't productively use the notification received, so pass
+			// it along.
+			renotifyFn()
+		}
+		var err error
+		if helping {
+			renotifyFn, err = blockFn(ctx, time.Time{}, &req.notifier().Waiters, b.confirmFn)
+			switch {
+			case err == nil:
+			case ctx.Err() != nil:
+				// Canceled: leave the handle SUSPENDED; the body's
+				// completion release discards it (no double give-back).
+				return
+			case errors.Is(err, ErrJobDone):
+				// Help domain exhausted — e.g. the drained subjob this
+				// goroutine was driving reports end-of-work. The reclaim
+				// becomes vacuously plain: keep waiting on the notifier
+				// without help. Abandoning here instead would let the
+				// body resume computing UNPERMITTED while a sibling
+				// holds the slot.
+				helping = false
+			default:
+				// A handler error surfaced by helped work. The work ran
+				// either way, and the reclaim must not abandon the
+				// permit; keep helping.
+			}
+		} else {
+			renotifyFn, err = req.notifier().Wait(ctx, &waiter, b.confirmFn)
+			if err != nil {
+				return // canceled: leave SUSPENDED, as above
+			}
+		}
+	}
+}
+
+// requestBlocker latches the acquire/resume across the blocking loop's
+// confirm/advance calls — once HELD, further tryAcquire/tryResume calls
+// would be illegal, so the latch is what keeps the loop state-legal.
 type requestBlocker struct {
 	req            request
 	ex             workq.Execution
+	resume         bool // advance via tryResume (reclaim) instead of tryAcquire
 	held           bool
 	blockingCalled bool
 
@@ -416,7 +481,11 @@ func (b *requestBlocker) Reset() {
 
 func (b *requestBlocker) advance() bool {
 	if !b.held {
-		b.held = b.req.tryAcquire()
+		if b.resume {
+			b.held = b.req.tryResume()
+		} else {
+			b.held = b.req.tryAcquire()
+		}
 	}
 	return b.held
 }
@@ -427,12 +496,28 @@ func (b *requestBlocker) confirm() bool {
 	}
 	if !b.blockingCalled {
 		b.blockingCalled = true
-		b.ex.Blocking()
+		if b.ex.Blocking != nil { // nil on the reclaim path (no executor)
+			b.ex.Blocking()
+		}
 	}
 	return true
 }
 
 var requestBlockerPool = omnipool.For[requestBlocker]()
+
+// suspendForEpisode suspends the calling body's held limiter request, if
+// any, at the start of a suspend-class episode (a gather or
+// block-and-help wait — see "Where suspend fires" in
+// docs/limiter-suspend-resume.md). Returns the request to reclaim at
+// episode end, or nil: no enclosing body holds a permit, or the handle is
+// already suspended by an enclosing episode (re-entrancy — the reclaim
+// belongs to the episode that suspended it).
+func suspendForEpisode(meta *ctxMeta) request {
+	if r := meta.currentHeldRequest(); r != nil && r.suspend() {
+		return r
+	}
+	return nil
+}
 
 // SetMaxConcurrency adjusts the maximum number of simultaneously-held
 // permits on a [Semaphore]-backed Limiter. Use n < 0 for unlimited.

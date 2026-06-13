@@ -284,6 +284,12 @@ func (j *Pool) Skim(ctx context.Context) error {
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetSkim(ctx)
+	// Suspend-class episode: a body driving this skim parks here while
+	// holding its limiter permit; give the slot back for the duration
+	// and reclaim (help-shaped) on return.
+	if r := suspendForEpisode(meta); r != nil {
+		defer reclaimRequest(ctx, j.blockFn, r)
+	}
 	_, err := j.skim(ctx, meta)
 	return err
 }
@@ -352,6 +358,17 @@ func (j *Pool) block(
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Pool=%p", j)
 	ctx, meta := j.vetSkim(ctx)
+	// Suspend-class episode: the block-and-help wait both parks and
+	// synchronously runs other framework-gated work. Bracketing here is
+	// correctness-required, not just utilization — without it, a
+	// subjob-top-level dispatch acquiring a limiter held by this same
+	// goroutine's enclosing body self-deadlocks (see "Where suspend
+	// fires" in docs/limiter-suspend-resume.md). Re-entrant: the
+	// reclaim's own block-and-help finds the handle already SUSPENDED
+	// and no-ops.
+	if r := suspendForEpisode(meta); r != nil {
+		defer reclaimRequest(ctx, j.blockFn, r)
+	}
 	adder := blockingWorkAdderPool.Get()
 	defer blockingWorkAdderPool.Put(adder)
 	adder.job = j
@@ -694,6 +711,15 @@ func (j *Pool) TrySkim(ctx context.Context) (bool, error) {
 func (j *Pool) SkimAll(ctx context.Context) error {
 	traceRegion := "Pool.SkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
+
+	// Suspend-class episode (one per SkimAll, not per inner skim): a
+	// body driving this drain — e.g. a subwave's CloseAndSkimAll —
+	// parks here while holding its limiter permit; give the slot back
+	// for the whole drain and reclaim (help-shaped) on return.
+	ctx, meta := j.vetSkim(ctx)
+	if r := suspendForEpisode(meta); r != nil {
+		defer reclaimRequest(ctx, j.blockFn, r)
+	}
 
 	err := j.skimAll(ctx, j.skim)
 	if errors.Is(err, ErrJobDone) {

@@ -172,6 +172,19 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 
 	if cm.ShouldBlock() {
 		if cm.IsTopLevel() {
+			// Suspend-class episode: the WHOLE blocking dispatch — the
+			// backpressure yield, any governor/limiter block-and-help
+			// waits, and the inner post — is one episode for an
+			// enclosing body's held limiter permit (a subjob dispatch
+			// runs on the body's goroutine). The reclaim must come
+			// after the inner post: on self-acquisition (the dispatched
+			// op shares the holder's limiter), reclaiming any earlier
+			// waits on a task that hasn't been queued yet. Interior
+			// brackets (Pool.block) no-op via re-entrancy.
+			if r := suspendForEpisode(cm); r != nil {
+				defer reclaimRequest(ctx, cm.job.blockFn, r)
+			}
+
 			// Make sure existing work has a chance to run before we add more.
 			wait()
 

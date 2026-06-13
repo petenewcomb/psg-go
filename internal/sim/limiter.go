@@ -11,12 +11,12 @@ import (
 var defaultLimiterConfig = LimiterConfig{
 	Count:   BiasedIntConfig{Min: 1, Med: 3, Max: 10},
 	Permits: BiasedIntConfig{Min: 1, Med: 3, Max: 10},
-	// TODO(suspend-resume task #4): raise to a meaningful probability
-	// (~0.25) in the same commit that lands the suspend brackets.
-	// Cross-subjob limiter sharing makes the shared-limiter deadlock
-	// witnesses (docs/limiter-suspend-resume.md) reachable, and until
-	// the brackets dissolve them, enabling it would make even the
-	// -short suite hang-prone.
+	// KEEP 0 until the orphaned-drain-duty deadlock is resolved (see
+	// REVIEW_FINDINGS.md Finding 10): with cross-subjob sharing enabled,
+	// a hold-through result post into pool A's full skim queue + A's
+	// driver parked inside a deeper subjob B + B gated on the shared
+	// limiter closes a three-pool cycle the suspend brackets do not
+	// dissolve. Trace-confirmed with -rapid.seed=15905911232756343239.
 	Inherit: BiasedBoolConfig{Probability: 0},
 }
 

@@ -111,14 +111,31 @@ expected):
   would make even the `-short` suite (pre-commit gate) hang-prone. Machinery
   is fully tested meanwhile (controller-aliasing unit test + hand-built
   two-level inherited-limiter plan at permits=2, contention-free).
-- **#4** Bracket suspend-class episodes (skim methods + the block-and-help
-  wait) with suspend + **help-shaped** reclaim (re-entrant via the already-
-  SUSPENDED no-op; cancellation leaves SUSPENDED so completion `release`
-  discards; help domain = the current pool's skim context).
+- **#4 — PARTIAL (brackets landed; cross-subjob sharing deferred — see Finding
+  10).** Suspend-class brackets added at the skim methods (`Pool.Skim`,
+  `Pool.SkimAll`), the block-and-help wait (`Pool.block`), and the top-level
+  dispatch episode (`ctxMeta.ExecuteNowOrQueue` — the WHOLE blocking dispatch
+  is one episode so self-acquisition reclaims *after* the inner post, not
+  mid-wait). Help-shaped `reclaim` with `suspendForEpisode`. **The original
+  livelock is fixed** and validated: full non-short suite green ×3, `-race`
+  short green, lint 0; `suspend_test.go` (sibling runs while holder drives a
+  subwave) + `TestSharedLimiterSelfDeadlockWitness` (two-level same-goroutine
+  shared limiter) green. **BUT flipping `Inherit` on (the task-#5 cross-subjob
+  sharing) reveals a NEW hang the brackets do not dissolve** — a hold-through
+  producer + cross-pool driver-scarcity cycle around one shared permit;
+  reclaim's `ErrJobDone → plain-wait` fallback is the suspect (Finding 7's
+  plain-wait-deadlock shape, one level out). Trace-confirmed at
+  `-rapid.seed=15905911232756343239`. `Inherit` stays **0**; needs design
+  resolution (Finding 10) — NOT a quick patch (concurrency-critical → design
+  review first, per CLAUDE.md). The overcount `2 > permits 1` first seen here
+  was a real over-admission from reclaim *abandoning* on `ErrJobDone`; the
+  plain-wait fallback fixes that (keep it) and is correct for the non-shared
+  case.
 - **#6** Verify: `go vet`, `go test -short`, `.githooks/pre-commit`, then the
-  non-short `-race` loop → target 0 hangs over a large sample (now including
-  the shared-limiter topologies), no concurrency-assertion failures, no
-  permit-accounting panics.
+  non-short `-race` loop → target 0 hangs over a large sample, no
+  concurrency-assertion failures, no permit-accounting panics. **Blocked on
+  Finding 10** for the shared-limiter topologies; can run now for the
+  non-shared case (the shipped-relevant scenario).
 
 **Key invariants to preserve:** externally-serialized handles (never touched
 concurrently; HB edges via queues/notifiers — listed in the note); the

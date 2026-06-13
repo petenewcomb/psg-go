@@ -437,8 +437,13 @@ Remaining pins, as discussed:
 
 ## Finding 10 — Cross-subjob shared-limiter deadlock survives the suspend brackets (DISCOVERED during task #4)
 
-**Severity: design gap (blocks flipping the sim's `Inherit` on; user-reachable).**
-**Status: OPEN — needs design resolution before cross-subjob limiter sharing ships.**
+**Severity: design gap (blocked flipping the sim's `Inherit` on; user-reachable).**
+**Status: RESOLVED + IMPLEMENTED + VALIDATED (2026-06-13) — root cause was a
+skim handler driving a subwave (monopolizing the sole serial skim driver);
+fix is to disallow blocking gathers from skim handlers and redirect subwork to
+a funnel (preferred) or task. Non-short `-race` loop 0 hangs/0 fails / 30 with
+`Inherit` on (was 3/30). See "Resolution" below; the earlier two-mechanism
+sketch is superseded.**
 
 Task #4 landed the suspend-class brackets (skim methods, block-and-help wait,
 top-level dispatch episode) with help-shaped reclaim. They dissolve the
@@ -497,33 +502,121 @@ the resolution.
   spirit — before the suspend work this same topology hit the *original*
   livelock — so this is the next layer of the onion, not a regression.
 
-### Provisional decision (this commit)
+### Resolution (PN, 2026-06-13): disallow blocking gathers from skim handlers
 
-- Keep `LimiterConfig.Inherit = 0` (cross-subjob sharing off in the sim) with a
-  comment pointing here. The machinery (inheritance, shared trackers) stays in
-  place and is exercised by the hand-written witnesses at safe topologies.
-- Keep the `ErrJobDone → plain-wait` reclaim fallback: it is strictly more
-  correct than abandoning (abandoning causes real over-admission — the
-  `observed 2 > permits 1` overcount that first surfaced here), and it is
-  correct for the non-shared case. Its plain-wait tail is the suspect for the
-  shared-case hang and is what the resolution must replace.
+The earlier "two mechanisms (queue / help-outward)" and "stacked help domains"
+directions were developed before the trace was fully re-read. Re-reading it
+(the dump had **no reclaim** in flight) overturned the reclaim framing: the
+hang was a **driver-scarcity cycle** — a single goroutine was the sole driver
+of a nested gather chain, parked in the innermost gather, while an *outer*
+level needed draining to free a shared permit the inner level needed. The
+goroutine got there by a **skim handler driving a subwave** (`runSubjob` from a
+Skimmer body), which monopolizes the wave's sole serial skim driver.
 
-### Candidate directions (for design discussion — not yet chosen)
+The fix is structural and far simpler than any drain-machinery change:
 
-1. **Stacked help domains.** After the immediate subjob drains, reclaim should
-   help the *next enclosing* drivable pool (ultimately the pool owning the
-   contended limiter), not plain-wait. Needs a way to walk from the exhausted
-   subjob outward to a still-live help domain — the cross-pool composition
-   Finding 7 set up but only one level deep.
-2. **Revisit hold-through under sharing.** If a hold-through permit can
-   participate in a drain cycle once shared, the two-class rule may need a
-   third case for shared limiters (e.g. suspend-at-capacity-wait when the
-   permit is shared across a pool boundary), at the documented cost of weaker
-   backpressure.
-3. **Constrain sharing.** Disallow (or detect-and-reject) sharing a single
-   limiter across a subwave boundary, making Finding 8-style structural
-   enforcement carry this too. Cheapest, but removes a legitimate use.
+**Disallow blocking gathers (`Skim`/`SkimAll`/`CloseAndSkimAll`) from inside a
+skim handler.** A skim handler must not drive a subwave — it would monopolize
+the sole serial skim driver and deadlock. Subwork from a skim handler goes to a
+**demand-driven** consumer instead, which never has a sole driver to
+monopolize:
 
-The user's stated preference (deep design review before coding
-concurrency-critical changes; reset+document over patching) applies: this is a
-design decision, not a quick fix.
+- **Preferred — populate a Funnel from the handler.** This is the right
+  primitive, not a workaround: it *is* a map-reduce (the serial populate loop
+  stays in the handler where the item and logic are; Accumulate = map; Flush =
+  reduce + emit; Close + return replaces the gather). Drops only the inline
+  wait-for-results, which is the deadlock-prone reliance.
+- **Fallback — launch a task that drives the subwave** (for a genuinely
+  structured sub-wave). Tasks are demand-spawned, so no monopolization.
+
+Enforced by a parent-chain walk at gather entry (`ctxMeta.vetNotNestedInSkim`,
+using the task #2 `parent` links): panic if an enclosing context is a skim
+context. Funnel/task/top-level enclosing contexts are fine — funnels and tasks
+are demand-driven.
+
+**Why this is sufficient (and the committed brackets suffice unchanged):** with
+skim handlers unable to gather, the skim driver is never monopolized → the
+enclosing wave is always drainable → a task/funnel body driving a subwave
+suspends its permit (committed bracket), and its reclaim can plain-wait safely
+because the permit's holder is drained by the enclosing wave's *own, available*
+skim driver. No accept-and-defer, no help-outward, no demand-spawn-skim-driver,
+no metric.
+
+**Use-case analysis (why disallow, not just discourage):** no case was found
+where delegation to a funnel/task is impossible — a skim handler returns
+`error`, not data, and emits via Submit, so all of its post-gather logic moves
+into the funnel/task. The only thing lost is inline wait-for-results and strict
+serial ordering of sub-computations — which are exactly the reliances that
+monopolize the driver and deadlock. So the patterns where inline "is needed"
+are the dangerous ones; disallow is the honest, enforceable choice.
+
+**Depth-1 invariant:** all other queue depths are effectively 1 (hold-through
+pins tight backpressure). Allowing skim-gather + buffering would have carved
+out the one unbounded queue in the system; disallowing it preserves the uniform
+depth-1 property.
+
+### Implemented + validated (2026-06-13)
+
+- `ctxMeta.vetNotNestedInSkim` at `Pool.Skim`/`Pool.SkimAll`; unit test
+  `TestSkimHandlerDrivingSubwavePanics`.
+- Sim: skimmer Handle bodies never generate subjobs (`newFunc` `allowSubjob`
+  param = false for skimmers); subjobs still under launcher/funnel bodies.
+- `LimiterConfig.Inherit` flipped to 0.25 (cross-subjob sharing on).
+- Sim measures the gated quantity only (accumulate concurrency) — see Finding
+  11; the flush overlap that produced the spurious `2 > 1` is intended
+  pipelining, not over-admission.
+- Validation: full suite ×5 green; `-race` short clean (except the known
+  pre-existing leakguard test race); non-short `-race` loop **0 hangs, 0 fails
+  / 30** (baseline was 3/30) with `Inherit` on.
+
+---
+
+## Finding 11 — Limiter semantics for funnels: intake-limited, drain-side-free
+
+**Severity: design clarification (settled the funnel-limiter meaning; shaped the
+sim measurement in Finding 10).**
+**Status: RESOLVED (2026-06-13).**
+
+Working through "what does a limiter mean for an accumulator" (and a couple of
+wrong turns — per-call gating of both methods; then a permit-per-instance held
+for the instance lifetime) landed on a clean principle by mapping a funnel onto
+the **intake/drain** split:
+
+- **Accumulate = intake.** Bounding how much work is admitted is exactly what a
+  limiter is for (same as launcher tasks). `WithLimits` on a funnel is an
+  **accumulate-execution concurrency** limiter.
+- **Flush = drain.** It emits the accumulated aggregate downstream ("much of
+  the time just a Submit to a skimmer"). It is the funnel's output path.
+
+This generalizes **Finding 8** (skimmers are limiter-free because gating the
+drain deadlocks): **drain-side operations — skim handlers AND funnel flushes —
+are limiter-free; intake operations — launcher tasks AND funnel accumulates —
+carry the limiter.**
+
+Consequences:
+
+- **Flush is not gated by the funnel limiter**, and that is required, not just
+  permitted. The reduce/pipeline proof: at limit=1, the moment an instance
+  flushes, continued demand must immediately create a new instance and
+  accumulate into it *concurrently with* the flush. If flush consumed the
+  accumulate permit, the next accumulate would stall on every flush boundary —
+  no pipeline. So flush must never hold an accumulate permit.
+- **No `WithFlushLimits`** — not deferred, but unwanted on principle (limiting
+  the drain is the deadlock Finding 8 prevents). The use case it might seem to
+  serve — bounding expensive flush-triggered work — is served by **flushing to
+  a downstream limited launcher/funnel**: the limit lives on the next *intake*
+  op, via ordinary composition. (As with skimmers, a user with heavy in-handler
+  work bounds it inside the body with their own primitive.)
+- **No separate instance-count limiter.** Instances are created on demand by
+  concurrency and pooled/reused (not per-value or per-key), so instance count
+  is bounded by accumulate concurrency (~N, within a small factor under
+  flush/accumulate overlap — never unbounded). Keyed aggregation *would*
+  decouple instance count from concurrency and could warrant its own resource —
+  future, via the scheduler/resource model (Finding 1).
+- **Sim measures the gated quantity only** (accumulate concurrency). A flush
+  overlapping an accumulate — including a parent op's flush overlapping a
+  subjob op's accumulate on a shared limiter — is **intended pipelining**, not
+  over-admission; counting both produced the spurious `observed 2 > permits 1`.
+
+Net: one knob on a funnel (`WithLimits` = accumulate-execution concurrency);
+flush and instances ride along bounded by it; drain stays free.

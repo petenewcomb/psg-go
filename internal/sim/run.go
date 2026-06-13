@@ -472,12 +472,17 @@ func (c *controller) newFunnelFactory(
 				return time.Time{}, err
 			},
 			FlushFn: func(ctx context.Context) error {
-				if tracker != nil {
-					tracker.enter()
-					defer tracker.exit()
-				}
+				// Flush is deliberately NOT counted against the limiter
+				// tracker: the funnel limiter gates funnelWork (the
+				// Accumulate dispatch) only; funnelInstance.flush never
+				// acquires the permit. Counting Flush would assert more
+				// than the limiter gates — and under cross-subjob sharing
+				// a parent op's end-of-work Flush legitimately overlaps a
+				// subjob op's Accumulate on the shared tracker. Pass nil
+				// so Subjob steps in a Flush body don't drop a
+				// contribution that was never added.
 				v := &simValue{DispatchTime: time.Now()}
-				err := c.executeFunc(ctx, t, cmb.Flush, v, tracker)
+				err := c.executeFunc(ctx, t, cmb.Flush, v, nil)
 				if err == nil && c.shouldReturnError(cmb.Flush) {
 					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}

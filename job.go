@@ -284,6 +284,9 @@ func (j *Pool) Skim(ctx context.Context) error {
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetSkim(ctx)
+	// A blocking gather from inside a skim handler would monopolize the
+	// sole serial skim driver and deadlock; redirect to a funnel/task.
+	meta.vetNotNestedInSkim()
 	// Suspend-class episode: a body driving this skim parks here while
 	// holding its limiter permit; give the slot back for the duration
 	// and reclaim (help-shaped) on return.
@@ -717,6 +720,9 @@ func (j *Pool) SkimAll(ctx context.Context) error {
 	// parks here while holding its limiter permit; give the slot back
 	// for the whole drain and reclaim (help-shaped) on return.
 	ctx, meta := j.vetSkim(ctx)
+	// A blocking gather from inside a skim handler would monopolize the
+	// sole serial skim driver and deadlock; redirect to a funnel/task.
+	meta.vetNotNestedInSkim()
 	if r := suspendForEpisode(meta); r != nil {
 		defer reclaimRequest(ctx, j.blockFn, r)
 	}

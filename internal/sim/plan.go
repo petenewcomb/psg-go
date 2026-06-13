@@ -140,9 +140,10 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 			depth = rapid.IntRange(0, maxSkimmerDepth).Draw(t, fmt.Sprintf("Skimmer#%d.Depth", id))
 		}
 		plan.Skimmers[i] = &Skimmer{
-			ID:     id,
-			Depth:  depth,
-			Handle: newFunc(t, plan, config, &config.Skimmer.Handle, nextIDs, fmt.Sprintf("Skimmer#%d.Handle", id)),
+			ID:    id,
+			Depth: depth,
+			Handle: newFunc(t, plan, config, &config.Skimmer.Handle, nextIDs,
+				fmt.Sprintf("Skimmer#%d.Handle", id), false), // skimmers can't drive subwaves
 		}
 	}
 	// Sort Skimmers by depth ascending — needed so cascade-target
@@ -172,9 +173,9 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 			ID:    id,
 			Depth: depth,
 			Accumulate: newFunc(t, plan, config, &config.Funnel.Accumulate, nextIDs,
-				fmt.Sprintf("Funnel#%d.Accumulate", id)),
+				fmt.Sprintf("Funnel#%d.Accumulate", id), true),
 			Flush: newFunc(t, plan, config, &config.Funnel.Flush, nextIDs,
-				fmt.Sprintf("Funnel#%d.Flush", id)),
+				fmt.Sprintf("Funnel#%d.Flush", id), true),
 		}
 		if combLimiterCount > 0 {
 			limIdx := rapid.IntRange(0, combLimiterCount-1).Draw(t, fmt.Sprintf("Funnel#%d.LimiterIndex", id))
@@ -344,7 +345,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 		runner := &Launcher{
 			ID:    id,
 			Depth: length,
-			Body:  newFunc(t, plan, config, &config.Launcher.Body, nextIDs, fmt.Sprintf("Launcher#%d.Body", id)),
+			Body: newFunc(t, plan, config, &config.Launcher.Body, nextIDs,
+				fmt.Sprintf("Launcher#%d.Body", id), true),
 		}
 		if taskLimiterCount > 0 {
 			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, fmt.Sprintf("Launcher#%d.LimiterIndex", id))
@@ -444,8 +446,14 @@ func probValue(config *Config, p float64) float64 {
 // draw against funcConfig.ReturnErrorProb — matches the old sim's
 // ReturnError bool semantics. Submits and StartTasks are appended by
 // the caller based on path-construction context.
+// allowSubjob is false for skimmer Handle bodies: a skim handler cannot
+// drive a subwave (it would monopolize the sole serial skim driver and
+// deadlock — see REVIEW_FINDINGS Finding 10; the framework panics on it).
+// Subwork from a skim handler goes through a funnel or a launched task,
+// so the generator simply never nests a subjob directly under a skimmer.
 func newFunc(
 	t *rapid.T, plan *Plan, config *Config, funcConfig *FuncConfig, nextIDs *idCounters, name string,
+	allowSubjob bool,
 ) *Func {
 	fn := &Func{}
 	errCfg := BiasedBoolConfig{Probability: funcConfig.ReturnErrorProb}
@@ -460,7 +468,7 @@ func newFunc(
 	}
 	fn.Steps = append(fn.Steps, SelfTime{Dist: dist})
 
-	if config.Subjob.MaxDepth > 0 && funcConfig.Subjob.Add.Draw(t, name+".Subjob.Add") {
+	if allowSubjob && config.Subjob.MaxDepth > 0 && funcConfig.Subjob.Add.Draw(t, name+".Subjob.Add") {
 		subConfig := *config
 		subConfig.Subjob.MaxDepth--
 		const subjobPathShrinkDivisor = 2

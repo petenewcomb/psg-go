@@ -54,3 +54,23 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 	require.NoError(t, launcher.Submit(ctx, 2))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 }
+
+// TestSkimHandlerDrivingSubwavePanics pins the Finding 10 constraint: a
+// skim handler may not drive a subwave (it would monopolize the wave's
+// sole serial skim driver and deadlock). Subwork from a skim handler must
+// go through a funnel or a launched task instead.
+func TestSkimHandlerDrivingSubwavePanics(t *testing.T) {
+	ctx, wave := psg.NewWave(context.Background())
+	defer wave.CancelAndWait()
+
+	skimmer := psg.NewFnSkimmer(wave, func(ctx context.Context, _ int, _ error) error {
+		subCtx, subWave := psg.NewWave(ctx)
+		defer subWave.CancelAndWait()
+		return subWave.CloseAndSkimAll(subCtx) // disallowed: gather from a skim handler
+	})
+
+	require.NoError(t, skimmer.Submit(ctx, 1))
+	require.Panics(t, func() {
+		_ = wave.CloseAndSkimAll(ctx)
+	})
+}

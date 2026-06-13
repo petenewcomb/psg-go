@@ -52,6 +52,29 @@ type ctxMeta struct {
 	executionEnvironment
 }
 
+// vetNotNestedInSkim panics if a blocking gather (Skim/SkimAll, hence
+// CloseAndSkimAll) is being driven from inside a skim handler — i.e. an
+// enclosing context on this goroutine is a skim context. Driving a
+// subwave from a skim handler monopolizes the wave's sole serial skim
+// driver while the handler is parked in the gather, which deadlocks
+// under shared limiters / nested subwaves (see REVIEW_FINDINGS Finding
+// 10). The fix is to keep skimming serial and drive subwork elsewhere:
+// populate a [Funnel] from the handler (the map-reduce primitive), or
+// launch a task that drives the subwave. Tasks and funnels are
+// demand-driven, so they never monopolize a sole driver.
+//
+// Walks parent (excluding the gather's own skim context). Funnel/task/
+// top-level enclosing contexts are fine — only an enclosing *skim*
+// handler is disallowed.
+func (cm *ctxMeta) vetNotNestedInSkim() {
+	for m := cm.parent; m != nil; m = m.parent {
+		if m.ctxType == skimContext {
+			panic("psg: cannot drive a subwave (Skim/SkimAll/CloseAndSkimAll) from a skim handler; " +
+				"populate a Funnel from the handler, or launch a task to drive the subwave")
+		}
+	}
+}
+
 // currentHeldRequest returns the limiter request handle held by the body
 // this context is synchronously nested under, walking parent links and
 // stopping at the first stamped handle. Structurally there is at most one

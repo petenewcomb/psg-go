@@ -11,13 +11,13 @@ import (
 var defaultLimiterConfig = LimiterConfig{
 	Count:   BiasedIntConfig{Min: 1, Med: 3, Max: 10},
 	Permits: BiasedIntConfig{Min: 1, Med: 3, Max: 10},
-	// KEEP 0 until the orphaned-drain-duty deadlock is resolved (see
-	// REVIEW_FINDINGS.md Finding 10): with cross-subjob sharing enabled,
-	// a hold-through result post into pool A's full skim queue + A's
-	// driver parked inside a deeper subjob B + B gated on the shared
-	// limiter closes a three-pool cycle the suspend brackets do not
-	// dissolve. Trace-confirmed with -rapid.seed=15905911232756343239.
-	Inherit: BiasedBoolConfig{Probability: 0},
+	// Cross-subjob limiter sharing. Safe to enable now that skim handlers
+	// can no longer drive subwaves (REVIEW_FINDINGS Finding 10): the
+	// deadlock it used to expose required a skim handler monopolizing its
+	// wave's sole serial driver while parked in a sub-gather; with that
+	// pattern disallowed (subwork goes through funnels/tasks, which are
+	// demand-driven), the committed suspend/reclaim brackets suffice.
+	Inherit: BiasedBoolConfig{Probability: 0.25},
 }
 
 // LimiterConfig controls generation of a kind of Limiter (task-bound or

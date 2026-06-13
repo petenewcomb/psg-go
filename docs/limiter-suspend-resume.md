@@ -391,6 +391,85 @@ intercept user code that blocks on its own channel, mutex, or syscall inside a
 body; that remains the user's concern. The livelock being fixed is entirely
 framework-mediated, so this is sufficient.
 
+## Intake vs drain: limiter placement and the skim-gather prohibition
+
+The two-class rule above keeps a *held* permit from deadlocking at a park. A
+second, structural rule keeps the *drain* itself always able to make
+progress — without which the hold-through class's "queue drain never depends on
+permits" claim fails under limiter sharing.
+
+**Limiters gate intake, not drain.** Map each op onto the intake/drain split:
+
+- *Intake* — launcher tasks and funnel **accumulates**. Admitting work is
+  exactly what a limiter bounds; these carry `WithLimits`.
+- *Drain* — skim handlers and funnel **flushes**. These move work *out* (a skim
+  consumes; a flush emits the aggregate downstream — often just a Submit to a
+  skimmer). They are **limiter-free**, generalizing "skimmers never take
+  `WithLimits`": gating the drain is the deadlock that commitment prevents.
+
+So for a funnel, `WithLimits` means **accumulate (intake) concurrency**, and:
+
+- **Flush is not gated, and must not be.** It runs in funnel context (it
+  postpones, never blocking a worker) and never holds an accumulate permit —
+  required for the flush/accumulate pipeline: at `limit==1`, the instant an
+  instance flushes, demand must create a new instance and accumulate into it
+  *concurrently with* the flush; a flush holding the permit would stall every
+  flush boundary.
+- **No `WithFlushLimits`.** Bounding flush-*triggered* work is done by flushing
+  to a downstream *limited* launcher/funnel — the limit lives on the next
+  intake hop. (As with a heavy skim handler, in-flush work a user wants bounded
+  is bounded inside the body with their own primitive.)
+- **No separate instance-count limiter.** Accumulator instances are created on
+  demand by concurrency and pooled/reused (not per-value or per-key), so
+  instance count — and thus partial-aggregate memory — is bounded by accumulate
+  concurrency. Whatever caps concurrency (an explicit limiter, or the
+  governor's downstream-blockage spawn-brake — see
+  `backpressure-and-reentrancy.md`) caps instances for free; an unlimited
+  funnel grows instances only as fast as the skimmer drains. (Keyed aggregation
+  *would* decouple instance count from concurrency and could warrant its own
+  resource — future, via the scheduler.)
+
+**Skim handlers must not drive a blocking gather.** A skimmer's drain has a
+single serial driver (its `Skim`/`SkimAll`/`CloseAndSkimAll` caller, plus
+transient block-and-help helpers). If a skim handler itself drives a subwave
+(`CloseAndSkimAll` from inside the handler), it monopolizes that sole driver
+while parked in the sub-gather — and under limiter sharing / nested subjobs
+that closes a driver-scarcity cycle: an outer wave can't drain to free a shared
+permit the inner gather needs, because the one goroutine that would drain it is
+stuck in the inner gather. So a blocking gather from skim context is
+**disallowed** — `ctxMeta.vetNotNestedInSkim` walks the parent chain at gather
+entry and panics if an enclosing context is a skim context (funnel/task/
+top-level enclosing contexts are fine; the non-blocking `Try*` gathers are not
+restricted). Subwork from a skim handler goes to a demand-driven consumer,
+which has no sole driver to monopolize:
+
+- *preferred* — populate a **funnel** from the handler. This is the right
+  primitive, not a workaround: it *is* the map-reduce (serial populate stays in
+  the handler; Accumulate = map; Flush = reduce-and-emit; Close + return
+  replaces the gather), dropping only the deadlock-prone inline
+  wait-for-results.
+- *fallback* — launch a **task** that drives the subwave (a genuinely
+  structured sub-wave; demand-spawned, so no monopolization).
+
+The ban is narrower than "drain-side ops can't gather" — it is specifically
+about the **sole serial driver**, not about being drain-side. A funnel **flush**
+is also drain-side (and also limiter-free), yet it *may* drive a subwave: it
+runs on a demand-spawned funnel-pool worker, so a flush parked in a sub-gather
+is simply replaced by another spawned worker — no monopolization. Same for a
+funnel accumulate or a launcher task. So two distinct properties are at work:
+*drain-side* governs limiter placement (skim handlers and flushes are
+limiter-free); *sole serial driver* governs the gather ban (only the skimmer
+drain has one). They coincide for skim and diverge for flush — which is why the
+check keys on skim context specifically, not on drain-side-ness.
+
+This rule is what makes the hold-through class safe under limiter sharing: with
+the drain always drivable, "queue drain never depends on a permit" holds, and
+the committed suspend/reclaim brackets need no further mechanism (no
+help-outward, no accept-and-defer, no metric). The cross-subjob deadlock that
+motivated the rule was exactly a skim handler driving a subjob (`runSubjob`
+from a Skimmer body); it is validated fixed with cross-subjob limiter sharing
+enabled (`0 hangs / 30`, baseline `3 / 30`).
+
 ## Serialization and scoping
 
 The handle needs no internal synchronization — not because it lives on one

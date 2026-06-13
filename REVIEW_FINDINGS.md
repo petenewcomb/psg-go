@@ -620,3 +620,79 @@ Consequences:
 
 Net: one knob on a funnel (`WithLimits` = accumulate-execution concurrency);
 flush and instances ride along bounded by it; drain stays free.
+
+---
+
+## Finding 12 — Generalize the governor: downstream blockage brakes Pool goroutine creation
+
+**Severity: pre-existing backpressure gap (resource-stability, not correctness);
+home is the Pool/FunnelPool consolidation.**
+**Status: OPEN — recorded for the consolidation pass; surfaced while settling
+Findings 10–11.**
+
+**The model.** Skimmers are the system's one serialization point and therefore
+the sole source of backpressure: a skim handler runs serially (single driver
+unless the user opts into multiple), it's the drain, and everything upstream
+postpones/blocks when a skimmer's queue fills. Everything else is *elastic* —
+launchers and funnels scale by adding goroutines (and, for funnels,
+instances), subject to limiters. Scaling into a skimmer bottleneck is pointless
+(it just manufactures stuck/idle goroutines and partial aggregates), so the
+governor's real job is a **per-wave scaling brake**: detect a *wave's*
+downstream blockage and stop creating goroutines/instances for that wave's work
+until it clears — leaving other waves on the same fungible pool free to scale.
+
+**Why only half-wired today.** Flush used to implicitly emit to a skimmer, so
+the one wired loop — blocked skim emit → `job.governor` → block top-level
+scatter (`launcherScatterWork.Execute`, `launcher.go:374`) — covered it. In the
+new model flush can emit anywhere and launcher/funnel are independent ops, so
+that inheritance no longer covers funnels: `cp.governor` (the FunnelPool's) is
+incremented (`funnelPostWork.Waiting`, `funnelpool.go:260`) but **never
+consulted** — no `cp.governor.Execute` exists, and `maybeSpawn` ignores it. So
+funnel elasticity scales regardless of downstream blockage. Matters most for
+*unlimited* ops (a limiter already caps scaling; an unlimited funnel feeding a
+stalled skimmer scales unbounded).
+
+**The lever — a per-wave admission gate, NOT a pool spawn-brake.** The gate sits
+on the **wave's launch point** (`Start`/`Submit`), keyed by that wave's
+downstream saturation, *independent of pool goroutine availability*: while a
+wave's downstream skim is blocked, that wave admits no new work; other waves on
+the same fungible pool are unaffected. It cannot be a spawn-brake, because the
+pool is fungible:
+
+- goroutines grown for a *healthy* wave will pick up a *saturated* wave's
+  already-admitted work — so braking goroutine *creation* doesn't brake the
+  saturated wave; and
+- conversely the saturated wave must not launch into those goroutines at all.
+
+The right shape already exists: `launcherScatterWork.Execute` gating the scatter
+on a governor *is* a launch-gate. The generalization is only (1) make the flag
+**per-wave** (Wave-owned, not per-pool `job.governor`), and (2) apply the same
+gate to **funnel intake** (`Submit`), which has none today. Spawn decisions
+(`trySpawnTaskWorker`/`maybeSpawn`) stay pure demand-driven — not a backpressure
+point.
+
+What the single per-wave gate bounds:
+
+- *The saturated wave's elasticity* — directly (no new admission → in-flight
+  drains → skimmer catches up → unblocks).
+- *Goroutines* — for free: a gated wave generates no demand, so the pool spawns
+  nothing for it; goroutine count tracks aggregate *healthy*-wave demand. (So no
+  separate spawn-brake — it was neither necessary nor sufficient.)
+- *Intake + memory* — existing queue-full backpressure (bounded rdvq outboxes).
+- *Instances/partial-aggregate memory* — for free: instances are
+  concurrency-demanded, and a gated wave generates no accumulate demand (closes
+  Finding 11's memory question — no instance limiter even for unlimited ops).
+
+**Deadlock-free** because the skimmer always drains — guaranteed by Finding 10
+(a skimmer's sole serial driver can't be monopolized, since skim handlers can't
+gather) — so the gate always clears; it pauses admission, never strands it.
+
+**Why per-wave.** The destination is one fungible pool serving many waves; a
+pool-wide gate would throttle healthy waves. Invisible today only because
+`NewWave` mints its own pool (pool ≈ wave). The flag belongs with **Wave**,
+alongside the flush/drain ownership the plan already migrates Pool → Wave.
+
+**Home / shape.** Pool/FunnelPool consolidation: one fungible pool, per-wave
+downstream-blocked flags (Wave-owned), a launch gate on `Start`/`Submit` that
+pauses only saturated waves — dissolving today's `job.governor`-read-by-launchers
++ `cp.governor`-write-only split.

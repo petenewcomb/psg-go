@@ -137,6 +137,21 @@ expected):
 - **#6 — DONE for the implemented scope** (`go vet`, `-short`, lint 0,
   non-short `-race` loop 0/30). The leakguard `TestLogLeakStructured` race is
   pre-existing/test-only (documented above).
+- **FUTURE (Pool-consolidation track) — generalize the governor (Finding 12).**
+  Skimmers are the system's sole serialization point / backpressure source;
+  launchers and funnels are elastic (scale goroutines/instances subject to
+  limiters). The governor's real job is a **scaling brake**: propagate
+  downstream-skim blockage to the **Pool's spawn decision** so no new
+  goroutines are created while a downstream skim is blocked. That caps
+  concurrency — and since funnel instances are concurrency-demanded, it caps
+  instance/partial-aggregate memory too (so no separate instance limiter, even
+  for unlimited ops). Intake/memory backpressure already falls out of
+  queue-full (bounded rdvq outboxes). Today only the launcher half is wired
+  (`job.governor` read by `launcherScatterWork`; `cp.governor` is write-only) —
+  a legacy artifact of flush implicitly emitting to a skimmer. Clean home: the
+  merged pool (one downstream-blocked flag, one spawn gate). Deadlock-free
+  because the skimmer always drains (Finding 10). Detail in REVIEW_FINDINGS
+  Finding 12.
 
 **Key invariants to preserve:** externally-serialized handles (never touched
 concurrently; HB edges via queues/notifiers — listed in the note); the

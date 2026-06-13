@@ -96,6 +96,270 @@ section heading further down, framed as "what we call this pattern."
 
 ---
 
+## Addendum: ultrapool — pure-speed competitor + reusable cross-library benchmark suite (2026-06-12)
+
+Single-repo review of [maurice2k/ultrapool](https://github.com/maurice2k/ultrapool)
+(README, repo metadata, benchmark source), added 2026-06-12. Not part of the
+original 2026-05-23 corpus sweep, and a different kind of evidence: this is
+a competitor analysis, not user-complaint mining. All performance numbers
+below are the vendor's own claims, not independently verified.
+
+### What it is
+
+A generic, sharded, adaptive worker pool; single-file, dependency-free,
+Go 1.20+, MIT. The README leads with "the fastest worker pool in Go" and
+sells almost entirely via benchmark tables. API shape is handler-per-pool,
+like ants' `PoolWithFunc` but generic: `NewWorkerPool(func(T))`, then
+`AddTask(T)` / `AddTaskWithBlocking(T)`. Architecture: ~GOMAXPROCS/2 shards
+each owning a task channel and worker set; lock-free CAS worker spawning
+against per-shard and global caps; idle workers retire after 1s above a
+floor. Claims 120–406 ns/op dispatch and 2–12× throughput vs `ants`,
+`pond`, `gammazero/workerpool`, and fasthttp's workerpool — and beating
+*raw goroutines* — across 8 workloads on 4 architectures (M2 Max,
+Graviton4 96c, EPYC 48c, Xeon 96c).
+
+Adoption signal: created 2020-01, recent v2 redesign, last push 2026-05-12 —
+actively developed, negligibly adopted (11 stars, 0 forks, 0 open issues).
+
+### Positioning relevance
+
+1. **The pure-speed axis is occupied and doesn't appear to sell.** A
+   library whose entire identity is "fastest worker pool" sits at 11 stars
+   after six years. Directional only — that could reflect zero marketing
+   rather than a market verdict — but it corroborates the recommendation
+   to lead with PP1/PP4 rather than dispatch ns/op. Speed is table stakes
+   to claim, not a headline to win on.
+2. **Reinforces the headline gap.** Even this 2026-era, generics-native
+   entrant takes `func(T)` with no return value — strictly fire-and-forget,
+   no results story at all (PP1 untouched). No recursive-submission story
+   either; a blocking `AddTaskWithBlocking` from inside a saturated worker
+   presumably has the same PP4 deadlock shape as every bounded pool
+   (unverified — its own benchmark harness would be a convenient place to
+   test that). The gaps psg targets remain open in the newest competition.
+3. **Vocabulary check passes.** "Worker pool", "task", `AddTask` —
+   consistent with the Appendix B inventory. Nothing here updates the
+   vocabulary recommendations.
+4. **Now covered in ARCHITECTURE_COMPARISON.md** (section 6, added
+   2026-06-12, source-level read of the whole 498-line library). Sharded
+   dispatch + CAS spawn-on-demand + idle retirement overlaps psg's
+   demand-driven spawning and idle-exit; rated Low-Medium contention,
+   near-zero framework allocations.
+
+### The benchmark suite (the actionable part)
+
+`benchmark/` in the ultrapool repo: `workerpool_test.go` (~23 kB),
+`crossbench*.sh` drivers, raw results. Workloads: Sleep 1µs, Sleep 50ms,
+SHA256 1kB, AES-CBC 1kB/8kB, CRC32 64B, MemScan 4kB, mixed bimodal
+(80% CRC32 / 20% AES), mutex contention. Harness: steady-state
+`b.RunParallel` at parallelism 1/10/50/100 measuring dispatch throughput,
+plus burst benchmarks (submit 50/500/5000 tasks, wait, let workers idle
+out, repeat) isolating cold-start spawn behavior, with a 1 ms sampler
+tracking peak goroutine/worker counts. Adapters already exist for ants,
+pond, gammazero, fasthttp, tunny, and raw goroutines.
+
+Why adapt psg to it:
+
+- ARCHITECTURE_COMPARISON.md says its ratings "should be backed by an
+  actual cross-library benchmark suite" before the README comparison table
+  is published. This is a ready-made one; writing a psg adapter (no-result
+  Launcher tasks) is cheap relative to building a suite from scratch.
+- The fire-and-forget workloads measure exactly the overhead psg pays for
+  machinery these tasks don't use (results plumbing, waves, limiters).
+  That is the configuration where psg should look *worst*, which makes it
+  the honest adversarial check on any "comparable speed" claim.
+- The burst benchmarks and peak-worker sampling speak directly to psg's
+  demand-driven spawning and scale-down-to-zero behavior.
+- Known gap: the suite measures throughput only — no latency percentiles.
+  Our priority order is P99/max latency first, throughput second, so psg
+  runs would extend the harness with latency measurement rather than adopt
+  its metrics wholesale.
+
+Caveats: vendor-authored benchmarks in the vendor's repo; competing
+libraries were adapted by the vendor and may not be optimally configured;
+the "beats raw goroutines" claim is extraordinary and should be reproduced
+locally before being repeated anywhere.
+
+---
+
+## Competitive landscape sweep (2026-06-12)
+
+Finding ultrapool by accident prompted the question: what else did the
+2026-05-23 research miss? This section is a systematic competitor sweep,
+distinct in kind from the original research: that was user-complaint
+mining; this is a library census.
+
+### Methodology
+
+Three parallel research agents, each searching a different way:
+curated lists + GitHub topic/keyword search (sorted by stars and by
+recency, including `created:>2023`); community discussions (HN via
+Algolia, blog/news coverage, search-engine snippets of Reddit — Reddit
+itself and some APIs remained blocked, the same gap as the May pass);
+and package indexes + stdlib/x-repo proposals (pkg.go.dev importer
+counts, golang/go issue tracker). Every reported library was verified by
+fetching its repo and README — nothing reported from model memory alone.
+Star counts and activity as observed 2026-06-12; treat rankings as
+directional.
+
+### Headline corrections to the earlier research
+
+1. **destel/rill was the big miss.** ~1.8k stars, actively maintained,
+   strong HN momentum (Show HN Nov 2024). "Go toolkit for clean,
+   composable, channel-based concurrency" — functions take channels in
+   and return channels out, every stage takes a concurrency parameter,
+   backpressure is a headline feature, and results stream by
+   construction. It owns the "streamed results + backpressure" narrative
+   this document recommended psg lead with. Its gaps are exactly psg's
+   territory: topology is fixed at pipeline-build time (no dynamic or
+   recursive task submission), no rate limiting, and HN commenters
+   flagged weak context integration and early-termination races. Note
+   the adoption asymmetry: 1.8k stars but only ~16 pkg.go.dev importers —
+   mindshare, not yet production share. **"Why not just use rill?" will
+   be the reflexive question; the README needs a ready answer.**
+2. **"Pools are fire-and-forget" is no longer a safe claim.** pond v2
+   (2.2k stars, v2.7.1 Apr 2026, the most actively shipping pool) has
+   typed `NewResultPool[T]` with `Submit(...).Wait() (T, error)` and
+   ordered result slices for task groups. goptics/varmq (187 stars,
+   active) delivers results via per-job handles. PP1 is being addressed
+   by the market — as *futures/handles per job*. psg's claim must
+   sharpen from "tasks return values" to **results streamed to handlers
+   as they arrive** (plus recursion-safety and limiting), which remains
+   unclaimed.
+3. **The stdlib is absorbing the low end.** Go 1.25 shipped
+   `sync.WaitGroup.Go(f)` (spawn-and-wait needs no library now);
+   proposal golang/go#57534 to promote errgroup into stdlib `sync` is
+   open (citing ~10k importers); errgroup's panic-propagation change was
+   added (Apr 2025) and then **reverted** (v0.16.0, Jun 2025) — the Go
+   team is iterating cautiously and errgroup's surface is effectively
+   frozen at error-only, no values, no recursion story. Don't compete on
+   spawn ergonomics; the stdlib won that.
+4. **Go 1.23 iterators are the new result-streaming substrate.** Two
+   agents independently converged on this: rill added range-over-func
+   integration, samber/lo grew a lazy-iterator subpackage, and the most
+   modern small entrant (firetiger-oss/concurrent) returns results as
+   `iter.Seq`/`iter.Seq2`. **psg's result-handler API should at minimum
+   have an `iter.Seq` interop story** — this is the most likely direction
+   from which psg gets leapfrogged.
+
+### Competitors that matter, ranked by relevance
+
+**Direct positioning competitors (result-returning / streaming):**
+
+- **destel/rill** (~1.8k★, active) — see above. The one to study first.
+- **earthboundkid/flowmatic** (~400★, dormant since 2023; author Carl
+  Johnson) — "Structured concurrency made easy." Its `ManageTasks` is
+  the only published API found that *markets* the "tasks that spawn more
+  tasks" pattern: a serial manager examines each task's output and may
+  return new work. Prior art for psg's recursive-submission story —
+  expect "how is this different from flowmatic?" The differences: psg
+  has no serial-manager bottleneck, streams results, and has per-op
+  limiting; flowmatic is also effectively abandoned.
+- **creachadair/taskgroup** (~36★, small but actively maintained) —
+  `Gatherer` delivers values to a serialized callback: conceptually the
+  nearest neighbor to psg's result-handler model. Its `Limit` returns a
+  start-func that blocks the submitter at the limit — **exactly the
+  recursive-submission deadlock psg avoids; crisp demo material.**
+- **alitto/pond v2** (2.2k★, very active) — typed result pools; see
+  correction #2.
+- **samber/lo `lop.Map`** (21.3k★ for lo) — by adoption, probably what
+  most developers actually use for "parallel map." One goroutine per
+  element, no limits, no errors, no streaming — a ready-made foil.
+- **chebyrash/promise** (~413★, active) — generic futures with
+  `.Await(ctx)`; per-stage pool selection (conc/ants integrations) is a
+  crude cousin of per-op limiting.
+- **reugn/go-streams** (~2.2k★, maintained) and **vladimirvivien/automi**
+  (848★, revived 2025) — fixed-topology stream-processing DSLs with
+  connectors (Kafka etc.); compete for "transform a stream concurrently"
+  but pull toward ETL, not in-process dynamic work.
+- **samber/ro** (new, Oct 2025) — RxJS-style observables; skeptical HN
+  reception ("heaps of reflection and panics"), but samber's
+  distribution reach (lo) means it could spread. The community's allergy
+  to the Rx paradigm is an opening: "streamed results without the
+  paradigm tax."
+- **go-pkgz/pool** (25★, active; umputun) — feature-for-feature the
+  closest *pool* to psg: typed results, streaming `Iter()` consumption,
+  bounded-buffer backpressure, cross-pool pipelines. Tiny adoption; a
+  design comparison point, not a market threat.
+
+**Adjacent-category competitors:**
+
+- **failsafe-go** (2.1k★, very active) — "Adaptive Limiter, Bulkhead,
+  Rate Limiter…" — increasingly *the* answer when a Go developer wants
+  per-operation limiting. psg's limiter story competes against
+  "errgroup + failsafe-go composition," not just against pools.
+- **noneback/go-taskflow** (632★, active) — taskflow-cpp-style DAGs with
+  visualization; competes for dependency-graph workloads, not streaming;
+  tasks communicate by side effect.
+- **hibiken/asynq** (13.4k★) — distributed Redis-backed task queue;
+  different category, but absorbs some "concurrent task processing"
+  searches. psg is the in-process, value-returning counterpoint.
+- **fatih/semgroup** (321★) — errgroup + semaphore, all-errors
+  accumulation; represents the "errgroup + semaphore is all you need"
+  school. Same recursive-submit deadlock as taskgroup's Limit.
+- **negrel/conc** (53★, new, unrelated to sourcegraph/conc) —
+  nursery-style structured concurrency where nested spawning is explicit
+  (pass the nursery down); overlaps the recursion story, error-only.
+
+**Watchlist (small, but show where the space is heading):**
+firetiger-oss/concurrent (9★ — `iter.Seq` results, **concurrency limits
+carried in the context that propagate down the call tree, only ever
+decreasing** — the only interesting alternative to per-op limiting
+found); goptics/varmq (187★ — result workers + pluggable persistence);
+Yiming1997/go-agile-pool (166★, active ants-style pool, fire-and-forget);
+kolosys/ion (1★ — bundles pool + multi-tier rate limiting + circuit
+breakers, claims outrun maturity).
+
+**Dead but instructive:**
+
+- **go-playground/pool** (724★, archived, last release 2016) — prior art
+  for psg's *exact* model: work units return `(interface{}, error)` and
+  `batch.Results()` **streams completed units over a channel**. Worth
+  citing as the pre-generics ancestor; it died with the type system,
+  not the idea.
+- **ReactiveX/RxGo** (5.1k★, dormant since 2021, pre-generics) — *the*
+  result-streaming library of its era; its collapse left the gap rill
+  now targets. Lesson (with go-playground/pool): streaming-results
+  libraries die in Go when they fight the type system — lead with type
+  safety.
+- devchat-ai/gopool (214★, dormant 2023 — result callbacks),
+  aaronjan/hunch, vardius/gollback, autom8ter/machine, workanator/go-floc
+  — the long tail of "errgroup with results" attempts, all abandoned.
+  The repeated abandonment is itself evidence the need is real and
+  unmet.
+
+### Updated strategic signals (supplements the 2026-05-23 list)
+
+- **conc's limbo confirmed deeper**: still at v0.3.0 since January 2023,
+  never 1.0, no successor found. The opening is still open.
+- **errgroup's footguns are getting publicity** (HN Aug 2025, "A subtle
+  bug with Go's errgroup," with bcmills defending the design). People
+  keep using it while increasingly calling it trap-laden.
+- **Community taste check**: the rill and ro HN threads split on clever
+  channel/stream abstractions; revealed preference is for *boring,
+  context-aware, type-safe* APIs. psg's context-first, handler-based
+  surface aligns; any README cleverness does not.
+- **Net competitive assessment** (all three agents converged): **no
+  actively maintained library combines psg's four differentiators** —
+  typed results streamed to handlers, deadlock-safe recursive
+  submission, backpressure, per-op concurrency/rate limiting. Each is
+  individually claimed (rill: streaming+backpressure; flowmatic/negrel:
+  recursion; pond v2/varmq: typed results; failsafe-go: limiting); the
+  conjunction is not.
+
+### Action items emerging
+
+1. Write the "why not rill?" comparison before the README rewrite —
+   it's the first question any informed reader will ask.
+2. Sharpen the PP1 claim to *streamed handlers*, not *result-returning*
+   (pond v2 closed the naive version).
+3. Build the recursive-deadlock demo against taskgroup `Limit` /
+   semgroup / a bounded pool — concrete, reproducible, vivid.
+4. Evaluate an `iter.Seq`/`iter.Seq2` interop surface for skim/result
+   consumption (also filed in TODO.md).
+5. Periodically re-check the watchlist + golang/go#57534.
+
+---
+
 ## Appendix A: Pain points with quotes
 
 ### PP1. "How do I get the results out?"

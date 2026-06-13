@@ -23,6 +23,9 @@ Sources examined:
 - `panjf2000/ants` (`pool.go`, `ants.go`, `worker.go`)
 - `alitto/pond` (`pool.go`, `internal/linkedbuffer/linkedbuffer.go`)
 - `cmitsakis/workerpool-go` (`main.go`)
+- `maurice2k/ultrapool` (`ultrapool.go` — entire library; local clone at
+  commit `1164638`, 2026-05-12) — **entry added 2026-06-12**, after the
+  original pass
 - psg-go internal packages on disk: `nbcq`, `rdvq`, `omnipool`, `workq`
 
 ---
@@ -273,7 +276,7 @@ holding a result channel/state. `resolve(err)` writes to it.
 
 **Overall contention rating: HIGH.** One `sync.Mutex` serializes all
 submits and all pickups across all workers. Under N submitters + M
-workers, this is the most heavily contended hot path of the five
+workers, this is the most heavily contended hot path of the six
 libraries. The blocking-submit path also waits on `p.submitWaiters` (a
 capacity-1 chan) which serializes wake-ups.
 
@@ -341,7 +344,100 @@ closures either — payloads are raw values, not `func()`.
 
 ---
 
-### 6. psg-go (this library)
+### 6. `maurice2k/ultrapool` (added 2026-06-12)
+
+Source: `ultrapool.go` — the entire library is one 498-line file. Line
+numbers refer to a local clone at commit `1164638` (2026-05-12). See
+POSITIONING_RESEARCH.md "Addendum: ultrapool" for adoption context and
+its vendor benchmark suite.
+
+**Submit path (`AddTask`)** — ultrapool.go:234–244:
+
+```go
+shard := wp.shards[randInt()%wp.numShards]
+return shard.dispatch(task)
+```
+
+- Shard selection is **random per call**: `randInt()` does a `sync.Pool`
+  Get/Put around a splitMix64 step (ultrapool.go:493–498). No producer
+  affinity — consecutive submissions from one goroutine scatter across
+  shards (default shard count GOMAXPROCS/2 clamped to [2, 48],
+  ultrapool.go:64–78).
+- `dispatch` (ultrapool.go:287–322) takes the shard's
+  `tqLock sync.RWMutex` **read lock on every dispatch** — it fences the
+  channel send against `Stop`'s `close(taskQueue)` (ultrapool.go:203–212).
+  Then: an atomic `stopped` check, a non-blocking send to the shard's
+  buffered `chan T` (default capacity 1024, ultrapool.go:58), and — when
+  backlog is visible after the send (`len() > 0`, ultrapool.go:301) —
+  `trySpawnWorker`.
+- `trySpawnWorker` (ultrapool.go:328–361) reserves a per-shard worker
+  slot via CAS loop, then a global slot via a second CAS loop (or an
+  unconditional atomic add when uncapped), then `go shard.workerLoop()`.
+  Once the shard is at its worker cap the call collapses to one atomic
+  load.
+- On a full buffer: spawn + one retry, else `ErrPoolOverload`
+  (ultrapool.go:310–321). `AddTaskWithBlocking` (ultrapool.go:247–278)
+  handles overload by retry-looping on a **single global capacity-1
+  `notify` channel shared by all waiters across all shards**; a waiter
+  that gets in re-arms the notification for the next waiter (chained
+  baton, ultrapool.go:257–263), and workers re-arm it on going idle and
+  on exit (`notifyWaiter`, ultrapool.go:396–397, 448, 454–462).
+
+**Work pickup path (`workerLoop`)** — ultrapool.go:375–452:
+
+- An inner loop drains the shard channel via non-blocking receive; on
+  empty, floor workers (≤ `shardMinWorkers`, default 2) park in a plain
+  blocking receive (ultrapool.go:401–408); above-floor workers select on
+  the channel plus a reused idle timer and retire after 1s idle via a
+  CAS-guarded decrement that never drops the shard below its floor
+  (ultrapool.go:430–441).
+- Per task, pickup is one buffered-channel receive. All workers and
+  dispatchers of a shard share that channel's hchan mutex; the shard
+  count divides this contention.
+
+**Result delivery** — none. The handler is fixed at pool construction
+(`NewWorkerPool(func(T))`, ultrapool.go:24, 81); tasks are data values,
+strictly fire-and-forget. Notably this also means there is **no per-task
+user closure** — the usual caller-side allocation hazard of
+`func()`-based pools is structurally absent. (No recursive-submission
+story either: with bounded queues and worker caps, handlers that block in
+`AddTaskWithBlocking` can exhaust the pool like any bounded pool.)
+
+**Overall contention rating: LOW-MEDIUM.** Sharding genuinely spreads
+load: per dispatch, the shared touches are one RWMutex read-lock (an
+atomic RMW on the shard's reader count), one buffered-channel send
+(hchan mutex), and under visible backlog one or two more atomic ops in
+`trySpawnWorker` — all on per-shard state randomly spread over up to 48
+shards. Structurally better than ants/pond (global locks) and conc
+(single channel); but unlike psg-go's per-sender private outboxes, each
+shard's cache lines are shared by every dispatcher and worker that lands
+there, and the random (rather than affine) shard pick guarantees
+cross-core traffic on those lines. The blocking-submit path's global
+one-at-a-time waiter baton is a serialization point, but only engages at
+overload.
+
+**Overall steady-state allocation rating: NEAR-ZERO (framework).** A
+submitted task is a `T` copied into a channel buffer — no envelope
+struct, no future, no closure; the shard-pick PRNG is `sync.Pool`-
+recycled (ultrapool.go:485–491). Two edge caveats: workers are
+goroutines, not pooled objects, so oscillating load churns goroutine
+stacks through the spawn-at-backlog / retire-at-1s-idle cycle; and each
+above-floor worker lazily allocates one reused `time.Timer`
+(ultrapool.go:411–415).
+
+**Code-quality observations** (relevant to weighing its benchmark
+claims): `wp.started` is read unsynchronized in `AddTask`
+(ultrapool.go:235) while written under `wp.mutex` in `Start`
+(ultrapool.go:188) — a data race if submission overlaps startup (benign
+in the typical start-then-submit usage, but a race-detector hit waiting
+to happen); and `dispatch` opens with a dead `if len(...) > 0` block
+whose body is commented out (ultrapool.go:288–290). One maintainer,
+recently rewritten (v2), essentially unadopted — high analysis
+confidence (whole file read), low field-testing confidence.
+
+---
+
+### 7. psg-go (this library)
 
 Source: `/home/peter/src/psg-go/` — `job.go`, `taskpool.go`,
 `internal/nbcq/nbcq.go`, `internal/rdvq/queue.go`,
@@ -458,6 +554,7 @@ submissions of a session pay normal allocation costs.**
 | panjf2000/ants           | Medium-High             | Low |
 | alitto/pond              | High                    | Medium-High (future + closures + buffer slot) |
 | cmitsakis/workerpool-go  | Medium                  | Low-Medium |
+| maurice2k/ultrapool      | Low-Medium              | Near-zero (framework) |
 | psg-go                   | Low                     | Near-zero |
 
 ---
@@ -504,6 +601,17 @@ submissions of a session pay normal allocation costs.**
   copied through channels — no per-task heap envelope from the framework,
   no object pooling either."
 
+**maurice2k/ultrapool**
+- *Contention:* "Dispatch takes a per-shard RWMutex read-lock plus one
+  buffered-channel send, randomly spread over up to 48 shards
+  (ultrapool.go:242, 292, 300); no global lock on the submit/pickup path,
+  but shard structures are shared by all dispatchers/workers landing
+  there."
+- *Allocations:* "Tasks are `T` values copied into a per-shard buffered
+  channel with a handler fixed at construction — no per-task closure,
+  envelope, or future (ultrapool.go:24, 81, 300); workers are unpooled
+  goroutines that retire after 1s idle."
+
 **psg-go**
 - *Contention:* "Hot path is a Michael-Scott lock-free queue using 128-bit
   atomic CAS (`nbcq.Queue`, nbcq.go:90–135) over per-sender private
@@ -549,7 +657,17 @@ submissions of a session pay normal allocation costs.**
    funnel — but it does mean throughput cannot exceed what one goroutine
    can multiplex.
 
-5. **psg-go's "near-zero" allocation rating is hot-path only.** Cold
+5. **ultrapool's rating is for the steady state its design optimizes;
+   its edges are weaker.** Under stable load it is genuinely lean (value
+   copy + channel send). Under oscillating load, the spawn-at-backlog /
+   retire-after-1s cycle churns goroutine stacks, and the random shard
+   pick trades cache locality for load spreading — both invisible in
+   sustained-throughput benchmarks (which its vendor suite emphasizes)
+   and visible in bursty ones. Its "beats raw goroutines" claim is
+   architecturally plausible for sub-microsecond tasks (warm workers
+   receiving values vs. fresh goroutine stacks) but unverified here.
+
+6. **psg-go's "near-zero" allocation rating is hot-path only.** Cold
    start, pool churn from sync.Pool's GC-driven flushes, and the
    (acknowledged in WORKING_NOTES.md) `wrappedRenotify` self-freeing edge
    case can produce occasional allocations. Long-running benchmarks

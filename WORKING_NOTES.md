@@ -65,30 +65,69 @@ rarely-hit error/cancel/teardown paths, not one instance.
    permit) never unwinds once its consumer is gone → `wg.Wait` blocks forever.
    Dump: 3 goroutines in `reclaimRequest`, `CancelAndWait` waiting on them.
 
-### Converged design (the fix — discard-drain still TODO)
-- **`Cancel` = cancel + close** so the drain can settle to `ErrJobDone`.
-- **`CancelAndWait` = drain the pipes until job-done, then `wg.Wait`.**
-- **Reclaim on a cancelled help-domain = help-and-block with a non-cancellable
-  ctx** (keep draining the tearing-down domain so the holder unwinds and frees
-  the slot); **never** abandon (no unpermitted resume), **never** plain-wait on
-  a drain nobody drives.
-- **Discard-drain (the missing piece):** the drain must **dequeue + free, never
-  execute** user handlers/accumulators/bodies. Running user code during teardown
-  both is semantically wrong and re-blocks (a drained handler dispatches/blocks)
-  AND manufactures unintended concurrency in the wait-drive. Execute-drain
-  reached only 1/8 pass under the repro; discard-drain is expected to close it.
+### Root cause (after a long design thread — discard-drain was a DETOUR)
+Both bugs are symptoms of one thing: **cancelling a subwave does not propagate
+cancellation to the goroutines actually running that wave's work.** We chased a
+"discard-drain" (consume the pipes without running user code) to unblock
+producers, got it partly working (over-admission gone, ~2/10 hangs remained),
+then a dump showed the real wall: with **a separate Pool per wave** (today every
+`NewWave` with no `WithPool` does `New(parent)`, `ownsPool=true`), a teardown
+drive on pool A *cannot reach* a permit-holding producer blocked one pool over.
+That is a cross-pool coordination gap, not a draining deficiency.
 
-Invariants the design satisfies: body never resumes unpermitted · teardown
-always drains (no deadlock) · no user code or new concurrency after cancel.
+**Verified key fact:** the hold-through post is `rdvq.BasicPushSelect`, which
+`select`s on `ctx.Done()` — so a parked producer **aborts and releases its
+permit the moment its ctx is cancelled**. *Draining is not required at all.* The
+deadlock is simply "cancel never reached the producer." So the whole
+discard-drain / tagging / queue-of-queues branch is unnecessary.
+
+### Converged design — per-wave cancellation propagation (this is wave-5b)
+The real need is two primitives, NOT a drain:
+1. **Per-wave cancellation that reaches every goroutine running the wave's
+   work** (so their `BasicPushSelect` posts abort → permits released).
+2. **A per-wave in-flight counter** to detect when the subtree has quiesced
+   (`CancelAndWait` waits on it; the wave's drain returns `ErrJobDone`).
+
+Mechanism (decided 2026-06-14, PN — defer the fancy version):
+- The Wave holds `waveCtx = WithCancel(poolCtx)` and an **nbcq pool of
+  per-execution contexts**, each `WithCancel(waveCtx)` **with its own mutable
+  `ctxMeta`** (`WithValue(WithCancel(waveCtx), …)` derived once, re-stamped per
+  borrow). Workers **must run user functions under the borrowed wave-execution
+  ctx, not their own goroutine ctx** — that is what makes per-wave cancel reach
+  user code.
+- **Distinct done channels** (one per pooled ctx) avoid the shared-channel
+  park-lock contention that a single `waveCtx.Done()` would reintroduce;
+  **nbcq borrow/return** is the lock-free reuse and amortizes the one-time
+  `WithCancel(waveCtx)` children-map registration. Prior art to mirror:
+  `funnelInstanceQueue` (`funnelop.go:316`) is the same nbcq reuse-cache pattern
+  (`TryPopFront`/`PushBack`, "spent shells linger" drain at :371); the trim TODO
+  applies to both.
+- Cancel fans out via plain stdlib ancestry (`poolCtx`→`waveCtx`→exec ctx);
+  no custom hook needed yet.
+- The **per-wave in-flight counter rides the same borrow/return** — one
+  mechanism gives cancellation-scoping AND completion-detection.
+- **Reuse-not-cancel invariant:** return ≠ cancel; only wave-cancel closes the
+  pooled ctxs, after which the wave is done so they are never reused closed.
+
+This is **wave-5b** (per-wave tagged cancel/drain), the consolidation's second
+half — note the Wave/Pool API decoupling (`WithPool`) already exists; what's
+missing is per-wave cancellation that addresses one wave's work. The reclaim
+"never abandon / no unpermitted resume" correctness folds in here (it was
+coupled to a working per-wave teardown, so it could not land standalone).
+
+Deferred (revisit with **Flows**): a joined-context adapter and a framework-
+native, alloc-free / mutex-free `AfterFunc`-equivalent hook (modeled on how
+`ctxMeta` is a preallocated reused value) — only needed if Flows must merge two
+*genuinely independent* (non-ancestor) cancellation scopes. See TODO.md.
 
 ### Status / next
-Harness + this design doc committed. The framework changes attempted so far
-(always-reclaim + help-and-block in `limiter.go`, `Cancel`+close +
-execute-drive in `job.go`) are **reverted** — they are superseded by the
-discard-drain design and will be reimplemented cleanly. **Next: implement
-discard-drain** — a consume-and-free (no-execute) route through
-`workQueue.ExecuteOne`/the skim drive, gated on cancellation, used by both
-`CancelAndWait` and the reclaim's help-and-block.
+Harness + design committed. All framework-fix attempts (discard-drain,
+always-reclaim, cancel+close, drive, skim discard gate) are **reverted** — they
+were a detour. **Next: implement wave-5b** — per-wave `waveCtx` + nbcq pool of
+wave-execution contexts (+ in-flight counter), workers execute user work under
+the borrowed wave ctx. The committed sim harness (`Subjob.CancelProb` + shared
+limiters) is the validator: it currently reproduces the two bugs and must go
+green.
 
 ## Limiter suspend/resume — DESIGN SETTLED + REVIEWED, ready to implement (2026-06-11)
 

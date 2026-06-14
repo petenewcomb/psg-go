@@ -53,6 +53,11 @@ type Plan struct {
 	// non-unit probabilities.
 	MinSkimmerInvocations []int
 	MaxSkimmerInvocations []int
+	// CancelTriggerRunnerID, when >= 0, names the Launcher whose body
+	// cancels this (sub)plan's wave when it runs — a plan-baked,
+	// structural mid-flight cancellation. -1 means no cancellation. Only
+	// set on subjob plans (see newFunc).
+	CancelTriggerRunnerID int
 }
 
 // NewPlan generates a new Plan for property-based testing.
@@ -81,7 +86,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 	planID := nextIDs.Plan
 	nextIDs.Plan++
 	planName := fmt.Sprintf("Plan#%d", planID)
-	plan := &Plan{ID: planID}
+	plan := &Plan{ID: planID, CancelTriggerRunnerID: -1}
 
 	nextIDsOrigin := *nextIDs
 
@@ -474,6 +479,20 @@ func newFunc(
 		const subjobPathShrinkDivisor = 2
 		subConfig.Path.Length.Med = max(subConfig.Path.Length.Min, subConfig.Path.Length.Med/subjobPathShrinkDivisor)
 		subPlan := newPlan(t, &subConfig, nextIDs, plan)
+		// Bake a mid-flight cancellation into some subjobs: a designated
+		// launcher's body cancels the subwave when it runs (structural,
+		// plan-baked trigger; only the interleaving that decides what is
+		// blocked at cancel time is nondeterministic). Exercises the
+		// cancellation/teardown error paths. The disrupted ops may not reach
+		// their sinks, so the subplan's skimmer lower bounds drop to zero.
+		if len(subPlan.Launchers) > 0 &&
+			(BiasedBoolConfig{Probability: config.Subjob.CancelProb}).Draw(t, name+".Subjob.Cancel") {
+			k := rapid.IntRange(0, len(subPlan.Launchers)-1).Draw(t, name+".Subjob.CancelTrigger")
+			subPlan.CancelTriggerRunnerID = subPlan.Launchers[k].ID
+			for i := range subPlan.MinSkimmerInvocations {
+				subPlan.MinSkimmerInvocations[i] = 0
+			}
+		}
 		plan.SubjobTaskCount += len(subPlan.Launchers) + subPlan.SubjobTaskCount
 		fn.Steps = append(fn.Steps, Subjob{Prob: probValue(config, 1.0), Plan: subPlan})
 	}

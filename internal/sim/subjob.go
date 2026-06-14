@@ -10,6 +10,14 @@ import (
 
 type SubjobConfig struct {
 	MaxDepth int
+	// CancelProb is the plan-time probability that a generated subjob is
+	// marked for mid-flight cancellation: a designated launcher's body
+	// cancels the subwave's context when it runs. This exercises the
+	// error/cancellation/teardown paths — e.g. a limiter permit discarded
+	// when a blocked acquire is cancelled coincident with a grant. The
+	// trigger is structural and baked into the plan; only the scheduling
+	// that decides what is blocked at cancel time is nondeterministic.
+	CancelProb float64
 }
 
 // SubjobOpRef identifies a Plan op (Launcher / Funnel / Skimmer)

@@ -44,7 +44,14 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller)
 	ctx, wave := psg.NewWave(ctx)
 	defer wave.CancelAndWait()
 
-	return newController(plan, wave, parent).Run(ctx, t)
+	c := newController(plan, wave, parent)
+	if plan.CancelTriggerRunnerID >= 0 {
+		// Plan-baked mid-flight cancellation: the designated launcher's body
+		// (see newLauncher) calls c.cancel while holding its permit, with
+		// siblings likely blocked acquiring the shared limiter.
+		ctx, c.cancel = context.WithCancel(ctx)
+	}
+	return c.Run(ctx, t)
 }
 
 // newController builds the per-Plan runtime adapter state. parent is the
@@ -116,6 +123,11 @@ type controller struct {
 	// ensurePools to alias inherited limiters and trackers.
 	parent *controller
 
+	// cancel is non-nil only when this Plan is baked for mid-flight
+	// cancellation (Plan.CancelTriggerRunnerID >= 0); the trigger
+	// launcher's body invokes it. Idempotent (context.CancelFunc).
+	cancel context.CancelFunc
+
 	taskLimiterTrackers   []*limiterTracker
 	funnelLimiterTrackers []*limiterTracker
 	skimmerInvocations    []atomic.Int64
@@ -178,15 +190,12 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	chk := assert.New(t)
 	for {
 		err := c.Wave.CloseAndSkimAll(ctx)
-		if err == nil {
-			break
-		}
-		var expectedErr ExpectedHandlerError
-		if errors.As(err, &expectedErr) {
+		if d := classify(err); d == dispRetry {
 			// Skimmer.Handle returned an error as expected.
 			continue
+		} else if d == dispFail {
+			chk.NoError(err)
 		}
-		chk.NoError(err)
 		break
 	}
 
@@ -309,8 +318,7 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 		return
 	}
 	err := run(ctx, t, s.Plan, c)
-	var expectedErr ExpectedHandlerError
-	if err != nil && !errors.As(err, &expectedErr) {
+	if classify(err) == dispFail {
 		assert.New(t).NoError(err)
 	}
 }
@@ -338,6 +346,14 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 			tracker.enter()
 			defer tracker.exit()
 		}
+		// Plan-baked structural cancellation trigger: this designated
+		// launcher's body cancels the subwave while holding its permit,
+		// with siblings likely blocked acquiring the shared limiter. The
+		// leak surfaces only when scheduling lands the cancel in a blocked
+		// acquire's grant window.
+		if c.cancel != nil && runner.ID == c.Plan.CancelTriggerRunnerID {
+			c.cancel()
+		}
 		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
 		if err := c.executeFuncInTask(ctx, t, runner.Body, v, tracker); err != nil {
 			return err
@@ -354,6 +370,40 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	return psg.NewLauncher(w, body, opts...)
 }
 
+// disposition tells an op driver how to react to an error returned by a psg
+// operation.
+type disposition int
+
+const (
+	dispDone    disposition = iota // completed (err == nil)
+	dispRetry                      // injected handler error: work was Free'd, re-drive
+	dispAbandon                    // cancellation / wave teardown: stop without completing
+	dispFail                       // unexpected: fail the test
+)
+
+// classify maps an error from a psg operation to a driver disposition. It is
+// the single point that decides which errors the sim tolerates as expected
+// disruptions: injected handler errors (re-drive — the work was Free'd, not
+// queued) and cancellation / wave-done (abandon — the op legitimately did not
+// complete). Anything else is a real failure. dispAbandon is dormant until a
+// disruption (e.g. mid-run cancellation) is injected; absent that, these
+// errors never surface here.
+func classify(err error) disposition {
+	var expected ExpectedHandlerError
+	switch {
+	case err == nil:
+		return dispDone
+	case errors.As(err, &expected):
+		return dispRetry
+	case errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, psg.ErrJobDone):
+		return dispAbandon
+	default:
+		return dispFail
+	}
+}
+
 // startTask dispatches a Plan Launcher. The Launcher was pre-built
 // in Run(); Start can return an ExpectedHandlerError from internal
 // backpressure-yielding (a previously-queued sink handler returned an
@@ -364,14 +414,12 @@ func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx
 	runner := &c.Launchers[runnerIdx]
 	for {
 		err := runner.Start(ctx)
-		if err == nil {
-			return
-		}
-		var expectedErr ExpectedHandlerError
-		if errors.As(err, &expectedErr) {
+		switch classify(err) {
+		case dispRetry:
 			continue
+		case dispFail:
+			chk.NoError(err)
 		}
-		chk.NoError(err)
 		return
 	}
 }
@@ -403,14 +451,12 @@ func (c *controller) submitTo(
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
 			return
 		}
-		if err == nil {
-			return
-		}
-		var expectedErr ExpectedHandlerError
-		if errors.As(err, &expectedErr) {
+		switch classify(err) {
+		case dispRetry:
 			continue
+		case dispFail:
+			chk.NoError(err)
 		}
-		chk.NoError(err)
 		return
 	}
 }

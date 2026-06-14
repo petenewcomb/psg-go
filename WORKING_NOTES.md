@@ -17,6 +17,79 @@ entered 0×); validated rt6 250 / rt7 264+ iters with 0 hangs (baseline hung at
 iter 44, 150). Full write-up: `REVIEW_FINDINGS.md` Finding 13. This is the
 residual that Finding 10's skim-gather ban did not reach.
 
+## Cancellation/teardown coverage — sim expansion + two bugs found (2026-06-14, IN PROGRESS)
+
+### Why
+The sim only ever drove the *success* path: injected handler errors were
+immediately retried, and it asserted only *peak* concurrency (`observed ≤
+permits`), never *quiescent* balance. The entire error/cancellation/teardown
+column was both un-triggered and un-detected. Goal: exercise the **class** of
+rarely-hit error/cancel/teardown paths, not one instance.
+
+### Principles (PN)
+- **Observable-only, no white-box probes.** Conservation violations must surface
+  as the two black-box signals that already exist: over-release → `observed >
+  permits`; under-release/leak → hang (timeout). A leaked permit is only
+  observable if the limiter keeps being demanded after the leak, so disruptions
+  must land on ops whose limiter is **shared with surviving work** (cross-subjob
+  `Inherit`).
+- **No runtime entropy.** Every decision is baked into the Plan at generation
+  time (rapid draws); the only live nondeterminism is goroutine scheduling. The
+  existing runtime already honors this (`drawDuration`→Med, `rollProb`→`p>=1`,
+  `shouldReturnError`→baked 0/1) — the "replace with a real RNG" comments are
+  exactly what we are NOT doing.
+- **Disruption matrix:** `{cancellation, submitted-error-propagated,
+  internally-generated-error} × {any nesting level} × {retried | abandoned}`.
+  Today only `{internal error} × {always retried}` is covered.
+
+### Harness landed (this commit)
+- `run.go`: centralized disruption classification (`classify`/`disposition`):
+  expected handler errors → retry; cancellation / `ErrJobDone` → abandon;
+  else → fail. Behavior-preserving until a disruption is injected.
+- Plan-baked, **structural** cancellation: `SubjobConfig.CancelProb` →
+  `Plan.CancelTriggerRunnerID`; the designated launcher's body calls
+  `controller.cancel` when it runs (holding its permit, siblings likely blocked
+  acquiring). `Plan.MinSkimmerInvocations` drops to 0 for cancelled subplans.
+- To reproduce the bugs below: set `TaskLimiter/FunnelLimiter.Permits={1}`,
+  `…Inherit={Probability:1}`, `Subjob.CancelProb=1` in `simulation_test.go`
+  (the TEMP block, reverted for the committed state).
+
+### Two bugs found (framework fix NOT yet committed — see below)
+1. **Over-admission on subwave cancel.** `reclaimRequest` keyed its abandon on
+   the **help-domain** ctx (the subwave). When only the subwave is cancelled and
+   the parent is live, the reclaim abandoned (`held=false`, confirmed by probe:
+   18 abandons coincident with `observed 2 > permits 1`), so the parent resumed
+   its body **UNPERMITTED**. (limiter.go ctx.Err branch.)
+2. **Teardown deadlock.** `Pool.CancelAndWait` was `Cancel(); wg.Wait()` with no
+   drain. A task blocked posting into a skim queue (hold-through, holding a
+   permit) never unwinds once its consumer is gone → `wg.Wait` blocks forever.
+   Dump: 3 goroutines in `reclaimRequest`, `CancelAndWait` waiting on them.
+
+### Converged design (the fix — discard-drain still TODO)
+- **`Cancel` = cancel + close** so the drain can settle to `ErrJobDone`.
+- **`CancelAndWait` = drain the pipes until job-done, then `wg.Wait`.**
+- **Reclaim on a cancelled help-domain = help-and-block with a non-cancellable
+  ctx** (keep draining the tearing-down domain so the holder unwinds and frees
+  the slot); **never** abandon (no unpermitted resume), **never** plain-wait on
+  a drain nobody drives.
+- **Discard-drain (the missing piece):** the drain must **dequeue + free, never
+  execute** user handlers/accumulators/bodies. Running user code during teardown
+  both is semantically wrong and re-blocks (a drained handler dispatches/blocks)
+  AND manufactures unintended concurrency in the wait-drive. Execute-drain
+  reached only 1/8 pass under the repro; discard-drain is expected to close it.
+
+Invariants the design satisfies: body never resumes unpermitted · teardown
+always drains (no deadlock) · no user code or new concurrency after cancel.
+
+### Status / next
+Harness + this design doc committed. The framework changes attempted so far
+(always-reclaim + help-and-block in `limiter.go`, `Cancel`+close +
+execute-drive in `job.go`) are **reverted** — they are superseded by the
+discard-drain design and will be reimplemented cleanly. **Next: implement
+discard-drain** — a consume-and-free (no-execute) route through
+`workQueue.ExecuteOne`/the skim drive, gated on cancellation, used by both
+`CancelAndWait` and the reclaim's help-and-block.
+
 ## Limiter suspend/resume — DESIGN SETTLED + REVIEWED, ready to implement (2026-06-11)
 
 **The design is finalized and written up in `docs/limiter-suspend-resume.md` —

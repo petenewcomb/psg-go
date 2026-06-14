@@ -4,6 +4,19 @@ This document contains working notes and context for development on the `combine
 
 Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
 
+## Residual reclaim busy-spin — FIXED (2026-06-14)
+
+The last known limiter livelock is resolved. Under max contention (`Permits=1`,
+`Inherit` prob 1), `reclaimRequest` could busy-spin on a permit it had already
+reclaimed because `addWorkWhileMaybeBlocking` returned a **stale `psResult`**
+(`outbox`) on iterations where `skimSelect` was short-circuited, keeping
+`PopFrontFunc`'s loop from reaching its empty-exit. Fix: declare `psResult`
+**inside** the per-iteration selectFn closure (one-line scoping change in
+`job.go`). Trace-proven (selectFn returned `outbox` 117k× while `skimSelect`
+entered 0×); validated rt6 250 / rt7 264+ iters with 0 hangs (baseline hung at
+iter 44, 150). Full write-up: `REVIEW_FINDINGS.md` Finding 13. This is the
+residual that Finding 10's skim-gather ban did not reach.
+
 ## Limiter suspend/resume — DESIGN SETTLED + REVIEWED, ready to implement (2026-06-11)
 
 **The design is finalized and written up in `docs/limiter-suspend-resume.md` —

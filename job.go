@@ -457,10 +457,16 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 	if workWaiters == nil {
 		err = j.tryAddWork(ctx, queueFn)
 	} else {
-		var psResult rdvq.PopSelectResult[workq.Work]
 		work, ok := j.skimQueue.PopFrontFunc(
 			meta.Receiver(),
 			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
+				// Declared per invocation: skimSelect (which is the only thing
+				// that populates this) is skipped on any iteration where the
+				// block confirm short-circuits — i.e. once the permit is
+				// acquired/reclaimed. A value hoisted across iterations would
+				// retain a stale outbox-ready result, keeping PopFrontFunc's
+				// loop from ever reaching its empty (renotifyFn==nil) exit.
+				var psResult rdvq.PopSelectResult[workq.Work]
 				workRf = workWaiters.WaitFunc(
 					meta.Waiter(),
 					confirmWorkWaitFn,

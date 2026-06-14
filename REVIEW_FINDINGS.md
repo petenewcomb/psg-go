@@ -696,3 +696,65 @@ alongside the flush/drain ownership the plan already migrates Pool → Wave.
 downstream-blocked flags (Wave-owned), a launch gate on `Start`/`Submit` that
 pauses only saturated waves — dissolving today's `job.governor`-read-by-launchers
 + `cp.governor`-write-only split.
+
+---
+
+## Finding 13 — Residual reclaim busy-spin: stale `psResult` in `addWorkWhileMaybeBlocking` (DISCOVERED after Finding 10)
+
+**Severity: correctness (busy-spin livelock under shared limiters); the deeper
+residual Finding 10's fix did not reach.**
+**Status: RESOLVED + IMPLEMENTED + VALIDATED (2026-06-14) — one-line scoping fix;
+see below.**
+
+Finding 10's skim-gather ban cleared the high-frequency hang (0/30 with `Inherit`
+on). But under **maximum contention** — `TaskLimiter/FunnelLimiter.Permits=1`,
+`Inherit` probability 1 (every subjob shares the parent's limiter), funnels
+dropped to isolate the launcher-task path — a **lower-frequency** residual
+busy-spin survived (reproduced at rt4 iter 44/60, rt5 iter 150/200 on the
+`-race` binary, `-rapid.checks=12`).
+
+### Root cause (trace-proven)
+
+`Pool.addWorkWhileMaybeBlocking` declared `psResult` **once outside** the
+`selectFn` closure that `skimQueue.PopFrontFunc` invokes per loop iteration.
+`psResult` is *populated only by `skimSelect`*, which the block confirm
+short-circuits away on any iteration where the permit is already
+acquired/reclaimed (`confirmBlockWaitFn` returns false →
+`blockWaiters.WaitFunc` aborts before `skimSelect`). So once an earlier
+iteration set `psResult = outbox` (via `OutboxReady`), every later
+short-circuiting iteration returned that **stale** `outbox` value.
+
+`PopFrontFunc`'s loop only exits on a real value or `renotifyFn == nil` (the
+"empty" result). A stale `outbox` keeps `renotifyFn` non-nil forever, so the
+loop never reaches its empty-exit → `Pool.block` never returns → `reclaimRequest`
+busy-spins on a permit it had **already reclaimed** (`tryResume → HELD`), pinning
+the slot and starving the sibling/cousin that shares it.
+
+Trace signature at the wedge (g616, `[runnable]` in `reclaimRequest`):
+`addWorkWhileMaybeBlocking.selectFn` returns `psResult=outbox` **117,619×**
+while `Pool.skimSelect` enters **0×** — i.e. the outbox value is never freshly
+selected, only carried.
+
+### Fix
+
+Declare `psResult` **inside** the selectFn closure (per-invocation lifetime), so
+a `skimSelect`-skipped iteration reports `empty` and `PopFrontFunc` takes its
+`renotifyFn == nil` exit. One-line move (`job.go`, `addWorkWhileMaybeBlocking`).
+
+- **`workRf`/`blockRf` audited, no fix needed.** `workRf` is reassigned
+  unconditionally every iteration (never stale). `blockRf` has the same
+  conditional-assign shape but goes non-nil only via `skimSelect`'s
+  `blockWaitCh` case, which sets `psResult=empty` and forces the loop-exit on
+  that same iteration — so it is always returned fresh, never carried across a
+  loop continuation (trace: `psResult=outbox` ∧ `blockRf=true` occurs 0×). The
+  staleness was uniquely harmful for `psResult` because `outbox` *continues* the
+  loop; the renotify-carrying vars are coupled to loop *exit*, so self-limiting.
+
+### Validated (2026-06-14)
+
+- Targeted repro (fix + max-contention config, race binary): rt6 **250 iters /
+  ~3000 checks, 0 hangs**; rt7 **264+ iters, 0 hangs** (baseline hung at iter 44
+  and 150).
+- Full non-short suite ×3 green; `-race -short` clean except the known
+  pre-existing `leakguard` structured-log test race (confirmed present without
+  the fix). Lint 0 issues.

@@ -13,6 +13,28 @@ The next major piece is **Pool/workq consolidation** (merge TaskPool + FunnelPoo
 
 The sections below are the original pre-refactor TODO. Many items are now stale or superseded; treat them as historical reference and consult WORKING_NOTES + CHANGELOG for current scope.
 
+## Limiter / livelock investigation follow-ups (2026-06-14)
+
+- **`acquireOrWait` error-path latent permit leak (defensive — NOT the proven
+  livelock cause).** In `acquireOrWait`'s block loop, `if err != nil { return
+  false, err }` discards a permit that `confirmFn` may have already latched
+  (`b.held`). If `blockFn` (`Pool.block`) ever returns a real error
+  (`ErrJobDone` / ctx cancel) coincident with a `confirmFn` grant, the caller
+  (`limiterScatterWork` / `funnelWork`) returns on the error without running the
+  gated work and is requeued (not freed), so the handle's `Free` release
+  backstop never runs and the HELD permit leaks. **This is NOT what fails the
+  `TestBySimulation -race` gate** — disproven 2026-06-14: a log-only variant
+  (postpone-on-latched-error disabled, branch instrumented) hung 4× with
+  **zero** occurrences of the latched-error branch, so it never fires in the
+  repro. But it's a real latent hazard; close it defensively (postpone the
+  latched permit before returning the error) once the actual livelock fix
+  lands. See WORKING_NOTES for live root-cause status.
+
+- **Rename `ErrJobDone` → `ErrWaveDone`.** Legacy "Job" vocabulary; the
+  user-facing sink is now a Wave. ~12 usages (errs.go, funnelpool.go,
+  limiter.go, job.go doc comment). Fold into the broader Job→Pool/Wave naming
+  reconciliation with the other deferred combiner-era renames.
+
 ## Combiner Branch Pre-Merge Tasks (original list — partially stale)
 
 Items to complete before merging to main branch.

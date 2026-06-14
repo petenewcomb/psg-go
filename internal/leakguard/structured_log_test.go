@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,8 +26,10 @@ func TestLogLeakStructured(t *testing.T) {
 		SetStackDepth(oldDepth)
 	}()
 
-	// Capture structured log output as JSON
-	var buf bytes.Buffer
+	// Capture structured log output as JSON. The leak reporter runs on the GC
+	// finalizer goroutine, so the buffer is written concurrently with the test
+	// goroutine's reads below — guard it.
+	var buf lockedBuffer
 	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
 	oldDefault := slog.Default()
 	slog.SetDefault(slog.New(handler))
@@ -96,4 +99,36 @@ func TestLogLeakStructured(t *testing.T) {
 			require.Equal(t, strconv.Itoa(creationLine), frame["line"], "frame 0 should be at New() call line")
 		}
 	}
+}
+
+// lockedBuffer is a goroutine-safe bytes.Buffer wrapper: the leak reporter
+// (slog) writes from the finalizer goroutine while the test reads. Bytes
+// returns a copy so callers can use it after releasing the lock.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.buf.Bytes())
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

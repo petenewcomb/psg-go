@@ -404,10 +404,65 @@ maxholdtime's serialization assumption → it must migrate to a limiter
 
 **Validate**: funnel suite + `-race` + sim (`sim-trace-debugging` skill on hang).
 
-**Next:** implement cp-5 per the above (one focused, iterative push — touches
-funnelpool.go, cpworker.go, funnelop.go, ctxmeta.go usage, cpstate deletion,
-pool.go un-exclude, and the option-using tests). The flusher-goroutine design is
-the part to prototype + validate first.
+### Flusher prototype — VALIDATED design (2026-06-16)
+
+The riskiest piece, settled against the lifecycle code before the mechanical
+cutover. The end-of-work flush moves OFF the worker loop to a dedicated per-pool
+flusher goroutine. Two risks checked:
+
+- **Sender lifetime — NO hazard.** The instance does NOT capture a sender at
+  allocation: `funnelInstance.allocate` takes a sender only for a panic-path
+  `emitErr`, and `emitErr` IGNORES it (`_ = sender`, funnelop.go:530) — errors go
+  through `op.errSink`; result emission is the user body calling `Submit` with the
+  **ctx**, which resolves the sender from the executing goroutine's exEnv at flush
+  time. So the flusher uses its OWN `funnelExEnv`/ctx (via `newWorkerState`) and
+  `forceFlush(flusherCtx, flusherSender)` is safe even though the allocating
+  worker has long exited.
+- **Lifecycle (jobstate/state.go).** `Closed→Flushing` when `inFlightWork→0`
+  (`noMoreWork` rotates `nextFlushChan` + closes the old → `FlushChan` edge);
+  `Flushing→Done` when `totalReferences→0`. A funnel instance holds ONE reference
+  from `allocate` until `flush` (`IncrementReference`/`DecrementReference`), and
+  references — unlike work — do NOT gate `Closed→Flushing` (so an idle live
+  instance lets the job flush). `flushAll` = `cp.queue.DrainAllScheduled` +
+  `forceFlush` each; idempotent (`ClaimForFlush` vs the deadline-driven `Execute`,
+  and `flush` no-ops when `accumulator==nil`).
+
+Prototype (drop into FunnelPool):
+```
+flusher goroutine (started in NewFunnelPool, BEFORE any work — reads the first
+FlushChan on the constructing goroutine so no first-cycle miss):
+  state, ctx, cancel := cp.newWorkerState(); defer cancel(); defer state.Release()
+  done := cp.job.state.Done()
+  for {
+    flushCh := cp.job.state.FlushChan()      // re-subscribe each cycle (rotated)
+    select {
+    case <-flushCh: cp.flushAll(ctx, state.Sender())
+    case <-done:    return
+    }
+  }
+flushAll(ctx, sender): for _, w := range cp.queue.DrainAllScheduled(nil) {
+    w.(scheduledFlusher).forceFlush(ctx, sender) }
+```
+Deadline-driven flushes still run through the generic Worker (`selectWork`'s
+`deadlineCh`); the flusher only force-flushes not-yet-due instances at job-end.
+**One edge to confirm in validation:** a self-recursive funnel (flush emits back
+into the SAME pool, re-populating its scheduled queue across multiple Flushing
+cycles) — the FlushChan re-read could pass a cycle. Within one pool this is rare
+(flush emits downstream, not to self); cross-pool work rides the shared job
+FlushChan so other pools' edges also wake this flusher. If the sim hangs on a
+recursive case, add a buffered-signal backstop. (Cannot use `SetFlushListener` —
+that's the user's `WithFlushListener` slot.)
+
+**Next:** the mechanical cutover (one focused push), in order:
+(1) `cpworker.go` → replace `cpWorker` with `funnelExEnv` (+ keep `scheduledFlusher`,
+`executeFunnel`= `bc.Funnel(ctx, Sender())`); (2) `funnelpool.go` → FunnelPool
+fields (`queue`+`pool`, drop `state`/`funnelQueue`/`workQueue`/`unmetDemandFn`),
+`NewFunnelPool` (+ `newWorkerState`, start flusher), `flushAll`, lifecycle
+(Acquire/Release/Wait), rewrite `funnelPostWork.Execute`→`Post`, delete
+`goroutine()`/`spawnNewGoroutine`; (3) `funnelop.go` → `executeInner` cast →
+`*funnelExEnv`, `funnel()` `workQueue`→`queue`; (4) delete cpstate usage; (5)
+options: `SetOptions` no-op + migrate `maxholdtime_test` to a limiter; (6) build-
+fix + funnel suite + `-race` + sim.
 
 ## Residual reclaim busy-spin — FIXED (2026-06-14)
 

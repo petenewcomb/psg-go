@@ -495,12 +495,56 @@ not a per-pool coordinator.
   `defaultPool.Post`. Dormant (nothing Posts yet → no demand → no workers), so
   `newWorkerState`'s placeholder ctx is unexercised; `taskExEnv`/`cpWorker` still
   live for the legacy paths until cut over.
-- **REMAINING:** wave-5b ctx model (`newWorkerState`'s real worker ctx + per-
-  execution stamping: work borrows its wave ctx, worker stamps `workerExEnv` as
-  the executionEnvironment), then `Wave` (waveCtx, per-wave in-flight/governor/
-  flush, `Acquire`/`Release` the global pool) + wire `submit`; funnel + task
-  producers collapse onto `defaultPool.Post`, then delete `taskExEnv`/`cpWorker`/
-  cpstate and the per-job pools.
+- **REMAINING:** the wave-5b ctx model (converged below), then `Wave` + wire
+  `submit`; funnel + task producers collapse onto `defaultPool.Post`, then delete
+  `taskExEnv`/`cpWorker`/cpstate and the per-job pools.
+
+### wave-5b ctx model — CONVERGED (PN, 2026-06-16)
+
+**Three contexts, by ancestry `poolCtx → waveCtx → execCtx`:**
+- **`poolCtx`** — the global pool's context. Cancels ONLY when `Wait()` has been
+  called AND refs hit zero (definitive teardown; distinct from idle-scale-to-zero).
+  Replaces `worker.Pool`'s `stop chan` (cancel under the same `refs==0 && waiting`
+  condition); the pool EXPOSES it so waves derive from it.
+- **`waveCtx = WithCancel(poolCtx)`** (a subwave = `WithCancel(parentWave.waveCtx)`
+  for wave-tree cancel ancestry). Per-wave cancel + global teardown both via
+  stdlib ancestry, no custom hook.
+- **`execCtx = WithCancel(waveCtx)`**, pooled per-wave (nbcq, prior art
+  `funnelInstanceQueue`), reused (reuse-not-cancel). **The ctxMeta lives on the
+  execCtx — never on the worker.** Distinct per-shell done channels avoid the
+  shared-`waveCtx.Done()` park-lock contention.
+
+**Worker:** holds `E` (NOT a ctxMeta) + a `poolCtx`-derived context used ONLY for
+the idle-side cancellation case in `selectWork`. Bodies never run under it. The
+fungible worker hands its `E` to the psg `work.Execute` (which knows the wave and
+does the borrow) via a generic `workq` channel — a ctx value under a workq key or
+a field on `Execution`, NOT ctxMeta. `work.Execute` borrows an execCtx shell from
+its wave, stamps `E` (+ group/heldRequest) into `shell.meta` for the borrow, runs
+the body under `shell.execCtx`, returns the shell. Borrow/return drives the
+per-wave in-flight counter.
+
+**E placement = A (per-worker), settled.** `Sender`/`Receiver` stay bound to the
+worker goroutine — the fungible buffering substrate whose capacity scales with
+worker count (= system parallelism). Stamped into the borrowed ctxMeta as a
+pointer; shells stay lightweight (no rdvq state). Rejected B (E embedded
+per-shell/per-wave): heavier shells, more Sender/Receiver instances + reset churn,
+buffering coupled to wave structure; its only win (wave-scoped buffer cleanup) is
+moot — see below.
+
+**Cross-wave handoff is decoupled, by rdvq design (PN).** A full outbox is owned
+by the DOWNSTREAM queue's `fullOutboxes` (outbox refcount), not by the `Sender`.
+So abandoning a full outbox is safe: it's already queued, and the eventual
+dequeuer empties + frees it. Therefore a **send completes when the item is
+handed-off-or-buffered, not when consumed** → the **per-wave in-flight decrements
+at send-completion**, so the sending wave drains and its `CancelAndWait` returns
+WITHOUT waiting for the downstream receiver. (This is why per-worker Senders can
+be abandoned freely, and why stale cross-wave delivery is a non-issue — if a
+cancelled wave's buffered item is later dequeued, its borrowed shell is already
+cancelled → the body aborts, accounted by borrow/return + `Free`.)
+
+**`worker.Pool` deltas implied:** `stop chan` → `poolCtx`/cancel; expose
+`poolCtx`; `newWorkerState` factory simplifies to building just `E` (the pool owns
+the worker's idle ctx, captured from `poolCtx` at spawn).
 
 --- superseded framing below (kept for the verbatim seams only) ---
 

@@ -453,6 +453,33 @@ FlushChan so other pools' edges also wake this flusher. If the sim hangs on a
 recursive case, add a buffered-signal backstop. (Cannot use `SetFlushListener` —
 that's the user's `WithFlushListener` slot.)
 
+### Lifecycle-integration finding (2026-06-16) — the LAST hard piece
+
+Started the cutover (wrote `funnelExEnv` in cpworker.go), reverted to stay green
+after surfacing this. Legacy funnel goroutines join via the shared **`cp.job.wg`**
+(`Pool.CancelAndWait` → `j.wg.Wait()`, job.go:252; `spawnNewGoroutine` does
+`cp.job.wg.Add(1)`). The new `worker.Pool` owns its OWN join (`pool.Wait()`), and
+its `spawnWorker` does the `Add` before `go` (race-safe) on its *internal* wg — it
+must not know about `j.wg`. So the cutover needs explicit join wiring covering
+BOTH end states:
+- **Cancel path**: `j.Cancel()` cancels `j.ctx`; funnel worker ctxs are
+  `WithCancel(j.ctx)` children → their `DriveOne` returns ctx err → workers exit →
+  `pool.Wait()` joins them.
+- **Normal completion**: job reaches `Done` via the Skim drain with NO cancel —
+  funnel workers idle-exit; the flusher force-flushes pending instances → refs→0 →
+  `Done`. Need to confirm what (if anything) joins the funnel workers here today
+  (does `CloseAndSkimAll`/Skim wait on `j.wg`? — it's `Pool.CancelAndWait` that
+  does, on the cancel path). VERIFY before wiring.
+
+**Proposed wiring:** one coordinator goroutine per FunnelPool, `j.wg.Add(1)` on the
+constructing goroutine (before `go` — no race), that waits for job end
+(`<-j.ctx.Done()` OR `<-j.state.Done()`), then `cp.pool.Wait()` + joins the
+flusher. The flusher's select must include `<-j.ctx.Done()` too (Cancel does not
+fire `state.Done()`), so it exits on cancel. This keeps `j.wg.Wait()` teardown
+working unchanged while `worker.Pool` keeps its own join. Per-job FunnelPool
+likely never `Acquire`s the pool (refs stay 0; `pool.Wait()` at teardown stops +
+joins) — confirm the refcount/idle-exit interaction.
+
 **Next:** the mechanical cutover (one focused push), in order:
 (1) `cpworker.go` → replace `cpWorker` with `funnelExEnv` (+ keep `scheduledFlusher`,
 `executeFunnel`= `bc.Funnel(ctx, Sender())`); (2) `funnelpool.go` → FunnelPool

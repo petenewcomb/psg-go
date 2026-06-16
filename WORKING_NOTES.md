@@ -487,15 +487,20 @@ not a per-pool coordinator.
   producer surface (`Post`/scheduled/`ExecuteNowOrQueue`) promotes, and the
   consuming side stays unexported in workq — done, green. (Dropped the external
   `*Queue` param + `DemandFunc`.)
-- Build the **context-free unified E** (integrationExEnv + Lock/Unlock +
-  `ExecuteNowOrQueue` → `defaultPool` (promoted)) — NO job/cp backref.
-- Un-exclude `pool.go`: `var defaultPool = worker.NewPool(newWorkerState)`;
-  `psg.Wait = defaultPool.Wait`. Producers `defaultPool.Post`.
-- The factory's worker ctx + per-execution ctxMeta stamping is wave-5b (the work
-  borrows its wave ctx, worker stamps E) — so the substrate compiles DORMANT
-  until `Wave` Acquires it. Then build `Wave` (waveCtx, per-wave
-  in-flight/governor/flush, Acquire/Release) + wire `submit`; funnel + task
-  producers collapse onto `defaultPool.Post`.
+- **DONE (green, dormant):** `pool.go` un-excluded — `var defaultPool =
+  worker.NewPool(newWorkerState)` + `func Wait() { defaultPool.Wait() }`. The
+  **context-free unified E** `workerExEnv` (just `integrationExEnv` + no-op
+  Lock/Unlock + `ExecuteNowOrQueue` → `defaultPool` promoted; `var _
+  executionEnvironment = (*workerExEnv)(nil)`) — NO job/cp backref. Producers will
+  `defaultPool.Post`. Dormant (nothing Posts yet → no demand → no workers), so
+  `newWorkerState`'s placeholder ctx is unexercised; `taskExEnv`/`cpWorker` still
+  live for the legacy paths until cut over.
+- **REMAINING:** wave-5b ctx model (`newWorkerState`'s real worker ctx + per-
+  execution stamping: work borrows its wave ctx, worker stamps `workerExEnv` as
+  the executionEnvironment), then `Wave` (waveCtx, per-wave in-flight/governor/
+  flush, `Acquire`/`Release` the global pool) + wire `submit`; funnel + task
+  producers collapse onto `defaultPool.Post`, then delete `taskExEnv`/`cpWorker`/
+  cpstate and the per-job pools.
 
 --- superseded framing below (kept for the verbatim seams only) ---
 

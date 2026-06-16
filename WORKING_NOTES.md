@@ -2,7 +2,339 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-Major combiner architecture work is complete. Branch is now in cleanup and finalization phase.
+A major new consolidation phase is in flight: see "Worker pool + workq
+consolidation" immediately below, which supersedes the wave-5b incremental
+approach.
+
+## Worker pool + workq consolidation — converged design (2026-06-14)
+
+Reproducing the teardown deadlock (sim TEMP config: `Permits=1`,
+`Inherit.Probability=1`, `Subjob.CancelProb=1`) showed the cancellation/drain
+tangle is rooted in `Pool` conflating the **worker substrate** with **batch
+lifecycle**, and that the real fix is the documented Pool/workq consolidation
+(REFACTOR_PLAN Wave 4+5), brought forward. A long design thread (with PN)
+converged on three internal building blocks; **the only public surface is
+`psg.Wait()`**.
+
+### `internal/worker.Pool[E]` (drafted)
+Fungible, **context-free**, uncapped, demand-driven goroutine-lifecycle manager.
+`NewPool(factory func() E)` — no ctx, no settings, no exported type. Workers
+**persist across waves** (idle-scale-to-zero, fixed internal timeout, no
+jitter/throttle — each idle worker independently times out and exits; no
+synchronized re-arm stampede, so the legacy jitter+throttle are gone). Lifecycle:
+`Acquire`/`Release` refcount (one per in-flight Wave) + `Wait` = graceful
+quiesce+join (stop workers when refs hit 0 *iff* a Wait is outstanding; immediate
+if refs==0; reusable after; `stop` captured per-worker at spawn). `psg.Wait()` =
+`defaultPool.Wait()` (→ `streampool.Wait`/`DefaultPool.Wait` if an exported pool
+ever returns). Each pool goroutine instantiates a `workq.Worker[E]` and drives it
+in a loop; spawn rides the Queue's `unmetDemandFn`. Lives in `internal/worker/`
+(mutual dep with Wave is gone — units bake in their own wave logic). Drafted in
+`internal/worker/pool.go` + main `pool.go` (Wait glue); builds. **FIX NEEDED:
+the factory must build the unified task/funnel exEnv, not `taskExEnv`** (see
+"one E each").
+
+### `internal/workq.Queue`
+The combined work engine: **hides `Pending`** (incoming handoff) **and `Accepted`**
+(fresh/postponed priority + scheduled/timed work + `unmetDemandFn`). Producer:
+`Post(...)` — collapses the 3 near-identical `*PostWork` escalations (try →
+`ShouldBlockOrPostpone` → listen/block → governor-notify → `Starting`). Consumer:
+`DriveOne(ctx, *Worker[E])` — merges `ExecuteOne`/`TryExecuteOne`
+(`drainScheduled → fresh → postponed → pull-from-incoming`). Timed:
+`Schedule`/`Reschedule`/`ClaimForFlush` (hide `Remove`/`Expedite` — no callers).
+
+### `internal/workq.Worker[E]`
+The driver bound to a `*Queue`, holding the per-worker exEnv `E`.
+`DriveOne`/`DriveUntilDrained`. Encapsulates the wait/notify ceremony
+(`BlockFunc`/`WaitBehavior`/`blockConfirmer`/`AddToListeners`) and **one canonical
+select** replacing `cpWorker.popSelect` + `Pool.skimSelect`, parameterized by
+Receiver/idle?/done/deadline. **Block-and-help = a nested `Worker.DriveOne` on the
+help-domain Queue** — dissolves `Pool.block` + `reclaimRequest`'s bespoke help
+loop.
+
+### Two engines, one E each
+- **Task/funnel engine**: one shared `Queue`, driven by **`worker.Pool`
+  goroutines**. **One unified `E`** — tasks and funnels are both `workq.Work` run
+  by the same workers, so `taskExEnv` + `cpWorker` collapse into one
+  integration-style exEnv (Sender + Receiver + group stack). `taskExEnv` existed
+  only because task workers didn't run `ExecuteOne`.
+- **Skim engine**: a separate `Queue`, driven by **user `Skim`/`SkimAll`
+  goroutines** (drive-until-drained), with its own `E` (top-level exEnv). NOT
+  `worker.Pool`. (Skimmers are the serial drain / backpressure source.)
+- `workq.Worker[E]` is generic (two instantiations); `worker.Pool` is the
+  single-E task/funnel one.
+
+### Per-wave (not in the pool)
+Work is tagged by wave. Per-wave: **cancellation** (`waveCtx`; the work's
+`Execute` borrows a `WithCancel(waveCtx)` exec ctx → per-wave cancel reaches the
+running body — the original wave-5b fix); **in-flight counter** (drain-completion;
+a wave is done when its count hits 0, draining the shared Queue); **governor**
+(admission — see the backpressure model below).
+
+### Design principle: structural knobs only, minimal WIP (PN, 2026-06-15)
+The framework exposes **no operational dials** — no idle timeout, no
+max-goroutines, no jitter, no buffer sizes. The user's only levers are
+**structural**: *topology* (which ops; which ops move together → a Wave; which
+ops are interdependent → a shared scheduler) and *capacity* (a limiter's permit
+count / rate). The framework derives everything operational from that structure
+(when to spawn, drain, buffer, admit, prioritize). The buffer is fixed at **1**
+(minimal WIP); input rate is automatically constrained to the throughput of the
+**narrowest bottleneck** via backpressure to top-level admission. The wave
+boundary and scheduler-sharing topology ARE the user's execution hints —
+architectural, not operational. (This is why we keep deleting knobs.)
+
+### Backpressure & admission model (settled, 2026-06-15)
+- **Minimal WIP / buffer-1.** Every backpressure source is a buffer-1 on-deck
+  slot. SATURATED = that slot is already full (one unsatisfiable item queued).
+  Uniform across skimmers and limiter-**schedulers** — the saturation lives on
+  the *scheduler's* on-deck candidate, not on the permits (all-permits-held is
+  healthy, not saturated).
+- **Limiting is post-admission, everywhere.** The permit is acquired at the
+  **worker** (acquire-or-postpone in `Work.Execute`), never as an admission gate.
+  A non-top-level submit (a body holding permit P_A) that had to acquire a permit
+  before acceptance would block *holding P_A* → hold-and-wait deadlock (the
+  documented suspend/resume livelock); it MUST be able to exit and release. Bonus:
+  admit-then-limit gives the scheduler + work queue the full candidate set →
+  better prioritization. The postponed candidate IS the scheduler's on-deck item.
+- **Deadlock-freedom invariant: non-top-level submits are NEVER gated** —
+  accepted unconditionally. Only **top-level** submits (user goroutine, holds no
+  permit) are gated. Safe AND sufficient: in-flight / non-top-level work always
+  flows, so every saturation is self-clearing (the gate only delays new top-level
+  intake, never the work that relieves the pressure). So aggregating "any source
+  saturated → gate" can over-throttle but **cannot deadlock**.
+- **Routing (governor = the transmitter).** Each Wave owns one governor that
+  **aggregates** the saturation of every source it feeds — its skimmers (direct)
+  and its ops' limiters' schedulers (indirect: scheduler ⇽ limiter ⇽ op ⇽ wave).
+  A top-level submit waits while any registered source is on-deck-full
+  (`gov.Execute` == `ExecuteOrWait` on the governor). Wave-scoping is correct **by
+  construction**, not coarse: the user draws the wave boundary to mean "moves as a
+  unit"; finer independence = more waves / separate schedulers.
+- **Shared schedulers = declared interdependence.** A scheduler shared across
+  limiters (the `Inherit` case) intentionally couples **both** concurrency and
+  backpressure — minimal-WIP, narrowest shared bottleneck paces input.
+  ("Shared cap, independent backpressure" is deliberately unexpressible.)
+  Independent ops use separate schedulers. A shared scheduler registers on the
+  governor of each wave it is associated with (no-op where a wave has no
+  top-level admission — e.g. a subwave fed only by non-top-level submits).
+
+### Structural vocabulary
+- **Resource** (semaphore / rate): pure capacity accounting; the one place a
+  number lives ("what," not "how").
+- **Scheduler**: the unit of backpressure-AND-scheduling coupling; user-facing
+  and shareable. Sharing = interdependence. Carries the on-deck saturation signal.
+- **Limiter**: binds scheduler + resource onto ops (`WithLimits`).
+- **Wave**: the unit that admits / drains / cancels together; owns the governor
+  that aggregates its sources and gates its top-level admission.
+
+### Dispatch (settled)
+ONE uniform `submit` for every op (no task/funnel/skim distinction). Non-top-level
+= `Queue.Post` (handoff) unconditionally; top-level = wave-governor admission gate
+(on-deck aggregate) then `Post`. The op's limiter is acquired post-admission at
+the worker. Sketch: `dispatch.go`.
+
+### What collapses (the slimming)
+- `Pending` + `Accepted` → `Queue`.
+- `ExecuteOne` + `TryExecuteOne` → `Queue.DriveOne`.
+- `AddWorkFunc`/`TryAddWorkFunc` + `cpWorker.AddWork` + `Pool.addWork`/
+  `addWorkWhileMaybeBlocking` → internalized in `DriveOne`.
+- `cpWorker.popSelect` + `Pool.skimSelect` → one canonical `Queue` select.
+- `taskPostWork` + `funnelPostWork` + `skimPostWork` → `Queue.Post`.
+- `taskExEnv` + `cpWorker` → one unified worker exEnv.
+- `BlockFunc`/`WaitBehavior`/`blockConfirmer`/`AddToListeners` → hidden behind
+  `Worker`/`Queue`.
+
+### Open questions (flagged, not yet decided)
+1. **Kill the `postWork` layer?** Fold limiter-gate-in-`Execute` (→ postpone on
+   reject) + the handoff escalation into `Queue.Post`, or is the `postWork`
+   separation load-bearing for the full-handoff block case?
+2. **Governor**: `Post` takes the wave's governor as a param (per-call
+   backpressure) — confirm.
+3. `AddWorkFunc`/`TryAddWorkFunc` likely dissolve into `DriveOne`'s blocking mode.
+
+### Status / next
+**Sketches landed** (first-cut, not hardened — for shape review only; carry
+marked TODOs / conceptual accessors):
+- `internal/workq/queue.go` — `Queue` (composes+hides `incoming Pending` +
+  `accepted Accepted`): `Post` = pure handoff via `ExecuteOrWait`; `driveOne`;
+  scheduled methods. `unmetDemandFn` = the one condition signal.
+- `internal/workq/worker.go` — `Worker[E ExecEnv]`: `DriveOne`/`DriveUntilDrained`,
+  the ONE canonical `selectWork`, `pull` (addWorkFn collapse), `Help` (=nested
+  drive). TODOs: `handoffNotifier`, `blockBehaviorFrom`, `workWaitCh`, native
+  `driveOne`.
+- `dispatch.go` — uniform `submit(ctx, meta, ex, q, wave, w, deadline)`:
+  non-top-level = unconditional `Post`; top-level = `wave.governor().Execute` then
+  `Post`; q routed by op type (pool work queue vs wave skim queue). Plus
+  `runUnderLimiter` — the post-admission limiter gate (head of `Work.Execute`).
+- `internal/worker/pool.go` + `pool.go` — `worker.Pool[E]` lifecycle + `Wait()`
+  (still over a raw `rdvq.Queue[Unit]`; to be rebuilt on `workq.Worker[E]`).
+
+**Build order (dependency-first) — a major new implementation phase, best with
+fresh context against these notes:**
+1. Harden `workq.Queue` + `Worker[E]` to compile with stable interfaces: native
+   `driveOne` (absorb/compose `Accepted`); `handoffNotifier` + `BlockBehavior`
+   plumbing; the canonical select's `workWaitCh`.
+2. Rebuild `worker.Pool[E]` to spawn goroutines that each construct a
+   `workq.Worker[E]` on the shared task/funnel `Queue` and `DriveOne` in a loop
+   (replacing the raw `rdvq.Queue[Unit]` draft). Fix `E` to the unified
+   task/funnel exEnv (`taskExEnv` + `cpWorker` collapsed).
+3. Build `Wave` around it: owns `waveCtx`, the per-wave governor, the skim
+   `Queue`, the in-flight counter; `Acquire`/`Release` the pool; `Wave.Skim`
+   drives a `Worker[E_skim]` on the skim `Queue` (`DriveUntilDrained`).
+4. Wire `submit` + per-wave cancellation (work borrows the wave exec ctx) + the
+   scheduler on-deck→governor registration.
+
+Validator throughout: the committed sim TEMP config above (revert before each
+commit). Exploration maps that grounded this (workq surface, the two driver
+loops, the producer patterns) were captured via sub-agents this session.
+
+### Implementation session 2026-06-16: green baseline + first-seam scoping
+
+**Sequencing decision (PN): incremental in-place**, NOT the parallel build-up the
+build order above literally describes. Each step makes a new block the *real* one
+a legacy consumer uses, as a no-op/simplification, staying green (full suite)
+throughout — per the refactoring principle "upgrade the foundation first; each
+foundational step a simplification or no-op."
+
+**Green baseline restored.** The draft sketches broke the build; fixed minimally:
+- `queue.go:80` — `q.unmetDemandFn` (`RenotifyFunc`) → `rdvq.BufferedFunc(...)`
+  conversion in `Post`'s `TryPushBack`. Semantically right: an item that had to
+  buffer (no immediate taker) IS the demand signal, so firing `unmetDemandFn` as
+  the handoff `bufferedFn` is correct.
+- `dispatch.go` — build-excluded (`//go:build ignore`). It is the step-4 *wiring*
+  sketch (references `Wave.governor()`/`blockBehaviorFor`, not yet built); dead
+  code that broke the root package. Drop the tag when wiring `submit`.
+Result: `go build ./...`, `go vet ./...`, `go test -short ./...` all green (modulo
+the known psgwf `Example_clientTimeout` timing flake — passes 5/5 on re-run).
+`workq.Queue`/`Worker[E]`, `worker.Pool[E]`, `psg.Wait` now compile but are dead
+(unadopted).
+
+**First-seam analysis — `FunnelPool` is the exact `workq.Queue` template.** Its
+field trio maps 1:1: `funnelQueue workq.Pending` = `Queue.incoming`;
+`workQueue workq.Accepted` = `Queue.accepted`; `cp.unmetDemandFn` =
+`Queue.unmetDemandFn`. `funnelPostWork.Execute` (producer) = `Queue.Post`;
+`workQueue.ExecuteOne(ctx, cpWorker.AddWork)` (consumer) = `Queue.driveOne` + the
+pull; `cpWorker.popSelect` = `Worker.selectWork`.
+
+**The entanglement that scopes the first seam.** A clean in-place adoption is NOT
+a field-swap, because legacy `funnelPostWork.Execute` and `cpWorker` interleave
+concerns that the new design moves *out*:
+- **spawn** — `maybeSpawn`/`ShouldSpawn{First,}Goroutine`/`SpawnNotifier`
+  (cpstate machine) → `worker.Pool` demand counter (`Enqueue`→`demand++` +
+  `bufferedFn`). The legacy `tryPost` already passes `maybeSpawn` as the
+  `bufferedFn`, mirroring `Queue.Post`'s `unmetDemandFn`.
+- **governor/backpressure** — `governor.Waiting` inside `Execute` → the `submit`
+  admission gate (top-level only).
+- **idle/done/flush** — `cpWorker` idle-jitter + `cpstate.TryIdleExit`,
+  `doneCh`/`doneErr`, `nextJobFlushCh`/`flushAll` → `worker.Pool` (fixed idle,
+  no jitter; stop channel) + a preserved end-of-work flush hook.
+Because the *simplification* of `Post`/`AddWork` depends on those concerns having
+moved, there is no behavior-identical AND simplifying micro-seam: the
+simplification IS the relocation. So the realistic plan is a sequence whose first
+step is a structural foothold, then inward migrations, each green.
+
+**Two refinements to bake in while hardening (confirmed against legacy):**
+1. `Queue.Post` should take `BlockBehavior` as a *parameter* (as legacy
+   `Governor.Execute` does), not derive it via the panicking `blockBehaviorFrom(ex)`.
+2. The unified worker `E` is `integrationExEnv` (sender + receiver + group/queue
+   stacks); `taskExEnv`'s "no receiver, single group" specialization disappears
+   because pool workers always have a receiver now.
+
+**Deeper grounding overturns "funnel is the easy first target" (2026-06-16).**
+Reading the three producers + `cpstate` more carefully:
+- **`ExecuteOrWait` doesn't fit the handoff.** `rdvq.Notifier` embeds
+  `Listeners`/`Waiters` *by value*, but the per-sender drain listeners live
+  *inside the outbox* (`ListenersFor(sender)` → `*Listeners`). The legacy
+  producers pass that `*Listeners` straight to `AddToListeners`; ExecuteOrWait
+  subscribes to its own `&notifier.Listeners`. So the clean `Queue.Post`-via-
+  `ExecuteOrWait` sketch can't reuse per-sender drain listeners. `Post` must be a
+  faithful hand-rolled port of the shared producer loop (tryPost → listen via
+  `ListenersFor` → block via `PushBackFunc`+`BasicPushSelect`), NOT ExecuteOrWait-
+  based. `ExecuteOrWait` is used only by `Governor.Execute` today; it stays the
+  limiter/governor-gate mechanism, not the handoff.
+- **The three producers share one loop skeleton**, differing in: bufferedFn
+  (task `registerDemand`; skim `nil`; funnel `maybeSpawn`), a `waiting()` hook
+  (skim/funnel `work.Waiting(governor)`), and the block-path select (skim/task
+  plain `BasicPushSelect`; **funnel a custom `spawnWaitCh` select**).
+- **Funnel is the HARDEST target, not the easiest.** Its block-path
+  `spawnWaitCh` select + `SpawnNotifier.Listeners` subscription implement
+  cap-aware elastic scaling: `ShouldSpawnGoroutine` is bounded by funnel
+  `MaxConcurrency`, and `SpawnNotifier` wakes blocked producers when a spawn slot
+  frees. This coupling is load-bearing while `MaxConcurrency` is finite — and it
+  is exactly what `worker.Pool`'s uncapped demand model replaces. So a *clean*
+  funnel `Post` (skim/task-style, spawn via `bufferedFn` only) is unsafe until
+  `worker.Pool` owns funnel goroutines. **Funnel-wholesale entangles with
+  `worker.Pool` adoption.**
+
+**Honest meta-conclusion:** no seam here is small. The queues, the three
+producers, the spawn lifecycle, and the governor are mutually coupled *by design*
+— which is why the build order above chose parallel build-up (build the new stack,
+cut over once) over incremental in-place. Incremental in-place is possible but
+needs throwaway scaffolding (hooks/accessors) at each seam that approaches the
+cost of the cutover. The cleanest in-place producer seam is **skim+task** (the two
+`BasicPushSelect` producers, no spawn-notifier coupling), leaving funnel until
+`worker.Pool` lands.
+
+**DECISION (PN, 2026-06-16): (C) funnel→`worker.Pool` combined seam.** Migrate
+`FunnelPool`'s goroutine substrate to `worker.Pool[E]` AND collapse its producer to
+`Queue.Post` together, *replacing* the cpstate spawn machinery
+(`ShouldSpawn*`/`SpawnNotifier`/`MaxConcurrency`) with `worker.Pool`'s uncapped
+demand model — not preserving it. The funnel `Post` becomes the clean skim/task-
+style handoff (spawn via `bufferedFn`=pool demand; no `spawnWaitCh` select).
+
+**Checkpoint plan (each lands green; foundation first):**
+1. **Harden `workq.Queue` — DONE (2026-06-16, uncommitted).** Faithful hand-rolled
+   `Post(ctx, ex, sender, shouldBlock, w, onWait)` (tryPost → listen via
+   `incoming.ListenersFor(sender)` → block via `incoming.PushBackFunc`+
+   `BasicPushSelect`; `bufferedFn`+about-to-wait `fireDemand` = `unmetDemandFn`;
+   `onWait` hook for governor downstream-registration). The `panic("TODO")` stubs
+   (`handoffNotifier`/`blockBehaviorFrom`) are GONE — `Post` is NOT ExecuteOrWait-
+   based (the per-sender `Listeners`-by-value snag). `driveOne` stays unexported
+   (Worker, same package, calls it directly + accesses `q.incoming`); scheduled
+   methods kept. `queue_test.go` pins the handoff (buffered+demand, direct
+   rendezvous) — `-race` ×3 green; workq + root `-short` + lint all green. NOTE:
+   `Post` has no caller yet (validated at checkpoint 5); `deadline` param dropped
+   (handoff uses ctx, not a deadline) — re-add if submit-wiring needs it.
+2. **Harden `workq.Worker[E]` — DONE (2026-06-16, uncommitted).** Real
+   `selectWork` now takes `workWaitCh` directly; `pull` wraps `PopFrontFunc`
+   inside `waiters.WaitFunc(state.Waiter(), confirmWaitFn, …)` (modeled on
+   `cpWorker.AddWork`) to supply it — that was the missing plumbing. Added
+   `Waiter() *rdvq.Waiter` to `ExecEnv`. idle/stop → `w.exit` → `ErrEndOfWork`
+   so the driver loop stops. `execCtx` still returns `w.ctx` (driveCtx and the
+   worker ctx coincide until Wave per-wave cancellation lands — cp 5+). Smoke
+   test `TestWorker_DriveOne_ExecutesPostedWork` (minimal `testExecEnv` over real
+   rdvq) drives Queue+Worker end-to-end; `-race` green, lint 0. The funnel
+   integration (cp 5) is the load validator.
+3. **Rebuild `worker.Pool[E]`** on `workq.Worker[E]`: each pool goroutine builds a
+   `Worker[E]` on the shared `Queue` and `DriveOne`s in a loop; demand/idle/stop
+   lifecycle. NOTE (cp-3 design, found at cp-2): the current `worker/pool.go`
+   draft is built on a separate `rdvq.Queue[Unit[E]]` + `Enqueue(sender, Unit)`
+   model that PREDATES the "drive the shared `workq.Queue`" decision — it must be
+   replaced, not adapted. Two coupling points pull cp-3 into cp-4/cp-5:
+   (a) **demand/spawn** must be rebuilt around the Queue's `unmetDemandFn` (fires
+   on Post buffer/about-to-wait) → `trySpawnWorker`, with a spawn chain to avoid
+   under-spawning on bursts (legacy used a demand counter; the new model can lean
+   on each `DriveOne` blocking when no work + idle-exit, but de-bouncing the spawn
+   rate still needs care — watch the documented demand-counter drift hazards);
+   (b) **per-goroutine worker ctx** wires `E` into `ctxMeta` (`executionEnvironment`
+   + fresh permit-root `parent=nil`), which is MAIN-PACKAGE — so `NewPool` must be
+   handed a factory producing a ready `(E, workerCtx, release)` rather than
+   building the ctx itself (keeps `internal/worker` main-package-independent).
+   ⇒ **cp-3/4/5 are one coupled cluster** (substrate + funnel cutover); take them
+   as a single focused push.
+4. **Unified funnel `E`** (`integrationExEnv`-based): sender + receiver + group/
+   queue stacks; the lifecycle state `cpWorker` held (idleTimer/doneCh/flush)
+   moves to `worker.Pool`/`Worker` or a preserved flush hook.
+5. **Cut `FunnelPool` over**: `funnelQueue`+`workQueue` → `cp.queue workq.Queue`;
+   `spawnNewGoroutine`+`cpstate` spawn+`goroutine()`+`cpWorker` → `worker.Pool[E]`+
+   `Worker`; `funnelPostWork.Execute` → `cp.queue.Post`; preserve end-of-work
+   flush + governor (transitional, until submit-wiring). Delete dead cpstate spawn
+   machinery.
+6. **Validate**: funnel suite + `-race` + sim green.
+
+**Next:** the coupled cluster cp-3/4/5 — rebuild `worker.Pool[E]` on the shared
+`workq.Queue`, define the unified funnel `E` (`integrationExEnv`-based), and cut
+`FunnelPool` over to `worker.Pool` + `Queue.Post` (replacing the cpstate spawn
+machinery). Foundation (`workq.Queue` + `Worker[E]`) is hardened, tested, green.
+Best started with fresh context against this plan.
 
 ## Residual reclaim busy-spin — FIXED (2026-06-14)
 

@@ -44,8 +44,19 @@ import (
 // Pool is a demand-driven pool of goroutines that drive a shared workq.Queue,
 // each holding per-worker state E. Construct with NewPool; the zero value is not
 // usable.
+// sharedQueue aliases workq.Queue so the Pool can embed it UNEXPORTED. The
+// global pool and the shared task/funnel queue are 1:1 and co-lifetimed, so the
+// pool owns and drives the queue outright rather than threading a separate
+// *Queue. Embedding unexported means only the queue's exported PRODUCER surface
+// (Post, the scheduled/timed methods, ExecuteNowOrQueue) promotes onto the Pool —
+// for external producers via the global pool — while the CONSUMING side (the
+// work pull + priority drive, unexported in workq) stays internal, reached only
+// by the pool's own Workers through &p.sharedQueue. (The skim engine uses a
+// standalone Queue driven by user goroutines, not a pool.)
+type sharedQueue = workq.Queue
+
 type Pool[E workq.ExecEnv] struct {
-	queue *workq.Queue
+	sharedQueue
 
 	// newState builds a fresh per-worker execution environment together with the
 	// worker context it runs under (E wired into the ctxMeta as the execution
@@ -72,27 +83,21 @@ type Pool[E workq.ExecEnv] struct {
 	stop    chan struct{}
 }
 
-// NewPool constructs a pool that drives queue, with per-worker environments built
-// by newState. It takes no settings: worker behavior is fixed (see
+// NewPool constructs a pool, initializing its embedded work Queue so the queue's
+// unmet-demand signal drives spawning. Per-worker environments are built by
+// newState. It takes no settings: worker behavior is fixed (see
 // workerIdleTimeout / spawnConcurrencyLimit).
 //
 //nolint:contextcheck // background context used only for tracing
 func NewPool[E workq.ExecEnv](
-	queue *workq.Queue,
 	newState func() (state E, workerCtx context.Context, cancel context.CancelFunc),
 ) *Pool[E] {
 	traceRegion := "worker.NewPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	p := &Pool[E]{queue: queue, newState: newState, stop: make(chan struct{})}
+	p := &Pool[E]{newState: newState, stop: make(chan struct{})}
+	p.Init(p.trySpawnWorker) // init the embedded queue; unmet demand → spawn a worker
 	trace.Logf(context.Background(), traceRegion, "Pool=%p", p)
 	return p
-}
-
-// DemandFunc returns the unmet-demand callback to wire into the queue (via
-// Queue.Init): when the queue signals fresh work with possibly no taker, the
-// pool tries to spawn a worker.
-func (p *Pool[E]) DemandFunc() workq.RenotifyFunc {
-	return p.trySpawnWorker
 }
 
 // ── Refcount + definitive quiesce ───────────────────────────────────────────
@@ -200,7 +205,7 @@ func (p *Pool[E]) runWorker(stop <-chan struct{}) {
 	state, ctx, cancel := p.newState()
 	defer cancel()
 
-	w := workq.NewWorker(p.queue, state, ctx,
+	w := workq.NewWorker(&p.sharedQueue, state, ctx,
 		workq.WithStop(stop), workq.WithIdleExit(workerIdleTimeout))
 	defer w.Release()
 

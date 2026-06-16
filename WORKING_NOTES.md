@@ -480,11 +480,22 @@ pool; then wire `submit` + per-wave ctx borrowing). The validated flusher LOGIC
 still holds — it just lives per-wave and the join is `psg.Wait`/Acquire-Release,
 not a per-pool coordinator.
 
-**Next (corrected):** wire the global substrate — un-exclude `pool.go`, build the
-context-free unified E, `defaultPool = worker.NewPool(&sharedQueue, factory)` +
-`sharedQueue.Init(defaultPool.DemandFunc())` + `psg.Wait`; then build `Wave`
-around it (waveCtx, per-wave in-flight/governor/flush, Acquire/Release) and wire
-`submit`. Funnel + task producers then collapse onto `Queue.Post`.
+**Next (corrected):** wire the global substrate.
+- `worker.Pool` now **embeds the shared `workq.Queue` UNEXPORTED** (alias
+  `sharedQueue`): the global pool and the queue are 1:1, so `NewPool(factory)`
+  owns + Inits the queue internally (`p.Init(p.trySpawnWorker)`), only the
+  producer surface (`Post`/scheduled/`ExecuteNowOrQueue`) promotes, and the
+  consuming side stays unexported in workq — done, green. (Dropped the external
+  `*Queue` param + `DemandFunc`.)
+- Build the **context-free unified E** (integrationExEnv + Lock/Unlock +
+  `ExecuteNowOrQueue` → `defaultPool` (promoted)) — NO job/cp backref.
+- Un-exclude `pool.go`: `var defaultPool = worker.NewPool(newWorkerState)`;
+  `psg.Wait = defaultPool.Wait`. Producers `defaultPool.Post`.
+- The factory's worker ctx + per-execution ctxMeta stamping is wave-5b (the work
+  borrows its wave ctx, worker stamps E) — so the substrate compiles DORMANT
+  until `Wave` Acquires it. Then build `Wave` (waveCtx, per-wave
+  in-flight/governor/flush, Acquire/Release) + wire `submit`; funnel + task
+  producers collapse onto `defaultPool.Post`.
 
 --- superseded framing below (kept for the verbatim seams only) ---
 

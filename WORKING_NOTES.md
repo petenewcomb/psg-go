@@ -341,16 +341,73 @@ style handoff (spawn via `bufferedFn`=pool demand; no `spawnWaitCh` select).
    machinery.
 6. **Validate**: funnel suite + `-race` + sim green.
 
-**Next:** cp-4/5 — the `FunnelPool` cutover (the one remaining cluster piece).
-`workq.Queue` + `Worker[E]` + `worker.Pool[E]` are all hardened and green
-(cp-1/2/3). The cutover is the large main-package surgery: define the unified `E`
-(cp-4 above), have `FunnelPool` own a `cp.queue workq.Queue` + a
-`worker.Pool[E]` (wiring `cp.queue.Init(pool.DemandFunc())`), rewrite
-`funnelPostWork.Execute` → `cp.queue.Post`, relocate end-of-work flush +
-completion, delete the cpstate spawn machinery + `cpWorker`/`goroutine()`/
-`spawnNewGoroutine`, and un-build-exclude `pool.go`. Validate: funnel suite +
-`-race` + sim. Best with fresh context — it touches funnelpool.go, cpworker.go,
-ctxmeta.go, cpstate, and pool.go together.
+### cp-5 cutover — detailed design (grounded 2026-06-16, ready to implement)
+
+Foundation done (cp-1/2/3, committed `c31d497`+`0193aab`). Added (uncommitted,
+green): `Queue.ExecuteNowOrQueue` (delegates to `accepted`; the synchronous-
+dispatch entry the unified `E` needs). The cutover lands as ONE commit (the
+unified `E` is unexported+unused until wired → can't be a separate green commit:
+`unused` lint). Pieces, with the verbatim seams:
+
+- **Unified `E` (`funnelExEnv`)** — model on `topLevelExEnv` (ctxmeta.go:387):
+  `struct { integrationExEnv; cp *FunnelPool }` + no-op `Lock`/`Unlock` (per the
+  old `cpWorker`, NOT a mutex) + `ExecuteNowOrQueue → cp.queue.ExecuteNowOrQueue`
+  + `executeFunnel(ctx, bc) { bc.Funnel(ctx, ee.Sender()) }` (drops
+  `IncrementCompleted` — cpstate metric, write-only, unread). `integrationExEnv`
+  already supplies Group/QueueFunc stacks + Receiver/Sender/Waiter, so this
+  satisfies BOTH `workq.ExecEnv` and the main-package `executionEnvironment`.
+- **`funnelWork.executeInner` (funnelop.go:804)**: `meta.executionEnvironment.(*cpWorker)`
+  → `.(*funnelExEnv)`; `cw.executeFunnel` stays. `funnelInstance.funnel`
+  (funnelop.go:561) `&c.op.funnelPool.workQueue` → `&cp.queue` (Schedule/Reschedule/
+  ClaimForFlush move to `Queue`, already present).
+- **Producer rewrite (`funnelPostWork.Execute`, funnelpool.go:241)** → collapses
+  to `cp.queue.Post(ctx, ex, meta.Sender(), meta.ShouldBlock(), w.work, onWait)`
+  where `onWait = func(){ w.work.Waiting(&cp.governor) }`. **Drops** the
+  spawn-notifier block-select + `ShouldSpawn*` (spawn now rides `Post`'s
+  `unmetDemandFn` = `pool.DemandFunc()`). Keeps the governor. On `posted`:
+  `ex.Starting()` (Post does it) + `w.work = nil`.
+- **`FunnelPool` fields**: `funnelQueue Pending` + `workQueue Accepted` →
+  `queue workq.Queue`; add `pool *worker.Pool[*funnelExEnv]`; KEEP `governor`,
+  `inFlight`, `job`; DELETE `state cpstate.FunnelPoolState`, `unmetDemandFn`.
+- **`NewFunnelPool`**: `cp.pool = worker.NewPool(&cp.queue, cp.newWorkerState)`;
+  `cp.queue.Init(cp.pool.DemandFunc())`; `governor.Init()`. `newWorkerState()
+  (*funnelExEnv, ctx, cancel)` mirrors `goroutine()` lines 138-151:
+  `WithCancel(j.ctx)`, `ensureCtxMeta` with `executionEnvironment=E`,
+  `parent=nil` (fresh permit-root). DELETE `goroutine()`/`spawnNewGoroutine()`.
+- **Pool lifecycle**: the FunnelPool must `cp.pool.Acquire()` (job start) /
+  `Release()` + `Wait()` (job teardown) — find where the legacy job waited on
+  `cp.job.wg` for funnel goroutines and route to `pool.Wait()`.
+
+**THE HARD PART — end-of-work flush relocation.** Deadline-driven flushes already
+work through the generic `Worker` (`selectWork`'s `deadlineCh` → `driveOne`
+re-drains scheduled → runs the flush). What's lost is the JOB-END force-flush of
+not-yet-due instances: legacy wove it into `cpWorker` (`nextJobFlushCh` →
+`flushAll` → `DrainAllScheduled` + `forceFlush` each). The generic `Worker` has no
+such case (correctly — it's funnel-specific). Relocate via **a dedicated per-
+FunnelPool flusher goroutine** that watches `cp.job.state.FlushChan()` and runs
+`flushAll` with its OWN `funnelExEnv`/sender (coordinates with workers via the
+existing `ClaimForFlush` arbitration). Preferred over a `SetFlushListener`
+callback, which would run flush (may emit downstream + need backpressure) on the
+arbitrary `noMoreWork()` goroutine — deadlock-risky. UNSETTLED until validated;
+this is the riskiest part of the cutover. Also re-confirm whether `cp.inFlight` is
+still needed (legacy used it only for the worker end-of-work confirm, which
+worker.Pool's idle-exit replaces; job Done is gated by jobstate barrier refs, not
+the pool) — likely removable, verify.
+
+**Options fallout.** The design drops operational dials, but
+`WithMaxConcurrency`/`WithIdleTimeout`/`WithIdleJitter` are used by tests:
+`maxholdtime_test.go:36` `WithMaxConcurrency(1)` relies on SERIAL execution;
+`funnel_legacy_bench_test.go:602`; `example_funnel_test.go:54`
+`WithIdleTimeout(-1)`. Keeping `SetOptions` as a no-op compiles them but BREAKS
+maxholdtime's serialization assumption → it must migrate to a limiter
+(`WithLimits`, the design's real concurrency lever). Budget this as part of cp-5.
+
+**Validate**: funnel suite + `-race` + sim (`sim-trace-debugging` skill on hang).
+
+**Next:** implement cp-5 per the above (one focused, iterative push — touches
+funnelpool.go, cpworker.go, funnelop.go, ctxmeta.go usage, cpstate deletion,
+pool.go un-exclude, and the option-using tests). The flusher-goroutine design is
+the part to prototype + validate first.
 
 ## Residual reclaim busy-spin — FIXED (2026-06-14)
 

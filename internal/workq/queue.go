@@ -162,6 +162,15 @@ func (q *Queue) driveOne(ctx context.Context, addWorkFn AddWorkFunc) error {
 	return q.accepted.ExecuteOne(ctx, addWorkFn)
 }
 
+// ExecuteNowOrQueue runs work synchronously on the caller's goroutine, or — if it
+// postpones (does not start) — parks it on the priority engine's postponed queue
+// for a worker to retry. It is the synchronous-dispatch entry the execution
+// environment exposes (a body submitting work that can run inline). Surfaces the
+// priority engine's ExecuteNowOrQueue.
+func (q *Queue) ExecuteNowOrQueue(ctx context.Context, ex Execution, w Work) error {
+	return q.accepted.ExecuteNowOrQueue(ctx, ex, w)
+}
+
 // ── Scheduled / timed work (flush deadlines) ─────────────────────────────────
 //
 // Schedule a ScheduledWork to become ready at a deadline; due items drain into

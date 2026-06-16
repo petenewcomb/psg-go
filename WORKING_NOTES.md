@@ -453,32 +453,40 @@ FlushChan so other pools' edges also wake this flusher. If the sim hangs on a
 recursive case, add a buffered-signal backstop. (Cannot use `SetFlushListener` —
 that's the user's `WithFlushListener` slot.)
 
-### Lifecycle-integration finding (2026-06-16) — the LAST hard piece
+### CORRECTION (2026-06-16, PN) — the "funnel cutover" was mis-scoped
 
-Started the cutover (wrote `funnelExEnv` in cpworker.go), reverted to stay green
-after surfacing this. Legacy funnel goroutines join via the shared **`cp.job.wg`**
-(`Pool.CancelAndWait` → `j.wg.Wait()`, job.go:252; `spawnNewGoroutine` does
-`cp.job.wg.Add(1)`). The new `worker.Pool` owns its OWN join (`pool.Wait()`), and
-its `spawnWorker` does the `Add` before `go` (race-safe) on its *internal* wg — it
-must not know about `j.wg`. So the cutover needs explicit join wiring covering
-BOTH end states:
-- **Cancel path**: `j.Cancel()` cancels `j.ctx`; funnel worker ctxs are
-  `WithCancel(j.ctx)` children → their `DriveOne` returns ctx err → workers exit →
-  `pool.Wait()` joins them.
-- **Normal completion**: job reaches `Done` via the Skim drain with NO cancel —
-  funnel workers idle-exit; the flusher force-flushes pending instances → refs→0 →
-  `Done`. Need to confirm what (if anything) joins the funnel workers here today
-  (does `CloseAndSkimAll`/Skim wait on `j.wg`? — it's `Pool.CancelAndWait` that
-  does, on the cancel path). VERIFY before wiring.
+The whole per-job `FunnelPool`-owns-a-`worker.Pool` framing below is WRONG and is
+retracted. Per the converged design (lines 19-34, 54-72) and `pool.go`'s seam:
+- **ONE global `defaultPool`** held at package level. It OWNS the wg.
+  `Acquire`/`Release` = one ref per in-flight Wave; `Wait` stops workers when
+  refs→0 iff a Wait is outstanding. **`psg.Wait() = defaultPool.Wait()`** is the
+  public surface AND the "stop remaining goroutines once no wave references the
+  pool" logic. `worker.Pool` (cp-3) ALREADY implements exactly this — so the
+  `j.wg` coordinator goroutine I posited is unnecessary and contradicts the model.
+- **The unified E is CONTEXT-FREE** — Sender + Receiver + group stack, no
+  `cp *FunnelPool` / job backref. (My `funnelExEnv{cp}` was wrong.) Per-job/per-
+  wave context rides the WORK item; the worker runs each body under the work's
+  borrowed wave-exec ctx (wave-5b), stamping its E in.
+- **ONE shared task/funnel `Queue`**, tagged PER-WAVE. End-of-work flush + drain
+  + cancellation + governor are **per-wave** ("Per-wave (not in the pool)"), NOT
+  per-pool. So the flusher is per-wave (scoped to that wave's scheduled instances
+  + its in-flight drain), not the per-FunnelPool goroutine I drafted.
 
-**Proposed wiring:** one coordinator goroutine per FunnelPool, `j.wg.Add(1)` on the
-constructing goroutine (before `go` — no race), that waits for job end
-(`<-j.ctx.Done()` OR `<-j.state.Done()`), then `cp.pool.Wait()` + joins the
-flusher. The flusher's select must include `<-j.ctx.Done()` too (Cancel does not
-fire `state.Done()`), so it exits on cancel. This keeps `j.wg.Wait()` teardown
-working unchanged while `worker.Pool` keeps its own join. Per-job FunnelPool
-likely never `Acquire`s the pool (refs stay 0; `pool.Wait()` at teardown stops +
-joins) — confirm the refcount/idle-exit interaction.
+**Consequence:** the funnel engine does NOT cut over in isolation. It folds onto
+the global pool + shared queue + the per-wave Wave (build-order steps 3-4:
+`waveCtx`, per-wave in-flight counter, governor, `Acquire`/`Release` the global
+pool; then wire `submit` + per-wave ctx borrowing). The validated flusher LOGIC
+(idempotent `DrainAllScheduled`+`forceFlush`, sender-via-ctx, FlushChan/Done loop)
+still holds — it just lives per-wave and the join is `psg.Wait`/Acquire-Release,
+not a per-pool coordinator.
+
+**Next (corrected):** wire the global substrate — un-exclude `pool.go`, build the
+context-free unified E, `defaultPool = worker.NewPool(&sharedQueue, factory)` +
+`sharedQueue.Init(defaultPool.DemandFunc())` + `psg.Wait`; then build `Wave`
+around it (waveCtx, per-wave in-flight/governor/flush, Acquire/Release) and wire
+`submit`. Funnel + task producers then collapse onto `Queue.Post`.
+
+--- superseded framing below (kept for the verbatim seams only) ---
 
 **Next:** the mechanical cutover (one focused push), in order:
 (1) `cpworker.go` → replace `cpWorker` with `funnelExEnv` (+ keep `scheduledFlusher`,

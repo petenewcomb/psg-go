@@ -1,6 +1,15 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
+//go:build ignore
+
+// NOTE: build-excluded glue. The package-level default worker substrate +
+// psg.Wait depend on a concrete unified task/funnel exEnv and the shared
+// workq.Queue, which land with the FunnelPool cutover (WORKING_NOTES cp-5).
+// The worker.Pool[E] signature this used (NewPool(func() taskExEnv)) is also
+// superseded by the queue-driven rebuild (cp-3). Drop the build tag and rewrite
+// against the new worker.Pool when wiring the default pool.
+
 package psg
 
 import "github.com/petenewcomb/psg-go/internal/worker"

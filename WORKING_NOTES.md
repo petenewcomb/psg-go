@@ -303,26 +303,37 @@ style handoff (spawn via `bufferedFn`=pool demand; no `spawnWaitCh` select).
    test `TestWorker_DriveOne_ExecutesPostedWork` (minimal `testExecEnv` over real
    rdvq) drives Queue+Worker end-to-end; `-race` green, lint 0. The funnel
    integration (cp 5) is the load validator.
-3. **Rebuild `worker.Pool[E]`** on `workq.Worker[E]`: each pool goroutine builds a
-   `Worker[E]` on the shared `Queue` and `DriveOne`s in a loop; demand/idle/stop
-   lifecycle. NOTE (cp-3 design, found at cp-2): the current `worker/pool.go`
-   draft is built on a separate `rdvq.Queue[Unit[E]]` + `Enqueue(sender, Unit)`
-   model that PREDATES the "drive the shared `workq.Queue`" decision — it must be
-   replaced, not adapted. Two coupling points pull cp-3 into cp-4/cp-5:
-   (a) **demand/spawn** must be rebuilt around the Queue's `unmetDemandFn` (fires
-   on Post buffer/about-to-wait) → `trySpawnWorker`, with a spawn chain to avoid
-   under-spawning on bursts (legacy used a demand counter; the new model can lean
-   on each `DriveOne` blocking when no work + idle-exit, but de-bouncing the spawn
-   rate still needs care — watch the documented demand-counter drift hazards);
-   (b) **per-goroutine worker ctx** wires `E` into `ctxMeta` (`executionEnvironment`
-   + fresh permit-root `parent=nil`), which is MAIN-PACKAGE — so `NewPool` must be
-   handed a factory producing a ready `(E, workerCtx, release)` rather than
-   building the ctx itself (keeps `internal/worker` main-package-independent).
-   ⇒ **cp-3/4/5 are one coupled cluster** (substrate + funnel cutover); take them
-   as a single focused push.
-4. **Unified funnel `E`** (`integrationExEnv`-based): sender + receiver + group/
-   queue stacks; the lifecycle state `cpWorker` held (idleTimer/doneCh/flush)
-   moves to `worker.Pool`/`Worker` or a preserved flush hook.
+3. **Rebuild `worker.Pool[E]` — DONE (2026-06-16, uncommitted).** Replaced the
+   draft's separate `rdvq.Queue[Unit[E]]`+`Enqueue` model (it predated the
+   "drive the shared `workq.Queue`" decision). `Pool[E workq.ExecEnv]` now holds
+   `queue *workq.Queue` + `newState func() (E, context.Context, context.CancelFunc)`
+   (the main package owns the `ctxMeta` wiring → factory returns the worker ctx;
+   keeps `internal/worker` main-package-independent). `runWorker` builds a
+   `workq.NewWorker(queue, state, ctx, WithStop, WithIdleExit)` and loops
+   `DriveOne`. **Spawn model (counter-free — avoids the documented demand-counter
+   drift):** `DemandFunc()` (wired to `Queue.Init`'s `unmetDemandFn`) =
+   `trySpawnWorker` triggers the first spawn; the **spawn chain** ramps — a
+   freshly spawned worker whose first `DriveOne` returns `err==nil` (found+ran
+   work) spawns a successor, one that returns `err!=nil` (idle/stop) does not, so
+   the chain length tracks the backlog and self-terminates. `spawnConcurrencyLimit`
+   bounds simultaneous spawns. Lifecycle (Acquire/Release/Wait/stop/rearm) kept
+   verbatim. Generic + compiles standalone; load-validated at cp-5. The `pool.go`
+   psg glue (default pool + `psg.Wait`) is build-excluded until cp-5 (its old
+   `NewPool(func() taskExEnv)` signature is superseded).
+4. **Unified funnel `E`** — design grounded (ctxmeta.go:329). `*integrationExEnv`
+   already satisfies `workq.ExecEnv` (Sender/Receiver/Waiter via baseExEnv +
+   receiver). But `E` must ALSO satisfy the main-package `executionEnvironment`
+   iface (ctxmeta.go:233): Lock/Unlock, Group stack (PushGroup/PopGroup),
+   QueueFunc stack, `ExecuteNowOrQueue`. So `E` ≈ `cpWorker` MINUS its lifecycle
+   fields (idleTimer/doneCh/doneErr/idleTimerCh/nextJobFlushCh/followupFn/
+   workRenotifyFn/newWork/err — all now owned by `worker.Pool`+`Worker`), i.e.
+   `integrationExEnv` + `cp *FunnelPool` backref + Lock/Unlock + `ExecuteNowOrQueue`
+   (→ needs a `Queue.ExecuteNowOrQueue`, surfacing `accepted`'s). OPEN: where the
+   funnel end-of-work **flush** (`flushAll`/`nextJobFlushCh`) and **completion**
+   tracking (`executeFunnel`'s `IncrementCompleted`, being deleted with cpstate)
+   land — likely a preserved per-Pool flush hook + folding `executeFunnel`'s
+   wrapper into `funnelWork.Execute`. THIS is why cp-4 isn't cleanly additive: it
+   entangles with cp-5's "what moves out of cpWorker."
 5. **Cut `FunnelPool` over**: `funnelQueue`+`workQueue` → `cp.queue workq.Queue`;
    `spawnNewGoroutine`+`cpstate` spawn+`goroutine()`+`cpWorker` → `worker.Pool[E]`+
    `Worker`; `funnelPostWork.Execute` → `cp.queue.Post`; preserve end-of-work
@@ -330,11 +341,16 @@ style handoff (spawn via `bufferedFn`=pool demand; no `spawnWaitCh` select).
    machinery.
 6. **Validate**: funnel suite + `-race` + sim green.
 
-**Next:** the coupled cluster cp-3/4/5 — rebuild `worker.Pool[E]` on the shared
-`workq.Queue`, define the unified funnel `E` (`integrationExEnv`-based), and cut
-`FunnelPool` over to `worker.Pool` + `Queue.Post` (replacing the cpstate spawn
-machinery). Foundation (`workq.Queue` + `Worker[E]`) is hardened, tested, green.
-Best started with fresh context against this plan.
+**Next:** cp-4/5 — the `FunnelPool` cutover (the one remaining cluster piece).
+`workq.Queue` + `Worker[E]` + `worker.Pool[E]` are all hardened and green
+(cp-1/2/3). The cutover is the large main-package surgery: define the unified `E`
+(cp-4 above), have `FunnelPool` own a `cp.queue workq.Queue` + a
+`worker.Pool[E]` (wiring `cp.queue.Init(pool.DemandFunc())`), rewrite
+`funnelPostWork.Execute` → `cp.queue.Post`, relocate end-of-work flush +
+completion, delete the cpstate spawn machinery + `cpWorker`/`goroutine()`/
+`spawnNewGoroutine`, and un-build-exclude `pool.go`. Validate: funnel suite +
+`-race` + sim. Best with fresh context — it touches funnelpool.go, cpworker.go,
+ctxmeta.go, cpstate, and pool.go together.
 
 ## Residual reclaim busy-spin — FIXED (2026-06-14)
 

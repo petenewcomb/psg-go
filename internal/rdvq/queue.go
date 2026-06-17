@@ -5,11 +5,11 @@ package rdvq
 
 import (
 	"context"
-	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 )
 
 // BufferedFunc is called when a value is buffered in an outbox rather than
@@ -42,11 +42,11 @@ type BufferedFunc func()
 // themselves are always delivered in first-in-first-out (FIFO) order.
 type Queue[T any] struct {
 	inboxStackQueue[T]
-	outboxes      nbcq.Queue[*outbox[T]] // Borrow source: every live outbox except while checked out
-	fullOutboxes  nbcq.Queue[*outbox[T]] // Drain source: outboxes currently holding a value
-	outboxFree    sync.Pool              // Reclaimed drained outboxes (scale-to-zero via GC)
-	outboxFreed   Listeners              // Queue-level "an outbox freed" wakeup for postponed producers
-	outboxWaiters Waiters                // Notification system for new outbox items (receiver side)
+	outboxes      nbcq.Queue[*outbox[T]]    // Borrow source: every live outbox except while checked out
+	fullOutboxes  nbcq.Queue[*outbox[T]]    // Drain source: outboxes currently holding a value
+	outboxPool    *omnipool.Pool[outbox[T]] // Reclaimed drained outboxes (scale-to-zero via GC)
+	outboxFreed   Listeners                 // Queue-level "an outbox freed" wakeup for postponed producers
+	outboxWaiters Waiters                   // Notification system for new outbox items (receiver side)
 }
 
 // Init initializes the Queue for use. Must be called before any other operations.
@@ -62,6 +62,7 @@ func (q *Queue[T]) Init() {
 	q.inboxStackQueue.Init()
 	q.outboxes.Init()
 	q.fullOutboxes.Init()
+	q.outboxPool = omnipool.For[outbox[T]]()
 	q.outboxFreed.Init()
 	q.outboxWaiters.Init()
 }

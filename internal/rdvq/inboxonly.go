@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/trace"
 )
 
@@ -27,29 +28,26 @@ type inboxStackQueue[T any] = inboxOnlyQueue[T, inboxStack[T], inboxStackTrait[T
 // or inboxStack), while CT is the trait type that provides operations on C.
 type inboxOnlyQueue[T any, C any, CT emptyInboxesTrait[T, C]] struct {
 	emptyInboxes C
-	// inboxFree recycles drained inboxes that are out of the emptyInboxes
+	// inboxPool recycles drained inboxes that are out of the emptyInboxes
 	// collection, so the destination owns inbox storage (no per-receiver map) and
 	// a looping receiver allocates nothing in steady state. Only inboxes a caller
 	// reclaims (PopFrontFunc reported clean) land here; abandoned ones stay in the
 	// collection until a sender/notifier drains their marker and are then GC'd.
-	inboxFree sync.Pool
+	inboxPool *omnipool.Pool[inbox[T]]
 }
 
 // borrowInbox returns an inbox for a receiver to register and wait on, recycling
-// a drained one from the pool or allocating a fresh one. A pooled inbox keeps
-// its (empty) channel, so reuse avoids re-allocating it.
+// a drained one from the shared pool or allocating (and Init-ing) a fresh one. A
+// pooled inbox keeps its (empty) channel, so reuse avoids re-allocating it.
 func (q *inboxOnlyQueue[T, C, CT]) borrowInbox() *inbox[T] {
-	if v := q.inboxFree.Get(); v != nil {
-		return v.(*inbox[T])
-	}
-	return &inbox[T]{}
+	return q.inboxPool.Get()
 }
 
-// reclaimInbox returns a drained inbox to the pool. The caller must only reclaim
-// an inbox that PopFrontFunc reported clean (drained and out of the emptyInboxes
-// collection), so no sender can still reference it.
+// reclaimInbox returns a drained inbox to the shared pool. The caller must only
+// reclaim an inbox that PopFrontFunc reported clean (drained and out of the
+// emptyInboxes collection), so no sender can still reference it.
 func (q *inboxOnlyQueue[T, C, CT]) reclaimInbox(ib *inbox[T]) {
-	q.inboxFree.Put(ib)
+	q.inboxPool.Put(ib)
 }
 
 // emptyInboxesTrait is the internal interface for managing collections of
@@ -76,6 +74,7 @@ func (q *inboxOnlyQueue[T, C, CT]) Init() {
 
 	var ct CT
 	ct.Init(&q.emptyInboxes)
+	q.inboxPool = omnipool.For[inbox[T]]()
 }
 
 //nolint:contextcheck // background context used only for tracing

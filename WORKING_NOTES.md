@@ -16,7 +16,7 @@ mechanical pass (checkpoint 3, next).
 
 **✓ Checkpoint 1 — `Sender` gutted (DONE, green this commit).** rdvq core
 rewritten to the destination-owned **outbox pool**: `outboxes` (borrow source) +
-`fullOutboxes` (drain source) + `outboxFree` (`sync.Pool`) + gen-CAS reclaim
+`fullOutboxes` (drain source) + `outboxPool` (`omnipool.Pool`) + gen-CAS reclaim
 (one atomic `state` word per outbox), replacing the per-`Sender` outbox map,
 per-outbox refcount, and per-outbox listeners. Per-outbox listeners collapsed
 to ONE queue-level `outboxFreed Listeners` ("an outbox freed" wakeup), fired by
@@ -793,7 +793,7 @@ limiter waiters), so gutting `Receiver` forces gutting `Waiter`. One mechanism
 handles both, since the data inbox (`Queue` embeds `inboxStackQueue`) and the
 wait inbox (`Waiters` embeds `inboxQueueQueue`) are the same
 `inboxOnlyQueue.PopFrontFunc`:
-- **Inbox pool on `inboxOnlyQueue`** (`inboxFree sync.Pool` +
+- **Inbox pool on `inboxOnlyQueue`** (`inboxPool *omnipool.Pool[inbox[T]]` +
   `borrowInbox`/`reclaimInbox`); a pooled inbox keeps its (empty) channel so
   reuse re-allocates nothing.
 - **`PopFrontFunc` gains a `clean bool` return:** true when the inbox ends
@@ -823,13 +823,31 @@ wait inbox (`Waiters` embeds `inboxQueueQueue`) are the same
   this change.)
 - **Hot path stays cheap:** a looping worker that receives via direct handoff
   exits clean every time → reclaim + reborrow cycles the SAME inbox through the
-  `sync.Pool` (zero steady-state alloc), replacing the old per-goroutine map
-  lookup with a comparable/cheaper pool op.
+  pool (zero steady-state alloc), replacing the old per-goroutine map lookup with
+  a comparable/cheaper pool op.
 - **Validated:** rdvq short+`-race`+full-stress (141s `-race`);
   `TestBySimulation` short+full+`-race`+1000-check sweep (92s) all green; module
   vets clean. `Receiver`/`Waiter` → `struct{}` + no-op `Release`; params kept
   and `_`-ignored. `inboxOnlyQueue.PopFront` (ctx test helper) still takes an
   `ib` and ignores the new bool.
+
+**POOL BACKING — `omnipool`, not naked `sync.Pool` (PN flagged, corrected).**
+Checkpoints 1+2 first transcribed the prototype's naked `sync.Pool`; switched to
+`omnipool.Pool` (the codebase's pooling abstraction, used by `nbcq`) for both
+the outbox pool (`outboxPool *omnipool.Pool[outbox[T]]`, cached in `Queue`) and
+the inbox pool (`inboxPool *omnipool.Pool[inbox[T]]`, cached in `inboxOnlyQueue`),
+set via `omnipool.For[…]()` in `Init` (nbcq's pattern). `outbox`/`inbox` now
+implement `omnipool.Initer` (`Init` allocates the cap-1 channel) + `Resetter`
+(`Reset` clears state/`wasEmptied` but KEEPS the drained channel — also stops
+omnipool's default whole-struct zeroing from nil-ing it). Why omnipool: the
+hot-path cost worry was wrong — `Pool[T].Get` reflects once in `For[T]()`
+(cached `hasInit`/`hasReset` bools), so per-call `Get`/`Put` ≈ naked
+`sync.Pool`; consistency wins; and global-by-type sharing is safe (a reclaimed
+outbox/inbox is element-type-generic, not Queue-specific) and improves reuse.
+The "destination-owned" principle still holds via the per-`Queue`
+`outboxes`/`fullOutboxes` (the WIP-bounding state); only the spare-struct
+free-list is shared. Re-validated to the same gates (rdvq 143s `-race`; 1000-
+check sim `-race`).
 
 --- superseded framing below (kept for the verbatim seams only) ---
 

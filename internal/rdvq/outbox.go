@@ -56,6 +56,17 @@ func (ob *outbox[T]) markReclaimable(g uint64) bool {
 	return ob.state.CompareAndSwap(g<<1, (g<<1)|1)
 }
 
+// Init implements [omnipool.Initer]: it allocates the cap-1 buffered channel for
+// a freshly created outbox.
+func (ob *outbox[T]) Init() { ob.ch = make(chan T, 1) }
+
+// Reset implements [omnipool.Resetter]: on return to the pool it clears the
+// generation/reclaimable state but KEEPS the (drained, empty) channel, since an
+// outbox is only reclaimed once empty and the next fill re-establishes the
+// generation. Implementing Reset also prevents omnipool's default whole-struct
+// zeroing, which would nil the channel.
+func (ob *outbox[T]) Reset() { ob.state.Store(0) }
+
 // ── Destination-owned outbox pool ────────────────────────────────────────────
 //
 // The pool is two queues plus a sync.Pool:
@@ -73,18 +84,16 @@ func (ob *outbox[T]) markReclaimable(g uint64) bool {
 // atomic state word, so the borrow and drain paths never share a lock.
 
 // obtainOutbox returns an empty outbox ready to fill, recycling one from the
-// sync.Pool or allocating a fresh one.
+// shared pool or allocating (and Init-ing) a fresh one.
 func (q *Queue[T]) obtainOutbox() *outbox[T] {
-	if v := q.outboxFree.Get(); v != nil {
-		return v.(*outbox[T])
-	}
-	return &outbox[T]{ch: make(chan T, 1)}
+	return q.outboxPool.Get()
 }
 
-// reclaimOutbox discards a drained outbox to the sync.Pool, shrinking the live
-// set toward current concurrency.
+// reclaimOutbox discards a drained outbox to the shared pool, shrinking the live
+// set toward current concurrency (the pool's own GC-clearing is the
+// scale-to-zero).
 func (q *Queue[T]) reclaimOutbox(ob *outbox[T]) {
-	q.outboxFree.Put(ob)
+	q.outboxPool.Put(ob)
 }
 
 // borrowToFill pops an outbox for a blocking fill. It prefers a full outbox —

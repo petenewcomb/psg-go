@@ -27,6 +27,29 @@ type inboxStackQueue[T any] = inboxOnlyQueue[T, inboxStack[T], inboxStackTrait[T
 // or inboxStack), while CT is the trait type that provides operations on C.
 type inboxOnlyQueue[T any, C any, CT emptyInboxesTrait[T, C]] struct {
 	emptyInboxes C
+	// inboxFree recycles drained inboxes that are out of the emptyInboxes
+	// collection, so the destination owns inbox storage (no per-receiver map) and
+	// a looping receiver allocates nothing in steady state. Only inboxes a caller
+	// reclaims (PopFrontFunc reported clean) land here; abandoned ones stay in the
+	// collection until a sender/notifier drains their marker and are then GC'd.
+	inboxFree sync.Pool
+}
+
+// borrowInbox returns an inbox for a receiver to register and wait on, recycling
+// a drained one from the pool or allocating a fresh one. A pooled inbox keeps
+// its (empty) channel, so reuse avoids re-allocating it.
+func (q *inboxOnlyQueue[T, C, CT]) borrowInbox() *inbox[T] {
+	if v := q.inboxFree.Get(); v != nil {
+		return v.(*inbox[T])
+	}
+	return &inbox[T]{}
+}
+
+// reclaimInbox returns a drained inbox to the pool. The caller must only reclaim
+// an inbox that PopFrontFunc reported clean (drained and out of the emptyInboxes
+// collection), so no sender can still reference it.
+func (q *inboxOnlyQueue[T, C, CT]) reclaimInbox(ib *inbox[T]) {
+	q.inboxFree.Put(ib)
 }
 
 // emptyInboxesTrait is the internal interface for managing collections of
@@ -125,12 +148,20 @@ func basicInboxOnlyPopSelect[T any](ctx context.Context, ib *inbox[T], processFn
 	}
 }
 
+// PopFrontFunc registers ib as a waiting inbox and runs selectFn to block on it.
+// It returns clean = true when ib ends up drained and out of the emptyInboxes
+// collection (a value was received directly or via an orphan), meaning the
+// caller may safely reclaim or reuse it; clean = false when ib was abandoned
+// (left in the collection with a marker for a sender to drain), meaning the
+// caller must NOT reclaim it but may still re-pass it to a later PopFrontFunc
+// (which drains the stale marker and reuses it).
+//
 //nolint:contextcheck // background context used only for tracing
 func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
 	ib *inbox[T],
 	processOrphanFn ProcessValueFunc[T],
 	selectFn inboxOnlyPopSelectFunc[T],
-) {
+) (clean bool) {
 	traceRegion := "rdvq.inboxOnlyQueue.PopFrontFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
@@ -177,16 +208,22 @@ func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
 		select {
 		case inboxCh <- *new(T):
 			// Marked channel as abandoned, will be ignored by TryPushBack
-			// unless subsequently drained by the reuse logic above.
+			// unless subsequently drained by the reuse logic above. ib remains
+			// in the collection, so it is NOT clean (must not be reclaimed).
 			trace.Logf(context.Background(), traceRegion, "marked inboxCh=%p abandoned", inboxCh)
+			return false
 		default:
-			// Channel is full, drain the orphaned value and process it.
+			// Channel is full, drain the orphaned value and process it. A sender
+			// delivered it, so ib was popped from the collection: now clean.
 			orphan := <-inboxCh
 			ib.emptied()
 			trace.Logf(context.Background(), traceRegion, "drained orphan from inboxCh=%p", inboxCh)
 			processOrphanFn(orphan)
 		}
 	}
+	// Drained directly (wasEmptied) or via orphan: ib is out of the collection
+	// and empty, so the caller may reclaim or reuse it.
+	return true
 }
 
 func (q *inboxOnlyQueue[T, C, CT]) PopFront(ctx context.Context, ib *inbox[T], processFn ProcessValueFunc[T]) error {

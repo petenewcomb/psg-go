@@ -6,13 +6,13 @@ A major new consolidation phase is in flight: see "Worker pool + workq
 consolidation" immediately below, which supersedes the wave-5b incremental
 approach.
 
-## ►► NEXT SESSION: rdvq integration (Receiver next)
+## ►► NEXT SESSION: rdvq integration (Checkpoint 3 — mechanical removal)
 
 Decided sequencing (PN): **gut internals first, defer type/signature removal.**
-Land the destination-owned pool while keeping `Sender`/`Receiver` on every
-signature (as vestigial `struct{}` params), one at a time, each a green
-checkpoint; the eventual deletion of the types + params is then a purely
-mechanical pass (checkpoint 3).
+Land the destination-owned pool while keeping `Sender`/`Receiver`/`Waiter` on
+every signature (as vestigial `struct{}` params), one seam at a time, each a
+green checkpoint; the eventual deletion of the types + params is then a purely
+mechanical pass (checkpoint 3, next).
 
 **✓ Checkpoint 1 — `Sender` gutted (DONE, green this commit).** rdvq core
 rewritten to the destination-owned **outbox pool**: `outboxes` (borrow source) +
@@ -28,19 +28,41 @@ short+full+`-race`+1000-check deep sweep (114s) all green. Design + the
 non-blocking/conservation reconciliation written up in the "Checkpoint 1" note
 under "rdvq Sender redesign" below.
 
-**Checkpoint 2 — `Receiver` next.** Symmetric destination-owned **inbox
-borrow** (weaker: no staleness, no buffering/reclamation — cleanliness not
-necessity). Gut `Receiver` to `struct{}` keeping its param; confirm the
-per-receive inbox borrow stays cheap (hot path) and LIFO waiting-inbox order
-(worker scale-down) is preserved. Get green, commit.
+**✓ Checkpoint 2 — `Receiver` AND `Waiter` gutted (DONE, green this commit).**
+Scope was larger than "just Receiver": `Receiver` embeds `outboxWaiter Waiter`,
+and `Waiter` is used standalone across the wait-side (`meta.Waiter()`, spawn/
+work/block/limiter waiters), so gutting one forced gutting both (PN chose the
+unified gut). One mechanism does it: the **inbox pool moved into
+`inboxOnlyQueue`** (`borrowInbox`/`reclaimInbox`), and `inboxOnlyQueue.PopFrontFunc`
+gained a `clean bool` return (drained + out-of-collection ⇒ safe to reclaim).
+The **caller** still owns the borrow (so cross-iteration reuse + the
+reuse-without-requeue marker path are preserved): `Queue.PopFrontFunc` borrows a
+data inbox **lazily** (only when about to wait — fast path borrows nothing) and
+reclaims iff clean; `Waiters.WaitFunc` borrows a wait-inbox per call, reclaims
+iff clean. Abandoned inboxes stay in the LIFO stack / FIFO with their marker and
+are drained by a sender/notifier then GC'd — exactly today's behavior, just not
+map-held. `Receiver` and `Waiter` are now `struct{}` with no-op `Release`; their
+params are `_`-ignored (`PopFrontFunc` passes `nil` to `outboxWaiters.WaitFunc`).
+Ordering is provably preserved (the pool changes inbox-struct identity, not the
+`inboxStack`/`inboxQueue` push/pop order or delivery). Signatures unchanged →
+zero ripple. Validated: rdvq short+`-race`+full-stress (141s `-race`);
+`TestBySimulation` short+full+`-race`+1000-check deep sweep (92s) all green;
+whole module vets clean. Design in the "Checkpoint 2" note under "rdvq Sender
+redesign" below.
 
-**Checkpoint 3 (later, mechanical).** Delete `Sender`/`Receiver` + strip the
-params from `PushBack*`/`PopFront*`/`ListenersFor` and every `*.Sender()`/
-`*.Receiver()` site (workq `Post`, the psg producers + exEnvs). Then the
-**consolidation cutover** (separate effort): unified `E`, `Wave` (waveCtx +
-per-wave in-flight/governor/flush per the converged wave-5b ctx model),
-`submit`, funnel/task producers onto `defaultPool.Post`, delete the legacy
-per-job pools.
+*Known pre-existing flake (NOT this change):* `Example_observable` /
+`Example_funnel` use `exmpclk` — an "imperfect" real-`time.Sleep` clock quantized
+to 10ms — so under heavy `go test ./...` load a drifting sleep can shift the
+quantized event-log order and fail the `// Output:` match (~1-2%). Results stay
+correct; only the timing log moves. 250+ isolated runs of the change passed.
+
+**Checkpoint 3 (next, mechanical).** Delete `Sender`/`Receiver`/`Waiter` + strip
+the params from `PushBack*`/`PopFront*`/`ListenersFor`/`WaitFunc`/`Wait` and every
+`*.Sender()`/`*.Receiver()`/`*.Waiter()` site (workq `Post`, the psg producers +
+exEnvs, the `workq.Waiter`/`Waiters` aliases). Then the **consolidation cutover**
+(separate effort): unified `E`, `Wave` (waveCtx + per-wave in-flight/governor/
+flush per the converged wave-5b ctx model), `submit`, funnel/task producers onto
+`defaultPool.Post`, delete the legacy per-job pools.
 
 Prototype proofs (`outboxpool_proto_test.go`, `outboxpool_reclaim_proto_test.go`,
 `outboxpool_compare_test.go`) now superseded by the real implementation —
@@ -50,7 +72,8 @@ candidates for removal at a cleanup pass once checkpoint 2 lands.
 `workq.Queue`/`Worker[E]` (`c31d497`), `worker.Pool[E]` embedding the queue
 (`0193aab`,`29aa0fd`), global `defaultPool`/`psg.Wait`/`workerExEnv` (`f361c24`),
 wave-5b ctx model (`f584735`), rdvq design (`ce83a46`), outbox pool landed
-(this commit).
+(`4aed0fa`), inbox pool landed (this commit). rdvq is now handle-free internally:
+`Sender`/`Receiver`/`Waiter` are all vestigial `struct{}`.
 
 ## Worker pool + workq consolidation — converged design (2026-06-14)
 
@@ -759,6 +782,54 @@ the prototype. Reconciliation as implemented (`internal/rdvq/outbox.go`,
   drain marks reclaimable (fires freed) a hair before the blocked producer's
   refill `bumpGen` clears it; harmless churn (woken producer retries, finds the
   slot taken, re-postpones), not a livelock (a value did move = progress).
+
+**CHECKPOINT 2 — landed (destination-owned inbox borrow; gut Receiver AND
+Waiter, PN chose unified gut 2026-06-16).** The inbox side is the symmetric
+counterpart to the outbox pool, but WEAKER (an inbox is pure rendezvous — no
+buffered value, no reclamation hazard), so the goal is cleanliness/handle-free,
+not a staleness fix. Scope discovery: `Receiver` embeds `outboxWaiter Waiter`
+AND `Waiter` is used standalone everywhere (`meta.Waiter()`, spawn/work/block/
+limiter waiters), so gutting `Receiver` forces gutting `Waiter`. One mechanism
+handles both, since the data inbox (`Queue` embeds `inboxStackQueue`) and the
+wait inbox (`Waiters` embeds `inboxQueueQueue`) are the same
+`inboxOnlyQueue.PopFrontFunc`:
+- **Inbox pool on `inboxOnlyQueue`** (`inboxFree sync.Pool` +
+  `borrowInbox`/`reclaimInbox`); a pooled inbox keeps its (empty) channel so
+  reuse re-allocates nothing.
+- **`PopFrontFunc` gains a `clean bool` return:** true when the inbox ends
+  drained AND out of the empty-inboxes collection (received directly, or an
+  orphan was drained) ⇒ caller may reclaim/reuse; false when abandoned (marker
+  left, inbox still in the collection) ⇒ caller must NOT reclaim. The method
+  body is otherwise unchanged (the delicate marker/abandonment protocol is
+  untouched).
+- **Caller owns the borrow** (NOT pushed inside PopFrontFunc) — this is what
+  preserves cross-iteration reuse and the reuse-without-requeue marker-drain
+  path that prevents marker pile-up in the retry loop. `Queue.PopFrontFunc`
+  borrows the data inbox **lazily inside the WaitFunc selectFn** (so a
+  confirmFn-grab on the fast path borrows nothing), reuses it across the retry
+  loop, and a `defer` reclaims iff the last `clean` was true. `Waiters.WaitFunc`
+  borrows a wait-inbox per call, reclaims iff clean.
+- **Why the abandonment leak is fine (= today's behavior):** an abandoned inbox
+  is left in the LIFO stack / FIFO with its zero-value marker; a later sender
+  (`TryPushBack`) or notifier (`Notify`) drains the marker, removing it, and it
+  is GC'd. Before, the per-goroutine map held it for reuse; now it is simply not
+  pooled. At most one abandoned inbox per PopFront/WaitFunc call (cross-iteration
+  reuse keeps it to one), same as before. FIFO cleanup is actually favorable
+  (abandoned wait-inboxes sit at the front, drained first by the next `Notify`).
+- **Ordering preserved by construction:** the pool changes which inbox *struct*
+  is reused, not the `inboxStack`(LIFO)/`inboxQueue`(FIFO) push/pop order or
+  which receiver a sender hands off to — so delivery order and worker scale-down
+  are unchanged. (Confirms the `Example_observable` flake is the real clock, not
+  this change.)
+- **Hot path stays cheap:** a looping worker that receives via direct handoff
+  exits clean every time → reclaim + reborrow cycles the SAME inbox through the
+  `sync.Pool` (zero steady-state alloc), replacing the old per-goroutine map
+  lookup with a comparable/cheaper pool op.
+- **Validated:** rdvq short+`-race`+full-stress (141s `-race`);
+  `TestBySimulation` short+full+`-race`+1000-check sweep (92s) all green; module
+  vets clean. `Receiver`/`Waiter` → `struct{}` + no-op `Release`; params kept
+  and `_`-ignored. `inboxOnlyQueue.PopFront` (ctx test helper) still takes an
+  `ib` and ignores the new bool.
 
 --- superseded framing below (kept for the verbatim seams only) ---
 

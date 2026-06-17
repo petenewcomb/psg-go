@@ -3,49 +3,15 @@
 
 package rdvq
 
-import "sync"
-
-// Receiver funnels inbox and waiter functionality for receiving from queues.
-// Each goroutine should have its own Receiver instance to avoid races.
-// The Receiver automatically creates and manages inboxes as needed when
-// receiving from different Queue instances.
+// Receiver is a vestigial handle retained on the receive API while the
+// mechanical removal pass is pending. Inbox storage now lives on the destination
+// [Queue], which pools inboxes (see [inboxOnlyQueue.borrowInbox]); a Receiver
+// holds no state, so callers may share one freely or pass nil.
 //
-// To enable map pooling across goroutine lifecycles, callers should call
-// [Receiver.Release] when done with a Receiver. Forgoing Release is safe but
-// wastes the per-Receiver map allocation.
-type Receiver struct {
-	inboxMap     map[any]any
-	outboxWaiter Waiter
-}
+// It once cached a per-goroutine inbox per destination plus a [Waiter] for the
+// outbox-availability subscription; both now come from the destination's pools.
+type Receiver struct{}
 
-// Release returns the Receiver's underlying inbox map to a shared pool for
-// reuse by future Receivers. After Release the Receiver remains usable;
-// lazily-initialized state will be re-acquired on the next receive.
-func (r *Receiver) Release() {
-	r.outboxWaiter.Release()
-	if r.inboxMap == nil {
-		return
-	}
-	clear(r.inboxMap)
-	receiverMapPool.Put(r.inboxMap)
-	r.inboxMap = nil
-}
-
-var receiverMapPool = sync.Pool{
-	New: func() any { return make(map[any]any) },
-}
-
-// inboxFor returns the inbox for the given key, creating one if it doesn't exist.
-func inboxFor[T any](r *Receiver, q *Queue[T]) *inbox[T] {
-	if r.inboxMap == nil {
-		r.inboxMap = receiverMapPool.Get().(map[any]any)
-	}
-
-	ibAny := r.inboxMap[q]
-	if ibAny == nil {
-		ib := &inbox[T]{}
-		r.inboxMap[q] = ib
-		return ib
-	}
-	return ibAny.(*inbox[T])
-}
+// Release is a no-op retained for API compatibility. A Receiver holds no state
+// to free.
+func (r *Receiver) Release() {}

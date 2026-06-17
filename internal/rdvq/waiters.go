@@ -59,7 +59,9 @@ func (w *Waiters) Init() {
 // select handling.
 //
 // Parameters:
-//   - waiter: Waiter instance for this goroutine
+//   - waiter: vestigial — wait-inbox storage now lives on the Waiters, which
+//     pools inboxes (see [inboxOnlyQueue.borrowInbox]). Retained on the
+//     signature pending the mechanical removal pass.
 //   - confirmFn: Function called to verify conditions after registration but
 //     before blocking. The confirmFn prevents missed notifications by
 //     re-checking conditions after the waiter is registered. If it returns
@@ -71,7 +73,7 @@ func (w *Waiters) Init() {
 // other case such as ctx.Done).
 //
 //nolint:contextcheck // background context used only for tracing
-func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
+func (w *Waiters) WaitFunc(_ *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
 	traceRegion := "rdvq.Waiters.WaitFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
@@ -83,9 +85,15 @@ func (w *Waiters) WaitFunc(waiter *Waiter, confirmFn func() bool, selectFn WaitS
 		return selectFn(nil)
 	}
 
-	waitInbox := waitInboxFor(waiter, w)
+	waitInbox := w.q.borrowInbox()
+	clean := true
+	defer func() {
+		if clean {
+			w.q.reclaimInbox(waitInbox)
+		}
+	}()
 	var rf RenotifyFunc
-	w.q.PopFrontFunc(
+	clean = w.q.PopFrontFunc(
 		waitInbox,
 		func(renotifyFn RenotifyFunc) {
 			// Stranded renotifyFn from an abandoned inbox: re-queue it for

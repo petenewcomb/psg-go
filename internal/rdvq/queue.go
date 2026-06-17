@@ -298,9 +298,13 @@ func BasicPopSelect[T any](
 // true if one was received via any path; returns the zero value and false
 // only if selectFn signalled completion without a value.
 //
+// The receiver parameter is vestigial — inbox storage now lives on the Queue,
+// which pools inboxes (see borrowInbox). It is retained on the signature pending
+// the mechanical removal pass.
+//
 //nolint:contextcheck // background context used only for tracing
 func (q *Queue[T]) PopFrontFunc(
-	receiver *Receiver,
+	_ *Receiver,
 	selectFn PopSelectFunc[T],
 ) (T, bool) {
 	traceRegion := "rdvq.Queue.PopFrontFunc"
@@ -324,8 +328,20 @@ func (q *Queue[T]) PopFrontFunc(
 		return !ok
 	}
 
+	// Borrow a data inbox lazily — only when we are actually about to wait — so
+	// the fast path (an outbox value is immediately available) touches no inbox
+	// at all. The same inbox is reused across retry iterations (preserving the
+	// reuse-without-requeue path for its own abandonment marker); reclaim it only
+	// when PopFrontFunc last reported it clean (drained and out of the stack).
+	var ib *inbox[T]
+	ibClean := true
+	defer func() {
+		if ib != nil && ibClean {
+			q.reclaimInbox(ib)
+		}
+	}()
+
 	var renotifyFn RenotifyFunc
-	ib := inboxFor(receiver, q)
 	for {
 		if value, ok = q.TryPopFront(); ok {
 			return value, true
@@ -341,13 +357,17 @@ func (q *Queue[T]) PopFrontFunc(
 		// where confirmFn consumes an outbox value AND a parallel sender
 		// direct-delivers to ib (which would otherwise produce a second
 		// orphan value via post-cleanup that the (T, bool) return cannot
-		// carry).
+		// carry). The inbox is borrowed inside the selectFn (only reached once
+		// confirmFn confirms we will wait), so a confirmFn-grab borrows nothing.
 		renotifyFn = q.outboxWaiters.WaitFunc(
-			&receiver.outboxWaiter,
+			nil,
 			confirmFn,
 			func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+				if ib == nil {
+					ib = q.borrowInbox()
+				}
 				var rf RenotifyFunc
-				q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
+				ibClean = q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
 					result := selectFn(ib.channel(), waitCh)
 					if result.inboxEmptied {
 						ib.emptied()

@@ -6,6 +6,33 @@ A major new consolidation phase is in flight: see "Worker pool + workq
 consolidation" immediately below, which supersedes the wave-5b incremental
 approach.
 
+## ►► NEXT SESSION: rdvq integration (start here)
+
+The rdvq Sender/Receiver redesign is **fully designed + validated + committed**
+(`ce83a46`; design in the "rdvq Sender redesign" subsection below; executable
+proof in `internal/rdvq/outboxpool_reclaim_proto_test.go` +
+`outboxpool_compare_test.go`). Next is the integration — a big but mechanical-ish
+ripple. Order:
+1. **rdvq core:** replace the per-`Sender` outbox map + refcount + per-outbox
+   listeners with the two-queue pool (`outboxes` + `fullOutboxes`) + gen-CAS
+   reclaim + `sync.Pool`; add a queue-level "outbox freed" wakeup (replacing the
+   per-outbox listeners). Dissolve `Sender` AND `Receiver` (symmetric
+   destination-owned inbox borrow) → handle-free `Push(v)`/`Pop()` API. Drop the
+   sender/receiver params from `PushBack`/`TryPushBack`/`PushBackFunc`/`PopFront`/
+   `PopFrontFunc`/`ListenersFor`. Update rdvq's own test suite (heavy — it threads
+   sender/receiver everywhere). Validate `-race`.
+2. **Ripple:** workq `Queue.Post` + `ListenersFor` lose the sender; then every
+   `*.Sender()`/`*.Receiver()` site in the psg producers + exEnvs.
+3. **Then the consolidation cutover** (separate effort): unified `E`, `Wave`
+   (waveCtx + per-wave in-flight/governor/flush per the converged wave-5b ctx
+   model), `submit`, funnel/task producers onto `defaultPool.Post`, delete the
+   legacy per-job pools.
+
+**State:** all foundation + designs committed, tree green. Foundation =
+`workq.Queue`/`Worker[E]` (`c31d497`), `worker.Pool[E]` embedding the queue
+(`0193aab`,`29aa0fd`), global `defaultPool`/`psg.Wait`/`workerExEnv` (`f361c24`),
+wave-5b ctx model (`f584735`), rdvq design (`ce83a46`).
+
 ## Worker pool + workq consolidation — converged design (2026-06-14)
 
 Reproducing the teardown deadlock (sim TEMP config: `Permits=1`,

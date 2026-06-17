@@ -183,13 +183,185 @@ func runEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Du
 	cancel()
 	drainWg.Wait()
 
+	b.ReportMetric(float64(refusals.Load())/float64(b.N), "refuse/op")
+	reportEmitMetrics(b, latencies, drainDurs, nProducers, nDrainers, producerThink)
+}
+
+// runChanEmitBench is the head-to-head baseline for runEmitBench: the same
+// producer/drainer/heavy-tail model driven against a plain buffered channel whose
+// capacity equals the number of PRODUCERS — the closest naive equivalent of
+// rdvq's "buffer length 1 per sender". Producers use a blocking send (the
+// idiomatic channel backpressure); the measured emit latency is t0→send-accepted,
+// the same "time to posted" runEmitBench measures, so the tails are directly
+// comparable. There is no refuse/op (a blocking send never refuses); the cost of
+// backpressure shows up entirely in the emit tail.
+func runChanEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Duration, drainHeavy bool) {
+	b.Helper()
+	ch := make(chan int, nProducers) // buffer = number of producers
+
+	drainDurs := make([][]time.Duration, nDrainers)
+	var drainWg sync.WaitGroup
+	for d := 0; d < nDrainers; d++ {
+		drainWg.Add(1)
+		go func(d int, seed uint64) {
+			defer drainWg.Done()
+			rng := newRNG(seed)
+			for range ch { // ranges until the channel is closed after producers finish
+				if drainHeavy {
+					t0 := time.Now()
+					time.Sleep(paretoSleep(rng)) // heavy-tailed consume work
+					drainDurs[d] = append(drainDurs[d], time.Since(t0))
+				}
+			}
+		}(d, uint64(d)+1)
+	}
+
+	latencies := make([][]time.Duration, nProducers)
+	base, rem := b.N/nProducers, b.N%nProducers
+
+	b.ResetTimer()
+	var prodWg sync.WaitGroup
+	for p := 0; p < nProducers; p++ {
+		count := base
+		if p < rem {
+			count++
+		}
+		latencies[p] = make([]time.Duration, 0, count)
+		prodWg.Add(1)
+		go func(p, count int) {
+			defer prodWg.Done()
+			for i := 0; i < count; i++ {
+				if producerThink > 0 {
+					time.Sleep(producerThink) // steady production load (not timed)
+				}
+				t0 := time.Now()
+				ch <- i // blocking send: blocks once the shared buffer fills (backpressure)
+				latencies[p] = append(latencies[p], time.Since(t0))
+			}
+		}(p, count)
+	}
+	prodWg.Wait()
+	b.StopTimer()
+
+	close(ch)
+	drainWg.Wait()
+
+	reportEmitMetrics(b, latencies, drainDurs, nProducers, nDrainers, producerThink)
+}
+
+// runChanNBEmitBench is the APPLES-TO-APPLES baseline for runEmitBench: a plain
+// buffered channel (capacity = #producers) driven with a NON-BLOCKING send
+// (select/default) and the IDENTICAL cond-retry postpone harness as the rdvq arm
+// — on a refused send the producer parks on `freed` and retries when a drain
+// signals, exactly as runEmitBench does on a refused TryPushBack. Both arms are
+// non-blocking and pay the same postpone-coordination cost (the shared mutex +
+// cond, which models rdvq's outboxFreed re-drive), so the comparison isolates the
+// data structure: a channel's non-blocking send vs rdvq's two-tier outbox. (The
+// blocking runChanEmitBench bypasses this coordination via the runtime's direct
+// handoff — a lower bound psg cannot use, since a producer must not park.)
+func runChanNBEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Duration, drainHeavy bool) {
+	b.Helper()
+	ch := make(chan int, nProducers) // buffer = number of producers
+	done := make(chan struct{})
+
+	var mu sync.Mutex
+	freed := sync.NewCond(&mu)
+
+	drainDurs := make([][]time.Duration, nDrainers)
+	var drainWg sync.WaitGroup
+	for d := 0; d < nDrainers; d++ {
+		drainWg.Add(1)
+		go func(d int, seed uint64) {
+			defer drainWg.Done()
+			rng := newRNG(seed)
+			for {
+				select {
+				case <-ch:
+				case <-done:
+					return
+				}
+				mu.Lock()
+				freed.Signal() // a slot just freed — wake ONE parked producer
+				mu.Unlock()
+				if drainHeavy {
+					t0 := time.Now()
+					time.Sleep(paretoSleep(rng))
+					drainDurs[d] = append(drainDurs[d], time.Since(t0))
+				}
+			}
+		}(d, uint64(d)+1)
+	}
+
+	var refusals atomic.Int64
+	latencies := make([][]time.Duration, nProducers)
+	base, rem := b.N/nProducers, b.N%nProducers
+
+	b.ResetTimer()
+	var prodWg sync.WaitGroup
+	for p := 0; p < nProducers; p++ {
+		count := base
+		if p < rem {
+			count++
+		}
+		latencies[p] = make([]time.Duration, 0, count)
+		prodWg.Add(1)
+		go func(p, count int) {
+			defer prodWg.Done()
+			for i := 0; i < count; i++ {
+				if producerThink > 0 {
+					time.Sleep(producerThink)
+				}
+				t0 := time.Now()
+				sent := false
+				for !sent {
+					select {
+					case ch <- i:
+						sent = true
+					default:
+						refusals.Add(1)
+						mu.Lock()
+						select {
+						case ch <- i: // retry under lock to close the race vs the signal
+							sent = true
+						default:
+						}
+						if !sent {
+							freed.Wait() // park until a drain frees a slot
+						}
+						mu.Unlock()
+					}
+				}
+				latencies[p] = append(latencies[p], time.Since(t0))
+			}
+		}(p, count)
+	}
+	prodWg.Wait()
+	b.StopTimer()
+
+	close(done)
+	drainWg.Wait()
+
+	b.ReportMetric(float64(refusals.Load())/float64(b.N), "refuse/op")
+	reportEmitMetrics(b, latencies, drainDurs, nProducers, nDrainers, producerThink)
+}
+
+// reportEmitMetrics reports the emit-latency percentiles (tail is primary per
+// [[feedback_bench_priorities]]) and the achieved drain-duration distribution +
+// implied actual load, shared by the rdvq and buffered-channel harnesses. The
+// drain distribution checks that time.Sleep overshoot has not moved the regime
+// off its nominal load-factor label.
+func reportEmitMetrics(
+	b *testing.B,
+	latencies, drainDurs [][]time.Duration,
+	nProducers, nDrainers int,
+	producerThink time.Duration,
+) {
+	b.Helper()
 	var all []time.Duration
 	for _, s := range latencies {
 		all = append(all, s...)
 	}
 	slices.Sort(all)
-	b.ReportMetric(float64(refusals.Load())/float64(b.N), "refuse/op")
-	b.ReportMetric(float64(q.missRefusals.Load())/float64(b.N), "miss/op")
 	reportPercentile(b, all, 0.50, "emit-p50-us")
 	reportPercentile(b, all, 0.99, "emit-p99-us")
 	reportPercentile(b, all, 0.999, "emit-p99.9-us")
@@ -197,9 +369,6 @@ func runEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Du
 		b.ReportMetric(float64(all[len(all)-1].Microseconds()), "emit-max-us")
 	}
 
-	// Achieved drain-duration distribution (independent of emit latency) + the
-	// actual load it implies, to check time.Sleep overshoot hasn't moved the
-	// regime off its nominal load-factor label.
 	var drains []time.Duration
 	for _, s := range drainDurs {
 		drains = append(drains, s...)
@@ -242,6 +411,46 @@ func thinkForLoad(loadFactor float64, nProducers, nDrainers int) time.Duration {
 	return time.Duration(float64(nProducers) / rate)
 }
 
+// BenchmarkOutboxHintCycle drives the steady outbox+hint path single-threaded
+// with no waiting receiver: every push buffers in an outbox and every pop drains
+// it, so each iteration mints a hint (markEmpty → emptyOutboxes.PushBack) and
+// claims one (TryPushBack hint-claim). It isolates the hint path from harness
+// noise to confirm the generation-stamped outboxHint adds no per-op allocation —
+// nbcq pools the stored value (valuePool), so steady state is 0 allocs/op.
+func BenchmarkOutboxHintCycle(b *testing.B) {
+	var q Queue[int]
+	q.Init()
+	q.TryPushBack(nil, -1, nil) // warm the pools (outbox, node, value)
+	if _, ok := q.TryPopFront(); !ok {
+		b.Fatal("warmup drain failed")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !q.TryPushBack(nil, i, nil) {
+			b.Fatal("push refused")
+		}
+		if _, ok := q.TryPopFront(); !ok {
+			b.Fatal("drain failed")
+		}
+	}
+}
+
+// BenchmarkChanCycle is the buffered-channel analog of BenchmarkOutboxHintCycle:
+// the zero-contention, no-consumer base cost of a single push+drain. Comparing
+// the two ns/op isolates rdvq's per-op machinery (two-tier inbox/outbox + hint
+// mint/claim + reclaim probe) against a plain channel send/recv, with no
+// goroutines, backpressure, or refuse dynamics in play.
+func BenchmarkChanCycle(b *testing.B) {
+	ch := make(chan int, 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ch <- i
+		<-ch
+	}
+}
+
 // BenchmarkQueueEmit sweeps the load factor against a heavy-tailed drain — the
 // dimension that governs whether free outboxes ever sit behind a full front.
 func BenchmarkQueueEmit(b *testing.B) {
@@ -257,4 +466,58 @@ func BenchmarkQueueEmit(b *testing.B) {
 	b.Run("overhead", func(b *testing.B) {
 		runEmitBench(b, procs, procs, 0, false)
 	})
+}
+
+// BenchmarkEmitVsChan runs rdvq head-to-head against a plain buffered channel
+// (capacity = number of producers) under SATURATED production — no producer
+// think time — across a concurrency sweep decoupled from GOMAXPROCS. The point
+// is to contend the data structures: producers push as fast as they can while
+// nDrainers consume, so the shared structure (rdvq's lock-free outbox pool vs the
+// channel's mutex + wait queue) is the bottleneck, not an artificial pacing
+// delay. The drain side sets the regime:
+//
+//   - fastdrain: drainers consume in a tight loop (no sleep). Production and
+//     consumption both hammer the structure — raw contention / throughput, and
+//     the direct-handoff path (a receiver is usually waiting). This is where
+//     rdvq's lock-free design should pull ahead of the channel's mutex as the
+//     producer count climbs past cores.
+//   - heavydrain: drainers block heavy-tailed (Pareto), so producers saturate
+//     into a slow consumer — sustained backpressure: emit latency is dominated by
+//     waiting for a slot, and the structures' wait/wake fairness shows in the tail.
+//
+// Three arms per (conc, drain), interleaved so throughput (ns/op) and emit tails
+// sit adjacent:
+//
+//   - rdvq:      TryPushBack + the cond-retry postpone harness.
+//   - chan-nb:   the APPLES-TO-APPLES baseline — a non-blocking channel send
+//     (select/default) with the SAME cond-retry postpone harness. Both arms are
+//     non-blocking and pay the same postpone-coordination cost (shared mutex/cond
+//     modelling rdvq's outboxFreed re-drive), so this isolates the data structure.
+//   - chan-block: blocking send — a LOWER BOUND that bypasses postpone coordination
+//     via the runtime's direct handoff. psg cannot use it (a producer must not
+//     park), so it is a reference, not a drop-in alternative.
+//
+// (The think-time/load-factor miss regime — a free outbox behind a full one — is
+// covered by BenchmarkQueueEmit, the recovery regression guard; saturation skips it.)
+func BenchmarkEmitVsChan(b *testing.B) {
+	b.Logf("intended drain: Pareto(xm=200us, alpha=1.05, cap=2s); sampled mean=%v", meanDrain)
+	for _, conc := range []int{8, 64, 512} {
+		conc := conc
+		for _, drain := range []struct {
+			name  string
+			heavy bool
+		}{{"fastdrain", false}, {"heavydrain", true}} {
+			heavy := drain.heavy
+			prefix := "conc-" + strconv.Itoa(conc) + "/" + drain.name + "/"
+			b.Run(prefix+"rdvq", func(b *testing.B) {
+				runEmitBench(b, conc, conc, 0, heavy) // think=0: saturate
+			})
+			b.Run(prefix+"chan-nb", func(b *testing.B) {
+				runChanNBEmitBench(b, conc, conc, 0, heavy)
+			})
+			b.Run(prefix+"chan-block", func(b *testing.B) {
+				runChanEmitBench(b, conc, conc, 0, heavy)
+			})
+		}
+	}
 }

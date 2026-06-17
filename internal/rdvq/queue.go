@@ -5,20 +5,12 @@ package rdvq
 
 import (
 	"context"
-	"os"
-	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/nbcq"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 )
-
-// recoverMisses toggles how TryPushBack finds a free outbox, for A/B
-// benchmarking only (PROTOTYPE). Default: claim via an emptyOutboxes hint
-// (recovers the empty-behind-full miss). RDVQ_FRONT_ONLY=1 selects the
-// non-recovering front-of-`outboxes` check + requeue. Read once at init.
-var recoverMisses = os.Getenv("RDVQ_FRONT_ONLY") == ""
 
 // BufferedFunc is called when a value is buffered in an outbox rather than
 // delivered directly to a receiver. This allows senders to track when their
@@ -29,6 +21,18 @@ var recoverMisses = os.Getenv("RDVQ_FRONT_ONLY") == ""
 // receiver. Callers may therefore rely on side effects of BufferedFunc being
 // visible to whichever receiver eventually picks up the value.
 type BufferedFunc func()
+
+// outboxHint is a generation-stamped reference to a drained outbox, published on
+// emptyOutboxes when a receiver marks an outbox empty. The generation is the one
+// the outbox held when the hint was minted; a claimer must claim at exactly that
+// generation, so a hint that outlived its incarnation (the outbox refilled, or
+// reclaimed to the pool and reused) fails its CAS and is dropped. A bare pointer
+// would not suffice: claiming at the outbox's current generation would let a
+// stale hint claim a reclaimed outbox sitting in the pool.
+type outboxHint[T any] struct {
+	ob  *outbox[T]
+	gen uint64
+}
 
 // Queue implements a rendezvous queue that provides direct handoff between
 // senders and receivers with limited buffering, ensuring that senders can always
@@ -51,20 +55,11 @@ type BufferedFunc func()
 type Queue[T any] struct {
 	inboxStackQueue[T]
 	outboxes      nbcq.Queue[*outbox[T]]    // All live outboxes (in place; a fill never removes, a blocking pop re-adds)
-	emptyOutboxes nbcq.Queue[*outbox[T]]    // Hints to drained outboxes (lossy; validated by a gen-guarded claimEmpty)
+	emptyOutboxes nbcq.Queue[outboxHint[T]] // Hints to drained outboxes (lossy; validated by a gen-guarded claimEmpty)
 	fullOutboxes  nbcq.Queue[*outbox[T]]    // Drain source: outboxes currently holding a value
 	outboxPool    *omnipool.Pool[outbox[T]] // Free list for fresh outboxes
 	outboxFreed   Listeners                 // Queue-level "an outbox freed" wakeup for postponed producers
 	outboxWaiters Waiters                   // Notification system for new outbox items (receiver side)
-
-	// INSTRUMENTATION (recovery diagnostic): empties is the count of outboxes
-	// currently in the empty state (++ on drain mark-empty, -- on a hint claim);
-	// missRefusals counts TryPushBack refusals taken while empties > 0 — i.e. a
-	// free outbox existed but the hint mechanism failed to surface it (a recovery
-	// miss), as opposed to genuine backpressure (empties == 0). Lets us tell
-	// whether a higher refuse/op is unrecovered misses or true backpressure.
-	empties      atomic.Int64
-	missRefusals atomic.Int64
 }
 
 // Init initializes the Queue for use. Must be called before any other operations.
@@ -195,50 +190,33 @@ func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool
 		return true
 	}
 
-	if recoverMisses {
-		// Claim a free outbox via a hint from emptyOutboxes — O(1), no scan.
-		// Hints are lossy: a stale one (slot refilled or outbox reused) fails the
-		// gen-guarded claimEmpty and is dropped.
-		for {
-			hint, ok := q.emptyOutboxes.TryPopFront()
-			if !ok {
-				break
-			}
-			g, st := hint.loadState()
-			if st == outboxEmpty && hint.claimEmpty(g) {
-				// Claimed in place: the outbox never left `outboxes`. Its channel
-				// is empty (drained at g, not refilled), so the send cannot block.
-				q.empties.Add(-1) // instrumentation
-				hint.ch <- value
-				q.publishFull(hint, g, bufferedFn, false)
-				return true
-			}
+	// Claim a free outbox via a hint from emptyOutboxes — O(1), no scan. Hints are
+	// lossy: a stale one (slot refilled, or the outbox reclaimed and reused) fails
+	// the generation-guarded claimEmpty and is dropped.
+	for {
+		hint, ok := q.emptyOutboxes.TryPopFront()
+		if !ok {
+			break
 		}
-		if !q.outboxes.Empty() {
-			if q.empties.Load() > 0 {
-				q.missRefusals.Add(1) // a free outbox existed but no hint surfaced it
-			}
-			return false
+		// Claim at the hint's MINTED generation, not the current one. If the outbox
+		// has been refilled or reclaimed-and-reused since the hint was minted, its
+		// generation has advanced and this CAS fails, dropping the stale hint.
+		// Claiming at the current generation would defeat the guard entirely — a
+		// hint to a reclaimed outbox sitting in the pool would claim and fill it
+		// there, putting it in two places at once.
+		if hint.ob.claimEmpty(hint.gen) {
+			// Claimed the exact empty incarnation the hint named; its channel is
+			// drained (empty at that gen, not refilled), so the send cannot block.
+			hint.ob.ch <- value
+			q.publishFull(hint.ob, hint.gen, bufferedFn, false)
+			return true
 		}
-		// outboxes empty ⇒ allocate (shared path below)
-	} else {
-		// Front-only (non-recovering): check just the front of outboxes.
-		if ob, ok := q.outboxes.TryPopFront(); ok {
-			g, st := ob.loadState()
-			if st == outboxEmpty && ob.claimEmpty(g) {
-				q.empties.Add(-1)
-				ob.ch <- value
-				q.publishFull(ob, g, bufferedFn, true) // popped ⇒ re-add
-				return true
-			}
-			// Full/filling: requeue and refuse (a free outbox behind it is the miss).
-			q.outboxes.PushBack(ob)
-			if q.empties.Load() > 0 {
-				q.missRefusals.Add(1)
-			}
-			return false
-		}
-		// outboxes empty ⇒ allocate (shared path below)
+	}
+	if !q.outboxes.Empty() {
+		// A live outbox exists but no hint surfaced a free one: genuine
+		// backpressure. Refuse so the caller postpones and is re-driven on the
+		// outboxFreed wakeup.
+		return false
 	}
 
 	// No free outbox and none live: allocate one (the concurrency bound).
@@ -513,15 +491,12 @@ func (q *Queue[T]) TryPopFront() (T, bool) {
 		trace.Logf(context.Background(), traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
 		select {
 		case value := <-outboxCh:
-			trace.Logf(context.Background(), traceRegion, "received value from outbox=%p outboxCh=%p, returning true",
-				outbox, outboxCh)
 			if outbox.markEmpty(g) {
 				// A buffered slot truly opened up (full→empty stuck): publish a
-				// hint and wake one postponed producer. A failed CAS means a
-				// blocking producer is refilling this slot (claimed filling), so it
-				// is taken — no hint, no wakeup owed.
-				q.empties.Add(1) // instrumentation
-				q.emptyOutboxes.PushBack(outbox)
+				// generation-stamped hint and wake one postponed producer. A failed
+				// CAS means a blocking producer is refilling this slot (claimed
+				// filling), so it is taken — no hint, no wakeup owed.
+				q.emptyOutboxes.PushBack(outboxHint[T]{ob: outbox, gen: g})
 				q.outboxFreed.Notify(nil)
 			}
 			return value, true

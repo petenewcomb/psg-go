@@ -83,6 +83,20 @@ func (q *Queue[T]) Init() {
 	q.tail.Store(pointer[T]{ptr: node})
 }
 
+// Empty reports whether the queue currently holds no items. It is a lock-free
+// snapshot and may be stale the instant it returns (a concurrent PushBack or
+// TryPopFront can change it), so it is suitable only as a heuristic. On an
+// inconsistent snapshot it conservatively reports false (non-empty).
+func (q *Queue[T]) Empty() bool {
+	head := q.head.Load()
+	tail := q.tail.Load()
+	next := head.ptr.next.Load()
+	if head != q.head.Load() {
+		return false
+	}
+	return head.ptr == tail.ptr && next.ptr == nil
+}
+
 // enqueue(Q: pointer to queue_t, value: data type)
 //
 //nolint:gocritic // ignore commented-out (pseudo-)code

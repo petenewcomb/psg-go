@@ -6,7 +6,63 @@ A major new consolidation phase is in flight: see "Worker pool + workq
 consolidation" immediately below, which supersedes the wave-5b incremental
 approach.
 
-## ►► NEXT SESSION: rdvq integration (Checkpoint 3 — mechanical removal)
+## ►► rdvq outbox recovery — LANDED FINDING + productionization (start here)
+
+Full writeup: `docs/rdvq-outbox-recovery.md` (the investigation + the
+methodology journey — keep it, the lessons are general). The **benchmark is the
+scheme-pin**: `internal/rdvq/queue_bench_test.go` `BenchmarkQueueEmit` + the
+`RDVQ_FRONT_ONLY=1` A/B toggle is the executable justification + regression
+guard. The doc records *why*; the benchmark proves it and re-proves it.
+
+**Finding (counterintuitive, hard-won):** the non-blocking `TryPushBack`
+"empty-behind-full miss" (front-check refuses while a free outbox sits behind a
+full one) IS worth recovering. The `emptyOutboxes` hint-queue design cuts
+worst-case emit latency by **~⅓** (`emit-max` geomean −33.5%, p99.9 −19.8%,
+significant n=12), and that compounds across workflow hops. This reverses
+several earlier "front-check wins / red herring" conclusions, which were
+artifacts of unfaithful benchmark retry models (tight-spin / wake-all both let
+front-check brute-force-rotate, erasing the opportunity cost). The faithful
+model wakes **one** waiter per freed slot (`cond.Signal` ≡ `outboxFreed.Notify`)
+— matching psg's actual postpone/re-drive — and only then does the cost appear.
+See the doc for the four corrections (instrumentation, achieved-distribution,
+load-factor mislabel, retry-model fidelity).
+
+**State:** `emptyOutboxes` is implemented and uncommitted in the working tree as
+a PROTOTYPE — `empty/filling/full` state machine (`outbox.go`, monotonic gen for
+cross-queue hint safety), `emptyOutboxes` hint queue, `nbcq.Empty()`, the
+`RDVQ_FRONT_ONLY` toggle, and bench-only instrumentation (`empties`/
+`missRefusals`). Correct: rdvq short+`-race`+full stress, `TestBySimulation`
+full `-race`, all green (both toggle modes). NOT productionized.
+
+**Productionization plan (the prototype → ship gap):**
+1. **Reclamation / scale-down.** The prototype SKIPPED it (outboxes grow to peak
+   concurrency and never shrink) to isolate the latency question. Re-add the
+   destination-owned scale-down: a `borrowToFill`/drain path that returns idle
+   empties to `outboxPool`, with the monotonic gen making stale hints to
+   reclaimed outboxes safe (a reclaim bumps gen → the hint's claim CAS fails).
+   This is the load-bearing missing piece (without it, long-lived destinations
+   leak memory — the very thing the pool was meant to fix).
+2. **Decide the toggle's fate.** Keep `RDVQ_FRONT_ONLY` (so the benchmark stays a
+   live A/B — but two correct hot-path impls to maintain), OR drop the front-only
+   `else` branch (clean single path; the A/B result is preserved in the doc +
+   git, re-establish it if a truly better scheme appears). Lean: drop it once
+   landed; the benchmark guards `emptyOutboxes` and the doc holds the
+   counterfactual. (PN: "keeping the benchmark is sufficient to pin the scheme
+   unless a truly better one is found.")
+3. **Strip / right-size the bench-only instrumentation** (`empties`/
+   `missRefusals` + the `miss/op` metric) — keep only what the kept benchmark
+   needs.
+4. **Validate hard:** `-race`, full `TestBySimulation` (+ deep `rapid.checks`
+   sweep), and an overhead-regime benchmark to confirm no throughput regression
+   (the n=12 run showed `sec/op` within noise — re-confirm post-reclamation).
+5. **Commit** the productionized design; keep `BenchmarkQueueEmit` (faithful
+   `cond.Signal` model + achieved-drain measurement) as the long-term suite.
+
+This sits ON TOP of the `Sender`/`Receiver`/`Waiter` gut (checkpoints 1+2,
+committed). Checkpoint 3 (mechanical removal of those vestigial types) is still
+pending and independent — see below.
+
+## ►► rdvq integration (Checkpoint 3 — mechanical removal, still pending)
 
 Decided sequencing (PN): **gut internals first, defer type/signature removal.**
 Land the destination-owned pool while keeping `Sender`/`Receiver`/`Waiter` on

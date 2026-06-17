@@ -4,68 +4,87 @@
 package rdvq
 
 import (
+	"math/bits"
 	"sync/atomic"
 )
 
-// outbox is a single cap-1 buffered handoff slot, owned by the destination
-// Queue rather than by any sender. A Queue keeps a pool of outboxes that
-// self-sizes to the concurrency it actually experiences (see the "rdvq Sender
-// redesign" notes): borrowers fill them, receivers drain them, and drained
-// outboxes that are no longer needed are reclaimed to a sync.Pool so the live
-// set tracks current concurrency.
-//
-// state folds a generation counter and a "reclaimable" bit into one atomic
-// word: (gen << 1) | reclaimableBit. The generation closes the use-after-
-// reclaim hazard. A receiver that drains an outbox at generation g marks it
-// reclaimable with a CAS that sticks only if the generation is still g; any
-// refill bumps the generation first (clearing reclaimable), so a refilled
-// (full) outbox can never be left marked reclaimable and discarded out from
-// under the value sitting in it.
+// outboxState is the lifecycle state of an outbox, held in the low bits of the
+// atomic state word alongside a monotonic generation counter. Every transition
+// is a generation-guarded CAS, so a stale reference (a hint for a slot that has
+// since been refilled, or an outbox reused from the pool) can never act on the
+// wrong incarnation.
+type outboxState uint64
+
+const (
+	outboxEmpty      outboxState = iota // drained & available: on `outboxes` in place + a hint on `emptyOutboxes`
+	outboxFilling                       // a push owns it mid-fill (transient)
+	outboxFull                          // holds a value: on `outboxes` + `fullOutboxes`
+	outboxStateCount                    // trailing iota — number of states
+)
+
+// genShift reserves the low bits of the state word for outboxState; the
+// generation occupies the rest. Derived from the state count, so adding a state
+// widens it automatically. (var, not const: bits.Len is not a constant function.)
+var (
+	genShift  = uint(bits.Len(uint(outboxStateCount - 1)))
+	stateMask = uint64(1)<<genShift - 1
+)
+
+func packState(gen uint64, s outboxState) uint64 { return gen<<genShift | uint64(s) }
+
+// outbox is a single cap-1 buffered handoff slot, owned by the destination Queue
+// rather than by any sender. A Queue keeps a pool of outboxes that self-sizes to
+// the concurrency it actually experiences (see the "rdvq Sender redesign" notes).
 type outbox[T any] struct {
 	ch    chan T
-	state atomic.Uint64
+	state atomic.Uint64 // gen<<genShift | outboxState
 }
 
-// reclaimable reports whether the outbox has been drained and not refilled,
-// making it safe to discard to the sync.Pool.
-func (ob *outbox[T]) reclaimable() bool { return ob.state.Load()&1 == 1 }
-
-// genNow returns the outbox's current generation, captured by a draining
-// receiver before it attempts to mark the outbox reclaimable.
-func (ob *outbox[T]) genNow() uint64 { return ob.state.Load() >> 1 }
-
-// bumpGen marks a fresh fill: it advances the generation and clears the
-// reclaimable bit in one step, so a concurrent receiver's markReclaimable
-// (which is gen-guarded) cannot mark this now-full outbox reclaimable.
-func (ob *outbox[T]) bumpGen() {
-	for {
-		old := ob.state.Load()
-		next := ((old >> 1) + 1) << 1 // next generation, reclaimable cleared
-		if ob.state.CompareAndSwap(old, next) {
-			return
-		}
-	}
+// loadState reads the current generation and state.
+func (ob *outbox[T]) loadState() (gen uint64, s outboxState) {
+	w := ob.state.Load()
+	return w >> genShift, outboxState(w & stateMask)
 }
 
-// markReclaimable sets the reclaimable bit iff the generation is still g (no
-// refill since the caller drained the outbox at generation g). It reports
-// whether it marked, which is also the signal that a buffered slot truly
-// opened up (a failed CAS means a producer refilled the slot, so nothing was
-// freed).
-func (ob *outbox[T]) markReclaimable(g uint64) bool {
-	return ob.state.CompareAndSwap(g<<1, (g<<1)|1)
+// claimEmpty transitions empty→filling iff the generation is still g (a hint's
+// slot has not been refilled or reused since the hint was minted). Reports
+// whether it claimed.
+func (ob *outbox[T]) claimEmpty(g uint64) bool {
+	return ob.state.CompareAndSwap(packState(g, outboxEmpty), packState(g, outboxFilling))
+}
+
+// claimFull transitions full→filling iff still at generation g — the blocking
+// path taking ownership of a full outbox to block-fill (pace) it.
+func (ob *outbox[T]) claimFull(g uint64) bool {
+	return ob.state.CompareAndSwap(packState(g, outboxFull), packState(g, outboxFilling))
+}
+
+// finishFill publishes a completed fill: filling→full at the next generation.
+// Only the owning push reaches this state, so a plain store is safe.
+func (ob *outbox[T]) finishFill(g uint64) { ob.state.Store(packState(g+1, outboxFull)) }
+
+// markEmpty transitions full→empty iff still at generation g (no refill since the
+// caller drained at g). A failed CAS means a blocking producer is refilling this
+// slot, so it must NOT be marked empty (the slot is taken). Reports whether it
+// marked.
+func (ob *outbox[T]) markEmpty(g uint64) bool {
+	return ob.state.CompareAndSwap(packState(g, outboxFull), packState(g, outboxEmpty))
 }
 
 // Init implements [omnipool.Initer]: it allocates the cap-1 buffered channel for
-// a freshly created outbox.
+// a freshly created outbox (generation 0, state empty).
 func (ob *outbox[T]) Init() { ob.ch = make(chan T, 1) }
 
-// Reset implements [omnipool.Resetter]: on return to the pool it clears the
-// generation/reclaimable state but KEEPS the (drained, empty) channel, since an
-// outbox is only reclaimed once empty and the next fill re-establishes the
-// generation. Implementing Reset also prevents omnipool's default whole-struct
-// zeroing, which would nil the channel.
-func (ob *outbox[T]) Reset() { ob.state.Store(0) }
+// Reset implements [omnipool.Resetter]: on return to the pool it ADVANCES the
+// generation (never resets it) and leaves the state empty with the drained
+// channel intact. Monotonic generations are what make a stale emptyOutboxes hint
+// safe: a CAS at the hint's old generation can never match a reused outbox.
+// Implementing Reset also prevents omnipool's default whole-struct zeroing, which
+// would nil the channel.
+func (ob *outbox[T]) Reset() {
+	g, _ := ob.loadState()
+	ob.state.Store(packState(g+1, outboxEmpty))
+}
 
 // ── Destination-owned outbox pool ────────────────────────────────────────────
 //
@@ -85,100 +104,67 @@ func (ob *outbox[T]) Reset() { ob.state.Store(0) }
 
 // obtainOutbox returns an empty outbox ready to fill, recycling one from the
 // shared pool or allocating (and Init-ing) a fresh one.
+//
+// NOTE: the reciprocal reclaimOutbox (returning idle empties to outboxPool for
+// scale-down) is intentionally absent in this PROTOTYPE — reclamation is the
+// first item of the productionization plan (see docs/rdvq-outbox-recovery.md and
+// WORKING_NOTES). Without it the live set never shrinks.
 func (q *Queue[T]) obtainOutbox() *outbox[T] {
 	return q.outboxPool.Get()
 }
 
-// reclaimOutbox discards a drained outbox to the shared pool, shrinking the live
-// set toward current concurrency (the pool's own GC-clearing is the
-// scale-to-zero).
-func (q *Queue[T]) reclaimOutbox(ob *outbox[T]) {
-	q.outboxPool.Put(ob)
-}
+// borrowScanCap bounds how far the blocking path scans `outboxes` for a full
+// outbox to block-fill before giving up and allocating, so a deep backlog of
+// empties/in-flight can't spin it.
+const borrowScanCap = 32
 
-// borrowToFill pops an outbox for a blocking fill. It prefers a full outbox —
-// filling it blocks on the cap-1 channel until a receiver drains it, which is
-// the pacing that keeps work-in-flight minimal — reclaiming any drained empties
-// it passes along the way and keeping at most one as a fallback. When the
-// borrow pool holds no full outbox it returns an empty (the fallback, or a
-// fresh/recycled one) ready for a non-blocking drop-and-go fill.
+// borrowToFill obtains an outbox for a BLOCKING fill (the PushBack path). It
+// prefers a full outbox — claiming it (full→filling) and block-filling it paces
+// the producer to drain rate (minimal work-in-flight) — and returns it with
+// full=true. Empty/filling/claim-lost entries it passes are re-added to
+// `outboxes` (empties are the non-blocking hint path's to claim; filling is
+// in-flight). If it finds no full within the cap it allocates a fresh outbox and
+// returns it claimed (filling) for a non-blocking drop-and-go fill (full=false).
 //
-// The returned outbox is checked out (off the outboxes queue); the caller must
-// either fill and publish it (publishFilled) or, if it declines to fill a full
-// one, return it via outboxes.PushBack.
-func (q *Queue[T]) borrowToFill() (ob *outbox[T], full bool) {
-	var fallback *outbox[T]
-	for {
-		cand, ok := q.outboxes.TryPopFront()
-		if !ok {
-			if fallback != nil {
-				return fallback, false
-			}
-			return q.obtainOutbox(), false
-		}
-		if cand.reclaimable() {
-			q.reclaimable.Add(-1) // instrumentation: consuming a reclaimable
-			// Drained slack. Keep one as a drop-and-go fallback to skip a pool
-			// round-trip; reclaim any further empties.
-			if fallback == nil {
-				fallback = cand
-			} else {
-				q.reclaimOutbox(cand)
-			}
-			continue
-		}
-		// Full ⇒ prefer it (block-fill = pacing). The held empty fallback, if
-		// any, is now surplus.
-		if fallback != nil {
-			q.reclaimOutbox(fallback)
-		}
-		return cand, true
-	}
-}
-
-// scanCap bounds how deep the gated scan (PROTOTYPE) probes for a free outbox
-// behind a full front, so a deep backlog can't turn one push into an O(queue)
-// requeue storm.
-const scanCap = 32
-
-// scanForReclaimable is the PROTOTYPE gated scan. `full` is a full outbox already
-// popped from the front; it is requeued. If the supply counter says no free
-// outbox exists (reclaimable == 0) it returns nil immediately (genuine
-// backpressure). Otherwise it pops up to scanCap further outboxes, requeuing
-// fulls, and returns the first reclaimable one (checked out) — or nil if none is
-// found within the cap (a residual miss, counted).
-func (q *Queue[T]) scanForReclaimable(full *outbox[T]) *outbox[T] {
-	q.outboxes.PushBack(full)
-	if q.reclaimable.Load() <= 0 {
-		return nil
-	}
-	for i := 0; i < scanCap; i++ {
+// The returned outbox is in state `filling` at the returned generation; the
+// caller fills its channel then calls publishFull(ob, gen, ...).
+func (q *Queue[T]) borrowToFill() (ob *outbox[T], gen uint64, full bool) {
+	for i := 0; i < borrowScanCap; i++ {
 		cand, ok := q.outboxes.TryPopFront()
 		if !ok {
 			break
 		}
-		if cand.reclaimable() {
-			return cand
+		g, st := cand.loadState()
+		if st == outboxFull && cand.claimFull(g) {
+			return cand, g, true // block-fill this (paces)
 		}
+		// Empty (hint path's), in-flight, or our claim lost a race: re-add and
+		// keep looking for a full to pace on.
 		q.outboxes.PushBack(cand)
 	}
-	q.missRefusals.Add(1) // had a target but didn't reach it within the cap
-	return nil
+	// No full to pace on: allocate a fresh outbox and drop-and-go fill it.
+	fresh := q.obtainOutbox()
+	g, _ := fresh.loadState()
+	fresh.claimEmpty(g) // uncontended (just obtained)
+	return fresh, g, false
 }
 
-// publishFilled completes a fill: a value has just been sent into ob.ch by the
-// caller. It bumps the generation (clearing reclaimable so a racing drain
-// cannot discard this now-full outbox), runs bufferedFn before the value
-// becomes observable, then publishes the outbox to the drain source and back to
-// the borrow pool and notifies a waiting receiver.
-func (q *Queue[T]) publishFilled(ob *outbox[T], bufferedFn BufferedFunc) {
-	ob.bumpGen()
+// publishFull completes a fill: a value has just been sent into ob.ch and ob is
+// in state `filling` at generation g. It transitions filling→full (next gen),
+// runs bufferedFn before the value becomes observable, publishes ob to the drain
+// source (and, when addToOutboxes, to the borrow pool — true for a freshly
+// allocated or blocking-checked-out outbox; false for a non-blocking in-place
+// hint claim, which never left `outboxes`), and notifies a waiting receiver.
+func (q *Queue[T]) publishFull(ob *outbox[T], g uint64, bufferedFn BufferedFunc, addToOutboxes bool) {
+	ob.finishFill(g)
 	// bufferedFn must complete before the value can be observed by any receiver,
 	// so run it before publishing to fullOutboxes.
 	if bufferedFn != nil {
 		bufferedFn()
 	}
 	q.fullOutboxes.PushBack(ob)
-	q.outboxes.PushBack(ob)
+	if addToOutboxes {
+		q.outboxes.PushBack(ob)
+	}
 	q.outboxWaiters.Notify(nil)
 }

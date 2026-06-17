@@ -27,36 +27,102 @@ model wakes **one** waiter per freed slot (`cond.Signal` ≡ `outboxFreed.Notify
 See the doc for the four corrections (instrumentation, achieved-distribution,
 load-factor mislabel, retry-model fidelity).
 
-**State:** `emptyOutboxes` is implemented and uncommitted in the working tree as
-a PROTOTYPE — `empty/filling/full` state machine (`outbox.go`, monotonic gen for
-cross-queue hint safety), `emptyOutboxes` hint queue, `nbcq.Empty()`, the
-`RDVQ_FRONT_ONLY` toggle, and bench-only instrumentation (`empties`/
-`missRefusals`). Correct: rdvq short+`-race`+full stress, `TestBySimulation`
-full `-race`, all green (both toggle modes). NOT productionized.
+**State:** the recovery PROTOTYPE is **committed** (47975c2) — `empty/filling/full`
+state machine (`outbox.go`, monotonic gen for cross-queue hint safety),
+`emptyOutboxes` hint queue, `nbcq.Empty()`. On top of it, **reclamation (item 1)
+is now implemented in the working tree (uncommitted)** per the converged design
+in `docs/rdvq-outbox-reclamation.md`, which also strips the bench-only
+instrumentation (item 3) and drops the `RDVQ_FRONT_ONLY` toggle + front-only
+branch (item 2). Validated green: rdvq full `-race` (162s, incl. the new
+`TestTryPushBackSaturation` regression); `TestBySimulation` `-race` + deep
+`rapid.checks=500`.
 
-**Productionization plan (the prototype → ship gap):**
-1. **Reclamation / scale-down.** The prototype SKIPPED it (outboxes grow to peak
-   concurrency and never shrink) to isolate the latency question. Re-add the
-   destination-owned scale-down: a `borrowToFill`/drain path that returns idle
-   empties to `outboxPool`, with the monotonic gen making stale hints to
-   reclaimed outboxes safe (a reclaim bumps gen → the hint's claim CAS fails).
-   This is the load-bearing missing piece (without it, long-lived destinations
-   leak memory — the very thing the pool was meant to fix).
-2. **Decide the toggle's fate.** Keep `RDVQ_FRONT_ONLY` (so the benchmark stays a
-   live A/B — but two correct hot-path impls to maintain), OR drop the front-only
-   `else` branch (clean single path; the A/B result is preserved in the doc +
-   git, re-establish it if a truly better scheme appears). Lean: drop it once
-   landed; the benchmark guards `emptyOutboxes` and the doc holds the
-   counterfactual. (PN: "keeping the benchmark is sufficient to pin the scheme
-   unless a truly better one is found.")
-3. **Strip / right-size the bench-only instrumentation** (`empties`/
-   `missRefusals` + the `miss/op` metric) — keep only what the kept benchmark
-   needs.
-4. **Validate hard:** `-race`, full `TestBySimulation` (+ deep `rapid.checks`
-   sweep), and an overhead-regime benchmark to confirm no throughput regression
-   (the n=12 run showed `sec/op` within noise — re-confirm post-reclamation).
-5. **Commit** the productionized design; keep `BenchmarkQueueEmit` (faithful
-   `cond.Signal` model + achieved-drain measurement) as the long-term suite.
+**⚠ CRITICAL BUG found + fixed during productionization (gen-stamped hints).**
+The `emptyOutboxes` hint was a bare `*outbox`, and the hint-claim read the
+outbox's CURRENT generation (`g,_ := ob.loadState(); ob.claimEmpty(g)`) — so the
+monotonic-gen guard the whole design relies on NEVER FIRED. A hint outliving its
+incarnation (outbox reclaimed → `Reset` → back in the pool) read the pool
+generation, `claimEmpty` succeeded, and a producer filled an outbox WHILE IT SAT
+IN THE FREE LIST → double presence → never-drained channel inside "non-blocking"
+`TryPushBack` → deadlock. Latent pre-reclamation (a hinted outbox was always live
+on `outboxes`); reclamation exposed it. **Fix:** hints are now `outboxHint{ob,
+gen}` stamped at mark-empty; claim is `ob.claimEmpty(hint.gen)` at the MINTED gen.
+Only `emptyOutboxes` needs this — `outboxes`/`fullOutboxes` membership IS the
+liveness marker (popped before pooling), so their popped entries are always live.
+No new alloc: nbcq already pools the stored value (`valuePool.Clone`/`Put`).
+Found by saturation repro + a lock-free op-history ring (runtime/trace perturbed
+the timing and HID it — it's a logical/ABA race, not a data race). Regression
+guard: `TestTryPushBackSaturation` (saturated TryPushBack+PopFront, -race).
+
+**Reclamation design (converged — see `docs/rdvq-outbox-reclamation.md`):** the
+key insight is that reclamation can ONLY happen at an `outboxes` front-pop (nbcq
+has no interior removal; a dangling entry left behind is a double-presence
+corruption hazard), and `borrowToFill` runs only under backpressure (no slack to
+reclaim). The resolution: **piggyback an O(1) reclaim probe on a successful
+`emptyOutboxes` hint-claim** — a successful claim IS the "we have slack" signal,
+so it fires exactly when reclaim is wanted and auto-backs-off under pressure.
+After delivering, pop one front of `outboxes`; if `empty` + `claimEmpty` wins,
+`Put` it (immediate reclaim; `Reset` bumps gen → stale hint inert); else push
+back. **Skip-self** (the just-claimed outbox), bounded to two pops by holding it
+off-queue. **No counter, no floor, zero new global state** — the probe
+self-regulates (front usually full at high utilization → no reclaim; usually
+empty when over-provisioned → reclaim). Idle set → 0; bursts re-`Get` from the
+warm `sync.Pool`. `reclaimOutbox` mirrors the Checkpoint-2 `reclaimInbox`.
+
+**Productionization plan (remaining):**
+1. ✓ **Reclamation / scale-down** — DONE (working tree). Hint-claim probe +
+   `reclaimOutbox`; immediate-Put, skip-self, no counter.
+2. ✓ **Toggle dropped** — the `RDVQ_FRONT_ONLY` var + the front-only `else` branch
+   in `TryPushBack` are removed; the hint-claim recover path is now the single
+   unconditional production path. The A/B counterfactual is preserved in git
+   (≤47975c2) + `docs/rdvq-outbox-recovery.md`. (PN: "keeping the benchmark is
+   sufficient to pin the scheme unless a truly better one is found.")
+3. ✓ **Strip bench-only instrumentation** (`empties`/`missRefusals` + `miss/op`) —
+   DONE alongside item 1.
+4. ✓ **Validated hard:** `go vet ./...`; rdvq full `-race` (incl.
+   `TestTryPushBackSaturation`); `TestBySimulation` `-race` + deep
+   `rapid.checks=500`; `BenchmarkOutboxHintCycle -benchmem` = **0 allocs/op**
+   (gen-stamped hint is alloc-neutral; nbcq pools the value). TODO (deferred):
+   extend the sim's outbox-accounting invariant to assert the single-`outboxes`-
+   entry invariant.
+5. **Commit** the productionized design (NOT yet committed). Keep
+   `BenchmarkQueueEmit` + `BenchmarkEmitVsChan` as the long-term guards.
+
+**Floor: measured and REMOVED.** An `outboxFloor`/`liveOutboxes` warm-reserve knob
+was prototyped and A/B'd on the fixed code. It cuts the fastdrain refuse rate
+3–7× and improves throughput 29–45% — but makes the **tail** (the primary metric)
+worse (conc-512 fastdrain `emit-p99.9` 23→30 ms; conc-64 heavydrain `emit-max`
+23→36 ms), is neutral/harmful under backpressure, and needs a concurrency-tracking
+target to be production-useful. Net negative under tail-primary priorities →
+removed. The no-floor probe is the shipped design.
+
+**Deferred:** the `retiring` 4th state (full-outbox relief accelerator at the
+requeue points) — documented in `docs/rdvq-outbox-reclamation.md` but NOT built;
+add only if a bench shows relief-regime shrink lag matters.
+
+**Benchmarks added:** `BenchmarkEmitVsChan` (saturated head-to-head: `rdvq` vs
+`chan-nb` [non-blocking select + identical cond-retry postpone harness] vs
+`chan-block` [blocking lower bound], swept conc {8,64,512} × drain {fast,heavy});
+`BenchmarkOutboxHintCycle` / `BenchmarkChanCycle` (single-threaded zero-contention
+base cost); `TestTryPushBackSaturation` (saturation regression guard).
+
+## ►► rdvq overhead — separate performance investigation (NOT this branch's scope)
+
+The head-to-head benchmarks surfaced a real, broad finding that is independent of
+the reclamation work and deserves its own effort. **rdvq's emit path is ~27× a
+plain channel at the zero-contention base** (`BenchmarkOutboxHintCycle` 1257 ns/op
+vs `BenchmarkChanCycle` 46 ns/op, both 0 alloc) — the two-tier inbox/outbox + hint
+mint/claim + reclaim probe machinery is intrinsically heavy. Under saturation it
+is ~4–6× `chan-nb` on throughput, driven by a **much higher refuse rate**: rdvq
+grows the outbox set only when `outboxes` is *completely empty* (otherwise it
+refuses rather than allocating), so it runs with a far smaller effective buffer
+than a `nProducers`-slot channel and refuses into the expensive cond-retry/
+postpone path far more (conc-512 fastdrain: rdvq 38% refuse vs chan-nb 0.5%). Two
+threads for a future investigation: (a) the **base per-op cost** of the machinery;
+(b) the **"grow only when empty" buffer-sizing policy** that under-buffers and
+over-refuses (the floor band-aided this but hurt the tail — the real fix is the
+policy). NB the fair baseline is `chan-nb` (non-blocking, same postpone cost), not
+`chan-block` (blocking parks the producer — which psg's architecture forbids).
 
 This sits ON TOP of the `Sender`/`Receiver`/`Waiter` gut (checkpoints 1+2,
 committed). Checkpoint 3 (mechanical removal of those vestigial types) is still

@@ -209,6 +209,11 @@ func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool
 			// drained (empty at that gen, not refilled), so the send cannot block.
 			hint.ob.ch <- value
 			q.publishFull(hint.ob, hint.gen, bufferedFn, false)
+			// A free outbox was just found and used (slack, not backpressure), so
+			// opportunistically reclaim an idle surplus outbox to keep the live set
+			// tracking concurrency. Runs after delivery, off the receiver-visible
+			// path.
+			q.reclaimProbe(hint.ob)
 			return true
 		}
 	}

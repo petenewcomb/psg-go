@@ -104,13 +104,53 @@ func (ob *outbox[T]) Reset() {
 
 // obtainOutbox returns an empty outbox ready to fill, recycling one from the
 // shared pool or allocating (and Init-ing) a fresh one.
-//
-// NOTE: the reciprocal reclaimOutbox (returning idle empties to outboxPool for
-// scale-down) is intentionally absent in this PROTOTYPE — reclamation is the
-// first item of the productionization plan (see docs/rdvq-outbox-recovery.md and
-// WORKING_NOTES). Without it the live set never shrinks.
 func (q *Queue[T]) obtainOutbox() *outbox[T] {
 	return q.outboxPool.Get()
+}
+
+// reclaimOutbox returns a drained, owned outbox to the shared pool — the
+// reciprocal of obtainOutbox and the scale-down primitive. The caller must hold
+// it in a state no other path will act on (won via claimEmpty) and have already
+// removed its outboxes entry, so no concurrent claimer or stale outboxes entry
+// can resurrect it. Put → Reset bumps the generation, inerting any stale
+// emptyOutboxes hint to this incarnation. See docs/rdvq-outbox-reclamation.md.
+func (q *Queue[T]) reclaimOutbox(ob *outbox[T]) {
+	q.outboxPool.Put(ob)
+}
+
+// reclaimProbe runs only after a successful emptyOutboxes hint-claim, so a free
+// outbox was just confirmed available (slack, not backpressure). It reclaims at
+// most one genuinely-idle outbox to track the live set to current concurrency,
+// never the one just claimed (which is in use, not an idle reserve). Bounded to
+// two pops of outboxes, O(1).
+//
+// The probe regulates itself from structure, holding no counter: the front of
+// outboxes is usually full when utilization is high (push back, no reclaim) and
+// usually empty when over-provisioned (reclaim), giving a negative-feedback
+// equilibrium at the active working set. See docs/rdvq-outbox-reclamation.md for
+// why no counter and no idle floor are kept (a floor trades primary-metric tail
+// latency for secondary-metric throughput and was measured not worth it).
+func (q *Queue[T]) reclaimProbe(claimed *outbox[T]) {
+	ob, ok := q.outboxes.TryPopFront()
+	if !ok {
+		return
+	}
+	if ob == claimed {
+		// The in-use outbox sat at the front. Hold it off-queue so the next pop
+		// is guaranteed a different outbox, then restore it.
+		next, nok := q.outboxes.TryPopFront()
+		q.outboxes.PushBack(claimed)
+		if !nok {
+			return // only the in-use outbox was present — nothing idle to reclaim
+		}
+		ob = next
+	}
+	g, st := ob.loadState()
+	if st == outboxEmpty && ob.claimEmpty(g) {
+		q.reclaimOutbox(ob) // immediate reclaim; stale hint goes gen-safe on Reset
+	} else {
+		q.outboxes.PushBack(ob) // in use, or our claim lost a race
+	}
 }
 
 // borrowScanCap bounds how far the blocking path scans `outboxes` for a full

@@ -590,6 +590,82 @@ dissolves the `Sender` that `E` would otherwise be built around). Ripple: rip
 `Sender` out of `PushBack`/`ListenersFor` and every `*.Sender()` emit site (workq
 `Post` + the psg producers) — that's the big integration the proto defers.
 
+**"Cheat" fast-path — MEASURED (hardened), REJECTED (2026-06-16).** Considered
+promoting drained outboxes onto a separate `emptyOutboxes` queue (prioritized
+borrow) to avoid a borrow blocking on a still-full `maybeFull` front while an
+empty sits behind it. It breaks the single-borrow-queue invariant (an outbox is
+then on `empty` + a stale `maybeFull` entry), so it needs a per-outbox claim CAS +
+two membership flags + a looser bound. Measurement went through several stages, each fixing a flaw PN caught (the
+journey IS the lesson — don't trust a measurement until metric, workload, and
+topology are all realistic):
+- *throughput* (firehose, zero work): inconclusive, block count noise-dominated.
+- *single max block*: looked like cheat cut the tail 3–4× — MISLEADING (one noisy
+  sample).
+- *too-short work / wrong ratio* (busySpin 200ns/200µs, pushers<<drainers): cheat
+  won p50 but lost the tail — but the work was a single atomic-op's worth, and
+  many-drainers absorbed everything.
+- *FINAL — realistic* (`outboxpool_compare_test.go`): drain handler =
+  heavy-tailed **blocking I/O** (`time.Sleep`, Pareto p50 1.7ms / p99 37ms /
+  p99.9 213ms / max 1s), across the topologies that matter (P==D fungible-
+  balanced; P>>D fan-in overload), push-latency percentiles ×4 runs each:
+  - **P==D balanced** (cheat's best case — buffer oscillates, empties exist):
+    cheat wins **p50** (~5.5 vs 7.7µs) but LOSES the tail every run — p99 ~4.5 vs
+    ~3.6ms, p99.9 ~6.6 vs ~5.6ms.
+  - **P>>D overload** (sustained backlog → no empties → cheat ≡ clean): IDENTICAL
+    — p50 ~28ms, p99 ~72ms, p99.9 ~75–117ms both.
+**Principled reason** the cheat can't win the tail: the tail is **consumer-
+driven** (a slow handler backs up the pool; BOTH eat that equally); the cheat's
+only lever is *which* outbox a borrow grabs — it can't make consumers faster — and
+its machinery (claim CAS + skip-stale loops) adds variance that lands IN the tail.
+Also notable: the structure **absorbs** the I/O tail — with many fungible
+consumers + FIFO drain, a producer waits for the NEXT free consumer, not a
+specific slow one, so a 1s handler tail shows up as a ~ms push tail.
+**SHIP CLEAN** — wins or ties the tail (the priority metric) in every realistic
+regime, simpler (no claim/flags), tight self-sizing bound. The cheat's only win
+is a µs-scale median in one regime — not the priority. (Lesson, from PN: harden
+the measurement — realistic metric + heavy-tailed blocking-I/O + right P:D ratios
+reversed the conclusion more than once. See [[feedback_bench_methodology]].)
+
+**Reclamation — race-safe, VALIDATED (2026-06-16).** The clean two-queue core
+never shrinks: a concurrency spike pins peak-concurrency outboxes on `outboxes`
+forever, and the count is **goroutine-bound** (a goroutine parked on a full
+outbox costs no core, so it's NOT ≤ GOMAXPROCS — it's however many pile up on a
+slow destination), and the shared task/funnel queue is long-lived. Crucially the
+per-`Sender` design we're replacing scaled down FOR FREE (`Sender.Release` on
+goroutine exit), so the destination-owned pool would be a memory REGRESSION on
+long-lived destinations without reclamation — i.e. reclamation is load-bearing,
+not a refinement. **Protocol:** fold a generation counter + the reclaimable bit
+into ONE atomic word per outbox (`state = gen<<1 | reclaimable`). Fill bumps gen
++ clears reclaimable; drain captures gen `g`, receives, then `CAS (g,0)→(g,1)` —
+which sticks ONLY if no refill bumped gen, so a refilled (full) outbox can never
+be left reclaimable (kills the use-after-reclaim, the whole hazard). Borrow
+prefers a full outbox (block-fill = pace) and discards reclaimable empties to a
+**`sync.Pool`** — whose own GC-clearing IS the scale-to-zero (cheap reuse hot,
+release cold). Validated `outboxpool_reclaim_proto_test.go`: `-race` clean, every
+value received exactly once (no use-after-reclaim), scales to `circulating=1` at
+idle; the `sync.Pool` churn (~1.3MB/run of small structs) is negligible — an early
+"too aggressive" worry was a mis-read of a big-looking allocation count
+(`sync.Pool` is fast).
+
+**Both `Sender` AND `Receiver` go (PN).** `Sender` (per-goroutine outbox map) →
+the destination-owned outbox pool above (functional: fixes staleness, adds
+scale-down). `Receiver` (per-goroutine inbox map) → symmetric destination-owned
+inbox borrow, leaving rdvq a **handle-free channel API** (`Push(v)`/`Pop()`, no
+sender/receiver params). The Receiver case is WEAKER (no staleness — a worker
+receives from ~one queue; the inbox is pure rendezvous, no buffering/reclamation),
+so it's cleanliness not necessity — when implementing, confirm the per-receive
+inbox borrow stays cheap (hot path) and the LIFO waiting-inbox order (worker
+scale-down) is preserved. End state: the unified `E` holds neither.
+
+**FINAL outbox-pool design (settled, ready to integrate):** two queues —
+`outboxes` (everything; borrow source) + `fullOutboxes` (has-a-value; drain
+source); no per-sender map, no refcount, no per-outbox listeners. Borrow pops
+`outboxes`, prefers full (block-fill = pacing = minimal-WIP), reclaims empties to
+`sync.Pool`. Fill sends, bumps gen + clears reclaimable, publishes to both. Drain
+pops `fullOutboxes`, receives, gen-guarded CAS-marks reclaimable. One atomic word
+per outbox. = a zero-contention buffered channel sized to peak concurrency, that
+backpressures by blocking (not buffer inflation) and scales back down.
+
 --- superseded framing below (kept for the verbatim seams only) ---
 
 **Next:** the mechanical cutover (one focused push), in order:

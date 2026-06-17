@@ -6,32 +6,51 @@ A major new consolidation phase is in flight: see "Worker pool + workq
 consolidation" immediately below, which supersedes the wave-5b incremental
 approach.
 
-## ►► NEXT SESSION: rdvq integration (start here)
+## ►► NEXT SESSION: rdvq integration (Receiver next)
 
-The rdvq Sender/Receiver redesign is **fully designed + validated + committed**
-(`ce83a46`; design in the "rdvq Sender redesign" subsection below; executable
-proof in `internal/rdvq/outboxpool_reclaim_proto_test.go` +
-`outboxpool_compare_test.go`). Next is the integration — a big but mechanical-ish
-ripple. Order:
-1. **rdvq core:** replace the per-`Sender` outbox map + refcount + per-outbox
-   listeners with the two-queue pool (`outboxes` + `fullOutboxes`) + gen-CAS
-   reclaim + `sync.Pool`; add a queue-level "outbox freed" wakeup (replacing the
-   per-outbox listeners). Dissolve `Sender` AND `Receiver` (symmetric
-   destination-owned inbox borrow) → handle-free `Push(v)`/`Pop()` API. Drop the
-   sender/receiver params from `PushBack`/`TryPushBack`/`PushBackFunc`/`PopFront`/
-   `PopFrontFunc`/`ListenersFor`. Update rdvq's own test suite (heavy — it threads
-   sender/receiver everywhere). Validate `-race`.
-2. **Ripple:** workq `Queue.Post` + `ListenersFor` lose the sender; then every
-   `*.Sender()`/`*.Receiver()` site in the psg producers + exEnvs.
-3. **Then the consolidation cutover** (separate effort): unified `E`, `Wave`
-   (waveCtx + per-wave in-flight/governor/flush per the converged wave-5b ctx
-   model), `submit`, funnel/task producers onto `defaultPool.Post`, delete the
-   legacy per-job pools.
+Decided sequencing (PN): **gut internals first, defer type/signature removal.**
+Land the destination-owned pool while keeping `Sender`/`Receiver` on every
+signature (as vestigial `struct{}` params), one at a time, each a green
+checkpoint; the eventual deletion of the types + params is then a purely
+mechanical pass (checkpoint 3).
+
+**✓ Checkpoint 1 — `Sender` gutted (DONE, green this commit).** rdvq core
+rewritten to the destination-owned **outbox pool**: `outboxes` (borrow source) +
+`fullOutboxes` (drain source) + `outboxFree` (`sync.Pool`) + gen-CAS reclaim
+(one atomic `state` word per outbox), replacing the per-`Sender` outbox map,
+per-outbox refcount, and per-outbox listeners. Per-outbox listeners collapsed
+to ONE queue-level `outboxFreed Listeners` ("an outbox freed" wakeup), fired by
+the draining receiver when `markReclaimable` sticks. `Sender` is now `struct{}`
+with a no-op `Release`; its param is `_`-ignored in `PushBackFunc`/`TryPushBack`/
+`ListenersFor`. Signatures unchanged → zero ripple, whole module still builds.
+Validated: rdvq short+`-race`+full-stress (141s `-race`); `TestBySimulation`
+short+full+`-race`+1000-check deep sweep (114s) all green. Design + the
+non-blocking/conservation reconciliation written up in the "Checkpoint 1" note
+under "rdvq Sender redesign" below.
+
+**Checkpoint 2 — `Receiver` next.** Symmetric destination-owned **inbox
+borrow** (weaker: no staleness, no buffering/reclamation — cleanliness not
+necessity). Gut `Receiver` to `struct{}` keeping its param; confirm the
+per-receive inbox borrow stays cheap (hot path) and LIFO waiting-inbox order
+(worker scale-down) is preserved. Get green, commit.
+
+**Checkpoint 3 (later, mechanical).** Delete `Sender`/`Receiver` + strip the
+params from `PushBack*`/`PopFront*`/`ListenersFor` and every `*.Sender()`/
+`*.Receiver()` site (workq `Post`, the psg producers + exEnvs). Then the
+**consolidation cutover** (separate effort): unified `E`, `Wave` (waveCtx +
+per-wave in-flight/governor/flush per the converged wave-5b ctx model),
+`submit`, funnel/task producers onto `defaultPool.Post`, delete the legacy
+per-job pools.
+
+Prototype proofs (`outboxpool_proto_test.go`, `outboxpool_reclaim_proto_test.go`,
+`outboxpool_compare_test.go`) now superseded by the real implementation —
+candidates for removal at a cleanup pass once checkpoint 2 lands.
 
 **State:** all foundation + designs committed, tree green. Foundation =
 `workq.Queue`/`Worker[E]` (`c31d497`), `worker.Pool[E]` embedding the queue
 (`0193aab`,`29aa0fd`), global `defaultPool`/`psg.Wait`/`workerExEnv` (`f361c24`),
-wave-5b ctx model (`f584735`), rdvq design (`ce83a46`).
+wave-5b ctx model (`f584735`), rdvq design (`ce83a46`), outbox pool landed
+(this commit).
 
 ## Worker pool + workq consolidation — converged design (2026-06-14)
 
@@ -692,6 +711,54 @@ source); no per-sender map, no refcount, no per-outbox listeners. Borrow pops
 pops `fullOutboxes`, receives, gen-guarded CAS-marks reclaimable. One atomic word
 per outbox. = a zero-contention buffered channel sized to peak concurrency, that
 backpressures by blocking (not buffer inflation) and scales back down.
+
+**CHECKPOINT 1 — landed (the non-blocking + freed-wakeup reconciliation, PN
+chose path A 2026-06-16).** The settled design above is the *blocking* push
+(`PushBackFunc`/`PushBack`); the prototype's `push()` always succeeds (allocates
+on exhaustion). But `Post` also needs (a) a `TryPushBack` that can *fail* — that
+failure is the backpressure signal that triggers LISTEN/postpone — and (b)
+`ListenersFor` collapsed to a queue-level "outbox freed" wakeup. Neither is in
+the prototype. Reconciliation as implemented (`internal/rdvq/outbox.go`,
+`queue.go`):
+- **Two borrow helpers, not one.** `borrowToFill` (blocking path) = the
+  prototype scan verbatim: prefer full (block-fill = pace), reclaim drained
+  extras keeping one fallback, allocate/recycle on exhaustion; always returns an
+  outbox. `tryBorrowEmpty` (non-blocking path) pops at most one: reclaimable →
+  drop-and-go; pool exhausted → fresh empty (a new slot is not backlog, so
+  admit); **front is full → re-push it and refuse** (no slack). So the SAME pool
+  serves both: blocking prefers full to pace; non-blocking prefers/requires
+  empty to stay non-blocking. This is NOT the rejected "cheat" (that was a
+  separate `emptyOutboxes` queue + claim-CAS for the *blocking* tail); here
+  prefer-empty is *required* for non-blocking semantics, with no extra
+  machinery.
+- **`TryPushBack` no longer routes through `PushBackFunc`** (the old code shared
+  it via a non-blocking selectFn). They diverge at the borrow, so they're now
+  separate methods sharing `publishFilled`.
+- **Empty-behind-full false negative is accepted** (documented in
+  `tryBorrowEmpty`): a non-blocking borrow that hits a full front refuses even
+  if an empty sits behind it. Safe (refuse → postpone, never deadlock),
+  consistent with "ship clean / don't optimize empty-behind-full," and
+  self-corrects: `Post`'s subscribe-then-retry re-pops the (now re-queued) front
+  and finds the empty.
+- **Queue-level `outboxFreed Listeners`** replaces per-outbox `listeners`.
+  `ListenersFor` returns `&q.outboxFreed`; ALL postponed producers subscribe to
+  it; a drain fires `outboxFreed.Notify(nil)` **only when `markReclaimable`
+  sticks** (a slot truly opened — a failed CAS = a blocked producer refilled, so
+  nothing was freed and no wakeup is owed). Stale listeners (dead executions)
+  are skipped lazily by `Listeners.Notify`'s pop-until-true loop, so no
+  free()-time `NotifyAll` drain is needed any more.
+- **Conservation argument (the livelock risk I flagged):** each freed slot →
+  one `outboxFreed` notify → wakes one postponed producer; if a *different*
+  fresh `TryPushBack` steals that slot first, the woken producer's retry fails
+  and it re-subscribes — but that thief's own eventual drain fires another
+  freed, so notifications track freed slots one-for-one. `Post`'s
+  subscribe-before-retry closes the lost-wakeup race (same discipline as the old
+  per-outbox path). **Validated:** `-race` + 1000-check `TestBySimulation` deep
+  sweep clean (114s), so the conservation holds across randomized concurrency.
+- **Known benign spurious notify:** on the paced block-fill path the unblocking
+  drain marks reclaimable (fires freed) a hair before the blocked producer's
+  refill `bumpGen` clears it; harmless churn (woken producer retries, finds the
+  slot taken, re-postpones), not a livelock (a value did move = progress).
 
 --- superseded framing below (kept for the verbatim seams only) ---
 

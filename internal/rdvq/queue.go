@@ -5,6 +5,7 @@ package rdvq
 
 import (
 	"context"
+	"sync"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -41,8 +42,11 @@ type BufferedFunc func()
 // themselves are always delivered in first-in-first-out (FIFO) order.
 type Queue[T any] struct {
 	inboxStackQueue[T]
-	fullOutboxes  nbcq.Queue[*outbox[T]] // Queue of outboxes containing items
-	outboxWaiters Waiters                // Notification system for new outbox items
+	outboxes      nbcq.Queue[*outbox[T]] // Borrow source: every live outbox except while checked out
+	fullOutboxes  nbcq.Queue[*outbox[T]] // Drain source: outboxes currently holding a value
+	outboxFree    sync.Pool              // Reclaimed drained outboxes (scale-to-zero via GC)
+	outboxFreed   Listeners              // Queue-level "an outbox freed" wakeup for postponed producers
+	outboxWaiters Waiters                // Notification system for new outbox items (receiver side)
 }
 
 // Init initializes the Queue for use. Must be called before any other operations.
@@ -52,11 +56,13 @@ func (q *Queue[T]) Init() {
 	traceRegion := "rdvq.Queue.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion,
-		"Queue=%p, fullOutboxes=%p, outboxWaiters=%p",
-		q, &q.fullOutboxes, &q.outboxWaiters)
+		"Queue=%p, outboxes=%p, fullOutboxes=%p, outboxFreed=%p, outboxWaiters=%p",
+		q, &q.outboxes, &q.fullOutboxes, &q.outboxFreed, &q.outboxWaiters)
 
 	q.inboxStackQueue.Init()
+	q.outboxes.Init()
 	q.fullOutboxes.Init()
+	q.outboxFreed.Init()
 	q.outboxWaiters.Init()
 }
 
@@ -87,60 +93,50 @@ func BasicPushSelect[T any](ctx context.Context, outboxCh chan<- T, value T) (bo
 //  2. If no receiver available and outbox empty: put in outbox and return immediately
 //  3. If outbox full: call selectFn to wait for outbox to become available
 //
-// This method provides "drop-and-go" semantics for the first overflow item
-// per sender, dramatically improving performance under bursty workloads.
+// This method provides "drop-and-go" semantics whenever the destination-owned
+// outbox pool has slack, dramatically improving performance under bursty
+// workloads.
 //
-// The sender parameter manages per-sender outboxes. Each goroutine must use
-// its own Sender instance to avoid races.
+// The sender parameter is vestigial — outbox ownership now lives on the Queue,
+// so the destination self-sizes its pool to actual concurrency (see the "rdvq
+// Sender redesign" notes). It is retained on the signature pending the
+// mechanical removal pass.
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Queue[T]) PushBackFunc(sender *Sender, value T, bufferedFn BufferedFunc, selectFn PushSelectFunc[T]) {
+func (q *Queue[T]) PushBackFunc(_ *Sender, value T, bufferedFn BufferedFunc, selectFn PushSelectFunc[T]) {
 	traceRegion := "rdvq.Queue.PushBackFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Queue=%p", q)
 
-	// First try to deliver to a waiting inbox
+	// First try to deliver to a waiting inbox.
 	if q.inboxStackQueue.TryPushBack(value) {
 		return
 	}
 
-	outbox := outboxFor(sender, q)
-	outbox.fillPending()
-	defer outbox.fillAttemptComplete()
-	select {
-	case outbox.ch <- value:
-		outbox.filled()
+	// Borrow an outbox from the destination-owned pool, preferring a full one to
+	// block-fill (pacing). An empty one is a drop-and-go.
+	ob, full := q.borrowToFill()
+	if !full {
+		ob.ch <- value // empty, known not to block
 		trace.Logf(context.Background(), traceRegion,
-			"outbox=%p was empty, delivered value into outboxCh=%p",
-			outbox, outbox.ch)
-		if bufferedFn != nil {
-			bufferedFn()
-		}
-		q.fullOutboxes.PushBack(outbox)
-		q.outboxWaiters.Notify(nil)
+			"outbox=%p was empty, delivered value into outboxCh=%p", ob, ob.ch)
+		q.publishFilled(ob, bufferedFn)
 		return
-	default:
 	}
 
-	// Outbox is full, wait for it to become available
+	// Full: selectFn waits for it to drain (or declines).
 	trace.Logf(context.Background(), traceRegion,
-		"outbox=%p is full (outboxCh=%p), calling selectFn",
-		outbox, outbox.ch)
-	if !selectFn(outbox.ch) {
-		// Value was not sent via outbox, so there's no further action to take
+		"outbox=%p is full (outboxCh=%p), calling selectFn", ob, ob.ch)
+	if !selectFn(ob.ch) {
+		// Value was not sent. Return the still-full outbox to the borrow pool;
+		// it remains drainable via fullOutboxes (and, if a receiver drained it
+		// meanwhile, it is now marked reclaimable and will be treated as empty).
 		trace.Logf(context.Background(), traceRegion,
-			"selectFn returned without filling outbox=%p (outboxCh=%p)",
-			outbox, outbox.ch)
+			"selectFn returned without filling outbox=%p (outboxCh=%p)", ob, ob.ch)
+		q.outboxes.PushBack(ob)
 		return
 	}
-	outbox.filled()
-
-	// Value was successfully sent to outbox, so queue it and notify waiters
-	if bufferedFn != nil {
-		bufferedFn()
-	}
-	q.fullOutboxes.PushBack(outbox)
-	q.outboxWaiters.Notify(nil)
+	q.publishFilled(ob, bufferedFn)
 }
 
 // PushBack sends a value using the two-tier delivery system with context support.
@@ -162,36 +158,42 @@ func (q *Queue[T]) PushBack(ctx context.Context, sender *Sender, value T, buffer
 	return err
 }
 
-// TryPushBack attempts to send a value without blocking.
-// Returns true if the value was sent to a waiting receiver, false otherwise.
-// This is analogous to a non-blocking channel send.
+// TryPushBack attempts to send a value without blocking. Returns true if the
+// value was delivered (to a waiting receiver, or dropped into an empty outbox),
+// false if there was no slack — no waiting receiver and every outbox full. A
+// false return is the backpressure signal callers use to postpone; the value is
+// re-driven when the queue-level "outbox freed" wakeup fires (see ListenersFor).
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Queue[T]) TryPushBack(sender *Sender, value T, bufferedFn BufferedFunc) bool {
+func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool {
 	traceRegion := "rdvq.Queue.TryPushBack"
 
-	sent := true
-	q.PushBackFunc(sender, value, bufferedFn, func(outboxCh chan<- T) bool {
-		// Don't block waiting for outbox to become available
-		trace.Logf(context.Background(), traceRegion, "entering select: outboxCh=%p", outboxCh)
-		select {
-		case outboxCh <- value:
-			trace.Logf(context.Background(), traceRegion, "delivered value into outboxCh=%p", outboxCh)
-			return true
-		default:
-			trace.Logf(context.Background(), traceRegion, "outboxCh=%p full, aborting", outboxCh)
-			sent = false
-			return false
-		}
-	})
+	// First try to deliver to a waiting inbox.
+	if q.inboxStackQueue.TryPushBack(value) {
+		trace.Logf(context.Background(), traceRegion, "delivered to waiting inbox")
+		return true
+	}
 
-	trace.Logf(context.Background(), traceRegion, "returning %v", sent)
-	return sent
+	ob, ok := q.tryBorrowEmpty()
+	if !ok {
+		trace.Logf(context.Background(), traceRegion, "no slack, refusing")
+		return false
+	}
+	ob.ch <- value // empty, known not to block
+	trace.Logf(context.Background(), traceRegion, "dropped value into outbox=%p outboxCh=%p", ob, ob.ch)
+	q.publishFilled(ob, bufferedFn)
+	return true
 }
 
-// Listeners returns the outbox's listeners for subscription to availability notifications.
-func (q *Queue[T]) ListenersFor(s *Sender) *Listeners {
-	return &outboxFor(s, q).listeners
+// ListenersFor returns the queue-level "an outbox freed" listener set. A
+// producer that could not push (TryPushBack refused) subscribes here and is
+// re-driven when a receiver drains an outbox, freeing a buffered slot. This
+// replaces the former per-outbox listeners: with destination-owned outboxes
+// there is no per-sender outbox to wait on, only the pool as a whole.
+//
+// The sender parameter is vestigial (see PushBackFunc).
+func (q *Queue[T]) ListenersFor(_ *Sender) *Listeners {
+	return &q.outboxFreed
 }
 
 // PopSelectResult is the result returned by a PopSelectFunc to communicate
@@ -404,7 +406,7 @@ func (q *Queue[T]) PopFront(
 }
 
 // TryPopFront attempts to retrieve a value from the queue without blocking.
-// It checks all full outboxes for available items.
+// It drains the full outboxes for available items.
 // Returns the value and true if an item was retrieved, or zero value and false if no items were available.
 //
 //nolint:contextcheck // background context used only for tracing
@@ -418,13 +420,21 @@ func (q *Queue[T]) TryPopFront() (T, bool) {
 			return *new(T), false // No more outboxes
 		}
 
+		// Capture the generation before receiving: markReclaimable below sticks
+		// only if no producer has refilled (and bumped the generation) since.
+		g := outbox.genNow()
 		outboxCh := outbox.ch
 		trace.Logf(context.Background(), traceRegion, "entering select: outbox=%p, outboxCh=%p", outbox, outboxCh)
 		select {
 		case value := <-outboxCh:
 			trace.Logf(context.Background(), traceRegion, "received value from outbox=%p outboxCh=%p, returning true",
 				outbox, outboxCh)
-			outbox.emptied()
+			if outbox.markReclaimable(g) {
+				// A buffered slot truly opened up (no concurrent refill): wake one
+				// postponed producer to retry. A failed CAS means a producer
+				// refilled the slot, so nothing was freed and no wakeup is owed.
+				q.outboxFreed.Notify(nil)
+			}
 			return value, true
 		default:
 			trace.Logf(context.Background(), traceRegion, "outbox=%p outboxCh=%p was empty, trying next", outbox, outboxCh)

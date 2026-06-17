@@ -3,53 +3,17 @@
 
 package rdvq
 
-import "sync"
-
-// Sender manages outboxes across multiple queues for a single goroutine.
-// Each goroutine should have its own Sender instance to avoid races.
-// The Sender automatically creates and manages outboxes as needed when
-// sending to different Queue instances.
+// Sender is a vestigial handle retained on the push API while the mechanical
+// removal pass is pending. Outbox ownership now lives on the destination
+// [Queue], which keeps a pool of outboxes that self-sizes to the concurrency it
+// actually experiences (see the "rdvq Sender redesign" notes). A Sender holds
+// no state; callers may share one freely or pass nil.
 //
-// To enable map and outbox pooling across goroutine lifecycles, callers
-// should call [Sender.Release] when done with a Sender. Forgoing Release is
-// safe but wastes the per-Sender map allocation; it can also be a
-// deliberate choice for an outlier goroutine that sends to a large number
-// of distinct queues, to avoid leaving an oversized map in the shared pool.
-type Sender struct {
-	outboxMap map[any]any
-}
+// It once cached per-goroutine outboxes keyed by destination, which accumulated
+// stale entries for long-lived senders feeding many short-lived destinations —
+// the staleness the destination-owned pool eliminates.
+type Sender struct{}
 
-// Release frees the Sender's per-queue outboxes and returns the underlying
-// map to a shared pool for reuse by future Senders. After Release the
-// Sender remains usable; lazily-initialized state will be re-acquired on
-// the next send.
-func (s *Sender) Release() {
-	if s.outboxMap == nil {
-		return
-	}
-	for _, v := range s.outboxMap {
-		v.(interface{ free() }).free() // Free the outbox
-	}
-	clear(s.outboxMap)
-	senderMapPool.Put(s.outboxMap)
-	s.outboxMap = nil
-}
-
-var senderMapPool = sync.Pool{
-	New: func() any { return make(map[any]any) },
-}
-
-// outboxFor returns the outbox for the given key, creating one if it doesn't exist.
-func outboxFor[T any](s *Sender, q *Queue[T]) *outbox[T] {
-	if s.outboxMap == nil {
-		s.outboxMap = senderMapPool.Get().(map[any]any)
-	}
-
-	obAny := s.outboxMap[q]
-	if obAny == nil {
-		ob := newOutbox[T]()
-		s.outboxMap[q] = ob
-		return ob
-	}
-	return obAny.(*outbox[T])
-}
+// Release is a no-op retained for API compatibility. A Sender holds no state to
+// free.
+func (s *Sender) Release() {}

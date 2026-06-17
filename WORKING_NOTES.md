@@ -546,6 +546,50 @@ cancelled → the body aborts, accounted by borrow/return + `Free`.)
 `poolCtx`; `newWorkerState` factory simplifies to building just `E` (the pool owns
 the worker's idle ctx, captured from `poolCtx` at spawn).
 
+### rdvq Sender redesign — destination-owned outbox pool (PN, 2026-06-16)
+
+Came out of the E/Sender thread: in the global fungible pool, the per-goroutine
+`Sender.outboxMap` accumulates stale outboxes for many wave-scoped destinations
+(long-lived worker, short-lived destinations). Fix by moving outbox ownership to
+the destination (the `Queue`), eliminating the `Sender` map AND the per-outbox
+refcount.
+
+**Mechanism — three per-Queue outbox queues** (replacing `Sender`-cached outboxes
++ refcount): `emptyOutboxes`, `maybeFullOutboxes`, `fullOutboxes`. **Invariant:**
+every outbox is on exactly one of empty/maybeFull when not checked out by a
+`Push`; `full` is an independent membership ("holds a value, awaiting a
+receiver"). `Push` borrows: prefer `empty`, fall back to `maybeFull` (which may
+still be full → the cap-1 fill BLOCKS = pacing), else allocate. After a buffered
+fill: publish to `full` + `maybeFull`. A receiver drains from `full` and
+**leaves the outbox on `maybeFull`** (now drained) — it never touches the borrow
+side, so the two sides share state only through the cap-1 channel (race-free).
+Allocation happens only when both empty+maybeFull are empty ⇒ every outbox is
+checked out ⇒ **pool capped at #concurrent borrowers (≤ #goroutines)**.
+
+**What this IS (PN):** rdvq becomes a **zero-contention buffered channel whose
+buffer size is 1:1 with the peak concurrency it actually experiences** —
+N distinct cap-1 channels reached lock-free (nbcq), self-sizing to exactly the
+concurrency seen (no dial), shrinking back via idle outboxes on `maybeFull`.
+Minimal-WIP made structural: WIP ≡ actual peak parallelism.
+
+**API simplification:** `PushBack`/`TryPushBack`/`PushBackFunc` drop the `Sender`
+param; per-outbox `refcount` + `listeners` collapse (the listeners → ONE
+queue-level "an outbox freed" wakeup that postponing producers subscribe to,
+fired by the receiver on drain); the `Sender` type largely dissolves. `selectFn`
+variants stay. INBOXES unchanged — an inbox is pure rendezvous (no buffered value
+outliving the call), and the per-`Receiver` inbox map has no staleness (a worker
+receives from ~one queue), so the asymmetry is principled.
+
+**PROVEN (prototype, `outboxpool_proto_test.go`, `-race` ×3):** the empty/
+maybeFull/full borrow pool moved 160k values through **exactly 8 outboxes for 8
+pushers** (3 drainers, so the full/pacing path was hammered), every value received
+exactly once, zero races — bound tight, pacing holds.
+
+**Sequencing:** land this rdvq change BEFORE wiring `E` into Wave/submit (it
+dissolves the `Sender` that `E` would otherwise be built around). Ripple: rip
+`Sender` out of `PushBack`/`ListenersFor` and every `*.Sender()` emit site (workq
+`Post` + the psg producers) — that's the big integration the proto defers.
+
 --- superseded framing below (kept for the verbatim seams only) ---
 
 **Next:** the mechanical cutover (one focused push), in order:

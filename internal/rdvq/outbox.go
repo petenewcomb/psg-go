@@ -135,31 +135,6 @@ func (q *Queue[T]) borrowToFill() (ob *outbox[T], full bool) {
 	}
 }
 
-// tryBorrowEmpty pops at most one outbox for a non-blocking drop-and-go fill.
-// It returns an empty outbox (a drained one, or a fresh/recycled one when the
-// borrow pool is exhausted) ready for a send that will not block, or (nil,
-// false) when the front of the pool is a full outbox — there is no slack, and
-// the caller should treat the push as refused (backpressure).
-//
-// It does not scan past a full outbox to find an empty behind it: that false
-// negative is safe (a refused push postpones, never deadlocks) and matches the
-// clean borrow discipline (no per-outbox claim machinery). A postponed producer
-// is re-driven by the queue-level "outbox freed" wakeup when a receiver drains.
-func (q *Queue[T]) tryBorrowEmpty() (*outbox[T], bool) {
-	cand, ok := q.outboxes.TryPopFront()
-	if !ok {
-		// Pool exhausted (all outboxes checked out, or none yet): a fresh empty
-		// slot is not backlog, so admit it.
-		return q.obtainOutbox(), true
-	}
-	if cand.reclaimable() {
-		return cand, true
-	}
-	// Full ⇒ no slack. Return it to the borrow pool and refuse.
-	q.outboxes.PushBack(cand)
-	return nil, false
-}
-
 // publishFilled completes a fill: a value has just been sent into ob.ch by the
 // caller. It bumps the generation (clearing reclaimable so a racing drain
 // cannot discard this now-full outbox), runs bufferedFn before the value

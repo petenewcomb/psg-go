@@ -160,9 +160,9 @@ func (q *Queue[T]) PushBack(ctx context.Context, sender *Sender, value T, buffer
 }
 
 // TryPushBack attempts to send a value without blocking. Returns true if the
-// value was delivered (to a waiting receiver, or dropped into an empty outbox),
-// false if there was no slack — no waiting receiver and every outbox full. A
-// false return is the backpressure signal callers use to postpone; the value is
+// value was delivered — to a waiting receiver, or into an outbox that could
+// accept it immediately — and false if neither was possible right now. A false
+// return is the backpressure signal callers use to postpone; the value is
 // re-driven when the queue-level "outbox freed" wakeup fires (see ListenersFor).
 //
 //nolint:contextcheck // background context used only for tracing
@@ -175,9 +175,24 @@ func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool
 		return true
 	}
 
-	ob, ok := q.tryBorrowEmpty()
-	if !ok {
-		trace.Logf(context.Background(), traceRegion, "no slack, refusing")
+	// No waiting receiver: can the front outbox take the value right now, without
+	// blocking? We check only the front and don't scan deeper for a free outbox
+	// behind a full one. Scanning is O(queue) exactly when it can't help — under
+	// backpressure every outbox is full, so each push would requeue the whole queue
+	// and still refuse — whereas the front check stays O(1). The price is a false
+	// negative (a free outbox behind a full front); the caller handles the refusal
+	// (retry/postpone), and the requeue below rotates the front so a retry probes a
+	// different outbox.
+	ob, ok := q.outboxes.TryPopFront()
+	switch {
+	case !ok:
+		ob = q.obtainOutbox() // none pooled — a fresh outbox is empty, so it can
+	case ob.reclaimable():
+		// drained since its last fill — its channel is empty, so it can
+	default:
+		// still full — accepting would block; put it back and refuse
+		q.outboxes.PushBack(ob)
+		trace.Logf(context.Background(), traceRegion, "next outbox still full, refusing")
 		return false
 	}
 	ob.ch <- value // empty, known not to block

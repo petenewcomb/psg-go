@@ -54,18 +54,15 @@ import (
 // resolves the tail without busy-spinning (which would starve drainers).
 const pollInterval = 25 * time.Microsecond
 
-// drainMeanApprox is the nominal mean of paretoSleep, used to size the steady
-// producer interval from a load factor. (The truncated-Pareto mean is fuzzy; the
-// load factor is approximate, which is fine for a relative before/after.)
-const drainMeanApprox = 1450 * time.Microsecond
-
-// paretoSleep returns a heavy-tailed drain duration: most short, a few very long
-// (matching the consumer profile of outboxpool_compare_test.go).
+// paretoSleep returns a heavy-tailed drain duration: most short, a few very long.
+// alpha near 1 makes the tail extreme — rare multi-hundred-ms-to-second stalls
+// that briefly drop drain capacity and build large transient backlogs, the
+// condition under which a free outbox can end up behind a full front.
 func paretoSleep(rng *rand.Rand) time.Duration {
 	const (
 		xm    = 200 * time.Microsecond // minimum
-		alpha = 1.16                   // ~80/20 heavy tail
-		ceil  = time.Second            // truncate the worst case
+		alpha = 1.05                   // very heavy tail (closer to 1 = heavier)
+		ceil  = 2 * time.Second        // truncate the worst case
 	)
 	u := rng.Float64() //nolint:gosec // non-cryptographic use case
 	if u < 1e-12 {
@@ -77,6 +74,20 @@ func paretoSleep(rng *rand.Rand) time.Duration {
 	}
 	return d
 }
+
+// meanDrain is the empirical mean of paretoSleep, used to size the steady producer
+// interval from a load factor. Estimated once from a large fixed-seed sample so it
+// stays accurate when the distribution changes (the truncated heavy-tail mean is
+// not worth deriving in closed form).
+var meanDrain = func() time.Duration {
+	rng := newRNG(42)
+	const n = 1 << 21
+	var sum time.Duration
+	for i := 0; i < n; i++ {
+		sum += paretoSleep(rng)
+	}
+	return sum / n
+}()
 
 //nolint:gosec // non-cryptographic use case
 func newRNG(seed uint64) *rand.Rand { return rand.New(rand.NewPCG(seed, 0x9e3779b97f4a7c15)) }
@@ -155,6 +166,7 @@ func runEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Du
 	}
 	slices.Sort(all)
 	b.ReportMetric(float64(refusals.Load())/float64(b.N), "refuse/op")
+	b.ReportMetric(float64(q.missRefusals.Load())/float64(b.N), "miss/op")
 	reportPercentile(b, all, 0.50, "p50-us")
 	reportPercentile(b, all, 0.99, "p99-us")
 	reportPercentile(b, all, 0.999, "p99.9-us")
@@ -176,8 +188,8 @@ func reportPercentile(b *testing.B, sorted []time.Duration, p float64, name stri
 // 1/think roughly equals loadFactor × (nDrainers / meanDrain) — the average drain
 // capacity. loadFactor < 1 leaves headroom; > 1 overloads.
 func thinkForLoad(loadFactor float64, nProducers, nDrainers int) time.Duration {
-	capacity := float64(nDrainers) / float64(drainMeanApprox) // drains per ns
-	rate := loadFactor * capacity                             // target emits per ns
+	capacity := float64(nDrainers) / float64(meanDrain) // drains per ns
+	rate := loadFactor * capacity                       // target emits per ns
 	return time.Duration(float64(nProducers) / rate)
 }
 
@@ -185,7 +197,7 @@ func thinkForLoad(loadFactor float64, nProducers, nDrainers int) time.Duration {
 // dimension that governs whether free outboxes ever sit behind a full front.
 func BenchmarkQueueEmit(b *testing.B) {
 	procs := max(4, runtime.GOMAXPROCS(0))
-	for _, lf := range []float64{0.5, 0.8, 0.95, 1.5} {
+	for _, lf := range []float64{0.5, 0.8, 0.95, 0.99, 1.0, 1.01, 1.05, 1.5} {
 		name := "heavytail/load-" + strconv.FormatFloat(lf, 'g', -1, 64)
 		think := thinkForLoad(lf, procs, procs)
 		b.Run(name, func(b *testing.B) {

@@ -5,6 +5,7 @@ package rdvq
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
 
@@ -47,6 +48,15 @@ type Queue[T any] struct {
 	outboxPool    *omnipool.Pool[outbox[T]] // Reclaimed drained outboxes (scale-to-zero via GC)
 	outboxFreed   Listeners                 // Queue-level "an outbox freed" wakeup for postponed producers
 	outboxWaiters Waiters                   // Notification system for new outbox items (receiver side)
+
+	// INSTRUMENTATION (empty-behind-full investigation): reclaimable approximates
+	// the count of empty outboxes currently sitting in outboxes; missRefusals
+	// counts TryPushBack refusals taken while reclaimable > 0 — i.e. a free outbox
+	// existed but sat behind a full front (the recoverable miss), as opposed to
+	// genuine backpressure (every outbox full). Remove if the miss proves
+	// negligible; promote reclaimable to a scan gate if it proves worth recovering.
+	reclaimable  atomic.Int64
+	missRefusals atomic.Int64
 }
 
 // Init initializes the Queue for use. Must be called before any other operations.
@@ -188,12 +198,19 @@ func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool
 	case !ok:
 		ob = q.obtainOutbox() // none pooled — a fresh outbox is empty, so it can
 	case ob.reclaimable():
+		q.reclaimable.Add(-1) // instrumentation: consuming a reclaimable
 		// drained since its last fill — its channel is empty, so it can
 	default:
-		// still full — accepting would block; put it back and refuse
-		q.outboxes.PushBack(ob)
-		trace.Logf(context.Background(), traceRegion, "next outbox still full, refusing")
-		return false
+		// Front is full. PROTOTYPE (gated scan): if the supply counter says a
+		// free outbox exists behind it, scan a bounded depth for it instead of
+		// refusing; otherwise it is genuine backpressure — refuse.
+		r := q.scanForReclaimable(ob)
+		if r == nil {
+			trace.Logf(context.Background(), traceRegion, "next outbox still full, refusing")
+			return false
+		}
+		q.reclaimable.Add(-1)
+		ob = r
 	}
 	ob.ch <- value // empty, known not to block
 	trace.Logf(context.Background(), traceRegion, "dropped value into outbox=%p outboxCh=%p", ob, ob.ch)
@@ -469,6 +486,7 @@ func (q *Queue[T]) TryPopFront() (T, bool) {
 				// A buffered slot truly opened up (no concurrent refill): wake one
 				// postponed producer to retry. A failed CAS means a producer
 				// refilled the slot, so nothing was freed and no wakeup is owed.
+				q.reclaimable.Add(1) // instrumentation
 				q.outboxFreed.Notify(nil)
 			}
 			return value, true

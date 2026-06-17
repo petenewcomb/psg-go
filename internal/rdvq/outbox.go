@@ -117,6 +117,7 @@ func (q *Queue[T]) borrowToFill() (ob *outbox[T], full bool) {
 			return q.obtainOutbox(), false
 		}
 		if cand.reclaimable() {
+			q.reclaimable.Add(-1) // instrumentation: consuming a reclaimable
 			// Drained slack. Keep one as a drop-and-go fallback to skip a pool
 			// round-trip; reclaim any further empties.
 			if fallback == nil {
@@ -133,6 +134,36 @@ func (q *Queue[T]) borrowToFill() (ob *outbox[T], full bool) {
 		}
 		return cand, true
 	}
+}
+
+// scanCap bounds how deep the gated scan (PROTOTYPE) probes for a free outbox
+// behind a full front, so a deep backlog can't turn one push into an O(queue)
+// requeue storm.
+const scanCap = 32
+
+// scanForReclaimable is the PROTOTYPE gated scan. `full` is a full outbox already
+// popped from the front; it is requeued. If the supply counter says no free
+// outbox exists (reclaimable == 0) it returns nil immediately (genuine
+// backpressure). Otherwise it pops up to scanCap further outboxes, requeuing
+// fulls, and returns the first reclaimable one (checked out) — or nil if none is
+// found within the cap (a residual miss, counted).
+func (q *Queue[T]) scanForReclaimable(full *outbox[T]) *outbox[T] {
+	q.outboxes.PushBack(full)
+	if q.reclaimable.Load() <= 0 {
+		return nil
+	}
+	for i := 0; i < scanCap; i++ {
+		cand, ok := q.outboxes.TryPopFront()
+		if !ok {
+			break
+		}
+		if cand.reclaimable() {
+			return cand
+		}
+		q.outboxes.PushBack(cand)
+	}
+	q.missRefusals.Add(1) // had a target but didn't reach it within the cap
+	return nil
 }
 
 // publishFilled completes a fill: a value has just been sent into ob.ch by the

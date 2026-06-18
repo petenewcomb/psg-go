@@ -85,15 +85,36 @@ panicked; fixed by reading meta directly + "no matching meta → non-top-level /
 shouldBlock=false" in `j.shouldBlock`/`task`/`funnel`/`skimPostWork`). Green: root
 tests + examples (15/15), sim `-race` 120 (~16s), lint0.
 
-**►► NEXT (cleanup + remaining seams):** (a) Delete the transitional funnel
-machinery: replace the persistent cpWorker with a dedicated per-wave flusher (docs
-§6), delete `cpWorker`/`cpstate`/`FunnelPool.goroutine`/`spawnNewGoroutine`/
-`funnelQueue`/most of `FunnelPool`; options fallout (`WithMaxConcurrency` etc.;
-maxholdtime→limiter). (b) **Skim seam** (same pattern, but skim is user-goroutine-
-driven on a per-wave queue — likely just the producer/meta cleanup, no worker
-move). (c) `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global
-workers. (d) Limiter post-admission move + governor/`submit` collapse. (e)
-`Pool`→`Wave` rename. Anchor: `docs/global-substrate-activation.md`.
+**►► CLEANUP — ✓ cpstate DELETED + cpWorker→persistent flusher (`ac90383`).**
+`internal/cpstate` gone; FunnelPool reduced to `{job, funnelQueue(dead), governor,
+workQueue(scheduled flushes)}` + one persistent flush driver. Green.
+
+**►► ALIGNMENT WITH API_DESIGN.md (the repositioning).** This whole consolidation
+is the foundation for the planned Pool/Wave/Flow repositioning (a "major-version
+rewrite, single coherent landing"). The design's notable refactors map to what's
+been built: "Split conflated Pool into Pool(workers)/Wave/Flow" = the global
+`defaultPool` + per-wave; "Merge TaskPool and FunnelPool machinery into one internal
+worker pool" = the task+funnel cutover (DONE); "package-level default Pool" +
+"refcount-driven lifecycle, sync worker termination on last referencing Wave's
+drain" = `defaultPool` + the Acquire/Release still to wire. **API_DESIGN.md rejects
+keeping FunnelPool as a distinct type** ("API noise; the Pool itself is the single
+worker pool; per-op concurrency via Limiters") and targets `NewFunnel(wave,
+factory)` — consistent with `NewLauncher`/`NewSkimmer`. See
+[[feedback_api_consistency_over_alias]].
+
+**►► NEXT:**
+(a) **Eliminate FunnelPool → `NewFunnel(wave, …)`** (PN-requested; per API_DESIGN.md):
+   move the funnel flush machinery (workQueue/governor/persistent flusher) onto the
+   `Pool` (job), lazily init'd on first funnel (sync.Once); funnel governor MERGES
+   into a per-job governor (governor collapse); `funnelOp.funnelPool.X` → `job.X`;
+   delete `FunnelPool`/`NewFunnelPool`/`funnelQueue`; change `NewFunnel`/`NewFnFunnel`/
+   `NewErrFunnel` to take a `*Wave` and update ~47 call sites (tests/examples/bench/
+   sim). The funnel binds to a Wave like the other ops.
+(b) **Skim seam** (user-goroutine-driven; mostly producer/meta cleanup, no worker move).
+(c) `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global workers.
+(d) Limiter post-admission + governor/`submit` collapse.
+(e) The full Pool→Wave/**Flow** rename (the coordinated major-version landing).
+Anchors: `docs/global-substrate-activation.md`, `API_DESIGN.md`.
 
 **REFERENCE — the task-seam plan that was executed (kept for the funnel/skim
 seams, which mirror it).** Reading the wrappers (launcher.go:363 `launcherScatterWork.Execute`

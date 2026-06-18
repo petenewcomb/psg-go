@@ -5,16 +5,12 @@ package psg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
-	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/cpstate"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/timerp"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -23,12 +19,6 @@ import (
 // It handles concurrency limits, spawning new goroutines, and reusing existing ones.
 type FunnelPool struct {
 	job *Pool
-
-	// FunnelPoolState hosts the data and core logic for managing the pool of
-	// goroutines to maximize throughput with the minimum number of goroutines
-	// and therefore duplication of individual funnels.
-	state    cpstate.FunnelPoolState
-	inFlight jobstate.InFlightCounter
 
 	funnelQueue workq.Pending
 
@@ -64,35 +54,23 @@ func NewFunnelPool(job *Pool, options ...psgopt.FunnelPoolOption) *FunnelPool {
 	}
 
 	trace.Logf(context.Background(), traceRegion,
-		"FunnelPool=%p, job=%p, state=%p, funnelQueue=%p, governor=%p, workQueue=%p",
-		cp, job, &cp.state, &cp.funnelQueue, &cp.governor, &cp.workQueue)
+		"FunnelPool=%p, job=%p, funnelQueue=%p, governor=%p, workQueue=%p",
+		cp, job, &cp.funnelQueue, &cp.governor, &cp.workQueue)
 
 	cp.funnelQueue.Init()
 	cp.governor.Init()
-	// workQueue now holds only scheduled funnelInstance flushes (funnel BODY work
-	// runs on the global pool via defaultPool.Post); no unmet-demand spawn — a
-	// single persistent flusher drives it.
+	// workQueue holds only scheduled funnelInstance flushes (funnel BODY work runs
+	// on the global pool via defaultPool.Post). One persistent flusher drives it.
 	cp.workQueue.Init(nil)
-	cp.state.Init()
 
-	// Apply default configuration
-	cp.state.SetOptions(
-		psgopt.WithMaxConcurrency(-1), // unlimited by default
-		psgopt.WithIdleTimeout(psgopt.DefaultFunnelPoolIdleTimeout),
-		psgopt.WithIdleJitter(psgopt.DefaultFunnelPoolIdleJitter),
-	)
+	// options are accepted for source compatibility but no longer mean anything:
+	// the funnel body runs on the global worker.Pool (uncapped), and there is a
+	// single persistent flush driver (no idle-exit / spawn concurrency to tune).
+	_ = options
 
-	// Apply user options
-	cp.state.SetOptions(options...)
-
-	// TRANSITIONAL: the funnel BODY now runs on the global worker.Pool, but the
-	// scheduled-flush queue (deadline-driven + end-of-work flushes) still needs a
-	// driver. Run ONE persistent flusher (the cpWorker drive loop with idle-exit
-	// forced off) instead of the legacy on-demand spawn machinery. It lives until
-	// the job reaches Done / is cancelled. (Full cpWorker/cpstate deletion + a
-	// dedicated per-wave flusher is a later cleanup; see docs §6.)
-	cp.state.SetOptions(psgopt.WithIdleTimeout(-1))
-	cp.spawnNewGoroutine()
+	// Run the single persistent flush driver (drains deadline-driven +
+	// end-of-work funnelInstance flushes until the job reaches Done).
+	cp.spawnFlusher()
 
 	return cp
 }
@@ -104,26 +82,30 @@ func (cp *FunnelPool) checkInitialized() {
 	}
 }
 
-// SetOptions applies the given configuration options to the pool.
-func (cp *FunnelPool) SetOptions(options ...psgopt.FunnelPoolOption) {
+// SetOptions is retained for source compatibility but is now a no-op: the funnel
+// body runs on the uncapped global worker.Pool and there is a single persistent
+// flush driver, so there are no per-pool concurrency/idle dials left to set.
+func (cp *FunnelPool) SetOptions(_ ...psgopt.FunnelPoolOption) {
 	cp.checkInitialized()
-	cp.state.SetOptions(options...)
 }
 
+// spawnFlusher starts the single persistent flush driver goroutine. It is tracked
+// by the job's wait group so the job's teardown joins it.
+//
 //nolint:contextcheck // goroutine will use job context
-func (cp *FunnelPool) spawnNewGoroutine() {
-	traceRegion := "FunnelPool.spawnNewGoroutine"
+func (cp *FunnelPool) spawnFlusher() {
+	traceRegion := "FunnelPool.spawnFlusher"
 	trace.Logf(context.Background(), traceRegion,
-		"FunnelPool=%p starting new goroutine", cp)
+		"FunnelPool=%p starting flush driver", cp)
 	wg := &cp.job.wg
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		cp.goroutine()
+		cp.flusher()
 	}()
 }
 
-func (cp *FunnelPool) goroutine() {
+func (cp *FunnelPool) flusher() {
 	var doneWg sync.WaitGroup
 	doneCh := make(chan struct{})
 	var doneErr error
@@ -185,56 +167,24 @@ func (cp *FunnelPool) goroutine() {
 	// startup or it would never wake to run the end-of-work flush sweep.
 	worker.nextJobFlushCh = j.state.FlushChan()
 
-	worker.idleTimer = timerp.Get()
-	defer timerp.Put(worker.idleTimer)
-
-	cp.state.GoroutineStarted()
-
 	addWorkFn := worker.AddWork
 
-	confirmEndOfWork := false
+	// Persistent flush driver: drain due scheduled funnelInstance flushes
+	// (deadline-driven) and run the end-of-work flush sweep when the job's
+	// FlushChan fires (popSelect installs flushAll as the followup), looping until
+	// the job reaches Done / is cancelled. There is exactly one flusher per pool
+	// (no idle-exit, no spawn coordination), so the legacy multi-worker
+	// ErrEndOfWork / GoroutineExiting dance is gone.
 	for {
-		confirmingEndOfWork := confirmEndOfWork
-		confirmEndOfWork = false
-
 		err := cp.workQueue.ExecuteOne(ctx, addWorkFn)
 		switch {
 		case err == nil:
-		case errors.Is(err, workq.ErrEndOfWork):
-			if confirmingEndOfWork {
-				trace.Logf(ctx, traceRegion, "last goroutine at end of work, flushing funnels")
-				// Flush every pending instance through the shared scheduled
-				// queue. Any worker can do this (see flushAll); a worker that
-				// never ran a funnel must still flush so live instances'
-				// barrier references drop and the job can reach Done.
-				worker.flushAll(ctx)
-			}
-			if cp.state.GoroutineExiting() {
-				// This is the last goroutine running. Keep running a bit longer
-				// to confirm that there's nothing more to do
-				cp.state.GoroutineRestarted()
-				confirmEndOfWork = cp.inFlight.IsZero()
-			} else {
-				trace.Logf(ctx, traceRegion, "goroutine exiting")
-				// No timer-holder handoff needed: remaining workers each arm
-				// their own deadline timer in workq's WaitForNew, and a flush
-				// scheduled while they are parked wakes them via the scheduled-work
-				// queue's wake hook.
-				// The flush-signal subscription holds no reference, so
-				// there is nothing to release on exit.
-				worker.nextJobFlushCh = nil
-				return
-			}
+			// Ran a due flush (or the end-of-work flushAll followup); keep going.
 		case errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded):
-			trace.Logf(ctx, traceRegion, "exiting with err=%v", err)
-			// Do NOT call GoroutineExiting() here. The Pool is shutting down, so
-			// goroutine accounting no longer matters. Additionally, this goroutine
-			// may have already called GoroutineExiting() then GoroutineRestarted()
-			// on the ErrEndOfWork path above, and calling it again would cause
-			// double-decrement.
+			trace.Logf(ctx, traceRegion, "flusher exiting with err=%v", err)
 			return
 		default:
-			panic(fmt.Sprintf("funnel goroutine received unexpected error: %v", err))
+			panic(fmt.Sprintf("funnel flusher received unexpected error: %v", err))
 		}
 	}
 }

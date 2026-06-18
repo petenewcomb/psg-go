@@ -701,7 +701,6 @@ func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inpu
 	w.input = input
 	w.inputErr = inputErr
 	w.wave = wave
-	op.funnelPool.inFlight.Increment()
 	op.ref() // Add reference for the funnel work
 }
 
@@ -817,8 +816,6 @@ func (w *funnelWork[T]) Free() {
 	traceRegion := "funnelWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", w, w)
-
-	w.op.funnelPool.inFlight.Decrement()
 
 	if w.req != nil {
 		// Normal completion already released at body end; this is the

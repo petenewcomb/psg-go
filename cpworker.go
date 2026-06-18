@@ -5,7 +5,6 @@ package psg
 
 import (
 	"context"
-	"math/rand/v2"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -18,11 +17,9 @@ type cpWorker struct {
 	integrationExEnv
 	cp *FunnelPool
 
-	idleTimer *time.Timer
-	doneCh    <-chan struct{}
-	doneErr   func() error
+	doneCh  <-chan struct{}
+	doneErr func() error
 
-	idleTimerCh    <-chan time.Time
 	nextJobFlushCh <-chan struct{}
 	followupFn     func(context.Context)
 	workRenotifyFn workq.RenotifyFunc
@@ -75,20 +72,9 @@ func (cw *cpWorker) AddWork(
 		cw.workRenotifyFn = nil
 	}()
 
-	// Capture the current idle timeout value to ensure consistency
-	idleTimeout := cw.cp.state.IdleTimeout()
-	if idleTimeout >= 0 {
-		// Add jitter to spread out mutex contention when multiple workers timeout
-		maxJitter := cw.cp.state.IdleJitter()
-		jitter := time.Duration(rand.Int64N(int64(maxJitter))) //nolint:gosec // jitter doesn't need crypto/rand
-		cw.idleTimer.Reset(idleTimeout + jitter)
-		cw.idleTimerCh = cw.idleTimer.C
-		defer func() {
-			cw.idleTimerCh = nil
-		}()
-	}
-
-	// Primary goroutine, no need for idle detection
+	// The single persistent flush driver never idle-exits (no idleTimer): it parks
+	// until a scheduled flush is due, the end-of-work flush fires, or the job is
+	// done.
 	workWaiters.WaitFunc(confirmWorkWaitFn,
 		func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			work, ok := cw.cp.funnelQueue.PopFrontFunc(
@@ -146,11 +132,6 @@ func (cw *cpWorker) popSelect(
 		// A scheduled flush deadline arrived; return so ExecuteOne re-drains
 		// the now-due scheduled work into the fresh queue.
 		trace.Logf(ctx, traceRegion, "received flush deadline signal")
-	case <-cw.idleTimerCh:
-		trace.Logf(ctx, traceRegion, "received idle timer signal")
-		if cw.cp.state.TryIdleExit() {
-			cw.err = workq.ErrEndOfWork
-		}
 	case <-cw.nextJobFlushCh:
 		trace.Logf(ctx, traceRegion, "received job flush signal")
 		cw.followupFn = func(ctx context.Context) {

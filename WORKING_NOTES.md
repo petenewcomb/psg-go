@@ -49,14 +49,29 @@ landed green + committed:
   CancelAndWait cancel waveCtx + release shells. Additive (still behind legacy
   execution); green. **This exhausts the cleanly-additive steps.**
 
-**Key finding for the rewire (from reading `taskWork.Execute`, job.go:115):** it
-already stamps wave/heldRequest onto *whatever ctxMeta is in the ctx* and runs
-`w.task.Execute(ctx, …)`. So the cut is fundamentally **switching the body's ctx
-from the worker ctx (legacy `taskExEnv`) to a borrowed shell ctx
-(`workerExEnv`)** — threaded with the E-handoff (worker → `work.Execute`), the
-dispatch reroute (`launcher` → `submit` → `defaultPool.Post` instead of
-`taskPostWork`→`taskQueue`), and deleting `runTasks`/`taskQueue`/`taskExEnv`/
-`*PostWork`. One contiguous concurrency-critical change, NO green intermediate.
+- **worker-exec core (`8fc378d`)** — the wave-5b execution core, additive + dormant:
+  `newWorkerState(poolCtx)` (factory now takes poolCtx; worker ctx derives from it +
+  carries E under `workerEnvKey`; no ctxMeta on the worker ctx) and
+  `runInShell(workerCtx, wave, ctxType, req, fn)` (reads E from workerCtx, borrows a
+  shell, stamps E+ctxType+req, runs fn under the shell ctx, returns it). 2 more
+  `-race` tests. **The ENTIRE wave-5b ctx+exec model is now green: poolCtx, shells,
+  body-runner, E-handoff.** Nothing Posts to defaultPool yet.
+
+**Key finding (from reading `taskWork.Execute`, job.go:115):** it already stamps
+wave/heldRequest onto *whatever ctxMeta is in the ctx* and runs `w.task.Execute(ctx,
+…)` — so the body logic is already shell-compatible; `runInShell` supplies the ctx.
+
+**►► REMAINING = the task-seam cutover (the irreducible NO-GREEN break).** Make
+`taskWork` a `workq.Work` (`Execute(ctx, ex) error` = `runUnderLimiter` →
+`runInShell` → `w.task.Execute(shell.ctx, group, completedFn)`); reroute task
+dispatch (`launcher.dispatch`/`newScatterWork`: today `launcherScatterWork`→
+`limiterScatterWork`→`taskPostWork`→`taskQueue` via `meta.ExecuteNowOrQueue`) to
+`submit`→`defaultPool.Post(taskWork)`; delete `runTasks`/`taskQueue`/`taskExEnv`/
+`taskPostWork`/`taskWorkerDemand`/spawn machinery. **Keep funnel+skim on the legacy
+per-Pool substrate** (task-first seam) → reaches green with task on the global pool,
+funnel/skim legacy. Then repeat for funnel, then skim. The shared dispatch ceremony
+(`ExecuteNowOrQueue` suspend/yield, governor) is split task-vs-rest during the
+transition. Anchor: `docs/global-substrate-activation.md`.
 - **DECISION TAKEN (gut-before-rename):** `Pool` stays the per-Wave *lifecycle*
   object (sheds worker substrate later); `ctxMeta` structurally unchanged
   (`job *Pool`); `Pool`→`Wave` rename deferred. This unblocked the shell.

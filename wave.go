@@ -25,6 +25,17 @@ type Wave struct {
 	// drain methods also tear down the Pool. When the Pool was
 	// supplied by the caller, lifecycle stays with the caller.
 	ownsPool bool
+
+	// wave-5b per-Wave substrate (being wired in; see
+	// docs/global-substrate-activation.md). waveCtx = WithCancel(the global
+	// defaultPool's poolCtx): per-wave cancellation and global pool teardown both
+	// reach a running body by context ancestry. shells hands out the per-wave
+	// borrowed execution contexts that global-pool workers run bodies under.
+	// NOT YET on the execution path — task/funnel/skim still run on the legacy
+	// per-Pool substrate until the producer cutover.
+	waveCtx    context.Context //nolint:containedctx // per-wave cancellation root
+	waveCancel context.CancelFunc
+	shells     execShellPool
 }
 
 // WaveOption configures a Wave at construction time.
@@ -93,6 +104,13 @@ func NewWave(parent context.Context, opts ...WaveOption) (context.Context, *Wave
 
 	w := &Wave{pool: pool, ownsPool: ownsPool}
 
+	// wave-5b: derive the per-wave cancellation root from the global pool's
+	// teardown context and build the per-wave execShell pool over it. Not yet on
+	// the execution path (legacy per-Pool substrate still runs the work), but
+	// owning them here is the structural foothold for the producer cutover.
+	w.waveCtx, w.waveCancel = context.WithCancel(defaultPool.PoolCtx())
+	w.shells.Init(w.waveCtx, pool, w)
+
 	// Inject the Wave into the ctxMeta of the returned ctx so op
 	// dispatches can find it. Use topLevelCtxMeta so the cached meta
 	// also has its executionEnvironment populated — otherwise
@@ -140,6 +158,10 @@ func resolveWave(opWave *Wave, ctx context.Context) *Wave {
 // the Wave owns its Pool (constructed via [NewWave] without
 // [WithPool]), this cancels the Pool's root context too.
 func (w *Wave) Cancel() {
+	// wave-5b: cancel the per-wave context. Once work runs under borrowed shells
+	// (descendants of waveCtx) this is what reaches a running body; today it is
+	// additive and the Pool cancel below still does the real teardown.
+	w.waveCancel()
 	if w.ownsPool {
 		w.pool.Cancel()
 		return
@@ -154,6 +176,11 @@ func (w *Wave) Cancel() {
 // When the Wave owns its Pool, the Pool's workers also exit before
 // this call returns.
 func (w *Wave) CancelAndWait() {
+	w.waveCancel()
+	// wave-5b: release the per-wave execShells. Harmless today (no body has
+	// borrowed one); once workers run bodies under shells this reaps their
+	// contexts promptly rather than waiting for waveCtx GC.
+	defer w.shells.release()
 	if w.ownsPool {
 		w.pool.CancelAndWait()
 		return

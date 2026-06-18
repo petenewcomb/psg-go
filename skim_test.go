@@ -124,7 +124,7 @@ func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 			return nil
 		},
 	)
-	funnelPool := psg.NewFunnelPool(wave.Pool())
+	funnelPool := wave
 	funnel := psg.NewFunnel(funnelPool, psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
 		return psg.FuncAccumulator[int]{
 			AccumulateFn: func(accCtx context.Context, v int, _ error) (time.Time, error) {

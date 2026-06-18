@@ -22,11 +22,11 @@ type FunnelOp[T any] = GenericFunnelOp[T, context.Context]
 // Both psgwf names will be revisited when psgwf consolidates into Flow
 // (Wave 7).
 func NewFunnelOp[T, C any](
-	funnelPool *psg.FunnelPool,
+	wave *psg.Wave,
 	funnelFactory GenericFunnelFactory[T, C],
 ) GenericFunnelOp[T, C] {
 	return GenericFunnelOp[T, C](psg.NewFunnel(
-		funnelPool,
+		wave,
 		wrapFunnelFactory(funnelFactory),
 	))
 }

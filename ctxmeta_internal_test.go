@@ -144,7 +144,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 	var funnelReq request
 	ctx2, wave2 := NewWave(context.Background())
 	defer wave2.CancelAndWait()
-	fp := NewFunnelPool(wave2.Pool())
+	fp := wave2
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
@@ -165,7 +165,7 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	ctx, wave := NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	fp := NewFunnelPool(wave.Pool())
+	fp := wave
 	var funnelMeta *ctxMeta
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{

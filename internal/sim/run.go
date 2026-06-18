@@ -62,7 +62,6 @@ func newController(plan *Plan, wave *psg.Wave, parent *controller) *controller {
 		Wave:                  wave,
 		parent:                parent,
 		TaskLimiters:          make([]psg.Limiter, len(plan.TaskLimiters)),
-		FunnelPool:            nil, // lazily constructed in ensurePools
 		FunnelLimiters:        make([]psg.Limiter, len(plan.FunnelLimiters)),
 		Skimmers:              make([]*psg.Skimmer[*simValue], len(plan.Skimmers)),
 		Funnels:               make([]*psg.Funnel[*simValue], len(plan.Funnels)),
@@ -106,7 +105,6 @@ type controller struct {
 	Plan           *Plan
 	Wave           *psg.Wave
 	TaskLimiters   []psg.Limiter
-	FunnelPool     *psg.FunnelPool
 	FunnelLimiters []psg.Limiter
 	Skimmers       []*psg.Skimmer[*simValue]
 	Funnels        []*psg.Funnel[*simValue]
@@ -116,7 +114,6 @@ type controller struct {
 	Launchers []psg.TaskLauncher
 
 	limitersOnce sync.Once
-	combPoolOnce sync.Once
 
 	// parent is the enclosing controller when this Plan runs as a
 	// Subjob; nil at top level. Read-only after construction; used by
@@ -165,7 +162,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		if len(cp.LimiterIndexes) > 0 {
 			opts = append(opts, psg.WithLimits(c.FunnelLimiters[cp.LimiterIndexes[0]]))
 		}
-		funnel := psg.NewFunnel(c.FunnelPool, c.newFunnelFactory(t, cp, idx), opts...)
+		funnel := psg.NewFunnel(c.Wave, c.newFunnelFactory(t, cp, idx), opts...)
 		c.Funnels[i] = &funnel
 	}
 	// Construct Launchers after Funnels/Skimmers so the bodies can
@@ -276,9 +273,8 @@ func (c *controller) ensurePools() {
 			c.funnelLimiterTrackers[i] = &limiterTracker{}
 		}
 	})
-	c.combPoolOnce.Do(func() {
-		c.FunnelPool = psg.NewFunnelPool(c.Wave.Pool())
-	})
+	// The funnel engine is now an internal per-job detail behind NewFunnel(wave);
+	// no FunnelPool to construct here anymore.
 }
 
 // executeStep dispatches a Step. Currently handles StartTask, Submit

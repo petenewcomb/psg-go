@@ -69,19 +69,22 @@ type Funnel[T any] struct {
 //
 //nolint:contextcheck // background context used only for tracing
 func NewFunnel[T any](
-	funnelPool *FunnelPool,
+	wave *Wave,
 	funnelFactory AccumulatorFactory[T],
 	opts ...OpOption,
 ) Funnel[T] {
 	traceRegion := "NewFunnel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	if funnelPool == nil {
-		panic("funnelPool must be non-nil")
+	if wave == nil {
+		panic("wave must be non-nil")
 	}
 	if funnelFactory == nil {
 		panic("funnelFactory must be non-nil")
 	}
+	// The funnel engine is an internal per-job detail shared by all funnels bound
+	// to Waves on the same job (lazily created here).
+	funnelPool := wave.pool.funnelPool()
 
 	cfg := resolveOpConfig(opts)
 
@@ -129,12 +132,12 @@ func NewFunnel[T any](
 // Pass nil for closeFn if the factory has no factory-level state
 // to release.
 func NewFnFunnel[T any](
-	funnelPool *FunnelPool,
+	wave *Wave,
 	newAccumulator func() Accumulator[T],
 	closeFn func() error,
 	opts ...OpOption,
 ) Funnel[T] {
-	return NewFunnel(funnelPool, NewAccumulatorFactory(newAccumulator, closeFn), opts...)
+	return NewFunnel(wave, NewAccumulatorFactory(newAccumulator, closeFn), opts...)
 }
 
 // ErrFunnel is the [Funnel][struct{}] case viewed as an err
@@ -159,13 +162,13 @@ type ErrFunnel = Funnel[struct{}]
 // [NewAccumulatorFactory] with a [NewErrAccumulator] inside the
 // factory closure.
 func NewErrFunnel(
-	funnelPool *FunnelPool,
+	wave *Wave,
 	accumulate func(ctx context.Context, err error) (time.Time, error),
 	flush func(ctx context.Context) error,
 	closeFn func() error,
 	opts ...OpOption,
 ) ErrFunnel {
-	return NewFunnel(funnelPool, NewErrAccumulatorFactory(accumulate, flush, closeFn), opts...)
+	return NewFunnel(wave, NewErrAccumulatorFactory(accumulate, flush, closeFn), opts...)
 }
 
 // Submit posts a value to the Funnel. Sugar for

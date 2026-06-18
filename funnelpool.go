@@ -37,13 +37,13 @@ type FunnelPool struct {
 	workQueue workq.Accepted
 }
 
-// NewFunnelPool creates a new FunnelPool bound to the specified job.
-//
-// Panics if the job is nil or in the done state.
+// newFunnelPool creates the job's internal funnel engine. Not user-facing: funnels
+// are created with NewFunnel(wave, ...), which calls Pool.funnelPool to lazily
+// build and share one of these per job.
 //
 //nolint:contextcheck // background context used only for tracing
-func NewFunnelPool(job *Pool, options ...psgopt.FunnelPoolOption) *FunnelPool {
-	traceRegion := "NewFunnelPool"
+func newFunnelPool(job *Pool) *FunnelPool {
+	traceRegion := "newFunnelPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	// Check if the job is done
@@ -62,11 +62,6 @@ func NewFunnelPool(job *Pool, options ...psgopt.FunnelPoolOption) *FunnelPool {
 	// workQueue holds only scheduled funnelInstance flushes (funnel BODY work runs
 	// on the global pool via defaultPool.Post). One persistent flusher drives it.
 	cp.workQueue.Init(nil)
-
-	// options are accepted for source compatibility but no longer mean anything:
-	// the funnel body runs on the global worker.Pool (uncapped), and there is a
-	// single persistent flush driver (no idle-exit / spawn concurrency to tune).
-	_ = options
 
 	// Run the single persistent flush driver (drains deadline-driven +
 	// end-of-work funnelInstance flushes until the job reaches Done).

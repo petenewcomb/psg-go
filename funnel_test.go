@@ -53,7 +53,7 @@ func TestFunnelFactoryCloseFires(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	funnelPool := psg.NewFunnelPool(wave.Pool())
+	funnelPool := wave
 	closeCount := 0
 	factory := psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
 		return psg.FuncAccumulator[int]{
@@ -79,7 +79,7 @@ func TestNewErrFunnel(t *testing.T) {
 	ctx, wave := psg.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	funnelPool := psg.NewFunnelPool(wave.Pool())
+	funnelPool := wave
 	var seen []error
 	funnel := psg.NewErrFunnel(
 		funnelPool,
@@ -119,7 +119,7 @@ func TestFunnelScatterFromTask(t *testing.T) {
 			return nil
 		},
 	)
-	funnelPool := psg.NewFunnelPool(wave.Pool())
+	funnelPool := wave
 	funnelOp := psg.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
@@ -157,7 +157,7 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 			return nil
 		},
 	)
-	funnelPool := psg.NewFunnelPool(parentWave.Pool())
+	funnelPool := parentWave
 	funnelOp := psg.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
@@ -207,7 +207,7 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 			return nil
 		},
 	)
-	funnelPool := psg.NewFunnelPool(parentWave.Pool())
+	funnelPool := parentWave
 	funnelOp := psg.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),

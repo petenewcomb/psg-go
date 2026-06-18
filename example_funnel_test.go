@@ -51,7 +51,7 @@ func ExampleFunnel() {
 	taskLimit := psg.NewSemaphore(nil, 2)
 
 	// Create a funnel pool and disable the idle timeout
-	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithIdleTimeout(-1))
+	funnelPool := wave
 
 	// Define a result aggregation function and create a funneld skim/funnel operation
 	skimmer := psg.NewSkimmer(wave, psg.HandlerFunc[map[string]int](skimFn))

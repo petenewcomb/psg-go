@@ -11,7 +11,6 @@ import (
 
 	"github.com/petenewcomb/psg-go"
 
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -33,7 +32,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		return nil
 	})
 
-	funnelPool := psg.NewFunnelPool(wave.Pool(), psgopt.WithMaxConcurrency(1)) // Force exactly 1 goroutine
+	funnelPool := wave // NOTE: WithMaxConcurrency(1) dropped (no-op now); serialization must move to a limiter
 
 	funnelOp := psg.NewFunnel(funnelPool, psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
 		return psg.FuncAccumulator[int]{

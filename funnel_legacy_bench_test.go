@@ -30,7 +30,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
-	"github.com/petenewcomb/psg-go/psgopt"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -599,7 +598,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 								return skimmer.TryStart(ctx, deadline, target, task)
 							}
 						} else {
-							funnelPool := psg.NewFunnelPool(job, psgopt.WithMaxConcurrency(funnelLimit))
+							funnelPool := wave
 							skimmer := psg.NewSkimmer(wave, psg.NewHandler(skimFn))
 							funnelFactory := func() psg.Accumulator[benchmarkTaskResult] {
 								return newBenchmarkFunnel(

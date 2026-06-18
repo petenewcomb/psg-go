@@ -251,58 +251,6 @@ type baseExEnv struct {
 func (ee *baseExEnv) Release() {
 }
 
-type taskExEnv struct {
-	baseExEnv
-	// group is the GroupID of the task currently executing on the worker
-	// that owns this exEnv. Set by the worker loop before invoking the
-	// task body and cleared after; user-facing Submit calls from inside
-	// the task pick it up via Group() so submissions ride on the task's
-	// group rather than always allocating a fresh one.
-	group workq.GroupID
-}
-
-// Lock/Unlock are no-ops in task context: the exEnv is per-worker and
-// the worker runs one task body at a time, so cross-goroutine
-// serialization isn't needed (matching integrationExEnv).
-func (ee *taskExEnv) Lock()   {}
-func (ee *taskExEnv) Unlock() {}
-
-func (ee *taskExEnv) Group() workq.GroupID {
-	return ee.group
-}
-
-func (ee *taskExEnv) PushGroup(workq.GroupID) {
-	panic("PushGroup not supported in task context")
-}
-
-func (ee *taskExEnv) PopGroup() {
-	panic("PopGroup not supported in task context")
-}
-
-func (ee *taskExEnv) QueueFunc() workq.QueueWorkFunc {
-	return nil
-}
-
-func (ee *taskExEnv) PushQueueFunc(workq.QueueWorkFunc) {
-	panic("PushQueueFunc not supported in task context")
-}
-
-func (ee *taskExEnv) PopQueueFunc() {
-	panic("PopQueueFunc not supported in task context")
-}
-
-func (ee *taskExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, work workq.Work) error {
-	err := work.Execute(ctx, ex)
-	if err != nil {
-		return err
-	}
-	if !ex.Started() {
-		panic("work not started")
-	}
-	work.Free()
-	return nil
-}
-
 type integrationExEnv struct {
 	baseExEnv
 	groupStack   []workq.GroupID

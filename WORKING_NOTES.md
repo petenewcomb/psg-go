@@ -61,23 +61,29 @@ landed green + committed:
 wave/heldRequest onto *whatever ctxMeta is in the ctx* and runs `w.task.Execute(ctx,
 …)` — so the body logic is already shell-compatible; `runInShell` supplies the ctx.
 
-**►► REMAINING = the task-seam cutover (the irreducible NO-GREEN break).**
+**►► TASK-SEAM CUTOVER — ✓ DONE + GREEN, landed on combiner (2026-06-18).** Task
+work now runs entirely on the global `worker.Pool` + shared `workq.Queue` via
+borrowed per-wave execShells; legacy `runTasks`/`taskQueue`/`taskExEnv`/
+`*PostWork`-task-handoff deleted. FULLY GREEN: all root `psg` tests + examples
+(3/3 + 20/20 example runs), sim `-race` rapid.checks=120 in ~11s, build/vet/lint0.
+(psgwf `Example_clientTimeout` flake is pre-existing.) Three bugs found+fixed:
+spawn deadlock (release the spawn slot at work-secure not post-body → new
+`workq.Worker.WithOnSecure`; a task body that synchronously drains a nested subwave
+blocks inside its first drive and would pin the lone spawn slot); cross-job guard
+(thread the wave's `parentJobs` ancestry into the shell metas); de-stampede scaling
+(bounded `spawnConcurrencyLimit`=1 restored once safe — was the `-race` blowup).
 
-**⚠ WIP IN PROGRESS on branch `combiner-wip-taskcut` (commit `4d3e445`): BUILDS,
-HANGS.** The structural cut is done + compiles there: `taskWork` is a `workq.Work`
-(`Execute`=`ex.Starting()`+`runInShell`), `taskPostWork.Execute`→`defaultPool.Post`,
-legacy `runTasks`/`spawnTaskWorker`/`trySpawnTaskWorker` deleted. Runtime HANGS:
-the Wave↔`defaultPool` lifecycle is unwired (drain waits on the now-empty `j.wg`).
-**Resume on that branch.** Next: (1) wire `defaultPool.Acquire()` in `NewWave` +
-`Release()` at drain completion, and make per-wave drain wait for jobstate Done
-(task bodies finish on the GLOBAL workers via `DecrementWork` in `taskWork.Free`),
-not `j.wg`; (2) diagnose remaining hang with the `sim-trace-debugging` skill; (3)
-delete dead leftovers (`taskQueue` field+Init, taskWorker idle/jitter/spawn fields+
-Init+SetOptions, `tryTaskWorkerIdleExit`, `demandRegistered`, `taskExEnv`). The
-plan below is the spec; the branch is the in-progress execution.
+**►► NEXT: funnel seam** (same proven pattern): make the funnel body work a
+`workq.Work` running via `runInShell`, reroute `funnelPostWork.Execute` →
+`defaultPool.Post`, delete `cpWorker`/`FunnelPool` goroutine/spawn machinery +
+`cpstate`. Funnel is harder than task (the flush + the `cpWorker.(*cpWorker)`
+assertion at funnelop.go:801 → `(*workerExEnv)`; the per-wave flusher design is in
+docs §6). Then: skim seam; `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait`
+joins global workers; limiter post-admission move + governor/`submit` collapse;
+`Pool`→`Wave` rename. Anchor: `docs/global-substrate-activation.md`.
 
-**REFINED PLAN (2026-06-18, lower-risk — keep the limiter at dispatch, reroute only
-the HANDOFF).** Reading the wrappers (launcher.go:363 `launcherScatterWork.Execute`
+**REFERENCE — the task-seam plan that was executed (kept for the funnel/skim
+seams, which mirror it).** Reading the wrappers (launcher.go:363 `launcherScatterWork.Execute`
 = governor gate; limiter.go:654 `limiterScatterWork.Execute` = `acquireOrWait` at
 DISPATCH; `taskPostWork.Execute` = handoff to `taskQueue`) shows the permit is
 acquired at **dispatch**, before the handoff — the OPPOSITE of the new model's

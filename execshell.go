@@ -56,16 +56,24 @@ type execShellPool struct {
 	waveCtx context.Context //nolint:containedctx // the ancestor every shell ctx derives from
 	job     *Pool           // the per-wave lifecycle object stamped as meta.job
 	wave    *Wave           // stamped as meta.wave (the shells are this wave's)
-	free    nbcq.Queue[*execShell]
+	// parentJobs is the wave's cross-job ancestry (the jobs this wave descends
+	// from), stamped onto every shell meta so the "Context belongs to a child job"
+	// guards (Pool.ctxMeta / ensureCtxMeta) fire correctly for bodies that reach
+	// across job boundaries (e.g. a sub-task skimming its parent job). Read-only
+	// after Init; ensureCtxMeta copies before extending, so sharing is safe.
+	parentJobs map[*Pool]struct{}
+	free       nbcq.Queue[*execShell]
 }
 
 // Init wires the pool to its wave. waveCtx is the ancestor for every shell context
 // (so wave cancel / pool teardown propagate); job and wave are the fixed
-// per-execution identity stamped into every shell's meta.
-func (p *execShellPool) Init(waveCtx context.Context, job *Pool, wave *Wave) {
+// per-execution identity stamped into every shell's meta; parentJobs is the wave's
+// job ancestry (from the top-level meta ensureCtxMeta built at NewWave).
+func (p *execShellPool) Init(waveCtx context.Context, job *Pool, wave *Wave, parentJobs map[*Pool]struct{}) {
 	p.waveCtx = waveCtx
 	p.job = job
 	p.wave = wave
+	p.parentJobs = parentJobs
 	p.free.Init()
 }
 
@@ -106,9 +114,10 @@ func (p *execShellPool) giveBack(s *execShell) {
 func (p *execShellPool) newShell() *execShell {
 	execCtx, cancel := context.WithCancel(p.waveCtx)
 	meta := &ctxMeta{
-		job:    p.job,
-		wave:   p.wave,
-		parent: nil,
+		job:        p.job,
+		wave:       p.wave,
+		parent:     nil,
+		parentJobs: p.parentJobs,
 	}
 	// Stamp the meta onto the context under the same key the framework reads
 	// (ctxMetaValueKey); ctxmap.Map.WithValue resolves it via ctx.Value, so

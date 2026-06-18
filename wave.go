@@ -105,11 +105,9 @@ func NewWave(parent context.Context, opts ...WaveOption) (context.Context, *Wave
 	w := &Wave{pool: pool, ownsPool: ownsPool}
 
 	// wave-5b: derive the per-wave cancellation root from the global pool's
-	// teardown context and build the per-wave execShell pool over it. Not yet on
-	// the execution path (legacy per-Pool substrate still runs the work), but
-	// owning them here is the structural foothold for the producer cutover.
+	// teardown context. The execShell pool is Init'd below, once the top-level meta
+	// gives us the wave's job ancestry (parentJobs).
 	w.waveCtx, w.waveCancel = context.WithCancel(defaultPool.PoolCtx())
-	w.shells.Init(w.waveCtx, pool, w)
 
 	// Inject the Wave into the ctxMeta of the returned ctx so op
 	// dispatches can find it. Use topLevelCtxMeta so the cached meta
@@ -124,6 +122,14 @@ func NewWave(parent context.Context, opts ...WaveOption) (context.Context, *Wave
 		}
 	})
 	meta.wave = w
+
+	// Build the per-wave execShell pool, stamping the wave's job ancestry
+	// (meta.parentJobs, computed by ensureCtxMeta when this wave descends from a
+	// body in another job) onto every shell so the cross-job guards fire. Not yet
+	// on the execution path for funnel/skim (legacy per-Pool substrate runs those);
+	// task bodies run under these shells.
+	w.shells.Init(w.waveCtx, pool, w, meta.parentJobs)
+
 	return ctx, w
 }
 

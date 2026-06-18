@@ -6,10 +6,7 @@ package psg
 import (
 	"context"
 	"errors"
-	"fmt"
-	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -41,17 +38,6 @@ type Pool struct {
 
 	workQueue workq.Accepted
 
-	taskQueue                       rdvq.Queue[*taskWork]
-	taskWorkerIdleTimeout           atomic.Int64 // stores time.Duration as nanoseconds
-	taskWorkerIdleJitter            atomic.Int64 // stores time.Duration as nanoseconds
-	taskWorkerSpawnConcurrencyLimit atomic.Int64 // maximum concurrent task worker spawns
-
-	taskWorkersSpawning jobstate.InFlightCounter // count of workers in spawning state
-	taskWorkerDemand    jobstate.InFlightCounter // count of tasks waiting for workers
-
-	taskWorkerMu             sync.Mutex
-	latestTaskWorkerIdleExit time.Time // protected by taskWorkerMu
-
 	ctxMetaMap     ctxmap.Map[ctxMetaValueKey, *ctxMeta]
 	skimCtxMetaMap ctxmap.Map[skimCtxMetaValueKey, *Pool]
 
@@ -67,6 +53,7 @@ func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, req request, wav
 
 	w := taskWorkPool.Get()
 	w.Init(group, j)
+	w.job = j
 	w.task = task
 	w.req = req
 	if req != nil {
@@ -82,6 +69,9 @@ func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, req request, wav
 
 type taskWork struct {
 	poolWork
+	// job is stored so Free() satisfies workq.Work (no-arg); taskWork is now a
+	// workq.Work run by the global pool's workers.
+	job  *Pool
 	task boundTask
 	// req is the Limiter request handle this task's admission was granted
 	// through; nil for unlimited ops. The taskWork owns the handle's
@@ -93,60 +83,42 @@ type taskWork struct {
 	// wave is the dispatching Wave; stamped onto the worker's
 	// ctxMeta during Execute so nil-wave op dispatches from the task
 	// body can resolve it.
-	wave             *Wave
-	demandRegistered atomic.Bool
+	wave *Wave
 }
 
 func (w *taskWork) Reset() {
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), "taskWork.Reset",
-			"DEMAND_RESET task=%p demandRegistered=%v", w, w.demandRegistered.Load())
-	}
 	w.poolWork = poolWork{}
+	w.job = nil
 	w.task = nil
 	w.req = nil
 	w.completedFn = nil
 	w.wave = nil
-	if w.demandRegistered.Load() {
-		panic(fmt.Sprintf("taskWork.Reset: demandRegistered still true - unbalanced demand counter (task=%p)", w))
-	}
 }
 
-func (w *taskWork) Execute(ctx context.Context) {
+// Execute is the workq.Work entry run by a global-pool worker. It borrows a
+// per-wave execShell (supplying the body's context + ctxMeta with this worker's E),
+// stamps the held limiter request, and runs the task body under the shell ctx. The
+// permit was already acquired at dispatch (limiterScatterWork, transitional), so
+// runInShell only stamps w.req as heldRequest so framework parking points inside
+// the body can suspend it.
+func (w *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	// Stamp the dispatching wave onto the worker's per-worker ctxMeta
-	// so nil-wave op dispatches inside the task body resolve to it.
-	// The worker's ctxMeta is exclusive to this goroutine for the
-	// task's lifetime; mutation is race-free as long as user code
-	// doesn't capture ctx into a goroutine that outlives the body.
-	if meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta); ok {
-		prev := meta.wave
-		meta.wave = w.wave
-		defer func() { meta.wave = prev }()
-		if w.req != nil {
-			// Stamp the held limiter request so framework parking points
-			// inside the body can suspend it (currentHeldRequest). Stamp
-			// sites must be chain roots — see ctxMeta.parent.
-			if meta.parent != nil {
-				panic("limiter request stamped on non-root ctxMeta; worker contexts must be fresh permit-roots")
-			}
-			prevReq := meta.heldRequest
-			meta.heldRequest = w.req
-			defer func() { meta.heldRequest = prevReq }()
-		}
-	}
-
-	w.task.Execute(ctx, w.Group(), w.completedFn)
+	ex.Starting()
+	return runInShell(ctx, w.wave, taskContext, w.req, func(shellCtx context.Context) error {
+		w.task.Execute(shellCtx, w.Group(), w.completedFn)
+		return nil
+	})
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *taskWork) Free(job *Pool) {
+func (w *taskWork) Free() {
 	traceRegion := "taskWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", w)
 
+	job := w.job
 	w.task.Free()
 	if w.req != nil {
 		// Normal completion already released (completedFn); release here
@@ -156,13 +128,6 @@ func (w *taskWork) Free(job *Pool) {
 		w.req.release()
 		freeRequest(w.req)
 		w.req = nil
-	}
-	// If demand was registered but task never picked up, decrement the counter
-	if w.demandRegistered.CompareAndSwap(true, false) {
-		if trace.IsEnabled() {
-			trace.Logf(context.Background(), traceRegion, "DEMAND_DEC_FREE task=%p counter=%p", w, &job.taskWorkerDemand)
-		}
-		job.taskWorkerDemand.Decrement()
 	}
 	w.Close(job)
 	taskWorkPool.Put(w)
@@ -196,18 +161,13 @@ func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
 	j.addWorkFn = j.addWork
 
 	trace.Logf(ctx, traceRegion,
-		"Pool=%p, state=%p, skimQueue=%p, governor=%p, workQueue=%p, taskQueue=%p",
-		j, &j.state, &j.skimQueue, &j.governor, &j.workQueue, &j.taskQueue)
+		"Pool=%p, state=%p, skimQueue=%p, governor=%p, workQueue=%p",
+		j, &j.state, &j.skimQueue, &j.governor, &j.workQueue)
 
 	j.state.Init()
 	j.skimQueue.Init()
 	j.governor.Init()
 	j.workQueue.Init(nil)
-	j.taskQueue.Init()
-	// taskWorkersSpawning zero-value ready, no init needed
-	j.taskWorkerIdleTimeout.Store(int64(psgopt.DefaultTaskWorkerIdleTimeout))
-	j.taskWorkerIdleJitter.Store(int64(psgopt.DefaultTaskWorkerIdleJitter))
-	j.taskWorkerSpawnConcurrencyLimit.Store(int64(psgopt.DefaultTaskWorkerSpawnConcurrencyLimit))
 
 	// Apply user options
 	j.SetOptions(options...)
@@ -772,179 +732,6 @@ func (j *Pool) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMet
 	}
 }
 
-// spawnTaskWorkerGoroutine spawns a new task worker goroutine.
-// Caller must have already incremented taskWorkersSpawning.
-//
-//nolint:contextcheck // goroutine will use job context
-func (j *Pool) spawnTaskWorker() {
-	traceRegion := "Pool.spawnTaskWorker"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	j.wg.Add(1)
-	go j.runTasks()
-}
-
-// Attempts to spawn a worker if we're under the spawn concurrency limit.
-//
-//nolint:contextcheck // background context used only for tracing
-func (j *Pool) trySpawnTaskWorker() bool {
-	traceRegion := "Pool.trySpawnTaskWorker"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	// Try to spawn within concurrency limit
-	limit := int(j.taskWorkerSpawnConcurrencyLimit.Load())
-	if limit == -1 {
-		// Unlimited - always spawn
-		j.taskWorkersSpawning.Increment()
-	} else if !j.taskWorkersSpawning.IncrementIfUnder(limit) {
-		// Limited - spawn only if under limit
-		return false
-	}
-
-	j.spawnTaskWorker()
-	return true
-}
-
-//nolint:contextcheck // task worker goroutine will use job context
-func (j *Pool) runTasks() {
-	defer j.wg.Done()
-
-	var task *taskWork
-
-	spawning := true
-	defer func() {
-		if spawning {
-			j.taskWorkersSpawning.Decrement() // Safety: always release if still spawning
-		}
-	}()
-
-	traceRegion := "taskWorker.Run"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Pool=%p, spawning=%v", j, spawning)
-
-	goroutineCtx, cancelGoroutineCtx := context.WithCancel(j.ctx)
-	defer func() {
-		trace.Logf(context.Background(), traceRegion, "canceling goroutine context")
-		cancelGoroutineCtx()
-	}()
-
-	var exEnv taskExEnv
-	defer exEnv.Release()
-
-	ctx, _ := j.ensureCtxMeta(goroutineCtx,
-		func(ctx context.Context, meta *ctxMeta) context.Context {
-			meta.ctxType = taskContext
-			// Create execution environment with access to outboxes
-			meta.executionEnvironment = &exEnv
-			// Worker contexts are fresh permit-roots: for a subjob, j.ctx
-			// carries the dispatching body's meta from a foreign pool, and
-			// inheriting the parent link would let this worker find that
-			// body's held limiter permit across the goroutine boundary.
-			meta.parent = nil
-			return ctx
-		},
-	)
-
-	var idleTimer *time.Timer
-	defer func() {
-		if idleTimer != nil {
-			timerp.Put(idleTimer)
-		}
-	}()
-
-	for {
-		// Fast-path: check the queue before expensive waiter registration
-		if task == nil {
-			if t, ok := j.taskQueue.TryPopFront(); ok {
-				task = t
-			}
-		}
-
-		if task != nil {
-			// Decrement demand counter when worker receives task
-			if task.demandRegistered.CompareAndSwap(true, false) {
-				if trace.IsEnabled() {
-					trace.Logf(ctx, traceRegion, "DEMAND_DEC_WORKER task=%p counter_before=%p", task, &j.taskWorkerDemand)
-				}
-				j.taskWorkerDemand.Decrement()
-			}
-
-			// Secured task - release spawn counter
-			if spawning {
-				spawning = false
-				if j.taskWorkerDemand.IsZero() {
-					j.taskWorkersSpawning.Decrement()
-				} else {
-					j.spawnTaskWorker()
-				}
-			}
-
-			// Execute the task. Publish the task's group on the exEnv so
-			// user-facing Submit calls from inside the task body inherit
-			// that group instead of allocating a fresh one.
-			func() {
-				defer task.Free(j)
-				exEnv.group = task.Group()
-				defer func() { exEnv.group = workq.InvalidGroupID }()
-				task.Execute(ctx)
-			}()
-			task = nil
-			continue
-		}
-
-		// No immediately available work - now worth paying waiter registration cost
-		// Wait for next task with timeout
-		idleTimeout := time.Duration(j.taskWorkerIdleTimeout.Load())
-		var idleTimerCh <-chan time.Time
-		if idleTimeout != -1 {
-			// Timeout enabled - ensure we have a timer and set it
-			if idleTimer == nil {
-				idleTimer = timerp.Get()
-			}
-			maxJitter := time.Duration(j.taskWorkerIdleJitter.Load())
-			jitter := time.Duration(rand.Int64N(int64(maxJitter))) //nolint:gosec // jitter doesn't need crypto/rand
-			timerp.Reset(idleTimer, idleTimeout+jitter)
-			idleTimerCh = idleTimer.C
-		} else if idleTimer != nil {
-			// Timeout disabled - return timer to pool
-			timerp.Put(idleTimer)
-			idleTimer = nil
-		}
-
-		exit := false
-		t, ok := j.taskQueue.PopFrontFunc(
-			func(inboxCh <-chan *taskWork, outboxWaitCh <-chan rdvq.RenotifyFunc) (result rdvq.PopSelectResult[*taskWork]) {
-				trace.Logf(ctx, traceRegion,
-					"entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
-				select {
-				case received := <-inboxCh:
-					trace.Logf(ctx, traceRegion, "received task from inboxCh=%p", inboxCh)
-					result.InboxEmptied(received)
-				case rf := <-outboxWaitCh:
-					trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
-					result.OutboxReady(rf)
-				case <-idleTimerCh:
-					trace.Logf(ctx, traceRegion, "received signal from idle timer")
-					exit = j.tryTaskWorkerIdleExit()
-				case <-ctx.Done():
-					trace.Logf(ctx, traceRegion, "received context done signal")
-					exit = true
-				}
-				return
-			},
-		)
-		if ok {
-			task = t
-			exit = false // Got a task; ignore any concurrent exit signal — process it first
-		}
-		if exit {
-			if task != nil {
-				panic("exiting with non-nil task")
-			}
-			break
-		}
-	}
-}
-
 type taskPostWork struct {
 	poolWork
 	job  *Pool
@@ -958,84 +745,17 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 		trace.Logf(ctx, traceRegion, "%v", w)
 	}
 
-	registerDemand := func() {
-		if w.task.demandRegistered.CompareAndSwap(false, true) {
-			w.job.taskWorkerDemand.Increment()
-			if trace.IsEnabled() {
-				trace.Logf(ctx, traceRegion, "DEMAND_INC task=%p counter=%p", w.task, &w.job.taskWorkerDemand)
-			}
-		}
-		w.job.trySpawnTaskWorker()
-	}
-
-	posted, err := func() (bool, error) {
-		ctx, meta := w.job.ctxMeta(ctx)
-
-		bufferedFn := func() {
-			// Work was buffered in the sender's outbox because a task worker wasn't
-			// immediately available -- go ahead and start one if we can.
-			registerDemand()
-		}
-
-		tryPost := func() bool {
-			// Try non-blocking post - can be retried if it fails
-			return w.job.taskQueue.TryPushBack(w.task, bufferedFn)
-		}
-
-		for {
-			if tryPost() {
-				return true, nil
-			}
-
-			if !ex.ShouldBlockOrPostpone() {
-				return false, nil
-			}
-
-			// Post attempt failed, need more task workers
-			registerDemand()
-
-			if !meta.ShouldBlock() {
-				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(w.job.taskQueue.ListenersFor())
-
-				// Check again after registering for notification, but return
-				// and expect to be called again if needed
-				posted := tryPost()
-				if trace.IsEnabled() {
-					trace.Logf(ctx, traceRegion, "meta.ShouldBlock() == false, posted=%v", posted)
-				}
-
-				return posted, nil
-			}
-
-			// Use blocking post
-			posted := true
-			var err error
-			w.job.taskQueue.PushBackFunc(w.task, bufferedFn, func(outboxCh chan<- *taskWork) bool {
-				posted = false
-
-				// Slow path, really going to block now
-				ex.Blocking()
-
-				var sent bool
-				sent, err = rdvq.BasicPushSelect[*taskWork](ctx, outboxCh, w.task)
-				if sent {
-					posted = true
-				}
-				return sent
-			})
-			if trace.IsEnabled() {
-				trace.Logf(ctx, traceRegion, "meta.ShouldBlock() == true, posted=%v, err=%v", posted, err)
-			}
-			if posted || err != nil {
-				return posted, err
-			}
-		}
-	}()
-
+	// Handoff to the GLOBAL pool's shared work queue: the unified Queue.Post
+	// replaces the legacy taskQueue try/listen/block loop, and the pool's
+	// unmet-demand signal (trySpawnWorker) replaces registerDemand/
+	// trySpawnTaskWorker. Spawn/governor are handled elsewhere (governor at
+	// launcherScatterWork, spawn at defaultPool). onWait is nil for task (no
+	// downstream governor registration here).
+	ctx, meta := w.job.ctxMeta(ctx)
+	posted, err := defaultPool.Post(ctx, ex, meta.ShouldBlock(), w.task, nil)
 	if posted {
-		ex.Starting() // Signal success only if we actually posted
-		w.task = nil  // Clear the work reference since it's now owned by the queue
+		// Ownership transferred to the queue; the worker will run + Free it.
+		w.task = nil
 	}
 	return err
 }
@@ -1049,7 +769,7 @@ func (w *taskPostWork) Free() {
 	// Free the nested task work if we still own it
 	if w.task != nil {
 		trace.Logf(context.Background(), traceRegion, "w.task.Free()")
-		w.task.Free(w.job)
+		w.task.Free()
 	}
 
 	w.Close(w.job)
@@ -1130,34 +850,14 @@ type poolConfigWrapper struct {
 }
 
 func (w poolConfigWrapper) Update(changes opts.PoolConfigChanges) {
-	if changes.TaskWorkerIdleTimeout != nil {
-		w.job.taskWorkerIdleTimeout.Store(int64(*changes.TaskWorkerIdleTimeout))
-	}
-	if changes.TaskWorkerIdleJitter != nil {
-		w.job.taskWorkerIdleJitter.Store(int64(*changes.TaskWorkerIdleJitter))
-	}
-	if changes.TaskWorkerSpawnConcurrencyLimit != nil {
-		w.job.taskWorkerSpawnConcurrencyLimit.Store(int64(*changes.TaskWorkerSpawnConcurrencyLimit))
-	}
+	// TRANSITIONAL: the task-worker idle/jitter/spawn-limit options are now no-ops
+	// (the global worker.Pool owns worker lifecycle; its idle/spawn behavior is
+	// fixed, not per-job tunable). The option API is still accepted for source
+	// compatibility; removing WithTaskWorker* from psgopt is the options-fallout
+	// cleanup. See docs/global-substrate-activation.md.
 	if changes.FlushListener != nil {
 		w.job.state.SetFlushListener(*changes.FlushListener)
 	}
-}
-
-// tryTaskWorkerIdleExit attempts to record an idle task worker exit. Returns true if this worker
-// is allowed to exit (enough time has passed since latest exit), false if
-// another worker exited too recently and this worker should retry later.
-func (j *Pool) tryTaskWorkerIdleExit() bool {
-	j.taskWorkerMu.Lock()
-	defer j.taskWorkerMu.Unlock()
-
-	now := time.Now()
-	idleTimeout := time.Duration(j.taskWorkerIdleTimeout.Load())
-	if now.Sub(j.latestTaskWorkerIdleExit) >= idleTimeout {
-		j.latestTaskWorkerIdleExit = now
-		return true
-	}
-	return false
 }
 
 // SetOptions applies the given configuration options to the job.

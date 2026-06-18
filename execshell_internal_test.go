@@ -15,7 +15,7 @@ func newTestShellPool(t *testing.T) (*execShellPool, context.CancelFunc) {
 	t.Helper()
 	waveCtx, cancel := context.WithCancel(context.Background())
 	p := &execShellPool{}
-	p.Init(waveCtx, nil, nil)
+	p.Init(waveCtx, nil, nil, nil)
 	return p, cancel
 }
 
@@ -118,7 +118,7 @@ func TestRunInShell_RunsBodyUnderShell(t *testing.T) {
 	waveCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &Wave{}
-	w.shells.Init(waveCtx, nil, w)
+	w.shells.Init(waveCtx, nil, w, nil)
 
 	// A worker context carries the worker's E under workerEnvKey (newWorkerState).
 	ee := &workerExEnv{}
@@ -171,7 +171,7 @@ func TestRunInShell_ReturnsShellForReuse(t *testing.T) {
 	waveCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &Wave{}
-	w.shells.Init(waveCtx, nil, w)
+	w.shells.Init(waveCtx, nil, w, nil)
 	ee := &workerExEnv{}
 	workerCtx := context.WithValue(context.Background(), workerEnvKey{}, ee)
 

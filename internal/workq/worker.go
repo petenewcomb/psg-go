@@ -48,6 +48,13 @@ type Worker[E ExecEnv] struct {
 	idle time.Duration   // >0: idle-exit after this long with nothing to do
 	done <-chan struct{} // pool stop / termination; nil for skim
 
+	// onSecure, if set, fires EXACTLY ONCE the first time this worker secures a
+	// work item from the queue — before the body runs. worker.Pool uses it to
+	// release its spawn-concurrency slot at work-secure rather than after the
+	// (possibly long/blocking) body, so a blocked body never pins the slot.
+	onSecure func()
+	secured  bool
+
 	// reusable scratch (avoid per-drive alloc)
 	pullFn    AddWorkFunc
 	idleTimer *time.Timer
@@ -62,8 +69,9 @@ type Worker[E ExecEnv] struct {
 type WorkerOption func(*workerOpts)
 
 type workerOpts struct {
-	idle time.Duration
-	done <-chan struct{}
+	idle     time.Duration
+	done     <-chan struct{}
+	onSecure func()
 }
 
 // WithIdleExit makes the worker exit after d with nothing to do (pool workers
@@ -74,6 +82,11 @@ func WithIdleExit(d time.Duration) WorkerOption { return func(o *workerOpts) { o
 // current drive (worker.Pool's definitive Wait).
 func WithStop(done <-chan struct{}) WorkerOption { return func(o *workerOpts) { o.done = done } }
 
+// WithOnSecure registers a callback fired once, the first time the worker secures
+// a work item (before the body runs). worker.Pool uses it to release its spawn slot
+// at work-secure rather than post-body.
+func WithOnSecure(fn func()) WorkerOption { return func(o *workerOpts) { o.onSecure = fn } }
+
 // NewWorker binds a worker to q with per-worker state and the already-wired
 // worker ctx (E is its ctxMeta executionEnvironment).
 func NewWorker[E ExecEnv](q *Queue, state E, workerCtx context.Context, opts ...WorkerOption) *Worker[E] {
@@ -81,9 +94,19 @@ func NewWorker[E ExecEnv](q *Queue, state E, workerCtx context.Context, opts ...
 	for _, opt := range opts {
 		opt(&o)
 	}
-	w := &Worker[E]{q: q, state: state, ctx: workerCtx, idle: o.idle, done: o.done}
+	w := &Worker[E]{q: q, state: state, ctx: workerCtx, idle: o.idle, done: o.done, onSecure: o.onSecure}
 	w.pullFn = w.pull
 	return w
+}
+
+// markSecured fires onSecure exactly once, when this worker first obtains work.
+func (w *Worker[E]) markSecured() {
+	if !w.secured {
+		w.secured = true
+		if w.onSecure != nil {
+			w.onSecure()
+		}
+	}
 }
 
 // DriveOne processes at most one work item: priority fresh → postponed → pull a
@@ -138,6 +161,7 @@ func (w *Worker[E]) pull(
 	if waiters == nil {
 		// Non-blocking probe (the old TryAddWorkFunc path).
 		if work, ok := w.q.incoming.TryPopFront(); ok {
+			w.markSecured()
 			queueFn(work)
 		}
 		return nil, nil
@@ -166,6 +190,7 @@ func (w *Worker[E]) pull(
 		},
 	)
 	if newWork != nil {
+		w.markSecured()
 		queueFn(newWork)
 	}
 	if w.exit && w.selErr == nil {

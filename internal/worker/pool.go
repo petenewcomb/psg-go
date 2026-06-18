@@ -228,33 +228,37 @@ func (p *Pool[E]) runWorker(poolCtx context.Context) {
 	state, ctx, cancel := p.newState(poolCtx)
 	defer cancel()
 
-	// poolCtx.Done() is the definitive-stop signal (pool teardown); the worker
-	// captured poolCtx at spawn, so a later re-arm never reaches it.
-	w := workq.NewWorker(&p.sharedQueue, state, ctx,
-		workq.WithStop(poolCtx.Done()), workq.WithIdleExit(workerIdleTimeout))
-	defer w.Release()
-
-	// spawning is true until this worker's first drive completes, after which it
-	// leaves the spawning set. The safety defer releases the slot if we never get
-	// there (e.g. a panic before the first drive); after the first iteration
-	// spawning is false, so it is a no-op.
+	// spawning is true until this worker leaves the spawn set, which happens at
+	// WORK-SECURE (onSecure, before the body runs) — NOT after the first drive.
+	// Releasing post-body would let a long/blocking body (e.g. a task that
+	// synchronously drains a nested subwave) pin the spawn-concurrency slot and
+	// deadlock the demand that needs another worker. On securing work the worker
+	// also extends the spawn chain (a backlog may remain). The safety defer
+	// releases the slot if the worker exits without ever securing (idled out on its
+	// first drive) or panics before securing.
 	spawning := true
-	defer func() {
-		if spawning {
-			p.spawning.Decrement()
-		}
-	}()
-
-	for {
-		_, err := w.DriveOne(ctx)
+	releaseSpawn := func(extendChain bool) {
 		if spawning {
 			spawning = false
 			p.spawning.Decrement()
-			if err == nil {
-				// Found and ran work: a backlog may remain, so extend the chain.
+			if extendChain {
 				p.trySpawnWorker()
 			}
 		}
+	}
+	defer releaseSpawn(false)
+
+	// poolCtx.Done() is the definitive-stop signal (pool teardown); the worker
+	// captured poolCtx at spawn, so a later re-arm never reaches it. onSecure fires
+	// on this same goroutine inside DriveOne, so releaseSpawn's access to spawning
+	// is race-free.
+	w := workq.NewWorker(&p.sharedQueue, state, ctx,
+		workq.WithStop(poolCtx.Done()), workq.WithIdleExit(workerIdleTimeout),
+		workq.WithOnSecure(func() { releaseSpawn(true) }))
+	defer w.Release()
+
+	for {
+		_, err := w.DriveOne(ctx)
 		if err != nil {
 			// ErrEndOfWork (idle scale-to-zero or definitive stop) or a context
 			// cancellation: this worker is done.
@@ -273,6 +277,8 @@ func (p *Pool[E]) runWorker(poolCtx context.Context) {
 const workerIdleTimeout = 1 * time.Second
 
 // spawnConcurrencyLimit caps how many workers may be spawning simultaneously
-// (bounds burst spawn, not total workers); <0 means unlimited. The spawn chain
-// already self-throttles, so a small constant suffices.
+// (bounds burst spawn, not total workers); <0 means unlimited. The slot is held
+// only between spawn and WORK-SECURE (onSecure), never through a body, so a
+// blocking body can't pin it (see runWorker). The spawn chain self-throttles the
+// ramp; this small constant just de-stampedes a demand burst.
 const spawnConcurrencyLimit = 1

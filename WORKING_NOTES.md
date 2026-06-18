@@ -63,6 +63,19 @@ wave/heldRequest onto *whatever ctxMeta is in the ctx* and runs `w.task.Execute(
 
 **►► REMAINING = the task-seam cutover (the irreducible NO-GREEN break).**
 
+**⚠ WIP IN PROGRESS on branch `combiner-wip-taskcut` (commit `4d3e445`): BUILDS,
+HANGS.** The structural cut is done + compiles there: `taskWork` is a `workq.Work`
+(`Execute`=`ex.Starting()`+`runInShell`), `taskPostWork.Execute`→`defaultPool.Post`,
+legacy `runTasks`/`spawnTaskWorker`/`trySpawnTaskWorker` deleted. Runtime HANGS:
+the Wave↔`defaultPool` lifecycle is unwired (drain waits on the now-empty `j.wg`).
+**Resume on that branch.** Next: (1) wire `defaultPool.Acquire()` in `NewWave` +
+`Release()` at drain completion, and make per-wave drain wait for jobstate Done
+(task bodies finish on the GLOBAL workers via `DecrementWork` in `taskWork.Free`),
+not `j.wg`; (2) diagnose remaining hang with the `sim-trace-debugging` skill; (3)
+delete dead leftovers (`taskQueue` field+Init, taskWorker idle/jitter/spawn fields+
+Init+SetOptions, `tryTaskWorkerIdleExit`, `demandRegistered`, `taskExEnv`). The
+plan below is the spec; the branch is the in-progress execution.
+
 **REFINED PLAN (2026-06-18, lower-risk — keep the limiter at dispatch, reroute only
 the HANDOFF).** Reading the wrappers (launcher.go:363 `launcherScatterWork.Execute`
 = governor gate; limiter.go:654 `limiterScatterWork.Execute` = `acquireOrWait` at

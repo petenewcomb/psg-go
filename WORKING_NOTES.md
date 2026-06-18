@@ -6,14 +6,37 @@ This document contains working notes and context for development on the `combine
 work below (outbox recovery → reclamation → gen-stamped-hint bug fix → vestigial
 `Sender`/`Receiver`/`Waiter` removal, all committed and green) is DONE — it was in
 service of the consolidation (those handles were per-worker `E` state being
-untangled). Resume at **cp-5: the FunnelPool→`worker.Pool` cutover** — see "Worker
-pool + workq consolidation" → "cp-5 cutover" further below. Foundation cp-1/2/3
-are committed; cp-5 is "ready to implement" as one commit, and the `E` it needs is
-now simpler (no Sender/Receiver/Waiter). Goal: collapse the three live producer
-paths (task/skim/funnel) onto the single unified `workq.Post` → `workq.Queue`,
-driven by `worker.Pool`/`Worker`, until there is just `workq.Queue.incoming`. The
-channel-vs-rdvq queue-impl question is DEFERRED until then (PN: by then we'll know
-what that one queue actually needs).
+untangled). Goal: collapse the three live producer paths (task/skim/funnel) onto
+the single unified `workq.Post` → `workq.Queue`, driven by `worker.Pool`/`Worker`,
+until there is just `workq.Queue.incoming`.
+
+**Resume at: the global-substrate activation (the corrected model — NOT the
+per-job "cp-5 FunnelPool→worker.Pool cutover," which is RETRACTED; see "CORRECTION
+(2026-06-16, PN)" below).** Authoritative plan = **"Next (corrected)"** /
+**"wave-5b ctx model — CONVERGED"** below: one global `defaultPool` + one shared
+`workq.Queue` + a context-free unified `E` already exist and compile but are
+DORMANT (nothing `Post`s yet). Remaining sequence: (1) wire the wave-5b ctx model
+into `worker.Pool` (stop-chan → `poolCtx`, expose it); (2) build the new per-`Wave`
+substrate (`waveCtx`, per-wave governor + in-flight counter + skim queue +
+Acquire/Release the global pool + per-wave flusher); (3) wire uniform `submit`
+(non-top-level → `Post`; top-level → governor gate → `Post`; per-wave execCtx
+borrow); (4) collapse the task/funnel/skim producers onto `defaultPool.Post` /
+skim-queue `Post`; (5) delete `taskExEnv`/`cpWorker`/cpstate + the per-job pools +
+legacy `Pool`/`Wave` binding. The channel-vs-rdvq queue-impl question is DEFERRED
+until then (PN: by then we'll know what that one queue actually needs).
+
+**SEQUENCING (PN): DESIGN REVIEW FIRST — ✓ COMPLETE (2026-06-17).** Written design
++ all open questions resolved with PN in **`docs/global-substrate-activation.md`**
+(grounds the converged model in the current code: the `Pool`=job naming trap, the
+global/per-wave split, the wave-5b ctx model, producer collapse onto `Post`, the
+per-wave flusher, deletion list, checkpoint sequence §8, and the resolved Q1–Q6 +
+dispatch-layering crux in §9–§10). **Next: implement on the §8 checkpoint sequence**
+— (1+2 folded) build the per-Wave substrate + `poolCtx` dormant; (3) the atomic cut
+(`submit` + execCtx borrow + 3 producers→`Post` + unified-E body entry + delete
+legacy substrate); (4) validate; (5) cleanup. Key decisions: jobstate is per-Wave;
+keep top-level ceremony (`suspend`/`reclaim` + `wait`/`yield` "old-before-new") and
+`exEnv.ExecuteNowOrQueue` (subwave inline cases); skim shares the wave governor (no
+skim-first); limiter wiring transitional.
 
 ## ►► rdvq outbox recovery — LANDED FINDING + productionization (rdvq thread, DONE)
 

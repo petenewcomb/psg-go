@@ -27,8 +27,11 @@
 //     referrers to finish on their own (so it blocks forever if one never
 //     Releases, like sync.WaitGroup.Wait). The pool is reusable afterward.
 //
-// The pool has no context of its own: per-goroutine cancellation is the worker
-// context built by newState, under which the work runs.
+// The pool owns a poolCtx (exposed via PoolCtx) that is cancelled on definitive
+// teardown (Wait → workers exit) and re-armed on reuse; Waves derive their waveCtx
+// from it so teardown propagates down the wave tree by context ancestry (wave-5b).
+// Per-execution cancellation is separate: work runs under the worker context built
+// by newState (and, in wave-5b, a borrowed per-wave exec context).
 package worker
 
 import (
@@ -72,15 +75,20 @@ type Pool[E workq.ExecEnv] struct {
 	spawning jobstate.InFlightCounter
 
 	// lifecycle, all guarded by mu (see package doc):
-	//   refs    — number of active referrers (e.g. in-flight Waves).
-	//   waiting — a Wait is outstanding; stop workers when refs hits zero.
-	//   stop    — closed to tell workers to exit; re-armed for reuse. Each worker
-	//             captures the current stop at spawn (race-free), so a re-arm
-	//             never reaches an already-running worker.
-	mu      sync.Mutex
-	refs    int
-	waiting bool
-	stop    chan struct{}
+	//   refs       — number of active referrers (e.g. in-flight Waves).
+	//   waiting    — a Wait is outstanding; stop workers when refs hits zero.
+	//   poolCtx    — the pool's context; cancelled to tell workers to exit, and
+	//                re-armed (fresh WithCancel) for reuse. Each worker captures
+	//                the current poolCtx at spawn (race-free), so a re-arm never
+	//                reaches an already-running worker. Exposed via PoolCtx so
+	//                Waves derive their waveCtx from it: cancellation propagates
+	//                pool teardown down the wave tree by stdlib ancestry (wave-5b).
+	//   poolCancel — cancels poolCtx.
+	mu         sync.Mutex
+	refs       int
+	waiting    bool
+	poolCtx    context.Context //nolint:containedctx // the pool teardown signal; see PoolCtx
+	poolCancel context.CancelFunc
 }
 
 // NewPool constructs a pool, initializing its embedded work Queue so the queue's
@@ -94,7 +102,11 @@ func NewPool[E workq.ExecEnv](
 ) *Pool[E] {
 	traceRegion := "worker.NewPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	p := &Pool[E]{newState: newState, stop: make(chan struct{})}
+	// poolCancel is stored on the pool and called by stopWorkersLocked (Wait/Release
+	// teardown); gosec's intraprocedural check can't see that cross-method call.
+	//nolint:gosec // G118: poolCancel stored and called in stopWorkersLocked
+	poolCtx, poolCancel := context.WithCancel(context.Background())
+	p := &Pool[E]{newState: newState, poolCtx: poolCtx, poolCancel: poolCancel}
 	p.Init(p.trySpawnWorker) // init the embedded queue; unmet demand → spawn a worker
 	trace.Logf(context.Background(), traceRegion, "Pool=%p", p)
 	return p
@@ -102,9 +114,8 @@ func NewPool[E workq.ExecEnv](
 
 // ── Refcount + definitive quiesce ───────────────────────────────────────────
 
-// Acquire registers a new referrer. On a 0→1 transition it re-arms a stop
-// channel a prior Wait closed, so freshly spawned workers aren't instantly
-// stopped.
+// Acquire registers a new referrer. On a 0→1 transition it re-arms a poolCtx a
+// prior Wait cancelled, so freshly spawned workers aren't instantly stopped.
 func (p *Pool[E]) Acquire() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -144,24 +155,33 @@ func (p *Pool[E]) Wait() {
 	p.mu.Unlock()
 }
 
-// stopWorkersLocked closes the stop channel once (idempotent within a cycle),
-// waking idle/blocked workers to exit. Caller holds p.mu.
+// stopWorkersLocked cancels poolCtx (idempotent — context cancel no-ops after the
+// first call), waking idle/blocked workers to exit. Caller holds p.mu.
 func (p *Pool[E]) stopWorkersLocked() {
-	select {
-	case <-p.stop: // already closed this cycle
-	default:
-		close(p.stop)
+	p.poolCancel()
+}
+
+// rearmStopLocked replaces a cancelled poolCtx with a fresh one so the pool can be
+// reused. Caller holds p.mu.
+func (p *Pool[E]) rearmStopLocked() {
+	if p.poolCtx.Err() != nil {
+		// The old poolCancel was already called (poolCtx is cancelled — that is
+		// the rearm precondition), so replacing it leaks nothing.
+		//nolint:gosec // G118: prior poolCancel already called (poolCtx cancelled)
+		p.poolCtx, p.poolCancel = context.WithCancel(context.Background())
 	}
 }
 
-// rearmStopLocked replaces a closed stop channel with a fresh one so the pool
-// can be reused. Caller holds p.mu.
-func (p *Pool[E]) rearmStopLocked() {
-	select {
-	case <-p.stop:
-		p.stop = make(chan struct{})
-	default:
-	}
+// PoolCtx returns the pool's current context. It is cancelled when the pool tears
+// down definitively (the last Release with a Wait outstanding, or Wait while idle)
+// and re-armed on reuse. Waves derive their waveCtx from it so pool teardown
+// propagates down the wave tree by stdlib context ancestry (wave-5b). The returned
+// context is valid for the current Acquire/Release cycle; callers Acquire before
+// reading it (Acquire re-arms after a prior teardown).
+func (p *Pool[E]) PoolCtx() context.Context {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.poolCtx
 }
 
 // ── Spawning ────────────────────────────────────────────────────────────────
@@ -184,10 +204,12 @@ func (p *Pool[E]) trySpawnWorker() {
 }
 
 func (p *Pool[E]) spawnWorker() {
-	// Capture the current stop channel so a later re-arm never reaches this
-	// worker (it will have exited on the channel it was born with).
+	// Capture the current poolCtx's Done channel so a later re-arm never reaches
+	// this worker (it will have exited on the context it was born with). CP1 only
+	// needs the stop signal here; wave-5b will derive the worker's exec ctx from
+	// poolCtx (capturing the context itself).
 	p.mu.Lock()
-	stop := p.stop
+	stop := p.poolCtx.Done()
 	p.mu.Unlock()
 
 	p.workers.Add(1)
@@ -205,6 +227,9 @@ func (p *Pool[E]) runWorker(stop <-chan struct{}) {
 	state, ctx, cancel := p.newState()
 	defer cancel()
 
+	// stop is the captured poolCtx.Done() — the definitive-stop signal (pool
+	// teardown); the worker captured it at spawn, so a later re-arm never reaches
+	// it.
 	w := workq.NewWorker(&p.sharedQueue, state, ctx,
 		workq.WithStop(stop), workq.WithIdleExit(workerIdleTimeout))
 	defer w.Release()

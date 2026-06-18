@@ -217,16 +217,19 @@ func (w *Wave) CancelAndWait() {
 	// borrowed one); once workers run bodies under shells this reaps their
 	// contexts promptly rather than waiting for waveCtx GC.
 	defer w.shells.release()
-	// TODO(wave-5b): with a shared Pool (WithPool) this cancels the whole Pool;
-	// it should drain only this Wave's tagged work.
-	w.pool.CancelAndWait()
-	// Join this wave's funnel flusher (if one was ever created). pool.CancelAndWait
-	// cancelled the pool context, driving the flusher out; this waits for the
-	// goroutine to fully exit. The flusher is jobstate-joined, not Pool.wg-tracked
-	// (see FunnelPool.flusherDone).
+	// Cancel the pool context first to drive this wave's funnel flusher toward
+	// exit, then JOIN it before the pool teardown below clears the ctxMetaMaps —
+	// the flusher reads those maps (ensureCtxMeta, flush bodies), so clearing them
+	// while it still runs is a data race. The flusher is jobstate-joined, not
+	// Pool.wg-tracked (see FunnelPool.flusherDone). Cancel is idempotent, so the
+	// CancelAndWait below repeating it is harmless.
+	w.pool.Cancel()
 	if eng := w.funnelEngine.Load(); eng != nil {
 		eng.joinFlusher()
 	}
+	// TODO(wave-5b): with a shared Pool (WithPool) this cancels the whole Pool;
+	// it should drain only this Wave's tagged work.
+	w.pool.CancelAndWait()
 }
 
 // Close signals that no more new top-level dispatches will be made

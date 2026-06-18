@@ -61,17 +61,50 @@ landed green + committed:
 wave/heldRequest onto *whatever ctxMeta is in the ctx* and runs `w.task.Execute(ctx,
 …)` — so the body logic is already shell-compatible; `runInShell` supplies the ctx.
 
-**►► REMAINING = the task-seam cutover (the irreducible NO-GREEN break).** Make
-`taskWork` a `workq.Work` (`Execute(ctx, ex) error` = `runUnderLimiter` →
-`runInShell` → `w.task.Execute(shell.ctx, group, completedFn)`); reroute task
-dispatch (`launcher.dispatch`/`newScatterWork`: today `launcherScatterWork`→
-`limiterScatterWork`→`taskPostWork`→`taskQueue` via `meta.ExecuteNowOrQueue`) to
-`submit`→`defaultPool.Post(taskWork)`; delete `runTasks`/`taskQueue`/`taskExEnv`/
-`taskPostWork`/`taskWorkerDemand`/spawn machinery. **Keep funnel+skim on the legacy
-per-Pool substrate** (task-first seam) → reaches green with task on the global pool,
-funnel/skim legacy. Then repeat for funnel, then skim. The shared dispatch ceremony
-(`ExecuteNowOrQueue` suspend/yield, governor) is split task-vs-rest during the
-transition. Anchor: `docs/global-substrate-activation.md`.
+**►► REMAINING = the task-seam cutover (the irreducible NO-GREEN break).**
+
+**REFINED PLAN (2026-06-18, lower-risk — keep the limiter at dispatch, reroute only
+the HANDOFF).** Reading the wrappers (launcher.go:363 `launcherScatterWork.Execute`
+= governor gate; limiter.go:654 `limiterScatterWork.Execute` = `acquireOrWait` at
+DISPATCH; `taskPostWork.Execute` = handoff to `taskQueue`) shows the permit is
+acquired at **dispatch**, before the handoff — the OPPOSITE of the new model's
+"limit post-admission at the worker." Per Q5 (limiter transitional, don't bend over
+backwards), the task-first cut should **keep the whole dispatch chain
+(`launcherScatterWork` governor + `limiterScatterWork` acquire) intact** and change
+ONLY the handoff target + the executor:
+1. **`taskWork` → `workq.Work`**: add `Execute(ctx, ex) error` = `ex.Starting()` +
+   `runInShell(ctx, w.wave, taskContext, w.req, func(sc) { w.task.Execute(sc,
+   w.Group(), w.completedFn); return nil })`. (The body logic already stamps via
+   whatever ctxMeta is in ctx; `runInShell` supplies the shell ctx + E.) The
+   permit is already HELD (acquired at dispatch by `limiterScatterWork`), so
+   `runInShell` just stamps `w.req` as `heldRequest` — no acquire here (transitional).
+   - **GOTCHA — `Free` signature**: `workq.Work.Free()` is no-arg, but
+     `taskWork.Free(job *Pool)` takes job (for `Close(job)`=DecrementWork + req
+     release + demand decrement). Make `taskWork` store its `*Pool` (or use
+     `w.wave.pool`) so `Free()` is no-arg. Check the wrapper Free chain
+     (`taskPostWork.Free` → `taskWork.Free`).
+2. **`taskPostWork.Execute` → `defaultPool.Post`**: replace the `taskQueue`
+   try/listen/block loop with `posted, err := defaultPool.Post(ctx, ex,
+   meta.ShouldBlock(), w.task, nil)` (onWait nil — governor is in
+   `launcherScatterWork`). Drop `registerDemand`/`taskWorkerDemand`/
+   `trySpawnTaskWorker` (defaultPool's `unmetDemandFn`=`trySpawnWorker` handles
+   spawn). On posted: `w.task = nil`.
+   - Two different `ex` objects (dispatch-side Post ex vs worker-side body ex) →
+     both call `Starting()`, no conflict.
+3. **Global worker runs it**: worker pulls `taskWork` from the shared Queue;
+   `accepted.ExecuteOne` calls `taskWork.Execute(workerCtx, ex)`; `workerCtx` carries
+   E (workerEnvKey) → `runInShell` resolves it. `worker.go execCtx()` returns `w.ctx`
+   (the worker ctx) — fine.
+4. **DELETE legacy task worker**: `runTasks`, `taskQueue` (rdvq), `taskExEnv`,
+   `taskWorkerDemand`/`taskWorkersSpawning`/`spawnTaskWorker`/`trySpawnTaskWorker`/
+   idle-exit/jitter, the `*PoolState` task knobs. Keep `launcherScatterWork`/
+   `limiterScatterWork`/`taskPostWork` (transitional).
+5. **Lifecycle**: a Wave must `defaultPool.Acquire()` (NewWave) / `Release()` (drain
+   done) so `psg.Wait` joins the global workers; per-wave drain still gated by
+   `jobstate` (DecrementWork→noMoreWork). Wire Acquire/Release into NewWave/
+   CancelAndWait/CloseAndSkimAll completion. (Needed for task workers to be reaped.)
+**Keep funnel+skim legacy** → green with task on the global pool. Then funnel, then
+skim. Anchor: `docs/global-substrate-activation.md`.
 - **DECISION TAKEN (gut-before-rename):** `Pool` stays the per-Wave *lifecycle*
   object (sheds worker substrate later); `ctxMeta` structurally unchanged
   (`job *Pool`); `Pool`→`Wave` rename deferred. This unblocked the shell.

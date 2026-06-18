@@ -2,11 +2,20 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-A major new consolidation phase is in flight: see "Worker pool + workq
-consolidation" immediately below, which supersedes the wave-5b incremental
-approach.
+**►► START HERE (active work): the Worker-pool + workq CONSOLIDATION.** The rdvq
+work below (outbox recovery → reclamation → gen-stamped-hint bug fix → vestigial
+`Sender`/`Receiver`/`Waiter` removal, all committed and green) is DONE — it was in
+service of the consolidation (those handles were per-worker `E` state being
+untangled). Resume at **cp-5: the FunnelPool→`worker.Pool` cutover** — see "Worker
+pool + workq consolidation" → "cp-5 cutover" further below. Foundation cp-1/2/3
+are committed; cp-5 is "ready to implement" as one commit, and the `E` it needs is
+now simpler (no Sender/Receiver/Waiter). Goal: collapse the three live producer
+paths (task/skim/funnel) onto the single unified `workq.Post` → `workq.Queue`,
+driven by `worker.Pool`/`Worker`, until there is just `workq.Queue.incoming`. The
+channel-vs-rdvq queue-impl question is DEFERRED until then (PN: by then we'll know
+what that one queue actually needs).
 
-## ►► rdvq outbox recovery — LANDED FINDING + productionization (start here)
+## ►► rdvq outbox recovery — LANDED FINDING + productionization (rdvq thread, DONE)
 
 Full writeup: `docs/rdvq-outbox-recovery.md` (the investigation + the
 methodology journey — keep it, the lessons are general). The **benchmark is the
@@ -125,10 +134,9 @@ policy). NB the fair baseline is `chan-nb` (non-blocking, same postpone cost), n
 `chan-block` (blocking parks the producer — which psg's architecture forbids).
 
 This sits ON TOP of the `Sender`/`Receiver`/`Waiter` gut (checkpoints 1+2,
-committed). Checkpoint 3 (mechanical removal of those vestigial types) is still
-pending and independent — see below.
+committed) and Checkpoint 3 (✓ vestigial types removed — `a18bbb7`).
 
-## ►► rdvq integration (Checkpoint 3 — mechanical removal, still pending)
+## ►► rdvq integration (Checkpoint 3 — ✓ DONE, `a18bbb7`)
 
 Decided sequencing (PN): **gut internals first, defer type/signature removal.**
 Land the destination-owned pool while keeping `Sender`/`Receiver`/`Waiter` on
@@ -178,17 +186,32 @@ to 10ms — so under heavy `go test ./...` load a drifting sleep can shift the
 quantized event-log order and fail the `// Output:` match (~1-2%). Results stay
 correct; only the timing log moves. 250+ isolated runs of the change passed.
 
-**Checkpoint 3 (next, mechanical).** Delete `Sender`/`Receiver`/`Waiter` + strip
-the params from `PushBack*`/`PopFront*`/`ListenersFor`/`WaitFunc`/`Wait` and every
-`*.Sender()`/`*.Receiver()`/`*.Waiter()` site (workq `Post`, the psg producers +
-exEnvs, the `workq.Waiter`/`Waiters` aliases). Then the **consolidation cutover**
-(separate effort): unified `E`, `Wave` (waveCtx + per-wave in-flight/governor/
-flush per the converged wave-5b ctx model), `submit`, funnel/task producers onto
-`defaultPool.Post`, delete the legacy per-job pools.
+**✓ Checkpoint 3 — DONE (committed `a18bbb7`).** Deleted `Sender`/`Receiver`/
+`Waiter` and stripped the no-op params from every signature and call site
+(`PushBack*`/`PopFront*`/`ListenersFor`/`WaitFunc`/`Wait`; `workq.Post`; the
+`workq.ExecEnv` interface; the psg exEnv providers + producers; the build-excluded
+`dispatch.go` sketch; the `workq.Waiter` alias). Purely mechanical, behavior-
+preserving; `doc.go` rewritten to the destination-owned pooled `Queue`. Validated:
+build/vet, `-short ./...`, golangci-lint, and `-race` on rdvq + workq +
+`TestBySimulation`, all green. (Also landed this session, on top of cp 1+2: the
+rdvq outbox **reclamation** + the **gen-stamped-hint** use-after-reclaim bug fix —
+commits `424e301`, `c8559de`; see the "start here" section above.)
+
+**⇒ Consequence for the consolidation (the reason this mattered):** the
+`Sender`/`Receiver`/`Waiter` handles were a chunk of the per-worker `E`/`ExecEnv`
+state being untangled for the cutover. With them gone, `workq.ExecEnv` is now
+`interface{}` (empty), `Worker.pull` no longer threads `state.Waiter()`, and the
+unified funnel `E` (cp-4) no longer needs to satisfy any Sender/Receiver/Waiter
+contract — it only needs the main-package `executionEnvironment` methods
+(Lock/Unlock, group/queue stacks, `ExecuteNowOrQueue`). So the cp-4/cp-5 notes
+below that reference `state.Waiter()` / "E satisfies ExecEnv via S/R/W" are now
+SIMPLER than written. **Next consolidation step: cp-5 (the FunnelPool→worker.Pool
+combined cutover), "ready to implement" — see "cp-5 cutover" below.** Best started
+with FRESH CONTEXT against these notes (a major implementation phase).
 
 Prototype proofs (`outboxpool_proto_test.go`, `outboxpool_reclaim_proto_test.go`,
-`outboxpool_compare_test.go`) now superseded by the real implementation —
-candidates for removal at a cleanup pass once checkpoint 2 lands.
+`outboxpool_compare_test.go`) are superseded by the shipped implementation —
+candidates for removal at a cleanup pass.
 
 **State:** all foundation + designs committed, tree green. Foundation =
 `workq.Queue`/`Worker[E]` (`c31d497`), `worker.Pool[E]` embedding the queue

@@ -83,7 +83,7 @@ func NewAccumulatorFactory[T any](
 // values inside a [Funnel]. Each input is delivered via
 // [Accumulator.Accumulate]; the instance owns its accumulated state
 // across calls. When the framework finalizes the instance (on a
-// user-requested flush deadline or on FunnelPool drain),
+// user-requested flush deadline or on funnelEngine drain),
 // [Accumulator.Flush] is invoked.
 //
 // Downstream emission is the body's responsibility: an Accumulator

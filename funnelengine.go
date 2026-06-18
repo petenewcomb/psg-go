@@ -12,12 +12,14 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/workq"
-	"github.com/petenewcomb/psg-go/psgopt"
 )
 
-// FunnelPool manages a pool of goroutines that execute funnels.
-// It handles concurrency limits, spawning new goroutines, and reusing existing ones.
-type FunnelPool struct {
+// funnelEngine is a Wave's lazily-created funnel machinery: the scheduled-flush
+// queue plus the single persistent goroutine that drives deadline-driven and
+// end-of-work flushes. Funnel BODY work runs on the global defaultPool (not here);
+// this type only owns flush scheduling and the flusher. One per Wave, built on the
+// first NewFunnel(wave, …).
+type funnelEngine struct {
 	job *Pool
 
 	funnelQueue workq.Pending
@@ -42,25 +44,25 @@ type FunnelPool struct {
 	flusherDone chan struct{}
 }
 
-// newFunnelPool creates the job's internal funnel engine. Not user-facing: funnels
-// are created with NewFunnel(wave, ...), which calls Pool.funnelPool to lazily
-// build and share one of these per job.
+// newFunnelEngine creates a wave's internal funnel engine. Not user-facing: funnels
+// are created with NewFunnel(wave, ...), which calls Wave.funnelPool to lazily
+// build and share one of these per wave.
 //
 //nolint:contextcheck // background context used only for tracing
-func newFunnelPool(job *Pool) *FunnelPool {
-	traceRegion := "newFunnelPool"
+func newFunnelEngine(job *Pool) *funnelEngine {
+	traceRegion := "newFunnelEngine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	// Check if the job is done
 	job.panicIfDone()
 
-	cp := &FunnelPool{
+	cp := &funnelEngine{
 		job:         job,
 		flusherDone: make(chan struct{}),
 	}
 
 	trace.Logf(context.Background(), traceRegion,
-		"FunnelPool=%p, job=%p, funnelQueue=%p, workQueue=%p",
+		"funnelEngine=%p, job=%p, funnelQueue=%p, workQueue=%p",
 		cp, job, &cp.funnelQueue, &cp.workQueue)
 
 	cp.funnelQueue.Init()
@@ -75,28 +77,13 @@ func newFunnelPool(job *Pool) *FunnelPool {
 	return cp
 }
 
-// checkInitialized panics if the FunnelPool was not properly initialized via NewFunnelPool
-func (cp *FunnelPool) checkInitialized() {
-	if cp.job == nil {
-		panic("FunnelPool not initialized: must use NewFunnelPool")
-	}
-}
-
-// SetOptions is retained for source compatibility but is now a no-op: the funnel
-// body runs on the uncapped global worker.Pool and there is a single persistent
-// flush driver, so there are no per-pool concurrency/idle dials left to set.
-func (cp *FunnelPool) SetOptions(_ ...psgopt.FunnelPoolOption) {
-	cp.checkInitialized()
-}
-
-// spawnFlusher starts the single persistent flush driver goroutine. It is tracked
-// by the job's wait group so the job's teardown joins it.
+// spawnFlusher starts the single persistent flush driver goroutine.
 //
 //nolint:contextcheck // goroutine will use job context
-func (cp *FunnelPool) spawnFlusher() {
-	traceRegion := "FunnelPool.spawnFlusher"
+func (cp *funnelEngine) spawnFlusher() {
+	traceRegion := "funnelEngine.spawnFlusher"
 	trace.Logf(context.Background(), traceRegion,
-		"FunnelPool=%p starting flush driver", cp)
+		"funnelEngine=%p starting flush driver", cp)
 	go func() {
 		defer close(cp.flusherDone)
 		cp.flusher()
@@ -107,11 +94,11 @@ func (cp *FunnelPool) spawnFlusher() {
 // caller is expected to have already driven the flusher toward exit — either a
 // graceful drain reaching job Done, or pool-context cancellation — so this only
 // closes the goroutine-exit window before a wave's teardown returns.
-func (cp *FunnelPool) joinFlusher() {
+func (cp *funnelEngine) joinFlusher() {
 	<-cp.flusherDone
 }
 
-func (cp *FunnelPool) flusher() {
+func (cp *funnelEngine) flusher() {
 	var doneWg sync.WaitGroup
 	doneCh := make(chan struct{})
 	var doneErr error
@@ -124,9 +111,9 @@ func (cp *FunnelPool) flusher() {
 	}
 	defer worker.Release()
 
-	traceRegion := "FunnelPool.goroutine"
+	traceRegion := "funnelEngine.goroutine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "FunnelPool=%p, worker=%p", cp, worker)
+	trace.Logf(context.Background(), traceRegion, "funnelEngine=%p, worker=%p", cp, worker)
 
 	j := cp.job
 
@@ -197,11 +184,11 @@ func (cp *FunnelPool) flusher() {
 
 type funnelPostWork struct {
 	poolWork
-	pool *FunnelPool
+	pool *funnelEngine
 	work boundFunnelWork
 }
 
-func (w *funnelPostWork) Init(group workq.GroupID, pool *FunnelPool, work boundFunnelWork) {
+func (w *funnelPostWork) Init(group workq.GroupID, pool *funnelEngine, work boundFunnelWork) {
 	w.poolWork.Init(group, pool.job)
 	w.pool = pool
 	w.work = work
@@ -256,12 +243,12 @@ func (w *funnelPostWork) Free() {
 var funnelPostWorkPool = omnipool.For[funnelPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (cp *FunnelPool) newFunnelPostWork(group workq.GroupID, bc boundFunnelWork) *funnelPostWork {
-	traceRegion := "FunnelPool.newFunnelPostWork"
+func (cp *funnelEngine) newFunnelPostWork(group workq.GroupID, bc boundFunnelWork) *funnelPostWork {
+	traceRegion := "funnelEngine.newFunnelPostWork"
 
 	w := funnelPostWorkPool.Get()
 	w.Init(group, cp, bc)
 
-	trace.Logf(context.Background(), traceRegion, "FunnelPool=%p created %v", cp, w)
+	trace.Logf(context.Background(), traceRegion, "funnelEngine=%p created %v", cp, w)
 	return w
 }

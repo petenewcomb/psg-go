@@ -15,7 +15,7 @@ import (
 
 type cpWorker struct {
 	integrationExEnv
-	cp *FunnelPool
+	cp *funnelEngine
 
 	doneCh  <-chan struct{}
 	doneErr func() error

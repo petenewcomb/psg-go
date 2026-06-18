@@ -39,22 +39,22 @@ type Wave struct {
 	waveCancel context.CancelFunc
 	shells     execShellPool
 
-	// funnelEngine is this Wave's funnel machinery (scheduled-flush queue + its
-	// backpressure governor + the persistent flush driver), created lazily on the
-	// first NewFunnel(wave, …). It lives on the Wave, NOT the Pool: funnel flush
-	// and backpressure are BATCH-scoped, so under WithPool (several Waves sharing
-	// one Pool) each Wave gets its own engine rather than sharing one. (FunnelPool
-	// is the internal type behind it; its fields fold directly onto Wave in the
-	// continued dissolution.) funnelEngine is stored atomically so teardown
-	// (CancelAndWait) can read it without racing a concurrent first creation;
-	// funnelEngineMu serializes the create-once.
+	// funnelEngine is this Wave's funnel machinery (the scheduled-flush queue and
+	// the persistent flush driver). It is a deliberately lazy sub-object — nil until
+	// the first NewFunnel(wave, …) — rather than fields flattened onto Wave, because
+	// most waves never create a funnel and should not carry that state or spawn a
+	// flusher. It is BATCH-scoped (per-Wave, not per-Pool): under WithPool each Wave
+	// gets its own engine. Stored atomically so teardown (CancelAndWait) can read it
+	// without racing a concurrent first creation; funnelEngineMu serializes the
+	// create-once. (Funnel backpressure is NOT here — it registers on the wave's
+	// shared governor; see funnelPostWork.Execute.)
 	funnelEngineMu sync.Mutex
-	funnelEngine   atomic.Pointer[FunnelPool]
+	funnelEngine   atomic.Pointer[funnelEngine]
 }
 
 // funnelPool returns this Wave's lazily-created funnel engine, building it on the
 // first call (double-checked under funnelEngineMu).
-func (w *Wave) funnelPool() *FunnelPool {
+func (w *Wave) funnelPool() *funnelEngine {
 	if eng := w.funnelEngine.Load(); eng != nil {
 		return eng
 	}
@@ -63,7 +63,7 @@ func (w *Wave) funnelPool() *FunnelPool {
 	if eng := w.funnelEngine.Load(); eng != nil {
 		return eng
 	}
-	eng := newFunnelPool(w.pool)
+	eng := newFunnelEngine(w.pool)
 	w.funnelEngine.Store(eng)
 	return eng
 }
@@ -164,8 +164,8 @@ func NewWave(parent context.Context, opts ...WaveOption) (context.Context, *Wave
 }
 
 // Pool returns the [Pool] this Wave is bound to. Exposed for advanced
-// uses such as constructing a [FunnelPool] that shares the same
-// Pool; typical callers don't need this.
+// uses such as binding another op to the same Pool; typical callers
+// don't need this.
 func (w *Wave) Pool() *Pool {
 	return w.pool
 }
@@ -221,7 +221,7 @@ func (w *Wave) CancelAndWait() {
 	// exit, then JOIN it before the pool teardown below clears the ctxMetaMaps —
 	// the flusher reads those maps (ensureCtxMeta, flush bodies), so clearing them
 	// while it still runs is a data race. The flusher is jobstate-joined, not
-	// Pool.wg-tracked (see FunnelPool.flusherDone). Cancel is idempotent, so the
+	// Pool.wg-tracked (see funnelEngine.flusherDone). Cancel is idempotent, so the
 	// CancelAndWait below repeating it is harmless.
 	w.pool.Cancel()
 	if eng := w.funnelEngine.Load(); eng != nil {

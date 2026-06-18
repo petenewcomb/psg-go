@@ -38,7 +38,7 @@ func (funnelOpHandleTrait[T]) String(c *funnelOp[T]) string {
 // Funnel represents a stateful aggregation op. Inputs flow in through
 // [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks);
 // the user-supplied [Accumulator] processes them inside a
-// FunnelPool worker. Downstream emission is the Accumulator body's
+// funnelEngine worker. Downstream emission is the Accumulator body's
 // responsibility — it calls Submit on whatever downstream sinks it has
 // captured. There is no framework-mediated output type; Accumulator
 // errors are surfaced via the Pool's SkimAll path.
@@ -127,7 +127,7 @@ func NewFunnel[T any](
 }
 
 // NewFnFunnel binds closure-based factory functions to a
-// FunnelPool. Convenience wrapper for
+// funnelEngine. Convenience wrapper for
 // `NewFunnel(funnelPool, NewAccumulatorFactory(newAccumulator, closeFn), opts...)`.
 // Pass nil for closeFn if the factory has no factory-level state
 // to release.
@@ -301,7 +301,7 @@ type funnelOp[T any] struct {
 	// errSink is framework-owned. Accumulator errors are routed through
 	// it; its handler returns err as-is so it surfaces via SkimAll.
 	errSink       ErrSkimmer
-	funnelPool    *FunnelPool
+	funnelPool    *funnelEngine
 	funnelFactory AccumulatorFactory[T]
 
 	// limiter caps how many funnelWorks this Funnel processes

@@ -31,7 +31,7 @@ import (
 //     when waveCtx tears the whole wave down.
 //
 // The shell REPLACES the legacy per-worker ctx creation (WithCancel(j.ctx) +
-// ensureCtxMeta in runTasks / FunnelPool.goroutine) and the ctxMetaMap caching for
+// ensureCtxMeta in runTasks / funnelEngine.goroutine) and the ctxMetaMap caching for
 // worker-executed bodies: the shell IS the reused, cached meta. j.ctxMeta(shell.ctx)
 // still resolves the meta — ctxmap.Map.WithValue finds it via ctx.Value (the meta
 // is stamped under ctxMetaValueKey), so the rest of the framework is unchanged.

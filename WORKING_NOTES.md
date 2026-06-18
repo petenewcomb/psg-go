@@ -43,8 +43,20 @@ landed green + committed:
   (`execshell.go`): a global worker borrows a shell from the body's Wave to get the
   per-wave exec ctx (cancellation + ctxMeta) while supplying its own E. `borrow`/
   `giveBack`/`newShell`/`release`; meta stamped under `ctxMetaValueKey` so
-  `j.ctxMeta` resolves it unchanged. 5 `-race` tests; tested (not unused-dead),
-  but NOT yet wired into a Wave.
+  `j.ctxMeta` resolves it unchanged. 5 `-race` tests; tested (not unused-dead).
+- **Wave foothold (`bk5r…`)** — `NewWave` now owns `waveCtx =
+  WithCancel(defaultPool.PoolCtx())` + an Init'd `execShellPool`; Cancel/
+  CancelAndWait cancel waveCtx + release shells. Additive (still behind legacy
+  execution); green. **This exhausts the cleanly-additive steps.**
+
+**Key finding for the rewire (from reading `taskWork.Execute`, job.go:115):** it
+already stamps wave/heldRequest onto *whatever ctxMeta is in the ctx* and runs
+`w.task.Execute(ctx, …)`. So the cut is fundamentally **switching the body's ctx
+from the worker ctx (legacy `taskExEnv`) to a borrowed shell ctx
+(`workerExEnv`)** — threaded with the E-handoff (worker → `work.Execute`), the
+dispatch reroute (`launcher` → `submit` → `defaultPool.Post` instead of
+`taskPostWork`→`taskQueue`), and deleting `runTasks`/`taskQueue`/`taskExEnv`/
+`*PostWork`. One contiguous concurrency-critical change, NO green intermediate.
 - **DECISION TAKEN (gut-before-rename):** `Pool` stays the per-Wave *lifecycle*
   object (sheds worker substrate later); `ctxMeta` structurally unchanged
   (`job *Pool`); `Pool`→`Wave` rename deferred. This unblocked the shell.

@@ -35,25 +35,49 @@ top-level ceremony (`suspend`/`reclaim` + `wait`/`yield` "old-before-new") and
 `exEnv.ExecuteNowOrQueue` (subwave inline cases); skim shares the wave governor (no
 skim-first); limiter wiring transitional.
 
-**PROGRESS:** **CP1 DONE + COMMITTED (`6019c6d`)** — `worker.Pool` `stop chan` →
-`poolCtx`/cancel, exposed via `PoolCtx()` for waves to derive `waveCtx`; dormant,
-green (build/vet/`-short`/lint0/`TestBySimulation -race`).
+**PROGRESS (2026-06-17 session):** Two foundational pieces of the wave-5b ctx model
+landed green + committed:
+- **CP1 (`6019c6d`)** — `worker.Pool` `stop chan` → `poolCtx`/cancel, exposed via
+  `PoolCtx()` for waves to derive `waveCtx`; dormant.
+- **execShell pool (`f097584`)** — per-Wave reusable `{ctx, cancel, meta}` shells
+  (`execshell.go`): a global worker borrows a shell from the body's Wave to get the
+  per-wave exec ctx (cancellation + ctxMeta) while supplying its own E. `borrow`/
+  `giveBack`/`newShell`/`release`; meta stamped under `ctxMetaValueKey` so
+  `j.ctxMeta` resolves it unchanged. 5 `-race` tests; tested (not unused-dead),
+  but NOT yet wired into a Wave.
+- **DECISION TAKEN (gut-before-rename):** `Pool` stays the per-Wave *lifecycle*
+  object (sheds worker substrate later); `ctxMeta` structurally unchanged
+  (`job *Pool`); `Pool`→`Wave` rename deferred. This unblocked the shell.
 
-**►► RESUME HERE (next session, FRESH CONTEXT recommended): the CP2+CP3 cut.** CP2
-does NOT separate from CP3 — they fuse at the **ctxMeta seam** (the execCtx-shell
-carries a reusable `*ctxMeta`, but ctxMeta creation is `Pool`(job)-bound:
-`ctxMetaMap` cache + `j.ctx` AfterFunc + `ctxMeta.job *Pool`; the shell replaces
-that caching and `ctxMeta.job`→wave/lifecycle). `poolCtx` was the only cleanly
-dormant piece. **First thing next session: settle the "ctxMeta in the per-Wave
-model" decision** (design doc §8 step 2 FINDING + KEY CP3 DECISION: two meta
-lifecycles — user-dispatch cached `topLevelExEnv`, worker-exec shell `workerExEnv`;
-re-target `job`/`parentJobs`/`heldRequest`-parent-walk off job identity onto
-wave/lifecycle). Then build: per-Wave `jobstate` + governor + skim `Queue` +
-in-flight + execCtx-shell pool (model `funnelInstanceQueue`, omnipool+nbcq) +
-flusher; wire `submit` + execCtx borrow; collapse the 3 producers onto `Post`;
-unified-E body entry (funnelop.go:801); delete legacy substrate (cpstate/cpWorker/
-taskExEnv/FunnelPool/per-job pools/`*PostWork`). Validate (funnel+task+skim +
-`-race` + sim). The notes below + the design doc are the anchor.
+**►► RESUME HERE: the atomic cut (FRESH CONTEXT recommended — major multi-file,
+concurrency-critical).** The cleanly-separable foundations are now DONE (poolCtx,
+execShell). What remains is the genuinely atomic cut — build & wire together,
+green at the end:
+1. **New `Wave` construction**: own `waveCtx = WithCancel(defaultPool.PoolCtx())`,
+   an `execShellPool` (Init with waveCtx + the wave's `Pool` lifecycle + wave), the
+   per-wave `jobstate`/governor/skim `Queue`/in-flight/flusher. `Acquire`/`Release`
+   the global `defaultPool` around the wave's active span. Today `Wave` binds 1:1 to
+   a `Pool` and delegates — re-home those to the new substrate.
+2. **Worker exec model (wave-5b)**: the global worker hands its E to `work.Execute`
+   (ctx-value or `workq.Execution` field — Q6); `work.Execute` borrows a shell from
+   its wave (`w.wave`), runs the body under `shell.ctx`, returns it (borrow/return
+   drives the per-wave in-flight). Worker exec ctx derives from `poolCtx` (the
+   worker.go FIRST-CUT `execCtx()` returning `w.ctx` is superseded).
+3. **`submit` wiring** (un-exclude `dispatch.go`; its `Post` sig is stale): top-level
+   = relocated ceremony (`suspend`/`reclaim` + `wait`/`yield` "old-before-new") +
+   `governor.Execute` gate → `Post`; non-top-level = unconditional `Post`. Keep
+   `exEnv.ExecuteNowOrQueue` (subwave inline). Pin composition vs
+   `accepted.ExecuteNowOrQueue`.
+4. **Producer collapse**: `taskPostWork`/`funnelPostWork`/`skimPostWork` →
+   `Queue.Post` (shared pool Queue / wave skim Queue); `onWait`=governor reg.
+5. **Unified-E body entry**: funnelop.go:801 `(*cpWorker)`→`(*workerExEnv)`;
+   `executeFunnel` onto the unified E (drop `IncrementCompleted`).
+6. **Delete legacy substrate**: cpstate, cpWorker, taskExEnv, FunnelPool, per-job
+   task workers/queues, `*PostWork`, spawn machinery. Options fallout
+   (`WithMaxConcurrency` etc.; maxholdtime_test → limiter).
+7. **Validate**: funnel+task+skim + `-race` + `TestBySimulation` (sim TEMP teardown
+   config; `sim-trace-debugging` skill on hang).
+Anchor: `docs/global-substrate-activation.md` (§8 sequence, §9–10 resolved Q's).
 
 ## ►► rdvq outbox recovery — LANDED FINDING + productionization (rdvq thread, DONE)
 

@@ -6,6 +6,7 @@ package psg
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -36,6 +37,24 @@ type Wave struct {
 	waveCtx    context.Context //nolint:containedctx // per-wave cancellation root
 	waveCancel context.CancelFunc
 	shells     execShellPool
+
+	// funnelEngine is this Wave's funnel machinery (scheduled-flush queue + its
+	// backpressure governor + the persistent flush driver), created lazily on the
+	// first NewFunnel(wave, …). It lives on the Wave, NOT the Pool: funnel flush
+	// and backpressure are BATCH-scoped, so under WithPool (several Waves sharing
+	// one Pool) each Wave gets its own engine rather than sharing one. (FunnelPool
+	// is the internal type behind it; its fields fold directly onto Wave in the
+	// continued dissolution.)
+	funnelEngineOnce sync.Once
+	funnelEngine     *FunnelPool
+}
+
+// funnelPool returns this Wave's lazily-created funnel engine.
+func (w *Wave) funnelPool() *FunnelPool {
+	w.funnelEngineOnce.Do(func() {
+		w.funnelEngine = newFunnelPool(w.pool)
+	})
+	return w.funnelEngine
 }
 
 // WaveOption configures a Wave at construction time.

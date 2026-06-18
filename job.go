@@ -45,22 +45,6 @@ type Pool struct {
 	blockFn      workq.BlockFunc      // avoid closure reallocation
 	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
-
-	// funnelPool is the job's funnel engine (scheduled-flush queue + persistent
-	// flush driver), created lazily on the first NewFunnel bound to a Wave on this
-	// job and shared by all of them. FunnelPool is no longer user-facing — it's an
-	// internal detail behind NewFunnel(wave, ...) (gut-before-removing: the type +
-	// its remaining internals get folded into Pool in a later pass).
-	funnelPoolOnce   sync.Once
-	cachedFunnelPool *FunnelPool
-}
-
-// funnelPool returns the job's lazily-created, shared funnel engine.
-func (j *Pool) funnelPool() *FunnelPool {
-	j.funnelPoolOnce.Do(func() {
-		j.cachedFunnelPool = newFunnelPool(j)
-	})
-	return j.cachedFunnelPool
 }
 
 //nolint:contextcheck // background context used only for tracing

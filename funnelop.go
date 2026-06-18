@@ -82,9 +82,9 @@ func NewFunnel[T any](
 	if funnelFactory == nil {
 		panic("funnelFactory must be non-nil")
 	}
-	// The funnel engine is an internal per-job detail shared by all funnels bound
-	// to Waves on the same job (lazily created here).
-	funnelPool := wave.pool.funnelPool()
+	// The funnel engine is an internal per-WAVE detail (batch-scoped flush +
+	// backpressure), shared by all funnels on this wave; lazily created here.
+	funnelPool := wave.funnelPool()
 
 	cfg := resolveOpConfig(opts)
 

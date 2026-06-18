@@ -13,11 +13,13 @@ internal worker pool", "package-level default Pool").
 
 **RESUME with the "►► NEXT:" block further down** (also mirrored in the task list).
 Remaining, roughly in order: **(a) funnel cleanup** — IN PROGRESS: init-timing
-(lazy) + governor unify DONE (`49427c2`, `a9776db`); REMAINING = flatten
-`FunnelPool`→`Wave`+delete type (large/fiddly), `funnelQueue` deletion (= the
-deprioritized flusher rewrite), `psgopt` prune (needs `maxholdtime_test`→limiter
-migration). See the "FUNNEL CLEANUP (a)" blocks below + the pre-existing teardown
-race finding. **(b) skim seam** (user-goroutine-driven; the
+(lazy) + governor unify + `FunnelPool`→internal `funnelEngine` DONE (`49427c2`,
+`a9776db`, `9e94f0d`). **DECISION (PN): do NOT flatten the engine onto `Wave`** —
+keep it as the lazily-allocated per-Wave sub-object (most waves never funnel).
+REMAINING = `funnelQueue` deletion (= the deprioritized flusher rewrite),
+`psgopt` prune (needs `maxholdtime_test`→limiter migration). See the "FUNNEL
+CLEANUP (a)" blocks below + the pre-existing teardown race finding.
+**(b) skim seam** (user-goroutine-driven; the
 block-and-help / suspend-reclaim collapse is the trickiest concurrency). **(c)**
 `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global workers.
 **(d)** limiter post-admission + governor/`submit` collapse (un-exclude `dispatch.go`;
@@ -161,19 +163,40 @@ when the `Wave`↔`defaultPool` `Acquire`/`Release` join lands. NB: validate fun
 work with **root `TestBySimulation -race`** (clean), not the inherit-test `-race`
 loop (pre-existing flake).
 
-**►► FUNNEL CLEANUP (a) — REMAINING, each entangled (reassessed 2026-06-18):**
-- **funnelQueue deletion** → `funnelQueue` (`workq.Pending`) is never posted (only
-  `Init`+pop); it survives ONLY as the rdvq-inbox vehicle driving `cpWorker.popSelect`
-  (the flusher's wait on deadline/flush-signal/done). Removing it = rewriting the
-  flusher wait loop (concurrency-sensitive) → it IS the deprioritized flusher
-  optimization. Defer.
-- **flatten `FunnelPool`→`Wave` + delete type** → the headline (a) goal, but large
-  mechanical churn (the "fiddly" WIP). With the flusher kept, it relocates the
-  `funnelQueue`/`cpWorker` machinery onto `Wave` rather than simplifying it. Cleanest
-  done AFTER (or with) the flusher simplification. Best with fresh context.
-- **psgopt funnel-option prune** → not a no-op: `maxholdtime_test.go:~36` uses
-  `WithMaxConcurrency` with a SERIAL (concurrency=1) assumption that must migrate to a
-  `WithLimits` limiter (doc §7); `example_funnel_test.go` also touches a funnel option.
+**►► FUNNEL CLEANUP (a) — engine type cleaned up; flatten REJECTED (2026-06-18).**
+- **`FunnelPool`→internal `funnelEngine` DONE (`9e94f0d`).** Unexported the type
+  (file `funnelpool.go`→`funnelengine.go`), dropped dead `SetOptions`/
+  `checkInitialized`. **DECISION (PN): do NOT flatten the engine's fields onto
+  `Wave`** — keep it as the lazily-allocated per-Wave sub-object (`Wave.funnelEngine
+  atomic.Pointer[funnelEngine]`, nil until first `NewFunnel`): most/many waves never
+  funnel and shouldn't carry the scheduled-flush queue or spawn a flusher. So the
+  API_DESIGN "no public `FunnelPool`" goal is met by internalizing, not deleting.
+- **funnelQueue deletion (deferred)** → `funnelQueue` (`workq.Pending`) is never
+  posted (only `Init`+pop); survives ONLY as the rdvq-inbox vehicle driving
+  `cpWorker.popSelect` (the flusher's wait on deadline/flush-signal/done). Removing it
+  = rewriting the flusher wait loop (concurrency-sensitive) → it IS the deprioritized
+  flusher optimization ("not that important, optimize later" — PN). Defer.
+- **psgopt funnel-option prune (deferred)** → not a no-op: `maxholdtime_test.go:~36`
+  uses `WithMaxConcurrency` with a SERIAL (concurrency=1) assumption that must migrate
+  to a `WithLimits` limiter (doc §7); `example_funnel_test.go` also touches one.
+
+**►► DESIGN NOTE — Wave should become a leakguard handle (PN, 2026-06-18).** Ops
+(`Launcher`/`Skimmer`/`Funnel`) are value handles over
+`leakguard.Handle[opState, trait]`: the underlying state is `omnipool`-pooled AND a
+runtime finalizer reports a leak if the handle is dropped without `Close`. `Wave` is
+currently a plain `&Wave{}` heap struct with neither. **Decision: make `Wave` a
+handle too** — (1) pooling, since subwaves can be created at high frequency, and (2)
+leak detection, the bigger win: a `Wave` is the heaviest lifecycle object (waveCtx,
+jobstate, flusher, shells) and a forgotten one leaks goroutines/contexts; a leakguard
+finalizer would catch a `Wave` dropped without `CancelAndWait`/`CloseAndSkimAll`.
+**Land it WITH the multi-wave work, not before** — "making multiples" is the
+multi-wave-per-Pool model (WithPool still transitional, per-wave drain TODO); the
+handle's release point IS the item-(c) `Acquire`/`Release` drain-completion; and it's
+the natural shape to settle during the Pool→Wave/Flow rename (item e). Carry forward:
+`waveState` needs `Reset` (incl. the `funnelEngine` atomic.Pointer + mutex);
+`meta.wave`/`taskWork.wave`/`funnelWork.wave` become the handle; `NewWave`'s
+`(ctx, Wave)` return + ctxMeta embedding adjust. Belongs in `API_DESIGN.md` when (e)
+is planned.
 
 **►► NEXT:**
 (b) **Skim seam** (user-goroutine-driven; mostly producer/meta cleanup, no worker move).

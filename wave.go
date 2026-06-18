@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -44,17 +45,27 @@ type Wave struct {
 	// and backpressure are BATCH-scoped, so under WithPool (several Waves sharing
 	// one Pool) each Wave gets its own engine rather than sharing one. (FunnelPool
 	// is the internal type behind it; its fields fold directly onto Wave in the
-	// continued dissolution.)
-	funnelEngineOnce sync.Once
-	funnelEngine     *FunnelPool
+	// continued dissolution.) funnelEngine is stored atomically so teardown
+	// (CancelAndWait) can read it without racing a concurrent first creation;
+	// funnelEngineMu serializes the create-once.
+	funnelEngineMu sync.Mutex
+	funnelEngine   atomic.Pointer[FunnelPool]
 }
 
-// funnelPool returns this Wave's lazily-created funnel engine.
+// funnelPool returns this Wave's lazily-created funnel engine, building it on the
+// first call (double-checked under funnelEngineMu).
 func (w *Wave) funnelPool() *FunnelPool {
-	w.funnelEngineOnce.Do(func() {
-		w.funnelEngine = newFunnelPool(w.pool)
-	})
-	return w.funnelEngine
+	if eng := w.funnelEngine.Load(); eng != nil {
+		return eng
+	}
+	w.funnelEngineMu.Lock()
+	defer w.funnelEngineMu.Unlock()
+	if eng := w.funnelEngine.Load(); eng != nil {
+		return eng
+	}
+	eng := newFunnelPool(w.pool)
+	w.funnelEngine.Store(eng)
+	return eng
 }
 
 // WaveOption configures a Wave at construction time.
@@ -206,13 +217,16 @@ func (w *Wave) CancelAndWait() {
 	// borrowed one); once workers run bodies under shells this reaps their
 	// contexts promptly rather than waiting for waveCtx GC.
 	defer w.shells.release()
-	if w.ownsPool {
-		w.pool.CancelAndWait()
-		return
-	}
-	// TODO(wave-5b): drain only this Wave's tagged work, not the
-	// whole Pool.
+	// TODO(wave-5b): with a shared Pool (WithPool) this cancels the whole Pool;
+	// it should drain only this Wave's tagged work.
 	w.pool.CancelAndWait()
+	// Join this wave's funnel flusher (if one was ever created). pool.CancelAndWait
+	// cancelled the pool context, driving the flusher out; this waits for the
+	// goroutine to fully exit. The flusher is jobstate-joined, not Pool.wg-tracked
+	// (see FunnelPool.flusherDone).
+	if eng := w.funnelEngine.Load(); eng != nil {
+		eng.joinFlusher()
+	}
 }
 
 // Close signals that no more new top-level dispatches will be made

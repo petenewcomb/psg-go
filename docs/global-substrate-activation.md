@@ -238,6 +238,30 @@ With the global substrate already dormant-but-compiled, the realistic sequence:
    skimQueue, in-flight, shell pool, flusher, lifecycle) ALONGSIDE the legacy
    `Pool`-bound Wave, not yet dispatched into. *Green if it compiles unused* (may
    trip `unused` lint → may have to merge with step 3).
+
+   **FINDING (2026-06-17): CP2 fuses into CP3 at the ctxMeta seam — earlier than
+   hoped.** The execCtx-shell must carry a reusable `*ctxMeta`, but ctxMeta creation
+   is deeply `Pool`(job)-bound: the `ctxMetaMap` cache, the `j.ctx` `AfterFunc`
+   cancel-chaining (ctxmeta.go:425-431, links each derived ctx to the job ctx), and
+   `ctxMeta.job *Pool`. The shell *replaces* the `ctxMetaMap` caching (the shell IS
+   the cached, reused meta) and `ctxMeta.job` must become a wave/lifecycle reference
+   under waveCtx ancestry (not `j.ctx`). So the shell pool cannot be built against
+   the *current* ctxMeta shape without the CP3 ctxMeta rework. **`poolCtx` (CP1) was
+   the only cleanly-separable dormant piece.** CP2+CP3 proceed together as the cut.
+
+   **⇒ KEY CP3 DECISION (open, for next session): ctxMeta in the per-Wave model.**
+   - `ctxMeta.job *Pool` → what? (a wave/lifecycle backref; the per-wave `jobstate`
+     replaces the per-job one). The `parentJobs` map, cross-job panics, and the
+     `currentHeldRequest` parent-walk all key off `job` identity — re-target to
+     wave/lifecycle identity.
+   - The `ctxMetaMap.WithValue` caching (one meta per ctx, job-keyed) → the execCtx
+     **shell** is the reused meta; borrow stamps `executionEnvironment`(=worker E),
+     `group`, `heldRequest`, `wave`; the shell's ctx is `WithCancel(waveCtx)` (not
+     `WithCancel(ctx)`+`AfterFunc(j.ctx)`).
+   - Top-level/skim ctxMeta (`topLevelCtxMeta`/`skimCtxMeta`, the USER-goroutine
+     side) still need job/wave-keyed caching for the dispatch entry — only the
+     WORKER-side meta becomes a shell. So two meta lifecycles: user-dispatch (cached,
+     `topLevelExEnv`) and worker-exec (shell, `workerExEnv`).
 3. **Cut over — atomic-ish**: wire `submit` + per-wave execCtx borrow; collapse the
    three producers onto `Post`/skim `Post`; switch body-entry to the unified E
    (funnelop.go:801); start using `defaultPool`. Delete the legacy substrate. This

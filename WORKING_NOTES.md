@@ -30,13 +30,30 @@ until then (PN: by then we'll know what that one queue actually needs).
 (grounds the converged model in the current code: the `Pool`=job naming trap, the
 global/per-wave split, the wave-5b ctx model, producer collapse onto `Post`, the
 per-wave flusher, deletion list, checkpoint sequence §8, and the resolved Q1–Q6 +
-dispatch-layering crux in §9–§10). **Next: implement on the §8 checkpoint sequence**
-— (1+2 folded) build the per-Wave substrate + `poolCtx` dormant; (3) the atomic cut
-(`submit` + execCtx borrow + 3 producers→`Post` + unified-E body entry + delete
-legacy substrate); (4) validate; (5) cleanup. Key decisions: jobstate is per-Wave;
-keep top-level ceremony (`suspend`/`reclaim` + `wait`/`yield` "old-before-new") and
+dispatch-layering crux in §9–§10). Key decisions: jobstate is per-Wave; keep
+top-level ceremony (`suspend`/`reclaim` + `wait`/`yield` "old-before-new") and
 `exEnv.ExecuteNowOrQueue` (subwave inline cases); skim shares the wave governor (no
 skim-first); limiter wiring transitional.
+
+**PROGRESS:** **CP1 DONE + COMMITTED (`6019c6d`)** — `worker.Pool` `stop chan` →
+`poolCtx`/cancel, exposed via `PoolCtx()` for waves to derive `waveCtx`; dormant,
+green (build/vet/`-short`/lint0/`TestBySimulation -race`).
+
+**►► RESUME HERE (next session, FRESH CONTEXT recommended): the CP2+CP3 cut.** CP2
+does NOT separate from CP3 — they fuse at the **ctxMeta seam** (the execCtx-shell
+carries a reusable `*ctxMeta`, but ctxMeta creation is `Pool`(job)-bound:
+`ctxMetaMap` cache + `j.ctx` AfterFunc + `ctxMeta.job *Pool`; the shell replaces
+that caching and `ctxMeta.job`→wave/lifecycle). `poolCtx` was the only cleanly
+dormant piece. **First thing next session: settle the "ctxMeta in the per-Wave
+model" decision** (design doc §8 step 2 FINDING + KEY CP3 DECISION: two meta
+lifecycles — user-dispatch cached `topLevelExEnv`, worker-exec shell `workerExEnv`;
+re-target `job`/`parentJobs`/`heldRequest`-parent-walk off job identity onto
+wave/lifecycle). Then build: per-Wave `jobstate` + governor + skim `Queue` +
+in-flight + execCtx-shell pool (model `funnelInstanceQueue`, omnipool+nbcq) +
+flusher; wire `submit` + execCtx borrow; collapse the 3 producers onto `Post`;
+unified-E body entry (funnelop.go:801); delete legacy substrate (cpstate/cpWorker/
+taskExEnv/FunnelPool/per-job pools/`*PostWork`). Validate (funnel+task+skim +
+`-race` + sim). The notes below + the design doc are the anchor.
 
 ## ►► rdvq outbox recovery — LANDED FINDING + productionization (rdvq thread, DONE)
 

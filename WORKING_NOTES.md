@@ -102,14 +102,16 @@ worker pool; per-op concurrency via Limiters") and targets `NewFunnel(wave,
 factory)` — consistent with `NewLauncher`/`NewSkimmer`. See
 [[feedback_api_consistency_over_alias]].
 
+**►► `NewFunnel(wave, …)` — ✓ DONE (`28bbde5`).** Funnels bind to a Wave like the
+other ops; `NewFunnel`/`NewFnFunnel`/`NewErrFunnel` take a `*Wave`; the funnel
+engine is an internal per-job detail via `Pool.funnelPool()` (sync.Once-cached);
+`NewFunnelPool` unexported; `psgwf.NewFunnelOp(wave)`; ~16 call sites updated.
+**Gut-before-removing**: the `FunnelPool` TYPE + its internals (workQueue/governor/
+flusher) + the now-no-op `psgopt` funnel options still exist internally — fold them
+into `Pool` (governor MERGE into per-job governor; `funnelOp.funnelPool.X`→`job.X`;
+delete the type + `funnelQueue`) and prune the dead psgopt options in a later pass.
+
 **►► NEXT:**
-(a) **Eliminate FunnelPool → `NewFunnel(wave, …)`** (PN-requested; per API_DESIGN.md):
-   move the funnel flush machinery (workQueue/governor/persistent flusher) onto the
-   `Pool` (job), lazily init'd on first funnel (sync.Once); funnel governor MERGES
-   into a per-job governor (governor collapse); `funnelOp.funnelPool.X` → `job.X`;
-   delete `FunnelPool`/`NewFunnelPool`/`funnelQueue`; change `NewFunnel`/`NewFnFunnel`/
-   `NewErrFunnel` to take a `*Wave` and update ~47 call sites (tests/examples/bench/
-   sim). The funnel binds to a Wave like the other ops.
 (b) **Skim seam** (user-goroutine-driven; mostly producer/meta cleanup, no worker move).
 (c) `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global workers.
 (d) Limiter post-admission + governor/`submit` collapse.

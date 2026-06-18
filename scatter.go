@@ -6,7 +6,6 @@ package psg
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/workq"
 )
 
@@ -14,6 +13,6 @@ import (
 // Launcher constructs boundTask values and feeds them through
 // [Pool.newTaskWork] for execution on a worker.
 type boundTask interface {
-	Execute(ctx context.Context, group workq.GroupID, completedFn func(), taskWorkerSender *rdvq.Sender)
+	Execute(ctx context.Context, group workq.GroupID, completedFn func())
 	Free()
 }

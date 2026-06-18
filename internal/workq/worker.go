@@ -20,19 +20,14 @@ import (
 	"github.com/petenewcomb/psg-go/internal/timerp"
 )
 
-// ExecEnv is the per-worker state a Worker holds: the execution environment that
-// supplies the rdvq Sender (executed work posts downstream through it) and
-// Receiver (the Worker pulls incoming work through it). The concrete E also
-// serves as the ctxMeta executionEnvironment for work executing on this worker;
-// that ctxMeta wiring is main-package, so the constructor is handed the
-// already-wired worker ctx rather than building it here (keeps workq
-// main-package-independent). If a pointer to E implements interface{ Release() }
-// it is released when the worker is done (see worker.Pool's use).
-type ExecEnv interface {
-	Sender() *rdvq.Sender
-	Receiver() *rdvq.Receiver
-	Waiter() *rdvq.Waiter
-}
+// ExecEnv is the per-worker state a Worker holds: the execution environment for
+// work executing on this worker. The concrete E also serves as the ctxMeta
+// executionEnvironment for work executing on this worker; that ctxMeta wiring is
+// main-package, so the constructor is handed the already-wired worker ctx rather
+// than building it here (keeps workq main-package-independent). If a pointer to E
+// implements interface{ Release() } it is released when the worker is done (see
+// worker.Pool's use).
+type ExecEnv interface{}
 
 // Worker drives a Queue, holding per-worker state E. The SAME type serves both
 // driver populations — only the driving cadence differs:
@@ -157,10 +152,9 @@ func (w *Worker[E]) pull(
 	// canonical select can wake and re-probe the priority engine. confirmWaitFn
 	// closes the race between "found nothing" and committing to the wait.
 	var newWork Work
-	waiters.WaitFunc(w.state.Waiter(), confirmWaitFn,
+	waiters.WaitFunc(confirmWaitFn,
 		func(workWaitCh <-chan RenotifyFunc) RenotifyFunc {
 			work, ok := w.q.incoming.PopFrontFunc(
-				w.state.Receiver(),
 				func(inboxCh <-chan Work, outboxWaitCh <-chan RenotifyFunc) rdvq.PopSelectResult[Work] {
 					return w.selectWork(ctx, inboxCh, outboxWaitCh, workWaitCh, deadlineCh, idleCh)
 				},

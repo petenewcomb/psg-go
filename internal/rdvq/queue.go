@@ -112,13 +112,8 @@ func BasicPushSelect[T any](ctx context.Context, outboxCh chan<- T, value T) (bo
 // outbox pool has slack, dramatically improving performance under bursty
 // workloads.
 //
-// The sender parameter is vestigial — outbox ownership now lives on the Queue,
-// so the destination self-sizes its pool to actual concurrency (see the "rdvq
-// Sender redesign" notes). It is retained on the signature pending the
-// mechanical removal pass.
-//
 //nolint:contextcheck // background context used only for tracing
-func (q *Queue[T]) PushBackFunc(_ *Sender, value T, bufferedFn BufferedFunc, selectFn PushSelectFunc[T]) {
+func (q *Queue[T]) PushBackFunc(value T, bufferedFn BufferedFunc, selectFn PushSelectFunc[T]) {
 	traceRegion := "rdvq.Queue.PushBackFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Queue=%p", q)
@@ -164,9 +159,9 @@ func (q *Queue[T]) PushBackFunc(_ *Sender, value T, bufferedFn BufferedFunc, sel
 //
 // The first overflow item is buffered in the outbox without blocking, allowing
 // "drop-and-go" semantics for senders.
-func (q *Queue[T]) PushBack(ctx context.Context, sender *Sender, value T, bufferedFn BufferedFunc) error {
+func (q *Queue[T]) PushBack(ctx context.Context, value T, bufferedFn BufferedFunc) error {
 	var err error
-	q.PushBackFunc(sender, value, bufferedFn, func(outboxCh chan<- T) bool {
+	q.PushBackFunc(value, bufferedFn, func(outboxCh chan<- T) bool {
 		var sent bool
 		sent, err = BasicPushSelect(ctx, outboxCh, value)
 		return sent
@@ -181,7 +176,7 @@ func (q *Queue[T]) PushBack(ctx context.Context, sender *Sender, value T, buffer
 // re-driven when the queue-level "outbox freed" wakeup fires (see ListenersFor).
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool {
+func (q *Queue[T]) TryPushBack(value T, bufferedFn BufferedFunc) bool {
 	traceRegion := "rdvq.Queue.TryPushBack"
 
 	// First try to deliver to a waiting inbox.
@@ -238,9 +233,7 @@ func (q *Queue[T]) TryPushBack(_ *Sender, value T, bufferedFn BufferedFunc) bool
 // re-driven when a receiver drains an outbox, freeing a buffered slot. This
 // replaces the former per-outbox listeners: with destination-owned outboxes
 // there is no per-sender outbox to wait on, only the pool as a whole.
-//
-// The sender parameter is vestigial (see PushBackFunc).
-func (q *Queue[T]) ListenersFor(_ *Sender) *Listeners {
+func (q *Queue[T]) ListenersFor() *Listeners {
 	return &q.outboxFreed
 }
 
@@ -346,13 +339,8 @@ func BasicPopSelect[T any](
 // true if one was received via any path; returns the zero value and false
 // only if selectFn signalled completion without a value.
 //
-// The receiver parameter is vestigial — inbox storage now lives on the Queue,
-// which pools inboxes (see borrowInbox). It is retained on the signature pending
-// the mechanical removal pass.
-//
 //nolint:contextcheck // background context used only for tracing
 func (q *Queue[T]) PopFrontFunc(
-	_ *Receiver,
 	selectFn PopSelectFunc[T],
 ) (T, bool) {
 	traceRegion := "rdvq.Queue.PopFrontFunc"
@@ -408,7 +396,6 @@ func (q *Queue[T]) PopFrontFunc(
 		// carry). The inbox is borrowed inside the selectFn (only reached once
 		// confirmFn confirms we will wait), so a confirmFn-grab borrows nothing.
 		renotifyFn = q.outboxWaiters.WaitFunc(
-			nil,
 			confirmFn,
 			func(waitCh <-chan RenotifyFunc) RenotifyFunc {
 				if ib == nil {
@@ -456,10 +443,9 @@ func (q *Queue[T]) PopFrontFunc(
 // value was available.
 func (q *Queue[T]) PopFront(
 	ctx context.Context,
-	receiver *Receiver,
 ) (T, error) {
 	var err error
-	value, ok := q.PopFrontFunc(receiver, func(inboxCh <-chan T, outboxWaitCh <-chan RenotifyFunc) PopSelectResult[T] {
+	value, ok := q.PopFrontFunc(func(inboxCh <-chan T, outboxWaitCh <-chan RenotifyFunc) PopSelectResult[T] {
 		var result PopSelectResult[T]
 		result, err = BasicPopSelect(ctx, inboxCh, outboxWaitCh)
 		return result

@@ -415,8 +415,6 @@ func reclaimRequest(ctx context.Context, blockFn workq.BlockFunc, req request) {
 	b.resume = true
 
 	helping := true
-	var waiter workq.Waiter
-	defer waiter.Release()
 
 	var renotifyFn workq.RenotifyFunc
 	for !b.advance() {
@@ -448,7 +446,7 @@ func reclaimRequest(ctx context.Context, blockFn workq.BlockFunc, req request) {
 				// permit; keep helping.
 			}
 		} else {
-			renotifyFn, err = req.notifier().Wait(ctx, &waiter, b.confirmFn)
+			renotifyFn, err = req.notifier().Wait(ctx, b.confirmFn)
 			if err != nil {
 				return // canceled: leave SUSPENDED, as above
 			}

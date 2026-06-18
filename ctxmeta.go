@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/workq"
@@ -242,32 +241,14 @@ type executionEnvironment interface {
 	PushQueueFunc(queueFn workq.QueueWorkFunc)
 	PopQueueFunc()
 	ExecuteNowOrQueue(context.Context, workq.Execution, workq.Work) error
-
-	Receiver() *rdvq.Receiver
-	Sender() *rdvq.Sender
-	Waiter() *rdvq.Waiter
 }
 
 type baseExEnv struct {
-	sender rdvq.Sender
-	waiter rdvq.Waiter
 }
 
-func (ee *baseExEnv) Sender() *rdvq.Sender {
-	return &ee.sender
-}
-
-//nolint:contextcheck // background context used only for tracing
-func (ee *baseExEnv) Waiter() *rdvq.Waiter {
-	return &ee.waiter
-}
-
-// Release returns the exEnv's pooled rdvq resources (sender, waiter) to
-// their shared pools. Should be called via defer when the goroutine that
-// owns this exEnv is exiting.
+// Release returns the exEnv's pooled resources to their shared pools. Should be
+// called via defer when the goroutine that owns this exEnv is exiting.
 func (ee *baseExEnv) Release() {
-	ee.sender.Release()
-	ee.waiter.Release()
 }
 
 type taskExEnv struct {
@@ -322,23 +303,10 @@ func (ee *taskExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, 
 	return nil
 }
 
-func (ee *taskExEnv) Receiver() *rdvq.Receiver {
-	panic("Receiver not supported in task context")
-}
-
 type integrationExEnv struct {
 	baseExEnv
 	groupStack   []workq.GroupID
 	queueFnStack []workq.QueueWorkFunc
-	receiver     rdvq.Receiver
-}
-
-// Release returns the integrationExEnv's pooled rdvq resources (sender,
-// waiter, receiver) to their shared pools. Should be called via defer when
-// the goroutine that owns this exEnv is exiting.
-func (ee *integrationExEnv) Release() {
-	ee.receiver.Release()
-	ee.baseExEnv.Release()
 }
 
 func (ee *integrationExEnv) Group() workq.GroupID {
@@ -378,10 +346,6 @@ func (ee *integrationExEnv) PopQueueFunc() {
 		panic("queue function stack underflow")
 	}
 	ee.queueFnStack = ee.queueFnStack[:len(ee.queueFnStack)-1]
-}
-
-func (ee *integrationExEnv) Receiver() *rdvq.Receiver {
-	return &ee.receiver
 }
 
 type topLevelExEnv struct {

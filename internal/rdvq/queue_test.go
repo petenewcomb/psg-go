@@ -33,13 +33,11 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Start producer that will push 3 values
-	var sender rdvq.Sender
-	defer sender.Release() // Free after all values are consumed
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 1; i <= 3; i++ {
-			_ = q.PushBack(ctx, &sender, i, nil)
+			_ = q.PushBack(ctx, i, nil)
 			values <- i
 		}
 		close(values)
@@ -55,10 +53,9 @@ func TestQueue_BasicFunctionality(t *testing.T) {
 	assert.Equal(t, 1, <-values)
 
 	// Consume remaining values with PopFront
-	var receiver rdvq.Receiver
-	val2, err := q.PopFront(ctx, &receiver)
+	val2, err := q.PopFront(ctx)
 	assert.NoError(t, err)
-	val3, err := q.PopFront(ctx, &receiver)
+	val3, err := q.PopFront(ctx)
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []int{2, 3}, []int{val2, val3})
 
@@ -85,8 +82,7 @@ func TestQueue_ContextCancellation(t *testing.T) {
 	// Start a receiver that will block
 	done := make(chan struct{})
 	go func() {
-		var receiver rdvq.Receiver
-		_, err := q.PopFront(ctx, &receiver)
+		_, err := q.PopFront(ctx)
 		assert.Error(t, err, "Should not receive value when cancelled")
 		close(done)
 	}()
@@ -113,8 +109,7 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	// Start receiver first
 	received := make(chan int)
 	go func() {
-		var receiver rdvq.Receiver
-		val, err := q.PopFront(ctx, &receiver)
+		val, err := q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
 	}()
@@ -127,9 +122,7 @@ func TestQueue_ReceiverThenSender(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var sender rdvq.Sender
-		defer sender.Release()
-		err := q.PushBack(ctx, &sender, 42, nil)
+		err := q.PushBack(ctx, 42, nil)
 		assert.NoError(t, err)
 	}()
 	defer wg.Wait()
@@ -151,9 +144,8 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
-			var receiver rdvq.Receiver
 			// This will block and then abandon
-			_, err := q.PopFront(ctx, &receiver)
+			_, err := q.PopFront(ctx)
 			assert.Error(t, err)
 		}()
 		time.Sleep(5 * time.Millisecond)
@@ -169,15 +161,12 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var sender rdvq.Sender
-		defer sender.Release()
-		err := q.PushBack(ctx, &sender, 99, nil)
+		err := q.PushBack(ctx, 99, nil)
 		assert.NoError(t, err)
 	}()
 
 	// New receiver should get the value
-	var receiver rdvq.Receiver
-	val, err := q.PopFront(ctx, &receiver)
+	val, err := q.PopFront(ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, 99, val)
 	wg.Wait()
@@ -218,9 +207,8 @@ func TestQueue_Concurrency(t *testing.T) {
 			defer readerWg.Done()
 			<-startCh
 
-			var receiver rdvq.Receiver
 			for {
-				val, err := q.PopFront(readerCtx, &receiver)
+				val, err := q.PopFront(readerCtx)
 				if err != nil {
 					return // Context cancelled
 				}
@@ -239,12 +227,10 @@ func TestQueue_Concurrency(t *testing.T) {
 			defer writerWg.Done()
 			<-startCh
 
-			var sender rdvq.Sender
-			defer sender.Release()
 			rangeStart := writerID * iterations
 			rangeEnd := rangeStart + iterations
 			for v := rangeStart; v < rangeEnd; v++ {
-				if err := q.PushBack(ctx, &sender, v, nil); err == nil {
+				if err := q.PushBack(ctx, v, nil); err == nil {
 					totalPushed.Add(1)
 				}
 			}
@@ -316,22 +302,22 @@ func TestQueue_Stress(t *testing.T) {
 	pushErrCh := make(chan error, 1)
 	popErrCh := make(chan error, 1)
 
-	pushOps := []func(context.Context, *rdvq.Sender){
-		func(ctx context.Context, sender *rdvq.Sender) {
+	pushOps := []func(context.Context){
+		func(ctx context.Context) {
 			// Trying pusher
 			tryPushed.Add(1)
 			value := values.Add(1)
-			if q.TryPushBack(sender, int(value), nil) {
+			if q.TryPushBack(int(value), nil) {
 				trace.Logf(ctx, traceRegion, "TryPushBack value=%d", value)
 			} else {
 				pushRefused.Add(1)
 			}
 		},
-		func(ctx context.Context, sender *rdvq.Sender) {
+		func(ctx context.Context) {
 			// Normal pusher
 			pushed.Add(1)
 			value := values.Add(1)
-			err := q.PushBack(ctx, sender, int(value), nil)
+			err := q.PushBack(ctx, int(value), nil)
 			switch {
 			case err == nil:
 				trace.Logf(ctx, traceRegion, "PushBack value=%d", value)
@@ -346,10 +332,10 @@ func TestQueue_Stress(t *testing.T) {
 		},
 	}
 
-	popOps := []func(context.Context, *rdvq.Receiver){
-		func(ctx context.Context, receiver *rdvq.Receiver) {
+	popOps := []func(context.Context){
+		func(ctx context.Context) {
 			// Normal popper
-			value, err := q.PopFront(ctx, receiver)
+			value, err := q.PopFront(ctx)
 			switch {
 			case err == nil:
 				trace.Logf(ctx, traceRegion, "PopFront value=%d", value)
@@ -362,17 +348,17 @@ func TestQueue_Stress(t *testing.T) {
 				}
 			}
 		},
-		func(ctx context.Context, receiver *rdvq.Receiver) {
+		func(ctx context.Context) {
 			// Trying popper
 			if value, ok := q.TryPopFront(); ok {
 				trace.Logf(ctx, traceRegion, "TryPopFront value=%d", value)
 				tryPopped.Add(1)
 			}
 		},
-		func(ctx context.Context, receiver *rdvq.Receiver) {
+		func(ctx context.Context) {
 			// Abandoning popper
 			shortCtx, shortCancel := context.WithTimeout(ctx, 1*time.Nanosecond)
-			value, err := q.PopFront(shortCtx, receiver)
+			value, err := q.PopFront(shortCtx)
 			switch {
 			case err == nil:
 				trace.Logf(ctx, traceRegion, "AbandoningPopFront value=%d", value)
@@ -401,10 +387,9 @@ func TestQueue_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			var receiver rdvq.Receiver
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
-				popOps[rand.IntN(len(popOps))](ctx, &receiver)
+				popOps[rand.IntN(len(popOps))](ctx)
 			}
 		}()
 	}
@@ -418,11 +403,9 @@ func TestQueue_Stress(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			var sender rdvq.Sender
-			defer sender.Release()
 			for ctx.Err() == nil {
 				//nolint:gosec // non-cryptographic use case
-				pushOps[rand.IntN(len(pushOps))](ctx, &sender)
+				pushOps[rand.IntN(len(pushOps))](ctx)
 			}
 		}()
 	}
@@ -471,18 +454,15 @@ func TestQueue_TryPushBack(t *testing.T) {
 	ctx := context.Background()
 
 	// TryPushBack should succeed when outbox is empty
-	var sender rdvq.Sender
-	defer sender.Release()
-	success := q.TryPushBack(&sender, 42, nil)
+	success := q.TryPushBack(42, nil)
 	assert.True(t, success, "TryPushBack should succeed with empty outbox")
-	success = q.TryPushBack(&sender, 24, nil)
+	success = q.TryPushBack(24, nil)
 	assert.False(t, success, "TryPushBack should fail with full outbox and no waiting receivers")
 
 	// Start a receiver
 	received := make(chan int)
 	go func() {
-		var receiver rdvq.Receiver
-		val, err := q.PopFront(ctx, &receiver)
+		val, err := q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
 	}()
@@ -491,7 +471,7 @@ func TestQueue_TryPushBack(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// TryPushBack should succeed now
-	success = q.TryPushBack(&sender, 42, nil)
+	success = q.TryPushBack(42, nil)
 	assert.True(t, success, "TryPushBack should succeed with waiting receiver")
 
 	// Verify the value was received
@@ -511,9 +491,6 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 		var q rdvq.Queue[int]
 		q.Init()
 
-		var sender rdvq.Sender
-		defer sender.Release()
-
 		var sawValueDuringBufferedFn bool
 		bufferedFn := func() {
 			if _, ok := q.TryPopFront(); ok {
@@ -521,7 +498,7 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 			}
 		}
 
-		ok := q.TryPushBack(&sender, 42, bufferedFn)
+		ok := q.TryPushBack(42, bufferedFn)
 		assert.True(t, ok, "TryPushBack should succeed with empty outbox")
 		assert.False(t, sawValueDuringBufferedFn,
 			"value must not be observable via TryPopFront while bufferedFn runs")
@@ -535,11 +512,8 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 		var q rdvq.Queue[int]
 		q.Init()
 
-		var sender rdvq.Sender
-		defer sender.Release()
-
 		// Fill the outbox so the next send takes the slow path.
-		ok := q.TryPushBack(&sender, 1, nil)
+		ok := q.TryPushBack(1, nil)
 		assert.True(t, ok)
 
 		var sawValueDuringBufferedFn bool
@@ -551,7 +525,7 @@ func TestQueue_BufferedFuncOrdering(t *testing.T) {
 
 		// Custom selectFn drains the previous value to free outbox.ch, then
 		// sends the new value, exercising the slow path synchronously.
-		q.PushBackFunc(&sender, 2, bufferedFn, func(outboxCh chan<- int) bool {
+		q.PushBackFunc(2, bufferedFn, func(outboxCh chan<- int) bool {
 			drained, ok := q.TryPopFront()
 			assert.True(t, ok)
 			assert.Equal(t, 1, drained)
@@ -576,8 +550,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	// Test Tier 1: Direct delivery to waiting receiver
 	received := make(chan int, 1)
 	go func() {
-		var receiver rdvq.Receiver
-		val, err := q.PopFront(ctx, &receiver)
+		val, err := q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
 	}()
@@ -585,9 +558,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	// Give receiver time to register
 	time.Sleep(10 * time.Millisecond)
 
-	var sender rdvq.Sender
-	defer sender.Release()
-	err := q.PushBack(ctx, &sender, 100, nil)
+	err := q.PushBack(ctx, 100, nil)
 	assert.NoError(t, err)
 
 	// Should receive immediately via direct delivery
@@ -599,7 +570,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	}
 
 	// Test Tier 2: Outbox buffering when no receivers waiting
-	err = q.PushBack(ctx, &sender, 200, nil)
+	err = q.PushBack(ctx, 200, nil)
 	assert.NoError(t, err)
 
 	// Test Tier 3: Shared channel when outbox is full
@@ -607,7 +578,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	go func() {
 		defer close(done)
 		// This should block on shared channel since outbox is full
-		err := q.PushBack(ctx, &sender, 300, nil)
+		err := q.PushBack(ctx, 300, nil)
 		assert.NoError(t, err)
 	}()
 
@@ -617,15 +588,14 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	// Start receiver to unblock the sender - need two PopFront calls:
 	// one for the outboxed item (200) and one for the shared channel item (300)
 	go func() {
-		var receiver rdvq.Receiver
 
 		// First PopFront should get the outboxed item
-		val, err := q.PopFront(ctx, &receiver)
+		val, err := q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
 
 		// Second PopFront should get the shared channel item
-		val, err = q.PopFront(ctx, &receiver)
+		val, err = q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
 	}()
@@ -664,8 +634,7 @@ func TestQueue_OutboxNotification(t *testing.T) {
 	receiverStarted := make(chan struct{})
 	go func() {
 		close(receiverStarted)
-		var receiver rdvq.Receiver
-		val, err := q.PopFront(ctx, &receiver)
+		val, err := q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
 	}()
@@ -675,9 +644,7 @@ func TestQueue_OutboxNotification(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Send item to outbox - this should notify the waiting receiver
-	var sender rdvq.Sender
-	defer sender.Release()
-	err := q.PushBack(ctx, &sender, 42, nil)
+	err := q.PushBack(ctx, 42, nil)
 	assert.NoError(t, err)
 
 	// Receiver should be notified and drain the outbox
@@ -702,9 +669,8 @@ func TestQueue_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 
 	// Start receiver
 	go func() {
-		var receiver rdvq.Receiver
 		for i := 0; i < numSenders*itemsPerSender; i++ {
-			val, err := q.PopFront(ctx, &receiver)
+			val, err := q.PopFront(ctx)
 			assert.NoError(t, err)
 			received <- val
 		}
@@ -716,11 +682,9 @@ func TestQueue_MultipleSendersWithSeparateOutboxes(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			var sender rdvq.Sender
-			defer sender.Release()
 			for i := 0; i < itemsPerSender; i++ {
 				value := id*1000 + i // Unique value per sender
-				err := q.PushBack(ctx, &sender, value, nil)
+				err := q.PushBack(ctx, value, nil)
 				assert.NoError(t, err)
 			}
 		}(senderID)
@@ -759,9 +723,7 @@ func TestQueue_TryPopFrontWithOutboxes(t *testing.T) {
 	assert.Equal(t, 0, value) // zero value for int
 
 	// Add item to outbox
-	var sender rdvq.Sender
-	defer sender.Release()
-	success := q.TryPushBack(&sender, 42, nil)
+	success := q.TryPushBack(42, nil)
 	assert.True(t, success) // Should go to outbox
 
 	// TryPopFront should immediately drain the outbox

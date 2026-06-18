@@ -8,23 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/stretchr/testify/require"
 )
 
-// testExecEnv is a minimal ExecEnv over real rdvq primitives, enough to drive a
-// Worker[E] in tests. The funnel/task engine's real E (integrationExEnv-based)
-// adds the group/queue stacks; the Worker only needs Sender/Receiver/Waiter.
-type testExecEnv struct {
-	sender   rdvq.Sender
-	receiver rdvq.Receiver
-	waiter   rdvq.Waiter
-}
+// testExecEnv is a minimal ExecEnv, enough to drive a Worker[E] in tests. The
+// funnel/task engine's real E (integrationExEnv-based) adds the group/queue
+// stacks; the Worker needs nothing beyond the ExecEnv marker.
+type testExecEnv struct{}
 
-func (e *testExecEnv) Sender() *rdvq.Sender     { return &e.sender }
-func (e *testExecEnv) Receiver() *rdvq.Receiver { return &e.receiver }
-func (e *testExecEnv) Waiter() *rdvq.Waiter     { return &e.waiter }
-func (e *testExecEnv) Release()                 { e.sender.Release(); e.receiver.Release() }
+func (e *testExecEnv) Release() {}
 
 // TestQueue_Post_BuffersAndSignalsDemand pins the handoff's no-taker path: with
 // no receiver, Post buffers the work in the sender's outbox, fires the demand
@@ -37,15 +29,12 @@ func TestQueue_Post_BuffersAndSignalsDemand(t *testing.T) {
 	demand := 0
 	q.Init(func() { demand++ })
 
-	var sender rdvq.Sender
-	defer sender.Release()
-
 	started := false
 	ex := Execution{Starting: func() { started = true }} // AddToListeners nil → cannot wait
 
 	work := newWorkItem(func(context.Context, Execution) error { return nil })
 
-	posted, err := q.Post(context.Background(), ex, &sender, false, work, nil)
+	posted, err := q.Post(context.Background(), ex, false, work, nil)
 	chk.NoError(err)
 	chk.True(posted)
 	chk.True(started)
@@ -65,9 +54,6 @@ func TestQueue_Post_DirectHandoffToWaitingReceiver(t *testing.T) {
 	var q Queue
 	q.Init(nil)
 
-	var sender rdvq.Sender
-	defer sender.Release()
-
 	work := newWorkItem(func(context.Context, Execution) error { return nil })
 
 	type result struct {
@@ -76,14 +62,12 @@ func TestQueue_Post_DirectHandoffToWaitingReceiver(t *testing.T) {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		var receiver rdvq.Receiver
-		defer receiver.Release()
-		w, err := q.incoming.PopFront(context.Background(), &receiver)
+		w, err := q.incoming.PopFront(context.Background())
 		ch <- result{w, err}
 	}()
 
 	ex := Execution{Starting: func() {}}
-	posted, err := q.Post(context.Background(), ex, &sender, false, work, nil)
+	posted, err := q.Post(context.Background(), ex, false, work, nil)
 	chk.NoError(err)
 	chk.True(posted)
 
@@ -117,9 +101,7 @@ func TestWorker_DriveOne_ExecutesPostedWork(t *testing.T) {
 		return nil
 	})
 
-	var prod rdvq.Sender
-	defer prod.Release()
-	posted, err := q.Post(ctx, Execution{Starting: func() {}}, &prod, false, work, nil)
+	posted, err := q.Post(ctx, Execution{Starting: func() {}}, false, work, nil)
 	chk.NoError(err)
 	chk.True(posted)
 

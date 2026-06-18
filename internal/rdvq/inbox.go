@@ -3,9 +3,9 @@
 
 package rdvq
 
-// inbox provides per-receiver buffering for direct handoff from senders.
-// Each inbox is dedicated to a specific Receiver receiving items from
-// a specific Queue.
+// inbox provides per-receive-operation buffering for direct handoff from
+// senders. Each inbox is dedicated to a specific receive operation receiving
+// items from a specific Queue.
 type inbox[T any] struct {
 	ch         chan T
 	wasEmptied bool

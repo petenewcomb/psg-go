@@ -264,7 +264,7 @@ func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.pool.funnelQueue.TryPushBack(meta.Sender(), w.work, maybeSpawn)
+			return w.pool.funnelQueue.TryPushBack(w.work, maybeSpawn)
 		}
 
 		for {
@@ -278,7 +278,7 @@ func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 
 			if !meta.ShouldBlock() {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(w.pool.funnelQueue.ListenersFor(meta.Sender()))
+				ex.AddToListeners(w.pool.funnelQueue.ListenersFor())
 				// AddToListeners to be notified when spawning conditions change
 				ex.AddToListeners(&w.pool.state.SpawnNotifier().Listeners)
 
@@ -297,9 +297,9 @@ func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 			shouldWait := func() bool {
 				return !tryPost()
 			}
-			spawnWaiters.WaitFunc(meta.Waiter(), shouldWait, func(spawnWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			spawnWaiters.WaitFunc(shouldWait, func(spawnWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 				var renotifyFn rdvq.RenotifyFunc
-				w.pool.funnelQueue.PushBackFunc(meta.Sender(), w.work, maybeSpawn, func(outboxCh chan<- workq.Work) bool {
+				w.pool.funnelQueue.PushBackFunc(w.work, maybeSpawn, func(outboxCh chan<- workq.Work) bool {
 					// Slow path, posting no longer implicit
 					posted = false
 

@@ -47,7 +47,7 @@ func TestTryPushBackSaturation(t *testing.T) {
 		go func() {
 			defer drainWg.Done()
 			for {
-				v, err := q.PopFront(ctx, nil)
+				v, err := q.PopFront(ctx)
 				if err != nil {
 					return
 				}
@@ -65,7 +65,7 @@ func TestTryPushBackSaturation(t *testing.T) {
 		go func(base int) {
 			defer prodWg.Done()
 			for i := 0; i < perProd; i++ {
-				for !q.TryPushBack(nil, base+i, nil) {
+				for !q.TryPushBack(base+i, nil) {
 					runtime.Gosched() // refuse → re-drive
 				}
 			}

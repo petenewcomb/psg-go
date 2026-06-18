@@ -119,7 +119,7 @@ func runEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Du
 			defer drainWg.Done()
 			rng := newRNG(seed)
 			for {
-				if _, err := q.PopFront(ctx, nil); err != nil {
+				if _, err := q.PopFront(ctx); err != nil {
 					return // ctx cancelled
 				}
 				mu.Lock()
@@ -163,10 +163,10 @@ func runEmitBench(b *testing.B, nProducers, nDrainers int, producerThink time.Du
 					time.Sleep(producerThink) // steady production load (not timed)
 				}
 				t0 := time.Now()
-				for !q.TryPushBack(nil, i, nil) {
+				for !q.TryPushBack(i, nil) {
 					refusals.Add(1)
 					mu.Lock()
-					if q.TryPushBack(nil, i, nil) { // retry under lock to close the race vs the signal
+					if q.TryPushBack(i, nil) { // retry under lock to close the race vs the signal
 						mu.Unlock()
 						break
 					}
@@ -420,14 +420,14 @@ func thinkForLoad(loadFactor float64, nProducers, nDrainers int) time.Duration {
 func BenchmarkOutboxHintCycle(b *testing.B) {
 	var q Queue[int]
 	q.Init()
-	q.TryPushBack(nil, -1, nil) // warm the pools (outbox, node, value)
+	q.TryPushBack(-1, nil) // warm the pools (outbox, node, value)
 	if _, ok := q.TryPopFront(); !ok {
 		b.Fatal("warmup drain failed")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if !q.TryPushBack(nil, i, nil) {
+		if !q.TryPushBack(i, nil) {
 			b.Fatal("push refused")
 		}
 		if _, ok := q.TryPopFront(); !ok {

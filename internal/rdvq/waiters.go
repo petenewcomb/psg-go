@@ -59,9 +59,6 @@ func (w *Waiters) Init() {
 // select handling.
 //
 // Parameters:
-//   - waiter: vestigial — wait-inbox storage now lives on the Waiters, which
-//     pools inboxes (see [inboxOnlyQueue.borrowInbox]). Retained on the
-//     signature pending the mechanical removal pass.
 //   - confirmFn: Function called to verify conditions after registration but
 //     before blocking. The confirmFn prevents missed notifications by
 //     re-checking conditions after the waiter is registered. If it returns
@@ -73,7 +70,7 @@ func (w *Waiters) Init() {
 // other case such as ctx.Done).
 //
 //nolint:contextcheck // background context used only for tracing
-func (w *Waiters) WaitFunc(_ *Waiter, confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
+func (w *Waiters) WaitFunc(confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
 	traceRegion := "rdvq.Waiters.WaitFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
@@ -115,9 +112,9 @@ func (w *Waiters) WaitFunc(_ *Waiter, confirmFn func() bool, selectFn WaitSelect
 }
 
 // Wait registers a waiter and blocks until notified or context cancelled.
-func (w *Waiters) Wait(ctx context.Context, waiter *Waiter, confirmFn func() bool) (RenotifyFunc, error) {
+func (w *Waiters) Wait(ctx context.Context, confirmFn func() bool) (RenotifyFunc, error) {
 	var err error
-	rf := w.WaitFunc(waiter, confirmFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+	rf := w.WaitFunc(confirmFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
 		var got RenotifyFunc
 		got, err = BasicWaitSelect(ctx, waitCh)
 		return got

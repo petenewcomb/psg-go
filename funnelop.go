@@ -12,7 +12,6 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/leakguard"
 	"github.com/petenewcomb/psg-go/internal/nbcq"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
@@ -442,17 +441,15 @@ type funnelInstance[T any] struct {
 
 // Execute implements [workq.Work]: it runs the scheduled flush once the
 // instance's deadline has come due and the scheduled-work queue has
-// surfaced it as fresh work. Any funnel worker may run it; the Sender
-// comes from the executing worker's environment. This is party "D" in the
-// lifetime model: it flushes and drops op-liveness, then never touches
+// surfaced it as fresh work. Any funnel worker may run it. This is party "D"
+// in the lifetime model: it flushes and drops op-liveness, then never touches
 // the instance again (see [funnelInstance.forceFlush]), so an owner
 // reuse-pop is free to recycle the spent shell the instant Execute
 // releases c.mu.
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	workerCtx, meta := c.op.funnelPool.job.ctxMeta(ctx)
-	cw := meta.executionEnvironment.(*cpWorker)
-	c.forceFlush(workerCtx, cw.Sender())
+	workerCtx, _ := c.op.funnelPool.job.ctxMeta(ctx)
+	c.forceFlush(workerCtx)
 	return nil
 }
 
@@ -470,13 +467,13 @@ func (c *funnelInstance[T]) Free() {}
 // c.mu and uses only that local afterward, so it never touches the
 // instance object once c.mu is released (rule R2): the spent shell is
 // then safe for an owner reuse-pop to recycle concurrently.
-func (c *funnelInstance[T]) forceFlush(ctx context.Context, sender *rdvq.Sender) {
+func (c *funnelInstance[T]) forceFlush(ctx context.Context) {
 	op := c.op
 	var didFlush bool
 	func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		didFlush = c.flush(ctx, sender)
+		didFlush = c.flush(ctx)
 	}()
 	if didFlush {
 		op.dropInstanceLiveness()
@@ -486,7 +483,6 @@ func (c *funnelInstance[T]) forceFlush(ctx context.Context, sender *rdvq.Sender)
 func (c *funnelInstance[T]) allocate(
 	ctx context.Context,
 	newAccumulator AccumulatorFactory[T],
-	sender *rdvq.Sender,
 ) {
 	traceRegion := "funnelInstance.allocate"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -494,13 +490,13 @@ func (c *funnelInstance[T]) allocate(
 	panicked := true
 	defer func() {
 		if panicked {
-			c.emitErr(ctx, sender, ErrFunnelFactoryPanicked)
+			c.emitErr(ctx, ErrFunnelFactoryPanicked)
 		}
 	}()
 	c.accumulator = newAccumulator.NewAccumulator()
 	panicked = false
 	if c.accumulator == nil {
-		c.emitErr(ctx, sender, ErrFunnelFactoryReturnedNil)
+		c.emitErr(ctx, ErrFunnelFactoryReturnedNil)
 		c.accumulator = &errAccumulator[T]{err: ErrFunnelFactoryReturnedNil}
 	}
 
@@ -514,7 +510,7 @@ func (c *funnelInstance[T]) allocate(
 // Pool.SkimAll. Successful results are not surfaced this way — the
 // Accumulator body is expected to Submit those to user-owned downstream
 // sinks directly.
-func (c *funnelInstance[T]) emitErr(ctx context.Context, sender *rdvq.Sender, accErr error) {
+func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
 	traceRegion := "funnelInstance.emitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -527,12 +523,10 @@ func (c *funnelInstance[T]) emitErr(ctx context.Context, sender *rdvq.Sender, ac
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
-	_ = sender
 }
 
 func (c *funnelInstance[T]) funnel(
 	ctx context.Context,
-	sender *rdvq.Sender,
 	input T,
 	inputErr error,
 ) {
@@ -544,7 +538,7 @@ func (c *funnelInstance[T]) funnel(
 	defer func() {
 		if !didNotPanic {
 			// Just in case the panic is otherwise suppressed
-			c.emitErr(ctx, sender, ErrFunnelPanicked)
+			c.emitErr(ctx, ErrFunnelPanicked)
 		}
 	}()
 
@@ -553,7 +547,7 @@ func (c *funnelInstance[T]) funnel(
 	didNotPanic = true
 
 	if err != nil {
-		c.emitErr(ctx, sender, err)
+		c.emitErr(ctx, err)
 	}
 
 	workQueue := &c.op.funnelPool.workQueue
@@ -566,7 +560,7 @@ func (c *funnelInstance[T]) funnel(
 		// its pending Execute will flush the data just accumulated and we
 		// leave the accumulator live (rule R1).
 		if workQueue.ClaimForFlush(c) {
-			c.flush(ctx, sender)
+			c.flush(ctx)
 		}
 	default:
 		// Either a future deadline or no deadline (zero). In the
@@ -591,7 +585,7 @@ func (c *funnelInstance[T]) funnel(
 // barrier reference, but NOT op-liveness or the pooled object — the caller
 // does that after releasing c.mu (the flusher drops op-liveness; the owner
 // lineage recycles).
-func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) bool {
+func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	traceRegion := "funnelInstance.flush"
 
 	accumulator := c.accumulator
@@ -613,7 +607,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) bool
 	defer func() {
 		if panicked {
 			// Just in case the panic is otherwise suppressed
-			c.emitErr(ctx, sender, ErrFunnelFlushPanicked)
+			c.emitErr(ctx, ErrFunnelFlushPanicked)
 		}
 	}()
 
@@ -621,7 +615,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, sender *rdvq.Sender) bool
 	err := accumulator.Flush(ctx)
 	panicked = false
 	if err != nil {
-		c.emitErr(ctx, sender, err)
+		c.emitErr(ctx, err)
 	}
 	return true
 }
@@ -659,7 +653,7 @@ func (c *funnelOp[T]) trySubmit(
 // boundFunnelWork interface allows type erasure for funnelWork instances
 type boundFunnelWork interface {
 	workq.Work
-	Funnel(ctx context.Context, sender *rdvq.Sender)
+	Funnel(ctx context.Context)
 	Waiting(*workq.Governor)
 }
 
@@ -711,7 +705,7 @@ func (w *funnelWork[T]) Init(group workq.GroupID, op *funnelOp[T], input T, inpu
 	op.ref() // Add reference for the funnel work
 }
 
-func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
+func (w *funnelWork[T]) Funnel(ctx context.Context) {
 	// This is the owner lineage ("A"/"C"): an instance is either cached in
 	// instanceQueue or being processed here, never both.
 	var hbc *funnelInstance[T]
@@ -757,7 +751,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 		hbc.ScheduledWorkItem = workq.ScheduledWorkItem{}
 		hbc.Init(w.Group())
 		hbc.earliestGroup = w.Group()
-		hbc.allocate(ctx, w.op.funnelFactory, sender)
+		hbc.allocate(ctx, w.op.funnelFactory)
 	}
 	defer func() {
 		// If funnel() flushed inline, it did so via ClaimForFlush, which
@@ -774,7 +768,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context, sender *rdvq.Sender) {
 			op.instanceQueue.PushBack(hbc)
 		}
 	}()
-	hbc.funnel(ctx, sender, w.input, w.inputErr)
+	hbc.funnel(ctx, w.input, w.inputErr)
 }
 
 func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {

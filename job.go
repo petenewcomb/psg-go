@@ -112,7 +112,7 @@ func (w *taskWork) Reset() {
 	}
 }
 
-func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
+func (w *taskWork) Execute(ctx context.Context) {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -138,7 +138,7 @@ func (w *taskWork) Execute(ctx context.Context, taskWorkerSender *rdvq.Sender) {
 		}
 	}
 
-	w.task.Execute(ctx, w.Group(), w.completedFn, taskWorkerSender)
+	w.task.Execute(ctx, w.Group(), w.completedFn)
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -458,7 +458,6 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 		err = j.tryAddWork(ctx, queueFn)
 	} else {
 		work, ok := j.skimQueue.PopFrontFunc(
-			meta.Receiver(),
 			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
 				// Declared per invocation: skimSelect (which is the only thing
 				// that populates this) is skipped on any iteration where the
@@ -468,7 +467,6 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 				// loop from ever reaching its empty (renotifyFn==nil) exit.
 				var psResult rdvq.PopSelectResult[workq.Work]
 				workRf = workWaiters.WaitFunc(
-					meta.Waiter(),
 					confirmWorkWaitFn,
 					func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 						var innerWorkRf rdvq.RenotifyFunc
@@ -478,7 +476,6 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 							)
 						} else {
 							blockRf = blockWaiters.WaitFunc(
-								meta.Waiter(),
 								func() bool {
 									shouldWait := confirmBlockWaitFn()
 									if !shouldWait {
@@ -584,7 +581,7 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.job.skimQueue.TryPushBack(meta.Sender(), w.work, nil)
+			return w.job.skimQueue.TryPushBack(w.work, nil)
 		}
 
 		for {
@@ -598,7 +595,7 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 			if !meta.ShouldBlock() {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(w.job.skimQueue.ListenersFor(meta.Sender()))
+				ex.AddToListeners(w.job.skimQueue.ListenersFor())
 
 				// Check again after registering for notification, but return
 				// and expect to be called again if needed
@@ -613,7 +610,7 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.skimQueue.PushBackFunc(meta.Sender(), w.work, nil, func(outboxCh chan<- workq.Work) bool {
+			w.job.skimQueue.PushBackFunc(w.work, nil, func(outboxCh chan<- workq.Work) bool {
 				posted = false
 
 				// Slow path, really going to block now
@@ -847,9 +844,6 @@ func (j *Pool) runTasks() {
 		},
 	)
 
-	var receiver rdvq.Receiver
-	defer receiver.Release()
-
 	var idleTimer *time.Timer
 	defer func() {
 		if idleTimer != nil {
@@ -891,7 +885,7 @@ func (j *Pool) runTasks() {
 				defer task.Free(j)
 				exEnv.group = task.Group()
 				defer func() { exEnv.group = workq.InvalidGroupID }()
-				task.Execute(ctx, exEnv.Sender())
+				task.Execute(ctx)
 			}()
 			task = nil
 			continue
@@ -918,7 +912,6 @@ func (j *Pool) runTasks() {
 
 		exit := false
 		t, ok := j.taskQueue.PopFrontFunc(
-			&receiver,
 			func(inboxCh <-chan *taskWork, outboxWaitCh <-chan rdvq.RenotifyFunc) (result rdvq.PopSelectResult[*taskWork]) {
 				trace.Logf(ctx, traceRegion,
 					"entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
@@ -986,7 +979,7 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.job.taskQueue.TryPushBack(meta.Sender(), w.task, bufferedFn)
+			return w.job.taskQueue.TryPushBack(w.task, bufferedFn)
 		}
 
 		for {
@@ -1003,7 +996,7 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 			if !meta.ShouldBlock() {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(w.job.taskQueue.ListenersFor(meta.Sender()))
+				ex.AddToListeners(w.job.taskQueue.ListenersFor())
 
 				// Check again after registering for notification, but return
 				// and expect to be called again if needed
@@ -1018,7 +1011,7 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.taskQueue.PushBackFunc(meta.Sender(), w.task, bufferedFn, func(outboxCh chan<- *taskWork) bool {
+			w.job.taskQueue.PushBackFunc(w.task, bufferedFn, func(outboxCh chan<- *taskWork) bool {
 				posted = false
 
 				// Slow path, really going to block now

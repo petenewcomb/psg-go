@@ -77,13 +77,12 @@ func (q *Queue) Init(unmetDemandFn RenotifyFunc) {
 func (q *Queue) Post(
 	ctx context.Context,
 	ex Execution,
-	sender *rdvq.Sender,
 	shouldBlock bool,
 	w Work,
 	onWait func(),
 ) (posted bool, err error) {
 	bufferedFn := rdvq.BufferedFunc(q.unmetDemandFn)
-	tryPost := func() bool { return q.incoming.TryPushBack(sender, w, bufferedFn) }
+	tryPost := func() bool { return q.incoming.TryPushBack(w, bufferedFn) }
 
 	for {
 		if tryPost() {
@@ -107,7 +106,7 @@ func (q *Queue) Post(
 			// LISTEN: subscribe to the sender's drain notification, retry once
 			// (closing the race between the failed push and the subscription),
 			// then return to be re-driven when the outbox drains.
-			ex.AddToListeners(q.incoming.ListenersFor(sender))
+			ex.AddToListeners(q.incoming.ListenersFor())
 			if tryPost() {
 				posted = true
 				break
@@ -120,7 +119,7 @@ func (q *Queue) Post(
 
 		// BLOCK: park on the sender's outbox until a worker takes the item.
 		posted = true
-		q.incoming.PushBackFunc(sender, w, bufferedFn, func(outboxCh chan<- Work) bool {
+		q.incoming.PushBackFunc(w, bufferedFn, func(outboxCh chan<- Work) bool {
 			posted = false
 			ex.Blocking()
 			if onWait != nil {

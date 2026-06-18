@@ -89,9 +89,9 @@ func (cw *cpWorker) AddWork(
 	}
 
 	// Primary goroutine, no need for idle detection
-	workWaiters.WaitFunc(cw.Waiter(), confirmWorkWaitFn,
+	workWaiters.WaitFunc(confirmWorkWaitFn,
 		func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-			work, ok := cw.cp.funnelQueue.PopFrontFunc(cw.Receiver(),
+			work, ok := cw.cp.funnelQueue.PopFrontFunc(
 				func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
 					return cw.popSelect(ctx, inboxCh, outboxWaitCh, workWaitCh, deadlineCh)
 				},
@@ -173,7 +173,7 @@ func (cw *cpWorker) popSelect(
 // instance and drops its op-liveness, matching the deadline-driven
 // Execute path.
 type scheduledFlusher interface {
-	forceFlush(ctx context.Context, sender *rdvq.Sender)
+	forceFlush(ctx context.Context)
 }
 
 // flushAll drains every still-pending scheduled flush from the shared
@@ -192,7 +192,7 @@ func (cw *cpWorker) flushAll(ctx context.Context) {
 	traceRegion := "cpWorker.flushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	for _, w := range cw.cp.workQueue.DrainAllScheduled(nil) {
-		w.(scheduledFlusher).forceFlush(ctx, cw.Sender())
+		w.(scheduledFlusher).forceFlush(ctx)
 	}
 	cw.nextJobFlushCh = nil
 }
@@ -213,6 +213,6 @@ func (cw *cpWorker) executeFunnel(ctx context.Context, bc boundFunnelWork) {
 		// barrier), so the subscription is purely a wake-up channel.
 		cw.nextJobFlushCh = cw.cp.job.state.FlushChan()
 	}
-	bc.Funnel(ctx, cw.Sender())
+	bc.Funnel(ctx)
 	cw.cp.state.IncrementCompleted()
 }

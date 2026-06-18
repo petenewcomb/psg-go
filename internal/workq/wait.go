@@ -13,7 +13,6 @@ import (
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 )
 
-type Waiter = rdvq.Waiter
 type Waiters = rdvq.Waiters
 type Notifier = rdvq.Notifier
 

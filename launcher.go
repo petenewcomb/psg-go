@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/trace"
 	"github.com/petenewcomb/psg-go/internal/workq"
 )
@@ -260,10 +259,8 @@ func (w *launcherWork[T]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
-	taskWorkerSender *rdvq.Sender,
 ) {
 	_ = group
-	_ = taskWorkerSender
 	traceRegion := "launcherWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 

@@ -54,7 +54,7 @@ import (
 func submit(
 	ctx context.Context,
 	meta *ctxMeta, // the dispatching ctx's metadata; embeds the exEnv, so it
-	// answers Sender() + IsTopLevel() directly. Passed (not re-derived from ctx)
+	// answers IsTopLevel() directly. Passed (not re-derived from ctx)
 	// per the codebase's (ctx, meta) idiom — and kept distinct from ex, which is
 	// workq's per-work admission Execution, a different layer.
 	ex workq.Execution,
@@ -63,11 +63,9 @@ func submit(
 	w workq.Work,
 	deadline time.Time,
 ) (posted bool, err error) {
-	sender := meta.Sender() // the dispatching goroutine's outbox (via the exEnv)
-
 	// The HANDOFF — deliver w to a worker (the limiter is the worker's problem).
 	handoff := func(ctx context.Context, ex workq.Execution) error {
-		posted, err = q.Post(ctx, ex, sender, deadline, w)
+		posted, err = q.Post(ctx, ex, deadline, w)
 		return err
 	}
 
@@ -145,4 +143,4 @@ type schedRequest interface {
 //	                         skimmers' + ops' schedulers' on-deck signals)
 //	blockBehaviorFor(ex)   — the pool BlockBehavior; canBlock (top-level) lives here
 //
-// (ctxMeta already provides Sender() and IsTopLevel() — it embeds the exEnv.)
+// (ctxMeta already provides IsTopLevel() — it embeds the exEnv.)

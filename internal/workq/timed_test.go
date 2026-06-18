@@ -47,10 +47,8 @@ func blockingAddWork(
 		// Non-blocking probe: no work to contribute.
 		return nil, nil
 	}
-	var waiter rdvq.Waiter
-	defer waiter.Release()
 	var err error
-	rf := waiters.WaitFunc(&waiter, confirmWaitFn,
+	rf := waiters.WaitFunc(confirmWaitFn,
 		func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 			select {
 			case rf := <-waitCh:

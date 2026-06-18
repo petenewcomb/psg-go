@@ -249,6 +249,22 @@ With the global substrate already dormant-but-compiled, the realistic sequence:
    the *current* ctxMeta shape without the CP3 ctxMeta rework. **`poolCtx` (CP1) was
    the only cleanly-separable dormant piece.** CP2+CP3 proceed together as the cut.
 
+   **DECISION TAKEN (gut-before-rename):** keep `Pool` as the per-Wave *lifecycle*
+   object (it sheds its worker substrate to the global pool but retains `jobstate`/
+   governor/skim/`ctxMetaMap`); `ctxMeta` stays structurally unchanged
+   (`job *Pool`); the `Pool`→`Wave` rename is a later mechanical pass. This unblocks
+   the shell pool against the current ctxMeta shape.
+
+   **✓ execShell pool LANDED (2026-06-17, `execshell.go` + `execshell_internal_test.go`).**
+   Per-Wave reusable `{ctx, cancel, meta}` shells: `borrow(ctxType, exEnv)` stamps
+   the transient meta (ctxType + E; parent/heldRequest reset to permit-root),
+   `giveBack` clears the transient fields and recycles via an nbcq free list,
+   `newShell` builds `WithValue(WithCancel(waveCtx), ctxMetaValueKey{}, meta)` so
+   `j.ctxMeta(shell.ctx)` resolves it (ctxmap reads `ctx.Value`). `release` cancels
+   the free list. 5 `-race` tests: meta-stamp, reuse+reset, waveCtx-cancel
+   propagation, distinct done channels, release. Green (build/vet/`-short`/lint0).
+   NOT yet wired (no Wave constructs one yet) — but tested, so not unused-dead.
+
    **⇒ KEY CP3 DECISION (open, for next session): ctxMeta in the per-Wave model.**
    - `ctxMeta.job *Pool` → what? (a wave/lifecycle backref; the per-wave `jobstate`
      replaces the per-job one). The `parentJobs` map, cross-job panics, and the

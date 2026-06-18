@@ -2,28 +2,28 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►► START HERE (active work): the Worker-pool + workq CONSOLIDATION.** The rdvq
-work below (outbox recovery → reclamation → gen-stamped-hint bug fix → vestigial
-`Sender`/`Receiver`/`Waiter` removal, all committed and green) is DONE — it was in
-service of the consolidation (those handles were per-worker `E` state being
-untangled). Goal: collapse the three live producer paths (task/skim/funnel) onto
-the single unified `workq.Post` → `workq.Queue`, driven by `worker.Pool`/`Worker`,
-until there is just `workq.Queue.incoming`.
+**►► START HERE (next session). The Worker-pool + workq CONSOLIDATION is LARGELY
+DONE and landed green on `combiner` (clean tree @ `d827a94`).** Task AND funnel work
+now run on the ONE global `defaultPool` (`internal/worker.Pool` + shared
+`workq.Queue`) via borrowed per-wave execShells; the per-job task substrate +
+`cpstate` are deleted; `NewFunnel(wave, …)` is the public API (FunnelPool out of it);
+the funnel engine is per-Wave (on `Wave`). This implements most of the API_DESIGN.md
+repositioning's internal refactors ("merge TaskPool+FunnelPool machinery into one
+internal worker pool", "package-level default Pool").
 
-**Resume at: the global-substrate activation (the corrected model — NOT the
-per-job "cp-5 FunnelPool→worker.Pool cutover," which is RETRACTED; see "CORRECTION
-(2026-06-16, PN)" below).** Authoritative plan = **"Next (corrected)"** /
-**"wave-5b ctx model — CONVERGED"** below: one global `defaultPool` + one shared
-`workq.Queue` + a context-free unified `E` already exist and compile but are
-DORMANT (nothing `Post`s yet). Remaining sequence: (1) wire the wave-5b ctx model
-into `worker.Pool` (stop-chan → `poolCtx`, expose it); (2) build the new per-`Wave`
-substrate (`waveCtx`, per-wave governor + in-flight counter + skim queue +
-Acquire/Release the global pool + per-wave flusher); (3) wire uniform `submit`
-(non-top-level → `Post`; top-level → governor gate → `Post`; per-wave execCtx
-borrow); (4) collapse the task/funnel/skim producers onto `defaultPool.Post` /
-skim-queue `Post`; (5) delete `taskExEnv`/`cpWorker`/cpstate + the per-job pools +
-legacy `Pool`/`Wave` binding. The channel-vs-rdvq queue-impl question is DEFERRED
-until then (PN: by then we'll know what that one queue actually needs).
+**RESUME with the "►► NEXT:" block further down** (also mirrored in the task list).
+Remaining, roughly in order: **(a) funnel cleanup** — flatten the `FunnelPool` fields
+onto `Wave` + delete the type; decide funnel-engine init timing (lazy `sync.Once`
+vs eager in `NewWave`); merge the funnel governor into one per-Wave governor; prune
+the no-op `psgopt` funnel options. **(b) skim seam** (user-goroutine-driven; the
+block-and-help / suspend-reclaim collapse is the trickiest concurrency). **(c)**
+`Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global workers.
+**(d)** limiter post-admission + governor/`submit` collapse (un-exclude `dispatch.go`;
+relocate the top-level `suspend`/`reclaim`+`wait`/`yield` ceremony into `submit`).
+**(e)** the `Pool`→`Wave`/`Flow` rename (the coordinated major-version landing).
+Anchors: **`docs/global-substrate-activation.md`** (the design + resolved Q1–Q6) and
+**`API_DESIGN.md`** (the repositioning target). The detailed session-by-session
+history is below; the rdvq notes at the very bottom are older context.
 
 **SEQUENCING (PN): DESIGN REVIEW FIRST — ✓ COMPLETE (2026-06-17).** Written design
 + all open questions resolved with PN in **`docs/global-substrate-activation.md`**

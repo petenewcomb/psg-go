@@ -12,10 +12,12 @@ repositioning's internal refactors ("merge TaskPool+FunnelPool machinery into on
 internal worker pool", "package-level default Pool").
 
 **RESUME with the "►► NEXT:" block further down** (also mirrored in the task list).
-Remaining, roughly in order: **(a) funnel cleanup** — flatten the `FunnelPool` fields
-onto `Wave` + delete the type; decide funnel-engine init timing (lazy `sync.Once`
-vs eager in `NewWave`); merge the funnel governor into one per-Wave governor; prune
-the no-op `psgopt` funnel options. **(b) skim seam** (user-goroutine-driven; the
+Remaining, roughly in order: **(a) funnel cleanup** — IN PROGRESS: init-timing
+(lazy) + governor unify DONE (`49427c2`, `a9776db`); REMAINING = flatten
+`FunnelPool`→`Wave`+delete type (large/fiddly), `funnelQueue` deletion (= the
+deprioritized flusher rewrite), `psgopt` prune (needs `maxholdtime_test`→limiter
+migration). See the "FUNNEL CLEANUP (a)" blocks below + the pre-existing teardown
+race finding. **(b) skim seam** (user-goroutine-driven; the
 block-and-help / suspend-reclaim collapse is the trickiest concurrency). **(c)**
 `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global workers.
 **(d)** limiter post-admission + governor/`submit` collapse (un-exclude `dispatch.go`;
@@ -121,6 +123,57 @@ discarded — it was getting fiddly); decide funnel-engine init timing (current 
 and avoids a `wg.Add`-after-`Wait` edge, but spawns a parked flusher per Wave;
 lazy avoids that for funnel-less Waves/subwaves); merge the funnel governor into a
 single per-Wave governor; prune the no-op `psgopt` funnel options.
+
+**►► FUNNEL CLEANUP (a) — IN PROGRESS (2026-06-18). Two pieces landed green:**
+- **CP1 — flusher off `Pool.wg`, jobstate-joined (`49427c2`).** The per-wave funnel
+  flusher was tracked on `Pool.wg`, but `Pool.wg` is for worker goroutines (now on
+  the global `defaultPool`). Funnel-flush *completion* is jobstate-ref-counted
+  (`CloseAndSkimAll` blocks on `state.Done` until every `funnelInstance` flushed), so
+  the wg only joined the goroutine — and the lazy `wg.Add(1)` could race a concurrent
+  `CancelAndWait`'s `wg.Wait()` when an op body creates the first funnel during a
+  graceful-drain flush (a SUPPORTED scenario, per PN). Replaced with
+  `FunnelPool.flusherDone` (closed on exit), joined in `Wave.CancelAndWait`;
+  `Wave.funnelEngine` is now an `atomic.Pointer` for race-free teardown read.
+  **Decisions taken (PN):** init timing = **lazy** (scale-to-zero; funnel-less
+  waves/subwaves spawn no flusher), wg-edge closed structurally via the jobstate
+  join; the dedicated per-wave flusher stays (doc §6) — not worth dissolving onto the
+  pool now ("optimize later if needed"). Cancel = abrupt (submissions error, no new
+  bodies); all else graceful.
+- **CP2 — funnel backpressure unified on the wave governor + flusher join-order fix
+  (`a9776db`).** `funnelPostWork`'s `onWait` registered downstream saturation on a
+  separate `FunnelPool.governor` that nothing ever `Execute`d (orphan → inert). Now
+  registers on `w.pool.job.governor` — the SAME governor top-level task admission
+  gates on (`launcherScatterWork`) and skim registers on — so funnel backpressure is
+  live and unified. Deleted the orphan field. Per PN: the governor's physical
+  `Pool`→`Wave` relocation **rides with the skim seam (b)**; under today's 1:1
+  Pool↔Wave binding the job governor IS the per-wave governor. Also fixed a CP1
+  ordering bug (join the flusher BEFORE `pool.CancelAndWait` clears the ctxMetaMaps,
+  which the flusher reads). Validated: root `TestBySimulation -race` 320 checks clean.
+
+**►► PRE-EXISTING TEARDOWN RACE FOUND (item-c territory, NOT introduced here).**
+Under `-race` stress of the `internal/sim` inherit tests, `Pool.CancelAndWait` →
+`ctxMetaMap.Clear()` races still-active work (`Launcher.SubmitResult` from a
+`defaultPool` task body, `Skimmer.SubmitResult`) writing ctxMeta. **Confirmed
+identical on baseline `b32f650`** (fails ~iter 4–7 of a `-race -count` inherit-test
+loop). Root cause = the item-(c) gap: `CancelAndWait` clears shared maps without
+barriering in-flight global-pool/skim work. Out of scope for funnel cleanup; fix
+when the `Wave`↔`defaultPool` `Acquire`/`Release` join lands. NB: validate funnel
+work with **root `TestBySimulation -race`** (clean), not the inherit-test `-race`
+loop (pre-existing flake).
+
+**►► FUNNEL CLEANUP (a) — REMAINING, each entangled (reassessed 2026-06-18):**
+- **funnelQueue deletion** → `funnelQueue` (`workq.Pending`) is never posted (only
+  `Init`+pop); it survives ONLY as the rdvq-inbox vehicle driving `cpWorker.popSelect`
+  (the flusher's wait on deadline/flush-signal/done). Removing it = rewriting the
+  flusher wait loop (concurrency-sensitive) → it IS the deprioritized flusher
+  optimization. Defer.
+- **flatten `FunnelPool`→`Wave` + delete type** → the headline (a) goal, but large
+  mechanical churn (the "fiddly" WIP). With the flusher kept, it relocates the
+  `funnelQueue`/`cpWorker` machinery onto `Wave` rather than simplifying it. Cleanest
+  done AFTER (or with) the flusher simplification. Best with fresh context.
+- **psgopt funnel-option prune** → not a no-op: `maxholdtime_test.go:~36` uses
+  `WithMaxConcurrency` with a SERIAL (concurrency=1) assumption that must migrate to a
+  `WithLimits` limiter (doc §7); `example_funnel_test.go` also touches a funnel option.
 
 **►► NEXT:**
 (b) **Skim seam** (user-goroutine-driven; mostly producer/meta cleanup, no worker move).

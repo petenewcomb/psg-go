@@ -111,6 +111,17 @@ flusher) + the now-no-op `psgopt` funnel options still exist internally — fold
 into `Pool` (governor MERGE into per-job governor; `funnelOp.funnelPool.X`→`job.X`;
 delete the type + `funnelQueue`) and prune the dead psgopt options in a later pass.
 
+**►► `NewFunnel(wave)` + funnel engine on Wave — ✓ DONE (`28bbde5`, `28a5212`).**
+The funnel engine (scheduled-flush queue + governor + persistent flusher) is now
+per-Wave (cached on `Wave`, lazily via `wave.funnelPool()`), batch-scoped — correct
+under WithPool. **DEFERRED to a subsequent cleanup** (PN): flatten the `FunnelPool`
+fields directly onto `Wave` + delete the `FunnelPool` type (the WIP flatten was
+discarded — it was getting fiddly); decide funnel-engine init timing (current lazy
+`sync.Once` vs eager in `NewWave` — eager is simpler/consistent with waveCtx+shells
+and avoids a `wg.Add`-after-`Wait` edge, but spawns a parked flusher per Wave;
+lazy avoids that for funnel-less Waves/subwaves); merge the funnel governor into a
+single per-Wave governor; prune the no-op `psgopt` funnel options.
+
 **►► NEXT:**
 (b) **Skim seam** (user-goroutine-driven; mostly producer/meta cleanup, no worker move).
 (c) `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global workers.

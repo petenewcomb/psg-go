@@ -797,32 +797,20 @@ func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 
 func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	workerCtx, meta := w.op.funnelPool.job.ctxMeta(ctx)
-	cw := meta.executionEnvironment.(*cpWorker)
-	cw.PushGroup(w.Group())
-	defer cw.PopGroup()
-	// Stamp the dispatching wave onto the worker's per-worker
-	// ctxMeta so nil-wave op dispatches from inside the Accumulate /
-	// Flush body resolve to it. The worker's ctxMeta is exclusive to
-	// this goroutine for the funnel's lifetime; mutation is race-free
-	// as long as user code doesn't capture ctx into a goroutine that
-	// outlives the body.
-	prevWave := meta.wave
-	meta.wave = w.wave
-	defer func() { meta.wave = prevWave }()
-	if w.req != nil {
-		// Stamp the held limiter request so framework parking points
-		// inside the Accumulate body can suspend it (currentHeldRequest).
-		// Stamp sites must be chain roots — see ctxMeta.parent.
-		if meta.parent != nil {
-			panic("limiter request stamped on non-root ctxMeta; worker contexts must be fresh permit-roots")
-		}
-		prevReq := meta.heldRequest
-		meta.heldRequest = w.req
-		defer func() { meta.heldRequest = prevReq }()
-	}
-	cw.executeFunnel(workerCtx, w)
-	return nil
+	// Run the funnel body on a global-pool worker under a borrowed per-wave
+	// execShell (mirrors taskWork.Execute). runInShell supplies the body context +
+	// ctxMeta (wave + worker E + the held limiter request); we push the funnel's
+	// group onto that exEnv so nil-wave op dispatches from inside the Accumulate /
+	// Flush body resolve to it. The legacy cpWorker flush-signal subscription and
+	// IncrementCompleted metric are dropped (the end-of-work flush is the per-wave
+	// flusher; IncrementCompleted was write-only).
+	return runInShell(ctx, w.wave, funnelContext, w.req, func(shellCtx context.Context) error {
+		meta, _ := shellCtx.Value(ctxMetaValueKey{}).(*ctxMeta)
+		meta.PushGroup(w.Group())
+		defer meta.PopGroup()
+		w.Funnel(shellCtx)
+		return nil
+	})
 }
 
 func (w *funnelWork[T]) Free() {

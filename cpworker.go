@@ -201,18 +201,3 @@ func (cw *cpWorker) flushAll(ctx context.Context) {
 // flush placeholder so the job-end sweep finds such instances. Large
 // enough to subsume any reasonable future deadline.
 const maxFlushAllSkew = 24 * time.Hour
-
-func (cw *cpWorker) executeFunnel(ctx context.Context, bc boundFunnelWork) {
-	traceRegion := "cpWorker.executeFunnel"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "cpWorker=%p", cw)
-	if cw.nextJobFlushCh == nil {
-		// Subscribe to the job's flush signal so this worker wakes to run
-		// the end-of-work flush sweep. No reference is taken here; the
-		// flush barrier is carried per-instance (see funnelInstance flush
-		// barrier), so the subscription is purely a wake-up channel.
-		cw.nextJobFlushCh = cw.cp.job.state.FlushChan()
-	}
-	bc.Funnel(ctx)
-	cw.cp.state.IncrementCompleted()
-}

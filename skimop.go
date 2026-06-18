@@ -264,7 +264,7 @@ func (g Skimmer[T]) submit(
 	err error,
 ) error {
 	skimWork := g.newSkimWork(group, job, value, err)
-	postWork := job.newSkimPostWork(group, skimWork)
+	postWork := job.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
@@ -279,7 +279,7 @@ func (g Skimmer[T]) trySubmit(
 	deadline time.Time,
 ) (bool, error) {
 	skimWork := g.newSkimWork(group, job, value, err)
-	postWork := job.newSkimPostWork(group, skimWork)
+	postWork := job.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()

@@ -73,13 +73,26 @@ blocks inside its first drive and would pin the lone spawn slot); cross-job guar
 (thread the wave's `parentJobs` ancestry into the shell metas); de-stampede scaling
 (bounded `spawnConcurrencyLimit`=1 restored once safe — was the `-race` blowup).
 
-**►► NEXT: funnel seam** (same proven pattern): make the funnel body work a
-`workq.Work` running via `runInShell`, reroute `funnelPostWork.Execute` →
-`defaultPool.Post`, delete `cpWorker`/`FunnelPool` goroutine/spawn machinery +
-`cpstate`. Funnel is harder than task (the flush + the `cpWorker.(*cpWorker)`
-assertion at funnelop.go:801 → `(*workerExEnv)`; the per-wave flusher design is in
-docs §6). Then: skim seam; `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait`
-joins global workers; limiter post-admission move + governor/`submit` collapse;
+**►► FUNNEL SEAM — ✓ DONE + GREEN (2026-06-18).** Funnel work runs on the global
+worker.Pool via execShells (mirrors task). `funnelWork.executeInner` → `runInShell`;
+`funnelPostWork.Execute` → `defaultPool.Post`; spawn-notifier machinery dropped.
+FLUSH (transitional): `cp.workQueue` now holds only scheduled funnelInstance
+flushes, driven by ONE **persistent cpWorker** per FunnelPool (started in
+NewFunnelPool, idle-exit forced off, subscribes `nextJobFlushCh` at startup). Found
++ fixed a latent **producer-postpone meta panic** (a producer postponed onto the
+global shared queue is re-run by a global worker with NO ctxMeta → `j.ctxMeta`
+panicked; fixed by reading meta directly + "no matching meta → non-top-level /
+shouldBlock=false" in `j.shouldBlock`/`task`/`funnel`/`skimPostWork`). Green: root
+tests + examples (15/15), sim `-race` 120 (~16s), lint0.
+
+**►► NEXT (cleanup + remaining seams):** (a) Delete the transitional funnel
+machinery: replace the persistent cpWorker with a dedicated per-wave flusher (docs
+§6), delete `cpWorker`/`cpstate`/`FunnelPool.goroutine`/`spawnNewGoroutine`/
+`funnelQueue`/most of `FunnelPool`; options fallout (`WithMaxConcurrency` etc.;
+maxholdtime→limiter). (b) **Skim seam** (same pattern, but skim is user-goroutine-
+driven on a per-wave queue — likely just the producer/meta cleanup, no worker
+move). (c) `Wave`↔`defaultPool` `Acquire`/`Release` so `psg.Wait` joins global
+workers. (d) Limiter post-admission move + governor/`submit` collapse. (e)
 `Pool`→`Wave` rename. Anchor: `docs/global-substrate-activation.md`.
 
 **REFERENCE — the task-seam plan that was executed (kept for the funnel/skim

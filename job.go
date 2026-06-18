@@ -304,8 +304,14 @@ func (j *Pool) yield(ctx context.Context, deadline time.Time) error {
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
 
 func (j *Pool) shouldBlock(ctx context.Context) workq.BlockFunc {
-	_, meta := j.ctxMeta(ctx)
-	if meta.IsTopLevel() {
+	// Read the meta directly (not via j.ctxMeta, which panics on a missing meta).
+	// A dispatch chain (launcherScatterWork governor gate / limiterScatterWork
+	// acquire) that postponed onto the global shared queue is re-run by a global
+	// worker whose ctx carries NO ctxMeta — and such work is never a TOP-LEVEL
+	// dispatch (top-level runs on the user goroutine, where the meta is present).
+	// So "no matching meta → not top-level → don't block" is correct.
+	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	if ok && meta.job == j && meta.IsTopLevel() {
 		return j.blockFn
 	}
 	return nil
@@ -517,12 +523,19 @@ type skimPostWork struct {
 	poolWork
 	job  *Pool
 	work boundSkimWork
+	// shouldBlock is captured at dispatch (from the dispatching meta) rather than
+	// re-derived from the run ctx: when this producer postpones onto the global
+	// shared queue, a global worker re-runs it under the worker ctx, which carries
+	// no ctxMeta — so ctxMeta(ctx) would panic ("Context not associated with a
+	// job"). The post only needs ShouldBlock + the ctx for cancellation.
+	shouldBlock bool
 }
 
-func (w *skimPostWork) Init(group workq.GroupID, job *Pool, work boundSkimWork) {
+func (w *skimPostWork) Init(group workq.GroupID, job *Pool, work boundSkimWork, shouldBlock bool) {
 	w.poolWork.Init(group, job)
 	w.job = job
 	w.work = work
+	w.shouldBlock = shouldBlock
 }
 
 func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
@@ -531,9 +544,6 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	trace.Logf(ctx, traceRegion, "%v", w)
 
 	posted, err := func() (bool, error) {
-		// Discover outbox from execution environment
-		ctx, meta := w.job.ctxMeta(ctx)
-
 		waiting := func() {
 			// Call Waiting on the nested skimWork to notify the governor
 			w.work.Waiting(&w.job.governor)
@@ -553,7 +563,7 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 				return false, nil
 			}
 
-			if !meta.ShouldBlock() {
+			if !w.shouldBlock {
 				// We expect to be queued and called again, so listen and don't block
 				ex.AddToListeners(w.job.skimQueue.ListenersFor())
 
@@ -619,11 +629,11 @@ func (w *skimPostWork) Free() {
 var skimPostWorkPool = omnipool.For[skimPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork) *skimPostWork {
+func (j *Pool) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
 	traceRegion := "Pool.newSkimPostWork"
 
 	w := skimPostWorkPool.Get()
-	w.Init(group, j, skimWork)
+	w.Init(group, j, skimWork, shouldBlock)
 
 	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
 	return w
@@ -751,8 +761,13 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	// trySpawnTaskWorker. Spawn/governor are handled elsewhere (governor at
 	// launcherScatterWork, spawn at defaultPool). onWait is nil for task (no
 	// downstream governor registration here).
-	ctx, meta := w.job.ctxMeta(ctx)
-	posted, err := defaultPool.Post(ctx, ex, meta.ShouldBlock(), w.task, nil)
+	// shouldBlock is read directly from the ctx (not via j.ctxMeta, which panics on
+	// a missing meta): a producer only postpones onto the global queue in LISTEN
+	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta —
+	// so "no matching meta → shouldBlock=false" matches the original dispatch.
+	meta, _ := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	shouldBlock := meta != nil && meta.job == w.job && meta.ShouldBlock()
+	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.task, nil)
 	if posted {
 		// Ownership transferred to the queue; the worker will run + Free it.
 		w.task = nil

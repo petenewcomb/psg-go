@@ -114,6 +114,86 @@ func TestExecShell_DistinctDoneChannels(t *testing.T) {
 	}
 }
 
+func TestRunInShell_RunsBodyUnderShell(t *testing.T) {
+	waveCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &Wave{}
+	w.shells.Init(waveCtx, nil, w)
+
+	// A worker context carries the worker's E under workerEnvKey (newWorkerState).
+	ee := &workerExEnv{}
+	workerCtx := context.WithValue(context.Background(), workerEnvKey{}, ee)
+
+	// Capture the meta state INSIDE the body — the deferred giveBack resets the
+	// transient fields once runInShell returns.
+	var gotCtx context.Context
+	var gotEE executionEnvironment
+	var gotType contextType
+	var gotWave *Wave
+	var haveMeta bool
+	err := runInShell(workerCtx, w, taskContext, nil, func(ctx context.Context) error {
+		gotCtx = ctx
+		m, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+		haveMeta = ok
+		if ok {
+			gotEE = m.executionEnvironment
+			gotType = m.ctxType
+			gotWave = m.wave
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runInShell error: %v", err)
+	}
+	if !haveMeta {
+		t.Fatal("body did not run under a shell ctx carrying a ctxMeta")
+	}
+	if gotEE != executionEnvironment(ee) {
+		t.Fatal("worker E not stamped into the shell meta")
+	}
+	if gotType != taskContext {
+		t.Fatalf("ctxType = %v, want taskContext", gotType)
+	}
+	if gotWave != w {
+		t.Fatal("wave not on the shell meta")
+	}
+	// The body ran under the shell ctx (a descendant of waveCtx), not the worker
+	// ctx: cancelling waveCtx must cancel the ctx the body saw.
+	cancel()
+	select {
+	case <-gotCtx.Done():
+	default:
+		t.Fatal("body ctx not a descendant of waveCtx")
+	}
+}
+
+func TestRunInShell_ReturnsShellForReuse(t *testing.T) {
+	waveCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &Wave{}
+	w.shells.Init(waveCtx, nil, w)
+	ee := &workerExEnv{}
+	workerCtx := context.WithValue(context.Background(), workerEnvKey{}, ee)
+
+	var meta1, meta2 *ctxMeta
+	_ = runInShell(workerCtx, w, taskContext, nil, func(ctx context.Context) error {
+		meta1, _ = ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+		return nil
+	})
+	_ = runInShell(workerCtx, w, funnelContext, nil, func(ctx context.Context) error {
+		meta2, _ = ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+		return nil
+	})
+	// Sequential bodies reuse the one freed shell (giveBack on return).
+	if meta1 == nil || meta1 != meta2 {
+		t.Fatal("runInShell did not return the shell for reuse")
+	}
+	// Transient fields cleared between borrows.
+	if meta2.heldRequest != nil {
+		t.Fatal("heldRequest leaked across borrows")
+	}
+}
+
 func TestExecShell_ReleaseCancelsFreeList(t *testing.T) {
 	p, cancel := newTestShellPool(t)
 	defer cancel()

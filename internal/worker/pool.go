@@ -62,11 +62,12 @@ type Pool[E workq.ExecEnv] struct {
 	sharedQueue
 
 	// newState builds a fresh per-worker execution environment together with the
-	// worker context it runs under (E wired into the ctxMeta as the execution
-	// environment, a fresh permit-root) and that context's cancel. Supplied by
-	// the main package, which owns the ctxMeta wiring — keeping this package
-	// independent of it.
-	newState func() (state E, workerCtx context.Context, cancel context.CancelFunc)
+	// worker context it runs idle/cancel selects under and that context's cancel.
+	// It is handed the pool's poolCtx (captured at spawn) to derive the worker
+	// context from, so definitive teardown cancels idle workers by ancestry.
+	// Supplied by the main package, which owns the context/E wiring — keeping this
+	// package independent of it.
+	newState func(poolCtx context.Context) (state E, workerCtx context.Context, cancel context.CancelFunc)
 
 	workers sync.WaitGroup // every live worker goroutine
 
@@ -98,7 +99,7 @@ type Pool[E workq.ExecEnv] struct {
 //
 //nolint:contextcheck // background context used only for tracing
 func NewPool[E workq.ExecEnv](
-	newState func() (state E, workerCtx context.Context, cancel context.CancelFunc),
+	newState func(poolCtx context.Context) (state E, workerCtx context.Context, cancel context.CancelFunc),
 ) *Pool[E] {
 	traceRegion := "worker.NewPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -204,34 +205,33 @@ func (p *Pool[E]) trySpawnWorker() {
 }
 
 func (p *Pool[E]) spawnWorker() {
-	// Capture the current poolCtx's Done channel so a later re-arm never reaches
-	// this worker (it will have exited on the context it was born with). CP1 only
-	// needs the stop signal here; wave-5b will derive the worker's exec ctx from
-	// poolCtx (capturing the context itself).
+	// Capture the current poolCtx so a later re-arm never reaches this worker (it
+	// will have exited on the context it was born with). The worker derives its
+	// idle/cancel context from poolCtx (via newState) and stops on poolCtx.Done().
 	p.mu.Lock()
-	stop := p.poolCtx.Done()
+	poolCtx := p.poolCtx
 	p.mu.Unlock()
 
 	p.workers.Add(1)
-	go p.runWorker(stop)
+	go p.runWorker(poolCtx)
 }
 
 // ── Worker loop ─────────────────────────────────────────────────────────────
 
-func (p *Pool[E]) runWorker(stop <-chan struct{}) {
+//nolint:contextcheck // poolCtx is the captured spawn-time pool context by design
+func (p *Pool[E]) runWorker(poolCtx context.Context) {
 	defer p.workers.Done()
 
 	traceRegion := "worker.Pool.runWorker"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	state, ctx, cancel := p.newState()
+	state, ctx, cancel := p.newState(poolCtx)
 	defer cancel()
 
-	// stop is the captured poolCtx.Done() — the definitive-stop signal (pool
-	// teardown); the worker captured it at spawn, so a later re-arm never reaches
-	// it.
+	// poolCtx.Done() is the definitive-stop signal (pool teardown); the worker
+	// captured poolCtx at spawn, so a later re-arm never reaches it.
 	w := workq.NewWorker(&p.sharedQueue, state, ctx,
-		workq.WithStop(stop), workq.WithIdleExit(workerIdleTimeout))
+		workq.WithStop(poolCtx.Done()), workq.WithIdleExit(workerIdleTimeout))
 	defer w.Release()
 
 	// spawning is true until this worker's first drive completes, after which it

@@ -117,6 +117,33 @@ func (p *execShellPool) newShell() *execShell {
 	return &execShell{ctx: ctx, cancel: cancel, meta: meta}
 }
 
+// runInShell runs a body on a global-pool worker under a borrowed per-wave
+// execShell — the wave-5b worker execution core shared by task and funnel bodies.
+// The fungible worker supplies E (carried on workerCtx); the wave supplies the
+// execution context. It borrows a shell from wave, stamps E (via borrow) and the
+// held limiter request, runs fn under the shell's context, then returns the shell.
+//
+// req is the limiter request this body's admission was granted through (nil for
+// unlimited ops); it is stamped onto the permit-root shell meta so framework
+// parking points inside the body can suspend it (currentHeldRequest). The wave is
+// already on the shell meta (shells are per-wave); borrow reset parent and
+// heldRequest, and giveBack clears the transient fields, so no save/restore is
+// needed.
+func runInShell(
+	workerCtx context.Context,
+	wave *Wave,
+	ctxType contextType,
+	req request,
+	fn func(ctx context.Context) error,
+) error {
+	ee := workerEnvFromContext(workerCtx)
+	shell := wave.shells.borrow(ctxType, ee)
+	defer wave.shells.giveBack(shell)
+	shell.meta.heldRequest = req
+	//nolint:contextcheck // the body runs under the per-wave shell ctx by design
+	return fn(shell.ctx)
+}
+
 // release cancels the shells currently in the free list. Normally unnecessary —
 // waveCtx cancellation already cancels each shell's derived context by ancestry —
 // but draining the free list and cancelling explicitly lets a wave promptly

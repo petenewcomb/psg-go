@@ -55,13 +55,29 @@ func (ee *workerExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution
 	return defaultPool.ExecuteNowOrQueue(ctx, ex, work)
 }
 
-// newWorkerState builds a fresh worker environment plus the context it runs
-// under. PLACEHOLDER context: the real per-execution ctxMeta stamping (the work
-// borrows its wave context, and this exEnv is stamped as the
-// executionEnvironment) is wave-5b. The pool is dormant until the Wave wiring
-// lands, so this context is not yet exercised.
-func newWorkerState() (*workerExEnv, context.Context, context.CancelFunc) {
+// workerEnvKey carries the worker's execution environment E on its worker context
+// so a body executing on this worker can retrieve E (to stamp into the borrowed
+// per-wave execShell) without it living in a ctxMeta. The worker ctx itself holds
+// NO ctxMeta — bodies run under a borrowed shell's ctx, never the worker ctx.
+type workerEnvKey struct{}
+
+// newWorkerState builds a fresh worker environment plus the worker context it runs
+// idle/cancel selects under. The context derives from the global pool's poolCtx
+// (so definitive teardown cancels idle workers by ancestry) and carries E under
+// workerEnvKey. Bodies do NOT run under this context — they run under a per-wave
+// execShell borrowed at execution; this context is only the worker's own
+// idle/cancel signal.
+func newWorkerState(poolCtx context.Context) (*workerExEnv, context.Context, context.CancelFunc) {
 	ee := &workerExEnv{}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(poolCtx)
+	ctx = context.WithValue(ctx, workerEnvKey{}, ee)
 	return ee, ctx, cancel
+}
+
+// workerEnvFromContext returns the worker's execution environment carried on a
+// worker context, or nil if ctx is not a worker context (e.g. a top-level or
+// legacy worker context). A body uses it to obtain the E to run against.
+func workerEnvFromContext(ctx context.Context) *workerExEnv {
+	ee, _ := ctx.Value(workerEnvKey{}).(*workerExEnv)
+	return ee
 }

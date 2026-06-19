@@ -2,6 +2,71 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► FOLD psg.Pool INTO Wave — DECIDED (PN, 2026-06-19). THE major item-(e)
+restructure. ATTEMPTED + REVERTED to green (`26555e7`) because fold stage 1 hit an
+intermittent `-race` drain hang (see the ⚠ HANG note in the staged plan below).
+Stage 1 code = dangling commit `437db7b`; stage 2 (full Pool→Wave name flip,
+complete) = `git stash@{0} "fold-stage2-wip"` — both recoverable. NEXT SESSION:
+capture an execution trace to confirm/fix the hang root cause (the `meta.job==
+meta.wave` permit-scoping hypothesis), THEN re-land the fold informed by it (the
+trace may show a fold shape that doesn't collapse the identity permit-scoping
+relies on).** Decision history this session: eliminate the "job" term →
+realized `psg.Pool` (job.go) is NOT a worker pool anymore (workers live on the global
+`defaultPool`); it's the per-wave **lifecycle** object, 1:1 with the thin `Wave`
+wrapper — a vestige. So: **fold `psg.Pool` entirely into `Wave`** (one type), delete
+`New`/`WithPool`/`WithPoolOptions`/`Wave.Pool()` (the shared-Pool feature is obsolete —
+`defaultPool` is the shared substrate). `meta.job`→`meta.wave`, `parentJobs`→
+`parentWaves` (keyed by `*Wave`). NO back-ref needed: once `Pool`'s methods (esp.
+`ensureCtxMeta`) ARE `Wave` methods, the receiver IS the wave, so `meta.wave = w` falls
+out. "Almost entirely a renaming exercise because the interface is inherited" (PN).
+
+**Staged plan (alias bridge keeps each stage green; `type Wave = Pool` until the flip):**
+- **Stage 1 — absorb + alias (green checkpoint).** Add the thin Wave's fields to the
+  `Pool` struct (`ownsPool`,`waveCtx`,`waveCancel`,`shells`,`fEngineMu`,`fEngine`);
+  move `funnelEngine()` onto `Pool` (self, not `w.pool`); MERGE the wave-5b logic into
+  `Pool.Cancel`/`Pool.CancelAndWait` (waveCancel; cancel→**joinFlusher BEFORE
+  ctxMetaMap.Clear** [the race fix from `a9776db`]; shells.release); delete the thin
+  `Wave` struct + its delegating methods (Skim/TrySkim/SkimAll/TrySkimAll/Close/
+  CloseAndSkimAll/Pool()); `type Wave = Pool`; rewrite `NewWave` to build the Pool
+  inline (was `New()`+wrapper); remove `WithPool` (keep `WithPoolOptions` as config for
+  now). `meta.job`/`*Pool` stay valid via the alias.
+- **Stage 2 — flip the name (green).** `type Pool struct`→`type Wave struct`; drop the
+  alias; delete `New`/SetOptions-as-`New`-path as needed; fix `psgopt.PoolOption` story
+  (Pool→Wave options) + `psgopt/doc.go` example + tests. Receiver `j *Pool`→`w *Wave`.
+- **Stage 3 — finish the terminology (green).** `meta.job`→`meta.wave` (drop the
+  redundant field; `ensureCtxMeta` stamps `meta.wave=w`); `parentJobs`→`parentWaves`
+  (`map[*Wave]`); remaining `job`/`j` locals→`wave`/`w`; `skimCtxMetaMap[*Pool]`→`[*Wave]`.
+  Open Q (defer, evidence-based): is `parentWaves` still needed at all? It feeds limiter
+  permit-scoping (severing) — needs the limiter TEMP sim config + `sim-trace-debugging`,
+  not a guess. Rename now; decide removal separately.
+- **⚠ HANG — fold stage 1 (`437db7b`) introduced an intermittent `-race` drain
+  deadlock (~1 in 200–600 rapid checks); UNRESOLVED.** Baseline `26555e7` passed 400
+  checks clean; stage 1 hangs ~reliably by ~600. **Diagnosis (partial, from the dump —
+  full trace not yet captured):** the wedge is a **nested subwave drain**, NOT the
+  flusher. A task body (`TaskFunc.Handle` → `runInShell` on a global worker) drives a
+  subwave's `CloseAndSkimAll` → `skimAll`/`skim` → `addWorkWhileMaybeBlocking` →
+  `skimSelect`, PARKED waiting for the subwave's work that never completes. Flushers
+  are parked correctly (RED HERRING — my first fix, a sticky-FlushNotify backstop in
+  wavestate/cpworker, did NOT fix it and was reverted). This is the suspend/resume +
+  block-and-help + limiter permit-scoping machinery (the trickiest concurrency).
+  **Leading hypothesis (unconfirmed):** stage 1's `shells.Init(w, w)` makes the
+  execShell `meta.job == meta.wave` (same object) vs baseline's distinct `*Pool`/
+  `*Wave`; that identity collapse may break limiter permit-scoping (`parentJobs`/
+  severing in `ensureCtxMeta`/`borrow`) → hold-and-wait in a nested subwave drain that
+  shares/inherits a limiter. The unlimited-limiter discriminator can't be used as-is —
+  the sim `limiterTracker` asserts observed-concurrency ≤ the PLAN permits, so
+  `NewSemaphore(-1)` fails fast instead of running. **NEXT: capture an execution trace
+  (full `sim-trace-debugging` pipeline) to confirm the hold-and-wait + inspect whether
+  the `meta.job==meta.wave` collapse changed a permit-scoping identity check.** Until
+  resolved, do NOT build stages 2–3 on stage 1. (Stage 2 — the full Pool→Wave name
+  flip — is complete + stashed: `git stash@{0} "fold-stage2-wip"`; it inherits the hang.)
+- **Validate each stage:** vet/lint/short ./...; root `TestBySimulation -race`;
+  limiter inherit sims. NB the pre-existing `CancelAndWait`-Clear-vs-active-work `-race`
+  flake (baseline `b32f650`, item-c) — validate with root sim, not the inherit `-race` loop.
+- **Already landed this session (clean tree @ `26555e7`):** `internal/jobstate`→
+  `internal/wavestate`+`WaveState`; `ErrJobDone`→`ErrWaveDone`. (The `job`→`pool`
+  handle rename was started then REVERTED — superseded by this fold: it's `→wave`, not `→pool`.)
+
 **►► START HERE (next session). The Worker-pool + workq CONSOLIDATION is LARGELY
 DONE and landed green on `combiner` (clean tree @ `d827a94`).** Task AND funnel work
 now run on the ONE global `defaultPool` (`internal/worker.Pool` + shared

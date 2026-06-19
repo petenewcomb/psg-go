@@ -39,33 +39,33 @@ type Wave struct {
 	waveCancel context.CancelFunc
 	shells     execShellPool
 
-	// funnelEngine is this Wave's funnel machinery (the scheduled-flush queue and
-	// the persistent flush driver). It is a deliberately lazy sub-object — nil until
+	// fEngine is this Wave's funnel machinery (the scheduled-flush queue and the
+	// persistent flush driver). It is a deliberately lazy sub-object — nil until
 	// the first NewFunnel(wave, …) — rather than fields flattened onto Wave, because
 	// most waves never create a funnel and should not carry that state or spawn a
 	// flusher. It is BATCH-scoped (per-Wave, not per-Pool): under WithPool each Wave
 	// gets its own engine. Stored atomically so teardown (CancelAndWait) can read it
-	// without racing a concurrent first creation; funnelEngineMu serializes the
+	// without racing a concurrent first creation; fEngineMu serializes the
 	// create-once. (Funnel backpressure is NOT here — it registers on the wave's
 	// shared governor; see funnelPostWork.Execute.)
-	funnelEngineMu sync.Mutex
-	funnelEngine   atomic.Pointer[funnelEngine]
+	fEngineMu sync.Mutex
+	fEngine   atomic.Pointer[funnelEngine]
 }
 
-// funnelPool returns this Wave's lazily-created funnel engine, building it on the
-// first call (double-checked under funnelEngineMu).
-func (w *Wave) funnelPool() *funnelEngine {
-	if eng := w.funnelEngine.Load(); eng != nil {
-		return eng
+// funnelEngine returns this Wave's lazily-created funnel engine, building it on
+// the first call (double-checked under fEngineMu).
+func (w *Wave) funnelEngine() *funnelEngine {
+	if fe := w.fEngine.Load(); fe != nil {
+		return fe
 	}
-	w.funnelEngineMu.Lock()
-	defer w.funnelEngineMu.Unlock()
-	if eng := w.funnelEngine.Load(); eng != nil {
-		return eng
+	w.fEngineMu.Lock()
+	defer w.fEngineMu.Unlock()
+	if fe := w.fEngine.Load(); fe != nil {
+		return fe
 	}
-	eng := newFunnelEngine(w.pool)
-	w.funnelEngine.Store(eng)
-	return eng
+	fe := newFunnelEngine(w.pool)
+	w.fEngine.Store(fe)
+	return fe
 }
 
 // WaveOption configures a Wave at construction time.
@@ -224,8 +224,8 @@ func (w *Wave) CancelAndWait() {
 	// Pool.wg-tracked (see funnelEngine.flusherDone). Cancel is idempotent, so the
 	// CancelAndWait below repeating it is harmless.
 	w.pool.Cancel()
-	if eng := w.funnelEngine.Load(); eng != nil {
-		eng.joinFlusher()
+	if fe := w.fEngine.Load(); fe != nil {
+		fe.joinFlusher()
 	}
 	// TODO(wave-5b): with a shared Pool (WithPool) this cancels the whole Pool;
 	// it should drain only this Wave's tagged work.

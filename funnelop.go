@@ -84,7 +84,7 @@ func NewFunnel[T any](
 	}
 	// The funnel engine is an internal per-WAVE detail (batch-scoped flush +
 	// backpressure), shared by all funnels on this wave; lazily created here.
-	funnelPool := wave.funnelPool()
+	fe := wave.funnelEngine()
 
 	cfg := resolveOpConfig(opts)
 
@@ -94,8 +94,8 @@ func NewFunnel[T any](
 	if inner.refCount.Load() != 0 {
 		panic("unexpected nonzero inner.refCount")
 	}
-	if inner.funnelPool != nil {
-		panic("unexpected non-nil inner.funnelPool")
+	if inner.fEngine != nil {
+		panic("unexpected non-nil inner.fEngine")
 	}
 	if inner.funnelFactory != nil {
 		panic("unexpected non-nil inner.funnelFactory")
@@ -111,7 +111,7 @@ func NewFunnel[T any](
 	inner.errSink = newInternalSkimmer(NewErrHandler(func(_ context.Context, err error) error {
 		return err
 	}))
-	inner.funnelPool = funnelPool
+	inner.fEngine = fe
 	inner.funnelFactory = funnelFactory
 	inner.limiter = cfg.singleLimiter()
 	inner.innerPool = innerPool
@@ -120,15 +120,15 @@ func NewFunnel[T any](
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion, "Funnel(%p), handleID=%d, pool=%p",
-			inner, h.HandleID(), funnelPool)
+			inner, h.HandleID(), fe)
 	}
 
 	return Funnel[T]{h: h}
 }
 
-// NewFnFunnel binds closure-based factory functions to a
-// funnelEngine. Convenience wrapper for
-// `NewFunnel(funnelPool, NewAccumulatorFactory(newAccumulator, closeFn), opts...)`.
+// NewFnFunnel binds closure-based factory functions to a Funnel.
+// Convenience wrapper for
+// `NewFunnel(wave, NewAccumulatorFactory(newAccumulator, closeFn), opts...)`.
 // Pass nil for closeFn if the factory has no factory-level state
 // to release.
 func NewFnFunnel[T any](
@@ -206,7 +206,7 @@ func (c *Funnel[T]) SubmitResult(
 	defer inner.unref()
 	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
-	ctx, meta := inner.funnelPool.job.ctxMeta(ctx)
+	ctx, meta := inner.fEngine.job.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -252,7 +252,7 @@ func (c *Funnel[T]) TrySubmitResult(
 	defer inner.unref()
 	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
-	ctx, meta := inner.funnelPool.job.ctxMeta(ctx)
+	ctx, meta := inner.fEngine.job.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -301,7 +301,7 @@ type funnel[T any] struct {
 	// errSink is framework-owned. Accumulator errors are routed through
 	// it; its handler returns err as-is so it surfaces via SkimAll.
 	errSink       ErrSkimmer
-	funnelPool    *funnelEngine
+	fEngine       *funnelEngine
 	funnelFactory AccumulatorFactory[T]
 
 	// limiter caps how many funnelWorks this Funnel processes
@@ -392,9 +392,9 @@ func (c *funnel[T]) unref() {
 	// surface via SkimAll.
 	if c.funnelFactory != nil {
 		if closeErr := c.funnelFactory.Close(); closeErr != nil {
-			ctx, meta := c.funnelPool.job.ctxMeta(c.funnelPool.job.ctx)
+			ctx, meta := c.fEngine.job.ctxMeta(c.fEngine.job.ctx)
 			intErr := c.errSink.submit(
-				ctx, meta, c.funnelPool.job, workq.InvalidGroupID,
+				ctx, meta, c.fEngine.job, workq.InvalidGroupID,
 				struct{}{}, closeErr,
 			)
 			if intErr != nil && ctx.Err() == nil {
@@ -408,7 +408,7 @@ func (c *funnel[T]) unref() {
 
 	// Clear all fields
 	c.errSink = ErrSkimmer{}
-	c.funnelPool = nil
+	c.fEngine = nil
 	c.funnelFactory = nil
 	c.limiter = Limiter{}
 	// Keep c.innerPool - it's metadata about where to return this object
@@ -451,7 +451,7 @@ type funnelInstance[T any] struct {
 // releases c.mu.
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	workerCtx, _ := c.funnel.funnelPool.job.ctxMeta(ctx)
+	workerCtx, _ := c.funnel.fEngine.job.ctxMeta(ctx)
 	c.forceFlush(workerCtx)
 	return nil
 }
@@ -520,9 +520,9 @@ func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
 	if accErr == nil {
 		return
 	}
-	ctx, meta := c.funnel.funnelPool.job.ctxMeta(ctx)
+	ctx, meta := c.funnel.fEngine.job.ctxMeta(ctx)
 	err := c.funnel.errSink.submit(
-		ctx, meta, c.funnel.funnelPool.job, c.earliestGroup, struct{}{}, accErr)
+		ctx, meta, c.funnel.fEngine.job, c.earliestGroup, struct{}{}, accErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
@@ -553,7 +553,7 @@ func (c *funnelInstance[T]) accumulate(
 		c.emitErr(ctx, err)
 	}
 
-	workQueue := &c.funnel.funnelPool.workQueue
+	workQueue := &c.funnel.fEngine.workQueue
 	switch {
 	case !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0:
 		// Already-past deadline — flush inline, but only if no
@@ -604,7 +604,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	// downstream Submit performed by Flush takes its work reference
 	// before this reference drops — totalReferences cannot transiently
 	// reach zero across an emitting flush.
-	defer c.funnel.funnelPool.job.state.DecrementReference()
+	defer c.funnel.fEngine.job.state.DecrementReference()
 
 	panicked := true // Assume the worst
 	defer func() {
@@ -631,7 +631,7 @@ func (c *funnel[T]) submit(
 	err error,
 ) error {
 	funnelWork := c.newFunnelWork(group, value, err, meta.wave)
-	postWork := c.funnelPool.newFunnelPostWork(group, funnelWork)
+	postWork := c.fEngine.newFunnelPostWork(group, funnelWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
@@ -645,7 +645,7 @@ func (c *funnel[T]) trySubmit(
 ) (bool, error) {
 	// Create funnel work directly with values
 	funnelWork := c.newFunnelWork(group, value, err, meta.wave)
-	postWork := c.funnelPool.newFunnelPostWork(group, funnelWork)
+	postWork := c.fEngine.newFunnelPostWork(group, funnelWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()
@@ -699,7 +699,7 @@ func (c *funnel[T]) newFunnelWork(group workq.GroupID, value T, err error, wave 
 }
 
 func (w *funnelWork[T]) Init(group workq.GroupID, f *funnel[T], input T, inputErr error, wave *Wave) {
-	w.poolWork.Init(group, f.funnelPool.job)
+	w.poolWork.Init(group, f.fEngine.job)
 	w.funnel = f
 	w.input = input
 	w.inputErr = inputErr
@@ -741,7 +741,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 		// the job out of Done while the accumulator is unflushed,
 		// regardless of which worker eventually flushes it. Released in
 		// flush().
-		w.funnel.funnelPool.job.state.IncrementReference()
+		w.funnel.fEngine.job.state.IncrementReference()
 		w.funnel.instanceCount.Add(1)
 		hbc.funnel = w.funnel
 		// Reset and re-Init the embedded work item: a fresh work ID, the
@@ -785,7 +785,7 @@ func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	if w.req == nil {
 		w.req = w.funnel.limiter.impl.newRequest(w)
 	}
-	held, err := acquireOrWait(ctx, ex, time.Time{}, w.funnel.funnelPool.job.protoBB, w.req)
+	held, err := acquireOrWait(ctx, ex, time.Time{}, w.funnel.fEngine.job.protoBB, w.req)
 	if err != nil || !held {
 		return err
 	}
@@ -831,7 +831,7 @@ func (w *funnelWork[T]) Free() {
 	}
 
 	w.DownstreamWork.Close()
-	w.poolWork.Close(w.funnel.funnelPool.job)
+	w.poolWork.Close(w.funnel.fEngine.job)
 
 	pool := w.funnel.funnelWorkPool
 	w.funnel.unref()

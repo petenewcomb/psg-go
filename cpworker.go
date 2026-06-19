@@ -15,7 +15,7 @@ import (
 
 type cpWorker struct {
 	integrationExEnv
-	cp *funnelEngine
+	fEngine *funnelEngine
 
 	doneCh  <-chan struct{}
 	doneErr func() error
@@ -32,11 +32,11 @@ func (cw *cpWorker) Lock() {}
 func (cw *cpWorker) Unlock() {}
 
 func (cw *cpWorker) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, work workq.Work) error {
-	return cw.cp.workQueue.ExecuteNowOrQueue(ctx, ex, work)
+	return cw.fEngine.workQueue.ExecuteNowOrQueue(ctx, ex, work)
 }
 
 func (cw *cpWorker) TryAddWork(_ context.Context, queueFn workq.QueueWorkFunc) error {
-	if work, ok := cw.cp.funnelQueue.TryPopFront(); ok {
+	if work, ok := cw.fEngine.funnelQueue.TryPopFront(); ok {
 		queueFn(work)
 		return nil
 	}
@@ -55,7 +55,7 @@ func (cw *cpWorker) AddWork(
 
 	if workWaiters == nil {
 		// Non-blocking mode
-		if work, ok := cw.cp.funnelQueue.TryPopFront(); ok {
+		if work, ok := cw.fEngine.funnelQueue.TryPopFront(); ok {
 			cw.queue(work)
 		}
 		return nil, nil
@@ -77,7 +77,7 @@ func (cw *cpWorker) AddWork(
 	// done.
 	workWaiters.WaitFunc(confirmWorkWaitFn,
 		func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-			work, ok := cw.cp.funnelQueue.PopFrontFunc(
+			work, ok := cw.fEngine.funnelQueue.PopFrontFunc(
 				func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
 					return cw.popSelect(ctx, inboxCh, outboxWaitCh, workWaitCh, deadlineCh)
 				},
@@ -172,7 +172,7 @@ type scheduledFlusher interface {
 func (cw *cpWorker) flushAll(ctx context.Context) {
 	traceRegion := "cpWorker.flushAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	for _, w := range cw.cp.workQueue.DrainAllScheduled(nil) {
+	for _, w := range cw.fEngine.workQueue.DrainAllScheduled(nil) {
 		w.(scheduledFlusher).forceFlush(ctx)
 	}
 	cw.nextJobFlushCh = nil

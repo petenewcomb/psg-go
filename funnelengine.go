@@ -45,7 +45,7 @@ type funnelEngine struct {
 }
 
 // newFunnelEngine creates a wave's internal funnel engine. Not user-facing: funnels
-// are created with NewFunnel(wave, ...), which calls Wave.funnelPool to lazily
+// are created with NewFunnel(wave, ...), which calls Wave.funnelEngine to lazily
 // build and share one of these per wave.
 //
 //nolint:contextcheck // background context used only for tracing
@@ -56,37 +56,37 @@ func newFunnelEngine(job *Pool) *funnelEngine {
 	// Check if the job is done
 	job.panicIfDone()
 
-	cp := &funnelEngine{
+	fe := &funnelEngine{
 		job:         job,
 		flusherDone: make(chan struct{}),
 	}
 
 	trace.Logf(context.Background(), traceRegion,
 		"funnelEngine=%p, job=%p, funnelQueue=%p, workQueue=%p",
-		cp, job, &cp.funnelQueue, &cp.workQueue)
+		fe, job, &fe.funnelQueue, &fe.workQueue)
 
-	cp.funnelQueue.Init()
+	fe.funnelQueue.Init()
 	// workQueue holds only scheduled funnelInstance flushes (funnel BODY work runs
 	// on the global pool via defaultPool.Post). One persistent flusher drives it.
-	cp.workQueue.Init(nil)
+	fe.workQueue.Init(nil)
 
 	// Run the single persistent flush driver (drains deadline-driven +
 	// end-of-work funnelInstance flushes until the job reaches Done).
-	cp.spawnFlusher()
+	fe.spawnFlusher()
 
-	return cp
+	return fe
 }
 
 // spawnFlusher starts the single persistent flush driver goroutine.
 //
 //nolint:contextcheck // goroutine will use job context
-func (cp *funnelEngine) spawnFlusher() {
+func (fe *funnelEngine) spawnFlusher() {
 	traceRegion := "funnelEngine.spawnFlusher"
 	trace.Logf(context.Background(), traceRegion,
-		"funnelEngine=%p starting flush driver", cp)
+		"funnelEngine=%p starting flush driver", fe)
 	go func() {
-		defer close(cp.flusherDone)
-		cp.flusher()
+		defer close(fe.flusherDone)
+		fe.flusher()
 	}()
 }
 
@@ -94,17 +94,17 @@ func (cp *funnelEngine) spawnFlusher() {
 // caller is expected to have already driven the flusher toward exit — either a
 // graceful drain reaching job Done, or pool-context cancellation — so this only
 // closes the goroutine-exit window before a wave's teardown returns.
-func (cp *funnelEngine) joinFlusher() {
-	<-cp.flusherDone
+func (fe *funnelEngine) joinFlusher() {
+	<-fe.flusherDone
 }
 
-func (cp *funnelEngine) flusher() {
+func (fe *funnelEngine) flusher() {
 	var doneWg sync.WaitGroup
 	doneCh := make(chan struct{})
 	var doneErr error
 	worker := &cpWorker{
-		cp:     cp,
-		doneCh: doneCh,
+		fEngine: fe,
+		doneCh:  doneCh,
 		doneErr: func() error {
 			return doneErr
 		},
@@ -113,9 +113,9 @@ func (cp *funnelEngine) flusher() {
 
 	traceRegion := "funnelEngine.goroutine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "funnelEngine=%p, worker=%p", cp, worker)
+	trace.Logf(context.Background(), traceRegion, "funnelEngine=%p, worker=%p", fe, worker)
 
-	j := cp.job
+	j := fe.job
 
 	// Create the base goroutine context
 	ctx, cancel := context.WithCancel(j.ctx)
@@ -169,7 +169,7 @@ func (cp *funnelEngine) flusher() {
 	// (no idle-exit, no spawn coordination), so the legacy multi-worker
 	// ErrEndOfWork / GoroutineExiting dance is gone.
 	for {
-		err := cp.workQueue.ExecuteOne(ctx, addWorkFn)
+		err := fe.workQueue.ExecuteOne(ctx, addWorkFn)
 		switch {
 		case err == nil:
 			// Ran a due flush (or the end-of-work flushAll followup); keep going.
@@ -184,13 +184,13 @@ func (cp *funnelEngine) flusher() {
 
 type funnelPostWork struct {
 	poolWork
-	pool *funnelEngine
-	work boundFunnelWork
+	fEngine *funnelEngine
+	work    boundFunnelWork
 }
 
-func (w *funnelPostWork) Init(group workq.GroupID, pool *funnelEngine, work boundFunnelWork) {
-	w.poolWork.Init(group, pool.job)
-	w.pool = pool
+func (w *funnelPostWork) Init(group workq.GroupID, fe *funnelEngine, work boundFunnelWork) {
+	w.poolWork.Init(group, fe.job)
+	w.fEngine = fe
 	w.work = work
 }
 
@@ -214,8 +214,8 @@ func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 	// a missing meta): a producer only postpones onto the global queue in LISTEN
 	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta.
 	meta, _ := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
-	shouldBlock := meta != nil && meta.job == w.pool.job && meta.ShouldBlock()
-	onWait := func() { w.work.Waiting(&w.pool.job.governor) }
+	shouldBlock := meta != nil && meta.job == w.fEngine.job && meta.ShouldBlock()
+	onWait := func() { w.work.Waiting(&w.fEngine.job.governor) }
 	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.work, onWait)
 	if posted {
 		w.work = nil // ownership transferred to the queue
@@ -236,19 +236,19 @@ func (w *funnelPostWork) Free() {
 		w.work = nil
 	}
 
-	w.Close(w.pool.job)
+	w.Close(w.fEngine.job)
 	funnelPostWorkPool.Put(w)
 }
 
 var funnelPostWorkPool = omnipool.For[funnelPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (cp *funnelEngine) newFunnelPostWork(group workq.GroupID, bc boundFunnelWork) *funnelPostWork {
+func (fe *funnelEngine) newFunnelPostWork(group workq.GroupID, bc boundFunnelWork) *funnelPostWork {
 	traceRegion := "funnelEngine.newFunnelPostWork"
 
 	w := funnelPostWorkPool.Get()
-	w.Init(group, cp, bc)
+	w.Init(group, fe, bc)
 
-	trace.Logf(context.Background(), traceRegion, "funnelEngine=%p created %v", cp, w)
+	trace.Logf(context.Background(), traceRegion, "funnelEngine=%p created %v", fe, w)
 	return w
 }

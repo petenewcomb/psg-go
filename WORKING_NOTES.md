@@ -2,16 +2,19 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► FOLD psg.Pool INTO Wave — DECIDED (PN, 2026-06-19). THE major item-(e)
-restructure. ATTEMPTED + reverted to green (`26555e7`) for branch hygiene — but the
-fold is CORRECT: the `-race` drain hang it surfaced turned out to be PRE-EXISTING
-(baseline hangs identically at ~2500 checks) and the fold is behavior-equivalent (see
-the ⚠ HANG note below for the proof). Stage 1 code = dangling commit `437db7b`;
-stage 2 (full Pool→Wave name flip, complete) = `git stash@{0} "fold-stage2-wip"` —
-both recoverable. NEXT SESSION: fix the pre-existing nested-drain worker-starvation
-race (it benefits baseline too), then re-land the fold (stage 1+2) — it just makes
-the flake more frequent under `-race`, not a new bug.** Decision history this
-session: eliminate the "job" term →
+**►►► FOLD psg.Pool INTO Wave — LANDED (PN, 2026-06-19). `Pool` is gone; `Wave` is
+the one batch-lifecycle type.** Stage 1 (substrate absorb + alias) = `995bb05`;
+stage 2 (name flip `*Pool`→`*Wave`, delete `New`/`WithPool`/`Pool()`) = `5bf2e7c`.
+The fold is LOGICALLY CORRECT — proven (audit: nothing distinguishes `meta.job`
+from `meta.wave`; + the baseline reproduces the same `-race` hang). Landed
+deliberately to collapse the confusing Pool/Wave + job/wave duality into ONE type,
+which makes reasoning about the drain/dispatch code (and the next task) cleaner.
+**⚠ NEXT TASK: fix the PRE-EXISTING nested-drain worker-starvation race** (see the
+⚠ HANG note below) — it is NOT a fold regression (the pre-fold baseline hangs
+identically), but the fold makes it more frequent under heavy `-race`, so it's the
+priority. **Stage 3 (cosmetic, deferred):** `meta.job`→`meta.wave` (drop the now-
+redundant field), `parentJobs`→`parentWaves`, receiver `j`→`w`. Decision history
+this session: eliminate the "job" term →
 realized `psg.Pool` (job.go) is NOT a worker pool anymore (workers live on the global
 `defaultPool`); it's the per-wave **lifecycle** object, 1:1 with the thin `Wave`
 wrapper — a vestige. So: **fold `psg.Pool` entirely into `Wave`** (one type), delete
@@ -65,9 +68,12 @@ out. "Almost entirely a renaming exercise because the interface is inherited" (P
   worker-starvation race (likely: make the skim drain block-and-help the global pool, or
   fix a missed spawn-demand signal in workq/rdvq when all workers are in nested drains) —
   a separate task in the suspend/resume + block-and-help area (items c/d). **The fold
-  itself is correct and ready to re-land** (stage 1 = dangling commit `437db7b`; stage 2
-  = `git stash@{0} "fold-stage2-wip"`); it just makes this pre-existing flake more visible
-  under `-race`, so prefer fixing the race first (it benefits baseline too).
+  is LANDED (`995bb05`, `5bf2e7c`) — it is correct; it just makes this pre-existing
+  flake more visible under `-race`.** Repro to use next session: zero out the body
+  delays in `simulation_test.go` (`planConfig.{Launcher.Body,Funnel.Accumulate,
+  Funnel.Flush,Skimmer.Handle}.SelfTime = sim.BiasedDurationConfig{}`) + `-race`,
+  loop `-rapid.checks=1` runs (~5% hang each) — but REMEMBER no `-trace`/no stderr
+  logging (they hide it); diagnose by reasoning + fix-and-measure.
 - **Validate each stage:** vet/lint/short ./...; root `TestBySimulation -race`;
   limiter inherit sims. NB the pre-existing `CancelAndWait`-Clear-vs-active-work `-race`
   flake (baseline `b32f650`, item-c) — validate with root sim, not the inherit `-race` loop.

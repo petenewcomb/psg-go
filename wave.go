@@ -10,17 +10,6 @@ import (
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
-// Wave is the unit that admits, drains, and cancels a batch of scatter-gather
-// work together. It owns the batch lifecycle — wavestate (Open→Done), the
-// admission governor, the skim queue, cancellation, the ctxMetaMap — and
-// dispatches op bodies onto the global worker pool (defaultPool). [NewWave]
-// returns a Wave together with a Wave-augmented context that callers pass to op
-// dispatches (Start, Submit) so every dispatch associates with this batch.
-//
-// Wave is currently an alias of the internal Pool type while Pool is being
-// folded into Wave; the alias goes away when the type itself is renamed.
-type Wave = Pool
-
 // funnelEngine returns this Wave's lazily-created funnel engine, building it on
 // the first call (double-checked under fEngineMu). The engine is a deliberately
 // lazy sub-object — nil until the first NewFunnel — so waves that never funnel

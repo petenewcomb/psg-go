@@ -47,14 +47,14 @@
 //
 // # Cancellation Behavior
 //
-// When a job is canceled via Pool.Cancel or its context is canceled:
+// When a job is canceled via Wave.Cancel or its context is canceled:
 //
 //  1. All running Tasks receive context cancellation but will run until
 //     they return. The library will correctly clean up once they complete.
 //
 //  2. Funnels will be flushed to ensure no data is lost.
 //
-//  3. Pool.CancelAndWait guarantees that all task goroutines exit before
+//  3. Wave.CancelAndWait guarantees that all task goroutines exit before
 //     returning.
 //
 // # Context Safety Features

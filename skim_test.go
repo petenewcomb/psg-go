@@ -173,7 +173,7 @@ func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 // Thread C: Submit (non-Try) uses Forever internally; passes
 // through the dispatch path as the "block until success" sentinel.
 // Contended Submit (via limiter) blocks and then succeeds when the
-// limiter is freed — verifies the Forever path through Pool.block.
+// limiter is freed — verifies the Forever path through Wave.block.
 func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 	chk := assert.New(t)
 	ctx, wave := psg.NewWave(context.Background())

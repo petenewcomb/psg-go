@@ -112,7 +112,7 @@ func NewErrLauncher(wave *Wave, handle func(ctx context.Context, err error) erro
 // already-completed work. If a Limiter is at its concurrency limit,
 // Submit blocks until a slot becomes available. The ctx may be used
 // to cancel both skimming and launch; only the ctx associated with
-// the Wave's Pool is passed to Handle.
+// the Wave's Wave is passed to Handle.
 //
 // Returns a non-nil error if the ctx is canceled or if a skim
 // function returns an error. If the returned error is non-nil, the
@@ -217,7 +217,7 @@ func (r Launcher[T]) dispatch(
 }
 
 func (r Launcher[T]) newScatterWork(
-	pool *Pool, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
+	pool *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
 ) *launcherScatterWork {
 	inner := r.newTask(pool, group, value, callerErr)
 	var req request
@@ -233,7 +233,7 @@ func (r Launcher[T]) newScatterWork(
 	return newLauncherScatterWork(pool, deadline, gated)
 }
 
-func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
+func (r Launcher[T]) newTask(pool *Wave, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
 	w := r.workPool.Get()
 	w.pool = r.workPool
 	w.job = pool
@@ -247,7 +247,7 @@ func (r Launcher[T]) newTask(pool *Pool, group workq.GroupID, value T, callerErr
 
 type launcherWork[T any] struct {
 	pool      *omnipool.Pool[launcherWork[T]]
-	job       *Pool
+	job       *Wave
 	group     workq.GroupID
 	handler   Handler[T]
 	value     T
@@ -321,7 +321,7 @@ func newTaskErrSink() ErrSkimmer {
 // is not yet done. Panics on misuse.
 func vetStart(
 	ctx context.Context,
-	pool *Pool,
+	pool *Wave,
 ) (context.Context, *ctxMeta) {
 	ctx, meta := pool.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
@@ -340,16 +340,16 @@ func vetStart(
 }
 
 // launcherScatterWork wraps the target's inner scatter work with
-// the owning Pool's backpressure (protoBB). Mirrors
+// the owning Wave's backpressure (protoBB). Mirrors
 // skimScatterWork's role in the pre-Wave-3 codepath.
 type launcherScatterWork struct {
 	workq.Work
-	job      *Pool
+	job      *Wave
 	deadline time.Time
 }
 
 func newLauncherScatterWork(
-	job *Pool,
+	job *Wave,
 	deadline time.Time,
 	targetScatterWork workq.Work,
 ) *launcherScatterWork {

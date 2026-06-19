@@ -10,7 +10,7 @@ import (
 
 // newTestShellPool builds an execShellPool over a standalone waveCtx with nil
 // job/wave (the pool only stores those pointers into meta; it never dereferences
-// them), so the shell mechanism can be exercised without a full Pool/Wave.
+// them), so the shell mechanism can be exercised without a full Wave/Wave.
 func newTestShellPool(t *testing.T) (*execShellPool, context.CancelFunc) {
 	t.Helper()
 	waveCtx, cancel := context.WithCancel(context.Background())

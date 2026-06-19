@@ -302,7 +302,7 @@ func (c *controller) executeStep(ctx context.Context, t assert.TestingT, step St
 	}
 }
 
-// runSubjob executes a Subjob step by spinning up a fresh psg.Pool and
+// runSubjob executes a Subjob step by spinning up a fresh psg.Wave and
 // recursing into Run with the nested Plan. This exercises cross-Pool
 // boundary code (a key race-coverage objective) and matches old sim
 // semantics where Subjobs ran on their own Pool.

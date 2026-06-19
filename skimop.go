@@ -84,7 +84,7 @@ func NewErrSkimmer(wave *Wave, handle func(ctx context.Context, err error) error
 // newInternalSkimmer constructs a Skimmer used by the framework for
 // error-routing sinks owned by ops (Launcher, Funnel). It has no
 // Wave because the framework dispatches through it via the
-// lower-level submit() helper with an explicit target Pool rather
+// lower-level submit() helper with an explicit target Wave rather
 // than the public Submit API. Must not be exposed to user code —
 // calling the public Submit / SubmitErr methods on it would
 // dereference a nil wave.
@@ -199,7 +199,7 @@ type boundSkimWork interface {
 type skimWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	job     *Pool
+	job     *Wave
 	pool    *omnipool.Pool[skimWork[T]]
 	handler Handler[T]
 	value   T
@@ -207,7 +207,7 @@ type skimWork[T any] struct {
 }
 
 // newSkimWork creates a new skim work item with the provided values
-func (g Skimmer[T]) newSkimWork(group workq.GroupID, job *Pool, value T, err error) *skimWork[T] {
+func (g Skimmer[T]) newSkimWork(group workq.GroupID, job *Wave, value T, err error) *skimWork[T] {
 	w := g.workPool.Get()
 	w.Init(g.workPool, group, job, g.handler, value, err)
 	return w
@@ -216,7 +216,7 @@ func (g Skimmer[T]) newSkimWork(group workq.GroupID, job *Pool, value T, err err
 func (w *skimWork[T]) Init(
 	pool *omnipool.Pool[skimWork[T]],
 	group workq.GroupID,
-	job *Pool,
+	job *Wave,
 	handler Handler[T],
 	value T,
 	err error,
@@ -258,7 +258,7 @@ func (w *skimWork[T]) Free() {
 func (g Skimmer[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
-	job *Pool,
+	job *Wave,
 	group workq.GroupID,
 	value T,
 	err error,
@@ -272,7 +272,7 @@ func (g Skimmer[T]) submit(
 func (g Skimmer[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
-	job *Pool,
+	job *Wave,
 	group workq.GroupID,
 	value T,
 	err error,

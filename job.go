@@ -23,8 +23,15 @@ import (
 	"github.com/petenewcomb/psg-go/psgopt"
 )
 
+// Wave is the unit that admits, drains, and cancels a batch of scatter-gather
+// work together. It owns the batch lifecycle — wavestate (Open→Done), the
+// admission governor, the skim queue, cancellation, the ctxMetaMap — and
+// dispatches op bodies onto the global worker pool (defaultPool). [NewWave]
+// returns a Wave together with a Wave-augmented context that callers pass to op
+// dispatches (Start, Submit) so every dispatch associates with this batch.
+//
 //nolint:contextcheck // background context used only for tracing
-type Pool struct {
+type Wave struct {
 	ctx      context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
@@ -40,7 +47,7 @@ type Pool struct {
 	workQueue workq.Accepted
 
 	ctxMetaMap     ctxmap.Map[ctxMetaValueKey, *ctxMeta]
-	skimCtxMetaMap ctxmap.Map[skimCtxMetaValueKey, *Pool]
+	skimCtxMetaMap ctxmap.Map[skimCtxMetaValueKey, *Wave]
 
 	protoBB      workq.BlockBehavior  // avoid closure reallocation
 	blockFn      workq.BlockFunc      // avoid closure reallocation
@@ -48,7 +55,7 @@ type Pool struct {
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
 
 	// wave-5b per-Wave substrate (absorbed from the former thin Wave wrapper as
-	// part of folding Pool into Wave). waveCtx = WithCancel(defaultPool.PoolCtx());
+	// part of folding Wave into Wave). waveCtx = WithCancel(defaultPool.PoolCtx());
 	// shells hands out the per-wave borrowed execution contexts; fEngine is the
 	// lazily-created funnel engine. ownsPool is vestigial (every wave now owns its
 	// own substrate over the global defaultPool) and is removed with WithPool.
@@ -61,8 +68,8 @@ type Pool struct {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, req request, wave *Wave) *taskWork {
-	traceRegion := "Pool.newTaskWork"
+func (j *Wave) newTaskWork(group workq.GroupID, task boundTask, req request, wave *Wave) *taskWork {
+	traceRegion := "Wave.newTaskWork"
 
 	w := taskWorkPool.Get()
 	w.Init(group, j)
@@ -76,7 +83,7 @@ func (j *Pool) newTaskWork(group workq.GroupID, task boundTask, req request, wav
 	}
 	w.wave = wave
 
-	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
+	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", j, w)
 	return w
 }
 
@@ -84,7 +91,7 @@ type taskWork struct {
 	poolWork
 	// job is stored so Free() satisfies workq.Work (no-arg); taskWork is now a
 	// workq.Work run by the global pool's workers.
-	job  *Pool
+	job  *Wave
 	task boundTask
 	// req is the Limiter request handle this task's admission was granted
 	// through; nil for unlimited ops. The taskWork owns the handle's
@@ -185,16 +192,16 @@ func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wav
 }
 
 // Cancel terminates any in-flight tasks and forfeits any unskimed results.
-// Outstanding calls to [Start], [Pool.Skim], [Pool.TrySkim],
-// [Pool.SkimAll], or [Pool.TrySkimAll] using the job or any of its task pools will
+// Outstanding calls to [Start], [Wave.Skim], [Wave.TrySkim],
+// [Wave.SkimAll], or [Wave.TrySkimAll] using the job or any of its task pools will
 // fail with [context.Canceled] or other error returned by a [Skim].
 //
 // While Cancel always returns immediately, any running [Task] or
 // [Skim] will delay termination of their independent goroutine or caller
 // until it returns. This method cancels the context passed to each [Task],
 // but not the context passed to each [Skim]. Skim functions instead
-// receive the context passed to the calling [Start], [Pool.Skim],
-// [Pool.TrySkim], [Pool.SkimAll], or [Pool.TrySkimAll] function. If it is
+// receive the context passed to the calling [Start], [Wave.Skim],
+// [Wave.TrySkim], [Wave.SkimAll], or [Wave.TrySkimAll] function. If it is
 // desirable to transmit a cancelation signal to a running [Skim], one
 // must also cancel any contexts being passed to those callers.
 //
@@ -202,10 +209,10 @@ func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wav
 // effect.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) Cancel() {
-	traceRegion := "Pool.Cancel"
+func (j *Wave) Cancel() {
+	traceRegion := "Wave.Cancel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Pool=%p", j)
+	trace.Logf(context.Background(), traceRegion, "Wave=%p", j)
 	// wave-5b: cancel the per-wave context too (absorbed from the thin Wave). Once
 	// work runs under borrowed shells (descendants of waveCtx) this reaches running
 	// bodies; the pool-ctx cancel below does the rest of teardown.
@@ -213,12 +220,12 @@ func (j *Pool) Cancel() {
 	j.cancelFn()
 }
 
-// CancelAndWait cancels like [Pool.Cancel], but then blocks until any
+// CancelAndWait cancels like [Wave.Cancel], but then blocks until any
 // outstanding task goroutines exit.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) CancelAndWait() {
-	traceRegion := "Pool.CancelAndWait"
+func (j *Wave) CancelAndWait() {
+	traceRegion := "Wave.CancelAndWait"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	// wave-5b: release the per-wave execShells last (absorbed from the thin Wave).
@@ -242,7 +249,7 @@ func (j *Pool) CancelAndWait() {
 // a completed task is available, the provided context or job is canceled, or
 // another event causes a wake-up (e.g. a call to [TaskPool.SetOptions]).
 // If the job is closed and no tasks remain in flight, it will return immediately.
-// See [Pool.TrySkim] for a non-blocking alternative.
+// See [Wave.TrySkim] for a non-blocking alternative.
 //
 // Returns an error if one occurred:
 //
@@ -262,8 +269,8 @@ func (j *Pool) CancelAndWait() {
 //
 // NOTE: If a task result is skimmed, this method will call the task's
 // [Skim] and wait until it returns.
-func (j *Pool) Skim(ctx context.Context) error {
-	traceRegion := "Pool.Skim"
+func (j *Wave) Skim(ctx context.Context) error {
+	traceRegion := "Wave.Skim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetSkim(ctx)
@@ -280,25 +287,25 @@ func (j *Pool) Skim(ctx context.Context) error {
 	return err
 }
 
-func (j *Pool) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
-	traceRegion := "Pool.tryAddWork"
+func (j *Wave) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
+	traceRegion := "Wave.tryAddWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Pool=%p", j)
+	trace.Logf(ctx, traceRegion, "Wave=%p", j)
 	if workFn, ok := j.skimQueue.TryPopFront(); ok {
 		queueFn(workFn)
 	}
 	return nil
 }
 
-func (j *Pool) vetSkim(ctx context.Context) (context.Context, *ctxMeta) {
+func (j *Wave) vetSkim(ctx context.Context) (context.Context, *ctxMeta) {
 	return j.skimCtxMeta(ctx)
 }
 
-func (j *Pool) trySkim(ctx context.Context, _ *ctxMeta) (bool, error) {
+func (j *Wave) trySkim(ctx context.Context, _ *ctxMeta) (bool, error) {
 	return j.workQueue.TryExecuteOne(ctx, j.tryAddWorkFn)
 }
 
-func (j *Pool) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
+func (j *Wave) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
 	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn)
 }
 
@@ -306,8 +313,8 @@ func (j *Pool) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
 // preemptively skim or skim results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
-func (j *Pool) yield(ctx context.Context, deadline time.Time) error {
-	traceRegion := "Pool.yield"
+func (j *Wave) yield(ctx context.Context, deadline time.Time) error {
+	traceRegion := "Wave.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetSkim(ctx)
@@ -326,7 +333,7 @@ func (j *Pool) yield(ctx context.Context, deadline time.Time) error {
 
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
 
-func (j *Pool) shouldBlock(ctx context.Context) workq.BlockFunc {
+func (j *Wave) shouldBlock(ctx context.Context) workq.BlockFunc {
 	// Read the meta directly (not via j.ctxMeta, which panics on a missing meta).
 	// A dispatch chain (launcherScatterWork governor gate / limiterScatterWork
 	// acquire) that postponed onto the global shared queue is re-run by a global
@@ -340,15 +347,15 @@ func (j *Pool) shouldBlock(ctx context.Context) workq.BlockFunc {
 	return nil
 }
 
-func (j *Pool) block(
+func (j *Wave) block(
 	ctx context.Context,
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
 ) (workq.RenotifyFunc, error) {
-	traceRegion := "Pool.block"
+	traceRegion := "Wave.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Pool=%p", j)
+	trace.Logf(ctx, traceRegion, "Wave=%p", j)
 	ctx, meta := j.vetSkim(ctx)
 	// Suspend-class episode: the block-and-help wait both parks and
 	// synchronously runs other framework-gated work. Bracketing here is
@@ -379,7 +386,7 @@ func (j *Pool) block(
 var blockingWorkAdderPool = omnipool.For[blockingWorkAdder]()
 
 type blockingWorkAdder struct {
-	job                 *Pool
+	job                 *Wave
 	meta                *ctxMeta
 	blockDeadline       time.Time
 	blockWaiters        *workq.Waiters
@@ -413,23 +420,23 @@ func (a *blockingWorkAdder) addWork(
 	return workReadyRenotifyFn, err
 }
 
-func (j *Pool) addWork(
+func (j *Wave) addWork(
 	ctx context.Context,
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
 	_ <-chan time.Time, // skim queue has no scheduled work
 ) (workq.RenotifyFunc, error) {
-	traceRegion := "Pool.addWork"
+	traceRegion := "Wave.addWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Pool=%p", j)
+	trace.Logf(ctx, traceRegion, "Wave=%p", j)
 	ctx, meta := j.ctxMeta(ctx)
 	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
 		confirmWaitFn, time.Time{}, nil, nil)
 	return workReadyRenotifyFn, err
 }
 
-func (j *Pool) addWorkWhileMaybeBlocking(
+func (j *Wave) addWorkWhileMaybeBlocking(
 	ctx context.Context,
 	meta *ctxMeta,
 	queueFn workq.QueueWorkFunc,
@@ -505,7 +512,7 @@ func (j *Pool) addWorkWhileMaybeBlocking(
 	return workRf, blockRf, err
 }
 
-func (j *Pool) skimSelect(
+func (j *Wave) skimSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
 	outboxWaitCh <-chan rdvq.RenotifyFunc,
@@ -513,7 +520,7 @@ func (j *Pool) skimSelect(
 	blockTimerCh <-chan time.Time,
 	blockWaitCh <-chan rdvq.RenotifyFunc,
 ) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.RenotifyFunc, err error) {
-	traceRegion := "Pool.skimSelect"
+	traceRegion := "Wave.skimSelect"
 	trace.Logf(ctx, traceRegion,
 		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, blockWaitCh=%p",
 		inboxCh, outboxWaitCh, workWaitCh, blockWaitCh)
@@ -544,7 +551,7 @@ func (j *Pool) skimSelect(
 
 type skimPostWork struct {
 	poolWork
-	job  *Pool
+	job  *Wave
 	work boundSkimWork
 	// shouldBlock is captured at dispatch (from the dispatching meta) rather than
 	// re-derived from the run ctx: when this producer postpones onto the global
@@ -554,7 +561,7 @@ type skimPostWork struct {
 	shouldBlock bool
 }
 
-func (w *skimPostWork) Init(group workq.GroupID, job *Pool, work boundSkimWork, shouldBlock bool) {
+func (w *skimPostWork) Init(group workq.GroupID, job *Wave, work boundSkimWork, shouldBlock bool) {
 	w.poolWork.Init(group, job)
 	w.job = job
 	w.work = work
@@ -652,19 +659,19 @@ func (w *skimPostWork) Free() {
 var skimPostWorkPool = omnipool.For[skimPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
-	traceRegion := "Pool.newSkimPostWork"
+func (j *Wave) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
+	traceRegion := "Wave.newSkimPostWork"
 
 	w := skimPostWorkPool.Get()
 	w.Init(group, j, skimWork, shouldBlock)
 
-	trace.Logf(context.Background(), traceRegion, "Pool=%p created %v", j, w)
+	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", j, w)
 	return w
 }
 
 // TrySkim processes outstanding task results and then attempts to process
 // the next task result from a task previously launched via [Start]. Unlike
-// [Pool.Skim], it will not block if a completed task is not immediately available.
+// [Wave.Skim], it will not block if a completed task is not immediately available.
 //
 // Returns a boolean flag indicating whether there might be more task results
 // immediately available to process and an error if one occurred.
@@ -679,8 +686,8 @@ func (j *Pool) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shou
 // receive ErrWaveDone.
 //
 // See Skim for additional details.
-func (j *Pool) TrySkim(ctx context.Context) (bool, error) {
-	traceRegion := "Pool.TrySkim"
+func (j *Wave) TrySkim(ctx context.Context) (bool, error) {
+	traceRegion := "Wave.TrySkim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ctx, meta := j.vetSkim(ctx)
@@ -707,8 +714,8 @@ func (j *Pool) TrySkim(ctx context.Context) (bool, error) {
 //
 // NOTE: This method will serially call each skimmed task's [Skim] and
 // wait until it returns.
-func (j *Pool) SkimAll(ctx context.Context) error {
-	traceRegion := "Pool.SkimAll"
+func (j *Wave) SkimAll(ctx context.Context) error {
+	traceRegion := "Wave.SkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	// Suspend-class episode (one per SkimAll, not per inner skim): a
@@ -731,7 +738,7 @@ func (j *Pool) SkimAll(ctx context.Context) error {
 }
 
 // TrySkimAll processes all currently available task results without blocking.
-// Unlike [Pool.SkimAll], TrySkimAll will return immediately if there are no
+// Unlike [Wave.SkimAll], TrySkimAll will return immediately if there are no
 // completed tasks ready to process, regardless of whether the job is closed or
 // whether there are still tasks in flight.
 //
@@ -745,14 +752,14 @@ func (j *Pool) SkimAll(ctx context.Context) error {
 //
 // NOTE: If completed tasks are available, this method must still call each
 // task's [Skim] and wait until it finishes processing.
-func (j *Pool) TrySkimAll(ctx context.Context) error {
-	traceRegion := "Pool.TrySkimAll"
+func (j *Wave) TrySkimAll(ctx context.Context) error {
+	traceRegion := "Wave.TrySkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	return j.skimAll(ctx, j.trySkim)
 }
 
-func (j *Pool) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMeta) (bool, error)) error {
+func (j *Wave) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMeta) (bool, error)) error {
 	ctx, meta := j.vetSkim(ctx)
 	for {
 		ok, err := skimFn(ctx, meta)
@@ -767,7 +774,7 @@ func (j *Pool) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMet
 
 type taskPostWork struct {
 	poolWork
-	job  *Pool
+	job  *Wave
 	task *taskWork
 }
 
@@ -820,14 +827,14 @@ type poolWork struct {
 	workq.WorkItem
 }
 
-func (w *poolWork) Init(group workq.GroupID, job *Pool) {
+func (w *poolWork) Init(group workq.GroupID, job *Wave) {
 	w.WorkItem.Init(group)
 	trace.Logf(context.Background(), "poolWork.Init", "%v", &w.WorkItem)
 	job.state.IncrementWork()
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *poolWork) Close(job *Pool) {
+func (w *poolWork) Close(job *Wave) {
 	if w.ID() == 0 {
 		// This check and panic is best-effort only as it may also be a race if
 		// Close() is called from multiple goroutines -- which it should not be.
@@ -837,7 +844,7 @@ func (w *poolWork) Close(job *Pool) {
 	job.state.DecrementWork()
 }
 
-func (j *Pool) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
+func (j *Wave) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
 	w := taskPostWorkPool.Get()
 	w.Init(group, j)
 	w.job = j
@@ -846,13 +853,13 @@ func (j *Pool) newTaskPostWork(group workq.GroupID, deadline time.Time, task *ta
 }
 
 // panicIfDone panics if the job is in the done state
-func (j *Pool) panicIfDone() {
+func (j *Wave) panicIfDone() {
 	j.state.PanicIfDone()
 }
 
 // Close changes the job's state from open to closed, which allows it to eventually
 // progress to the done state once all tasks complete. When a job is closed,
-// [Pool.SkimAll] will return after processing all existing tasks and any tasks
+// [Wave.SkimAll] will return after processing all existing tasks and any tasks
 // they spawn, rather than blocking indefinitely.
 //
 // After a job is closed and all tasks have completed, launching new tasks will panic.
@@ -865,26 +872,26 @@ func (j *Pool) panicIfDone() {
 // Close may be called from any goroutine and may safely be called more than once.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) Close() {
-	traceRegion := "Pool.Close"
+func (j *Wave) Close() {
+	traceRegion := "Wave.Close"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	j.state.Close()
 }
 
-// CloseAndSkimAll closes the job via [Pool.Close] and then waits for and
-// skims the results of all in-flight tasks via [Pool.SkimAll].
-func (j *Pool) CloseAndSkimAll(ctx context.Context) error {
-	traceRegion := "Pool.CloseAndSkimAll"
+// CloseAndSkimAll closes the job via [Wave.Close] and then waits for and
+// skims the results of all in-flight tasks via [Wave.SkimAll].
+func (j *Wave) CloseAndSkimAll(ctx context.Context) error {
+	traceRegion := "Wave.CloseAndSkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	j.Close()
 	return j.SkimAll(ctx)
 }
 
-// poolConfigWrapper wraps a Pool to implement the poolConfig interface for options
+// poolConfigWrapper wraps a Wave to implement the poolConfig interface for options
 type poolConfigWrapper struct {
-	job *Pool
+	job *Wave
 }
 
 func (w poolConfigWrapper) Update(changes opts.PoolConfigChanges) {
@@ -902,8 +909,8 @@ func (w poolConfigWrapper) Update(changes opts.PoolConfigChanges) {
 // This method is safe to call at any time and changes take effect immediately.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Pool) SetOptions(options ...psgopt.PoolOption) {
-	traceRegion := "Pool.SetOptions"
+func (j *Wave) SetOptions(options ...psgopt.PoolOption) {
+	traceRegion := "Wave.SetOptions"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
 	opts.ApplyToPool(poolConfigWrapper{job: j}, options...)

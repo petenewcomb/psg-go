@@ -21,7 +21,7 @@ import (
 // factory-level state, return nil; the [AccumulatorFactoryFunc]
 // adapter provides a no-op Close for closure-based factories.
 //
-// Errors returned from Close surface through [Pool.SkimAll], the
+// Errors returned from Close surface through [Wave.SkimAll], the
 // same channel used for Accumulator errors.
 type AccumulatorFactory[T any] interface {
 	NewAccumulator() Accumulator[T]
@@ -94,7 +94,7 @@ func NewAccumulatorFactory[T any](
 // error.
 //
 // Errors returned from Accumulate or Flush are surfaced through
-// [Pool.SkimAll] (the framework's "unexpected error" channel,
+// [Wave.SkimAll] (the framework's "unexpected error" channel,
 // matching the SkimAll contract for skim-function errors). Expected
 // errors that the body wants to forward as values should be passed
 // through Submit/SubmitErr on downstream sinks instead.

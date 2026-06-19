@@ -20,7 +20,7 @@ import (
 // this type only owns flush scheduling and the flusher. One per Wave, built on the
 // first NewFunnel(wave, …).
 type funnelEngine struct {
-	job *Pool
+	job *Wave
 
 	funnelQueue workq.Pending
 
@@ -34,7 +34,7 @@ type funnelEngine struct {
 	workQueue workq.Accepted
 
 	// flusherDone is closed when the persistent flush driver goroutine returns.
-	// The flusher is deliberately NOT tracked by Pool.wg (that joins worker
+	// The flusher is deliberately NOT tracked by Wave.wg (that joins worker
 	// goroutines, which now live on the global defaultPool). Funnel-flush
 	// completion is governed by wavestate reference counts — CloseAndSkimAll/SkimAll
 	// block on state.Done until every funnelInstance has flushed — so a wave's
@@ -49,7 +49,7 @@ type funnelEngine struct {
 // build and share one of these per wave.
 //
 //nolint:contextcheck // background context used only for tracing
-func newFunnelEngine(job *Pool) *funnelEngine {
+func newFunnelEngine(job *Wave) *funnelEngine {
 	traceRegion := "newFunnelEngine"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
@@ -207,9 +207,7 @@ func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 	// saturation on the job's governor — the SAME one top-level task admission gates
 	// on (launcherScatterWork) and skim registers on — so funnel backpressure is now
 	// unified with the rest of the wave's sources rather than landing on a separate,
-	// never-consulted funnel governor. (The field's physical Pool→Wave move rides
-	// with the skim seam; today the 1:1 Pool↔Wave binding makes it the per-wave
-	// governor.)
+	// never-consulted funnel governor.
 	// shouldBlock is read directly from the ctx (not via j.ctxMeta, which panics on
 	// a missing meta): a producer only postpones onto the global queue in LISTEN
 	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta.

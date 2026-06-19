@@ -41,7 +41,7 @@ func (funnelHandleTrait[T]) String(c *funnel[T]) string {
 // funnelEngine worker. Downstream emission is the Accumulator body's
 // responsibility — it calls Submit on whatever downstream sinks it has
 // captured. There is no framework-mediated output type; Accumulator
-// errors are surfaced via the Pool's SkimAll path.
+// errors are surfaced via the Wave's SkimAll path.
 //
 // Thread-safety and copying: a Funnel value is designed to be copied.
 // While a single Funnel value does not support concurrent calls to
@@ -63,7 +63,7 @@ type Funnel[T any] struct {
 // number of concurrent funnel-work executions for this Funnel.
 //
 // The framework manages an internal error sink that surfaces
-// Accumulator errors through the Pool's SkimAll path; the user's
+// Accumulator errors through the Wave's SkimAll path; the user's
 // Accumulator body is responsible for routing successful results via
 // Submit on whatever downstream sinks it captures.
 //
@@ -107,7 +107,7 @@ func NewFunnel[T any](
 	inner.refCount.Store(1)
 	// Framework-owned error sink: Accumulator errors flow through this
 	// ErrSkimmer whose handler returns err as-is, surfacing via the
-	// Pool's SkimAll path.
+	// Wave's SkimAll path.
 	inner.errSink = newInternalSkimmer(NewErrHandler(func(_ context.Context, err error) error {
 		return err
 	}))
@@ -510,7 +510,7 @@ func (c *funnelInstance[T]) allocate(
 
 // emitErr surfaces an Accumulator error through the framework-owned error
 // sink. The errSink's handler returns the error to the caller of
-// Pool.SkimAll. Successful results are not surfaced this way — the
+// Wave.SkimAll. Successful results are not surfaced this way — the
 // Accumulator body is expected to Submit those to user-owned downstream
 // sinks directly.
 func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {

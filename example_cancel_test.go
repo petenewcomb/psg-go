@@ -14,7 +14,7 @@ import (
 )
 
 // Demonstrates job cancellation from the outer layer.
-func ExamplePool_Cancel() {
+func ExampleWave_Cancel() {
 
 	ctx := context.Background()
 
@@ -76,7 +76,7 @@ func ExamplePool_Cancel() {
 }
 
 // Demonstrates job cancellation from inside a task.
-func ExamplePool_Cancel_task() {
+func ExampleWave_Cancel_task() {
 
 	ctx := context.Background()
 

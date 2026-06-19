@@ -635,13 +635,13 @@ func (s *semaphoreResource) setMaxConcurrency(limit int) {
 // taskWork the request travels with across the queue hand-off.
 type limiterScatterWork struct {
 	workq.Work
-	job      *Pool
+	job      *Wave
 	req      request
 	deadline time.Time
 }
 
 func newLimiterScatterWork(
-	job *Pool, deadline time.Time, inner workq.Work, req request,
+	job *Wave, deadline time.Time, inner workq.Work, req request,
 ) *limiterScatterWork {
 	w := limiterScatterWorkPool.Get()
 	w.Work = inner

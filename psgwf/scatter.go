@@ -9,7 +9,7 @@ import (
 	"github.com/petenewcomb/psg-go"
 )
 
-// GenericLauncher dispatches a workflow-aware task onto a [psg.Pool].
+// GenericLauncher dispatches a workflow-aware task onto a [psg.Wave].
 // The runner owns the workflow ref/unref lifecycle: each [Start] takes
 // one reference to the workflow; the matching unref happens when the
 // downstream Skimmer (or Funnel) sink processes the result that the

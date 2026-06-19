@@ -47,21 +47,21 @@ type execShell struct {
 }
 
 // execShellPool hands out execShells for one Wave. It is owned by that Wave and
-// constructed once its waveCtx + lifecycle Pool are known. Borrows come from a
+// constructed once its waveCtx + lifecycle Wave are known. Borrows come from a
 // lock-free free list (nbcq); when empty a fresh shell is built under waveCtx, so
 // the live shell count self-sizes to the wave's peak concurrency and shrinks back
 // as borrows return. Shells live for the wave's lifetime and are released when
 // waveCtx cancels (which cancels each shell's derived context by ancestry).
 type execShellPool struct {
 	waveCtx context.Context //nolint:containedctx // the ancestor every shell ctx derives from
-	job     *Pool           // the per-wave lifecycle object stamped as meta.job
+	job     *Wave           // the per-wave lifecycle object stamped as meta.job
 	wave    *Wave           // stamped as meta.wave (the shells are this wave's)
 	// parentJobs is the wave's cross-job ancestry (the jobs this wave descends
 	// from), stamped onto every shell meta so the "Context belongs to a child job"
-	// guards (Pool.ctxMeta / ensureCtxMeta) fire correctly for bodies that reach
+	// guards (Wave.ctxMeta / ensureCtxMeta) fire correctly for bodies that reach
 	// across job boundaries (e.g. a sub-task skimming its parent job). Read-only
 	// after Init; ensureCtxMeta copies before extending, so sharing is safe.
-	parentJobs map[*Pool]struct{}
+	parentJobs map[*Wave]struct{}
 	free       nbcq.Queue[*execShell]
 }
 
@@ -69,7 +69,7 @@ type execShellPool struct {
 // (so wave cancel / pool teardown propagate); job and wave are the fixed
 // per-execution identity stamped into every shell's meta; parentJobs is the wave's
 // job ancestry (from the top-level meta ensureCtxMeta built at NewWave).
-func (p *execShellPool) Init(waveCtx context.Context, job *Pool, wave *Wave, parentJobs map[*Pool]struct{}) {
+func (p *execShellPool) Init(waveCtx context.Context, job, wave *Wave, parentJobs map[*Wave]struct{}) {
 	p.waveCtx = waveCtx
 	p.job = job
 	p.wave = wave

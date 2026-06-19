@@ -28,7 +28,7 @@ const (
 )
 
 type ctxMeta struct {
-	job  *Pool
+	job  *Wave
 	wave *Wave // set by NewWave; nil for ctxs not derived through a Wave
 	// parent links to the ctxMeta this one was derived from along the
 	// context value chain — the synchronous, same-goroutine derivations
@@ -46,7 +46,7 @@ type ctxMeta struct {
 	// framework parking points. A stamped handle is only ever HELD or
 	// SUSPENDED: POSTPONED is pre-body, DONE is post-unstamp.
 	heldRequest request
-	parentJobs  map[*Pool]struct{}
+	parentJobs  map[*Wave]struct{}
 	ctxType     contextType
 	executionEnvironment
 }
@@ -91,7 +91,7 @@ func (cm *ctxMeta) currentHeldRequest() request {
 }
 
 func (cm *ctxMeta) String() string {
-	return fmt.Sprintf("{%v Pool=%p exEnv=%p}", cm.ctxType, cm.job, cm.executionEnvironment)
+	return fmt.Sprintf("{%v Wave=%p exEnv=%p}", cm.ctxType, cm.job, cm.executionEnvironment)
 }
 
 func (cm *ctxMeta) IsTopLevel() bool {
@@ -202,7 +202,7 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 			// after the inner post: on self-acquisition (the dispatched
 			// op shares the holder's limiter), reclaiming any earlier
 			// waits on a task that hasn't been queued yet. Interior
-			// brackets (Pool.block) no-op via re-entrancy.
+			// brackets (Wave.block) no-op via re-entrancy.
 			if r := suspendForEpisode(cm); r != nil {
 				defer reclaimRequest(ctx, cm.job.blockFn, r)
 			}
@@ -316,8 +316,8 @@ func (ee *topLevelExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Executi
 
 type ctxMetaValueKey struct{}
 
-func (j *Pool) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
-	traceRegion := "Pool.ctxMeta"
+func (j *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+	traceRegion := "Wave.ctxMeta"
 
 	ctx, meta := j.ctxMetaMap.WithValue(ctx,
 		func(sourceMeta *ctxMeta, _ bool) (context.Context, *ctxMeta) {
@@ -343,16 +343,16 @@ func (j *Pool) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	return ctx, meta
 }
 
-func (j *Pool) ensureCtxMeta(
+func (j *Wave) ensureCtxMeta(
 	ctx context.Context,
 	updateFn func(context.Context, *ctxMeta) context.Context,
 ) (context.Context, *ctxMeta) {
-	traceRegion := "Pool.ensureCtxMeta"
+	traceRegion := "Wave.ensureCtxMeta"
 
 	ctx, meta := j.ctxMetaMap.WithValue(ctx,
 		func(sourceMeta *ctxMeta, _ bool) (context.Context, *ctxMeta) {
 			ctxType := topLevelContext
-			var parentJobs map[*Pool]struct{}
+			var parentJobs map[*Wave]struct{}
 			var exEnv executionEnvironment
 			if sourceMeta != nil {
 				if sourceMeta.job == j {
@@ -363,7 +363,7 @@ func (j *Pool) ensureCtxMeta(
 					if _, isParentJob := sourceMeta.parentJobs[j]; isParentJob {
 						panic("Context belongs to a child job")
 					}
-					parentJobs = make(map[*Pool]struct{}, len(sourceMeta.parentJobs)+1)
+					parentJobs = make(map[*Wave]struct{}, len(sourceMeta.parentJobs)+1)
 					maps.Copy(parentJobs, sourceMeta.parentJobs)
 					parentJobs[sourceMeta.job] = struct{}{}
 				}
@@ -389,7 +389,7 @@ func (j *Pool) ensureCtxMeta(
 			// (e.g. top-level → skim) so nil-wave op dispatch from
 			// inside a Skim/Accumulate body can still resolve.
 			// Across-job transitions intentionally drop the wave —
-			// the source wave is bound to a different Pool.
+			// the source wave is bound to a different Wave.
 			if sourceMeta != nil && sourceMeta.job == j {
 				meta.wave = sourceMeta.wave
 			}
@@ -413,10 +413,10 @@ func (j *Pool) ensureCtxMeta(
 type skimCtxMetaValueKey struct{}
 
 // checkCtxType should panic if the type is not allowed
-func (j *Pool) topLevelCtxMeta(
+func (j *Wave) topLevelCtxMeta(
 	ctx context.Context, checkCtxType func(ctxType contextType),
 ) (context.Context, *ctxMeta) {
-	traceRegion := "Pool.topLevelCtxMeta"
+	traceRegion := "Wave.topLevelCtxMeta"
 
 	ctx, meta := j.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
@@ -435,8 +435,8 @@ func (j *Pool) topLevelCtxMeta(
 	return ctx, meta
 }
 
-func (j *Pool) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
-	traceRegion := "Pool.skimCtxMeta"
+func (j *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+	traceRegion := "Wave.skimCtxMeta"
 
 	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		if ctxType != topLevelContext && ctxType != skimContext {
@@ -448,7 +448,7 @@ func (j *Pool) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	}
 
 	ctx, _ = j.skimCtxMetaMap.WithValue(ctx,
-		func(*Pool, bool) (context.Context, *Pool) {
+		func(*Wave, bool) (context.Context, *Wave) {
 			trace.Logf(ctx, traceRegion, "creating new skim context")
 			return ctx, j
 		},

@@ -127,7 +127,7 @@ type benchmarkFunnel struct {
 
 	// Downstream sink captured for Submit-on-Flush (Wave 2 reshape).
 	skimmer psg.Skimmer[benchmarkFunneldResult]
-	job     *psg.Pool
+	job     *psg.Wave
 
 	maxDepth                     int
 	funnelSubtaskBudget          int
@@ -161,7 +161,7 @@ func newBenchmarkFunnel(
 		cumulativeNominalDuration time.Duration) psg.Task[benchmarkTaskResult],
 	idealFunnelsPerSkim int,
 	skimmer psg.Skimmer[benchmarkFunneldResult],
-	job *psg.Pool,
+	job *psg.Wave,
 ) *benchmarkFunnel {
 	c := benchmarkFunnelPool.Get()
 	c.firstFunnelTime = time.Since(epoch)

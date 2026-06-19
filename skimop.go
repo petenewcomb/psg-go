@@ -132,7 +132,7 @@ func (g Skimmer[T]) SubmitResult(
 	traceRegion := "Skimmer.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := resolveWave(g.wave, ctx).pool
+	target := resolveWave(g.wave, ctx)
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()
@@ -177,7 +177,7 @@ func (g Skimmer[T]) TrySubmitResult(
 	traceRegion := "Skimmer.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := resolveWave(g.wave, ctx).pool
+	target := resolveWave(g.wave, ctx)
 	ctx, meta := target.ctxMeta(ctx)
 	meta.Lock()
 	defer meta.Unlock()

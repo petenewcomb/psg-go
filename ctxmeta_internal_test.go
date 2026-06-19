@@ -43,27 +43,27 @@ func TestPermitScopingChains(t *testing.T) {
 	ctx, wave := NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	_, topMeta := wave.pool.ctxMeta(ctx)
+	_, topMeta := wave.ctxMeta(ctx)
 	require.NotNil(t, topMeta)
 	require.Equal(t, topLevelContext, topMeta.ctxType)
 	assert.Nil(t, topMeta.parent, "root wave context has no parent")
 
 	var skimMeta *ctxMeta
 	skimmer := NewFnSkimmer(wave, func(sctx context.Context, _ int, _ error) error {
-		_, skimMeta = wave.pool.ctxMeta(sctx)
+		_, skimMeta = wave.ctxMeta(sctx)
 		return nil
 	})
 
 	var bodyMeta, subTopMeta, subBodyMeta *ctxMeta
 	launcher := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
-		_, bodyMeta = wave.pool.ctxMeta(bodyCtx)
+		_, bodyMeta = wave.ctxMeta(bodyCtx)
 
 		// Drive a subwave synchronously from inside the body — the
 		// telescoping path the suspend brackets rely on.
 		subCtx, subWave := NewWave(bodyCtx)
-		_, subTopMeta = subWave.pool.ctxMeta(subCtx)
+		_, subTopMeta = subWave.ctxMeta(subCtx)
 		subLauncher := NewTaskLauncher(subWave, func(subBodyCtx context.Context) error {
-			_, subBodyMeta = subWave.pool.ctxMeta(subBodyCtx)
+			_, subBodyMeta = subWave.ctxMeta(subBodyCtx)
 			return nil
 		})
 		if err := subLauncher.Start(subCtx); err != nil {
@@ -116,11 +116,11 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 
 	var bodyReq, subwaveSeenReq request
 	limited := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
-		_, bodyMeta := wave.pool.ctxMeta(bodyCtx)
+		_, bodyMeta := wave.ctxMeta(bodyCtx)
 		bodyReq = bodyMeta.currentHeldRequest()
 
 		subCtx, subWave := NewWave(bodyCtx)
-		_, subTopMeta := subWave.pool.ctxMeta(subCtx)
+		_, subTopMeta := subWave.ctxMeta(subCtx)
 		subwaveSeenReq = subTopMeta.currentHeldRequest()
 		return subWave.CloseAndSkimAll(subCtx)
 	}, WithLimits(NewSemaphore(nil, 1)))
@@ -128,7 +128,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 
 	var unlimitedReq request = &directRequest{} // sentinel, overwritten
 	unlimited := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
-		_, bodyMeta := wave.pool.ctxMeta(bodyCtx)
+		_, bodyMeta := wave.ctxMeta(bodyCtx)
 		unlimitedReq = bodyMeta.currentHeldRequest()
 		return nil
 	})
@@ -148,7 +148,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
-				_, m := wave2.pool.ctxMeta(fctx)
+				_, m := wave2.ctxMeta(fctx)
 				funnelReq = m.currentHeldRequest()
 				return time.Time{}, nil
 			},
@@ -170,7 +170,7 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
-				_, funnelMeta = wave.pool.ctxMeta(fctx)
+				_, funnelMeta = wave.ctxMeta(fctx)
 				return time.Time{}, nil
 			},
 			FlushFn: func(context.Context) error { return nil },

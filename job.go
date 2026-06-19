@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/psg-go/internal/trace"
@@ -45,6 +46,18 @@ type Pool struct {
 	blockFn      workq.BlockFunc      // avoid closure reallocation
 	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
+
+	// wave-5b per-Wave substrate (absorbed from the former thin Wave wrapper as
+	// part of folding Pool into Wave). waveCtx = WithCancel(defaultPool.PoolCtx());
+	// shells hands out the per-wave borrowed execution contexts; fEngine is the
+	// lazily-created funnel engine. ownsPool is vestigial (every wave now owns its
+	// own substrate over the global defaultPool) and is removed with WithPool.
+	ownsPool   bool
+	waveCtx    context.Context //nolint:containedctx // per-wave cancellation root
+	waveCancel context.CancelFunc
+	shells     execShellPool
+	fEngineMu  sync.Mutex
+	fEngine    atomic.Pointer[funnelEngine]
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -135,44 +148,40 @@ func (w *taskWork) Free() {
 
 var taskWorkPool = omnipool.For[taskWork]()
 
-// New creates an independent scatter-gather execution environment with the
-// specified context. The context passed to New is used as the root of the
-// context that will be passed to all task functions. (See [Task] and
-// [Pool.Cancel] for more detail.)
-//
-// Use [NewTaskPool] to create task pools bound to this job.
-//
-// Each call to New should typically be followed by a deferred call to
-// [Pool.CancelAndWait] to ensure that an early exit from the calling function
-// does not leave any outstanding goroutines.
-func New(ctx context.Context, options ...psgopt.PoolOption) *Pool {
-	traceRegion := "New"
-	defer trace.StartRegion(ctx, traceRegion).End()
+// newWaveSubstrate initializes the per-wave lifecycle substrate (formerly the
+// New() constructor, now folded into the Wave). parent is the caller's root
+// context; the wave-5b execShell pool is Init'd by NewWave once the top-level
+// meta gives the wave its ancestry.
+func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wave {
+	traceRegion := "newWaveSubstrate"
+	defer trace.StartRegion(parent, traceRegion).End()
 
-	ctx, cancelFn := context.WithCancel(ctx)
-	j := &Pool{
-		ctx:      ctx,
+	poolCtx, cancelFn := context.WithCancel(parent)
+	w := &Wave{
+		ctx:      poolCtx,
 		cancelFn: cancelFn,
+		ownsPool: true,
 	}
 
-	j.protoBB.ShouldBlock = j.shouldBlock
-	j.blockFn = j.block
-	j.tryAddWorkFn = j.tryAddWork
-	j.addWorkFn = j.addWork
+	w.protoBB.ShouldBlock = w.shouldBlock
+	w.blockFn = w.block
+	w.tryAddWorkFn = w.tryAddWork
+	w.addWorkFn = w.addWork
 
-	trace.Logf(ctx, traceRegion,
-		"Pool=%p, state=%p, skimQueue=%p, governor=%p, workQueue=%p",
-		j, &j.state, &j.skimQueue, &j.governor, &j.workQueue)
+	trace.Logf(parent, traceRegion,
+		"Wave=%p, state=%p, skimQueue=%p, governor=%p, workQueue=%p",
+		w, &w.state, &w.skimQueue, &w.governor, &w.workQueue)
 
-	j.state.Init()
-	j.skimQueue.Init()
-	j.governor.Init()
-	j.workQueue.Init(nil)
+	w.state.Init()
+	w.skimQueue.Init()
+	w.governor.Init()
+	w.workQueue.Init(nil)
+	w.SetOptions(options...)
 
-	// Apply user options
-	j.SetOptions(options...)
+	// wave-5b: per-wave cancellation root, derived from the global pool's teardown ctx.
+	w.waveCtx, w.waveCancel = context.WithCancel(defaultPool.PoolCtx())
 
-	return j
+	return w
 }
 
 // Cancel terminates any in-flight tasks and forfeits any unskimed results.
@@ -197,6 +206,10 @@ func (j *Pool) Cancel() {
 	traceRegion := "Pool.Cancel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Pool=%p", j)
+	// wave-5b: cancel the per-wave context too (absorbed from the thin Wave). Once
+	// work runs under borrowed shells (descendants of waveCtx) this reaches running
+	// bodies; the pool-ctx cancel below does the rest of teardown.
+	j.waveCancel()
 	j.cancelFn()
 }
 
@@ -208,7 +221,17 @@ func (j *Pool) CancelAndWait() {
 	traceRegion := "Pool.CancelAndWait"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
+	// wave-5b: release the per-wave execShells last (absorbed from the thin Wave).
+	defer j.shells.release()
+
+	// Cancel (which now also cancels waveCtx) drives this wave's funnel flusher
+	// toward exit; JOIN it BEFORE the map-clearing teardown below, because the
+	// flusher reads the ctxMetaMaps (ensureCtxMeta, flush bodies) — clearing them
+	// while it still runs is a data race. (Preserves the ordering fix from a9776db.)
 	j.Cancel()
+	if fe := j.fEngine.Load(); fe != nil {
+		fe.joinFlusher()
+	}
 	j.wg.Wait()
 	j.skimCtxMetaMap.Clear()
 	j.ctxMetaMap.Clear()

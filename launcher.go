@@ -195,7 +195,7 @@ func (r Launcher[T]) dispatch(
 	ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool,
 ) (bool, error) {
 	wave := resolveWave(r.wave, ctx)
-	pool := wave.pool
+	pool := wave
 	ctx, meta := vetStart(ctx, pool)
 	meta.Lock()
 	defer meta.Unlock()

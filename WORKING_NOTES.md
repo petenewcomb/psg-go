@@ -3,14 +3,15 @@
 This document contains working notes and context for development on the `combiner` branch.
 
 **►►► FOLD psg.Pool INTO Wave — DECIDED (PN, 2026-06-19). THE major item-(e)
-restructure. ATTEMPTED + REVERTED to green (`26555e7`) because fold stage 1 hit an
-intermittent `-race` drain hang (see the ⚠ HANG note in the staged plan below).
-Stage 1 code = dangling commit `437db7b`; stage 2 (full Pool→Wave name flip,
-complete) = `git stash@{0} "fold-stage2-wip"` — both recoverable. NEXT SESSION:
-capture an execution trace to confirm/fix the hang root cause (the `meta.job==
-meta.wave` permit-scoping hypothesis), THEN re-land the fold informed by it (the
-trace may show a fold shape that doesn't collapse the identity permit-scoping
-relies on).** Decision history this session: eliminate the "job" term →
+restructure. ATTEMPTED + reverted to green (`26555e7`) for branch hygiene — but the
+fold is CORRECT: the `-race` drain hang it surfaced turned out to be PRE-EXISTING
+(baseline hangs identically at ~2500 checks) and the fold is behavior-equivalent (see
+the ⚠ HANG note below for the proof). Stage 1 code = dangling commit `437db7b`;
+stage 2 (full Pool→Wave name flip, complete) = `git stash@{0} "fold-stage2-wip"` —
+both recoverable. NEXT SESSION: fix the pre-existing nested-drain worker-starvation
+race (it benefits baseline too), then re-land the fold (stage 1+2) — it just makes
+the flake more frequent under `-race`, not a new bug.** Decision history this
+session: eliminate the "job" term →
 realized `psg.Pool` (job.go) is NOT a worker pool anymore (workers live on the global
 `defaultPool`); it's the per-wave **lifecycle** object, 1:1 with the thin `Wave`
 wrapper — a vestige. So: **fold `psg.Pool` entirely into `Wave`** (one type), delete
@@ -39,27 +40,34 @@ out. "Almost entirely a renaming exercise because the interface is inherited" (P
   Open Q (defer, evidence-based): is `parentWaves` still needed at all? It feeds limiter
   permit-scoping (severing) — needs the limiter TEMP sim config + `sim-trace-debugging`,
   not a guess. Rename now; decide removal separately.
-- **⚠ HANG — fold stage 1 (`437db7b`) introduced an intermittent `-race` drain
-  deadlock (~1 in 200–600 rapid checks); UNRESOLVED.** Baseline `26555e7` passed 400
-  checks clean; stage 1 hangs ~reliably by ~600. **Diagnosis (partial, from the dump —
-  full trace not yet captured):** the wedge is a **nested subwave drain**, NOT the
-  flusher. A task body (`TaskFunc.Handle` → `runInShell` on a global worker) drives a
-  subwave's `CloseAndSkimAll` → `skimAll`/`skim` → `addWorkWhileMaybeBlocking` →
-  `skimSelect`, PARKED waiting for the subwave's work that never completes. Flushers
-  are parked correctly (RED HERRING — my first fix, a sticky-FlushNotify backstop in
-  wavestate/cpworker, did NOT fix it and was reverted). This is the suspend/resume +
-  block-and-help + limiter permit-scoping machinery (the trickiest concurrency).
-  **Leading hypothesis (unconfirmed):** stage 1's `shells.Init(w, w)` makes the
-  execShell `meta.job == meta.wave` (same object) vs baseline's distinct `*Pool`/
-  `*Wave`; that identity collapse may break limiter permit-scoping (`parentJobs`/
-  severing in `ensureCtxMeta`/`borrow`) → hold-and-wait in a nested subwave drain that
-  shares/inherits a limiter. The unlimited-limiter discriminator can't be used as-is —
-  the sim `limiterTracker` asserts observed-concurrency ≤ the PLAN permits, so
-  `NewSemaphore(-1)` fails fast instead of running. **NEXT: capture an execution trace
-  (full `sim-trace-debugging` pipeline) to confirm the hold-and-wait + inspect whether
-  the `meta.job==meta.wave` collapse changed a permit-scoping identity check.** Until
-  resolved, do NOT build stages 2–3 on stage 1. (Stage 2 — the full Pool→Wave name
-  flip — is complete + stashed: `git stash@{0} "fold-stage2-wip"`; it inherits the hang.)
+- **⚠ HANG — RESOLVED AS PRE-EXISTING; THE FOLD IS EXONERATED (2026-06-19).** Earlier
+  this looked like a fold regression, but it is a **pre-existing intermittent `-race`
+  drain deadlock**, NOT introduced by the fold. Evidence: (1) **audit** — `execShellPool.job`
+  is used ONLY to stamp `meta.job`, and `meta.job` is compared ONLY to the receiver `j`
+  (`ctxmeta.go:337/404`, `job.go:337`), NEVER to `meta.wave`; nothing distinguishes the
+  two, so the fold's `shells.Init(w,w)` (`meta.job==meta.wave`) collapse is logically
+  harmless → the fold is behavior-equivalent. (2) **baseline reproduces it** —
+  `26555e7` (pre-fold) HANGS at `-race -rapid.checks=2500` (~320s) with the IDENTICAL
+  wedge. The fold only shifts allocation timing (2 objects/wave → 1), raising the
+  frequency (fold ~2/40 single-case runs with zero delays; baseline 0/40 at that scale
+  but hangs by ~2500 normal checks). **The bug:** a nested-subwave-drain WORKER
+  STARVATION — task bodies (`TaskFunc.Handle`→`runInShell` on global workers) each drive
+  a subwave `CloseAndSkimAll`→`skimSelect`, parked waiting for that subwave's work;
+  **ZERO limiter/permit waiters** (not a hold-and-wait — my earlier permit-scoping and
+  flusher hypotheses were BOTH wrong). All global workers end up blocked in nested skim
+  drains while deeper work needs a worker; the skim drain waits on the wave's skimQueue
+  and does NOT block-and-help the global pool, so progress depends on the worker-spawn
+  chain — which a timing race apparently stalls. **CRITICAL TOOLING NOTE:** the bug is
+  acutely timing-sensitive — runtime/trace (`-trace`) AND stderr logging BOTH perturb it
+  away (0 hangs while instrumented). So the `sim-trace-debugging` trace pipeline does NOT
+  work here; diagnose by reasoning + fix-and-measure (fast repro: zero-delay sim config
+  in `simulation_test.go` + `-race`, ~5%/case). **NEXT:** fix the pre-existing
+  worker-starvation race (likely: make the skim drain block-and-help the global pool, or
+  fix a missed spawn-demand signal in workq/rdvq when all workers are in nested drains) —
+  a separate task in the suspend/resume + block-and-help area (items c/d). **The fold
+  itself is correct and ready to re-land** (stage 1 = dangling commit `437db7b`; stage 2
+  = `git stash@{0} "fold-stage2-wip"`); it just makes this pre-existing flake more visible
+  under `-race`, so prefer fixing the race first (it benefits baseline too).
 - **Validate each stage:** vet/lint/short ./...; root `TestBySimulation -race`;
   limiter inherit sims. NB the pre-existing `CancelAndWait`-Clear-vs-active-work `-race`
   flake (baseline `b32f650`, item-c) — validate with root sim, not the inherit `-race` loop.

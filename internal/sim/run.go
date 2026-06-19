@@ -393,7 +393,7 @@ func classify(err error) disposition {
 		return dispRetry
 	case errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded),
-		errors.Is(err, psg.ErrJobDone):
+		errors.Is(err, psg.ErrWaveDone):
 		return dispAbandon
 	default:
 		return dispFail

@@ -220,7 +220,7 @@ func (w *Wave) CancelAndWait() {
 	// Cancel the pool context first to drive this wave's funnel flusher toward
 	// exit, then JOIN it before the pool teardown below clears the ctxMetaMaps —
 	// the flusher reads those maps (ensureCtxMeta, flush bodies), so clearing them
-	// while it still runs is a data race. The flusher is jobstate-joined, not
+	// while it still runs is a data race. The flusher is wavestate-joined, not
 	// Pool.wg-tracked (see funnelEngine.flusherDone). Cancel is idempotent, so the
 	// CancelAndWait below repeating it is harmless.
 	w.pool.Cancel()

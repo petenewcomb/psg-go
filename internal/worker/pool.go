@@ -39,8 +39,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/psg-go/internal/wavestate"
 	"github.com/petenewcomb/psg-go/internal/workq"
 )
 
@@ -73,7 +73,7 @@ type Pool[E workq.ExecEnv] struct {
 
 	// spawning counts workers between spawn and the result of their first drive
 	// (bounds simultaneous spawns — a de-stampede — not the total worker count).
-	spawning jobstate.InFlightCounter
+	spawning wavestate.InFlightCounter
 
 	// lifecycle, all guarded by mu (see package doc):
 	//   refs       — number of active referrers (e.g. in-flight Waves).

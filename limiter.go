@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/psg-go/internal/wavestate"
 	"github.com/petenewcomb/psg-go/internal/workq"
 )
 
@@ -432,7 +432,7 @@ func reclaimRequest(ctx context.Context, blockFn workq.BlockFunc, req request) {
 				// Canceled: leave the handle SUSPENDED; the body's
 				// completion release discards it (no double give-back).
 				return
-			case errors.Is(err, ErrJobDone):
+			case errors.Is(err, ErrWaveDone):
 				// Help domain exhausted — e.g. the drained subjob this
 				// goroutine was driving reports end-of-work. The reclaim
 				// becomes vacuously plain: keep waiting on the notifier
@@ -568,7 +568,7 @@ func NewSemaphore(scheduler *Scheduler, n int) Limiter {
 // permits. Pure accounting — wakeups belong to the owning scheduler.
 type semaphoreResource struct {
 	maxConcurrency    atomic.Int32
-	inFlight          jobstate.InFlightCounter
+	inFlight          wavestate.InFlightCounter
 	capacityChangedFn func(delta int)
 }
 

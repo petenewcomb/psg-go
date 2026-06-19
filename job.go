@@ -13,11 +13,11 @@ import (
 
 	"github.com/petenewcomb/psg-go/internal/cerr"
 	"github.com/petenewcomb/psg-go/internal/ctxmap"
-	"github.com/petenewcomb/psg-go/internal/jobstate"
 	"github.com/petenewcomb/psg-go/internal/omnipool"
 	"github.com/petenewcomb/psg-go/internal/opts"
 	"github.com/petenewcomb/psg-go/internal/rdvq"
 	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/psg-go/internal/wavestate"
 	"github.com/petenewcomb/psg-go/internal/workq"
 	"github.com/petenewcomb/psg-go/psgopt"
 )
@@ -27,7 +27,7 @@ type Pool struct {
 	ctx      context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
-	state    jobstate.JobState
+	state    wavestate.WaveState
 
 	skimQueue workq.Pending
 
@@ -224,13 +224,13 @@ func (j *Pool) CancelAndWait() {
 // Returns an error if one occurred:
 //
 //   - nil: a task completed and was successfully skimmed
-//   - ErrJobDone: the job is done and therefore nothing is left to skim
+//   - ErrWaveDone: the job is done and therefore nothing is left to skim
 //   - other error: a task's skim function returned a non-nil error, or the
 //     argument or job-internal context was canceled
 //
 // If a skim function returns an error, the job continues running and you can
 // keep calling Skim to process more tasks (and errors, if any) until you
-// receive ErrJobDone.
+// receive ErrWaveDone.
 //
 // If all skim functions are thread-safe, then Skim is thread-safe and
 // may be called concurrently from multiple goroutines. Blocking and
@@ -511,7 +511,7 @@ func (j *Pool) skimSelect(
 		err = errBlockWaitSignaled
 	case <-j.state.Done():
 		trace.Logf(ctx, traceRegion, "received job done signal")
-		err = ErrJobDone
+		err = ErrWaveDone
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
 		err = ctx.Err()
@@ -648,12 +648,12 @@ func (j *Pool) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shou
 //
 // The error indicates:
 //   - nil: no skim function returned an error
-//   - ErrJobDone: the job is done and no more tasks will ever be available
+//   - ErrWaveDone: the job is done and no more tasks will ever be available
 //   - other error: a skim function returned an error or the context was canceled
 //
 // If a skim function returns an error, the job continues running and you can
 // keep calling TrySkim to process more tasks (and errors, if any) until you
-// receive ErrJobDone.
+// receive ErrWaveDone.
 //
 // See Skim for additional details.
 func (j *Pool) TrySkim(ctx context.Context) (bool, error) {
@@ -701,7 +701,7 @@ func (j *Pool) SkimAll(ctx context.Context) error {
 	}
 
 	err := j.skimAll(ctx, j.skim)
-	if errors.Is(err, ErrJobDone) {
+	if errors.Is(err, ErrWaveDone) {
 		return nil
 	}
 	return err
@@ -712,11 +712,11 @@ func (j *Pool) SkimAll(ctx context.Context) error {
 // completed tasks ready to process, regardless of whether the job is closed or
 // whether there are still tasks in flight.
 //
-// Returns nil when all immediately available tasks have been processed, ErrJobDone
+// Returns nil when all immediately available tasks have been processed, ErrWaveDone
 // when the job is done, or an error if the context is canceled or a task's
 // [Skim] returns a non-nil error. If a skim function returns an error,
 // you can call TrySkimAll again to continue processing more tasks (and errors,
-// if any) until you receive ErrJobDone.
+// if any) until you receive ErrWaveDone.
 //
 // See SkimAll for information about thread safety.
 //

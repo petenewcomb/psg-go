@@ -36,7 +36,7 @@ type funnelEngine struct {
 	// flusherDone is closed when the persistent flush driver goroutine returns.
 	// The flusher is deliberately NOT tracked by Pool.wg (that joins worker
 	// goroutines, which now live on the global defaultPool). Funnel-flush
-	// completion is governed by jobstate reference counts — CloseAndSkimAll/SkimAll
+	// completion is governed by wavestate reference counts — CloseAndSkimAll/SkimAll
 	// block on state.Done until every funnelInstance has flushed — so a wave's
 	// drain already waits for the flush work itself. This channel only lets
 	// Wave.CancelAndWait join the goroutine, closing the exit window before
@@ -145,7 +145,7 @@ func (fe *funnelEngine) flusher() {
 		defer doneWg.Done()
 		select {
 		case <-j.state.Done():
-			doneErr = ErrJobDone
+			doneErr = ErrWaveDone
 		case <-ctx.Done():
 			doneErr = ctx.Err()
 		}
@@ -173,7 +173,7 @@ func (fe *funnelEngine) flusher() {
 		switch {
 		case err == nil:
 			// Ran a due flush (or the end-of-work flushAll followup); keep going.
-		case errIn(err, ErrJobDone, context.Canceled, context.DeadlineExceeded):
+		case errIn(err, ErrWaveDone, context.Canceled, context.DeadlineExceeded):
 			trace.Logf(ctx, traceRegion, "flusher exiting with err=%v", err)
 			return
 		default:

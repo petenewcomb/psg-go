@@ -8,7 +8,29 @@ This is a design artifact, not an implementation plan. The decisions here
 are still revisable, but they form a coherent set — pulling one thread
 often unravels several.
 
+> **SUPERSEDED IN PARTS (2026-06-20).** Decisions taken after this doc
+> (2026-05-25) override three areas below; read `docs/permit-core.md` and
+> `docs/dispatch-execution-split.md` for the current model.
+> - **`Pool` is no longer user-exposed.** The worker pool is internal and
+>   automatically sized — there is no `NewPool` / `WithPool` / `PoolOption` in the
+>   surface. Users construct **Wave** (and optionally **Flow**); per-op concurrency
+>   is controlled with Limiters. The `Pool` type, its constructors, and the "With a
+>   custom Pool" example below are retired; "a Pool of workers serves Waves" survives
+>   only as the conceptual tagline.
+> - **The permit model is a hierarchical *cache*, not a global scheduler.** Permits
+>   are held through parks and *cached idle*; the give-back is an idle **steal**, and
+>   the model is **deadlock-free per-limiter, with no cycle graph and no global
+>   scheduler**. A coordinator survives only for the deferred cross-limiter
+>   *joint-acquisition* feature, so the per-limiter `scheduler` argument is retained
+>   for *that* — not collapsed to a global. (The "Limiters" block's "UPDATED" note
+>   and the suspend/resume wording are corrected inline below.)
+> - **Reentrancy: the only rule is "you cannot skim a wave you are part of."**
+>   Principle 7's "task-to-task scatter prohibition" and "skim queued-not-recursive"
+>   are superseded — any body may scatter and drive a sub-wave it owns.
+
 Companion docs:
+- `docs/permit-core.md` — the permit allocation model (the hierarchical cache).
+- `docs/dispatch-execution-split.md` — the dispatch/execution architecture.
 - `POSITIONING_RESEARCH.md` — outward-facing market/audience research.
 - `ARCHITECTURE_COMPARISON.md` — source-level contention/allocation
   analysis against competitors.
@@ -61,11 +83,14 @@ These guided every naming and shape decision below.
    callback must be a bracketed leaf** — it carries *zero* propagation
    duty (a leaf, never asked to re-notify), and the surrounding node
    discharges its conservation obligation *regardless of what the
-   callback does* (blocks, panics, re-enters, spawns). The existing
-   reentrancy constraints (task-to-task scatter prohibition,
-   `ctxmeta.ShouldBlock` returning nil for task contexts, skim being
-   queued-not-recursive) are exactly this defense. Any future plug-in
-   point — especially blocking-capable hooks — must pass the
+   callback does* (blocks, panics, re-enters, spawns). The
+   dispatch/execution split is exactly this defense: managers, which never
+   run user code, discharge each node's conservation obligation no matter
+   what an executor body does — block, panic, re-enter, spawn — and the one
+   reentrancy rule (a body may not skim a wave it is part of) closes the only
+   cycle. (The earlier task-to-task scatter prohibition / skim-queued-not-
+   recursive constraints are retired — see the banner above.) Any future
+   plug-in point — especially blocking-capable hooks — must pass the
    bracketed-leaf test or it punches a hole in conservation, no matter
    that the foundational types stay hidden. (This entry is a summary;
    the full treatment is a TODO — see TODO.md "Formal verification &
@@ -79,14 +104,13 @@ Three orthogonal concerns, three types. Conflating any two of them produces
 the kind of API friction this design exists to remove.
 
 1. **Pool** — the worker pool. Goroutines, idle policy, max-budget.
-   Fungible. A package-level default Pool exists implicitly; users
-   only construct a custom Pool when they need a non-default ctx
-   (for cancellation) or non-default tuning. Pool's lifecycle is
-   refcount-driven: workers spin up when the first referencing Wave
-   begins work and exit synchronously when the last Wave referencing
-   the Pool completes its drain. A Pool whose refcount has returned
-   to zero is fully reusable — the next Wave that references it
-   spins workers up again.
+   Fungible and **internal** (see the banner): a process-wide default Pool
+   serves all work and is sized automatically; it is not user-constructed
+   or tuned. Its lifecycle is refcount-driven: workers spin up when the
+   first referencing Wave begins work and exit synchronously when the last
+   Wave referencing it completes its drain, after which it is fully reusable.
+   (The original design exposed a `Pool` type / `NewPool`; that is retired —
+   the conceptual role remains, the surface does not.)
 
 2. **Wave** — a batch of work to be completed together. The
    user-facing primary type. Ops are constructed against a Wave; the
@@ -224,22 +248,20 @@ func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
 
 // ===== Limiters =====
 //
-// Full design: docs/limiter-suspend-resume.md AND docs/dispatch-execution-split.md
-// (the latter supersedes the former's suspend model — read both). Summary:
+// Current model: docs/permit-core.md (the permit cache) and
+// docs/dispatch-execution-split.md. The suspend/resume + per-limiter-scheduler
+// sketch this block once described is RETIRED; the corrected summary:
 //
-// UPDATED (2026-06-20) — two user-visible changes from the suspend/resume +
-// per-limiter-scheduler sketch below:
-//   1. A permit is now HELD THROUGH PARKS, not relinquished on a skim. A parked
-//      unit's permit is used by its sub-waves (they inherit it), and is given back
-//      only as a last-resort, scheduler-internal cycle-break — so the
-//      "relinquishes ... suspend/resume" wording below describes the *retired*
-//      mechanism. The active-concurrency cap it provides still holds.
-//   2. The scheduler is GLOBAL, one per process. The per-limiter `scheduler`
-//      argument and the "all resolve to the SAME scheduler" WithLimits check
-//      collapse to that single instance (nil = the global scheduler). And a permit
-//      demand that exceeds total capacity now FAILS FAST — panic for a static
-//      weight (a misconfiguration), a distinct error for a data-dependent one
-//      (an oversized input) — rather than ever blocking forever.
+//   1. Permits are a hierarchical CACHE. A permit is held through parks and cached
+//      idle; a parked unit's permit is inherited by its sub-waves, and the only
+//      give-back is an idle STEAL by another pool that genuinely needs it (no
+//      suspend, no relinquish-on-skim). The active-concurrency cap still holds.
+//   2. The model is DEADLOCK-FREE PER-LIMITER with no cycle graph and no global
+//      scheduler. The per-limiter `scheduler` argument is retained for the deferred
+//      cross-limiter JOINT-ACQUISITION feature (composing several limiters on one
+//      op), not collapsed to a global. A permit demand exceeding total capacity
+//      FAILS FAST — panic for a static weight (a misconfiguration), a distinct
+//      error for a data-dependent one (an oversized input) — never blocking forever.
 //
 // Limiter is the user-facing concurrency-control primitive. Limiters compose:
 // an op can bind multiple Limiters, all of which must permit a dispatch before
@@ -247,23 +269,23 @@ func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
 // them to WithLimits.
 //
 // Each Limiter binds to a *scheduler* at construction — the scheduler's first
-// argument, nil for self-scheduled (standalone). The scheduler is what actually
-// implements the framework contract; a Limiter is a resource bound to one.
-//   - Schedulers are the closed/sealed set (framework-provided): a direct
+// argument, nil for self-scheduled (standalone). A single self-scheduled limiter
+// is the common case; a non-nil scheduler is only needed to coordinate the joint
+// admission of several limiters on one op (the deferred feature).
+//   - Schedulers are the closed/sealed set (framework-provided): the direct
 //     scheduler (the nil/self case), and later OrderedScheduler /
 //     PriorityScheduler(prioritizer) for joint multi-limiter admission and
-//     cross-op prioritization. They carry all the lifecycle/suspend-resume/
-//     routing machinery.
+//     cross-op prioritization (with withholding).
 //   - Resources are the OPEN extension point: pure accounting (demand / acquire /
-//     release / suspendable / capacity-grew signal). A Semaphore is ~10 lines;
-//     memory/rate/weighted/user-defined resources are just as small.
+//     release / capacity-grew signal). A Semaphore is ~10 lines; memory / rate /
+//     weighted / user-defined resources are just as small.
 //
 // WithLimits requires all of its Limiters to resolve to the SAME scheduler
 // (a nil-scheduler limiter is its own self-scheduler), validated at op
-// construction. A Semaphore caps ACTIVE concurrency, not in-flight: a body
-// parked in a skim (e.g. driving a subwave) relinquishes its permit for the
-// duration and reclaims it on return (suspend/resume), which is what dissolves
-// the held-across-a-skim livelock.
+// construction. A Semaphore caps ACTIVE concurrency, not in-flight: a body parked
+// driving a subwave lends its permit to that subwave's work (the cache's
+// inheritance) and reacquires it to resume computing — which is what dissolves the
+// held-across-a-skim livelock.
 type Limiter struct {
     impl limiterImpl  // unexported; the scheduler — sealed against external implementations
 }
@@ -705,6 +727,12 @@ wave.SkimAll(ctx)
 ```
 
 ## With a custom Pool
+
+> **RETIRED — see the banner at the top.** `Pool` is no longer user-exposed
+> (`NewPool` / `WithPool` / `PoolOption` are gone; sizing is automatic). This
+> section is kept for design-history context only. A narrower cancellation domain is
+> obtained via the ctx passed to `NewWave` / `NewFlow`; concurrency is controlled
+> with Limiters.
 
 When you need a non-default ctx (cancellation domain narrower than
 process-wide) or non-default tuning:

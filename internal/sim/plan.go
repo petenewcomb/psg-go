@@ -453,7 +453,7 @@ func probValue(config *Config, p float64) float64 {
 // the caller based on path-construction context.
 // allowSubjob is false for skimmer Handle bodies: a skim handler cannot
 // drive a subwave (it would monopolize the sole serial skim driver and
-// deadlock — see REVIEW_FINDINGS Finding 10; the framework panics on it).
+// deadlock — see docs/limiter-suspend-resume.md; the framework panics on it).
 // Subwork from a skim handler goes through a funnel or a launched task,
 // so the generator simply never nests a subjob directly under a skimmer.
 func newFunc(

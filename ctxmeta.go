@@ -56,8 +56,9 @@ type ctxMeta struct {
 // enclosing context on this goroutine is a skim context. Driving a
 // subwave from a skim handler monopolizes the wave's sole serial skim
 // driver while the handler is parked in the gather, which deadlocks
-// under shared limiters / nested subwaves (see REVIEW_FINDINGS Finding
-// 10). The fix is to keep skimming serial and drive subwork elsewhere:
+// under shared limiters / nested subwaves (see
+// docs/limiter-suspend-resume.md, "Intake vs drain"). The fix is to keep
+// skimming serial and drive subwork elsewhere:
 // populate a [Funnel] from the handler (the map-reduce primitive), or
 // launch a task that drives the subwave. Tasks and funnels are
 // demand-driven, so they never monopolize a sole driver.

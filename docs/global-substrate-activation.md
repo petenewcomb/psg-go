@@ -7,6 +7,19 @@ plan for the next consolidation phase (supersedes the retracted per-job
 one shared `workq.Queue` + a context-free unified `E`, with admit/drain/cancel/
 flush all **per-Wave** — in the actual current code.
 
+> **NEXT LAYER (2026-06-20) — see `dispatch-execution-split.md`.** The global
+> substrate designed here (one `defaultPool` + shared `workq.Queue`, per-Wave
+> governor/skim/lifecycle) is the **foundation** the next architecture builds on:
+> that `defaultPool` becomes the **executor pool**, and a **manager pool / global
+> permit scheduler** is added alongside it — dispatch separated from execution, so a
+> blocking body can never stall the dispatcher. Two deferrals recorded below are
+> resolved there and change: **Q5**'s preserved `suspendForEpisode`/`reclaimRequest`
+> (eager permit suspend across a blocking dispatch) is **superseded by
+> hold-through-park** (permits held across parks; given back only as a last-resort
+> zero-leaf cycle-break), and the deferred **scheduler/on-deck→governor redesign**
+> becomes the **global permit scheduler** (held-period base holds + self-releasing
+> deltas). The per-Wave governor admission gate here is carried forward unchanged.
+
 ---
 
 ## 0. The naming trap that reshapes everything

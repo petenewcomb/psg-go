@@ -6,6 +6,27 @@ when the holder resumes work. It exists to dissolve a busy-spin livelock in
 which a permit held across a blocking skim starves other work that needs the
 same permit.
 
+> **PARTIALLY SUPERSEDED (2026-06-20) — see `dispatch-execution-split.md`.** The
+> *eager* protocol below — "a permit gates active computation, not blocked-waiting,"
+> so a holder relinquishes its permit *whenever it parks* (the two-class park rule,
+> the suspend/reclaim bracket, help-shaped reclaim) — is replaced. In the current
+> design a unit **holds its permits through parks** ("held by the unit, period") to
+> minimize work-in-flight and re-acquisition; the only give-back is a **last-resort,
+> scheduler-internal suspend of a zero-leaf parked permit** to break an actual
+> cross-subtree cycle. The scheduler is likewise no longer per-op/per-domain but
+> **global**, one per process.
+>
+> **Still authoritative here, and load-bearing in both designs:** the **intake/drain
+> split** (limiters gate intake, never drain; skimmers never take `WithLimits`; the
+> **skim-gather ban**) — "Intake vs drain"; the **scheduler/resource layering**
+> (closed schedulers — direct/ordered/prioritized; open resources — semaphore/
+> memory/rate/weighted) — "Resources" and "Multiple limiters"; the request-handle
+> state machine as the limiter's internal contract; **POSTPONED**; and the
+> prioritized scheduler's atomic-fit + withholding, on which the current design's
+> *delta* acquisition builds. What changes is *when* a permit is returned (eagerly on
+> any park → only as a last-resort cycle-break) and the scheduler's *scope*
+> (per-domain → global) — not the resource/scheduler machinery beneath.
+
 ## The problem
 
 A [Limiter] gates how much work an op runs at once. A permit is acquired before

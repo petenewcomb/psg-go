@@ -1,5 +1,14 @@
 # Limiter Suspend/Resume — Design Review Findings
 
+> **SUPERSEDED DESIGN (2026-06-20).** This reviews the *eager* suspend/resume
+> design of `docs/limiter-suspend-resume.md`, since superseded by
+> `docs/dispatch-execution-split.md` — permits are now held through parks
+> (hold-through-park) rather than relinquished on a skim, and the scheduler is
+> global. These findings stand as a record of that review, but the suspend protocol
+> they amend is retired; what carries forward (and the findings still bear on) is
+> the handle/scheduler/resource layering, the fresh-root scoping rule, and the
+> intake/drain split.
+
 Review of `docs/limiter-suspend-resume.md` against the current tree (branch
 `combiner`), 2026-06-10. Each finding has a Status line to track resolution as
 we work through them; resolutions should flow back into the design note (and

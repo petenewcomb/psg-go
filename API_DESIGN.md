@@ -224,7 +224,22 @@ func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
 
 // ===== Limiters =====
 //
-// Full design: docs/limiter-suspend-resume.md (the source of truth). Summary:
+// Full design: docs/limiter-suspend-resume.md AND docs/dispatch-execution-split.md
+// (the latter supersedes the former's suspend model — read both). Summary:
+//
+// UPDATED (2026-06-20) — two user-visible changes from the suspend/resume +
+// per-limiter-scheduler sketch below:
+//   1. A permit is now HELD THROUGH PARKS, not relinquished on a skim. A parked
+//      unit's permit is used by its sub-waves (they inherit it), and is given back
+//      only as a last-resort, scheduler-internal cycle-break — so the
+//      "relinquishes ... suspend/resume" wording below describes the *retired*
+//      mechanism. The active-concurrency cap it provides still holds.
+//   2. The scheduler is GLOBAL, one per process. The per-limiter `scheduler`
+//      argument and the "all resolve to the SAME scheduler" WithLimits check
+//      collapse to that single instance (nil = the global scheduler). And a permit
+//      demand that exceeds total capacity now FAILS FAST — panic for a static
+//      weight (a misconfiguration), a distinct error for a data-dependent one
+//      (an oversized input) — rather than ever blocking forever.
 //
 // Limiter is the user-facing concurrency-control primitive. Limiters compose:
 // an op can bind multiple Limiters, all of which must permit a dispatch before

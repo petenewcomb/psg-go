@@ -41,6 +41,13 @@ The sections below are the original pre-refactor TODO. Many items are now stale 
 
 ## Limiter / livelock investigation follow-ups (2026-06-14)
 
+> **REFRAMED (2026-06-20) — see `docs/dispatch-execution-split.md` + WORKING_NOTES.**
+> The limiter-livelock approach pivoted: the partial spawn-token fix (`6d77ce2`)
+> closed the dominant case, and the recurring deadlock *class* is now targeted by
+> the dispatch/execution split + global permit scheduler (eager suspend/reclaim →
+> hold-through-park). The `acquireOrWait` block-loop follow-up below is in code that
+> redesign retires; the `ErrJobDone`→`ErrWaveDone` rename stands regardless.
+
 - **`acquireOrWait` error-path latent permit leak (defensive — NOT the proven
   livelock cause).** In `acquireOrWait`'s block loop, `if err != nil { return
   false, err }` discards a permit that `confirmFn` may have already latched

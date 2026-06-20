@@ -2,19 +2,25 @@
 
 This document describes the implementation details of PSG's backpressure mechanisms and reentrancy management systems that enable reliable flow control and deadlock prevention in concurrent workflows.
 
-> **PARTLY SUPERSEDED (2026-06-20) — see `dispatch-execution-split.md`.** Much of
-> this document predates both the pool consolidation and the dispatch/execution
-> split: the `TaskPool`/`CombinerPool` framing and the conceptual pseudocode are
-> pre-consolidation, and the **"Tasks cannot scatter new work" deadlock-prevention
-> rule (under "Deadlock Prevention Through Architecture") is obsolete** — bodies *do*
-> scatter and drive sub-waves, and the split (managers that never run user code → an
-> always-live dispatcher; executors that are *allowed* to block) is what now makes
-> that deadlock-safe, replacing the goroutine-level block-and-help it describes
-> elsewhere. The **"Generalizing the Governor"** section below (the per-wave
-> admission gate keyed on downstream skim saturation) **remains accurate and is
-> carried forward**. For the current reentrancy/backpressure model — the submit
-> taxonomy, serial skim on the draining goroutine, and permits gating intake — read
-> `dispatch-execution-split.md`.
+> **PARTLY SUPERSEDED (2026-06-20) — see `dispatch-execution-split.md` and
+> `permit-core.md`.** Much of this document predates both the pool consolidation and
+> the dispatch/execution split: the `TaskPool`/`CombinerPool` framing and the
+> conceptual pseudocode are pre-consolidation, and several rules below are obsolete:
+> - The **"Tasks cannot scatter new work" deadlock-prevention rule** ("Deadlock
+>   Prevention Through Architecture") is gone — bodies *do* scatter and drive
+>   sub-waves. The one surviving reentrancy rule is **"you cannot skim a wave you are
+>   part of"** (own or ancestor); driving an independent sub-wave is fine.
+> - The **block-and-help drive loop** and any rationale that a **task's block
+>   function returns `nil` because it is "holding resources needed to resolve the
+>   congestion"** are retired. Permits are now a deadlock-free-per-limiter *cache*
+>   (`permit-core.md`): a parked body's permits are *lent* to its descendants, never
+>   blocked-on, so holding across a wait is safe and needs no suspend/reclaim.
+>
+> The **"Generalizing the Governor"** section below (the per-wave admission gate
+> keyed on downstream skim saturation) **remains accurate and is carried forward** as
+> the manager-side non-blocking admission gate. For the current reentrancy/
+> backpressure model — the submit taxonomy, serial skim on the draining goroutine,
+> and permits gating intake — read `dispatch-execution-split.md`.
 
 ## Overview
 

@@ -51,7 +51,7 @@ PSG specifically addresses the abundant hazards that make concurrent programming
 - Difficulty reasoning about system-wide dependencies
 
 **PSG's Solution**:
-- Fundamental architectural constraint: tasks cannot scatter (eliminates primary deadlock source)
+- Structural deadlock prevention: limiters gate *intake*, never drain (so a drain never waits on a permit), and a single reentrancy rule — *you cannot skim a wave you are part of* — forecloses the only skim-drive cycle. Bodies may otherwise scatter and drive sub-waves freely.
 - Clear dependency ordering in system design
 - Structured lifecycle management
 
@@ -125,7 +125,7 @@ The model addresses the fundamental tension between parallelism (for performance
 - Executes in parallel with other tasks
 - Returns results that flow to gather or combine operations
 - Inherits job context and configuration
-- Cannot scatter new work (fundamental deadlock prevention)
+- May scatter new work and drive a gather on a sub-wave it owns; the only restriction is that it cannot skim a wave it is part of
 
 **Gather Operation**: Sequential processing of task results that:
 - Maintains result ordering when required
@@ -199,7 +199,7 @@ for _, workItem := range workItems {
 
 ### Nested Workflows
 
-Gather and combine functions can scatter new work, enabling complex workflows:
+Any body — task, combine/accumulate, flush, or gather handler — can scatter new work, enabling complex workflows:
 
 ```go
 // Conceptual example
@@ -223,21 +223,16 @@ gatherFunc := func(ctx context.Context, result T, err error) error {
 
 ## Key Design Constraints
 
-### Task Isolation: No Scattering from Tasks
+### Reentrancy: any body may scatter and drive sub-waves
 
-**Fundamental Rule**: Tasks can only emit results - they cannot scatter new work.
+**Fundamental Rule**: Any body — a task, a combine/accumulate, a flush, or a gather handler — may scatter new work *and* drive a gather on a sub-wave it owns. The single structural restriction is: **you cannot skim a wave you are part of** (your own wave or any ancestor).
 
-**Why This Matters**:
-- Prevents deadlocks from circular task dependencies
-- Simplifies resource counting and cleanup
-- Enables deterministic shutdown coordination
-- Makes system behavior predictable and testable
+**Why this is safe (not deadlock-prone)**:
+- Limiters gate *intake*, never drain, so a drain never waits on a permit.
+- Dispatch is separated from execution: an always-live manager keeps admitting work, so a blocking body never stalls the dispatcher, and the permit layer is a deadlock-free-per-limiter cache (a parked body's permits are lent to its descendants, not blocked on).
+- The one skim restriction forecloses the only structural cycle: skimming a wave you are part of would make a drain wait, transitively, on itself.
 
-**Where Scattering IS Allowed**:
-- Gather functions (sequential processing of results)
-- Combine functions (incremental accumulation)
-- Flush functions (periodic emission of combined results)
-- Top-level application code
+**What it rules out, and what it doesn't**: re-skimming your own or an ancestor wave is forbidden; driving an *independent* sub-wave you created is fine, as is producing into any wave. Concurrent drives of independent waves are allowed (keep such skimmers concurrency-safe). The non-blocking `Try*` gathers are never restricted.
 
 ### Sequential Processing Guarantee
 
@@ -344,7 +339,7 @@ PSG's approach aligns with the broader **structured concurrency** movement in pr
 
 #### Key Differentiators from Industry Approaches
 
-**Dynamic Task Spawning**: Unlike traditional structured concurrency which prohibits task spawning from within tasks, PSG allows controlled reentrancy through gather/combine functions while maintaining structured guarantees.
+**Dynamic Task Spawning**: Unlike traditional structured concurrency which prohibits spawning from within tasks, PSG lets any body scatter and drive sub-waves it owns while maintaining structured guarantees — the only restriction is that a body cannot skim a wave it is part of.
 
 **Multi-Level Resource Management**: PSG extends structured concurrency with TaskPools and CombinerPools that provide independent resource boundaries within the overall structured scope.
 

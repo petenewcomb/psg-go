@@ -2,6 +2,42 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► ARCHITECTURE PIVOT — dispatch/execution split + global permit scheduler
+(DESIGN, 2026-06-20).** The pre-existing nested-drain worker-starvation deadlock
+(the ⚠ HANG note below) was partially fixed, then superseded by a design pivot.
+
+- **Partial fix (in tree, UNCOMMITTED): release the spawn token before ANY body
+  runs, on every path.** Root cause: `onSecure` fired only on the `pull` path, so
+  a worker that secured work via the postponed/fresh priority path (work queued by
+  a body's `ExecuteNowOrQueue`) ran — and blocked — while still holding the spawn
+  token, starving the demand that needed another worker. Fix moves the release into
+  `controller.execute` (threaded `onSecure` through `Queue.driveOne` /
+  `Accepted.ExecuteOne`). Measured **8.5% → 0.5%** hang rate (clean 600-run `-race`
+  zero-delay repro). Correct and a big win, but NOT complete — the residual ~0.5%
+  is the deeper multi-wave funnel/skim starvation the redesign targets. Files:
+  `internal/workq/{worker,queue,accepted}.go` (+ `_test`), `job.go`,
+  `funnelengine.go`; throwaway repro `zzz_repro_test.go` (build tag `repro`).
+  **Decision pending:** keep/commit as interim hardening of the current
+  architecture, or revert since the redesign replaces it.
+
+- **The redesign (the real fix): `docs/dispatch-execution-split.md`.** Separate
+  dispatch (managers — never run user code → always-live dispatcher) from execution
+  (executors — allowed to block). Permit model: a unit holds its permits *through
+  parks* ("period"), sub-waves use them; a sub-wave needing more acquires a *delta*
+  scoped to that unit; the cross-subtree cycle this creates is broken by a
+  last-resort scheduler-internal **suspend of a zero-leaf parked base permit**
+  (cycle detection optional churn-optimization over a pessimistic baseline). The
+  scheduler is **global** (one per process); hot path is per-limiter lock-free,
+  only cross-limiter coordination is single-writer. Supersedes the *eager*
+  suspend/reclaim of `limiter-suspend-resume.md`; keeps its intake/drain split +
+  skim-gather ban. Not implemented — see the doc's "Open / next."
+
+- **Measurement caveat (learned this session):** the zero-delay `-race` repro must
+  use an OUTER `timeout` only (rc=124 = hang); the test binary's own `-test.timeout`
+  reports a hang under a different exit code and silently undercounts. Low-rate
+  hangs (~0.5%) need 500+ runs to distinguish from zero — small samples mislead
+  (twice this session a 0/250 looked "fixed" but was a fluke).
+
 **►►► FOLD psg.Pool INTO Wave — LANDED (PN, 2026-06-19). `Pool` is gone; `Wave` is
 the one batch-lifecycle type.** Stage 1 (substrate absorb + alias) = `995bb05`;
 stage 2 (name flip `*Pool`→`*Wave`, delete `New`/`WithPool`/`Pool()`) = `5bf2e7c`.

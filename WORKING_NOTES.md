@@ -12,32 +12,26 @@ REVIEW_FINDINGS.md (code citations repointed to limiter-suspend-resume.md).
 Root-doc triage done (no deletions needed beyond REVIEW_FINDINGS): CHANGELOG /
 POSITIONING_RESEARCH / ARCHITECTURE_COMPARISON keep-as-is.
 
-**REMAINING (next, against a PINNED surface):**
-- **Refactor programming-model.md** into a focused streampool guide: package name
-  `streampool`; drop PSG / scatter-gather / "combine" vocabulary; three-type model
-  **Wave** + **Flow** (Pool is INTERNAL — *not* user-exposed); ops Launcher /
-  Skimmer / Funnel with `HandlerFunc[T]` / `Accumulator[T]` bodies; verb `Submit`;
-  `wave.SkimAll(ctx)` / `Skim`; limiters `NewSemaphore(nil,n)` + `WithLimits`. Keep
-  the reentrancy rule (you cannot skim a wave you are part of). CUT the big
-  "Comparison with Existing Approaches" section → fold into ARCHITECTURE_COMPARISON.
-- **Move ARCHITECTURE_COMPARISON.md → docs/** and fix refs.
-- **README swap**: delete old README.md, `git mv` README-proposed.md → README.md,
-  update to the pinned surface (it currently uses OLD op-names
-  Gatherer/TaskRunner/Combiner + a block-and-help backpressure claim).
-- **API_DESIGN.md**: NOT merged (decided against a literal full fuse). It stays as
-  the design record, but is STALE on: Pool exposure (no longer exposed); the
-  permit/global-scheduler block (L230-242 — global scheduler / suspend-resume /
-  cycle-break, all superseded by permit-core.md); principle 7's "task-to-task
-  scatter prohibition" + "skim queued-not-recursive" (superseded by the new
-  reentrancy rule). Update or fold these when the surface is pinned.
+**DONE this session (also):** programming-model.md refactored into a focused
+streampool guide (732→221 lines); its comparison section relocated into
+ARCHITECTURE_COMPARISON.md. README swap done (old README deleted, README-proposed →
+README, updated to the pinned surface). API_DESIGN.md reconciled (top banner + inline
+fixes: Pool un-exposed, permit cache not global scheduler, reentrancy rule,
+principle 7).
 
-**⚠ SURFACE IS BEING PINNED LIVE.** Decisions locked this session: `streampool`
-package; no user-facing `Pool`; drop scatter/gather/PSG terminology. STILL OPEN
-(needed before authoring the guide): where pool tuning (max goroutines, idle
-timeout) lives now that `Pool` is internal (Wave options? package-level setters?
-automatic-only?); whether `Flow` is in the v1 surface or deferred; the dispatch
-verb (`Submit` per API_DESIGN examples). API_DESIGN trails these, so it is NOT a
-clean surface source — pin the open points before the programming-model rewrite.
+**REMAINING (process/roadmap docs — lower stakes):**
+- **REFACTOR_PLAN.md** — old op-names; NO wave for the dispatch/execution split or
+  permit-core (biggest gap); "global permit scheduler" phrasing; companion-doc list.
+- **TODO.md** — the "global permit scheduler" line in the REFRAMED banner (L46);
+  op-names.
+- **Move ARCHITECTURE_COMPARISON.md → docs/** + fix refs (deferred — ref churn
+  across keep-as-is/prose docs; cosmetic). Also: the relocated comparison still has
+  some generic "scatter-gather-combine patterns" phrasing (minor).
+
+**SURFACE PINNED this session:** `streampool` package; no user-facing `Pool` (sizing
+automatic; concurrency via Limiters); drop scatter/gather/PSG vocabulary; dispatch
+verb `Submit`; `Flow` kept as the optional third concept. Go-forward calls made in
+the guide/README/API_DESIGN — ratify or correct.
 
 **►►► ARCHITECTURE PIVOT — dispatch/execution split + permit core (DESIGN,
 2026-06-20).** The pre-existing nested-drain worker-starvation deadlock (the ⚠ HANG

@@ -1,728 +1,221 @@
-# PSG Programming Model
+# streampool Programming Model
 
-This document describes the core programming model of PSG (Parallel Scatter-Gather), focusing on the user-facing concepts, design philosophy, and fundamental patterns that enable reliable concurrent workflows.
+streampool is a Go library for running large batches of related work concurrently
+and processing the results as they arrive. The model is small: **a pool of workers
+serves waves of work, and each wave hosts flows of related processing.** You
+describe work as a few composable *ops*, submit inputs, and drain results — the
+library handles worker scaling, backpressure, concurrency limits, cancellation, and
+cleanup.
 
-## Problem Statement: The Challenge of Concurrent Workflows
+This is the conceptual guide: the core types, the op model, the patterns, and the
+structural rules that make concurrent workflows reliable. For the permit/concurrency
+internals see `permit-core.md` and `dispatch-execution-split.md`; for how streampool
+compares to other libraries see `ARCHITECTURE_COMPARISON.md`.
 
-Modern applications require complex workflows that leverage concurrency and parallelism for performance, but concurrent programming introduces numerous hazards that make reliable implementation extremely difficult. PSG addresses these fundamental challenges:
+## The problem
 
-### User Requirements: Complex Concurrent Workflows
+Concurrent workflows are easy to get wrong: races on shared state, deadlocks from
+circular waits, unbounded resource growth, lost backpressure, and shutdown that
+leaks goroutines or drops work. streampool makes the common fan-out/fan-in shape —
+distribute many work items, process their results, optionally aggregate — safe and
+efficient without hand-rolled goroutine/channel/lock choreography, while keeping the
+hot path allocation-free.
 
-**Performance Demands**:
-- High-throughput processing of large datasets
-- Low-latency response to dynamic workloads  
-- Efficient resource utilization across multiple cores
-- Scalability from single-machine to distributed systems
+## Structured concurrency
 
-**Workflow Complexity**:
-- Multi-stage processing pipelines with dependencies
-- Fan-out/fan-in patterns for parallel processing
-- Incremental result aggregation and streaming
-- Dynamic workload adaptation and load balancing
+streampool is built on structured concurrency: concurrent work has a clear,
+hierarchical lifetime, like structured control flow. The properties that follow:
 
-**Operational Requirements**:
-- Predictable behavior under varying loads
-- Graceful degradation and error recovery
-- Observable system behavior for debugging and optimization
-- Configurable performance characteristics
+- **Clear boundaries** — parallel execution and sequential result processing are
+  explicit phases.
+- **Hierarchical composition** — waves nest; a parent's drain waits for its
+  children.
+- **Deterministic coordination** — result processing within a single drain is
+  sequential and ordered.
+- **Resource accountability** — all submitted work is tracked and must complete
+  before a wave's drain returns; no goroutine leaks.
+- **Failure isolation** — errors propagate through well-defined boundaries, and a
+  body panic is recovered and surfaced as an error.
 
-### The Perils of Concurrent Programming
+## The model: Pool, Wave, Flow
 
-PSG specifically addresses the abundant hazards that make concurrent programming treacherous:
+Three concerns, three concepts:
 
-#### Race Conditions and Data Races
-**The Problem**: Unsynchronized access to shared data leads to:
-- Corrupt state and inconsistent results
-- Intermittent failures that are difficult to reproduce
-- Subtle bugs that manifest only under specific timing conditions
-- Performance degradation from excessive synchronization
+- **Pool** — the worker pool that executes work. It is **internal**: a process-wide
+  default pool exists implicitly and is sized automatically (workers spin up on
+  demand and retire when idle). You don't construct or tune it; user-facing
+  concurrency control is expressed with **Limiters** (below), not pool knobs.
+- **Wave** — *the primary user-facing type*: a batch of work to complete together.
+  You construct ops against a wave, submit inputs, and call `Skim`/`SkimAll` to
+  process results and await completion. Waves **nest** via `NewChild`: a parent
+  wave's drain waits for its child waves. Multiple waves run concurrently.
+- **Flow** *(optional)* — one logical thread of related work, carried in context,
+  independent of any single wave. Reach for a Flow when you need to attach metadata
+  (trace context, audit data) to work that may cross wave boundaries, or run a
+  cleanup hook when that unit of work completes. Most programs never construct one.
 
-**PSG's Solution**: 
-- Sequential gather processing eliminates most shared state
-- Clear ownership models for mutable state
-- Structured concurrency boundaries
-- Deterministic execution order within sequential phases
+### The three ops
 
-#### Deadlocks and Livelocks
-**The Problem**: Circular dependencies and resource contention cause:
-- Complete system freezes requiring restarts
-- Subtle dependency cycles that emerge under load
-- Complex lock ordering requirements
-- Difficulty reasoning about system-wide dependencies
+Work is described with three op types, all constructed against a wave and fed with
+`Submit`:
 
-**PSG's Solution**:
-- Structural deadlock prevention: limiters gate *intake*, never drain (so a drain never waits on a permit), and a single reentrancy rule — *you cannot skim a wave you are part of* — forecloses the only skim-drive cycle. Bodies may otherwise scatter and drive sub-waves freely.
-- Clear dependency ordering in system design
-- Structured lifecycle management
+- **Launcher** — runs a body for each submitted input, in parallel on pool workers.
+  The body does the work and submits results downstream. This is the fan-out.
+- **Skimmer** — the terminal sink. Its body runs **serially on the draining
+  goroutine** (the one that called `Skim`/`SkimAll`), processing results one at a
+  time. This is the fan-in.
+- **Funnel** — incremental aggregation. Each instance is an `Accumulator` that folds
+  submitted values and flushes an aggregate downstream (on a threshold, a deadline,
+  or at close). This is the map-reduce primitive.
 
-#### Liveness and Starvation Issues
-**The Problem**: Poor scheduling and resource allocation leads to:
-- Some tasks never receiving CPU time
-- System responsiveness degradation under load
-- Unfair resource distribution
-- Cascade failures from resource exhaustion
+`Handler[T]` is the universal body interface (`Handle(ctx, T, err) error`), and
+`HandlerFunc[T]` adapts a closure. Implementing `Handler` on a struct lets the hot
+path run allocation-free.
 
-**PSG's Solution**:
-- Adaptive resource management
-- Built-in flow control mechanisms
-- Fair scheduling and resource distribution
-
-#### Performance Fragility and Operational Complexity
-**The Problem**: Concurrent systems often exhibit:
-- Performance cliffs and unpredictable behavior
-- Complex configuration requiring deep expertise
-- Difficult debugging and observability
-- Fragile error handling and recovery
-
-**PSG's Solution**:
-- Predictable performance characteristics
-- Self-tuning adaptive mechanisms
-- Built-in observability hooks
-- Structured error handling and cancellation
-
-### PSG's Design Philosophy: Structured Concurrency
-
-PSG embodies the principle of **structured concurrency** - the idea that concurrent programs should have clear, hierarchical structure similar to structured programming's approach to control flow. Just as structured programming eliminated goto statements and spaghetti code, structured concurrency eliminates the chaos of ad-hoc thread management and coordination.
-
-**Core Principles**:
-
-1. **Clear Boundaries**: Parallel and sequential execution phases are explicitly delineated
-2. **Hierarchical Composition**: Complex workflows compose from simpler scatter-gather-combine primitives  
-3. **Deterministic Coordination**: Within sequential phases, execution order is predictable and reproducible
-4. **Resource Accountability**: All concurrent work is tracked and properly cleaned up
-5. **Failure Isolation**: Errors are contained and propagated through well-defined boundaries
-
-**Benefits for Users**:
-- **Reasoning**: Developers can understand and predict system behavior
-- **Testing**: Deterministic behavior enables reliable automated testing
-- **Debugging**: Clear structure makes issues easier to isolate and reproduce
-- **Maintenance**: System behavior remains predictable as code evolves
-- **Performance**: Structured approach enables systematic optimization
-
-This structured approach transforms concurrent programming from a specialist skill requiring deep expertise into a more accessible programming model that delivers both performance and reliability.
-
-## Core Programming Model
-
-### Fundamental Concepts
-
-PSG implements a **scatter-gather-combine** programming model that enables efficient parallel computation through three primary operations:
-
-1. **Scattering**: Distributing work items across available goroutines
-2. **Gathering**: Sequentially processing completed task results  
-3. **Combining**: Incrementally accumulating related results before emission
-
-The model addresses the fundamental tension between parallelism (for performance) and coordination (for correctness) by providing structured concurrency primitives that maintain both efficiency and predictable behavior.
-
-### Core Abstractions
-
-**Job**: The root execution environment that provides:
-- Lifecycle management (Open → Closed → Flushing → Done)
-- Work coordination and proper shutdown
-- Context propagation with job-specific values
-- Centralized result collection and processing
-
-**Task**: A unit of work defined as `func(context.Context) (T, error)` that:
-- Executes in parallel with other tasks
-- Returns results that flow to gather or combine operations
-- Inherits job context and configuration
-- May scatter new work and drive a gather on a sub-wave it owns; the only restriction is that it cannot skim a wave it is part of
-
-**Gather Operation**: Sequential processing of task results that:
-- Maintains result ordering when required
-- Enables incremental computation patterns
-- Supports controlled reentrancy (scattering new work during processing)
-- Provides structured error handling
-
-**Combine Operation**: Incremental accumulation of related inputs that:
-- Groups inputs by key or other criteria
-- Applies user-defined combining logic
-- Manages time-based and count-based flushing
-- Emits aggregated results to downstream consumers
-
-### Programming Model Benefits
-
-1. **Structured Concurrency**: Clear boundaries between parallel and sequential execution phases
-2. **Composability**: Operations can be nested and chained naturally
-3. **Automatic Flow Control**: Built-in backpressure prevents resource exhaustion
-4. **Error Handling**: Structured error propagation through the computation graph
-5. **Testability**: Deterministic behavior despite internal concurrency
-
-## Programming Patterns
-
-### Basic Scatter-Gather Pattern
-
-The fundamental pattern distributes work across many tasks and gathers results sequentially:
+## Hello world
 
 ```go
-// Conceptual example
-job := psg.NewJob(ctx)
-gatherOp := psg.NewGatherOp(job, gatherFunc)
+ctx := context.Background()
 
-// Scatter phase: distribute work
-for _, workItem := range workItems {
-    gatherOp.Scatter(ctx, taskFunc(workItem))
-}
+wave := streampool.NewWave(ctx) // uses the implicit default pool
+defer wave.Close()
 
-// Gather phase: process results
-job.Close()  // No more scatters
-job.Wait()   // Wait for completion
-```
-
-**Characteristics**:
-- Tasks execute in parallel
-- Results are processed sequentially in completion order
-- Clear separation between parallel and sequential phases
-
-### Incremental Combine Pattern
-
-For aggregating related results before emission:
-
-```go
-// Conceptual example
-combinerPool := psg.NewCombinerPool(job, combinerFactory)
-combineOp := psg.NewCombineOp(combinerPool, keyFunc)
-
-// Scatter phase: distribute work that produces key-value pairs
-for _, workItem := range workItems {
-    combineOp.Scatter(ctx, taskFunc(workItem))
-}
-
-// Combine phase: automatic aggregation by key
-// Results are incrementally combined and emitted when ready
-```
-
-**Characteristics**:
-- Results are grouped by key or other criteria
-- Combining happens incrementally as results arrive
-- Automatic flushing based on time or completion
-- Efficient for streaming aggregation patterns
-
-### Nested Workflows
-
-Any body — task, combine/accumulate, flush, or gather handler — can scatter new work, enabling complex workflows:
-
-```go
-// Conceptual example
-gatherFunc := func(ctx context.Context, result T, err error) error {
-    // Process the result
-    processedData := process(result)
-    
-    // Scatter follow-up work based on the result
-    if needsFollowUp(processedData) {
-        anotherGatherOp.Scatter(ctx, followUpTask(processedData))
-    }
-    
-    return nil
-}
-```
-
-**Characteristics**:
-- Dynamic workflow generation based on intermediate results
-- Controlled reentrancy through work queueing
-- Maintains structured concurrency guarantees
-
-## Key Design Constraints
-
-### Reentrancy: any body may scatter and drive sub-waves
-
-**Fundamental Rule**: Any body — a task, a combine/accumulate, a flush, or a gather handler — may scatter new work *and* drive a gather on a sub-wave it owns. The single structural restriction is: **you cannot skim a wave you are part of** (your own wave or any ancestor).
-
-**Why this is safe (not deadlock-prone)**:
-- Limiters gate *intake*, never drain, so a drain never waits on a permit.
-- Dispatch is separated from execution: an always-live manager keeps admitting work, so a blocking body never stalls the dispatcher, and the permit layer is a deadlock-free-per-limiter cache (a parked body's permits are lent to its descendants, not blocked on).
-- The one skim restriction forecloses the only structural cycle: skimming a wave you are part of would make a drain wait, transitively, on itself.
-
-**What it rules out, and what it doesn't**: re-skimming your own or an ancestor wave is forbidden; driving an *independent* sub-wave you created is fine, as is producing into any wave. Concurrent drives of independent waves are allowed (keep such skimmers concurrency-safe). The non-blocking `Try*` gathers are never restricted.
-
-### Sequential Processing Guarantee
-
-**Within Gather Operations**: Results are processed one at a time in a single goroutine.
-
-**Benefits**:
-- Eliminates race conditions on shared state
-- Enables simple, thread-safe gather function implementation
-- Provides deterministic execution order
-- Simplifies debugging and testing
-
-**Performance Consideration**: Gather functions should be efficient since they're sequential bottlenecks.
-
-### Resource Accountability
-
-**All Work is Tracked**: Every scattered task is counted and must complete before job shutdown.
-
-**Guarantees**:
-- No goroutine leaks
-- Proper resource cleanup
-- Coordinated shutdown across all components
-- Clear completion semantics
-
-## Error Handling and Cancellation
-
-### Structured Error Propagation
-
-**Task Errors**: Propagated to gather functions with the task result
-**Gather Errors**: Can be accumulated and handled at job level
-**Context Cancellation**: Propagates through all scattered work
-**Panic Recovery**: Tasks panics are recovered and converted to errors
-
-### Cancellation Semantics
-
-**Context-Based**: Standard Go context cancellation throughout
-**Graceful Shutdown**: In-flight work completes, new work is rejected
-**Resource Cleanup**: Proper cleanup guaranteed even during cancellation
-
-## Configuration and Tuning
-
-### High-Level Configuration
-
-PSG provides intuitive configuration options that affect system behavior:
-
-**Concurrency Limits**: Control parallel execution bounds
-**Timeout Settings**: Configure combiner hold times and flush intervals
-**Pool Sizing**: Adjust resource allocation for different workload patterns
-
-### Self-Tuning Behavior
-
-Many aspects of PSG adapt automatically:
-- Goroutine pool sizing based on actual workload
-- Backpressure thresholds based on system performance
-- Queue sizing based on observed usage patterns
-
-## Observability and Debugging
-
-### Built-in Instrumentation Hooks
-
-PSG provides structured events for monitoring:
-- Task lifecycle events (started, completed, failed)
-- Queue depth and throughput metrics
-- Resource utilization statistics
-- Performance bottleneck identification
-
-### Deterministic Behavior
-
-**Within Sequential Phases**: Execution order is predictable
-**Testing Support**: Deterministic behavior enables reliable automated testing
-**Debugging Support**: Clear structure makes issues easier to isolate
-
-## Conclusion
-
-The PSG programming model provides a structured approach to concurrent workflows that combines the performance benefits of parallelism with the safety and predictability needed for production systems. By embracing structured concurrency principles and providing clear abstractions for scatter-gather-combine patterns, PSG enables developers to build complex concurrent applications without the typical hazards of concurrent programming.
-
-The model's strength lies in its ability to hide the complexity of coordination, backpressure, and resource management while exposing simple, composable primitives that naturally express parallel computation patterns.
-
-## Comparison with Existing Approaches
-
-### Structured Concurrency in the Industry
-
-PSG's approach aligns with the broader **structured concurrency** movement in programming languages and frameworks, while providing Go-specific innovations:
-
-#### Formal Structured Concurrency
-
-**Industry Definition**: Structured concurrency ensures that concurrent operations have clear, hierarchical structure where:
-- All spawned tasks complete before their parent scope exits
-- Cancellation propagates automatically through the hierarchy
-- Resource cleanup happens deterministically
-- Error handling follows structured patterns
-
-**Examples in Other Languages**:
-- **Nurseries** in Python's Trio library
-- **Structured Concurrency** in Java's Project Loom  
-- **Async/await** with structured scoping in Swift and Kotlin
-- **Green threads** with supervision trees in Erlang/OTP
-- **Structured concurrency** in modern C++ with co-routines
-
-**PSG's Implementation**:
-- **Jobs** provide the structured scope (nursery equivalent)
-- **Work reference counting** ensures all tasks complete before job completion
-- **Context propagation** handles cancellation and cleanup automatically
-- **Sequential gather processing** provides deterministic coordination points
-
-#### Key Differentiators from Industry Approaches
-
-**Dynamic Task Spawning**: Unlike traditional structured concurrency which prohibits spawning from within tasks, PSG lets any body scatter and drive sub-waves it owns while maintaining structured guarantees — the only restriction is that a body cannot skim a wave it is part of.
-
-**Multi-Level Resource Management**: PSG extends structured concurrency with TaskPools and CombinerPools that provide independent resource boundaries within the overall structured scope.
-
-**Incremental Processing**: Traditional structured concurrency waits for all tasks to complete before proceeding. PSG processes results incrementally while maintaining structured guarantees.
-
-### Comparison with Go Ecosystem
-
-#### creachadair/taskgroup Package
-
-**Project**: github.com/creachadair/taskgroup
-
-This is the closest existing library to PSG in the Go ecosystem, providing structured concurrency with advanced features.
-
-**Similarities**:
-- Structured task group management with automatic synchronization
-- Error collection and propagation from multiple concurrent tasks
-- Concurrency limiting capabilities
-- Support for result gathering from background tasks
-- Context-aware design for cancellation
-
-**Key Differences from PSG**:
-- **Result Processing**: taskgroup collects all results before processing; PSG processes incrementally
-- **Task Spawning**: taskgroup doesn't support dynamic task spawning from within tasks
-- **Resource Pools**: PSG provides multiple independent TaskPools with different limits
-- **Combiner Pattern**: PSG supports stateful aggregation with automatic flushing
-- **Work Queueing**: PSG enables controlled reentrancy through work queueing
-
-**Example Comparison**:
-```go
-// taskgroup approach
-g := taskgroup.New(nil).Limit(10) // Single global limit
-tasks := []taskgroup.Task{
-    func() error { return doWork(1) },
-    func() error { return doWork(2) },
-    func() error { return doWork(3) },
-}
-err := g.Go(tasks...).Wait() // Batch execution, wait for all
-
-// PSG approach  
-job := psg.NewJob(ctx)
-pool := psg.NewTaskPool(job).WithLimit(10) // Pool-specific limit
-gather := psg.NewGather(func(ctx context.Context, result int, err error) error {
-    if err == nil {
-        processResult(result) // Incremental processing
-        // Can spawn new tasks based on result
-        if needsFollowUp(result) {
-            gather.Scatter(ctx, pool, followUpTask(result))
-        }
-    }
-    return err
-})
-
-for i := 1; i <= 3; i++ {
-    gather.Scatter(ctx, pool, func(ctx context.Context) (int, error) {
-        return doWork(i)
-    })
-}
-```
-
-**taskgroup's Strengths**:
-- Simpler API for basic concurrent task execution
-- Excellent error handling and filtering capabilities
-- Mature, well-tested library
-- Minimal overhead for straightforward use cases
-
-**PSG's Advantages Over taskgroup**:
-- Incremental result processing (streaming vs. batch)
-- Dynamic workflow generation through reentrancy
-- Multiple resource pools with independent limits
-- Stateful aggregation through combiners
-- Type-safe generic interfaces
-
-#### Go's errgroup Package
-
-**errgroup Approach**:
-```go
-g, ctx := errgroup.WithContext(ctx)
-results := make([]string, 3) // Pre-allocated to avoid races
-for i := range 3 {
-    g.Go(func() error {
-        res, err := doWork(ctx, i)
+// Terminal sink: runs serially as results arrive.
+results := streampool.NewSkimmer(wave, streampool.HandlerFunc[*User](
+    func(ctx context.Context, user *User, err error) error {
         if err != nil {
             return err
         }
-        results[i] = res // Requires careful indexing
+        fmt.Println(user.Name)
         return nil
-    })
+    },
+))
+
+// Fan-out: each id is fetched on a worker, then submitted to results.
+fetch := streampool.NewLauncher(wave, streampool.HandlerFunc[UserID](
+    func(ctx context.Context, id UserID, err error) error {
+        user, err := userClient.Fetch(ctx, id)
+        if err != nil {
+            return err
+        }
+        return results.Submit(ctx, user)
+    },
+))
+
+for _, id := range userIDs {
+    fetch.Submit(ctx, id)
 }
-err := g.Wait()
+
+wave.SkimAll(ctx) // drain to completion; workers retire when the last wave drains
 ```
 
-**PSG Approach**:
-```go
-job := psg.NewJob(ctx)
-defer job.CancelAndWait()
+## Patterns
 
-var results []string // Safe dynamic slice
-gather := psg.NewGather(func(ctx context.Context, result string, err error) error {
-    if err == nil {
-        results = append(results, result) // Sequential processing
-    }
-    return err
+### Fan-out / fan-in
+
+The basic shape above: a Launcher distributes work across workers; a Skimmer
+processes results serially. Parallel where it helps, sequential where it is simplest
+to reason about.
+
+### Incremental aggregation (Funnel)
+
+To aggregate related results before emitting them:
+
+```go
+totals := streampool.NewFunnel(wave, func() streampool.Accumulator[int] {
+    var sum int
+    return streampool.NewAccumulator(
+        func(ctx context.Context, x int, err error) (time.Time, error) {
+            if err != nil {
+                return time.Time{}, err
+            }
+            sum += x
+            return time.Time{}, nil // no flush deadline; flush on Close
+        },
+        func(ctx context.Context) error { return results.Submit(ctx, sum) }, // final flush
+    )
 })
-
-for i := range 3 {
-    gather.Scatter(ctx, job, func(ctx context.Context) (string, error) {
-        return doWork(ctx, i)
-    })
-}
-
-err := job.CloseAndGatherAll(ctx)
 ```
 
-**Key Differences**:
-- **Result Handling**: PSG eliminates data races through sequential gather processing
-- **Dynamic Operations**: PSG supports task spawning from gather functions
-- **Type Safety**: PSG uses generics for compile-time type safety
-- **Resource Management**: PSG provides multiple concurrency pools
+Each accumulator instance owns its own state (here `sum`); the framework creates
+instances on demand by concurrency, so partial-aggregate memory is bounded by
+concurrency. Flushing is the instance's job — a downstream `Submit` from either the
+accumulate step (incremental) or the close step (final).
 
-#### Native Go Concurrency Patterns
+### Nested workflows and reentrancy
 
-**Traditional Go Pattern**:
+Any body — a Launcher handler, a Funnel accumulate/flush, or a Skimmer handler — may
+submit more work and may drive a **child** wave it owns (create one with `NewChild`,
+submit to it, and `SkimAll` it). This lets a workflow branch dynamically on
+intermediate results while keeping structured-concurrency guarantees.
+
+## Key rules
+
+### You cannot skim a wave you are part of
+
+The one structural restriction on reentrancy: a body may not skim **its own wave or
+any ancestor wave** — the only thing that would make a drain wait, transitively, on
+itself. Driving an *independent child* wave you created is fine; submitting into any
+wave is fine; the non-blocking `Try*` skims are never restricted. Why this single
+rule is enough is covered in `dispatch-execution-split.md` and `permit-core.md`.
+
+### Serial skim
+
+A wave's results are processed serially on the draining goroutine — one at a time,
+in completion order. That eliminates races on the skim body's state and keeps result
+processing simple to reason about; keep skim bodies efficient, as they are the
+sequential stage. (Multiple goroutines *may* drive the same wave concurrently when
+you need it, but then your skim bodies must be concurrency-safe.)
+
+### Deadlock freedom
+
+streampool prevents the classic concurrency deadlocks structurally, not by asking
+you to order locks. Dispatch is separated from execution — an always-live manager
+keeps admitting work, so a blocking body never stalls the dispatcher; permits form a
+deadlock-free-per-limiter cache; limiters gate *intake* only, never the drain; and
+the skim rule above forecloses the only reentrant cycle. The mechanics live in
+`permit-core.md` and `dispatch-execution-split.md`.
+
+## Concurrency control: Limiters
+
+User-facing concurrency is expressed with **Limiters**, attached to an op:
+
 ```go
-// Manual worker pool implementation
-jobs := make(chan Work, 100)
-results := make(chan Result, 100)
+slowAPI := streampool.NewSemaphore(nil, 5) // at most 5 concurrent
 
-// Start workers
-for i := 0; i < numWorkers; i++ {
-    go worker(jobs, results)
-}
-
-// Send work
-go func() {
-    for _, work := range workItems {
-        jobs <- work
-    }
-    close(jobs)
-}()
-
-// Collect results
-var collected []Result
-for i := 0; i < len(workItems); i++ {
-    collected = append(collected, <-results)
-}
+fetch := streampool.NewLauncher(wave, fetchFn, streampool.WithLimits(slowAPI))
 ```
 
-**PSG's Advantages**:
-- **Simplified API**: No manual channel management
-- **Automatic Resource Management**: TaskPools handle worker lifecycle
-- **Error Handling**: Built-in error propagation and aggregation
-- **Cancellation**: Automatic context-based cancellation
-- **Type Safety**: Generic interfaces eliminate type assertions
+A single limiter is self-scheduled (`nil` scheduler). The same `Limiter` shared
+across ops expresses "these collectively cap at N concurrent." Limiters compose with
+AND semantics; composing several on one op requires a shared scheduler to coordinate
+their joint admission deadlock-free (a future feature). Limiters gate **intake**
+(Launcher bodies, Funnel accumulates); skim bodies and funnel flushes are
+limiter-free, which is what keeps a drain from ever waiting on a permit.
+Worker-pool sizing is automatic — limiters bound *your* concurrency, not the pool.
 
-#### Reactive Extensions Family
+## Errors and cancellation
 
-**Examples**: RxJS (JavaScript), RxJava (Java), RxSwift (Swift), RxGo (Go), ReactiveX ecosystem
+- **Body errors** propagate to the wave; a Skimmer body can inspect the `err`
+  argument alongside the value and decide whether to surface or absorb it.
+- **Context cancellation** propagates through all in-flight work; cancel the ctx
+  given to the wave to abort.
+- **Panics** in a body are recovered and converted to errors.
+- **Cleanup is guaranteed**: a wave's drain does not return until its work (and its
+  child waves) complete, even under cancellation — no leaked goroutines.
 
-The Reactive Extensions family provides powerful abstractions for handling asynchronous data streams with operators for transformation, composition, and error handling.
+## Configuration and observability
 
-**Similarities to PSG**:
-- Support for scatter-gather patterns through operators like `forkJoin` and `combineLatest`
-- Handle asynchronous data streams and error propagation
-- Pipeline composition capabilities and incremental processing
-- Built-in backpressure management
-- Functional composition of complex workflows
+- **Concurrency** is controlled with Limiters; worker-pool sizing is automatic and
+  adaptive — there is no pool to tune.
+- **Funnel flushing** is configured per accumulator (threshold / deadline / close).
+- **Instrumentation**: streampool emits structured events (work lifecycle, queue
+  depth, throughput) for monitoring and bottleneck analysis, and result processing
+  is deterministic within a drain, which aids reproducible testing.
 
-**Example Patterns**:
-```javascript
-// RxJS scatter-gather
-forkJoin({
-  task1: service1$,
-  task2: service2$,
-  task3: service3$
-}).subscribe({
-  next: (results) => console.log(results),
-  error: (err) => console.error(err)
-});
+## See also
 
-// RxJS streaming aggregation
-source$.pipe(
-  mergeMap(item => processItem(item)),
-  scan((acc, result) => combineResults(acc, result)),
-  debounceTime(100)
-).subscribe(aggregatedResult => emit(aggregatedResult));
-```
-
-**Key Differences from PSG**:
-- **Programming Paradigm**: Stream-based reactive paradigm vs. imperative task-based execution
-- **Operator Semantics**: Fixed operator library vs. flexible user-defined gather/combine functions
-- **Learning Curve**: Requires understanding reactive concepts vs. familiar imperative patterns
-- **Concurrency Control**: Less direct control over resource limits and goroutine management
-- **Type System**: Varies by language implementation; PSG leverages Go's type system specifically
-- **Error Handling**: Stream-based error propagation vs. structured error collection
-
-**PSG's Advantages Over Reactive Approaches**:
-- **Familiar Patterns**: Uses imperative programming that's more familiar to most developers
-- **Direct Resource Control**: Explicit concurrency limits and resource pool management
-- **Simpler Mental Model**: Clear separation between parallel and sequential phases
-- **Language Integration**: Designed specifically for Go's concurrency model and idioms
-
-**Reactive Extensions' Advantages**:
-- **Mature Ecosystem**: Well-established with extensive operator libraries
-- **Cross-Language**: Consistent patterns across multiple programming languages
-- **Sophisticated Operators**: Rich set of pre-built operators for complex stream processing
-- **Time-Based Operations**: Excellent support for time-windowing and temporal operations
-
-#### Pipeline and Dataflow Libraries
-
-**Examples**: TPL Dataflow (.NET), Java's CompletableFuture, Python's asyncio, Akka Streams (Scala), Node.js Streams
-
-These libraries focus on data pipeline construction with stage-based processing and built-in backpressure management.
-
-**Similarities to PSG**:
-- **Data Pipeline Construction**: Stage-based processing with data flow between components
-- **Concurrent Execution**: Parallel processing across pipeline stages
-- **Backpressure Management**: Built-in flow control to prevent overwhelming downstream stages
-- **Composition**: Ability to compose complex pipelines from simpler components
-
-**Example (TPL Dataflow)**:
-```csharp
-var processBlock = new TransformBlock<Input, Output>(
-    input => ProcessData(input),
-    new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = 4 });
-
-var batchBlock = new BatchBlock<Output>(10);
-processBlock.LinkTo(batchBlock);
-
-var aggregateBlock = new ActionBlock<Output[]>(
-    batch => AggregateBatch(batch));
-batchBlock.LinkTo(aggregateBlock);
-```
-
-**Key Differences from PSG**:
-- **Pipeline Structure**: Fixed pipeline topology vs. dynamic task spawning
-- **Flexibility**: PSG allows recursive task creation and heterogeneous task management
-- **Programming Model**: Block-based architecture vs. function-based scatter-gather
-- **Error Handling**: PSG provides more flexible error handling and result aggregation
-- **Resource Management**: PSG supports multiple independent resource pools
-
-#### Async/Await and Future-Based Models
-
-**Examples**: JavaScript Promises, Python asyncio, C# async/await, Rust's async/await, Scala Futures
-
-These models provide asynchronous programming abstractions with composition capabilities.
-
-**Similarities to PSG**:
-- **Asynchronous Execution**: Non-blocking task execution with result handling
-- **Composition**: Ability to compose complex asynchronous workflows
-- **Error Propagation**: Structured error handling through the async chain
-- **Cancellation**: Support for operation cancellation
-
-**Key Differences from PSG**:
-- **Programming Model**: Promise/Future chaining vs. scatter-gather coordination
-- **Concurrency Control**: Limited direct control over resource allocation
-- **Result Processing**: Typically batch-oriented vs. incremental processing
-- **Reentrancy**: Less structured support for dynamic workflow generation
-
-### Unique Features of PSG
-
-#### Pipelined Processing
-Unlike traditional scatter-gather that waits for all tasks to complete, PSG processes results incrementally as they arrive, enabling streaming aggregation patterns.
-
-#### Controlled Reentrancy
-PSG allows gather and combine functions to spawn new tasks within the same job, enabling recursive processing while maintaining structured guarantees through work queueing.
-
-#### Multi-Resource Management
-Different task types can use independent concurrency pools (TaskPools) with separate limits, enabling fine-grained resource control within a structured scope.
-
-#### Combiner Pattern
-Stateful aggregation with automatic flushing enables efficient batch processing and windowing operations that traditional structured concurrency doesn't directly support.
-
-#### Zero Dependencies
-Pure Go implementation with no external dependencies, making it lightweight and easy to adopt in any Go project.
-
-### Use Case Differentiation
-
-**PSG is Ideal For**:
-- In-process concurrent task management with complex dependencies
-- Applications requiring incremental result processing
-- Scenarios with mixed resource constraints (I/O vs. compute)
-- Recursive operations like web crawling or tree traversal
-- Type-safe concurrent programming in Go
-- Streaming aggregation and data processing pipelines
-
-**PSG is NOT For**:
-- Distributed task execution across machines
-- Persistent workflow management with retry capabilities
-- Visual workflow construction and monitoring
-- Cross-system message-based integration
-
-### Comparison with Distributed Systems
-
-While these systems operate at a different architectural level than PSG, they share conceptual similarities and provided inspiration for PSG's design. PSG focuses solely on in-process concurrency, but its patterns support the requirements of distributed systems: workflow isolation, backpressure propagation, and careful stewardship of highly concurrent, failure-prone, and latency-sensitive operations.
-
-#### DAG Workflow Engines
-
-**Examples**: Apache Airflow, Argo Workflows, Dagster, Prefect, Temporal
-
-**Key Similarities**:
-- Task dependency management and parallel execution
-- Error handling and retry logic
-- Structured workflow composition
-
-**Key Differences**:
-- **Scope**: Cross-process/cross-machine orchestration vs. in-process concurrency
-- **Persistence**: Persistent state and workflow visualization vs. ephemeral execution
-- **Infrastructure**: Heavy platform requirements vs. lightweight library
-- **Focus**: Long-running, scheduled workflows vs. real-time processing
-- **Deployment**: Complex deployment requirements vs. simple library integration
-
-#### Actor Frameworks
-
-**Examples**: Akka (Scala), Erlang/OTP, Orleans
-
-**Key Similarities**:
-- Message-based task distribution
-- Error supervision and recovery patterns
-- Concurrent execution model with isolation
-
-**Key Differences**:
-- **Programming Model**: Actor model with message passing vs. direct function execution
-- **Distribution**: Distributed by design vs. local concurrency focus
-- **Complexity**: Complex deployment and operational requirements vs. simple library
-- **Learning Curve**: Requires understanding actor model vs. familiar imperative patterns
-
-#### Message Queue Systems
-
-**Examples**: RabbitMQ, Apache Kafka, AWS SQS
-
-**Key Similarities**:
-- Scatter-gather messaging patterns
-- Work distribution across consumers
-- Backpressure and flow control mechanisms
-
-**Key Differences**:
-- **Communication**: Network-based vs. in-memory communication
-- **Persistence**: Durability and persistence concerns vs. ephemeral processing
-- **Overhead**: Network serialization overhead vs. direct function calls
-- **Operational Complexity**: Separate infrastructure vs. embedded library
-
-#### Enterprise Integration Patterns
-
-**Examples**: Apache Camel, Spring Integration, MuleSoft
-
-**Key Similarities**:
-- Scatter-gather pattern implementation
-- Message routing and aggregation
-- Pipeline composition capabilities
-
-**Key Differences**:
-- **Architecture**: Enterprise service bus vs. library-based approach
-- **Integration**: Cross-system integration focus vs. in-process workflows
-- **Configuration**: Configuration-heavy XML/YAML vs. code-first API
-- **Type Safety**: Runtime configuration vs. compile-time type safety
-
-### Additional Go Libraries
-
-#### conc Package
-
-**Project**: github.com/sourcegraph/conc
-
-**Similarities**:
-- Safer concurrency abstractions for Go
-- Error handling improvements over raw goroutines
-- Context propagation and cancellation support
-
-**Differences from PSG**:
-- **Focus**: General safety improvements vs. specific scatter-gather patterns
-- **Features**: No built-in result gathering or aggregation capabilities
-- **Scope**: Limited support for dynamic task spawning and complex workflows
-- **Patterns**: Focuses on making existing patterns safer vs. introducing new patterns
-
-## Conclusion
-
-The PSG programming model provides a structured approach to concurrent workflows that combines the performance benefits of parallelism with the safety and predictability needed for production systems. By embracing structured concurrency principles and providing clear abstractions for scatter-gather-combine patterns, PSG enables developers to build complex concurrent applications without the typical hazards of concurrent programming.
-
-PSG's unique position in the Go ecosystem comes from its combination of structured concurrency guarantees, incremental processing capabilities, and Go-native design. It fills the gap between simple concurrency utilities like errgroup and complex reactive frameworks, providing a practical solution for sophisticated in-process concurrent workflows.
-
-The model's strength lies in its ability to hide the complexity of coordination, backpressure, and resource management while exposing simple, composable primitives that naturally express parallel computation patterns.
-
----
-
-*For implementation details on backpressure mechanisms, work queueing, and reentrancy management, see [backpressure-and-reentrancy.md](backpressure-and-reentrancy.md).*
-
-*For specific performance optimizations, see the focused design documents in this directory.*
+- `permit-core.md` — the permit allocation model (the hierarchical cache).
+- `dispatch-execution-split.md` — the dispatch/execution architecture.
+- `../ARCHITECTURE_COMPARISON.md` — how streampool compares to other concurrency
+  libraries and to its internal foundations.

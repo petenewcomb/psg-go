@@ -2,6 +2,43 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
+with the converged target design. Committed so far this session: permit-core.md (new
+spec); reconciled dispatch-execution-split.md, limiter-suspend-resume.md,
+global-substrate-activation.md (banners), backpressure-and-reentrancy.md,
+programming-model.md (reentrancy/scatter rule); trimmed dispatch.go; deleted
+REVIEW_FINDINGS.md (code citations repointed to limiter-suspend-resume.md).
+
+Root-doc triage done (no deletions needed beyond REVIEW_FINDINGS): CHANGELOG /
+POSITIONING_RESEARCH / ARCHITECTURE_COMPARISON keep-as-is.
+
+**REMAINING (next, against a PINNED surface):**
+- **Refactor programming-model.md** into a focused streampool guide: package name
+  `streampool`; drop PSG / scatter-gather / "combine" vocabulary; three-type model
+  **Wave** + **Flow** (Pool is INTERNAL — *not* user-exposed); ops Launcher /
+  Skimmer / Funnel with `HandlerFunc[T]` / `Accumulator[T]` bodies; verb `Submit`;
+  `wave.SkimAll(ctx)` / `Skim`; limiters `NewSemaphore(nil,n)` + `WithLimits`. Keep
+  the reentrancy rule (you cannot skim a wave you are part of). CUT the big
+  "Comparison with Existing Approaches" section → fold into ARCHITECTURE_COMPARISON.
+- **Move ARCHITECTURE_COMPARISON.md → docs/** and fix refs.
+- **README swap**: delete old README.md, `git mv` README-proposed.md → README.md,
+  update to the pinned surface (it currently uses OLD op-names
+  Gatherer/TaskRunner/Combiner + a block-and-help backpressure claim).
+- **API_DESIGN.md**: NOT merged (decided against a literal full fuse). It stays as
+  the design record, but is STALE on: Pool exposure (no longer exposed); the
+  permit/global-scheduler block (L230-242 — global scheduler / suspend-resume /
+  cycle-break, all superseded by permit-core.md); principle 7's "task-to-task
+  scatter prohibition" + "skim queued-not-recursive" (superseded by the new
+  reentrancy rule). Update or fold these when the surface is pinned.
+
+**⚠ SURFACE IS BEING PINNED LIVE.** Decisions locked this session: `streampool`
+package; no user-facing `Pool`; drop scatter/gather/PSG terminology. STILL OPEN
+(needed before authoring the guide): where pool tuning (max goroutines, idle
+timeout) lives now that `Pool` is internal (Wave options? package-level setters?
+automatic-only?); whether `Flow` is in the v1 surface or deferred; the dispatch
+verb (`Submit` per API_DESIGN examples). API_DESIGN trails these, so it is NOT a
+clean surface source — pin the open points before the programming-model rewrite.
+
 **►►► ARCHITECTURE PIVOT — dispatch/execution split + permit core (DESIGN,
 2026-06-20).** The pre-existing nested-drain worker-starvation deadlock (the ⚠ HANG
 note below) was partially fixed, then superseded by a design pivot.

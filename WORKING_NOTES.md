@@ -6,7 +6,14 @@ This document contains working notes and context for development on the `combine
 (DESIGN, 2026-06-20).** The pre-existing nested-drain worker-starvation deadlock
 (the ⚠ HANG note below) was partially fixed, then superseded by a design pivot.
 
-- **Partial fix (in tree, UNCOMMITTED): release the spawn token before ANY body
+**NEXT SESSION — implement the redesign.** Start at `docs/dispatch-execution-split.md`
+"Open / next": sketch the scheduler permit core (base-hold + delta acquisition,
+per-limiter hot path, single-writer cross-limiter coordination, baseline
+suspend-while-parked) on its own and model-check the no-silent-wait + cycle-break
+invariants in isolation before any cutover. This session landed the partial fix and
+the design; the implementation is fresh work.
+
+- **Partial fix — LANDED (`6d77ce2`): release the spawn token before ANY body
   runs, on every path.** Root cause: `onSecure` fired only on the `pull` path, so
   a worker that secured work via the postponed/fresh priority path (work queued by
   a body's `ExecuteNowOrQueue`) ran — and blocked — while still holding the spawn
@@ -16,9 +23,10 @@ This document contains working notes and context for development on the `combine
   zero-delay repro). Correct and a big win, but NOT complete — the residual ~0.5%
   is the deeper multi-wave funnel/skim starvation the redesign targets. Files:
   `internal/workq/{worker,queue,accepted}.go` (+ `_test`), `job.go`,
-  `funnelengine.go`; throwaway repro `zzz_repro_test.go` (build tag `repro`).
-  **Decision pending:** keep/commit as interim hardening of the current
-  architecture, or revert since the redesign replaces it.
+  `funnelengine.go`. Repro (deleted, recreatable): a build-tagged test that zeros
+  the `SelfTime` knobs in `sim.DefaultConfig`
+  (`Launcher.Body`/`Funnel.Accumulate`/`Funnel.Flush`/`Skimmer.Handle`) and runs
+  `sim.Run` under `-race`, looped with an OUTER `timeout` (rc=124=hang).
 
 - **The redesign (the real fix): `docs/dispatch-execution-split.md`.** Separate
   dispatch (managers — never run user code → always-live dispatcher) from execution

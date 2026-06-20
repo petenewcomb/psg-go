@@ -214,7 +214,15 @@ func (q *Accepted) ExecuteNowOrQueue(
 // Returns the error value from the work item if one was executed, the error
 // value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
 // been called but was nil.
-func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error {
+// onSecure, if non-nil, fires exactly once just before the first work body runs
+// (see [controller.execute]) — on EVERY path work reaches execution (fresh,
+// postponed-from-ExecuteNowOrQueue, or pulled-from-incoming), not only the pull
+// path. A worker.Pool driver passes its spawn-token release here: the token must
+// drop before the body runs because the body may block (a task draining a nested
+// subwave, a blocking Post), and a blocking body that still pinned the token would
+// starve the demand that needs another worker. nil for non-pool drivers (the
+// funnel flusher, the wave skim/block drains) which hold no spawn token.
+func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc, onSecure func()) error {
 	traceRegion := "workq.Accepted.ExecuteOne"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Accepted=%p", q)
@@ -226,6 +234,7 @@ func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc) error 
 
 	c := newController(q)
 	c.addWorkFn = addWorkFn
+	c.onSecure = onSecure
 	defer c.Free()
 
 	for {
@@ -311,6 +320,8 @@ type controller struct {
 	othersReleased           bool
 	addWorkFn                AddWorkFunc
 	tryAddWorkFn             TryAddWorkFunc
+	onSecure                 func() // released the driver's spawn token before the first body; see ExecuteOne
+	securedFired             bool   // onSecure already fired for this drive
 	renotifyFn               RenotifyFunc
 	workAddedCount           int
 	postponedWorkWasExecuted bool
@@ -563,6 +574,16 @@ func (c *controller) execute(ctx context.Context, blockOrListen bool) error {
 
 	if c.ex.Started() {
 		panic("started should not be set before execution")
+	}
+
+	// Release the driver's spawn token before running ANY body, on every path
+	// work reaches here (fresh, postponed, or pulled). The body may block
+	// (nested-subwave drain, blocking Post), so a token still held across it
+	// would starve the demand for a replacement worker. Fires once per drive;
+	// the worker side is itself idempotent. See ExecuteOne's onSecure.
+	if c.onSecure != nil && !c.securedFired {
+		c.securedFired = true
+		c.onSecure()
 	}
 
 	err := bw.work.Execute(ctx, ex)

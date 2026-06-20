@@ -57,6 +57,7 @@ type Worker[E ExecEnv] struct {
 
 	// reusable scratch (avoid per-drive alloc)
 	pullFn    AddWorkFunc
+	securedFn func() // bound markSecured passed to driveOne; nil when onSecure is nil
 	idleTimer *time.Timer
 
 	// per-select outputs
@@ -96,16 +97,22 @@ func NewWorker[E ExecEnv](q *Queue, state E, workerCtx context.Context, opts ...
 	}
 	w := &Worker[E]{q: q, state: state, ctx: workerCtx, idle: o.idle, done: o.done, onSecure: o.onSecure}
 	w.pullFn = w.pull
+	if o.onSecure != nil {
+		w.securedFn = w.markSecured
+	}
 	return w
 }
 
-// markSecured fires onSecure exactly once, when this worker first obtains work.
+// markSecured fires onSecure exactly once, the first time this worker is about to
+// run a work body. The driveOne consumer invokes it from the priority engine just
+// before executing — on every path work reaches execution, not only the pull path
+// — so a body that came from a nested ExecuteNowOrQueue (postponed) also releases
+// the spawn token before it (possibly blockingly) runs. nil-onSecure workers
+// (skim/block drivers) never wire securedFn, so this never runs for them.
 func (w *Worker[E]) markSecured() {
 	if !w.secured {
 		w.secured = true
-		if w.onSecure != nil {
-			w.onSecure()
-		}
+		w.onSecure()
 	}
 }
 
@@ -115,7 +122,7 @@ func (w *Worker[E]) markSecured() {
 // drained and (for this worker) nothing more is coming.
 func (w *Worker[E]) DriveOne(ctx context.Context) (executed bool, err error) {
 	w.renotify, w.exit, w.selErr = nil, false, nil
-	err = w.q.driveOne(w.execCtx(ctx), w.pullFn)
+	err = w.q.driveOne(w.execCtx(ctx), w.pullFn, w.securedFn)
 	// FIRST CUT: legacy ExecuteOne returns nil when one executed, ErrEndOfWork
 	// when drained. Map to (executed, err); the native driveOne will return
 	// the pair directly.
@@ -159,9 +166,10 @@ func (w *Worker[E]) pull(
 	deadlineCh <-chan time.Time,
 ) (RenotifyFunc, error) {
 	if waiters == nil {
-		// Non-blocking probe (the old TryAddWorkFunc path).
+		// Non-blocking probe (the old TryAddWorkFunc path). The spawn token is
+		// released by the priority engine just before this work runs (see
+		// markSecured), not here, so it covers every path work reaches execution.
 		if work, ok := w.q.incoming.TryPopFront(); ok {
-			w.markSecured()
 			queueFn(work)
 		}
 		return nil, nil
@@ -190,7 +198,6 @@ func (w *Worker[E]) pull(
 		},
 	)
 	if newWork != nil {
-		w.markSecured()
 		queueFn(newWork)
 	}
 	if w.exit && w.selErr == nil {

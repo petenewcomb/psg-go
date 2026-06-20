@@ -84,7 +84,7 @@ func TestAccepted_Schedule_ImmediateDue(t *testing.T) {
 	// should execute without the queue ever blocking on addWorkFn.
 	q.Schedule(w, time.Now().Add(-time.Millisecond))
 
-	err := q.ExecuteOne(ctx, endOfWorkAddWork)
+	err := q.ExecuteOne(ctx, endOfWorkAddWork, nil)
 	chk.NoError(err)
 	chk.True(w.executed, "due scheduled work should have executed")
 }
@@ -103,7 +103,7 @@ func TestAccepted_Remove_CancelsScheduled(t *testing.T) {
 
 	// Nothing is due and the work was removed, so ExecuteOne should reach
 	// end-of-work without executing it.
-	err := q.ExecuteOne(ctx, endOfWorkAddWork)
+	err := q.ExecuteOne(ctx, endOfWorkAddWork, nil)
 	chk.ErrorIs(err, ErrEndOfWork)
 	chk.False(w.executed, "removed scheduled work must not execute")
 }
@@ -122,7 +122,7 @@ func TestAccepted_Schedule_ReschedulesInPlace(t *testing.T) {
 	q.Schedule(w, time.Now().Add(time.Hour))
 	q.Schedule(w, time.Now().Add(-time.Millisecond))
 
-	err := q.ExecuteOne(ctx, endOfWorkAddWork)
+	err := q.ExecuteOne(ctx, endOfWorkAddWork, nil)
 	chk.NoError(err)
 	chk.True(w.executed, "rescheduled-to-due work should execute")
 }
@@ -142,7 +142,7 @@ func TestAccepted_FutureDeadline_WakesParkedWorker(t *testing.T) {
 	// With a blocking addWorkFn, the only thing that can wake the parked
 	// worker is the queue's internal deadline timer firing at ~delay.
 	start := time.Now()
-	err := q.ExecuteOne(ctx, blockingAddWork)
+	err := q.ExecuteOne(ctx, blockingAddWork, nil)
 	elapsed := time.Since(start)
 
 	chk.NoError(err)

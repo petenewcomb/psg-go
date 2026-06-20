@@ -169,7 +169,7 @@ func (fe *funnelEngine) flusher() {
 	// (no idle-exit, no spawn coordination), so the legacy multi-worker
 	// ErrEndOfWork / GoroutineExiting dance is gone.
 	for {
-		err := fe.workQueue.ExecuteOne(ctx, addWorkFn)
+		err := fe.workQueue.ExecuteOne(ctx, addWorkFn, nil)
 		switch {
 		case err == nil:
 			// Ran a due flush (or the end-of-work flushAll followup); keep going.

@@ -306,7 +306,7 @@ func (j *Wave) trySkim(ctx context.Context, _ *ctxMeta) (bool, error) {
 }
 
 func (j *Wave) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
-	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn)
+	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn, nil)
 }
 
 // This function is designed to be called before scattering a new task to
@@ -376,7 +376,7 @@ func (j *Wave) block(
 	adder.blockWaiters = blockWaiters
 	adder.confirmBlockWaitFn = confirmBlockWaitFn
 
-	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn)
+	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn, nil)
 	if errors.Is(err, errBlockWaitSignaled) {
 		err = nil
 	}

@@ -156,9 +156,10 @@ func (q *Queue) fireDemand() {
 // Worker.DriveOne. FIRST CUT delegates to the legacy controller; the native
 // version inlines drainScheduled → fresh → postponed → addWorkFn and merges the
 // old ExecuteOne/TryExecuteOne. Worker[E] (same package) calls this directly and
-// supplies the addWorkFn that pulls from q.incoming.
-func (q *Queue) driveOne(ctx context.Context, addWorkFn AddWorkFunc) error {
-	return q.accepted.ExecuteOne(ctx, addWorkFn)
+// supplies the addWorkFn that pulls from q.incoming and the onSecure that
+// releases its spawn token before the first body runs.
+func (q *Queue) driveOne(ctx context.Context, addWorkFn AddWorkFunc, onSecure func()) error {
+	return q.accepted.ExecuteOne(ctx, addWorkFn, onSecure)
 }
 
 // ExecuteNowOrQueue runs work synchronously on the caller's goroutine, or — if it

@@ -7,11 +7,25 @@ specific waves.
 
 Companion docs:
 - `API_DESIGN.md` — destination: final naming and API surface
+- `docs/permit-core.md` — the permit allocation model (the hierarchical cache)
+- `docs/dispatch-execution-split.md` — the dispatch/execution architecture
 - `POSITIONING_RESEARCH.md` — outward-facing audience research
 - `ARCHITECTURE_COMPARISON.md` — source-level competitive analysis
-- `README-proposed.md` — draft README using the new API
 
 This doc describes the *journey*. API_DESIGN describes the *destination*.
+
+> **PARTLY STALE (2026-06-20).** Two things have moved since this plan was written.
+> (1) The **op-trio names** in the candidate-wave prose are the older Gatherer /
+> TaskRunner / Combiner; the pinned names are **Skimmer / Launcher / Funnel** (with
+> `Handler` / `Accumulator` bodies, verb `Submit`) — see `API_DESIGN.md` /
+> `CHANGELOG.md`. (2) **`Pool` is no longer user-exposed** (internal, auto-sized;
+> concurrency via Limiters), which reframes the Wave 4 / Wave 5 entries below — and a
+> **major architecture wave is missing**: the dispatch/execution split + permit-core
+> migration (`docs/dispatch-execution-split.md`, `docs/permit-core.md`) — map the
+> manager/executor pools onto `worker.Pool` + `workq`, place the governor admission
+> gate, and cut over off the eager `limiter.go` (`directRequest` / `reclaimRequest` /
+> `suspendForEpisode`). Sequence it around the Pool/workq consolidation. Completed
+> Wave 1/2 history below is accurate as-of-then and left as-is.
 
 ---
 

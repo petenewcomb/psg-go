@@ -83,6 +83,19 @@ managers feeding executors, not by the blocked producer helping.
 
 ## The permit model: held through parks, with deltas
 
+> **REFINED — `permit-core.md` is authoritative for this section (2026-06-20).**
+> The base-hold/delta sketch below stands, but two of its specifics are
+> superseded. (1) A unit's hold is a **pool** its sub-wave siblings contend for
+> (`held`/`inUse`), not a single permit; borrowing reclaims the **idle subset**
+> (`held − inUse`) of any *parked* pool, not only a fully "zero-leaf" one, and it
+> is the **baseline** delta path (free → borrow → wait), not a last-resort
+> cycle-breaker. (2) That baseline is **deadlock-free per-limiter with no cycle
+> graph**, so the cycle detector, the "suspend-while-parked as a last resort"
+> breaker, and the deadlock-grounds justification for a global scheduler (next
+> section) are all retired — the global scheduler survives only for the deferred
+> cross-limiter *joint-acquisition* feature. Read this section for the dispatch
+> framing; read `permit-core.md` for the allocation model and the proof.
+
 The executor never participates in permit management — it requests its set, runs,
 and parks. All permit logic lives in the scheduler. The model has exactly two
 ideas: **base holds** and **deltas**.
@@ -174,6 +187,18 @@ all parked and nothing in that holder-set is runnable) over a clock, consistent
 with the rest of the design — never wait on a timer for something observable.
 
 ## The scheduler is global
+
+> **NARROWED — see `permit-core.md` (2026-06-20).** The argument below concludes
+> "global" from a *deadlock* need: a cross-limiter cycle spans limiters, so
+> breaking it needs one unified view. That need is gone — partial-idle borrowing
+> is deadlock-free per-limiter (the contested permit of a *parked* holder is
+> always idle and borrowable, a purely local fact), so a cross-limiter cycle
+> dissolves with no unified view. What remains genuinely cross-limiter is **atomic
+> joint acquisition** for a multi-limiter `WithLimits` (the ordered/prioritized
+> disciplines and their withholding) — a **deferred** feature. The hot-path /
+> single-writer split below still describes how *that* coordinator stays cheap;
+> it is just no longer load-bearing for deadlock-freedom, and a per-group
+> scheduler would be equally correct (global is the ergonomic choice).
 
 Hold-through-park makes the cross-subtree cycle span **multiple limiters** (it
 alternates "holds P, needs Q" with "holds Q, needs P"), so the wait-for graph that

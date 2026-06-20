@@ -2,16 +2,118 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► ARCHITECTURE PIVOT — dispatch/execution split + global permit scheduler
-(DESIGN, 2026-06-20).** The pre-existing nested-drain worker-starvation deadlock
-(the ⚠ HANG note below) was partially fixed, then superseded by a design pivot.
+**►►► ARCHITECTURE PIVOT — dispatch/execution split + permit core (DESIGN,
+2026-06-20).** The pre-existing nested-drain worker-starvation deadlock (the ⚠ HANG
+note below) was partially fixed, then superseded by a design pivot.
 
-**NEXT SESSION — implement the redesign.** Start at `docs/dispatch-execution-split.md`
-"Open / next": sketch the scheduler permit core (base-hold + delta acquisition,
-per-limiter hot path, single-writer cross-limiter coordination, baseline
-suspend-while-parked) on its own and model-check the no-silent-wait + cycle-break
-invariants in isolation before any cutover. This session landed the partial fix and
-the design; the implementation is fresh work.
+**PERMIT-CORE DESIGN CONVERGED — `docs/permit-core.md` (DESIGN REVIEW w/ PN,
+2026-06-20).** A design-review pass on `dispatch-execution-split.md`'s permit model
+converged it to a meaningfully simpler shape and is now the authoritative spec for
+the permit core. The organizing principle: **a hierarchical cache of permits**
+(thread-cache → central free list → page heap), locality-first acquire +
+cache-don't-return:
+
+- **Nested pools, not single base holds.** Each unit holding L-permits owns a pool
+  (`held` = base weight + deltas; `inUse` = permits backing running descendants;
+  `inUse ≤ held`). A unit's sub-wave siblings contend for its pool like a
+  semaphore of size `held`. A running body occupies exactly one permit and
+  subdivides nothing; depth-pools exist only under *parked* units.
+- **Pools are refcount-owned and outlive units; base pooled, deltas per-driver.**
+  A pool is owned jointly by its unit + every live sub-wave drawing on it, and
+  releases `held` to L only at refcount zero (unit exited AND all sub-waves
+  drained) — a sub-wave can outlive its creating unit. Model a unit's permits as a
+  pool uniformly from admission (avoids the multi-sub-wave "take-over" hazard).
+  Every pool is the same `{held, inUse, parent}` object, recursively: a unit's
+  **base is pooled** (all its sub-waves contend for it — the only free sharing);
+  a **delta is held by the sub-wave that drove it** (its units use it directly),
+  and sibling sub-waves share it ONLY via the ordinary borrow path. So borrowing
+  is the general cross-pool sharing mechanism, not a rare escape hatch.
+- **"Driving" is an alternation; reacquire = the ordinary acquire.** A body
+  driving a sub-wave (submit or skim on it) lends its base ONLY while
+  blocked-waiting; it must **reacquire its full base before each skim-handler
+  invocation and before returning from the drive** (the handler is its own
+  computation under L, and may itself nest-drive). Reacquire is just the ordinary
+  locality-ordered acquire (usually a step-1 hit on its own freshly-cached permits)
+  — the eager model's bespoke help-shaped reclaim collapses away. Nested/interleaved
+  driving works (A's handler drives B): the base
+  follows the computation locus down the nesting, one sub-wave per goroutine at a
+  time. `inUse` counts only actively-computing bodies (incl. handler invocations),
+  not blocked-waiting drivers. The sketch's model-check MUST cover the
+  reacquire-before-handler/return points + the nested-drive scenario.
+- **One locality-ordered acquire primitive; base/delta/inheritance = source, not
+  mechanism.** A pool needing a permit acquires into its OWN `held`, searching:
+  (1) own pool's cached-idle → (2) parked-ancestor's idle (inheritance, cost-free,
+  still local) → (3) free L capacity (first contended/`Σ held`-raising step) →
+  (4) STEAL from elsewhere in L's forest → (5) wait. A *delta* = an acquire that
+  missed 1–2 and reached 3/4. The ancestor draw (step 2) is a near cache HIT, NOT
+  the last-resort steal (step 4) — that distinction is what makes "stealing is rare"
+  true. Generalizes/REPLACES eager-suspend + the old "zero-leaf" idea.
+- **The steal (step 4) is a root-anchored search; "steal" not "borrow."**
+  Reaching step 4 means the whole ancestor chain (to root) + free L all missed, so
+  **inheritance is nearest-first but stealing is root-first** (maximally deferred,
+  cross-subtree coordination single-point). It's a **steal, not a loan**: no return
+  obligation, no lender/borrower bookkeeping — the victim loses the permit and
+  reacquires from scratch if needed.
+- **Idle is leaf-determined → the search needs guidance; the FREE telemetry is the
+  required baseline, the exact idle-bit must earn its keep (PN corrected my earlier
+  inversion).** Idle accumulates at the leaves where work cached its permits, so a
+  truly blind descent is ~half-forest. Guidance:
+  - **REQUIRED (free): victim-quality telemetry.** The acquisition up-walk already
+    traverses the chain; a relaxed per-pool `lastAscendedAt` stamp (logical seqno)
+    written as it passes does DOUBLE DUTY — *route* (descend toward the stalest =
+    quiescent = likely-idle child) and *choose* (stalest = coldest = LRU eviction
+    victim). Plus creation age (structural vs transient slack) and idle duration.
+    Free: rides existing walks (step-1 hits + releases never walk up), fully lax.
+  - **STAGED + LEFT OPEN (skeptical it ever pays).** The telemetry descent can
+    dead-end (stale branch already stolen from) → backtrack; safety net is the
+    exhaustive fallback, NOT an index. The obvious candidate to prune backtracks — an
+    exact subtree-idle bit — is no easy win: as a FILTER it must be exactly
+    maintained (a stranded subtree = skip real idle = liveness BUG, not a backtrack —
+    so NO cheap relaxed/short-circuited propagation; full sync cost on every leaf
+    0-crossing, acquire+release); as a pure PRIORITIZER one bit can't rank (needs
+    magnitude/recency = more cost). Steals are rare by construction, so commit only
+    to the free telemetry and leave the slot OPEN for some additional bookkeeping
+    (the bit being one candidate) IFF measurement shows the heuristic too lossy.
+  - **Liveness rests on NEITHER** — it's wake-on-free + exhaustive fallback; the
+    take is a CAS at the leaf, so all guidance is a hint (worst case: backtrack or
+    re-search, never a wrong grant or permanent miss).
+- **Cache, don't return; flow is pull-based.** A finished body lowers `inUse`, NOT
+  `held` — the permit stays CACHED in its pool (idle ⇒ borrowable), where its
+  subtree is the likely next consumer. No proactive return: a stolen permit isn't
+  handed back; the lender re-acquires (steals back) only on real demand. Permits
+  reach L's free pool only at pool destruction (refcount 0). **This COMPLEMENTS
+  minimum-WIP** (PN): WIP = number of *contenders*, not permits-checked-out; caching
+  lets in-progress work complete by pulling locally instead of re-contending
+  globally, draining the contender pool faster. Eager-return (low `Σ held`) is the
+  anti-pattern — it re-adds contenders on every resume.
+- **Deadlock-free per-limiter with NO cycle graph (a theorem, not a hope).**
+  "No free + no borrowable L-capacity" ⟺ "every L-permit is `inUse`" ⟺
+  "L-using bodies are running" ⟹ each parks/completes, freeing a permit. A true
+  cyclic deadlock ⟹ all members parked ⟹ pools fully idle ⟹ borrowable. The
+  load-bearing fact ("a parked holder's permit is idle → borrowable") is
+  per-limiter LOCAL, so cross-limiter cycles dissolve with no unified view. Cycle
+  detection is retired to a deferred churn-optimization. Rests on 3 structural
+  assumptions (intake-only limiting; park ⟹ idle; blocked unit holds no inUse
+  permit) — see the doc; all already guaranteed by the surrounding design.
+- **The global scheduler narrows to ONE deferred job: cross-limiter atomic joint
+  acquisition** (multi-limiter `WithLimits`, ordered/prioritized + withholding).
+  NOT needed for deadlock-freedom. Per-group vs global is ergonomic only (global =
+  cleaner partitioning, sidesteps the limiter-before-forest binding puzzle).
+- Residuals settled: executor count bounded by nesting (no cap); POSTPONED
+  reconciles (`inUse==0` → base/delta returns to pool, no special case).
+- Doc fixups landed: superseding banners on `dispatch-execution-split.md`'s "permit
+  model" + "scheduler is global" sections point to `permit-core.md`.
+
+**NEXT SESSION — build the isolated permit-core sketch.** Per `permit-core.md`
+"Open / next": implement pools (`held`/`inUse`) + delta acquisition
+(free → borrow → wait) + passive return for a SINGLE limiter, and model-check the
+invariants (per-pool `inUse ≤ held`; conservation `Σ held ≤ C`; concurrency bound
+`Σ inUse ≤ C`; no-silent-wait; liveness) under `pgregory.net/rapid` with
+adversarial nesting + cross-wave limiter sharing. No global coordinator, no graph.
+Then: decide step-3's event-based wake trigger; map manager/executor pools +
+governor around the core; sequence migration off the live eager `limiter.go`
+(`directRequest`/`reclaimRequest`/`suspendForEpisode`). This session converged the
+design + documented it; the sketch is fresh work.
 
 - **Partial fix — LANDED (`6d77ce2`): release the spawn token before ANY body
   runs, on every path.** Root cause: `onSecure` fired only on the `pull` path, so

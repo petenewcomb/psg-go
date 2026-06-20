@@ -176,7 +176,11 @@ order:
    rare by construction (it fires only when own pool, ancestors, and free L all
    miss — saturation *and* cross-subtree contention).
 5. **Wait** — nothing free or borrowable anywhere; park on L's availability and
-   re-search when a permit frees.
+   re-search when a permit frees. A caller that must not block takes steps 1–4 only
+   and, on a miss, *postpones* (holds the work un-admitted, retried on the same
+   wake) instead of waiting — that is how a manager admits without blocking, while
+   a mid-body reacquire does take this step. See `dispatch-execution-split.md`,
+   "Permits: managed off the executor."
 
 **Inheritance is nearest-first; stealing is root-first.** Reaching step 4 means
 steps 1–3 all missed — every ancestor up to the root, *and* free L. So a body never

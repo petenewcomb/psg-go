@@ -3,10 +3,14 @@
 
 //go:build ignore
 
-// NOTE: build-excluded design sketch. This is the step-4 dispatch wiring; it
-// references Wave.governor()/blockBehaviorFor which land when submit is wired.
-// Kept in-tree for shape review (see WORKING_NOTES "Worker pool + workq
-// consolidation" → Dispatch). Drop the build tag when wiring submit.
+// NOTE: build-excluded design sketch. This is the step-4 dispatch wiring — the
+// uniform `submit` shape; it references Wave.governor()/blockBehaviorFor which land
+// when submit is wired. Kept in-tree for shape review (see WORKING_NOTES "Worker
+// pool + workq consolidation" → Dispatch). Drop the build tag when wiring submit.
+//
+// The permit ACQUIRE model is NOT sketched here — see docs/permit-core.md (pools,
+// locality-ordered acquire, idle-steal) and docs/dispatch-execution-split.md
+// ("Permits: managed off the executor") for where and how permits are acquired.
 
 package psg
 
@@ -36,11 +40,12 @@ import (
 //     wave feeds has its buffer-1 on-deck slot full (minimal WIP — input paced by
 //     the narrowest bottleneck).
 //
-// The op's LIMITER is NOT acquired here. It is acquired post-admission, at the
-// worker (acquire-or-postpone in the work's Execute), so the submitting body can
-// always exit and release its own permit first. A postponed candidate is the
-// scheduler's on-deck item; when the scheduler is on-deck-full it registers on
-// the wave governor — exactly as a saturated skimmer does.
+// The op's LIMITER is NOT acquired here — submit only hands off. The permit is
+// acquired at ADMISSION by a manager (non-blocking: acquire-or-postpone, holding
+// the work un-admitted on a miss) and reacquired mid-body by the executor when it
+// resumes from a drive (see docs/dispatch-execution-split.md, "Permits: managed off
+// the executor"). A postponed candidate registers on the wave governor — exactly as
+// a saturated skimmer does.
 //
 // q is the TARGET stage Queue, chosen by the caller per op type (the only place
 // the op kind matters — and only to route, not to branch the logic):
@@ -82,54 +87,6 @@ func submit(
 	// granularity (a wave moves as a unit), not an approximation.
 	err = wave.governor().Execute(ctx, ex, deadline, blockBehaviorFor(ex), handoff)
 	return posted, err
-}
-
-// ── the limiter, post-admission at the worker ────────────────────────────────
-
-// runUnderLimiter is the prologue every work item runs when a worker executes
-// it (i.e. the head of taskWork/funnelWork.Execute, invoked from Queue.driveOne).
-// It is THE limiter gate — acquired here, not at dispatch, so the submitting
-// body already exited and released its own permit (deadlock-freedom).
-//
-// req is the op's scheduler request handle for this work. It is CREATED at
-// admission (so the scheduler sees the whole admitted candidate set — the
-// better-prioritization win), but only ACQUIRED here. nil for unlimited ops.
-// run is the body.
-func runUnderLimiter(ctx context.Context, ex workq.Execution, req schedRequest, run workq.WorkFunc) error {
-	if req == nil { // unlimited op — nothing to acquire
-		ex.Starting()
-		return run(ctx, ex)
-	}
-
-	if !req.tryAcquire() { // ask the op's scheduler (PENDING → HELD)
-		// Not granted. Do NOT call ex.Starting() → the Queue requeues this as
-		// POSTPONED (Workers prefer postponed over new). The request is now the
-		// scheduler's on-deck candidate; if the scheduler's on-deck slot was
-		// already full it registered on its waves' governors — backpressure to
-		// top-level admission (minimal WIP). The Worker re-drives this item when
-		// the scheduler notifies a freed permit (a prioritized scheduler may
-		// instead hand the freed permit to a higher-priority candidate), so
-		// there is no busy-retry.
-		return nil
-	}
-
-	// HELD. Run the body under the work's wave exec ctx; give the permit back at
-	// body end (release is idempotent — the work's Free backstops it). Across
-	// blocking gathers inside run, the permit suspends/resumes, and the wait is
-	// help-shaped: a nested Worker.DriveOne on the help-domain Queue.
-	ex.Starting()
-	defer req.release()
-	return run(ctx, ex)
-}
-
-// schedRequest is the op's scheduler request handle (conceptual; cf. limiter.go
-// `request`): tryAcquire transitions PENDING → HELD, or on failure leaves the
-// candidate on-deck (registering on its waves' governors when the on-deck slot
-// fills); release gives the permit back. suspend/resume (across gathers) and the
-// POSTPONED state layer on during hardening.
-type schedRequest interface {
-	tryAcquire() bool
-	release()
 }
 
 // ── how q is chosen (caller side, by op type) ────────────────────────────────

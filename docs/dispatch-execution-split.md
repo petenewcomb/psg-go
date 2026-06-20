@@ -1,14 +1,16 @@
-# Dispatch/Execution Split and the Global Permit Scheduler
+# Dispatch/Execution Split
 
-**Status: design, not yet implemented.** This document records an architecture
-arrived at through design discussion. It supersedes the goroutine-level
-block-and-help and the *eager* limiter suspend/reclaim protocol of
-`limiter-suspend-resume.md`, replacing both with (1) a clean separation of
-dispatch from execution and (2) a permit model in which a unit holds its permits
-through parks and gives them back only as a last resort. It deliberately keeps
-the load-bearing constraints of the limiter design (intake/drain split,
-skim-gather ban) and the limiter design's scheduler/resource layering, narrowing
-the scheduler to a single global instance.
+**Status: design, not yet implemented.** This document records the
+dispatch/execution architecture arrived at through design discussion: a clean
+separation of the goroutines that run blocking user bodies (**executors**) from the
+goroutines that own admission, queues, and scheduling (**managers**). It supersedes
+the goroutine-level block-and-help and the *eager* limiter suspend/reclaim protocol
+of `limiter-suspend-resume.md`. The permit *allocation* model that rides on this
+split — pools, the locality-ordered acquire, idle-stealing, cache-don't-return — is
+specified separately in `permit-core.md`; this document covers only how the split
+shapes, and is shaped by, that model. It deliberately keeps the load-bearing
+constraints of the limiter design (intake/drain split, skim-gather ban) and its
+scheduler/resource layering.
 
 ## The problem it solves
 
@@ -81,160 +83,64 @@ permits. Its mechanism is the existing downstream backpressure counter; the only
 change is that the relief path (consuming skim) is guaranteed by the always-live
 managers feeding executors, not by the blocked producer helping.
 
-## The permit model: held through parks, with deltas
+## Permits: managed off the executor, allocated per `permit-core.md`
 
-> **REFINED — `permit-core.md` is authoritative for this section (2026-06-20).**
-> The base-hold/delta sketch below stands, but two of its specifics are
-> superseded. (1) A unit's hold is a **pool** its sub-wave siblings contend for
-> (`held`/`inUse`), not a single permit; borrowing reclaims the **idle subset**
-> (`held − inUse`) of any *parked* pool, not only a fully "zero-leaf" one, and it
-> is the **baseline** delta path (free → borrow → wait), not a last-resort
-> cycle-breaker. (2) That baseline is **deadlock-free per-limiter with no cycle
-> graph**, so the cycle detector, the "suspend-while-parked as a last resort"
-> breaker, and the deadlock-grounds justification for a global scheduler (next
-> section) are all retired — the global scheduler survives only for the deferred
-> cross-limiter *joint-acquisition* feature. Read this section for the dispatch
-> framing; read `permit-core.md` for the allocation model and the proof.
+The split's rule for permits is simple: **the executor never manages them.** It
+requests the permits its body needs, runs, and parks; all allocation logic — the
+pools, the locality-ordered acquire, idle-stealing, the cache-don't-return flow —
+lives below that request interface and is specified in `permit-core.md`. That
+document carries the model and its central result: the permit core is
+**deadlock-free per-limiter, with no cycle graph and no global coordinator**, so
+this split can lean on "a ready body's permits resolve without a cross-cutting
+wedge" without itself reasoning about permit cycles. (It is what retired the
+earlier draft's hold-through-park-plus-cycle-breaker machinery; that history lives
+in `permit-core.md`.)
 
-The executor never participates in permit management — it requests its set, runs,
-and parks. All permit logic lives in the scheduler. The model has exactly two
-ideas: **base holds** and **deltas**.
+What *this* document owns is how the split **drives** that acquire, in two modes
+that differ only in what they do on a miss:
 
-### Base holds: held by the unit, period
+- **Manager-side, at admission — non-blocking.** A manager makes a body *ready* by
+  running the acquire without its waiting step (own pool → ancestor → free L →
+  steal): on success the body is handed to an executor; on a miss the work is held
+  un-admitted and retried when a permit frees. The manager never blocks, so the
+  always-live-dispatcher invariant holds.
+- **Executor-side, mid-body — blocking.** A driving executor that parked (lending
+  its permits while blocked-waiting on a sub-wave) must **reacquire** to resume
+  computing — to run a skim handler, or to return from the drive. That reacquire is
+  the full acquire *including* the waiting step: the executor may block, which is
+  exactly what executors are for, and the pool scales another executor to cover the
+  parent wave. (See `permit-core.md`, "Driving is an alternation.")
 
-A unit acquires its permits when admitted and **holds them for its entire
-lifetime, period** — released only on completion. We do not try to detect when a
-unit is "really using" a permit versus merely holding it idle, because in the
-general case we cannot know.
+So one primitive is *postponing* on the manager and *blocking* on the executor —
+the routing the eager design tangled into `ExecuteOrWait`, now cleanly divided by
+which pool runs it.
 
-Letting the unit's **sub-waves use those already-held permits** is just accepting
-that same uncertainty one level down: the sub-waves are the unit's own work, so
-they draw on the unit's hold. Nothing is reallocated and nothing leaves the unit's
-subtree. (This is what the prior draft called "inheritance"; the key point is that
-it is not a separate grant — it is the same hold, used by the unit's descendants.)
+## The cross-limiter coordinator (deferred)
 
-### Deltas: additional permission, scoped and self-releasing
+The permit core needs **no global coordinator for deadlock-freedom** — idle-stealing
+is per-limiter and local (`permit-core.md`). A coordinator is needed for exactly one
+thing, and it is **deferred**: **atomic joint acquisition** when an op's `WithLimits`
+spans several limiters that must be taken all-or-nothing (the ordered and
+prioritized scheduler disciplines, including starvation-avoidance by withholding).
 
-The *only* acquisition beyond a unit's base is the **delta**: when a sub-wave unit
-needs **more** permits than the enclosing unit holds, that extra permission is
-acquired separately, scoped to that sub-wave unit, and **released as a natural
-consequence of that unit completing** — ordinary lifecycle with a tighter scope
-than the base, not a special preemptible class and not a forced suspend. Base
-permits release when the unit finishes; deltas release when the sub-wave unit
-finishes. One lifecycle, two scopes.
-
-Deltas are the sole contention point, and they must be acquired deadlock-free —
-which is the whole subtlety below.
-
-### The cross-subtree cycle (the cost of holding through parks)
-
-Because base holds are retained **through a park** (a unit driving a sub-wave
-still holds its permits — that is what "period" means), a delta can need a permit
-that is, right now, a base-hold of *another parked unit in a different subtree*:
-
-> B holds P and is parked driving a sub-wave whose unit V needs Q; C holds Q and
-> is parked driving a sub-wave whose unit W needs P. Neither base-hold releases,
-> because each holder is parked driving the very sub-wave whose delta needs the
-> other's permit. Nobody completes, so no delta releases. Deadlock.
-
-This cycle is *created by* hold-through-park. The earlier eager-suspend design
-avoided it precisely by releasing a permit when its holder parked — at the cost of
-churn and re-acquisition on every park. Holding through parks is the minimum-WIP
-choice; the cycle is the bill for it, paid by the breaker below.
-
-### Breaking it: suspend-while-parked, as a last resort
-
-The only hold in such a cycle that is **not backing running work** is a *parked
-driver's base permit*: the driver is parked (not executing), so that permit is at
-**zero leaf** — no descendant is currently running with it — and can be
-reconsidered without preempting a running body. So the cycle-breaker is: the
-scheduler **suspends a zero-leaf parked base permit**, satisfies the blocked delta
-with it, and the original holder re-acquires it when it resumes.
-
-This is a *last resort*, used only to break an actual deadlock, to minimize the
-re-acquisition churn it costs (minimum-WIP). It is **not** a transfer between
-reservations and **not** an eager release; it is the scheduler reconsidering one
-non-running hold, exactly when waiting can no longer resolve.
-
-**Detecting when to do it.** The wait-for graph has two edge kinds and only one is
-dynamic:
-
-- *drive edges* — a parked unit waits for its sub-wave's units. These **are** the
-  wave-ancestry tree: static, acyclic on their own.
-- *resource edges* — a blocked unit waits for the holder of the permit it needs.
-  At most one per blocked unit, added on block, removed on grant.
-
-Every cycle therefore routes through resource edges and is composed only of
-*currently-blocked* units, so detection is a bounded walk over the small,
-contention-bounded blocked set — never the whole workload — run only on the cold
-path (a unit that could not get its permit). It shrinks further if each parked
-driver carries the small set of permits its subtree is blocked on (propagated up
-on block/unblock): the search graph is then just "parked holders ↔ contested
-permits."
-
-**Baseline first, detection as an optimization.** The cheap correct baseline needs
-no graph at all: a block that has not cleared by natural completion, against a
-holder that is *parked and zero-leaf*, gets that permit suspended — a local check
-on the holder's state. It is always safe (never touches running work) and resolves
-the block whether or not a true cycle existed; its only cost is extra re-acquisition
-churn when it fires on a non-cycle that would have cleared on its own. Precise
-cycle detection is purely a **churn-reduction** optimization over this baseline,
-worth building only if the measured suspend/re-acquire rate proves material — and
-under the structural rules below, genuine cycles should be rare enough that it may
-never pay for itself. The one knob to decide with the baseline is the trigger for
-"hasn't cleared": prefer event-based (fire when the contended permit's holders are
-all parked and nothing in that holder-set is runnable) over a clock, consistent
-with the rest of the design — never wait on a timer for something observable.
-
-## The scheduler is global
-
-> **NARROWED — see `permit-core.md` (2026-06-20).** The argument below concludes
-> "global" from a *deadlock* need: a cross-limiter cycle spans limiters, so
-> breaking it needs one unified view. That need is gone — partial-idle borrowing
-> is deadlock-free per-limiter (the contested permit of a *parked* holder is
-> always idle and borrowable, a purely local fact), so a cross-limiter cycle
-> dissolves with no unified view. What remains genuinely cross-limiter is **atomic
-> joint acquisition** for a multi-limiter `WithLimits` (the ordered/prioritized
-> disciplines and their withholding) — a **deferred** feature. The hot-path /
-> single-writer split below still describes how *that* coordinator stays cheap;
-> it is just no longer load-bearing for deadlock-freedom, and a per-group
-> scheduler would be equally correct (global is the ergonomic choice).
-
-Hold-through-park makes the cross-subtree cycle span **multiple limiters** (it
-alternates "holds P, needs Q" with "holds Q, needs P"), so the wait-for graph that
-contains it spans those limiters. Detecting and cleanly breaking it needs one
-unified view over all the limiters the cycle can touch — and since a forest's
-nesting is dynamic (any op can drive any sub-wave), you cannot statically prove two
-limiters never co-nest into a cross-cycle. So everything reachable collapses to one
-coordinator. Rather than compute per-forest scheduler boundaries (and solve the
-"limiter created before its forest exists" binding puzzle), the scheduler is simply
-**global, one per process**, like `defaultPool`. A global coordinator also "sees"
-cycles that cannot form across genuinely independent forests, which costs nothing
-but a marginally larger graph on the rare cycle check.
-
-**Global must not mean a global lock per acquire.** The hot path stays cheap via
-the existing resource/scheduler split:
+When that feature is built, it must not become a global lock per acquire. The
+resource/scheduler split keeps it cheap:
 
 - An **uncontended acquire/release** touches only *that limiter's own* per-limiter
-  state — its count, a small bounded holder set, the per-wave governor counter, a
-  push to the executor queue. This scales per-limiter and never serializes across
-  limiters or across cores.
-- Only **cross-limiter** work — a multi-limiter atomic-fit (the prioritized
-  scheduler's whole-vector grant) and the cycle detect/break that by definition
-  spans limiters — needs the coordinator. That path is rare by construction: it
-  fires under saturation, which scales with permit pressure, not core count.
+  state — its pool counters, the per-wave governor counter, a push to the executor
+  queue. It scales per-limiter and never serializes across limiters or cores.
+- Only **cross-limiter** work — the multi-limiter atomic-fit (the prioritized
+  scheduler's whole-vector grant) — needs the coordinator, and only under
+  saturation, which scales with permit pressure, not core count.
 
-So the part that wants to be **single-writer** is the *cross-limiter coordinated
-state* (the wait-for view, the cycle-break choice, the prioritized atomic-fit) —
-because that is where every hard race lives, and a single owner turns
-locks-and-races into plain sequential code. That is **not** the dispatch hot path.
-Concretely: do not funnel common admission through one goroutine (that is what
-would cap throughput when cores are plentiful); do let one writer own the
-cross-limiter coordination, routing only blocked + multi-limiter admissions to it.
-More cores then mean more parallel per-limiter acquires, not more coordination —
-unless you are also more saturated, at which point you are permit-bound anyway and
-serializing the contended decisions is the right thing. **One writer for the
-coordination, not one dispatch worker.**
+So the part that wants to be **single-writer** is the cross-limiter coordinated
+state (the prioritized atomic-fit, the withholding policy): one owner turns
+locks-and-races into plain sequential code, and it is **not** the dispatch hot path.
+Route only blocked multi-limiter admissions to it; let per-limiter acquires run in
+parallel. **One writer for the coordination, not one dispatch worker.** Whether that
+owner is process-global or per-limiter-group is ergonomic — global sidesteps the
+"limiter created before its forest exists" binding puzzle — not a deadlock
+requirement.
 
 ## Infeasible demand: never hang on it
 
@@ -251,11 +157,12 @@ Two cases, opposite answers:
   oversized item; panicking on bad input would make the library brittle. Never
   "allow anyway" — overcommit silently breaks the guarantee the limiter exists to
   provide.
-- **`W ≤ capacity` but unsatisfiable right now** (blocked by contention/cycle).
-  *Not* a failure case — it is the scheduler's job to get there (withhold, order,
-  and break the cycle per above). Failing or panicking here would turn solvable
-  contention into a spurious error. Wait; rely on the deadlock-free machinery. The
-  only thing forbidden is silently waiting forever.
+- **`W ≤ capacity` but unsatisfiable right now** (blocked by contention).
+  *Not* a failure case — the permit core gets there (free → steal idle → wait, per
+  `permit-core.md`; withholding/ordering when the deferred multi-limiter coordinator
+  is in play). Failing or panicking here would turn solvable contention into a
+  spurious error. Wait; rely on the deadlock-free machinery. The only thing
+  forbidden is silently waiting forever.
 
 (The "satisfiable only alone" request — `W ≤ C` but needing the whole pool — is not
 an allow-over-capacity case; it is the prioritized scheduler's withholding/
@@ -277,34 +184,45 @@ This design **keeps**, unchanged and load-bearing:
 
 This design **changes**:
 
-- **Eager suspend/reclaim → hold-through-park + last-resort suspend-while-parked.**
-  The two-class park rule and its bracket/reclaim machinery on the body path are
-  retired; permits are held through parks, and the only give-back is the
-  scheduler's zero-leaf cycle-breaker.
-- **Per-op / per-domain scheduler → one global scheduler.** `WithLimits`'s "all
-  limiters resolve to one scheduler" widens to "the global scheduler"; the
-  `NewSemaphore(scheduler, n)` binding becomes binding to the global instance.
+- **Eager suspend/reclaim → the hierarchical permit cache** (`permit-core.md`). The
+  two-class park rule and its bracket/reclaim machinery on the body path are retired;
+  permits are held through parks and cached idle rather than suspended, and the only
+  give-back is an idle *steal* by a pool that genuinely needs the permit — no
+  suspend, no eager release, no cycle-breaker.
+- **Per-op / per-domain scheduler → a per-limiter permit core, no coordinator.** The
+  core is deadlock-free per-limiter on its own; `WithLimits`'s "all limiters resolve
+  to one scheduler" applies only to the **deferred** multi-limiter joint-acquisition
+  feature, where a single coordinator (process-global or per-group) owns the
+  atomic-fit.
 - **Terminology.** That doc's "reservation" is a *PriorityScheduler withholding
-  policy* and is unrelated to anything here; this design speaks of a unit's
-  *held set* and *deltas*, never a "reservation," to avoid the collision.
+  policy* and is unrelated to anything here; this design speaks of *pools*
+  (`held`/`inUse`) and *deltas*, never a "reservation," to avoid the collision.
 
 ## What this deletes
 
 - the goroutine-level **block-and-help drive loop** and its re-entrancy rule;
 - the **eager suspend/reclaim** body-path protocol (bracket, re-entrancy no-op,
-  help-shaped reclaim) — replaced by the scheduler's last-resort zero-leaf suspend;
+  help-shaped reclaim) — replaced by the permit core's cache-and-steal flow
+  (`permit-core.md`), which never suspends;
 - the **nil-demand skim queue's** starvation case (always-live managers feed
   executors, so the relief path is never unfed);
 - the **spawn-token-through-body** hazard and the vacate/replacement subtleties —
   executors are *meant* to block, and the pool scales under an always-live producer;
-- **per-forest scheduler bookkeeping** — there is one.
+- **cross-cutting permit coordination on the deadlock path** — there is none; the
+  per-limiter core is deadlock-free, and the only coordinator (for the deferred
+  joint-acquisition feature) is off the hot path entirely.
 
 ## Open / next
 
-- Sketch the scheduler's permit core on its own — base-hold + delta acquisition,
-  the per-limiter hot path, the single-writer cross-limiter coordination, and the
-  baseline suspend-while-parked — and model-check the no-silent-wait and
-  cycle-break invariants in isolation before any cutover.
-- Decide the baseline's "hasn't cleared" trigger (event-based preferred).
-- Defer precise cycle detection until a measured churn number justifies it.
-- Map the manager/executor pools and the governor's per-wave gate around the core.
+- The permit core (pools, acquire, idle-steal) is specified and has its own
+  build/model-check plan in `permit-core.md`, "Open / next". This document's
+  remaining work is the **dispatch side**:
+- Map the **manager and executor pools** onto the existing `worker.Pool` +
+  `workq.Queue`: who admits (manager, non-blocking acquire) versus who runs and
+  reacquires (executor, blocking) — the two drive modes above — and how demand-driven
+  executor scaling reads its signal from the always-live managers.
+- Place the **governor's per-wave gate** around the manager admission path (it
+  shuts down top-level submits when the pipeline is clogged at skim or permit
+  capacity).
+- Sequence the migration off the live eager code in `limiter.go`
+  (`directRequest`/`reclaimRequest`/`suspendForEpisode`) without a flag day.

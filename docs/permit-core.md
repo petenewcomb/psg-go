@@ -301,13 +301,15 @@ body — its own code *including* a skim-handler invocation — always holds its
 base, while only a purely blocked-waiting body lends it.
 
 A body drives **at most one sub-wave at a time** (it is one goroutine, parked on
-one queue), but driving can **nest**: a skim handler for wave A may itself drive a
-wave B (`A`'s handler calls `CloseAndSkimAll(B)`). The base then follows the
-computation locus *down* the nesting — held by A's handler while it computes, lent
-to B's units while the handler waits on B, reacquired to run B's handler — and
-unwinds back out as each drive completes. Interleaved or nested driving is just the
-alternation applied at each level; no level holds the base while a deeper level
-needs to lend it.
+one queue), but driving can **nest**: a body driving wave A may, inside a handler,
+drive a further wave B (`CloseAndSkimAll(B)`). The base then follows the computation
+locus *down* the nesting — held while the body computes, lent to B's units while it
+waits on B, reacquired to run B's handler — and unwinds back out as each drive
+completes. Interleaved or nested driving is just the alternation applied at each
+level; no level holds the base while a deeper level needs to lend it. (A *skim*
+handler may nest a drive too, but it is limiter-free, so it holds no base to lend —
+B's units simply acquire their own permits; the only restriction is that B not be a
+wave the handler is part of — its own wave or an ancestor.)
 
 The deadlock-freedom argument below already accommodates this: a skim-handler
 invocation is itself a running computation that eventually completes (returns to
@@ -348,8 +350,8 @@ So the baseline ships with **no wait-for graph, no cycle walk, and no detector**
 and is provably live. Precise cycle detection survives only as a *churn-reduction*
 optimization — choosing *which* idle permit to steal to minimize re-acquisition —
 worth building only if a measured steal/re-acquire rate justifies it, and under
-the structural rules (intake-only limiting, the skim-gather ban) genuine
-contention should be rare enough that it may never pay for itself.
+the structural rules (intake-only limiting; you cannot skim a wave you are part of)
+genuine contention should be rare enough that it may never pay for itself.
 
 This rests on three structural assumptions, each of which the surrounding design
 already guarantees; a violation of any would reopen the cycle, so they are
@@ -363,10 +365,17 @@ contract, not convenience:
 - **Parking makes the parked unit's occupied permit idle** (`inUse−−` on park,
   `inUse++` on resume), so "parked ⟹ borrowable" is exact and needs no global
   bookkeeping.
-- **Limiters gate intake, not drain** (carried unchanged from
-  `limiter-suspend-resume.md`: skim handlers and funnel flushes are limiter-free;
-  the skim-gather ban holds). This is what keeps a drain — the thing that lets a
-  parked holder eventually resume — from itself depending on a permit.
+- **Limiters gate intake, not drain, and a drain never cyclically depends on a
+  permit.** Skim handlers and funnel flushes are limiter-free — they hold no permit.
+  A drain *may* drive a sub-wave (whose bodies acquire via the cache, deadlock-free),
+  but **a body may not skim a wave it is part of** — its own wave or any ancestor
+  (its `parentWaves`). That is the one rule that would otherwise let a drain wait,
+  transitively, on itself (a reentrant self-wait on its own goroutine, or a
+  cross-goroutine ancestor cycle). So a parked holder's drain always completes and
+  frees it: it holds
+  no permit and cannot cyclically depend on one. (This *narrows* the former blanket
+  skim-gather ban, which forbade a skim handler from driving *any* gather — an
+  independent sub-wave is not an ancestor, so it is now allowed.)
 
 ## Invariants (the model-check targets)
 

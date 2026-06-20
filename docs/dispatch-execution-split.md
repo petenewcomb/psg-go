@@ -9,8 +9,8 @@ of `limiter-suspend-resume.md`. The permit *allocation* model that rides on this
 split — pools, the locality-ordered acquire, idle-stealing, cache-don't-return — is
 specified separately in `permit-core.md`; this document covers only how the split
 shapes, and is shaped by, that model. It deliberately keeps the load-bearing
-constraints of the limiter design (intake/drain split, skim-gather ban) and its
-scheduler/resource layering.
+constraints of the limiter design (intake/drain split; the narrowed skim-cycle rule
+— you cannot skim a wave you are part of) and its scheduler/resource layering.
 
 ## The problem it solves
 
@@ -176,8 +176,12 @@ This design **keeps**, unchanged and load-bearing:
   `WithLimits`; skim handlers and funnel flushes are limiter-free. This is what
   makes "queue drain never depends on a permit" true, which the always-live-managers
   story also leans on.
-- **The skim-gather ban** (`vetNotNestedInSkim`): a skim handler — the sole serial
-  drain driver — may not drive a blocking gather.
+- **You cannot skim a wave you are part of** (narrows the former blanket skim-gather
+  ban): a body may not skim its own wave or any ancestor (its `parentWaves`) — the
+  single condition that closes a skim-drive cycle (a reentrant self-wait, or a
+  cross-goroutine ancestor cycle). A skim handler *may* now drive an independent
+  sub-wave (which it is not part of); concurrent drives of independent waves are
+  allowed (the caller must keep skimmers concurrency-safe). `Try*` is unrestricted.
 - **The scheduler/resource layering**: schedulers are the closed set (direct,
   ordered, prioritized) carrying the protocol; resources are the open extension
   point (semaphore, memory, rate, weighted), each a small accounting object.

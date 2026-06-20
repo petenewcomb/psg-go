@@ -23,7 +23,11 @@ same permit.
 >
 > **Still authoritative here, and load-bearing in the converged design:** the
 > **intake/drain split** (limiters gate intake, never drain; skimmers never take
-> `WithLimits`; the **skim-gather ban**) — "Intake vs drain"; the
+> `WithLimits`) — "Intake vs drain". **The blanket skim-gather ban below is
+> NARROWED**: the converged rule is just *you cannot skim a wave you are part of*
+> (own or ancestor — its `parentWaves`); a skim handler may now drive an independent
+> sub-wave, and concurrent drives of independent waves are allowed (concurrency-safe
+> skimmers are the caller's burden). Also still load-bearing: the
 > **scheduler/resource layering** (closed schedulers — direct/ordered/prioritized;
 > open resources — semaphore/memory/rate/weighted) — "Resources" and "Multiple
 > limiters"; and the prioritized scheduler's atomic-fit + withholding, on which the
@@ -456,9 +460,13 @@ So for a funnel, `WithLimits` means **accumulate (intake) concurrency**, and:
   *would* decouple instance count from concurrency and could warrant its own
   resource — future, via the scheduler.)
 
-**Skim handlers must not drive a blocking gather.** A skimmer's drain has a
-single serial driver (its `Skim`/`SkimAll`/`CloseAndSkimAll` caller, plus
-transient block-and-help helpers). If a skim handler itself drives a subwave
+**Skim handlers must not drive a blocking gather.** *(NARROWED — see the banner:
+the converged rule is only "you cannot skim a wave you are part of." A skim handler
+may drive an **independent** sub-wave; the blanket prohibition below was an
+artifact of the eager model's limiter-mediated cycle, which the permit cache
+dissolves.)* A skimmer's drain has a single serial driver (its
+`Skim`/`SkimAll`/`CloseAndSkimAll` caller, plus transient block-and-help helpers).
+If a skim handler itself drives a subwave
 (`CloseAndSkimAll` from inside the handler), it monopolizes that sole driver
 while parked in the sub-gather — and under limiter sharing / nested subjobs
 that closes a driver-scarcity cycle: an outer wave can't drain to free a shared

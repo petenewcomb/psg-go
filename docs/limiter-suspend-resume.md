@@ -6,26 +6,32 @@ when the holder resumes work. It exists to dissolve a busy-spin livelock in
 which a permit held across a blocking skim starves other work that needs the
 same permit.
 
-> **PARTIALLY SUPERSEDED (2026-06-20) — see `dispatch-execution-split.md`.** The
-> *eager* protocol below — "a permit gates active computation, not blocked-waiting,"
-> so a holder relinquishes its permit *whenever it parks* (the two-class park rule,
-> the suspend/reclaim bracket, help-shaped reclaim) — is replaced. In the current
-> design a unit **holds its permits through parks** ("held by the unit, period") to
-> minimize work-in-flight and re-acquisition; the only give-back is a **last-resort,
-> scheduler-internal suspend of a zero-leaf parked permit** to break an actual
-> cross-subtree cycle. The scheduler is likewise no longer per-op/per-domain but
-> **global**, one per process.
+> **SUPERSEDED (2026-06-20) — see `permit-core.md` (the allocation model) and
+> `dispatch-execution-split.md` (the dispatch/execution split).** The *eager*
+> protocol below — "a permit gates active computation, not blocked-waiting," so a
+> holder relinquishes its permit *whenever it parks* (the two-class park rule, the
+> suspend/reclaim bracket, help-shaped reclaim) — is replaced wholesale by a
+> **hierarchical permit cache**. A unit holds its permits through parks and they are
+> *cached idle* rather than suspended; the only give-back is an idle **steal** by
+> another pool that genuinely needs the permit — the baseline allocation path, not a
+> last-resort cycle-breaker. That model is **deadlock-free per-limiter with no cycle
+> graph**, so there is no cycle detector, no suspend-while-parked breaker, and no
+> global scheduler *for deadlock-freedom*; a coordinator survives only for the
+> deferred cross-limiter *joint-acquisition* feature. (An intermediate draft kept
+> "hold through parks + last-resort zero-leaf suspend + global scheduler"; that too
+> is now retired — `permit-core.md` carries the reasoning.)
 >
-> **Still authoritative here, and load-bearing in both designs:** the **intake/drain
-> split** (limiters gate intake, never drain; skimmers never take `WithLimits`; the
-> **skim-gather ban**) — "Intake vs drain"; the **scheduler/resource layering**
-> (closed schedulers — direct/ordered/prioritized; open resources — semaphore/
-> memory/rate/weighted) — "Resources" and "Multiple limiters"; the request-handle
-> state machine as the limiter's internal contract; **POSTPONED**; and the
-> prioritized scheduler's atomic-fit + withholding, on which the current design's
-> *delta* acquisition builds. What changes is *when* a permit is returned (eagerly on
-> any park → only as a last-resort cycle-break) and the scheduler's *scope*
-> (per-domain → global) — not the resource/scheduler machinery beneath.
+> **Still authoritative here, and load-bearing in the converged design:** the
+> **intake/drain split** (limiters gate intake, never drain; skimmers never take
+> `WithLimits`; the **skim-gather ban**) — "Intake vs drain"; the
+> **scheduler/resource layering** (closed schedulers — direct/ordered/prioritized;
+> open resources — semaphore/memory/rate/weighted) — "Resources" and "Multiple
+> limiters"; and the prioritized scheduler's atomic-fit + withholding, on which the
+> deferred joint-acquisition feature builds. The request-handle state machine and
+> the eager SUSPENDED state are gone (no suspend); **POSTPONED** reconciles into the
+> pool model (a pre-body grant has `inUse == 0` and returns to the pool). What
+> changes is the give-back mechanism (eager suspend on any park → cache-and-steal,
+> no suspend) and that no coordinator is needed for deadlock-freedom.
 
 ## The problem
 

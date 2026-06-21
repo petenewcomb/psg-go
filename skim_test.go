@@ -147,7 +147,7 @@ func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 
 	// Saturate a limiter so the next TrySubmit can't dispatch
 	// immediately.
-	limit := streampool.NewSemaphore(nil, 1)
+	limit := streampool.NewSemaphore(1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
 	runner := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
@@ -179,7 +179,7 @@ func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	limit := streampool.NewSemaphore(nil, 1)
+	limit := streampool.NewSemaphore(1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
 	runner := streampool.NewTaskLauncher(wave, func(_ context.Context) error {

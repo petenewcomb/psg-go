@@ -123,7 +123,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 		_, subTopMeta := subWave.ctxMeta(subCtx)
 		subwaveSeenReq = subTopMeta.currentHeldRequest()
 		return subWave.CloseAndSkimAll(subCtx)
-	}, WithLimits(NewSemaphore(nil, 1)))
+	}, WithLimits(NewSemaphore(1)))
 	require.NoError(t, limited.Start(ctx))
 
 	var unlimitedReq request = &directRequest{} // sentinel, overwritten
@@ -154,7 +154,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 			},
 			FlushFn: func(context.Context) error { return nil },
 		}
-	}, nil, WithLimits(NewSemaphore(nil, 1)))
+	}, nil, WithLimits(NewSemaphore(1)))
 	defer f.Close()
 	require.NoError(t, f.Submit(ctx2, 1))
 	require.NoError(t, wave2.CloseAndSkimAll(ctx2))

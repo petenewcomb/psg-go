@@ -23,7 +23,7 @@ func Example_scatterSkim() {
 	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := streampool.NewSemaphore(nil, 3)
+	poolLimit := streampool.NewSemaphore(3)
 	_ = ctx
 
 	var clock exmpclk.ExampleClock

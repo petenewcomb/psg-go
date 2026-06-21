@@ -37,20 +37,6 @@ type Limiter struct {
 	impl limiterImpl
 }
 
-// Scheduler is the coordination point for joint admission across multiple
-// Limiters: every Limiter is bound to at most one Scheduler, fixed at
-// construction, and all Limiters passed to a single op's [WithLimits] must
-// resolve to the same Scheduler. Passing a nil *Scheduler to a Limiter
-// constructor means self-scheduled (the Limiter is its own trivial,
-// single-member scheduler).
-//
-// In v0.x there are no Scheduler constructors yet — nil is the only
-// supported value. The parameter exists now so that the scheduler's role
-// is visible at the moment a Limiter is created.
-type Scheduler struct {
-	_ [0]func() // opaque; no public constructors yet
-}
-
 // limiterImpl is the internal contract every Limiter constructor must
 // satisfy. It is unexported, so external packages cannot introduce new
 // Limiter types. It is implemented by a scheduler — for now only the
@@ -537,20 +523,12 @@ func SetMaxConcurrency(l Limiter, n int) {
 }
 
 // NewSemaphore returns a Limiter that grants at most n simultaneous
-// permits. Use n < 0 for unlimited (the same semantics as the
-// pre-Wave-4 [NewTaskPool] default). n == 0 blocks all dispatches.
+// permits. Use n < 0 for unlimited; n == 0 blocks all dispatches.
 //
-// scheduler must be nil (self-scheduled) in v0.x; the parameter exists
-// so the scheduler's coordinating role is visible at construction. See
-// [Scheduler].
-//
-// The Semaphore replaces what was a [TaskPool] property in the pre-
-// Wave-4 API: WithMaxConcurrency on the pool moves to
-// `WithLimits(NewSemaphore(nil, n))` on the op.
-func NewSemaphore(scheduler *Scheduler, n int) Limiter {
-	if scheduler != nil {
-		panic("NewSemaphore: non-nil Scheduler is not yet supported")
-	}
+// Share one Limiter across ops for a collective cap; pass several to a
+// single op's [WithLimits] for AND-composition (admitted jointly in a
+// global order, deadlock-free).
+func NewSemaphore(n int) Limiter {
 	if n < -1 {
 		panic(fmt.Sprintf("max concurrency %d is less than minimum allowed value of -1", n))
 	}

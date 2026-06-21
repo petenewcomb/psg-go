@@ -48,7 +48,7 @@ func ExampleFunnel() {
 	defer wave.CancelAndWait()
 
 	// Limit concurrent tasks to 2.
-	taskLimit := streampool.NewSemaphore(nil, 2)
+	taskLimit := streampool.NewSemaphore(2)
 
 	// Create a funnel pool and disable the idle timeout
 	funnelPool := wave

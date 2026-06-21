@@ -44,7 +44,7 @@ func Example_observable() {
 	)
 
 	// Limit dispatch concurrency to 2.
-	limit := streampool.NewSemaphore(nil, 2)
+	limit := streampool.NewSemaphore(2)
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// Launcher. The task body Submits its result to the skimmer.

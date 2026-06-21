@@ -14,7 +14,7 @@ import (
 // request-handle access.
 func newTestSemaphore(t *testing.T, n int) (Limiter, *directScheduler) {
 	t.Helper()
-	l := NewSemaphore(nil, n)
+	l := NewSemaphore(n)
 	s, ok := l.impl.(*directScheduler)
 	require.True(t, ok, "NewSemaphore impl is not a directScheduler")
 	return l, s

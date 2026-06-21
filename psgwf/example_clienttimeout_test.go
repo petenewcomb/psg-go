@@ -24,7 +24,7 @@ func Example_clientTimeout() {
 	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := streampool.NewSemaphore(nil, 10)
+	poolLimit := streampool.NewSemaphore(10)
 
 	var clock exmpclk.ExampleClock
 	clock.Start()

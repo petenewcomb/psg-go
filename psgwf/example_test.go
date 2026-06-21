@@ -23,7 +23,7 @@ func Example() {
 	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := streampool.NewSemaphore(nil, 10)
+	poolLimit := streampool.NewSemaphore(10)
 	_ = ctx
 
 	// Track completed operations for ordered output

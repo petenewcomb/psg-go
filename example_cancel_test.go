@@ -24,7 +24,7 @@ func ExampleWave_Cancel() {
 	// not the call to Wave.Cancel that is the subject of this example.
 	defer wave.CancelAndWait()
 
-	limit := streampool.NewSemaphore(nil, 1)
+	limit := streampool.NewSemaphore(1)
 
 	printResult := streampool.NewFnSkimmer(wave,
 		func(ctx context.Context, result string, err error) error {
@@ -86,7 +86,7 @@ func ExampleWave_Cancel_task() {
 	// not the call to Wave.Cancel that is the subject of this example.
 	defer wave.CancelAndWait()
 
-	limit := streampool.NewSemaphore(nil, 1)
+	limit := streampool.NewSemaphore(1)
 
 	printResult := streampool.NewFnSkimmer(wave,
 		func(ctx context.Context, result string, err error) error {

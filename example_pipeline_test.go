@@ -45,7 +45,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Cap concurrent digesting tasks at the number of cores available
 	// to the program, since they should be CPU-bound.
-	digestLimit := streampool.NewSemaphore(nil, runtime.GOMAXPROCS(-1))
+	digestLimit := streampool.NewSemaphore(runtime.GOMAXPROCS(-1))
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)

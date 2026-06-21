@@ -260,7 +260,7 @@ func (c *controller) ensurePools() {
 				c.taskLimiterTrackers[i] = c.parent.taskLimiterTrackers[lim.InheritFromParent]
 				continue
 			}
-			c.TaskLimiters[i] = streampool.NewSemaphore(nil, lim.Permits)
+			c.TaskLimiters[i] = streampool.NewSemaphore(lim.Permits)
 			c.taskLimiterTrackers[i] = &limiterTracker{}
 		}
 		for i, lim := range c.Plan.FunnelLimiters {
@@ -269,7 +269,7 @@ func (c *controller) ensurePools() {
 				c.funnelLimiterTrackers[i] = c.parent.funnelLimiterTrackers[lim.InheritFromParent]
 				continue
 			}
-			c.FunnelLimiters[i] = streampool.NewSemaphore(nil, lim.Permits)
+			c.FunnelLimiters[i] = streampool.NewSemaphore(lim.Permits)
 			c.funnelLimiterTrackers[i] = &limiterTracker{}
 		}
 	})

@@ -1,5 +1,13 @@
 # Context Metadata Management
 
+> **Dated optimization record (pre-rename terminology).** This captures a
+> context-allocation optimization in `Job`/scatter/gather-era vocabulary; the
+> internal names below (`Job.vettedContext`, `Job.gatherContext`,
+> `BenchmarkCombinerThroughput`, etc.) predate the op-trio rename and the
+> Pool/workq consolidation and may no longer match the code. Treated as a decision
+> record; the live source of truth is `ctxmeta.go`. Reconcile against current code
+> as part of the doc pass that accompanies the code migration.
+
 ## Context Allocation Optimization: Three-Layer Caching Strategy
 
 **Impact**: 73% throughput improvement through systematic context allocation elimination

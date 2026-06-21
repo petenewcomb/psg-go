@@ -1,7 +1,11 @@
 # Architecture Comparison: Steady-State Contention & Allocations
 
-Source-based architectural analysis of how psg-go compares against the
-closest competitors on two performance axes used in `README-proposed.md`:
+> Decision/evidence doc. "psg-go" below is the current code; "streampool" is the
+> repositioned target name (see `docs/decisions/API_DESIGN.md`) — the source-level
+> analysis is of the current `psg-go` internals and holds under either name.
+
+Source-based architectural analysis of how the library compares against the
+closest competitors on two performance axes used in the README comparison table:
 **steady-state contention** and **per-task allocations**.
 
 This is design-level analysis, not benchmark data. The ratings in the
@@ -984,10 +988,14 @@ These models provide asynchronous programming abstractions with composition capa
 Unlike traditional scatter-gather that waits for all tasks to complete, streampool processes results incrementally as they arrive, enabling streaming aggregation patterns.
 
 #### Controlled Reentrancy
-streampool allows skim and funnel functions to spawn new tasks within the same wave, enabling recursive processing while maintaining structured guarantees through work queueing.
+Any body may submit more work and drive sub-waves it owns, enabling recursive
+processing while preserving structured-concurrency guarantees. The one structural
+rule is that a body may not skim a wave it is part of (its own or an ancestor).
 
 #### Multi-Resource Management
-Different task types can use independent concurrency pools (Launchers) with separate limits, enabling fine-grained resource control within a structured scope.
+Per-op concurrency is expressed with composable Limiters (a shared limiter for a
+collective cap, several on one op with AND semantics), enabling fine-grained
+resource control within a structured scope without separate pool types.
 
 #### Funnel Pattern
 Stateful aggregation with automatic flushing enables efficient batch processing and windowing operations that traditional structured concurrency doesn't directly support.
@@ -1095,7 +1103,7 @@ While these systems operate at a different architectural level than streampool, 
 
 ### Summary
 
-The streampool programming model provides a structured approach to concurrent workflows that combines the performance benefits of parallelism with the safety and predictability needed for production systems. By embracing structured concurrency principles and providing clear abstractions for scatter-gather-combine patterns, streampool enables developers to build complex concurrent applications without the typical hazards of concurrent programming.
+The streampool programming model provides a structured approach to concurrent workflows that combines the performance benefits of parallelism with the safety and predictability needed for production systems. By embracing structured concurrency principles and providing clear abstractions for fan-out, streaming aggregation, and result handling, streampool enables developers to build complex concurrent applications without the typical hazards of concurrent programming.
 
 streampool's unique position in the Go ecosystem comes from its combination of structured concurrency guarantees, incremental processing capabilities, and Go-native design. It fills the gap between simple concurrency utilities like errgroup and complex reactive frameworks, providing a practical solution for sophisticated in-process concurrent workflows.
 

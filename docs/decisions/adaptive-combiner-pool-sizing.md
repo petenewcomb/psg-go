@@ -1,5 +1,13 @@
 # Adaptive Combiner Pool Sizing
 
+> **Supplanted (history).** This documents the spare-channel U-curve / valley-knee
+> sizing algorithm for the old per-type "combiner pool." It was replaced by a
+> simpler demand-driven model (and the Pool/workq consolidation moves to an internal
+> `worker.Pool` with uncapped demand; per-op concurrency is via Limiters) — see
+> `docs/decisions/API_DESIGN.md` (open-question audit) and
+> `docs/plan/global-substrate-activation.md`. Kept as a decision record of the
+> approach and why it was set aside; it does not describe current/target behavior.
+
 ## Problem Context
 
 PSG's combiner pools face a fundamental resource allocation challenge: determining the optimal number of goroutines to maximize throughput while minimizing resource waste and latency. This problem is more complex than traditional capacity planning because of several unique characteristics of the PSG architecture.

@@ -64,6 +64,33 @@ may have docs lead code):**
 - `API_DESIGN.md` → reborn as the `docs/decisions/` target-surface record;
   `programming-model.md` → folds into `doc.go` (deferred to the code migration).
 
+**►►► WAVE LIFECYCLE FINALIZED (2026-06-21b) — supersedes the Wave bullet above**
+(the single-return / value-handle / adopt-parent-from-first-use thinking). Strict
+stance: **ctx is DRIVER-SPECIFIC.** Like the internal Pool, a Wave owns NO ctx.
+- **No constructor.** Ditch NewWave AND NewChild. `var w streampool.Wave` (zero
+  value usable). A sub-wave is just a zero-value Wave first-used inside a body.
+- **No Wave Cancel / Wait / CancelAndWait.** The only lifecycle op is the drain:
+  `Skim` / `SkimAll` / `CloseAndSkimAll`, returning **ErrWaveDone** when
+  in-flight==0 ∧ sealed. `SkimAll(ctx)` IS the structured scope; ctx is the driver's.
+- **Cancellation = the drive ctx (pure).** Cancelling the SkimAll ctx → it returns
+  ctx.Err(); in-flight work keeps running under its own submit ctxs (cancel those —
+  usually the same ctx — to stop it). NO framework force-abort. No goroutine leak:
+  workers belong to the GLOBAL pool (not per-wave); `streampool.Wait()` stops idle
+  workers and joins them.
+- **Lazy init + reuse.** A zero Wave self-inits its substrate on first ctx-bearing
+  use (op dispatch into it, or Skim/SkimAll) via a race-safe `ensureInit(ctx)`, and
+  is reusable after the drain returns (no explicit teardown call). The creation-time
+  `parentJobs`/`shells.Init` stamping (was in NewWave) MOVES to `ensureInit`, keyed
+  on the first-use ctx = the driving body's ctx → captures the DRIVING ancestry.
+- **Driving ancestry only.** Parentage for limiters (permit inheritance) and the
+  "can't skim a wave you're part of" guard is the DRIVING goroutine's ctxMeta
+  nesting, captured at drive — never a creation/cancellation parent.
+- **Funnel flusher re-homed** to exit on wavestate→Done (in-flight==0 ∧ sealed),
+  not a CancelAndWait join.
+- Wave stays `*Wave` (no value conversion); bind with `op.In(&w)`. The user owns
+  pooling (`sync.Pool[*Wave]` or reuse a var). 3b (single-return NewWave) and 3c
+  (value handle) are MOOT.
+
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new
 spec); reconciled dispatch-execution-split.md, limiter-suspend-resume.md,

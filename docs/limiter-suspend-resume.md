@@ -36,6 +36,15 @@ same permit.
 > pool model (a pre-body grant has `inUse == 0` and returns to the pool). What
 > changes is the give-back mechanism (eager suspend on any park → cache-and-steal,
 > no suspend) and that no coordinator is needed for deadlock-freedom.
+>
+> **The "scheduler" is now INTERNAL (2026-06-21 lock).** There is no user-facing
+> Scheduler/Coordinator and no `WithScheduler` — joint admission of a multi-limiter
+> `WithLimits` set is deadlock-free via a **global acquisition order** (no object),
+> and the prioritized discipline is a single **internal global arbiter**. So the
+> "Multiple limiters: the scheduler" section and the `NewSemaphore(scheduler, n)` /
+> `NewSemaphore(nil, n)` constructor shape below are superseded as a *user* surface;
+> they survive only as internal-mechanism history. Limiter constructors are
+> `NewSemaphore(n)` etc.
 
 ## The problem
 
@@ -455,7 +464,7 @@ So for a funnel, `WithLimits` means **accumulate (intake) concurrency**, and:
   instance count — and thus partial-aggregate memory — is bounded by accumulate
   concurrency. Whatever caps concurrency (an explicit limiter, or the
   governor's downstream-blockage spawn-brake — see
-  `backpressure-and-reentrancy.md`) caps instances for free; an unlimited
+  `docs/decisions/backpressure-and-reentrancy.md`) caps instances for free; an unlimited
   funnel grows instances only as fast as the skimmer drains. (Keyed aggregation
   *would* decouple instance count from concurrency and could warrant its own
   resource — future, via the scheduler.)

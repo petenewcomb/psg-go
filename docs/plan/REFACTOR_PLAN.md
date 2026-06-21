@@ -1,16 +1,16 @@
 # Refactor Plan
 
 The plan for moving from the current psg-go codebase to the streampool
-design captured in `API_DESIGN.md`. This doc tracks status, sequences
+design captured in `docs/decisions/API_DESIGN.md`. This doc tracks status, sequences
 remaining work, and flags decisions and design sessions that gate
 specific waves.
 
 Companion docs:
-- `API_DESIGN.md` — destination: final naming and API surface
+- `docs/decisions/API_DESIGN.md` — destination: final naming and API surface
 - `docs/permit-core.md` — the permit allocation model (the hierarchical cache)
 - `docs/dispatch-execution-split.md` — the dispatch/execution architecture
-- `POSITIONING_RESEARCH.md` — outward-facing audience research
-- `ARCHITECTURE_COMPARISON.md` — source-level competitive analysis
+- `docs/decisions/POSITIONING_RESEARCH.md` — outward-facing audience research
+- `docs/decisions/ARCHITECTURE_COMPARISON.md` — source-level competitive analysis
 
 This doc describes the *journey*. API_DESIGN describes the *destination*.
 

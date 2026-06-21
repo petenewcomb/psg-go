@@ -26,11 +26,10 @@ one of these walls:
 ``` go
 ctx := context.Background()
 
-wave := streampool.NewWave(ctx)   // a batch of work to await; uses the default pool
-defer wave.Close()
+wave := streampool.NewWave(ctx)   // a batch of work to await; the worker pool is internal
 
 var results []string
-collect := streampool.NewSkimmer(wave, streampool.HandlerFunc[string](
+collector := streampool.NewSkimmer(streampool.HandlerFunc[string](
     func(ctx context.Context, s string, err error) error {
         if err != nil { return err }
         results = append(results, s)
@@ -38,18 +37,18 @@ collect := streampool.NewSkimmer(wave, streampool.HandlerFunc[string](
     },
 ))
 
-greet := streampool.NewLauncher(wave, streampool.HandlerFunc[string](
+greeter := streampool.NewLauncher(streampool.HandlerFunc[string](
     func(ctx context.Context, s string, err error) error {
         if err != nil { return err }
         time.Sleep(1 * time.Millisecond)
-        return collect.Submit(ctx, s)
+        return collector.Submit(ctx, s)   // ambient: lands in this body's wave
     },
 ))
 
-greet.Submit(ctx, "Hello")
-greet.Submit(ctx, "world!")
+greeter.In(wave).Submit(ctx, "Hello")     // top level: route with In(wave)
+greeter.In(wave).Submit(ctx, "world!")
 
-wave.SkimAll(ctx)
+wave.CloseAndSkimAll(ctx)                  // seal + drain to completion
 fmt.Println(strings.Join(results, " "))
 ```
 
@@ -64,21 +63,21 @@ streampool enables frictionless execution of recursive streams of work
 in hierarchical waves with granular visibility and control of individual
 flows. Three types compose:
 
-- **Pool** — the workers. Internal and fungible: a process-wide default
-  is used implicitly, sized automatically (adaptive between zero and a
-  ceiling, retiring idle workers; lifecycle is refcount-driven). You
-  don't construct or tune it — per-op concurrency is controlled with
-  Limiters instead.
-- **`Wave`** — a batch of work to be completed together. The
-  user-primary type. Ops are constructed against a Wave;
-  `wave.Skim` / `wave.SkimAll` drain it. Waves nest
-  (`wave.NewChild`) and may overlap freely.
+- **`Wave`** — a batch of work to be completed together; the user-primary
+  type, a value handle. Ops route work into a wave (the ambient wave inside a
+  body, or `op.In(wave)`); `wave.Skim` / `wave.SkimAll` / `wave.CloseAndSkimAll`
+  drain it. Waves nest (`wave.NewChild`) and may overlap freely.
 - **`Flow`** — optional, ctx-borne lifecycle entity for a single
   workflow instance. Refcounted, can span multiple Waves. Use a Flow
   to attach trace context, audit metadata, or cleanup hooks to a
   logical unit of work that may cross batch boundaries.
+- **Pool** — the workers. Internal and fungible: a process-wide default
+  is used implicitly, sized automatically (adaptive with demand from zero,
+  retiring idle workers; lifecycle is refcount-driven). You don't construct
+  or tune it — per-op concurrency is controlled with Limiters instead.
 
-Inside a Wave, three op types compose pipelines:
+Ops are **wave-agnostic** — define them once (no wave at construction) and reuse
+them; three op types compose pipelines:
 
 - **`Launcher[T]`** — stateless dispatch. Each `Submit` runs the body
   (`Handler[T]` / `HandlerFunc[T]`) on the pool's workers, in parallel.
@@ -90,11 +89,11 @@ Inside a Wave, three op types compose pipelines:
   goroutine when you `wave.Skim(ctx)` or `wave.SkimAll(ctx)`.
 
 Function bodies route values explicitly by calling `sink.Submit(ctx, v)`
-(or `sink.SubmitErr(ctx, v, err)` for value+error pairs) on any
-downstream op they have in scope. No declarative wiring step; the
-dataflow lives in the code that produces values. Submit can cross Wave
-boundaries — a task running in one Wave can submit into another Wave's
-sinks.
+(or `sink.SubmitErr(ctx, v, err)` for value+error pairs) on any downstream op
+in scope. No declarative wiring step; the dataflow lives in the code that
+produces values. Inside a body, `Submit` targets the ambient wave; use
+`op.In(wave)` to place work at top level or redirect into another wave —
+routing never disturbs the ctx, so a Flow rides along across the hop.
 
 ## What you get
 
@@ -115,19 +114,17 @@ sinks.
   op via `WithLimits(...)`. Limiters compose: an op can be subject to a
   per-API semaphore *and* a global rate limit simultaneously. Multiple
   ops can share a Limiter to express a collective cap.
-- **Adaptive pool sizing.** The worker pool scales between zero and a
-  ceiling under demand and retires goroutines when idle — automatically,
-  with no pool to construct or tune. GC-aware and load-aware
-  backpressure are planned as `Limiter` types (`NewAdaptive`), letting
-  users opt in per-op or share one Adaptive Limiter across multiple ops
-  for process-wide coordination.
+- **Adaptive pool sizing.** The worker pool scales with demand from zero and
+  retires goroutines when idle — automatically, with no pool to construct or
+  tune. GC-aware and load-aware backpressure are planned as `Limiter` types,
+  letting users opt in per-op or share one across multiple ops for process-wide
+  coordination.
 - **End-to-end backpressure.** Workers don't just scale to local queue
   depth — the pool right-sizes to wherever the actual bottleneck is.
   Admission is paced by an always-live manager: top-level submission
-  waits while a downstream stage is saturated, funnel queues
-  back-pressure their upstream Submits, and the pool ceiling acts as a
-  hard cap. Pipelines stay paced to the slowest downstream stage with no
-  manual buffer-sizing.
+  waits while a downstream stage is saturated, and funnel queues
+  back-pressure their upstream Submits. Pipelines stay paced to the slowest
+  downstream stage with no manual buffer-sizing.
 - **Allocation-free hot path.** Op bindings, funnel state, queue nodes,
   and skim-callback wrappers are all recycled through pooled storage.
   With a typed argument (or a pooled argument struct), the user's
@@ -174,8 +171,8 @@ sinks.
 [^a]: Ceiling-only: workers spawn on demand up to a configurable maximum
   and retire when idle. No configurable floor (`pond` removed `MinWorkers`
   in v2). Ceiling is tunable at runtime (`ants.Tune`, `pond.Resize`).
-[^b]: Pool-wide adaptive worker count between zero and a configurable
-  ceiling. No separate task/funnel pool types to manage; per-op
+[^b]: Pool-wide adaptive worker count scaling with demand from zero, internal
+  and not user-tuned. No separate task/funnel pool types to manage; per-op
   concurrency control lives in composable Limiters instead.
 [^c]: Local queue-depth scaling; no awareness of downstream consumption.
   Queues can fill while consumers fall behind.
@@ -185,8 +182,7 @@ sinks.
   sequential pipelines.
 [^e]: The pool right-sizes to the workflow bottleneck. An always-live
   manager paces admission — top-level submission waits while a downstream
-  stage is saturated; funnel queues back-pressure their upstream Submits;
-  the pool ceiling acts as a hard cap.
+  stage is saturated; funnel queues back-pressure their upstream Submits.
 [^f]: `ants` takes a spin lock on every submit *and* every completion;
   `pond` takes a `sync.Mutex` on every submit and every `readTask`. Both
   serialize dispatch through a single shared lock.

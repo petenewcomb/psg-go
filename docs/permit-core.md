@@ -9,8 +9,9 @@ per-unit "base holds" with a *last-resort* zero-leaf suspend) and supersedes the
 results: acquisition is a single locality-ordered primitive that keeps the common
 case lock-free and local; idle capacity is *cached, not returned*, and flows by
 on-demand pull; the model is **deadlock-free per-limiter with no cycle graph**; and
-a global scheduler is needed *only* for the deferred cross-limiter joint-acquisition
-feature, never for deadlock-freedom.
+joint admission of multiple limiters is deadlock-free via a **global acquisition
+order** with **no user-facing coordinator** — only the deferred *prioritized*
+discipline uses an internal global arbiter, and never for deadlock-freedom.
 
 This is the spec the isolated permit-core sketch model-checks before any cutover.
 
@@ -358,7 +359,7 @@ already guarantees; a violation of any would reopen the cycle, so they are
 contract, not convenience:
 
 - **A unit blocked acquiring an L-permit holds no `inUse` L-permit itself.**
-  Additional L-concurrency is obtained only by scattering children into a sub-wave
+  Additional L-concurrency is obtained only by submitting children into a sub-wave
   and parking to drive it — never by a running body grabbing a second L-permit
   while staying runnable. An op of weight > 1 takes its whole weight atomically at
   admission, so there is no intra-acquisition hold-and-wait.
@@ -374,7 +375,7 @@ contract, not convenience:
   cross-goroutine ancestor cycle). So a parked holder's drain always completes and
   frees it: it holds
   no permit and cannot cyclically depend on one. (This *narrows* the former blanket
-  skim-gather ban, which forbade a skim handler from driving *any* gather — an
+  skim-drive ban, which forbade a skim handler from driving *any* sub-wave — an
   independent sub-wave is not an ancestor, so it is now allowed.)
 
 ## Invariants (the model-check targets)
@@ -398,20 +399,28 @@ limiter sharing:
 - **Liveness:** no reachable state has a blocked delta while some L-permit is
   borrowable or some L-using body is running.
 
-## What the global scheduler is actually for
+## Cross-limiter joint admission (no user-facing coordinator)
 
-With deadlock-freedom established per-limiter, the global scheduler's role narrows
-to its one genuine cross-limiter job: **atomic joint acquisition** when an op's
-`WithLimits` spans several limiters that must be taken all-or-nothing (the ordered
-and prioritized scheduler disciplines, including starvation-avoidance by
-withholding). That is a separate concern in the overall design matrix and remains
-**deferred**. A global coordinator owning the partitioning of limiters into
-joint-acquisition groups is cleaner than per-group schedulers — it sidesteps the
-"limiter created before its forest exists" binding puzzle — but a per-group
-scheduler would be equally correct; the choice is ergonomic, not a deadlock
-requirement. Everything per-limiter — the lock-free local pool acquire/release of
-steps 1–3 *and* the cross-subtree steal scan of step 4 — stays within that limiter
-and never routes through the cross-limiter coordinator.
+With deadlock-freedom established per-limiter, the only cross-limiter job left is
+**joint admission** when an op's `WithLimits` spans several limiters. This needs
+**no user-facing coordinator** — and, for the default discipline, no coordinating
+object at all:
+
+- **Ordered (default).** The framework acquires a `WithLimits` set in a single
+  **global canonical order** (a process-wide limiter sequence). That is deadlock-free
+  by the standard lock-ordering argument, fully automatic, and requires no per-set or
+  per-group object. A limiter may appear in any combination of `WithLimits` sets
+  because one global order makes them all mutually safe.
+- **Prioritized (deferred).** Cross-op priority with starvation-avoidance
+  (withholding) is the one discipline that needs a central arbiter — it must see all
+  pending demand to decide who to grant and when to withhold. It is a single
+  **internal global arbiter**, opt-in per op/wave, and still exposes **no coordinator
+  type**: a vector touches only the limiters it names, so disjoint ops never contend
+  in the fit decision. No user-defined grouping is needed.
+
+Everything per-limiter — the lock-free local pool acquire/release of steps 1–3 *and*
+the cross-subtree steal scan of step 4 — stays within that limiter and never routes
+through any cross-limiter coordination.
 
 ## Residual points
 

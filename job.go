@@ -899,7 +899,7 @@ func (w poolConfigWrapper) Update(changes opts.PoolConfigChanges) {
 	// (the global worker.Pool owns worker lifecycle; its idle/spawn behavior is
 	// fixed, not per-job tunable). The option API is still accepted for source
 	// compatibility; removing WithTaskWorker* from psgopt is the options-fallout
-	// cleanup. See docs/global-substrate-activation.md.
+	// cleanup. See docs/plan/global-substrate-activation.md.
 	if changes.FlushListener != nil {
 		w.job.state.SetFlushListener(*changes.FlushListener)
 	}

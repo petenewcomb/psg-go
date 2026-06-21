@@ -8,31 +8,31 @@ This is a design artifact, not an implementation plan. The decisions here
 are still revisable, but they form a coherent set — pulling one thread
 often unravels several.
 
-> **SUPERSEDED IN PARTS (2026-06-20).** Decisions taken after this doc
-> (2026-05-25) override three areas below; read `docs/permit-core.md` and
-> `docs/dispatch-execution-split.md` for the current model.
-> - **`Pool` is no longer user-exposed.** The worker pool is internal and
->   automatically sized — there is no `NewPool` / `WithPool` / `PoolOption` in the
->   surface. Users construct **Wave** (and optionally **Flow**); per-op concurrency
->   is controlled with Limiters. The `Pool` type, its constructors, and the "With a
->   custom Pool" example below are retired; "a Pool of workers serves Waves" survives
->   only as the conceptual tagline.
-> - **The permit model is a hierarchical *cache*, not a global scheduler.** Permits
->   are held through parks and *cached idle*; the give-back is an idle **steal**, and
->   the model is **deadlock-free per-limiter, with no cycle graph and no global
->   scheduler**. A coordinator survives only for the deferred cross-limiter
->   *joint-acquisition* feature, so the per-limiter `scheduler` argument is retained
->   for *that* — not collapsed to a global. (The "Limiters" block's "UPDATED" note
->   and the suspend/resume wording are corrected inline below.)
+> **RECONCILING TO THE LOCKED SURFACE (2026-06-21).** A design pass converged the
+> user-facing surface; this doc is being updated to match (full record:
+> `WORKING_NOTES.md`, "SURFACE REDESIGN"). The load-bearing changes vs. the original
+> (2026-05-25) text:
+> - **Pool is internal** — no `NewPool` / `WithPool` / `PoolOption`; sizing is
+>   automatic. Users construct **Wave** and optionally **Flow**.
+> - **Ops are wave-agnostic** — constructors take no wave. The target is the body's
+>   ambient wave, or `op.In(wave)` to place/redirect. No bind-at-construction, no
+>   sentinel.
+> - **Wave and Flow are value handles.** Wave has a single-owner lifecycle (no
+>   `Dup`; Close/Cancel non-refcounted). Flow keeps `Dup`/`Close` (the one cross-wave
+>   refcount) and is the lone ctx-borne type.
+> - **Funnel is wave-scoped** — `Flush` / `FlushTo`, no `Close` / `Dup`;
+>   finalization is wave-driven.
+> - **Limiters are standalone values** — `WithLimits` jointly admits in a global
+>   canonical order; **no user-facing Coordinator/Scheduler** (prioritization is a
+>   deferred, internal-arbiter feature; no API named yet).
 > - **Reentrancy: the only rule is "you cannot skim a wave you are part of."**
->   Principle 7's "task-to-task scatter prohibition" and "skim queued-not-recursive"
->   are superseded — any body may scatter and drive a sub-wave it owns.
+>   Principle 7's task-to-task prohibition / skim-queued-not-recursive are retired.
 
 Companion docs:
 - `docs/permit-core.md` — the permit allocation model (the hierarchical cache).
 - `docs/dispatch-execution-split.md` — the dispatch/execution architecture.
-- `POSITIONING_RESEARCH.md` — outward-facing market/audience research.
-- `ARCHITECTURE_COMPARISON.md` — source-level contention/allocation
+- `docs/decisions/POSITIONING_RESEARCH.md` — outward-facing market/audience research.
+- `docs/decisions/ARCHITECTURE_COMPARISON.md` — source-level contention/allocation
   analysis against competitors.
 
 ---
@@ -98,206 +98,138 @@ These guided every naming and shape decision below.
 
 ---
 
-## The three-type model
+## The model: Wave, Flow, and the internal Pool
 
-Three orthogonal concerns, three types. Conflating any two of them produces
-the kind of API friction this design exists to remove.
+Two user-facing types — **Wave** and **Flow** — plus the ops (the verbs). The
+worker **Pool** is an internal implementation detail, surfaced only to explain
+sizing. Keeping these concerns separate is what removes the API friction this
+design exists to remove.
 
-1. **Pool** — the worker pool. Goroutines, idle policy, max-budget.
-   Fungible and **internal** (see the banner): a process-wide default Pool
-   serves all work and is sized automatically; it is not user-constructed
-   or tuned. Its lifecycle is refcount-driven: workers spin up when the
-   first referencing Wave begins work and exit synchronously when the last
-   Wave referencing it completes its drain, after which it is fully reusable.
-   (The original design exposed a `Pool` type / `NewPool`; that is retired —
-   the conceptual role remains, the surface does not.)
+1. **Wave** — *the* user-facing primary type: a batch of work to complete
+   together, a **value handle** over internal per-batch state. Ops route work
+   into a wave (ambient inside a body, or `op.In(wave)` to place/redirect);
+   `wave.Skim` / `SkimAll` / `CloseAndSkimAll` drain it. Waves nest via
+   `NewChild` — a parent's drain waits for its children — and run concurrently.
+   **Single-owner lifecycle**: no `Dup`; `Close`/`Cancel` are not refcounted.
 
-2. **Wave** — a batch of work to be completed together. The
-   user-facing primary type. Ops are constructed against a Wave; the
-   Wave's `Skim` / `SkimAll` await the completion of its work.
-   Waves nest: a parent Wave's drain waits for its child Waves.
-   Multiple Waves run concurrently on the same Pool routinely.
+2. **Flow** *(optional)* — one logical thread of related work: a refcounted,
+   ctx-borne **value handle** that can span multiple Waves. Use a Flow to attach
+   metadata (trace context, audit data) or a cleanup hook to work that crosses
+   batch boundaries. It is the one type that **rides the ctx** (propagation) and
+   the one that keeps **`Dup`/`Close`** (a cross-wave lifetime no single wave
+   bounds). Most programs never construct one.
 
-3. **Flow** — one logical thread of related work. Refcount-driven,
-   carried in context, lives independently of any Wave. A Flow can
-   submit values into multiple Waves over its lifetime; its
-   lifecycle is bounded by when the work it spans completes, not by
-   any single Wave's drain. Flow is optional — needed when you want
-   to attach metadata (trace context, audit data) to a unit of work
-   that may cross Wave boundaries, run a cleanup hook when its work
-   completes, or have a cancellation domain narrower than the
-   enclosing Pool ctx.
+3. **Pool** *(internal)* — the worker goroutines. A process-wide default Pool
+   serves all work, sized automatically (adaptive under demand, retiring idle
+   workers; refcount-driven lifecycle). Not user-constructed or tuned; per-op
+   concurrency is expressed with **Limiters** instead.
 
-The streampool tagline lands literally: a **Pool** of workers serves
-**Waves** of work; each Wave hosts **Flows** of related processing.
-
-(The name "Stream" is reserved for a future observability concept — a
-stream of Flow lifecycle events for monitoring/aggregation. It's not
-used for any of the three types above precisely because "stream" in
-common usage denotes a flow of multiple items, which would mismatch
-the singular-instance semantics of Flow.)
+(The name "Stream" is reserved for a future observability concept — a stream of
+Flow lifecycle events for monitoring/aggregation — so it is not used for any type
+above, whose semantics are singular-instance.)
 
 ## The final API surface
 
 ```go
 package streampool
 
-// ===== Pool: worker pool (often implicit) =====
-
-// Pool hosts the goroutines that execute work for the Waves referencing
-// it. Fungible — a package-level default Pool exists implicitly; users
-// only call NewPool to get a custom ctx or non-default tuning.
+// ===== Pool: internal worker pool (not user-facing) =====
 //
-// Lifecycle is refcount-driven: each referencing Wave bumps the count
-// on construction and drops it when its drain completes. When the
-// count returns to zero, the Pool's workers exit synchronously before
-// the last Wave's drain method returns — so when SkimAll returns on
-// the final Wave, the Pool has zero live goroutines. The Pool object
-// itself is fully reusable; the next Wave that references it spins
-// workers up again.
-//
-// During active use (refcount > 0), individual workers between work
-// items exit via the configured IdleTimeout — that's the transient
-// idle case, distinct from the refcount=0 termination above.
-//
-// Hard abort: cancel the ctx given to NewPool. Cascades to all
-// referencing Waves, all in-flight work, all workers.
-type Pool struct { /* ... */ }
+// The worker Pool is NOT part of the surface. A process-wide default Pool serves
+// all work, sized automatically (adaptive under demand; idle workers retire;
+// refcount-driven lifecycle tied to active Waves). There is no NewPool / WithPool
+// / PoolOption. Per-op concurrency is expressed with Limiters (below); a narrower
+// cancellation domain comes from the ctx passed to NewWave / NewFlow.
 
-func NewPool(ctx context.Context, opts ...PoolOption) *Pool
+// ===== Wave: the batch of work the user awaits =====
 
-// (No Shutdown / Wait / Close method. Pool lifecycle is implicit.)
-
-// Pool options
-type PoolOption interface { /* ... */ }
-
-func WithMaxGoroutines(n int) PoolOption
-func WithIdleTimeout(d time.Duration) PoolOption
-// Advanced (rarely user-relevant):
-func WithIdleJitter(d time.Duration) PoolOption
-func WithSpawnConcurrencyLimit(n int) PoolOption
-
-// ===== Wave: batch of work the user awaits =====
-
-// Wave is a collection of work to be completed together. Ops are
-// constructed bound to a Wave (or with nil to defer binding — see Op
-// constructors); the Wave's drain methods await its work. Multiple
-// Waves run concurrently on the same Pool. Waves nest via NewChild.
+// Wave is a value handle over internal per-batch state. Ops are wave-AGNOSTIC
+// (constructed without a wave); work is routed to a wave at dispatch — the body's
+// ambient wave by default, or op.In(wave) to place/redirect (see "Routing").
+// Waves nest via NewChild (a parent's drain waits for its children) and run
+// concurrently. Single-owner lifecycle: no Dup, and Close/Cancel are not
+// refcounted.
 type Wave struct { /* ... */ }
 
-// NewWave creates a top-level Wave. Uses the package default Pool
-// unless WithPool is supplied.
-func NewWave(ctx context.Context, opts ...WaveOption) *Wave
+// NewWave creates a top-level Wave on the internal default Pool. It returns a
+// value handle and does NOT return a ctx — a Wave is a routing target, not
+// propagation (see Flow for the ctx-borne concept).
+func NewWave(parent context.Context, opts ...WaveOption) Wave
 
-// NewChild creates a Wave whose drain rolls up into the receiver's
-// drain. Inherits the receiver's Pool unless WithPool is supplied —
-// child Waves on a different Pool are valid (the library-isolation
-// case) but uncommon. Parent's SkimAll waits for all child Waves
-// to complete. Sub-work spawned inside the parent's task bodies
-// belongs to the parent unless explicitly created as a child Wave.
-func (*Wave) NewChild(ctx context.Context, opts ...WaveOption) *Wave
+// NewChild creates a Wave whose drain rolls up into the receiver's drain: the
+// parent's SkimAll / CloseAndSkimAll waits for all child Waves to complete.
+func (Wave) NewChild(parent context.Context, opts ...WaveOption) Wave
 
-func (*Wave) Skim(ctx context.Context) error      // pull one ready result through Skimmers
-func (*Wave) SkimAll(ctx context.Context) error   // drain to completion
-func (*Wave) Close()                                 // signal no more top-level entries to this Wave
-func (*Wave) CancelAndWait()                         // cancel Wave ctx, wait for drain
+func (Wave) Skim(ctx context.Context) error            // process one ready result through its Skimmer
+func (Wave) SkimAll(ctx context.Context) error         // drain to completion without sealing (for a pure drainer)
+func (Wave) CloseAndSkimAll(ctx context.Context) error // seal + drain to completion — the terminal call
+func (Wave) Close()                                    // seal: no more top-level entries to this Wave
+func (Wave) CancelAndWait()                            // cancel the Wave's ctx, wait for all work to exit
 
 type WaveOption interface { /* ... */ }
+// (No WithPool — the Pool is internal; a narrower cancellation domain comes from
+// the ctx passed to NewWave.)
 
-// WithPool routes a Wave's work to a specific Pool instead of the
-// inherited or default one.
-func WithPool(p *Pool) WaveOption
+// ===== Flow: one logical thread of work (optional) =====
 
-// ===== Flow: one logical thread of work =====
-
-// Flow is a refcounted, ctx-borne lifecycle entity representing a
-// single workflow instance. Its lifetime is determined by reference
-// counting across all work items that capture it — possibly spanning
-// multiple Waves. Use a Flow to attach metadata (trace context,
-// audit data) to related work, run a cleanup hook when all the
-// work completes, or scope a cancellation domain narrower than the
-// enclosing Pool ctx.
+// Flow is a refcounted, ctx-borne value handle for a single workflow instance —
+// the ONE type that rides the ctx (propagation) and the ONE that keeps Dup/Close
+// (a cross-wave lifetime no single Wave bounds). Use it to attach metadata (trace,
+// audit) or a cleanup hook to work that may cross Wave boundaries.
 type Flow struct { /* ... */ }
 
-// NewFlow creates a Flow rooted in parent. The returned ctx carries
-// the Flow; pass that ctx into op dispatches (Start, Submit) so the
-// framework can ref/unref the Flow across the work item's lifecycle.
-// The Flow starts with refcount 1 (the caller's reference) — call
-// Close to release it. afterFn fires when refcount reaches 0.
-// Cancellation: cancel parent (or use context.WithCancel before
-// calling NewFlow) to cancel the Flow's work.
-func NewFlow(parent context.Context, opts ...FlowOption) (context.Context, *Flow)
+// NewFlow creates a Flow rooted in parent and returns a ctx that CARRIES the Flow.
+// This is the deliberate exception to "constructors don't return a ctx" — a Flow's
+// whole purpose is to propagate on the ctx. Pass that ctx into dispatches so the
+// framework can ref/unref the Flow across each work item's lifecycle. Refcount
+// starts at 1 (the caller's reference); afterFn fires when it reaches 0.
+func NewFlow(parent context.Context, opts ...FlowOption) (context.Context, Flow)
 
-// FlowFromContext retrieves the Flow attached to ctx, or nil if none.
-// Useful inside task bodies that need to extend or inspect the Flow.
-func FlowFromContext(ctx context.Context) *Flow
+// FlowFromContext returns the Flow attached to ctx (a non-counting view), or the
+// zero Flow if none. Use to inspect or extend the Flow inside a body.
+func FlowFromContext(ctx context.Context) Flow
 
-// Dup returns a new reference to the same Flow, incrementing the
-// refcount. Use when handing the Flow to another goroutine that
-// will manage its own lifecycle.
-func (*Flow) Dup() *Flow
+// Dup returns an independent reference to the same Flow (refcount++). Use when
+// handing the Flow to another goroutine that manages its own lifecycle.
+func (Flow) Dup() Flow
 
-// Close releases the caller's reference. After all references
-// (caller's plus framework's per-work-item) are released, afterFn
-// fires.
-func (*Flow) Close()
+// Close releases the caller's reference (refcount--). afterFn fires once all
+// references (caller's + the framework's per-work-item refs) are released.
+func (Flow) Close()
 
 type FlowOption interface { /* ... */ }
 
-func WithAfterFunc(fn func()) FlowOption  // fires when Flow refcount reaches 0
+func WithAfterFunc(fn func()) FlowOption  // fires when the Flow's refcount reaches 0
 
 // ===== Limiters =====
 //
-// Current model: docs/permit-core.md (the permit cache) and
-// docs/dispatch-execution-split.md. The suspend/resume + per-limiter-scheduler
-// sketch this block once described is RETIRED; the corrected summary:
+// Permit model: docs/permit-core.md (a hierarchical permit cache, deadlock-free
+// per-limiter) and docs/dispatch-execution-split.md.
 //
-//   1. Permits are a hierarchical CACHE. A permit is held through parks and cached
-//      idle; a parked unit's permit is inherited by its sub-waves, and the only
-//      give-back is an idle STEAL by another pool that genuinely needs it (no
-//      suspend, no relinquish-on-skim). The active-concurrency cap still holds.
-//   2. The model is DEADLOCK-FREE PER-LIMITER with no cycle graph and no global
-//      scheduler. The per-limiter `scheduler` argument is retained for the deferred
-//      cross-limiter JOINT-ACQUISITION feature (composing several limiters on one
-//      op), not collapsed to a global. A permit demand exceeding total capacity
-//      FAILS FAST — panic for a static weight (a misconfiguration), a distinct
-//      error for a data-dependent one (an oversized input) — never blocking forever.
+// A Limiter is a standalone, composable concurrency-control value. Share one
+// Limiter across ops for a collective cap; list several in WithLimits on one op
+// (AND semantics — a dispatch proceeds only when all permit it). A multi-limiter
+// set is admitted JOINTLY in a global canonical order, which is deadlock-free by
+// construction (lock-ordering) and fully automatic — there is NO user-facing
+// coordinator/scheduler and no grouping to declare.
 //
-// Limiter is the user-facing concurrency-control primitive. Limiters compose:
-// an op can bind multiple Limiters, all of which must permit a dispatch before
-// it proceeds. Users obtain Limiter values from framework constructors and pass
-// them to WithLimits.
-//
-// Each Limiter binds to a *scheduler* at construction — the scheduler's first
-// argument, nil for self-scheduled (standalone). A single self-scheduled limiter
-// is the common case; a non-nil scheduler is only needed to coordinate the joint
-// admission of several limiters on one op (the deferred feature).
-//   - Schedulers are the closed/sealed set (framework-provided): the direct
-//     scheduler (the nil/self case), and later OrderedScheduler /
-//     PriorityScheduler(prioritizer) for joint multi-limiter admission and
-//     cross-op prioritization (with withholding).
-//   - Resources are the OPEN extension point: pure accounting (demand / acquire /
-//     release / capacity-grew signal). A Semaphore is ~10 lines; memory / rate /
-//     weighted / user-defined resources are just as small.
-//
-// WithLimits requires all of its Limiters to resolve to the SAME scheduler
-// (a nil-scheduler limiter is its own self-scheduler), validated at op
-// construction. A Semaphore caps ACTIVE concurrency, not in-flight: a body parked
-// driving a subwave lends its permit to that subwave's work (the cache's
-// inheritance) and reacquires it to resume computing — which is what dissolves the
-// held-across-a-skim livelock.
-type Limiter struct {
-    impl limiterImpl  // unexported; the scheduler — sealed against external implementations
-}
+// A Semaphore caps ACTIVE concurrency, not in-flight: a body parked driving a
+// sub-wave lends its permit to that sub-wave's work (the cache's inheritance) and
+// reacquires it to resume computing — which dissolves the held-across-a-skim
+// livelock. A permit demand exceeding total capacity FAILS FAST — panic for a
+// static (misconfigured) weight, a distinct error for a data-dependent oversized
+// input — never blocking forever.
+type Limiter struct { /* ... */ }  // opaque; obtained from the constructors below
 
-type Scheduler …  // sealed; nil (self-scheduled) is the only value usable in v0.x so far
+func NewSemaphore(n int) Limiter                    // cap active concurrency at n
+func NewRateLimit(n int, d time.Duration) Limiter   // (future) wraps x/time/rate
 
-func NewSemaphore(scheduler Scheduler, n int) Limiter            // active-concurrency cap; pass nil
-func NewRateLimit(scheduler Scheduler, n int, d time.Duration) Limiter  // (future) wraps x/time/rate
-
-// Future (additive, behind the same handle): OrderedScheduler / PriorityScheduler
-// constructors; NewMemoryLimiter etc.; an exported Resource interface +
-// NewLimiter(scheduler, resource) for user-defined resources; NewAdaptive(...).
+// Future (additive): more limiter constructors — NewMemoryLimiter, weighted /
+// cost limiters, NewAdaptive(...); optionally an exported Resource interface +
+// NewLimiter(resource) for user-defined resources. Prioritized admission
+// (cross-op priority + anti-starvation) is a separate deferred feature backed by
+// an internal global arbiter — no user-facing coordinator type; its API is left
+// to its own design effort and not specified here.
 
 // ===== User-supplied interfaces =====
 //
@@ -312,7 +244,7 @@ func NewRateLimit(scheduler Scheduler, n int, d time.Duration) Limiter  // (futu
 // invokes during drain. The method is named Handle; sync execution
 // verb on the interface, parallel to http.Handler.ServeHTTP. The
 // user-facing async dispatch verbs (Submit / SubmitErr /
-// SubmitResult / Start) live on the op types.
+// SubmitResult; Start is void sugar) live on the op types.
 type Handler[T any] interface {
     Handle(ctx context.Context, value T, err error) error
 }
@@ -458,11 +390,12 @@ func NewErrAccumulatorFactory(
 
 // ===== Op constructors =====
 //
-// All constructors bind ops to a *Wave at construction and take the
-// user-supplied interface as canonical input. The *Wave parameter
-// accepts nil as an explicit sentinel meaning "defer binding to
-// dispatch time, use the wave attached to the dispatch ctx." See
-// "Wave binding" below for the resolution rule.
+// Ops are WAVE-AGNOSTIC: constructors take no wave, only the user-supplied
+// interface. An op is a reusable spec — define it once (even before any wave
+// exists) and route its work to a wave at dispatch (see "Routing"). By
+// convention, name an op for its role as a noun distinct from its output —
+// Launcher: fetcher/crawler; Funnel: aggregator (+ totals); Skimmer: collector
+// (+ results) — so `op.Submit(...)` reads naturally.
 //
 // For raw closures, use HandlerFunc[T] (parameterized), Task
 // (no-arg, no-err), or ErrHandler (no-arg, with err); for Funnel,
@@ -481,36 +414,36 @@ func WithLimits(limiters ...Limiter) OpOption
 // specialized. Users pick the shortest one that fits their case.
 //
 // Launcher:
-//   NewLauncher(wave, handler Handler[T], opts...)         // interface; struct or HandlerFunc
-//   NewFnLauncher(wave, fn func(ctx, T, error) error, ...) // closure form, T inferred
-//   NewTaskLauncher(wave, fn func(ctx) error, opts...)     // no-arg (T=struct{}); wraps in TaskFunc
-//   NewErrLauncher(wave, fn func(ctx, err) error, opts...) // err-only (T=struct{}); wraps in ErrHandlerFunc
+//   NewLauncher(handler Handler[T], opts...)         // interface; struct or HandlerFunc
+//   NewFnLauncher(fn func(ctx, T, error) error, ...) // closure form, T inferred
+//   NewTaskLauncher(fn func(ctx) error, opts...)     // no-arg (T=struct{}); wraps in TaskFunc
+//   NewErrLauncher(fn func(ctx, err) error, opts...) // err-only (T=struct{}); wraps in ErrHandlerFunc
 //
 // Skimmer (same pattern, no TaskSkimmer):
-//   NewSkimmer(wave, handler Handler[T])
-//   NewFnSkimmer(wave, fn func(ctx, T, error) error)
-//   NewErrSkimmer(wave, fn func(ctx, err) error)
+//   NewSkimmer(handler Handler[T])
+//   NewFnSkimmer(fn func(ctx, T, error) error)
+//   NewErrSkimmer(fn func(ctx, err) error)
 //
 // Funnel (interface accepts AccumulatorFactory[T]; closure form
 // takes factory + close fns; err-only form takes accumulate/flush/
 // close fns directly via FuncErrAccumulatorFactory — zero framework-
 // added closures):
-//   NewFunnel(funnelPool, factory AccumulatorFactory[T], opts...)
-//   NewFnFunnel(funnelPool, newAccFn, closeFn, opts...)
-//   NewErrFunnel(funnelPool, accumulate, flush, closeFn, opts...)
+//   NewFunnel(factory AccumulatorFactory[T], opts...)
+//   NewFnFunnel(newAccFn, closeFn, opts...)
+//   NewErrFunnel(accumulate, flush, closeFn, opts...)
 
-func NewLauncher[T any](wave *Wave, handler Handler[T], opts ...OpOption) Launcher[T]
-func NewFnLauncher[T any](wave *Wave, handle func(ctx context.Context, value T, err error) error, opts ...OpOption) Launcher[T]
-func NewTaskLauncher(wave *Wave, task func(ctx context.Context) error, opts ...OpOption) TaskLauncher
-func NewErrLauncher(wave *Wave, handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher
+func NewLauncher[T any](handler Handler[T], opts ...OpOption) Launcher[T]
+func NewFnLauncher[T any](handle func(ctx context.Context, value T, err error) error, opts ...OpOption) Launcher[T]
+func NewTaskLauncher(task func(ctx context.Context) error, opts ...OpOption) TaskLauncher
+func NewErrLauncher(handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher
 
-func NewSkimmer[T any](wave *Wave, handler Handler[T]) Skimmer[T]
-func NewFnSkimmer[T any](wave *Wave, handle func(ctx context.Context, value T, err error) error) Skimmer[T]
-func NewErrSkimmer(wave *Wave, handle func(ctx context.Context, err error) error) ErrSkimmer
+func NewSkimmer[T any](handler Handler[T]) Skimmer[T]
+func NewFnSkimmer[T any](handle func(ctx context.Context, value T, err error) error) Skimmer[T]
+func NewErrSkimmer(handle func(ctx context.Context, err error) error) ErrSkimmer
 
-func NewFunnel[T any](funnelPool *FunnelPool, factory AccumulatorFactory[T], opts ...OpOption) Funnel[T]
-func NewFnFunnel[T any](funnelPool *FunnelPool, newAccumulator func() Accumulator[T], closeFn func() error, opts ...OpOption) Funnel[T]
-func NewErrFunnel(funnelPool *FunnelPool, accumulate func(ctx, err error) (time.Time, error), flush func(ctx) error, closeFn func() error, opts ...OpOption) ErrFunnel
+func NewFunnel[T any](factory AccumulatorFactory[T], opts ...OpOption) Funnel[T]
+func NewFnFunnel[T any](newAccumulator func() Accumulator[T], closeFn func() error, opts ...OpOption) Funnel[T]
+func NewErrFunnel(accumulate func(ctx, err error) (time.Time, error), flush func(ctx) error, closeFn func() error, opts ...OpOption) ErrFunnel
 
 // ===== Void-T type aliases (named for intent) =====
 
@@ -527,37 +460,36 @@ type ErrFunnel             = Funnel[struct{}]
 // instance active at a time — construct a Funnel with a 1-permit
 // limiter:
 //
-//   ordered := streampool.NewFunnel(funnelPool, factory,
-//       streampool.WithLimits(streampool.NewSemaphore(nil, 1)),
+//   ordered := streampool.NewFunnel(factory,
+//       streampool.WithLimits(streampool.NewSemaphore(1)),
 //   )
 
-// ===== Wave binding =====
+// ===== Routing: ambient wave + op.In(wave) =====
 //
-// Every op holds an optional *Wave bound at construction. At dispatch
-// (Start / Submit / SubmitErr / SubmitResult), the framework resolves the target
-// wave as follows:
+// An op has no wave of its own; each dispatch targets a wave, resolved as:
 //
-//   1. If the op was constructed with a non-nil *Wave, use it.
-//   2. Otherwise, use the *Wave attached to the dispatch ctx (the wave
-//      whose Task/Accumulator/Skim body the caller is running in).
-//   3. If neither is available, the dispatch panics with a message
-//      naming both options.
+//   1. op.In(wave).Submit(ctx, v)  — explicit: place this op's work in `wave`.
+//      Used at top level (no ambient wave) and to redirect into a child/other
+//      wave. In(wave) returns a cheap wave-bound handle (a value: bind once and
+//      reuse, or chain inline). It is membership, not a value destination — the
+//      value still goes to the op; `wave` is the batch the work is accounted to.
+//   2. op.Submit(ctx, v)           — ambient: inside a body the framework stamps
+//      the running body's wave on ctx, so an un-routed Submit lands in that wave.
+//      The common in-body case.
+//   3. An un-routed Submit from a goroutine with no ambient wave (e.g. top level)
+//      panics, naming the fix: route with In(wave).
 //
-// The split lets top-level callers bind explicitly at construction
-// (the common case) and lets ops constructed without a wave —
-// typically by reusable library helpers, or inside a body that
-// doesn't carry the wave in scope — resolve to the in-flight wave
-// at dispatch time. The wave handle itself never leaks to body code;
-// only the op does.
+// Routing is handle-level, so it never perturbs ctx — Flow / trace / cancellation
+// ride ctx untouched across a redirect: op.In(other).Submit(bodyCtx, v) keeps
+// bodyCtx's propagation while targeting `other`.
 
 // ===== Op types =====
 //
 // All three ops share the same dispatch family, layered as sugars
 // over a single primitive (TrySubmitResult taking a deadline
 // parameter). Launcher additionally has Start / TryStart as sugar
-// for the void case (T = struct{}). None of the dispatch methods
-// take a *Wave — the wave was bound at construction (or deferred
-// via nil; see "Wave binding").
+// for the void case (T = struct{}). Dispatch methods take no wave — route with
+// op.In(wave) when not using the ambient wave (see "Routing").
 //
 // Naming pattern: each method's name describes exactly what's being
 // submitted. Submit takes a value. SubmitErr takes an err.
@@ -596,6 +528,7 @@ type ErrFunnel             = Funnel[struct{}]
 var Forever time.Time = /* implementation-chosen specific instant; opaque */
 
 type Launcher[T any] struct { /* ... */ }
+func (Launcher[T]) In(wave Wave) Launcher[T]   // route work to wave (top-level / redirect); ambient otherwise
 // Dispatch surface. All sinks share this shape (TrySubmitResult is the primitive).
 func (Launcher[T]) Submit(ctx context.Context, v T) error                                                       // sugar — value only, block forever
 func (Launcher[T]) SubmitErr(ctx context.Context, err error) error                                              // sugar — err only, block forever
@@ -607,29 +540,31 @@ func (Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, v T,
 func (Launcher[T]) Start(ctx context.Context) error                                                             // sugar for Submit(ctx, *new(T))
 func (Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error)                              // sugar for TrySubmit(ctx, deadline, *new(T))
 
-// Funnel — stateful aggregation via factory-created Accumulator
-// instances. Parallel by default; cap parallelism via WithLimits.
+// Funnel — stateful aggregation via factory-created Accumulator instances,
+// wave-scoped (per-(funnel,wave) instances owned by the wave, force-flushed at
+// the wave's drain). Parallel by default; cap parallelism via WithLimits.
 type Funnel[T any] struct { /* ... */ }
+func (Funnel[T]) In(wave Wave) Funnel[T]   // route accumulate/flush to wave; ambient otherwise
 func (Funnel[T]) Submit(ctx context.Context, v T) error                                                         // sugar — value only, block forever
 func (Funnel[T]) SubmitErr(ctx context.Context, err error) error                                                // sugar — err only, block forever
 func (Funnel[T]) SubmitResult(ctx context.Context, v T, err error) error                                        // sugar — both, block forever
 func (Funnel[T]) TrySubmit(ctx context.Context, deadline time.Time, v T) (bool, error)                          // sugar — value only
 func (Funnel[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error)                 // sugar — err only
 func (Funnel[T]) TrySubmitResult(ctx context.Context, deadline time.Time, v T, err error) (bool, error)         // primitive
-func (Funnel[T]) Close()                                                                                        // signals no more input; triggers Flush on each instance
-func (Funnel[T]) Dup() Funnel[T]                                                                                // refcounted sharing across handlers
+func (Funnel[T]) Flush(ctx context.Context) error                                                              // finalize this funnel's instances; aggregates emit into the ambient wave
+func (Funnel[T]) FlushTo(ctx context.Context, wave Wave) error                                                 // one-shot finalize; aggregates emit into `wave` (snapshot / staged capture)
 
-// Skimmer — terminal sink; the Handler is dispatched on Wave.Skim pull.
+// Skimmer — terminal sink; the Handler runs on the draining goroutine at Wave.Skim.
 type Skimmer[T any] struct { /* ... */ }
+func (Skimmer[T]) In(wave Wave) Skimmer[T]   // route work to wave (top-level / redirect); ambient otherwise
 func (Skimmer[T]) Submit(ctx context.Context, v T) error                                                        // sugar — value only, block forever
 func (Skimmer[T]) SubmitErr(ctx context.Context, err error) error                                               // sugar — err only, block forever
 func (Skimmer[T]) SubmitResult(ctx context.Context, v T, err error) error                                       // sugar — both, block forever
 func (Skimmer[T]) TrySubmit(ctx context.Context, deadline time.Time, v T) (bool, error)                         // sugar — value only
 func (Skimmer[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error)                // sugar — err only
 func (Skimmer[T]) TrySubmitResult(ctx context.Context, deadline time.Time, v T, err error) (bool, error)        // primitive
-// (No Close / Dup on Skimmer — handler is stateless from the
-// framework's perspective; SkimAll completion is driven by
-// in-flight tracking, not by an explicit end-of-input signal.)
+// (No Flush / Close on Skimmer — it is terminal; SkimAll completion is driven by
+// the wave's in-flight tracking, not by an explicit end-of-input signal.)
 ```
 
 ### Forever sentinel and dispatch model
@@ -693,12 +628,11 @@ confront the base-time choice; the `For` sugar would actively hide it.
 ```go
 ctx := context.Background()
 
-// Wave: the batch of work this function awaits. Uses the package
-// default Pool implicitly; no Pool construction needed.
+// Wave: the batch of work this function awaits. The worker pool is internal.
 wave := streampool.NewWave(ctx)
-defer wave.Close()
 
-results := streampool.NewSkimmer(wave, streampool.HandlerFunc[*User](
+// Skimmer (terminal sink): runs on the draining goroutine as results arrive.
+printer := streampool.NewSkimmer(streampool.HandlerFunc[*User](
     func(ctx context.Context, user *User, err error) error {
         if err != nil { return err }
         fmt.Println(user.Name)
@@ -706,98 +640,83 @@ results := streampool.NewSkimmer(wave, streampool.HandlerFunc[*User](
     },
 ))
 
-fetch := streampool.NewLauncher(wave, streampool.HandlerFunc[UserID](
+// Launcher: fetches each id on a worker, then submits the user to the printer.
+fetcher := streampool.NewLauncher(streampool.HandlerFunc[UserID](
     func(ctx context.Context, id UserID, err error) error {
+        if err != nil { return err }
         user, ferr := userClient.Fetch(ctx, id)
-        if ferr != nil {
-            return errSink.SubmitErr(ctx, ferr)
-        }
-        return results.Submit(ctx, user)
+        if ferr != nil { return ferr }
+        return printer.Submit(ctx, user) // ambient: lands in this body's wave
     },
 ))
 
+// Top level has no ambient wave, so route explicitly with In(wave):
 for _, id := range userIDs {
-    fetch.Submit(ctx, id)
+    fetcher.In(wave).Submit(ctx, id)
 }
 
-wave.SkimAll(ctx)
-// When this Wave's drain returns, the default Pool's workers have
-// exited synchronously (refcount → 0). If you then create another
-// Wave, workers spin back up on demand.
+wave.CloseAndSkimAll(ctx) // seal + drain to completion
 ```
 
-## With a custom Pool
+## With a Flow
 
-> **RETIRED — see the banner at the top.** `Pool` is no longer user-exposed
-> (`NewPool` / `WithPool` / `PoolOption` are gone; sizing is automatic). This
-> section is kept for design-history context only. A narrower cancellation domain is
-> obtained via the ctx passed to `NewWave` / `NewFlow`; concurrency is controlled
-> with Limiters.
-
-When you need a non-default ctx (cancellation domain narrower than
-process-wide) or non-default tuning:
-
-```go
-pool := streampool.NewPool(ctx, streampool.WithMaxGoroutines(100))
-// No defer needed — Pool's workers exit when refcount returns to 0.
-
-wave := streampool.NewWave(ctx, streampool.WithPool(pool))
-defer wave.Close()
-// ... ops against wave ...
-wave.SkimAll(ctx)
-```
-
-Flow is omitted from the hello world because it's optional. Add a Flow
-when you want logical-thread metadata or cleanup hooks:
+Flow is optional — add one to attach logical-thread metadata (trace, audit) or a
+cleanup hook to work that may cross Wave boundaries:
 
 ```go
 ctx, flow := streampool.NewFlow(ctx, streampool.WithAfterFunc(func() {
-    // fires when refcount reaches 0 — all work attributed to this Flow done
+    // fires when refcount reaches 0 — all work attributed to this Flow is done
 }))
-defer flow.Close()  // releases the user's reference; framework refs come from work items
+defer flow.Close() // releases the caller's reference; framework refs come from work items
+
+// Dispatch with this ctx; the Flow rides it onto every work item and across waves.
+fetcher.In(wave).Submit(ctx, id)
 ```
 
 ## With a funnel
 
 ```go
-totals := streampool.NewFunnel(wave, func() streampool.Accumulator[int] {
-    var sum int
-    return streampool.NewAccumulator(
-        func(ctx context.Context, x int, err error) (time.Time, error) {
-            if err != nil { return time.Time{}, err }
-            sum += x
-            if sum >= flushThreshold {
-                if serr := results.Submit(ctx, sum); serr != nil {
-                    return time.Time{}, serr
+// NewFnFunnel takes the factory closure directly (and a factory-level closeFn,
+// nil here). NewFunnel takes the AccumulatorFactory interface instead.
+aggregator := streampool.NewFnFunnel(
+    func() streampool.Accumulator[int] {
+        var sum int
+        return streampool.NewAccumulator(
+            func(ctx context.Context, x int, err error) (time.Time, error) {
+                if err != nil { return time.Time{}, err }
+                sum += x
+                if sum >= flushThreshold {
+                    if serr := totals.Submit(ctx, sum); serr != nil {
+                        return time.Time{}, serr
+                    }
+                    sum = 0
                 }
-                sum = 0
-            }
-            return time.Time{}, nil  // no flush deadline; flush only on Close
-        },
-        func(ctx context.Context) error {
-            if sum != 0 {
-                return results.Submit(ctx, sum)
-            }
-            return nil
-        },
-    )
-})
+                return time.Time{}, nil // no deadline; otherwise flushed at wave drain
+            },
+            func(ctx context.Context) error { // final flush
+                if sum != 0 { return totals.Submit(ctx, sum) }
+                return nil
+            },
+        )
+    },
+    nil, // no factory-level Close
+)
 
-score := streampool.NewLauncher(wave, streampool.HandlerFunc[UserID](
+scorer := streampool.NewLauncher(streampool.HandlerFunc[UserID](
     func(ctx context.Context, id UserID, err error) error {
         if err != nil { return err }
         user, ferr := userClient.Fetch(ctx, id)
         if ferr != nil { return ferr }
-        return totals.Submit(ctx, user.Score)
+        return aggregator.Submit(ctx, user.Score) // ambient wave
     },
 ))
 ```
 
-The funnel factory creates a fresh `FuncAccumulator` (with its own
-closure-captured `sum`) each time the framework needs a new instance.
-Flushing is the instance's responsibility, expressed as a downstream
-`Submit` in either AccumulateFn (incremental flushes) or FlushFn (final
-flush on Close).
+The factory creates a fresh accumulator (with its own closure-captured `sum`) on
+demand by concurrency. Flushing is the instance's job — a downstream `Submit` from
+the accumulate step (incremental) or the final-flush step; the wave force-flushes
+any not-yet-flushed instances at its drain. To finalize early or capture a snapshot
+into another wave, call `aggregator.Flush(ctx)` / `aggregator.FlushTo(ctx, out)`.
 
 ## Allocation-free dispatch
 
@@ -806,23 +725,23 @@ To avoid per-call closure allocations on the hot path, implement the
 closure:
 
 ```go
-type fetcher struct {
+type userFetcher struct {
     db   *Database
     sink streampool.Skimmer[*User]
 }
 
-func (f *fetcher) Handle(ctx context.Context, id UserID, err error) error {
+func (f *userFetcher) Handle(ctx context.Context, id UserID, err error) error {
+    if err != nil { return err }
     user, ferr := f.db.Fetch(ctx, id)
-    if ferr != nil {
-        return f.errs.SubmitErr(ctx, ferr)
-    }
+    if ferr != nil { return ferr }
     return f.sink.Submit(ctx, user)
 }
 
-fetch := streampool.NewLauncher(wave, &fetcher{db: db, sink: results})
+fetcher := streampool.NewLauncher(&userFetcher{db: db, sink: printer})
 
+in := fetcher.In(wave) // bind once; reuse across the loop
 for _, id := range userIDs {
-    fetch.Submit(ctx, id)  // no closure allocation per call
+    in.Submit(ctx, id)  // no closure allocation per call
 }
 ```
 
@@ -834,49 +753,41 @@ signature (`Handle(ctx, _ struct{}, _ error) error`).
 
 ## With limiters
 
-A single limiter is self-scheduled (pass `nil`):
+A limiter is a standalone value:
 
 ```go
-slowAPI := streampool.NewSemaphore(nil, 5)
+slowAPI := streampool.NewSemaphore(5)
 
-fetch := streampool.NewLauncher(wave, fetchFn,
+fetcher := streampool.NewLauncher(fetchFn,
     streampool.WithLimits(slowAPI),
 )
 ```
 
-Composing *multiple* limiters on one op requires a shared scheduler to
-coordinate their joint admission (deadlock-free), so they're bound to one at
-construction (`OrderedScheduler` shown; future):
+Compose several limiters on one op — they are admitted jointly in a global order,
+deadlock-free and automatic; there is no coordinator to construct:
 
 ```go
-sched := streampool.NewOrderedScheduler()
-slowAPI := streampool.NewSemaphore(sched, 5)
-apiRate := streampool.NewRateLimit(sched, 100, time.Second)
+apiRate := streampool.NewRateLimit(100, time.Second) // future
 
-fetch := streampool.NewLauncher(wave, fetchFn,
-    streampool.WithLimits(slowAPI, apiRate), // both resolve to sched
+fetcher := streampool.NewLauncher(fetchFn,
+    streampool.WithLimits(slowAPI, apiRate),
 )
 ```
 
 Limiters compose with AND semantics: a dispatch proceeds only when all attached
-limiters permit, and `WithLimits` requires them all to resolve to the same
-scheduler (validated at op construction). The same `Limiter` instance can be
-shared across multiple ops, expressing "these collectively cap at N concurrent
-operations."
+limiters permit. The same `Limiter` shared across ops expresses "these collectively
+cap at N concurrent."
 
-## Deferred wave binding (nil at construction)
+## Reusable ops
 
-Some ops want to be reusable across waves — a helper that returns a
-Launcher without knowing which wave the caller will dispatch from,
-for instance. Pass `nil` as the wave at construction; the op resolves
-its target wave at each dispatch from the ctx the caller passes
-(specifically, from the wave whose Task/Accumulator/Skim body the
-caller is running in).
+Because ops are wave-agnostic, a library can build and return one without knowing
+which wave the caller will use; the caller routes it with `In(wave)`, or it resolves
+to the ambient wave inside a body.
 
 ```go
-// Library-style helper: returns a wave-agnostic Skimmer.
+// Library helper: a wave-agnostic Skimmer.
 func NewLogSkimmer(logger *slog.Logger) streampool.Skimmer[Event] {
-    return streampool.NewSkimmer(nil, streampool.HandlerFunc[Event](
+    return streampool.NewSkimmer(streampool.HandlerFunc[Event](
         func(ctx context.Context, e Event, err error) error {
             logger.Info("event", "name", e.Name, "err", err)
             return nil
@@ -884,28 +795,35 @@ func NewLogSkimmer(logger *slog.Logger) streampool.Skimmer[Event] {
     ))
 }
 
-// Caller binds the helper's skimmer to its own wave by dispatching
-// from a body that's running in that wave. The Skimmer was
-// constructed with nil, so each Submit resolves to the dispatching
-// ctx's wave.
-sink := NewLogSkimmer(slog.Default())
+events := NewLogSkimmer(slog.Default())
 
-runner := streampool.NewLauncher(wave, streampool.HandlerFunc[ID](
+runner := streampool.NewLauncher(streampool.HandlerFunc[ID](
     func(ctx context.Context, id ID, _ error) error {
-        evt := process(id)
-        return sink.Submit(ctx, evt)  // dispatches to `wave` via ctx
+        return events.Submit(ctx, process(id)) // ambient: this body's wave
     },
 ))
 ```
 
-Top-level callers calling `Submit`/`Start` directly on a nil-bound op
-panic — there is no ctx-attached wave at top level. The panic message
-names both options: pass a wave at construction, or dispatch from a
-body running in a wave.
+Inside a body, `events.Submit(ctx, …)` lands in the body's ambient wave. At top
+level there is no ambient wave, so route explicitly: `events.In(wave).Submit(…)`;
+an un-routed top-level `Submit` panics, naming the fix.
 
 ---
 
 ## Naming decisions
+
+> **Rationale below predates the 2026-06-21 lock.** These tables, the psg-go
+> mapping, "What we chose not to do," and the resolved open questions record how the
+> design got here and still hold for the names that survived (Wave, Flow,
+> Launcher/Funnel/Skimmer, Submit, Handler, the deadline model). They have NOT all
+> been re-edited to the locked surface, so where a row conflicts with the surface
+> above, **the surface wins.** Known reversals: **Pool is internal** (no
+> NewPool/WithPool); **ops are wave-agnostic** with `op.In(wave)` routing — note the
+> "`op.In(wave)` bind-chain" listed below as *rejected* is in fact what was adopted,
+> its objection having dissolved once Funnel lost Close/Dup; **Funnel has no
+> Close/Dup** (→ `Flush`/`FlushTo`, wave-driven finalization); **no user-facing
+> Coordinator/Scheduler** (global-order joint admission). Full record:
+> `WORKING_NOTES.md`, "SURFACE REDESIGN."
 
 | Decision | Choice | Reasoning |
 |---|---|---|
@@ -914,8 +832,8 @@ body running in a wave.
 | Role-3 name: `Wave` (not `Job` / `Group` / `Batch`) | "A wave of processing" carries the right metaphor: waves can overlap (multiple in flight in the same Pool), vary in size (small ripples to large processing bursts), and contain smaller waves (nested sub-batches). Coheres with the streampool nautical theme. `Job` is acceptable but reads as a discrete K8s/SLURM-style unit; `Group` clashes with errgroup. `Wave` is fresh and metaphorically apt. |
 | Role-2 name: `Flow` (not `Stream` / `Workflow`) | `Stream` denotes "a flow of items" in standard usage — Java/Akka/Kafka/Node streams. Our role-2 type holds no payload; it's a refcounted lifecycle marker. Stream would mislead. `Flow` reads concretely (one specific flow of work) without the abstract-vs-concrete ambiguity of `Workflow`, has no Argo/BPM/Temporal baggage, is short, and coheres with the nautical theme. `Stream` is reserved for a future observability concept (a stream of Flow events). |
 | Worker pool | `Pool` — fungible, often implicit | Pool's job is just goroutines, idle policy, max budget. No `Skim`, no `Shutdown`, no `Wait` — refcount-driven lifecycle handles termination implicitly. A package-level default Pool exists; users only call `NewPool` for a non-default ctx (cancellation domain) or non-default tuning. Matches `sync.Pool` convention as a fungible resource container. |
-| Op constructor first arg | `wave *Wave` (nil OK) | Ops bind to a Wave at construction (their lifecycle owner). Pool comes via the Wave (which references a Pool through default or `WithPool`). Flow comes in dynamically via ctx, not at construction — because a Flow can span Waves but ops can't. Passing `nil` defers wave-binding to dispatch time, resolving from the dispatching ctx; the same op can then be reused inside any wave's body. The dispatch methods never take a *Wave — the wave is locked in at construction (explicitly or as the deferred-to-ctx sentinel). |
-| Dispatch methods take no *Wave | `Start(ctx, ...)` / `Submit(ctx, v)` / `SubmitErr(ctx, v, err)` | Considered three alternatives and rejected each: (a) explicit *Wave on every dispatch — verbose in the common case where one wave handles many dispatches; (b) `Submit` / `SubmitIn` method split — doubles surface for every dispatch verb; (c) `op.In(wave)` bind-chain — breaks the lifecycle model for ops with Close (Funnel, Skimmer), since the unassigned intermediate handle has no way to be closed. Wave-at-construction with a nil sentinel preserves single-verb dispatch, single lifecycle, and explicit binding when desired. |
+| Op constructor first arg | `wave Wave` (AtDispatch to defer) | Ops bind to a Wave at construction (their lifecycle owner). Pool comes via the Wave (which references a Pool through default or `WithPool`). Flow comes in dynamically via ctx, not at construction — because a Flow can span Waves but ops can't. Passing AtDispatch defers wave-binding to dispatch time, resolving from the dispatching ctx; the same op can then be reused inside any wave's body. The dispatch methods never take a Wave — the wave is locked in at construction (explicitly or as the deferred-to-ctx sentinel). |
+| Dispatch methods take no Wave | `Submit(ctx, v)` / `SubmitErr(ctx, v, err)` / `Start(ctx, ...)` | Considered three alternatives and rejected each: (a) explicit Wave on every dispatch — verbose in the common case where one wave handles many dispatches; (b) `Submit` / `SubmitIn` method split — doubles surface for every dispatch verb; (c) `op.In(wave)` bind-chain — breaks the lifecycle model for ops with Close (Funnel, Skimmer), since the unassigned intermediate handle has no way to be closed. Wave-at-construction with the AtDispatch sentinel preserves single-verb dispatch, single lifecycle, and explicit binding when desired. |
 | Pool lifecycle | Refcount-driven; workers exit synchronously on last Wave drain | No `Shutdown` / `Wait` API. Each referencing Wave bumps refcount; drain completion drops it. When count → 0, workers terminate synchronously before the last Wave's drain returns — strong guarantee that no Pool goroutines outlive the user's drain calls. Pool reuse after this is automatic; the next Wave that references the Pool spins workers up again. |
 | Op trio names: `Launcher`, `Funnel`, `Skimmer` | Three fluid-handling concretes that reinforce the streampool nautical theme | **Launcher**: a launch is a small motorboat (nautical noun); also the verb sense ("launch a task," "launch a ship"). Universally understood; pairs cleanly with Start/Submit dispatch verbs. **Funnel**: the device that channels many inputs into a narrower output — exact metaphor for what a Combiner does (many submitted values → aggregated downstream output). Used as noun directly (no `-er` suffix needed); no awkward agent-noun derivation. **Skimmer**: pool skimmers are literal devices that pull debris from a pool's surface as it arrives — exact metaphor for pulling completed results from a wave's queue. Also a wading bird (nautical), and skimboarding is a form of wave-riding (themantic). All three are concrete physical referents, casual vocabulary (per Principle #1), and free of the academic baggage of `Gather`/`Combine`. The Wave's drain verbs match: `Wave.Skim` / `Wave.SkimAll` / `Wave.TrySkim`. |
 | Op constructor verb | `NewLauncher`, `NewFunnel`, `NewSkimmer` | Agent nouns (`-er` suffix where it pays; Funnel is a noun directly). The type names describe roles, not the function-call verb. Matches `http.Handler`, `io.Reader`, `sync.Mutex`. |
@@ -935,11 +853,11 @@ body running in a wave.
 | No `.To(sink)` wiring | Function bodies call `sink.Submit(ctx, value)` directly | Enables multi-output ops, conditional routing, zero-output paths. Cost: wiring is no longer visible at construction; users read function bodies to trace dataflow. Worth it for the flexibility and the elimination of the output type parameter on Funnel. |
 | No `Sink[T]` in public API | Not exported | Nothing in the framework's own API consumes a Sink type. User code that wants polymorphism over "things you can Submit to" defines a one-method interface locally; Go's structural typing makes that work without a published contract. |
 | Funnel state | Via `AccumulatorFactory[T]` interface (NewAccumulator + Close) returning `Accumulator[T]` instances | Factory creates per-instance Accumulators (each with closure state); framework calls each instance's `Accumulate` per input and `Flush` on Close. The factory's `Close()` fires once when the bound Funnel's refcount hits zero — releases factory-level state (shared connections, registries, etc.). For closure-based factories with no cleanup, `AccumulatorFactoryFunc[T]` is a bare-func adapter with no-op Close; for cleanup, `FuncAccumulatorFactory[T]` (struct) or `NewAccumulatorFactory[T](fn, closeFn)` (inference-friendly constructor). |
-| Serial accumulation ("reducer") | Funnel with `WithLimits(NewSemaphore(nil, 1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
+| Serial accumulation ("reducer") | Funnel with `WithLimits(NewSemaphore(1))` | No separate Reducer type. The "only one instance active at a time" property is enforced by a 1-permit limiter, reusing the Limiter abstraction. Same factory, same Accumulator interface — only the concurrency cap differs. |
 | Launcher.Close | Not present | The framework can't deduce what sinks a task body will Submit to, so closing the Launcher tells the framework nothing useful. Resources release via leakguard finalizer when the value falls out of scope. |
-| Funnel.Close | Present | Funnel has refcounted Accumulator instances that need final Flush on end-of-input. Close releases the user's reference; the framework's per-work-item refs unwind through SkimAll. |
+| Funnel.Close / .Dup | Removed | Funnels are wave-scoped; finalization is wave-driven (force-flush at the wave's drain), which subsumes the old refcount and counts *all* feeders. Early/snapshot finalize is `Flush(ctx)` / `FlushTo(ctx, wave)`. |
 | Skimmer.Close / .Dup | Absent | Skimmer's Handler is stateless from the framework's perspective; SkimAll completion is driven by in-flight tracking, not by an explicit end-of-input signal. No Dup either — sharing across handlers needs no lifecycle ceremony. |
-| Funnel.Dup | Present | Refcounted-handle pattern earns its place in psgwf-style scenarios where the Funnel crosses handler boundaries with independent lifecycles. Single-scope usage doesn't require Dup; advanced shared usage does. |
+| Wave.Dup | Absent | The cross-producer "all done" signal it would provide is the wave's own in-flight tracking; concurrent producers are wave-internal work. The one surviving refcounted handle is `Flow`. |
 | Per-op configuration | Functional options on constructor (`opts ...OpOption`) | Standard Go idiom for multiple optional parameters. Composable, extensible without breaking existing call sites. |
 | Limiters | First-class entity, not a pool property | Limiters compose; pools don't. Multiple Tasks can share a Limiter; an op can have multiple Limiters; new Limiter types extend the system without core-API changes. |
 | Type parameter convention | `T` | Default to T per user preference. (Earlier drafts considered T1/T2 for binary variants; with the unified Launcher[T] there are no per-arity types, and binary use cases pack into a struct.) |
@@ -954,9 +872,9 @@ body running in a wave.
 | `*Job` / `*Pool` (conflated) | `*Pool` (workers, fungible) + `*Wave` (batch, user-primary) | See three-type model above. |
 | `psg.NewPool` / `psg.NewTaskPool` | (removed) | Per-op concurrency limits move to Limiters; workers are managed by the Pool. |
 | `psg.NewCombinerPool` | (removed) | Same — funnel workloads run in the Pool's goroutine pool, bounded by Limiters. |
-| `psg.NewGatherOp(handler)` | `streampool.NewSkimmer(wave, handler)` | Wave bound at construction (or nil to defer to dispatch-ctx). Handler is `Handler[T]` (renamed from psgfn.Gather). |
+| `psg.NewGatherOp(handler)` | `streampool.NewSkimmer(wave, handler)` | Wave bound at construction (or AtDispatch to defer to dispatch-ctx). Handler is `Handler[T]` (renamed from psgfn.Gather). |
 | `psg.NewCombineOp(gather, pool, factory)` | `streampool.NewFunnel(wave, factory)` | Output type parameter gone; downstream sink wired via factory's closure. Wave bindable like Skimmer. |
-| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewLauncher(wave, handler)` + `runner.Submit(ctx, arg)` | Two-step: construct once (with wave or nil), dispatch with arg. Dispatch verb is `Submit` (matches Funnel / Skimmer); `Start` is sugar for `Submit(*new(T))`. The dispatch takes no *Wave; the wave was locked in at construction. |
+| `gatherOp.Scatter(ctx, job, taskFn)` | `streampool.NewLauncher(wave, handler)` + `runner.Submit(ctx, arg)` | Two-step: construct once (with wave or AtDispatch), dispatch with arg. Dispatch verb is `Submit` (matches Funnel / Skimmer); `Start` is sugar for `Submit(*new(T))`. The dispatch takes no Wave; the wave was locked in at construction. |
 | `gatherer.Submit(ctx, job, value, err)` | `skimmer.Submit(ctx, v)` / `skimmer.SubmitErr(ctx, err)` / `skimmer.SubmitResult(ctx, v, err)` | Job/Wave arg drops out of dispatch — was bound at construction. The three submission shapes name what's being submitted: value, err, or the full (v, err) result tuple. Callers typically branch — `if err != nil { errSink.SubmitErr(...) } else { sink.Submit(...) }` — so the value-only and err-only forms cover the dominant patterns; SubmitResult covers the rare both-case where one sink wants the pair. |
 | `runner.Start(ctx)` (post-Wave-3 shape with positional pool) | `runner.Submit(ctx, arg)` / `runner.Start(ctx)` | Pool/Wave arg drops out of dispatch. Start exists as sugar for void Submit (`T = struct{}`). |
 | `psg.TaskRunner0`, `psg.TaskRunner[T]`, `psg.TaskRunner2[T1, T2]` | `Launcher[T]` (single) | Per-arity types collapse: void = `T = struct{}`, two-arg packs into a struct with named fields. |

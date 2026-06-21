@@ -10,7 +10,7 @@ cleanup.
 This is the conceptual guide: the core types, the op model, the patterns, and the
 structural rules that make concurrent workflows reliable. For the permit/concurrency
 internals see `permit-core.md` and `dispatch-execution-split.md`; for how streampool
-compares to other libraries see `ARCHITECTURE_COMPARISON.md`.
+compares to other libraries see `docs/decisions/ARCHITECTURE_COMPARISON.md`.
 
 ## The problem
 
@@ -37,27 +37,31 @@ hierarchical lifetime, like structured control flow. The properties that follow:
 - **Failure isolation** — errors propagate through well-defined boundaries, and a
   body panic is recovered and surfaced as an error.
 
-## The model: Pool, Wave, Flow
+## The model: Wave, Flow, and the internal Pool
 
-Three concerns, three concepts:
+Two user-facing types — **Wave** and **Flow** — plus the ops (the verbs); the worker
+**Pool** is internal.
 
-- **Pool** — the worker pool that executes work. It is **internal**: a process-wide
-  default pool exists implicitly and is sized automatically (workers spin up on
-  demand and retire when idle). You don't construct or tune it; user-facing
-  concurrency control is expressed with **Limiters** (below), not pool knobs.
-- **Wave** — *the primary user-facing type*: a batch of work to complete together.
-  You construct ops against a wave, submit inputs, and call `Skim`/`SkimAll` to
-  process results and await completion. Waves **nest** via `NewChild`: a parent
-  wave's drain waits for its child waves. Multiple waves run concurrently.
-- **Flow** *(optional)* — one logical thread of related work, carried in context,
-  independent of any single wave. Reach for a Flow when you need to attach metadata
-  (trace context, audit data) to work that may cross wave boundaries, or run a
-  cleanup hook when that unit of work completes. Most programs never construct one.
+- **Wave** — *the primary user-facing type*: a batch of work to complete together, a
+  value handle over internal per-batch state. Ops route work into a wave (ambient
+  inside a body, or `op.In(wave)`); `wave.Skim` / `SkimAll` / `CloseAndSkimAll` drain
+  it. Waves **nest** via `NewChild` (a parent's drain waits for its children) and run
+  concurrently. Single-owner lifecycle: no `Dup`, and Close/Cancel are not refcounted.
+- **Flow** *(optional)* — one logical thread of related work: a refcounted, ctx-borne
+  value handle that can span multiple waves. Reach for a Flow to attach metadata
+  (trace, audit) or a cleanup hook to work that may cross wave boundaries. It is the
+  one type that rides the ctx and the one that keeps `Dup`/`Close`. Most programs
+  never construct one.
+- **Pool** *(internal)* — the worker goroutines. A process-wide default Pool serves
+  all work, sized automatically (spin up on demand, retire when idle). Not
+  constructed or tuned; per-op concurrency is expressed with **Limiters**, not pool
+  knobs.
 
 ### The three ops
 
-Work is described with three op types, all constructed against a wave and fed with
-`Submit`:
+Work is described with three op types. Ops are **wave-agnostic** — constructed
+without a wave and reusable; work is routed to a wave at dispatch (the ambient wave
+inside a body, or `op.In(wave)`). All are fed with `Submit`:
 
 - **Launcher** — runs a body for each submitted input, in parallel on pool workers.
   The body does the work and submits results downstream. This is the fan-out.
@@ -66,22 +70,23 @@ Work is described with three op types, all constructed against a wave and fed wi
   time. This is the fan-in.
 - **Funnel** — incremental aggregation. Each instance is an `Accumulator` that folds
   submitted values and flushes an aggregate downstream (on a threshold, a deadline,
-  or at close). This is the map-reduce primitive.
+  or when the wave drains). This is the map-reduce primitive.
 
 `Handler[T]` is the universal body interface (`Handle(ctx, T, err) error`), and
 `HandlerFunc[T]` adapts a closure. Implementing `Handler` on a struct lets the hot
-path run allocation-free.
+path run allocation-free. By convention, name an op for its role as a noun distinct
+from its output — Launcher: `fetcher`; Funnel: `aggregator` (+ `totals`); Skimmer:
+`collector` (+ `results`) — so `op.Submit(...)` reads naturally.
 
 ## Hello world
 
 ```go
 ctx := context.Background()
 
-wave := streampool.NewWave(ctx) // uses the implicit default pool
-defer wave.Close()
+wave := streampool.NewWave(ctx) // the worker pool is internal
 
-// Terminal sink: runs serially as results arrive.
-results := streampool.NewSkimmer(wave, streampool.HandlerFunc[*User](
+// Terminal sink: runs serially on the draining goroutine as results arrive.
+printer := streampool.NewSkimmer(streampool.HandlerFunc[*User](
     func(ctx context.Context, user *User, err error) error {
         if err != nil {
             return err
@@ -91,22 +96,26 @@ results := streampool.NewSkimmer(wave, streampool.HandlerFunc[*User](
     },
 ))
 
-// Fan-out: each id is fetched on a worker, then submitted to results.
-fetch := streampool.NewLauncher(wave, streampool.HandlerFunc[UserID](
+// Fan-out: each id is fetched on a worker, then submitted to the printer.
+fetcher := streampool.NewLauncher(streampool.HandlerFunc[UserID](
     func(ctx context.Context, id UserID, err error) error {
-        user, err := userClient.Fetch(ctx, id)
         if err != nil {
             return err
         }
-        return results.Submit(ctx, user)
+        user, ferr := userClient.Fetch(ctx, id)
+        if ferr != nil {
+            return ferr
+        }
+        return printer.Submit(ctx, user) // ambient: lands in this body's wave
     },
 ))
 
+// Top level has no ambient wave, so route with In(wave):
 for _, id := range userIDs {
-    fetch.Submit(ctx, id)
+    fetcher.In(wave).Submit(ctx, id)
 }
 
-wave.SkimAll(ctx) // drain to completion; workers retire when the last wave drains
+wave.CloseAndSkimAll(ctx) // seal + drain to completion
 ```
 
 ## Patterns
@@ -122,31 +131,38 @@ to reason about.
 To aggregate related results before emitting them:
 
 ```go
-totals := streampool.NewFunnel(wave, func() streampool.Accumulator[int] {
-    var sum int
-    return streampool.NewAccumulator(
-        func(ctx context.Context, x int, err error) (time.Time, error) {
-            if err != nil {
-                return time.Time{}, err
-            }
-            sum += x
-            return time.Time{}, nil // no flush deadline; flush on Close
-        },
-        func(ctx context.Context) error { return results.Submit(ctx, sum) }, // final flush
-    )
-})
+aggregator := streampool.NewFnFunnel(
+    func() streampool.Accumulator[int] {
+        var sum int
+        return streampool.NewAccumulator(
+            func(ctx context.Context, x int, err error) (time.Time, error) {
+                if err != nil {
+                    return time.Time{}, err
+                }
+                sum += x
+                return time.Time{}, nil // no deadline; flushed when the wave drains
+            },
+            func(ctx context.Context) error { return results.Submit(ctx, sum) }, // final flush
+        )
+    },
+    nil, // no factory-level Close
+)
 ```
 
-Each accumulator instance owns its own state (here `sum`); the framework creates
-instances on demand by concurrency, so partial-aggregate memory is bounded by
-concurrency. Flushing is the instance's job — a downstream `Submit` from either the
-accumulate step (incremental) or the close step (final).
+`NewFnFunnel` takes the factory closure directly (plus a factory-level `closeFn`,
+`nil` here); `NewFunnel` takes the `AccumulatorFactory` interface instead. Each
+accumulator instance owns its own state (here `sum`); the framework creates instances
+on demand by concurrency, so partial-aggregate memory is bounded by concurrency.
+Flushing is the instance's job — a downstream `Submit` from the accumulate step
+(incremental) or the final-flush step; the wave force-flushes any not-yet-flushed
+instances at its drain. Finalize early or snapshot into another wave with
+`aggregator.Flush(ctx)` / `aggregator.FlushTo(ctx, out)`.
 
 ### Nested workflows and reentrancy
 
 Any body — a Launcher handler, a Funnel accumulate/flush, or a Skimmer handler — may
 submit more work and may drive a **child** wave it owns (create one with `NewChild`,
-submit to it, and `SkimAll` it). This lets a workflow branch dynamically on
+submit to it, and `CloseAndSkimAll` it). This lets a workflow branch dynamically on
 intermediate results while keeping structured-concurrency guarantees.
 
 ## Key rules
@@ -181,18 +197,18 @@ the skim rule above forecloses the only reentrant cycle. The mechanics live in
 User-facing concurrency is expressed with **Limiters**, attached to an op:
 
 ```go
-slowAPI := streampool.NewSemaphore(nil, 5) // at most 5 concurrent
+slowAPI := streampool.NewSemaphore(5) // at most 5 concurrent
 
-fetch := streampool.NewLauncher(wave, fetchFn, streampool.WithLimits(slowAPI))
+fetcher := streampool.NewLauncher(fetchFn, streampool.WithLimits(slowAPI))
 ```
 
-A single limiter is self-scheduled (`nil` scheduler). The same `Limiter` shared
-across ops expresses "these collectively cap at N concurrent." Limiters compose with
-AND semantics; composing several on one op requires a shared scheduler to coordinate
-their joint admission deadlock-free (a future feature). Limiters gate **intake**
-(Launcher bodies, Funnel accumulates); skim bodies and funnel flushes are
-limiter-free, which is what keeps a drain from ever waiting on a permit.
-Worker-pool sizing is automatic — limiters bound *your* concurrency, not the pool.
+A limiter is a standalone value. The same `Limiter` shared across ops expresses
+"these collectively cap at N concurrent"; several on one op compose with AND
+semantics, admitted jointly in a global order (deadlock-free, automatic — no
+coordinator to construct). Limiters gate **intake** (Launcher bodies, Funnel
+accumulates); skim bodies and funnel flushes are limiter-free, which is what keeps a
+drain from ever waiting on a permit. Worker-pool sizing is automatic — limiters bound
+*your* concurrency, not the pool.
 
 ## Errors and cancellation
 
@@ -208,7 +224,8 @@ Worker-pool sizing is automatic — limiters bound *your* concurrency, not the p
 
 - **Concurrency** is controlled with Limiters; worker-pool sizing is automatic and
   adaptive — there is no pool to tune.
-- **Funnel flushing** is configured per accumulator (threshold / deadline / close).
+- **Funnel flushing** is per accumulator (threshold / deadline) plus a force-flush
+  at the wave's drain; finalize early or snapshot with `Flush` / `FlushTo`.
 - **Instrumentation**: streampool emits structured events (work lifecycle, queue
   depth, throughput) for monitoring and bottleneck analysis, and result processing
   is deterministic within a drain, which aids reproducible testing.
@@ -217,5 +234,5 @@ Worker-pool sizing is automatic — limiters bound *your* concurrency, not the p
 
 - `permit-core.md` — the permit allocation model (the hierarchical cache).
 - `dispatch-execution-split.md` — the dispatch/execution architecture.
-- `../ARCHITECTURE_COMPARISON.md` — how streampool compares to other concurrency
+- `docs/decisions/ARCHITECTURE_COMPARISON.md` — how streampool compares to other concurrency
   libraries and to its internal foundations.

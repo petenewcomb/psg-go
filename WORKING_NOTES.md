@@ -2,6 +2,68 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► SURFACE REDESIGN + DOC-ORG TARGET (LOCKED, 2026-06-21, design review w/ PN).**
+A deep design pass converged the user-facing `streampool` surface and the target doc
+organization. These SUPERSEDE earlier surface notes (incl. the 2026-06-20 "SURFACE
+PINNED" line below) where they conflict. Authoritative until reflected into the docs.
+
+**Surface (locked):**
+- **Wave = value handle**, `wave := NewWave(ctx)` — single return, NO ctx out
+  (returning a ctx was rejected: per-wave alloc, ctx-juggling, and it would conflate
+  *routing* with *propagation*). Value receivers. **Single-owner lifecycle, NO Dup**;
+  Close/Cancel non-refcounted. `Skim` / `SkimAll` / `CloseAndSkimAll` / `Close` /
+  `CancelAndWait`. `CloseAndSkimAll` = terminal (seal+drain); `SkimAll` = drain
+  without sealing.
+- **Ops are wave-agnostic** — `NewLauncher(h)` / `NewSkimmer(h)` / `NewFunnel(factory)`,
+  no construction wave, no sentinel. Reusable specs definable before any wave (no
+  wave-lifetime/creation-order coupling).
+- **Routing = ambient + `op.In(wave)`.** In-body `op.Submit(ctx, v)` uses the body's
+  ambient (framework-stamped) wave; `op.In(wave)` returns a cheap wave-bound value
+  handle for top-level, redirect, or bind-once reuse. `In` (membership: the op's work
+  is *part of* the wave) chosen over For/To; routing is handle-level so it never
+  perturbs the ctx → Flow/trace propagate across redirects untouched.
+- **Dispatch verb `Submit` kept** + **naming convention**: name ops as agent/role
+  nouns distinct from their outputs — Launcher→`fetcher`; Funnel→`aggregator`
+  (+`totals`); Skimmer→`collector` (+`results`). Rule: "-er for the op, plain noun
+  for the output." `Start` = void-Launcher sugar. (Considered `Do`/asymmetric verbs;
+  the naming convention makes `Submit` read right and keeps the clean
+  `SubmitErr`/`SubmitResult` family + `ants`/`pond` familiarity.)
+- **Funnel = wave-scoped**: per-(funnel,wave) accumulator instances owned by the wave,
+  force-flushed at wave drain (the per-wave flusher). `Flush(ctx)` (outputs → ambient
+  wave) + **`FlushTo(ctx, wave)`** (one-shot; outputs → given wave; FlushFn stays
+  wave-agnostic, its ambient overridden — enables snapshot/staged capture, e.g.
+  timer-driven). **NO Close/Dup** — finalization is wave-driven (in-flight==0 ∧
+  sealed), which subsumes the old Funnel.Dup refcount and counts *all* feeders.
+- **Limiters minimal**: standalone composable values — `NewSemaphore(n)`,
+  `NewRateLimit(n, d)`; `WithLimits(...)` AND-composition, **jointly admitted in a
+  global canonical order** (deadlock-free by lock-ordering, automatic, no object).
+  **NO user-facing Coordinator/Scheduler, no `.Under`/grouping.** Ordered joint
+  admission needs only the global order; the prioritized discipline (the only thing
+  needing a central arbiter) is a single *internal* global arbiter, not exposed.
+- **Flow kept, value handle**, `ctx, flow := NewFlow(parent)` — two-return (Flow *is*
+  ctx-borne propagation, the deliberate exception to "no ctx from constructors").
+  **Keeps Dup/Close** — the one legitimate refcount survivor (spans multiple waves; no
+  single wave bounds it). Framework auto-ref/unrefs per work item; `FlowFromContext` =
+  non-counting view; propagation requires ctx hygiene.
+- **Three-type framing fixed**: user-facing types are **Wave + Flow** (+ ops as
+  verbs); **Pool is internal** (auto-sized), mentioned only to explain sizing.
+- **Deferred (no API named — own design effort)**: a declarative op-and/or-wave
+  **scheduling priority** feeding work-dispatch ordering *and* the internal permit
+  arbiter; anti-starvation-tempered; intake-side only; one internal global arbiter,
+  no user grouping.
+
+**Doc organization (target; strict only on release-able branches — refactor branches
+may have docs lead code):**
+- User-facing = **current state**: README, `doc.go` (absorbs `programming-model`),
+  per-symbol API comments, `example_*_test.go`.
+- **`docs/` root** = maintainer, current-state design.
+- **`docs/decisions/`** = target-state design + rationale + superseded designs.
+- **`docs/plan/`** = path-to-target (migration/sequencing); empty/deleted at rest.
+- Positioning: concise comparison in README; deep evidence (ARCHITECTURE_COMPARISON
+  source analysis, POSITIONING_RESEARCH) → `docs/decisions/`.
+- `API_DESIGN.md` → reborn as the `docs/decisions/` target-surface record;
+  `programming-model.md` → folds into `doc.go` (deferred to the code migration).
+
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new
 spec); reconciled dispatch-execution-split.md, limiter-suspend-resume.md,

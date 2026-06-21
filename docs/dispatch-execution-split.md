@@ -17,7 +17,7 @@ constraints of the limiter design (intake/drain split; the narrowed skim-cycle r
 Every intermittent nested-drain deadlock we have chased traces to one conflation:
 **a single goroutine does both the framework bookkeeping (admission, permits,
 queue management) and runs the blocking user body.** A pool worker pulls a body,
-the body re-enters the framework — `Launcher.Start`, `Submit`, a synchronous
+the body re-enters the framework — `Launcher.Submit`, a synchronous
 `CloseAndSkimAll` on a sub-wave — and *blocks*. Because that goroutine was also
 the thing draining queues and admitting work, blocking the body blocks the
 dispatcher too, and the system can wedge with every worker parked inside a body
@@ -115,32 +115,36 @@ So one primitive is *postponing* on the manager and *blocking* on the executor �
 the routing the eager design tangled into `ExecuteOrWait`, now cleanly divided by
 which pool runs it.
 
-## The cross-limiter coordinator (deferred)
+## Cross-limiter joint admission (no user-facing coordinator)
 
 The permit core needs **no global coordinator for deadlock-freedom** — idle-stealing
-is per-limiter and local (`permit-core.md`). A coordinator is needed for exactly one
-thing, and it is **deferred**: **atomic joint acquisition** when an op's `WithLimits`
-spans several limiters that must be taken all-or-nothing (the ordered and
-prioritized scheduler disciplines, including starvation-avoidance by withholding).
+is per-limiter and local (`permit-core.md`). Joint admission of a multi-limiter
+`WithLimits` set splits by discipline:
 
-When that feature is built, it must not become a global lock per acquire. The
-resource/scheduler split keeps it cheap:
+- **Ordered (default, no object).** Acquire the set in a single **global canonical
+  order** (a process-wide limiter sequence) — deadlock-free by lock-ordering, fully
+  automatic, no per-set or per-group object, and no user-facing coordinator. This is
+  the only discipline v1 needs.
+- **Prioritized (deferred).** Cross-op priority + starvation-avoidance (withholding)
+  is the one thing that needs a central decision-maker, because it must see all
+  pending demand. It is a single **internal global arbiter**, never a user-constructed
+  type.
+
+When the prioritized arbiter is built it must not become a global lock per acquire:
 
 - An **uncontended acquire/release** touches only *that limiter's own* per-limiter
   state — its pool counters, the per-wave governor counter, a push to the executor
   queue. It scales per-limiter and never serializes across limiters or cores.
 - Only **cross-limiter** work — the multi-limiter atomic-fit (the prioritized
-  scheduler's whole-vector grant) — needs the coordinator, and only under
-  saturation, which scales with permit pressure, not core count.
+  whole-vector grant) — routes through the arbiter, and only under saturation, which
+  scales with permit pressure, not core count. Disjoint vectors never meet in the fit
+  decision, so one global arbiter needs no user-defined grouping.
 
-So the part that wants to be **single-writer** is the cross-limiter coordinated
-state (the prioritized atomic-fit, the withholding policy): one owner turns
-locks-and-races into plain sequential code, and it is **not** the dispatch hot path.
-Route only blocked multi-limiter admissions to it; let per-limiter acquires run in
-parallel. **One writer for the coordination, not one dispatch worker.** Whether that
-owner is process-global or per-limiter-group is ergonomic — global sidesteps the
-"limiter created before its forest exists" binding puzzle — not a deadlock
-requirement.
+So the part that wants to be **single-writer** is the prioritized coordinated state
+(the atomic-fit, the withholding policy): one owner turns locks-and-races into plain
+sequential code, and it is **not** the dispatch hot path. Route only blocked
+multi-limiter *prioritized* admissions to it; let per-limiter and ordered acquires
+run in parallel.
 
 ## Infeasible demand: never hang on it
 

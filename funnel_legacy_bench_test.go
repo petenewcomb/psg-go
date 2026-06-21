@@ -6,7 +6,7 @@
 
 // This file holds the Wave-2-era benchmark suite for the funnel.
 // Wave 3 reshaped psg.Task / Skimmer / Funnel enough that the benchmark
-// requires a deliberate redesign (see REFACTOR_PLAN.md: funnel-
+// requires a deliberate redesign (see docs/plan/REFACTOR_PLAN.md: funnel-
 // benchmark requirements session). To keep Wave 3 focused, the entire
 // benchmark is gated behind the `psg_wave3_legacy_bench` build tag and
 // is NOT compiled by default. Restore by either porting it to the new

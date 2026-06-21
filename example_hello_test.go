@@ -23,7 +23,7 @@ func Example_hello() {
 	defer wave.CancelAndWait() // hygiene
 
 	var results []string
-	skimmer := streampool.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result string, err error) error {
 			results = append(results, result)
 			return nil
@@ -32,7 +32,7 @@ func Example_hello() {
 
 	// Bind a string to a task that submits it to the skimmer after a short delay.
 	newRunner := func(s string) streampool.TaskLauncher {
-		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			time.Sleep(1 * time.Millisecond)
 			return skimmer.Submit(ctx, s)
 		})

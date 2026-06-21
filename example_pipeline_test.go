@@ -50,17 +50,17 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
 	newDigestSkimmer := func(path string) streampool.Skimmer[[md5.Size]byte] {
-		return streampool.NewSkimmer(wave, streampool.HandlerFunc[[md5.Size]byte](
+		return streampool.NewFnSkimmer(
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
 			},
-		))
+		)
 	}
 
 	newDigestingRunner := func(path string, data []byte) streampool.TaskLauncher {
 		skimmer := newDigestSkimmer(path)
-		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return skimmer.Submit(ctx, md5.Sum(data))
 		}, streampool.WithLimits(digestLimit))
@@ -69,11 +69,11 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// Creates a skimmer for a reading task whose handler dispatches a
 	// digesting task with the bytes that were read.
 	newReadSkimmer := func(path string) streampool.Skimmer[[]byte] {
-		return streampool.NewSkimmer(wave, streampool.HandlerFunc[[]byte](
+		return streampool.NewFnSkimmer(
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestingRunner(path, data).Start(ctx)
 			},
-		))
+		)
 	}
 
 	// No need for a pool to limit how many file reading tasks run concurrently
@@ -81,7 +81,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// the digesters.
 	newReadingRunner := func(path string) streampool.TaskLauncher {
 		skimmer := newReadSkimmer(path)
-		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
 			return skimmer.SubmitResult(ctx, data, err)

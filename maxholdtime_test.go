@@ -25,12 +25,12 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	var flushCount atomic.Int32
 	var skimCount atomic.Int32
 
-	skimmer := streampool.NewFnSkimmer(wave, func(ctx context.Context, result int, err error) error {
+	skimmer := streampool.NewFnSkimmer(func(ctx context.Context, result int, err error) error {
 		t.Logf("Skim called with result %d", result)
 		skimCount.Add(1)
 		chk.NoError(err)
 		return nil
-	})
+	}).In(wave)
 
 	funnelPool := wave // NOTE: WithMaxConcurrency(1) dropped (no-op now); serialization must move to a limiter
 
@@ -49,7 +49,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	defer funnelOp.Close()
 
 	newRunner := func(value int) streampool.TaskLauncher {
-		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			return funnelOp.Submit(ctx, value)
 		})
 	}

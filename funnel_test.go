@@ -104,7 +104,7 @@ func TestFunnelScatterNilSkimPanic(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	assert.PanicsWithValue(t, "handler must be non-nil", func() {
-		streampool.NewSkimmer[int](wave, nil)
+		streampool.NewSkimmer[int](nil)
 	})
 }
 
@@ -113,23 +113,23 @@ func TestFunnelScatterFromTask(t *testing.T) {
 	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := streampool.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
-	)
+	).In(wave)
 	funnelPool := wave
 	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+	innerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
 	})
-	outerRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -150,33 +150,33 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	skimmer := streampool.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	).In(parentWave)
 	funnelPool := parentWave
 	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		subCtx, subWave := streampool.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subSkimmer := streampool.NewFnSkimmer(subWave,
+		subSkimmer := streampool.NewFnSkimmer(
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
 		)
-		subRunner := streampool.NewTaskLauncher(subWave, func(ctx context.Context) error {
+		subRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
 		})
@@ -200,24 +200,24 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 	ctx, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	skimmer := streampool.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
-	)
+	).In(parentWave)
 	funnelPool := parentWave
 	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	innerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		chk.Fail("Should not get here - parent task pool task should not run")
 		return nil
 	})
-	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {

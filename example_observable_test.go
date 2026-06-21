@@ -32,7 +32,7 @@ func Example_observable() {
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Start and SkimAll.
 	var results []string
-	skimmer := streampool.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result string, err error) error {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   skimmed result %q\n", msSinceStart(), result)
@@ -49,7 +49,7 @@ func Example_observable() {
 	// Define a factory to bind task-specific inputs and resources into a
 	// Launcher. The task body Submits its result to the skimmer.
 	newRunner := func(taskName string) streampool.TaskLauncher {
-		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":

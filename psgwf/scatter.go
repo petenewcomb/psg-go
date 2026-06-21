@@ -76,7 +76,7 @@ func newGenericLauncher[T, C any](
 	})
 	return GenericLauncher[T, C]{
 		wf:    wf,
-		inner: streampool.NewLauncher(wave, body, opts...),
+		inner: streampool.NewLauncher(body, opts...).In(wave),
 	}
 }
 

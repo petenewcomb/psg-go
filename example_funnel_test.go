@@ -54,7 +54,7 @@ func ExampleFunnel() {
 	funnelPool := wave
 
 	// Define a result aggregation function and create a funneld skim/funnel operation
-	skimmer := streampool.NewSkimmer(wave, streampool.HandlerFunc[map[string]int](skimFn))
+	skimmer := streampool.NewFnSkimmer(skimFn).In(wave)
 
 	// After Wave 2, the streampool.Accumulator factory captures the downstream
 	// skimmer in its closure and Submits the aggregated map from
@@ -88,7 +88,7 @@ func ExampleFunnel() {
 	// Build a Launcher factory: the task body submits its result to
 	// funnelOp from inside the task context.
 	newRunner := func(number int, delay time.Duration, result string) streampool.TaskLauncher {
-		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",

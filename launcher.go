@@ -43,22 +43,21 @@ type Launcher[T any] struct {
 	workPool *omnipool.Pool[launcherWork[T]]
 }
 
-// NewLauncher binds a [Handler[T]] to wave. wave may be nil
-// to defer wave binding to the dispatching ctx at Submit / Start
-// time (see [NewSkimmer] for the resolution rules). Pass
-// [WithLimits] in opts to bind one or more [Limiter]s that throttle
-// dispatch.
+// NewLauncher creates a Launcher for handler. The op is wave-agnostic:
+// each dispatch resolves the target wave from the ambient body ctx, or
+// bind one explicitly with [Launcher.In] (required at top level, where
+// there is no ambient wave). Pass [WithLimits] in opts to bind one or
+// more [Limiter]s that throttle dispatch.
 //
 // The framework manages an internal error sink that surfaces
 // unexpected errors returned by Handle through the dispatching
 // Wave's SkimAll path.
-func NewLauncher[T any](wave *Wave, handler Handler[T], opts ...OpOption) Launcher[T] {
+func NewLauncher[T any](handler Handler[T], opts ...OpOption) Launcher[T] {
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
 	cfg := resolveOpConfig(opts)
 	return Launcher[T]{
-		wave:     wave,
 		handler:  handler,
 		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
@@ -66,17 +65,23 @@ func NewLauncher[T any](wave *Wave, handler Handler[T], opts ...OpOption) Launch
 	}
 }
 
-// NewFnLauncher binds a closure-based handler to wave. Convenience
-// wrapper for `NewLauncher(wave, NewHandler(handle), opts...)`.
-// T is inferred from handle's value parameter, sparing the user
-// the [T] annotation. wave may be nil to defer binding to the
-// dispatching ctx; see [NewLauncher].
+// In returns a copy of the Launcher bound to wave, so its dispatches place
+// work in wave instead of the ambient (body-ctx) wave. Use at top level (no
+// ambient wave) or to redirect work into another wave.
+func (r Launcher[T]) In(wave *Wave) Launcher[T] {
+	r.wave = wave
+	return r
+}
+
+// NewFnLauncher creates a Launcher from a closure-based handler.
+// Convenience wrapper for `NewLauncher(NewHandler(handle), opts...)`.
+// T is inferred from handle's value parameter, sparing the user the
+// [T] annotation. Wave-agnostic; see [NewLauncher] and [Launcher.In].
 func NewFnLauncher[T any](
-	wave *Wave,
 	handle func(ctx context.Context, value T, err error) error,
 	opts ...OpOption,
 ) Launcher[T] {
-	return NewLauncher(wave, NewHandler(handle), opts...)
+	return NewLauncher(NewHandler(handle), opts...)
 }
 
 // TaskLauncher is the [Launcher][struct{}] case — a launcher for
@@ -84,11 +89,11 @@ func NewFnLauncher[T any](
 // which pairs with the [Task] / [TaskFunc] no-input adapter).
 type TaskLauncher = Launcher[struct{}]
 
-// NewTaskLauncher binds a no-arg task body to wave. Convenience
-// wrapper for `NewLauncher(wave, NewTask(task), opts...)`. wave may
-// be nil to defer binding to the dispatching ctx; see [NewLauncher].
-func NewTaskLauncher(wave *Wave, task func(ctx context.Context) error, opts ...OpOption) TaskLauncher {
-	return NewLauncher(wave, NewTask(task), opts...)
+// NewTaskLauncher creates a Launcher for a no-arg task body. Convenience
+// wrapper for `NewLauncher(NewTask(task), opts...)`. Wave-agnostic; see
+// [NewLauncher] and [Launcher.In].
+func NewTaskLauncher(task func(ctx context.Context) error, opts ...OpOption) TaskLauncher {
+	return NewLauncher(NewTask(task), opts...)
 }
 
 // ErrLauncher is the [Launcher][struct{}] case viewed as an err
@@ -97,12 +102,11 @@ func NewTaskLauncher(wave *Wave, task func(ctx context.Context) error, opts ...O
 // [ErrHandler] / [ErrHandlerFunc] err-receiving adapter.
 type ErrLauncher = Launcher[struct{}]
 
-// NewErrLauncher binds an err-receiving handler to wave.
-// Convenience wrapper for
-// `NewLauncher(wave, NewErrHandler(handle), opts...)`. wave may be
-// nil to defer binding to the dispatching ctx; see [NewLauncher].
-func NewErrLauncher(wave *Wave, handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher {
-	return NewLauncher(wave, NewErrHandler(handle), opts...)
+// NewErrLauncher creates a Launcher for an err-receiving handler.
+// Convenience wrapper for `NewLauncher(NewErrHandler(handle), opts...)`.
+// Wave-agnostic; see [NewLauncher] and [Launcher.In].
+func NewErrLauncher(handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher {
+	return NewLauncher(NewErrHandler(handle), opts...)
 }
 
 // Submit dispatches Handle(ctx, value, nil) on the bound Wave's

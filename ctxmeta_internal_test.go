@@ -49,20 +49,20 @@ func TestPermitScopingChains(t *testing.T) {
 	assert.Nil(t, topMeta.parent, "root wave context has no parent")
 
 	var skimMeta *ctxMeta
-	skimmer := NewFnSkimmer(wave, func(sctx context.Context, _ int, _ error) error {
+	skimmer := NewFnSkimmer(func(sctx context.Context, _ int, _ error) error {
 		_, skimMeta = wave.ctxMeta(sctx)
 		return nil
 	})
 
 	var bodyMeta, subTopMeta, subBodyMeta *ctxMeta
-	launcher := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
+	launcher := NewTaskLauncher(func(bodyCtx context.Context) error {
 		_, bodyMeta = wave.ctxMeta(bodyCtx)
 
 		// Drive a subwave synchronously from inside the body — the
 		// telescoping path the suspend brackets rely on.
 		subCtx, subWave := NewWave(bodyCtx)
 		_, subTopMeta = subWave.ctxMeta(subCtx)
-		subLauncher := NewTaskLauncher(subWave, func(subBodyCtx context.Context) error {
+		subLauncher := NewTaskLauncher(func(subBodyCtx context.Context) error {
 			_, subBodyMeta = subWave.ctxMeta(subBodyCtx)
 			return nil
 		})
@@ -115,7 +115,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	var bodyReq, subwaveSeenReq request
-	limited := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
+	limited := NewTaskLauncher(func(bodyCtx context.Context) error {
 		_, bodyMeta := wave.ctxMeta(bodyCtx)
 		bodyReq = bodyMeta.currentHeldRequest()
 
@@ -127,7 +127,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 	require.NoError(t, limited.Start(ctx))
 
 	var unlimitedReq request = &directRequest{} // sentinel, overwritten
-	unlimited := NewTaskLauncher(wave, func(bodyCtx context.Context) error {
+	unlimited := NewTaskLauncher(func(bodyCtx context.Context) error {
 		_, bodyMeta := wave.ctxMeta(bodyCtx)
 		unlimitedReq = bodyMeta.currentHeldRequest()
 		return nil

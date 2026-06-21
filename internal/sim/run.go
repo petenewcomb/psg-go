@@ -152,7 +152,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		if i%2 == 0 {
 			w = c.Wave
 		}
-		skimmer := streampool.NewSkimmer(w, c.newSkimmerHandler(t, gp, idx))
+		skimmer := streampool.NewSkimmer(c.newSkimmerHandler(t, gp, idx)).In(w)
 		c.Skimmers[i] = &skimmer
 	}
 	for i, cmb := range c.Plan.Funnels {
@@ -363,7 +363,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	if bindWave {
 		w = c.Wave
 	}
-	return streampool.NewLauncher(w, body, opts...)
+	return streampool.NewLauncher(body, opts...).In(w)
 }
 
 // disposition tells an op driver how to react to an error returned by a psg

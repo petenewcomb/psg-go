@@ -29,42 +29,42 @@ type Skimmer[T any] struct {
 	workPool *omnipool.Pool[skimWork[T]]
 }
 
-// NewSkimmer binds a [Handler] to wave for value+err dispatch
-// during that Wave's drain. wave may be nil — in that case the
-// Skimmer is wave-independent and resolves the target wave at each
-// dispatch from the dispatching ctx (which must descend from a
-// [NewWave] call, or be a task / skim / accumulate body ctx whose
-// dispatching wave the framework has stamped). This enables one
-// Skimmer instance to be reused across many waves.
+// NewSkimmer creates a Skimmer for value+err dispatch during a Wave's
+// drain. The op is wave-agnostic: each dispatch resolves the target wave
+// from the ambient body ctx, or bind one explicitly with [Skimmer.In]
+// (required at top level). One Skimmer can thus be reused across waves.
 //
 // For closure-based handlers, wrap in [HandlerFunc] at the
 // call site; struct implementations of Handler[T] support the
 // alloc-free hot path.
 func NewSkimmer[T any](
-	wave *Wave,
 	handler Handler[T],
 ) Skimmer[T] {
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
 	return Skimmer[T]{
-		wave:     wave,
 		handler:  handler,
 		workPool: omnipool.For[skimWork[T]](),
 	}
 }
 
-// NewFnSkimmer binds a closure-based handler to wave for
+// In returns a copy of the Skimmer bound to wave, so its dispatches place
+// work in wave instead of the ambient (body-ctx) wave. Use at top level (no
+// ambient wave) or to redirect work into another wave.
+func (g Skimmer[T]) In(wave *Wave) Skimmer[T] {
+	g.wave = wave
+	return g
+}
+
+// NewFnSkimmer creates a Skimmer from a closure-based handler for
 // drain-time dispatch. Convenience wrapper for
-// `NewSkimmer(wave, NewHandler(handle))`. T is inferred from
-// handle's value parameter, sparing the user the [T] annotation.
-// wave may be nil to defer binding to the dispatching ctx; see
-// [NewSkimmer].
+// `NewSkimmer(NewHandler(handle))`. T is inferred from handle's value
+// parameter. Wave-agnostic; see [NewSkimmer] and [Skimmer.In].
 func NewFnSkimmer[T any](
-	wave *Wave,
 	handle func(ctx context.Context, value T, err error) error,
 ) Skimmer[T] {
-	return NewSkimmer(wave, NewHandler(handle))
+	return NewSkimmer(NewHandler(handle))
 }
 
 // ErrSkimmer is the [Skimmer][struct{}] case viewed as an err sink
@@ -73,12 +73,12 @@ func NewFnSkimmer[T any](
 // which pairs with the [ErrHandler] / [ErrHandlerFunc] adapter.
 type ErrSkimmer = Skimmer[struct{}]
 
-// NewErrSkimmer binds an err-receiving handler to wave for
+// NewErrSkimmer creates a Skimmer for an err-receiving handler for
 // drain-time dispatch. Convenience wrapper for
-// `NewSkimmer(wave, NewErrHandler(handle))`. wave may be nil to
-// defer binding to the dispatching ctx; see [NewSkimmer].
-func NewErrSkimmer(wave *Wave, handle func(ctx context.Context, err error) error) ErrSkimmer {
-	return NewSkimmer(wave, NewErrHandler(handle))
+// `NewSkimmer(NewErrHandler(handle))`. Wave-agnostic; see [NewSkimmer]
+// and [Skimmer.In].
+func NewErrSkimmer(handle func(ctx context.Context, err error) error) ErrSkimmer {
+	return NewSkimmer(NewErrHandler(handle))
 }
 
 // newInternalSkimmer constructs a Skimmer used by the framework for

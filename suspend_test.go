@@ -28,11 +28,11 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	gate := make(chan struct{})
-	launcher := streampool.NewFnLauncher(wave, func(ctx context.Context, unit int, _ error) error {
+	launcher := streampool.NewFnLauncher(func(ctx context.Context, unit int, _ error) error {
 		switch unit {
 		case 1:
 			subCtx, subWave := streampool.NewWave(ctx)
-			sub := streampool.NewTaskLauncher(subWave, func(ctx context.Context) error {
+			sub := streampool.NewTaskLauncher(func(ctx context.Context) error {
 				select {
 				case <-gate:
 					return nil
@@ -63,7 +63,7 @@ func TestSkimHandlerDrivingSubwavePanics(t *testing.T) {
 	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := streampool.NewFnSkimmer(wave, func(ctx context.Context, _ int, _ error) error {
+	skimmer := streampool.NewFnSkimmer(func(ctx context.Context, _ int, _ error) error {
 		subCtx, subWave := streampool.NewWave(ctx)
 		defer subWave.CancelAndWait()
 		return subWave.CloseAndSkimAll(subCtx) // disallowed: gather from a skim handler

@@ -591,7 +591,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 							scatter = func(ctx context.Context, deadline time.Time, target streampool.TaskPoolOrJob,
 								task streampool.Task[benchmarkTaskResult]) (bool, error) {
 								// Tests to make sure that NewSkimmer does not incur allocation overhead
-								skimmer := streampool.NewSkimmer(wave, streampool.NewHandler(skimFnAdapter))
+								skimmer := streampool.NewSkimmer(streampool.NewHandler(skimFnAdapter))
 								if deadline.IsZero() {
 									return true, skimmer.Start(ctx, target, task)
 								}
@@ -599,7 +599,7 @@ func BenchmarkFunnelThroughput(b *testing.B) {
 							}
 						} else {
 							funnelPool := wave
-							skimmer := streampool.NewSkimmer(wave, streampool.NewHandler(skimFn))
+							skimmer := streampool.NewSkimmer(streampool.NewHandler(skimFn))
 							funnelFactory := func() streampool.Accumulator[benchmarkTaskResult] {
 								return newBenchmarkFunnel(
 									&testStartTime,

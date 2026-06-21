@@ -26,7 +26,7 @@ func ExampleWave_Cancel() {
 
 	limit := streampool.NewSemaphore(1)
 
-	printResult := streampool.NewFnSkimmer(wave,
+	printResult := streampool.NewFnSkimmer(
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
@@ -35,7 +35,7 @@ func ExampleWave_Cancel() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+	firstRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		// Simulate a long-running task
 		time.Sleep(20 * time.Millisecond)
 		return printResult.Submit(ctx, "first task result")
@@ -47,7 +47,7 @@ func ExampleWave_Cancel() {
 	// Launch second task, which must wait for the first result to be skimmed
 	// because the Limiter only grants one permit at a time.
 	fmt.Println("Launching second task")
-	secondRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+	secondRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		// Simulate a longer-running task
 		time.Sleep(100 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
@@ -88,7 +88,7 @@ func ExampleWave_Cancel_task() {
 
 	limit := streampool.NewSemaphore(1)
 
-	printResult := streampool.NewFnSkimmer(wave,
+	printResult := streampool.NewFnSkimmer(
 		func(ctx context.Context, result string, err error) error {
 			fmt.Printf("Got %q, err=%v\n", result, err)
 			return nil
@@ -97,7 +97,7 @@ func ExampleWave_Cancel_task() {
 
 	// Launch first task
 	fmt.Println("Launching first task")
-	firstRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+	firstRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		return printResult.Submit(ctx, "first task result")
 	}, streampool.WithLimits(limit))
 	if err := firstRunner.Start(ctx); err != nil {
@@ -110,7 +110,7 @@ func ExampleWave_Cancel_task() {
 	// Launch second task, which also provides an opportunity for the first task
 	// result to be skimmed.
 	fmt.Println("Launching second task")
-	secondRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
+	secondRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		// Force cancellation from inside the task. This is a way to cut
 		// short the overall wave due to a fatal error within a task without
 		// even waiting for the task result to be skimmed.

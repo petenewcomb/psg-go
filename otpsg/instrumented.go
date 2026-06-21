@@ -82,7 +82,7 @@ func Scatter[T any](
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...streampool.OpOption,
 ) error {
-	runner := streampool.NewTaskLauncher(nil, func(ctx context.Context) error {
+	runner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitResult(ctx, result, err)
 	}, opts...)

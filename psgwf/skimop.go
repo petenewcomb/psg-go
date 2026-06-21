@@ -19,7 +19,7 @@ type Skimmer[T any] = GenericSkimOp[T, context.Context]
 // workflow context from tasks or funnels. wave may be nil to defer wave
 // binding to the dispatching ctx (see [streampool.NewSkimmer]).
 func NewSkimmer[T, C any](wave *streampool.Wave, skimFn GenericSkimFunc[T, C]) GenericSkimOp[T, C] {
-	return GenericSkimOp[T, C](streampool.NewSkimmer(wave, wrapSkimFunc(skimFn)))
+	return GenericSkimOp[T, C](streampool.NewSkimmer(wrapSkimFunc(skimFn)).In(wave))
 }
 
 func (g GenericSkimOp[T, C]) inner() streampool.Skimmer[result[T, C]] {

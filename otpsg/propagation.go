@@ -57,7 +57,7 @@ func PropagateSkim[T any](
 	wave *streampool.Wave,
 	skimFn func(ctx context.Context, result T, err error) error,
 ) streampool.Skimmer[PropagatedResult[T]] {
-	return streampool.NewSkimmer(wave, streampool.HandlerFunc[PropagatedResult[T]](
+	return streampool.NewFnSkimmer(
 		func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 			// Create context with propagated trace data
 			propagatedCtx := ctx
@@ -68,7 +68,7 @@ func PropagateSkim[T any](
 			// Call original skim with enhanced context
 			return skimFn(propagatedCtx, wrapped.UserResult, err)
 		},
-	))
+	).In(wave)
 }
 
 // PropagateFunnel wraps an accumulator factory to create accumulators that

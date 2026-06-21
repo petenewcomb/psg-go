@@ -109,13 +109,18 @@ fixes: Pool un-exposed, permit cache not global scheduler, reentrancy rule,
 principle 7).
 
 **REMAINING (process/roadmap docs — lower stakes):**
-- **REFACTOR_PLAN.md** — old op-names; NO wave for the dispatch/execution split or
-  permit-core (biggest gap); "global permit scheduler" phrasing; companion-doc list.
-- **TODO.md** — the "global permit scheduler" line in the REFRAMED banner (L46);
-  op-names.
-- **Move ARCHITECTURE_COMPARISON.md → docs/** + fix refs (deferred — ref churn
-  across keep-as-is/prose docs; cosmetic). Also: the relocated comparison still has
-  some generic "scatter-gather-combine patterns" phrasing (minor).
+- **REFACTOR_PLAN.md** (now `docs/plan/`) — reconciled 2026-06-21: candidate-waves
+  marked landed/superseded, the REVERSED Pool↔Wave direction fixed (Pool folded
+  INTO Wave, internal), op-names refreshed, and the missing dispatch/execution-split
+  + permit-core architecture wave added. Live status still lives in WORKING_NOTES.
+
+**DONE since (this block was itself stale):**
+- TODO.md "global permit scheduler" — already reads "no global scheduler" in the
+  REFRAMED banner; op-names refreshed; the wave-5b section rewritten to the
+  2026-06-21b finalized lifecycle (force-abort design retired).
+- ARCHITECTURE_COMPARISON.md / API_DESIGN.md / POSITIONING_RESEARCH.md already live
+  under `docs/decisions/`; REFACTOR_PLAN under `docs/plan/`. (The relocated
+  comparison may still carry minor generic "scatter-gather-combine" phrasing.)
 
 **SURFACE PINNED this session:** `streampool` package; no user-facing `Pool` (sizing
 automatic; concurrency via Limiters); drop scatter/gather/PSG vocabulary; dispatch

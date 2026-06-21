@@ -11,26 +11,29 @@ The combiner branch has progressed substantially beyond its original scope. See 
 
 The next major piece is **Pool/workq consolidation** (merge TaskPool + FunnelPool into one Pool, rationalize workq integration). Thread C completion falls out of that pass.
 
-### wave-5b: per-wave cancellation propagation (gates cancellation/teardown — see WORKING_NOTES)
-- **Implement per-wave cancellation that reaches user code.** Today every
-  `NewWave` (no `WithPool`) makes its own Pool, so a cancelled subwave can't
-  reach a permit-holding producer in another pool → teardown deadlock +
-  reclaim over-admission (both reproduced by the committed sim harness:
-  `Subjob.CancelProb` + shared limiters). Fix: Wave holds `waveCtx =
-  WithCancel(poolCtx)` and an **nbcq pool of per-execution contexts** (each
-  `WithCancel(waveCtx)` + own mutable `ctxMeta`); workers run user functions
-  under the borrowed wave-exec ctx, not their goroutine ctx. Verified enabling
-  fact: `rdvq.BasicPushSelect` aborts on `ctx.Done()`, so once cancel reaches a
-  producer it self-releases — **no drain needed** (the discard-drain we
-  prototyped was a detour). A per-wave in-flight counter rides the nbcq
-  borrow/return for completion detection. Folds in the reclaim "never abandon /
-  no unpermitted resume" correctness.
-- **Trim excessive build-up of nbcq reuse caches.** Peak-concurrency bursts
-  leave a high-water pool of idle shells. Applies to **both** the new
-  wave-execution-context pool **and** the existing `funnelInstanceQueue`
-  (`funnelop.go:316`, an nbcq of spent `funnelInstance` shells) — worth a
-  shared trim/cap mechanism over the nbcq reuse-cache pattern rather than two
-  bespoke ones.
+### wave-5b: per-wave cancellation/teardown — SUPERSEDED by the 2026-06-21b Wave lifecycle (see WORKING_NOTES top banner)
+- **The framework-force-abort design is retired.** The original plan here (Wave
+  holds `waveCtx = WithCancel(poolCtx)` + an **nbcq pool of per-execution
+  contexts**; workers run user code under a borrowed wave-exec ctx so a cancel
+  reaches permit-holding producers) is rejected by the finalized lifecycle:
+  **cancellation = the drive ctx, pure — NO framework force-abort.** Its premise
+  is also now false — workers belong to the GLOBAL pool, not a per-wave Pool
+  (Pool was folded into Wave, `5bf2e7c`), so the "cancelled subwave can't reach a
+  producer in another pool → teardown deadlock" path no longer exists. In-flight
+  work runs under its own submit ctxs; cancel those (usually the same ctx) to
+  stop it. No goroutine leak: `streampool.Wait()` joins idle global workers. The
+  reclaim "never abandon / no unpermitted resume" correctness moves to
+  **permit-core** (`docs/permit-core.md`, thread C2).
+- **Still a live regression target:** the committed sim coverage
+  (`Subjob.CancelProb` + shared limiters) that reproduced the old teardown
+  deadlock + reclaim over-admission must stay green through the lifecycle (B) and
+  permit-core (C2) cutovers.
+- **Trim excessive build-up of nbcq reuse caches.** (Independent of the
+  cancellation design.) The `instanceQueue` (`funnel.go:318`, an
+  `nbcq.Queue[*funnelInstance[T]]` of spent flush shells) leaves a high-water
+  pool of idle shells after peak-concurrency bursts; permit-core's per-pool
+  permit caches have the same shape. Worth a shared trim/cap mechanism over the
+  nbcq reuse-cache pattern rather than bespoke ones.
 - **Revisit the joined-context adapter when tackling Flows.** A framework-native
   alloc-free / mutex-free `AfterFunc`-equivalent hook (modeled on how `ctxMeta`
   is a preallocated reused value) is only needed if Flows must merge two

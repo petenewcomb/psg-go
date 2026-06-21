@@ -14,18 +14,55 @@ Companion docs:
 
 This doc describes the *journey*. API_DESIGN describes the *destination*.
 
-> **PARTLY STALE (2026-06-20).** Two things have moved since this plan was written.
-> (1) The **op-trio names** in the candidate-wave prose are the older Gatherer /
-> TaskRunner / Combiner; the pinned names are **Skimmer / Launcher / Funnel** (with
-> `Handler` / `Accumulator` bodies, verb `Submit`) — see `API_DESIGN.md` /
-> `CHANGELOG.md`. (2) **`Pool` is no longer user-exposed** (internal, auto-sized;
-> concurrency via Limiters), which reframes the Wave 4 / Wave 5 entries below — and a
-> **major architecture wave is missing**: the dispatch/execution split + permit-core
-> migration (`docs/dispatch-execution-split.md`, `docs/permit-core.md`) — map the
-> manager/executor pools onto `worker.Pool` + `workq`, place the governor admission
-> gate, and cut over off the eager `limiter.go` (`directRequest` / `reclaimRequest` /
-> `suspendForEpisode`). Sequence it around the Pool/workq consolidation. Completed
-> Wave 1/2 history below is accurate as-of-then and left as-is.
+> **RECONCILED (2026-06-21) — read this banner, then treat the "Candidate waves"
+> section below as RETAINED-FOR-HISTORY.** That section is the original pre-pivot
+> plan; its op-names and (especially) its Pool/Wave direction are superseded. Live
+> status is in `WORKING_NOTES.md`; the destination surface is `docs/decisions/
+> API_DESIGN.md`. Two structural pivots since this plan was written:
+>
+> 1. **Op-trio renamed again.** The candidate-wave prose says Gatherer / TaskRunner
+>    / Combiner; the pinned names are **Skimmer / Launcher / Funnel** (with
+>    `Handler` / `Accumulator` bodies, verb `Submit`) — see `API_DESIGN.md` /
+>    `CHANGELOG.md`.
+> 2. **Pool/Wave direction REVERSED.** Wave 5 below proposed *splitting* `Pool` into
+>    `Pool` (workers) + `Wave` (batch). The branch did the opposite: **`Pool` was
+>    folded INTO `Wave`** (`5bf2e7c`) and is now **internal, auto-sized, not
+>    user-exposed**; concurrency is expressed via Limiters. The user-facing framing
+>    is **Wave + Flow** (+ ops as verbs); Pool is an implementation detail. Wherever
+>    the prose says "split Pool into Pool+Wave" or treats `Pool`/`NewPool`/`WithPool`
+>    as user surface, read the inverse.
+>
+> **Landed / superseded status of the candidate waves:**
+>
+> | Wave | Status |
+> |---|---|
+> | 1 mechanical renames | ✅ landed (names later evolved per pivot #1) |
+> | 2 drop Combiner output → Accumulator | ✅ landed |
+> | 3 reshape Task funcs (`func(ctx,T) error` + Submit) | ✅ landed (Launcher arity collapse + `Submit`/`SubmitErr`/`SubmitResult`) |
+> | 4 consolidate TaskPool/CombinerPool into Pool | ◐ Limiters landed (`NewSemaphore`/`NewRateLimit`/`WithLimits`); **Pool/workq consolidation still open = thread C1** |
+> | 5 split Pool into Pool+Wave | ⛔ SUPERSEDED — reversed (Pool folded into Wave, internal) |
+> | 6 ctx propagation | ✅ landed (`ctxMeta` load-bearing across op boundaries) |
+> | 7 Flow replaces psgwf | ☐ pending — `Flow` kept as a type; psgwf not yet consolidated |
+> | 8 drop otpsg | ☐ pending — otpsg still present |
+> | 9 module rename → `streampool` | ✅ landed (`b2212f9`) |
+> | 10 naming cleanup | ◐ partial — Stage-3 cosmetic (`job.go`/`meta.job`/`parentJobs`/receiver `j`) still deferred |
+>
+> **The major architecture wave the original plan is MISSING** (now the dominant
+> go-forward work, tracked in WORKING_NOTES, not sequenced here):
+> - **C1 — dispatch/execution split + workq/worker consolidation**
+>   (`docs/dispatch-execution-split.md`): merge the legacy `FunnelPool`/`cpWorker`
+>   path onto one `workq.Queue` + `worker.Pool[E]`, place the governor admission
+>   gate, wire `dispatch.go` (currently `//go:build ignore`). Sketches landed but
+>   unadopted.
+> - **C2 — permit-core** (`docs/permit-core.md`): the hierarchical permit cache
+>   (acquire locality-first, cache-don't-return, deadlock-free per-limiter, no
+>   global scheduler). Replaces the eager `limiter.go`
+>   (`directRequest`/`reclaimRequest`/`suspendForEpisode`). Next step is an isolated
+>   sketch + `rapid` model-check before any live cutover.
+> - **B — 2026-06-21b Wave lifecycle** (WORKING_NOTES top banner): zero-value `Wave`
+>   + lazy `ensureInit(ctx)`, drop `NewWave`/`NewChild`/`CancelAndWait`, drain-only
+>   (`Skim`/`SkimAll`/`CloseAndSkimAll` → `ErrWaveDone`), pure drive-ctx cancel,
+>   funnel flusher re-homed to exit on `wavestate→Done`.
 
 ---
 
@@ -243,6 +280,10 @@ These outputs become inputs to the corresponding reshape waves.
 ---
 
 ## Candidate waves (post-Wave 1)
+
+> **HISTORICAL — see the RECONCILED banner at the top for landed/superseded status
+> and the two pivots (op-names; Pool folded into Wave, not split).** Read Wave 5's
+> direction as reversed and the op-names as Skimmer / Launcher / Funnel.
 
 The order below is *not* committed — these are candidates. The actual
 sequencing depends on the test-design sessions and on dependency
@@ -462,6 +503,10 @@ relevant waves proceed:
 ---
 
 ## Next concrete step
+
+> **HISTORICAL (2026-05-25).** This described the sim-vocabulary implementation,
+> long since landed. The actual next concrete step is in WORKING_NOTES — currently
+> thread A (doc reconcile) → B (Wave lifecycle) → C1/C2 (the architecture wave).
 
 The sim design session is complete (2026-05-25). Decisions captured
 in the sim section above and in API_DESIGN.md's three-type model:

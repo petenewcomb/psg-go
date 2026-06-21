@@ -23,8 +23,8 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 // structure pointer_t {ptr: pointer to node_t, count: unsigned integer}

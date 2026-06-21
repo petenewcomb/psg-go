@@ -9,14 +9,14 @@ import (
 	"slices"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/cerr"
-	"github.com/petenewcomb/psg-go/internal/delayq"
-	"github.com/petenewcomb/psg-go/internal/nbcq"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/streampool/internal/cerr"
+	"github.com/petenewcomb/streampool/internal/delayq"
+	"github.com/petenewcomb/streampool/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/timerp"
 )
 
 // Queue manages work items with single-item processing logic using a two-queue

@@ -10,20 +10,20 @@ import (
 
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
-	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
-	"github.com/petenewcomb/psg-go/internal/exmpclk"
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool/internal/exmpclk"
+	"github.com/petenewcomb/streampool/psgwf"
 )
 
 // Example_scatterSkim demonstrates using workflow context to cancel
 // related operations when one fails.
 func Example_scatterSkim() {
 	// Create a wave
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := psg.NewSemaphore(nil, 3)
+	poolLimit := streampool.NewSemaphore(nil, 3)
 	_ = ctx
 
 	var clock exmpclk.ExampleClock
@@ -55,7 +55,7 @@ func Example_scatterSkim() {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms Quick task completed\n", msSinceStart())
 			return "Quick result", nil
-		}, psg.WithLimits(poolLimit))
+		}, streampool.WithLimits(poolLimit))
 	err := quickRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting quick task: %v\n", msSinceStart(), err)
@@ -72,7 +72,7 @@ func Example_scatterSkim() {
 			fmt.Printf("%3dms Failing task failed - cancelling workflow\n", msSinceStart())
 			wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 			return "", fmt.Errorf("task failed")
-		}, psg.WithLimits(poolLimit))
+		}, streampool.WithLimits(poolLimit))
 	err = failingRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting failing task: %v\n", msSinceStart(), err)
@@ -95,7 +95,7 @@ func Example_scatterSkim() {
 				fmt.Printf("%3dms Slow task cancelled\n", msSinceStart())
 				return "", context.Canceled
 			}
-		}, psg.WithLimits(poolLimit))
+		}, streampool.WithLimits(poolLimit))
 	err = slowRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting slow task: %v\n", msSinceStart(), err)

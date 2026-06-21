@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/psgwf"
 )
 
 type task[T, C any] struct {

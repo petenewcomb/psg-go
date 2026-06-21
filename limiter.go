@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 import (
 	"context"
@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/wavestate"
-	"github.com/petenewcomb/psg-go/internal/workq"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/wavestate"
+	"github.com/petenewcomb/streampool/internal/workq"
 )
 
 // Limiter is the user-facing concurrency-control primitive. Limiters are

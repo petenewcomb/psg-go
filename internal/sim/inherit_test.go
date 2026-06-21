@@ -7,16 +7,16 @@ import (
 	"context"
 	"testing"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 	"github.com/stretchr/testify/require"
 )
 
 // TestInheritedLimiterAliasing pins the controller-level wiring: an
-// inherited limiter entry aliases the parent's psg.Limiter AND its
+// inherited limiter entry aliases the parent's streampool.Limiter AND its
 // concurrency tracker (split counters would each assert a subset of the
 // joint topology and could miss a violation); fresh entries do not.
 func TestInheritedLimiterAliasing(t *testing.T) {
-	_, parentWave := psg.NewWave(context.Background())
+	_, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 	parentPlan := &Plan{
 		TaskLimiters:   []Limiter{{ID: 1, Permits: 2, InheritFromParent: -1}},
@@ -25,7 +25,7 @@ func TestInheritedLimiterAliasing(t *testing.T) {
 	parent := newController(parentPlan, parentWave, nil)
 	parent.ensurePools()
 
-	_, childWave := psg.NewWave(context.Background())
+	_, childWave := streampool.NewWave(context.Background())
 	defer childWave.CancelAndWait()
 	childPlan := &Plan{
 		TaskLimiters: []Limiter{
@@ -37,11 +37,11 @@ func TestInheritedLimiterAliasing(t *testing.T) {
 	child := newController(childPlan, childWave, parent)
 	child.ensurePools()
 
-	// psg.Limiter shares state by reference; == is identity of the
+	// streampool.Limiter shares state by reference; == is identity of the
 	// underlying impl. (require.Equal would deep-compare and pass for
 	// two distinct same-permit semaphores — too weak here.)
 	if child.TaskLimiters[0] != parent.TaskLimiters[0] {
-		t.Fatal("inherited task limiter must alias the parent's psg.Limiter")
+		t.Fatal("inherited task limiter must alias the parent's streampool.Limiter")
 	}
 	require.Same(t, parent.taskLimiterTrackers[0], child.taskLimiterTrackers[0],
 		"inherited task limiter must share the parent's tracker")
@@ -52,7 +52,7 @@ func TestInheritedLimiterAliasing(t *testing.T) {
 	require.NotSame(t, parent.taskLimiterTrackers[0], child.taskLimiterTrackers[1])
 
 	if child.FunnelLimiters[0] != parent.FunnelLimiters[0] {
-		t.Fatal("inherited funnel limiter must alias the parent's psg.Limiter")
+		t.Fatal("inherited funnel limiter must alias the parent's streampool.Limiter")
 	}
 	require.Same(t, parent.funnelLimiterTrackers[0], child.funnelLimiterTrackers[0],
 		"inherited funnel limiter must share the parent's tracker")

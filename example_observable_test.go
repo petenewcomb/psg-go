@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
-	psg "github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/internal/exmpclk"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/internal/exmpclk"
 )
 
 // Observable uses psg to run a few tasks and produce logging that demonstrate
@@ -26,13 +26,13 @@ func Example_observable() {
 	ctx := context.Background()
 
 	// Create a scatter-gather wave
-	ctx, wave := psg.NewWave(ctx)
+	ctx, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Start and SkimAll.
 	var results []string
-	skimmer := psg.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(wave,
 		func(ctx context.Context, result string, err error) error {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms:   skimmed result %q\n", msSinceStart(), result)
@@ -44,12 +44,12 @@ func Example_observable() {
 	)
 
 	// Limit dispatch concurrency to 2.
-	limit := psg.NewSemaphore(nil, 2)
+	limit := streampool.NewSemaphore(nil, 2)
 
 	// Define a factory to bind task-specific inputs and resources into a
 	// Launcher. The task body Submits its result to the skimmer.
-	newRunner := func(taskName string) psg.TaskLauncher {
-		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	newRunner := func(taskName string) streampool.TaskLauncher {
+		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 			// Simulate latency
 			switch taskName {
 			case "A":
@@ -62,7 +62,7 @@ func Example_observable() {
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
 			return skimmer.Submit(ctx, "result for task "+taskName)
-		}, psg.WithLimits(limit))
+		}, streampool.WithLimits(limit))
 	}
 
 	// Launch some tasks

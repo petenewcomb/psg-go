@@ -6,9 +6,9 @@ package rdvq
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/nbcq"
 )
 
 // NoopRenotify is a no-op RenotifyFunc that can be used when no re-notification

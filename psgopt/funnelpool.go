@@ -6,11 +6,11 @@ package psgopt
 import (
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/opts"
+	"github.com/petenewcomb/streampool/internal/opts"
 )
 
 // DefaultFunnelPoolIdleTimeout is the default goroutine idle timeout for
-// [github.com/petenewcomb/psg-go.FunnelPool] unless overridden with
+// [github.com/petenewcomb/streampool.FunnelPool] unless overridden with
 // [WithIdleTimeout]. Empirically determined; subject to change.
 const DefaultFunnelPoolIdleTimeout = 1 * time.Second
 
@@ -27,7 +27,7 @@ const DefaultFunnelPoolIdleJitter = 10 * time.Millisecond
 type FunnelPoolOption = opts.FunnelPoolOption
 
 // WithIdleTimeout sets how long excess funnel goroutines in
-// [github.com/petenewcomb/psg-go.FunnelPool] can remain idle before being
+// [github.com/petenewcomb/streampool.FunnelPool] can remain idle before being
 // terminated. Use -1 to disable idle timeout.
 //
 // The default value is [DefaultFunnelPoolIdleTimeout].

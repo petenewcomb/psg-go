@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 	"go.uber.org/zap"
 )
 
@@ -57,7 +57,7 @@ func LoggedTask[T any](
 func LoggedSkim[T any](
 	operationName string,
 	skimFn func(ctx context.Context, result T, err error) error,
-) psg.HandlerFunc[T] {
+) streampool.HandlerFunc[T] {
 	return func(ctx context.Context, result T, err error) error {
 		// Get logger from context or use a default
 		logger := zap.L()
@@ -96,12 +96,12 @@ func LoggedSkim[T any](
 func LoggedFunnel[T any](
 	funnelOpName string,
 	flushOpName string,
-	funnelFactory psg.AccumulatorFactory[T],
-) psg.AccumulatorFactory[T] {
-	return psg.NewAccumulatorFactory(func() psg.Accumulator[T] {
+	funnelFactory streampool.AccumulatorFactory[T],
+) streampool.AccumulatorFactory[T] {
+	return streampool.NewAccumulatorFactory(func() streampool.Accumulator[T] {
 		innerFunnel := funnelFactory.NewAccumulator()
 
-		return psg.FuncAccumulator[T]{
+		return streampool.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Get logger from context or use a default
 				logger := zap.L()

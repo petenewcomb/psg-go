@@ -4,7 +4,7 @@
 package workq
 
 import (
-	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
 // Specialization of [rdvq.Queue] for [Work].

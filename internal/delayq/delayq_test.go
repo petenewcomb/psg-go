@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/delayq"
+	"github.com/petenewcomb/streampool/internal/delayq"
 	"github.com/stretchr/testify/assert"
 )
 

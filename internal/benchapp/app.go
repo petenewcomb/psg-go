@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool/psgwf"
 )
 
 type Context struct {

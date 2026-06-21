@@ -7,10 +7,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 )
 
-// GenericFunnel mirrors psg.Accumulator but injects the Workflow
+// GenericFunnel mirrors streampool.Accumulator but injects the Workflow
 // instance associated with each input. The implementation owns its
 // aggregated state and is responsible for routing results downstream
 // via Submit on whatever sinks it captures.
@@ -34,10 +34,10 @@ type FunnelFactory[T any] = GenericFunnelFactory[T, Context]
 
 func wrapFunnelFactory[T, C any](
 	funnelFactory GenericFunnelFactory[T, C],
-) psg.AccumulatorFactory[result[T, C]] {
-	return psg.AccumulatorFactoryFunc[result[T, C]](func() psg.Accumulator[result[T, C]] {
+) streampool.AccumulatorFactory[result[T, C]] {
+	return streampool.AccumulatorFactoryFunc[result[T, C]](func() streampool.Accumulator[result[T, C]] {
 		inner := funnelFactory()
-		return psg.FuncAccumulator[result[T, C]]{
+		return streampool.FuncAccumulator[result[T, C]]{
 			AccumulateFn: func(ctx context.Context, input result[T, C], inputErr error) (time.Time, error) {
 				defer input.Workflow.unref(ctx)
 				return inner.Accumulate(ctx, input.Workflow, input.Value, inputErr)

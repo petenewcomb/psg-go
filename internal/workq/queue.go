@@ -16,7 +16,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
 // Queue is the combined work engine. It hides the two things the rest of the

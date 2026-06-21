@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/petenewcomb/psg-go/internal/nbcq"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 type inboxQueueQueue[T any] = inboxOnlyQueue[T, inboxQueue[T], inboxQueueTrait[T]]

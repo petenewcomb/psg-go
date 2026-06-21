@@ -6,10 +6,10 @@ package psgopt
 import (
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/opts"
+	"github.com/petenewcomb/streampool/internal/opts"
 )
 
-// DefaultTaskWorkerIdleTimeout is the default task worker idle timeout for [github.com/petenewcomb/psg-go.Pool]
+// DefaultTaskWorkerIdleTimeout is the default task worker idle timeout for [github.com/petenewcomb/streampool.Pool]
 // unless overridden with [WithTaskWorkerIdleTimeout]. Controls how long task workers
 // wait for new work before exiting. Empirically determined; subject to change.
 const DefaultTaskWorkerIdleTimeout = 1 * time.Second
@@ -31,9 +31,9 @@ const DefaultTaskWorkerSpawnConcurrencyLimit = 1
 //   - [WithFlushListener] - Registers callback for when all tasks complete
 type PoolOption = opts.PoolOption
 
-// WithTaskWorkerIdleTimeout sets the duration that idle task workers in [github.com/petenewcomb/psg-go.Pool] wait for
-// new work before exiting. This controls how aggressively workers scale down
-// when load decreases.
+// WithTaskWorkerIdleTimeout sets the duration that idle task workers in
+// [github.com/petenewcomb/streampool.Pool] wait for new work before exiting.
+// This controls how aggressively workers scale down when load decreases.
 //
 // A shorter timeout reduces resource usage during idle periods but may increase
 // overhead when load patterns are bursty. A longer timeout keeps workers alive
@@ -70,7 +70,7 @@ type TaskWorkerIdleJitterOption interface {
 }
 
 // WithFlushListener registers a callback function that will be called each time
-// all tasks have completed and [github.com/petenewcomb/psg-go.Pool] is waiting
+// all tasks have completed and [github.com/petenewcomb/streampool.Pool] is waiting
 // for funnels to emit their results. After the callback returns, the job
 // signals any Funnel that has received inputs but hasn't yet emitted its
 // funneld results to do so immediately. The callback may be invoked multiple

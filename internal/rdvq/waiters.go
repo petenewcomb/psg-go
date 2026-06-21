@@ -6,7 +6,7 @@ package rdvq
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 // WaitSelectFunc handles the select operation for a Waiters wait. It receives

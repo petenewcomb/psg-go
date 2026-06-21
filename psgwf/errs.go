@@ -3,6 +3,6 @@
 
 package psgwf
 
-import "github.com/petenewcomb/psg-go/internal/cerr"
+import "github.com/petenewcomb/streampool/internal/cerr"
 
 const ErrWorkflowEnded = cerr.Error("workflow ended")

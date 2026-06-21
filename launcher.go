@@ -1,16 +1,16 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/trace"
-	"github.com/petenewcomb/psg-go/internal/workq"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/trace"
+	"github.com/petenewcomb/streampool/internal/workq"
 )
 
 // Launcher[T] dispatches a [Handler[T]] onto a [Wave]'s

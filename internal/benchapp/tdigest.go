@@ -5,7 +5,7 @@ package benchapp
 
 import (
 	"github.com/influxdata/tdigest"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
 var tdigestPool = omnipool.ForCustom(tdigestTrait{})

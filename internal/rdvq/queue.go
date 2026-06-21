@@ -6,10 +6,10 @@ package rdvq
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/nbcq"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
 // BufferedFunc is called when a value is buffered in an outbox rather than

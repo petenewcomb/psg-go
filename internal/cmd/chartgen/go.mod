@@ -1,4 +1,4 @@
-module github.com/petenewcomb/psg-go/internal/cmd/chartgen
+module github.com/petenewcomb/streampool/internal/cmd/chartgen
 
 go 1.25
 

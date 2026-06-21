@@ -1,13 +1,13 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
 	"testing"
 
-	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,15 +24,15 @@ import (
 // CloseAndSkimAll, unit 2 runs and unblocks the subwave, and unit 1
 // reclaims and completes.
 func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	gate := make(chan struct{})
-	launcher := psg.NewFnLauncher(wave, func(ctx context.Context, unit int, _ error) error {
+	launcher := streampool.NewFnLauncher(wave, func(ctx context.Context, unit int, _ error) error {
 		switch unit {
 		case 1:
-			subCtx, subWave := psg.NewWave(ctx)
-			sub := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
+			subCtx, subWave := streampool.NewWave(ctx)
+			sub := streampool.NewTaskLauncher(subWave, func(ctx context.Context) error {
 				select {
 				case <-gate:
 					return nil
@@ -48,7 +48,7 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 			close(gate)
 		}
 		return nil
-	}, psg.WithLimits(psg.NewSemaphore(nil, 1)))
+	}, streampool.WithLimits(streampool.NewSemaphore(nil, 1)))
 
 	require.NoError(t, launcher.Submit(ctx, 1))
 	require.NoError(t, launcher.Submit(ctx, 2))
@@ -60,11 +60,11 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 // sole serial skim driver and deadlock). Subwork from a skim handler must
 // go through a funnel or a launched task instead.
 func TestSkimHandlerDrivingSubwavePanics(t *testing.T) {
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(wave, func(ctx context.Context, _ int, _ error) error {
-		subCtx, subWave := psg.NewWave(ctx)
+	skimmer := streampool.NewFnSkimmer(wave, func(ctx context.Context, _ int, _ error) error {
+		subCtx, subWave := streampool.NewWave(ctx)
 		defer subWave.CancelAndWait()
 		return subWave.CloseAndSkimAll(subCtx) // disallowed: gather from a skim handler
 	})

@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -19,13 +19,13 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ctx, wave := psg.NewWave(ctx)
+	ctx, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	var flushCount atomic.Int32
 	var skimCount atomic.Int32
 
-	skimmer := psg.NewFnSkimmer(wave, func(ctx context.Context, result int, err error) error {
+	skimmer := streampool.NewFnSkimmer(wave, func(ctx context.Context, result int, err error) error {
 		t.Logf("Skim called with result %d", result)
 		skimCount.Add(1)
 		chk.NoError(err)
@@ -34,8 +34,8 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 
 	funnelPool := wave // NOTE: WithMaxConcurrency(1) dropped (no-op now); serialization must move to a limiter
 
-	funnelOp := psg.NewFunnel(funnelPool, psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
-		return psg.FuncAccumulator[int]{
+	funnelOp := streampool.NewFunnel(funnelPool, streampool.NewAccumulatorFactory(func() streampool.Accumulator[int] {
+		return streampool.FuncAccumulator[int]{
 			AccumulateFn: func(ctx context.Context, value int, err error) (time.Time, error) {
 				// Don't emit immediately - let the deadline trigger flushing
 				return time.Now().Add(100 * time.Millisecond), nil
@@ -48,8 +48,8 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	}, nil))
 	defer funnelOp.Close()
 
-	newRunner := func(value int) psg.TaskLauncher {
-		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	newRunner := func(value int) streampool.TaskLauncher {
+		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 			return funnelOp.Submit(ctx, value)
 		})
 	}

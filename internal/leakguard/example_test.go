@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/leakguard"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/leakguard"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
 // FileResource represents a file that needs cleanup.
@@ -216,8 +216,8 @@ func Example_leakDetectionWithLeak() {
 	// Created handle but forgot to close it
 	// Simulating GC and finalization...
 	// LEAK DETECTED: unclosed handle to leaked.txt created at:
-	// 	example_test.go:200: github.com/petenewcomb/psg-go/internal/leakguard_test.Example_leakDetectionWithLeak.func2
-	// 	example_test.go:203: github.com/petenewcomb/psg-go/internal/leakguard_test.Example_leakDetectionWithLeak
+	// 	example_test.go:200: github.com/petenewcomb/streampool/internal/leakguard_test.Example_leakDetectionWithLeak.func2
+	// 	example_test.go:203: github.com/petenewcomb/streampool/internal/leakguard_test.Example_leakDetectionWithLeak
 	// 	run_example.go:63: testing.runExample
 	// Closing file: leaked.txt
 }

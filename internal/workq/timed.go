@@ -3,7 +3,7 @@
 
 package workq
 
-import "github.com/petenewcomb/psg-go/internal/delayq"
+import "github.com/petenewcomb/streampool/internal/delayq"
 
 // ScheduledWork is a [Work] that can be handed to an [Accepted] queue
 // with a future deadline via [Accepted.Schedule]. It becomes ordinary

@@ -1,4 +1,4 @@
-module github.com/petenewcomb/psg-go/internal/cmd/fmttrace
+module github.com/petenewcomb/streampool/internal/cmd/fmttrace
 
 go 1.25
 

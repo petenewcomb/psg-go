@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -9,28 +9,28 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNewLauncherNilTaskPanic(t *testing.T) {
 	chk := assert.New(t)
-	_, wave := psg.NewWave(context.Background())
+	_, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	chk.PanicsWithValue("handler must be non-nil", func() {
 		// Nil handler should panic at construction.
-		psg.NewLauncher[struct{}](wave, nil)
+		streampool.NewLauncher[struct{}](wave, nil)
 	})
 }
 
 func TestSkimScatterNilSkimPanic(t *testing.T) {
 	chk := assert.New(t)
-	_, wave := psg.NewWave(context.Background())
+	_, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 	chk.PanicsWithValue("handler must be non-nil", func() {
-		psg.NewSkimmer[int](wave, nil)
+		streampool.NewSkimmer[int](wave, nil)
 	})
 }
 
@@ -39,11 +39,11 @@ func TestSkimScatterNilSkimPanic(t *testing.T) {
 // ctx, which descends from a NewWave call.
 func TestSkimmerNilWaveResolvesFromCtx(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	var got int
-	skimmer := psg.NewFnSkimmer(nil,
+	skimmer := streampool.NewFnSkimmer(nil,
 		func(_ context.Context, v int, err error) error {
 			chk.NoError(err)
 			got = v
@@ -58,7 +58,7 @@ func TestSkimmerNilWaveResolvesFromCtx(t *testing.T) {
 // Dispatching a nil-wave Skimmer on a ctx with no wave panics.
 func TestSkimmerNilWaveDispatchWithoutCtxWavePanics(t *testing.T) {
 	chk := assert.New(t)
-	skimmer := psg.NewFnSkimmer(nil,
+	skimmer := streampool.NewFnSkimmer(nil,
 		func(_ context.Context, _ int, _ error) error { return nil },
 	)
 	chk.PanicsWithValue(
@@ -70,11 +70,11 @@ func TestSkimmerNilWaveDispatchWithoutCtxWavePanics(t *testing.T) {
 // Same nil-sentinel resolution for Launcher0.
 func TestLauncherNilWaveResolvesFromCtx(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	ran := false
-	runner := psg.NewTaskLauncher(nil, func(_ context.Context) error {
+	runner := streampool.NewTaskLauncher(nil, func(_ context.Context) error {
 		ran = true
 		return nil
 	})
@@ -89,18 +89,18 @@ func TestLauncherNilWaveResolvesFromCtx(t *testing.T) {
 // ctxMeta around task.Run.
 func TestSkimmerNilWaveResolvesFromTaskBodyCtx(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	var got int
-	skimmer := psg.NewFnSkimmer(nil,
+	skimmer := streampool.NewFnSkimmer(nil,
 		func(_ context.Context, v int, err error) error {
 			chk.NoError(err)
 			got = v
 			return nil
 		},
 	)
-	runner := psg.NewTaskLauncher(wave, func(taskCtx context.Context) error {
+	runner := streampool.NewTaskLauncher(wave, func(taskCtx context.Context) error {
 		return skimmer.Submit(taskCtx, 99)
 	})
 	chk.NoError(runner.Start(ctx))
@@ -108,16 +108,16 @@ func TestSkimmerNilWaveResolvesFromTaskBodyCtx(t *testing.T) {
 	chk.Equal(99, got)
 }
 
-// Nil-wave dispatch from inside a Funnel psg.Accumulator body. Verifies
+// Nil-wave dispatch from inside a Funnel streampool.Accumulator body. Verifies
 // that the ctx reaching Accumulate carries the dispatching wave so
 // downstream nil-wave ops resolve.
 func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	var got int
-	downstream := psg.NewFnSkimmer(nil,
+	downstream := streampool.NewFnSkimmer(nil,
 		func(_ context.Context, v int, err error) error {
 			chk.NoError(err)
 			got = v
@@ -125,8 +125,8 @@ func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 		},
 	)
 	funnelPool := wave
-	funnel := psg.NewFunnel(funnelPool, psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
-		return psg.FuncAccumulator[int]{
+	funnel := streampool.NewFunnel(funnelPool, streampool.NewAccumulatorFactory(func() streampool.Accumulator[int] {
+		return streampool.FuncAccumulator[int]{
 			AccumulateFn: func(accCtx context.Context, v int, _ error) (time.Time, error) {
 				return time.Time{}, downstream.Submit(accCtx, v+1)
 			},
@@ -142,26 +142,26 @@ func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 // dispatch path is contended.
 func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	// Saturate a limiter so the next TrySubmit can't dispatch
 	// immediately.
-	limit := psg.NewSemaphore(nil, 1)
+	limit := streampool.NewSemaphore(nil, 1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
-	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
+	runner := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
 		close(blocking)
 		<-released
 		return nil
-	}, psg.WithLimits(limit))
+	}, streampool.WithLimits(limit))
 	chk.NoError(runner.Start(ctx))
 	<-blocking // first task is now occupying the limiter permit
 
 	// Zero deadline → fail-fast.
-	contender := psg.NewTaskLauncher(wave, func(_ context.Context) error {
+	contender := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
 		return nil
-	}, psg.WithLimits(limit))
+	}, streampool.WithLimits(limit))
 	ok, err := contender.TryStart(ctx, time.Time{})
 	chk.False(ok, "TryStart with zero deadline should fail-fast when contended")
 	chk.NoError(err, "fail-fast should not return an error")
@@ -176,26 +176,26 @@ func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 // limiter is freed — verifies the Forever path through Wave.block.
 func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	limit := psg.NewSemaphore(nil, 1)
+	limit := streampool.NewSemaphore(nil, 1)
 	blocking := make(chan struct{})
 	released := make(chan struct{})
-	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
+	runner := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
 		close(blocking)
 		<-released
 		return nil
-	}, psg.WithLimits(limit))
+	}, streampool.WithLimits(limit))
 	chk.NoError(runner.Start(ctx))
 	<-blocking
 
 	contended := false
 	contenderRan := make(chan struct{})
 	go func() {
-		contender := psg.NewTaskLauncher(wave, func(_ context.Context) error {
+		contender := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
 			return nil
-		}, psg.WithLimits(limit))
+		}, streampool.WithLimits(limit))
 		err := contender.Start(ctx) // uses Forever internally
 		contended = err == nil
 		close(contenderRan)
@@ -213,16 +213,16 @@ func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 // the named-intent err sink shape end-to-end.
 func TestNewErrSkimmer(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	wantErr := errors.New("propagate me")
 	var got error
-	sink := psg.NewErrSkimmer(wave, func(_ context.Context, err error) error {
+	sink := streampool.NewErrSkimmer(wave, func(_ context.Context, err error) error {
 		got = err
 		return nil
 	})
-	var _ psg.ErrSkimmer = sink //nolint:staticcheck // intentional alias type-check
+	var _ streampool.ErrSkimmer = sink //nolint:staticcheck // intentional alias type-check
 	chk.NoError(sink.SubmitErr(ctx, wantErr))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.ErrorIs(got, wantErr)
@@ -232,15 +232,15 @@ func TestNewErrSkimmer(t *testing.T) {
 // no-arg launcher shape end-to-end.
 func TestNewTaskLauncher(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	ran := false
-	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
+	runner := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
 		ran = true
 		return nil
 	})
-	var _ psg.TaskLauncher = runner //nolint:staticcheck // intentional alias type-check
+	var _ streampool.TaskLauncher = runner //nolint:staticcheck // intentional alias type-check
 	chk.NoError(runner.Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.True(ran)
@@ -250,31 +250,31 @@ func TestNewTaskLauncher(t *testing.T) {
 // the worker-side err handling shape end-to-end.
 func TestNewErrLauncher(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	wantErr := errors.New("propagate me")
 	var got error
-	sink := psg.NewErrLauncher(wave, func(_ context.Context, err error) error {
+	sink := streampool.NewErrLauncher(wave, func(_ context.Context, err error) error {
 		got = err
 		return nil
 	})
-	var _ psg.ErrLauncher = sink //nolint:staticcheck // intentional alias type-check
+	var _ streampool.ErrLauncher = sink //nolint:staticcheck // intentional alias type-check
 	chk.NoError(sink.SubmitErr(ctx, wantErr))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.ErrorIs(got, wantErr)
 }
 
-// Err-only sink via psg.ErrHandler + SubmitErr(ctx, err) — verifies
+// Err-only sink via streampool.ErrHandler + SubmitErr(ctx, err) — verifies
 // the err-only convenience pair lands cleanly.
 func TestSkimmerErrHandlerErrOnlySink(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	wantErr := errors.New("propagate me")
 	var got error
-	errSink := psg.NewErrSkimmer(wave,
+	errSink := streampool.NewErrSkimmer(wave,
 		func(_ context.Context, err error) error {
 			got = err
 			return nil
@@ -285,16 +285,16 @@ func TestSkimmerErrHandlerErrOnlySink(t *testing.T) {
 	chk.ErrorIs(got, wantErr)
 }
 
-// Launcher's err-only dispatch: psg.Task adapter + SubmitErr should
-// short-circuit (psg.Task.Handle returns err immediately when non-nil),
+// Launcher's err-only dispatch: streampool.Task adapter + SubmitErr should
+// short-circuit (streampool.Task.Handle returns err immediately when non-nil),
 // so the task body never runs.
 func TestLauncherTaskShortCircuitsOnSubmitErr(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	bodyRan := false
-	runner := psg.NewTaskLauncher(wave, func(_ context.Context) error {
+	runner := streampool.NewTaskLauncher(wave, func(_ context.Context) error {
 		bodyRan = true
 		return nil
 	})
@@ -302,7 +302,7 @@ func TestLauncherTaskShortCircuitsOnSubmitErr(t *testing.T) {
 	// CloseAndSkimAll should surface the propagated err.
 	err := wave.CloseAndSkimAll(ctx)
 	chk.Error(err)
-	chk.False(bodyRan, "psg.Task body must not run when err is non-nil")
+	chk.False(bodyRan, "streampool.Task body must not run when err is non-nil")
 }
 
 // Nil-wave dispatch from inside a Skimmer handler body. Verifies
@@ -310,18 +310,18 @@ func TestLauncherTaskShortCircuitsOnSubmitErr(t *testing.T) {
 // downstream nil-wave ops resolve.
 func TestSkimmerNilWaveResolvesFromSkimBodyCtx(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	var got int
-	downstream := psg.NewFnSkimmer(nil,
+	downstream := streampool.NewFnSkimmer(nil,
 		func(_ context.Context, v int, err error) error {
 			chk.NoError(err)
 			got = v
 			return nil
 		},
 	)
-	upstream := psg.NewFnSkimmer(wave,
+	upstream := streampool.NewFnSkimmer(wave,
 		func(skimCtx context.Context, v int, _ error) error {
 			return downstream.Submit(skimCtx, v*2)
 		},
@@ -333,20 +333,20 @@ func TestSkimmerNilWaveResolvesFromSkimBodyCtx(t *testing.T) {
 
 func TestLauncherStartFromTaskPanic(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(wave,
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
 	)
-	innerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	innerRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
 	})
-	outerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -361,33 +361,33 @@ func TestLauncherStartFromTaskPanic(t *testing.T) {
 
 func TestTaskCanStartTaskInSubJob(t *testing.T) {
 	chk := assert.New(t)
-	ctx, parentWave := psg.NewWave(context.Background())
+	ctx, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	skimmer := psg.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
 	)
-	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		// Create a sub-wave inside the task
-		subCtx, subWave := psg.NewWave(ctx)
+		subCtx, subWave := streampool.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subSkimmer := psg.NewFnSkimmer(subWave,
+		subSkimmer := streampool.NewFnSkimmer(subWave,
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
 		)
-		subRunner := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
+		subRunner := streampool.NewTaskLauncher(subWave, func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
 		})
@@ -408,21 +408,21 @@ func TestTaskCanStartTaskInSubJob(t *testing.T) {
 
 func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 	chk := assert.New(t)
-	ctx, parentWave := psg.NewWave(context.Background())
+	ctx, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
 	)
-	innerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	innerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.Fail("should not get here - parent pool task should not run")
 		return nil
 	})
-	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -438,17 +438,17 @@ func TestTaskCannotStartTaskOnParentPool(t *testing.T) {
 
 func TestTaskCannotSkim(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(wave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
 	)
-	runner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	runner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.PanicsWithValue("Skim called from task context but allowed only by top-level or skim context", func() {
 			_, _ = wave.TrySkim(ctx)
 		})
@@ -461,28 +461,28 @@ func TestTaskCannotSkim(t *testing.T) {
 
 func TestTaskCannotSkimParentJob(t *testing.T) {
 	chk := assert.New(t)
-	ctx, parentWave := psg.NewWave(context.Background())
+	ctx, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
 			return nil
 		},
 	)
-	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
-		subCtx, subWave := psg.NewWave(ctx)
+	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+		subCtx, subWave := streampool.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
-		subSkimmer := psg.NewFnSkimmer(subWave,
+		subSkimmer := streampool.NewFnSkimmer(subWave,
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
 		)
-		subRunner := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
+		subRunner := streampool.NewTaskLauncher(subWave, func(ctx context.Context) error {
 			chk.PanicsWithValue("Context belongs to a child job", func() {
 				_, _ = parentWave.TrySkim(ctx)
 			})

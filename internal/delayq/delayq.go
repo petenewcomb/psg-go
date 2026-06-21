@@ -42,8 +42,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/heap"
-	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/heap"
+	"github.com/petenewcomb/streampool/internal/nbcq"
 )
 
 // Item is the contract for an entry stored in a [Queue]. An item exposes

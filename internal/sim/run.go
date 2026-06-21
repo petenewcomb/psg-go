@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/internal/timerp"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/internal/timerp"
+	"github.com/petenewcomb/streampool/internal/trace"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -41,7 +41,7 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller)
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
 
-	ctx, wave := psg.NewWave(ctx)
+	ctx, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	c := newController(plan, wave, parent)
@@ -56,15 +56,15 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller)
 
 // newController builds the per-Plan runtime adapter state. parent is the
 // enclosing controller for a Subjob's nested Plan, nil at top level.
-func newController(plan *Plan, wave *psg.Wave, parent *controller) *controller {
+func newController(plan *Plan, wave *streampool.Wave, parent *controller) *controller {
 	return &controller{
 		Plan:                  plan,
 		Wave:                  wave,
 		parent:                parent,
-		TaskLimiters:          make([]psg.Limiter, len(plan.TaskLimiters)),
-		FunnelLimiters:        make([]psg.Limiter, len(plan.FunnelLimiters)),
-		Skimmers:              make([]*psg.Skimmer[*simValue], len(plan.Skimmers)),
-		Funnels:               make([]*psg.Funnel[*simValue], len(plan.Funnels)),
+		TaskLimiters:          make([]streampool.Limiter, len(plan.TaskLimiters)),
+		FunnelLimiters:        make([]streampool.Limiter, len(plan.FunnelLimiters)),
+		Skimmers:              make([]*streampool.Skimmer[*simValue], len(plan.Skimmers)),
+		Funnels:               make([]*streampool.Funnel[*simValue], len(plan.Funnels)),
 		taskLimiterTrackers:   make([]*limiterTracker, len(plan.TaskLimiters)),
 		funnelLimiterTrackers: make([]*limiterTracker, len(plan.FunnelLimiters)),
 		skimmerInvocations:    make([]atomic.Int64, len(plan.Skimmers)),
@@ -103,15 +103,15 @@ type simValue struct {
 // objects backing the Plan's static vocabulary.
 type controller struct {
 	Plan           *Plan
-	Wave           *psg.Wave
-	TaskLimiters   []psg.Limiter
-	FunnelLimiters []psg.Limiter
-	Skimmers       []*psg.Skimmer[*simValue]
-	Funnels        []*psg.Funnel[*simValue]
-	// Launchers holds one psg.TaskLauncher per Plan Launcher. The
+	Wave           *streampool.Wave
+	TaskLimiters   []streampool.Limiter
+	FunnelLimiters []streampool.Limiter
+	Skimmers       []*streampool.Skimmer[*simValue]
+	Funnels        []*streampool.Funnel[*simValue]
+	// Launchers holds one streampool.TaskLauncher per Plan Launcher. The
 	// closure inside each runs the runner's Body Func, which Submits
 	// directly to downstream Skimmers/Funnels.
-	Launchers []psg.TaskLauncher
+	Launchers []streampool.TaskLauncher
 
 	limitersOnce sync.Once
 
@@ -148,21 +148,21 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	for i, g := range c.Plan.Skimmers {
 		gp := g
 		idx := i
-		var w *psg.Wave
+		var w *streampool.Wave
 		if i%2 == 0 {
 			w = c.Wave
 		}
-		skimmer := psg.NewSkimmer(w, c.newSkimmerHandler(t, gp, idx))
+		skimmer := streampool.NewSkimmer(w, c.newSkimmerHandler(t, gp, idx))
 		c.Skimmers[i] = &skimmer
 	}
 	for i, cmb := range c.Plan.Funnels {
 		cp := cmb
 		idx := i
-		var opts []psg.OpOption
+		var opts []streampool.OpOption
 		if len(cp.LimiterIndexes) > 0 {
-			opts = append(opts, psg.WithLimits(c.FunnelLimiters[cp.LimiterIndexes[0]]))
+			opts = append(opts, streampool.WithLimits(c.FunnelLimiters[cp.LimiterIndexes[0]]))
 		}
-		funnel := psg.NewFunnel(c.Wave, c.newFunnelFactory(t, cp, idx), opts...)
+		funnel := streampool.NewFunnel(c.Wave, c.newFunnelFactory(t, cp, idx), opts...)
 		c.Funnels[i] = &funnel
 	}
 	// Construct Launchers after Funnels/Skimmers so the bodies can
@@ -172,7 +172,7 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	// Alternate explicit-wave (even idx) vs nil-wave (odd idx) for
 	// Launchers too — same rationale as the Skimmer construction
 	// above.
-	c.Launchers = make([]psg.TaskLauncher, len(c.Plan.Launchers))
+	c.Launchers = make([]streampool.TaskLauncher, len(c.Plan.Launchers))
 	for i, runner := range c.Plan.Launchers {
 		c.Launchers[i] = c.newLauncher(t, runner, i%2 == 0)
 	}
@@ -243,24 +243,24 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	return nil
 }
 
-// ensurePools lazily constructs the psg.Limiter and psg.FunnelPool
+// ensurePools lazily constructs the streampool.Limiter and streampool.FunnelPool
 // instances backing the Plan's Limiters. One Limiter per
 // Plan.TaskLimiters and Plan.FunnelLimiters entry. A single
 // FunnelPool hosts all Funnels — per-Funnel concurrency is
 // enforced via the FunnelLimiters bound to each Funnel via
-// psg.WithLimits.
+// streampool.WithLimits.
 func (c *controller) ensurePools() {
 	c.limitersOnce.Do(func() {
 		for i, lim := range c.Plan.TaskLimiters {
 			if c.parent != nil && lim.InheritFromParent >= 0 {
 				// Shared limiter across the subjob boundary: alias the
-				// parent's psg.Limiter AND its tracker so permits and the
+				// parent's streampool.Limiter AND its tracker so permits and the
 				// observed-max assertion both cover the joint topology.
 				c.TaskLimiters[i] = c.parent.TaskLimiters[lim.InheritFromParent]
 				c.taskLimiterTrackers[i] = c.parent.taskLimiterTrackers[lim.InheritFromParent]
 				continue
 			}
-			c.TaskLimiters[i] = psg.NewSemaphore(nil, lim.Permits)
+			c.TaskLimiters[i] = streampool.NewSemaphore(nil, lim.Permits)
 			c.taskLimiterTrackers[i] = &limiterTracker{}
 		}
 		for i, lim := range c.Plan.FunnelLimiters {
@@ -269,7 +269,7 @@ func (c *controller) ensurePools() {
 				c.funnelLimiterTrackers[i] = c.parent.funnelLimiterTrackers[lim.InheritFromParent]
 				continue
 			}
-			c.FunnelLimiters[i] = psg.NewSemaphore(nil, lim.Permits)
+			c.FunnelLimiters[i] = streampool.NewSemaphore(nil, lim.Permits)
 			c.funnelLimiterTrackers[i] = &limiterTracker{}
 		}
 	})
@@ -302,7 +302,7 @@ func (c *controller) executeStep(ctx context.Context, t assert.TestingT, step St
 	}
 }
 
-// runSubjob executes a Subjob step by spinning up a fresh psg.Wave and
+// runSubjob executes a Subjob step by spinning up a fresh streampool.Wave and
 // recursing into Run with the nested Plan. This exercises cross-Pool
 // boundary code (a key race-coverage objective) and matches old sim
 // semantics where Subjobs ran on their own Pool.
@@ -319,25 +319,25 @@ func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob)
 	}
 }
 
-// newLauncher constructs the psg.TaskLauncher that backs a Plan
+// newLauncher constructs the streampool.TaskLauncher that backs a Plan
 // Launcher. The task body walks the Plan's Body Func; Submits go
 // directly to downstream sinks (Funnels/Skimmers) via Submit, and
 // StartTask is skipped because the current API forbids dispatching new
 // work from a task body.
-func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) psg.TaskLauncher {
+func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) streampool.TaskLauncher {
 	// Concurrency tracking: bump the TaskLimiter tracker on entry to the
 	// task body, decrement on exit; the tracker also rides down the Func
 	// walk so Subjob steps can drop the contribution while the body
 	// drives the subwave. Used by the per-Limiter max-concurrency
 	// assertion in Run.
 	var tracker *limiterTracker
-	var opts []psg.OpOption
+	var opts []streampool.OpOption
 	if len(runner.LimiterIndexes) > 0 {
 		limIdx := runner.LimiterIndexes[0]
-		opts = append(opts, psg.WithLimits(c.TaskLimiters[limIdx]))
+		opts = append(opts, streampool.WithLimits(c.TaskLimiters[limIdx]))
 		tracker = c.taskLimiterTrackers[limIdx]
 	}
-	body := psg.NewTask(func(ctx context.Context) error {
+	body := streampool.NewTask(func(ctx context.Context) error {
 		if tracker != nil {
 			tracker.enter()
 			defer tracker.exit()
@@ -359,11 +359,11 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 		}
 		return nil
 	})
-	var w *psg.Wave
+	var w *streampool.Wave
 	if bindWave {
 		w = c.Wave
 	}
-	return psg.NewLauncher(w, body, opts...)
+	return streampool.NewLauncher(w, body, opts...)
 }
 
 // disposition tells an op driver how to react to an error returned by a psg
@@ -393,7 +393,7 @@ func classify(err error) disposition {
 		return dispRetry
 	case errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded),
-		errors.Is(err, psg.ErrWaveDone):
+		errors.Is(err, streampool.ErrWaveDone):
 		return dispAbandon
 	default:
 		return dispFail
@@ -459,12 +459,12 @@ func (c *controller) submitTo(
 
 // newSkimmerHandler builds the handler function for a Plan Skimmer —
 // walks its Handle Func, accounting invocations. Upstream errors
-// (valErr) are NOT propagated back; the psg.Handler returns either nil or
+// (valErr) are NOT propagated back; the streampool.Handler returns either nil or
 // its own injected ExpectedHandlerError. Matches old sim behavior:
 // errors flow alongside values into the handler for it to act on, but
 // the handler doesn't re-propagate them — that would short-circuit
 // the framework's drain and cause subsequent queued work to be lost.
-func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) psg.HandlerFunc[*simValue] {
+func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) streampool.HandlerFunc[*simValue] {
 	return func(ctx context.Context, v *simValue, valErr error) error {
 		_ = valErr
 		_ = v
@@ -488,7 +488,7 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) p
 // FlushFn returns just error after Wave 2 — no output type.
 func (c *controller) newFunnelFactory(
 	t assert.TestingT, cmb *Funnel, idx int,
-) psg.AccumulatorFactory[*simValue] {
+) streampool.AccumulatorFactory[*simValue] {
 	_ = idx
 	// Concurrency tracking: bump the FunnelLimiter tracker on entry to
 	// Accumulate or Flush, decrement on exit; the tracker also rides
@@ -498,8 +498,8 @@ func (c *controller) newFunnelFactory(
 	if len(cmb.LimiterIndexes) > 0 {
 		tracker = c.funnelLimiterTrackers[cmb.LimiterIndexes[0]]
 	}
-	return psg.NewAccumulatorFactory(func() psg.Accumulator[*simValue] {
-		return psg.FuncAccumulator[*simValue]{
+	return streampool.NewAccumulatorFactory(func() streampool.Accumulator[*simValue] {
+		return streampool.FuncAccumulator[*simValue]{
 			AccumulateFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
 				if tracker != nil {
 					tracker.enter()

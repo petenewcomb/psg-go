@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-module github.com/petenewcomb/psg-go
+module github.com/petenewcomb/streampool
 
 go 1.25
 

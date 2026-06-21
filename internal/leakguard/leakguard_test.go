@@ -34,7 +34,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/stretchr/testify/require"
 )
 

@@ -16,8 +16,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/petenewcomb/psg-go/internal/timerp"
+	"github.com/petenewcomb/streampool/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/timerp"
 )
 
 // ExecEnv is the per-worker state a Worker holds: the execution environment for

@@ -1,13 +1,13 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/worker"
-	"github.com/petenewcomb/psg-go/internal/workq"
+	"github.com/petenewcomb/streampool/internal/worker"
+	"github.com/petenewcomb/streampool/internal/workq"
 )
 
 // defaultPool is the single, package-level worker substrate that all Waves

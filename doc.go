@@ -99,7 +99,7 @@
 //
 //  5. For tasks that need to create internal concurrency, consider creating a
 //     sub-job within the task rather than calling Start directly.
-package psg
+package streampool
 
 //go:generate go build -C internal/cmd/benchnorm -o ../../bin/benchnorm
 //go:generate go build -C internal/cmd/benchcmp -o ../../bin/benchcmp

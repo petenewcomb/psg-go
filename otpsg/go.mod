@@ -1,9 +1,9 @@
-module github.com/petenewcomb/psg-go/otpsg
+module github.com/petenewcomb/streampool/otpsg
 
 go 1.25
 
 require (
-	github.com/petenewcomb/psg-go v0.0.1
+	github.com/petenewcomb/streampool v0.0.1
 	go.opentelemetry.io/otel v1.38.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.38.0
 	go.opentelemetry.io/otel/sdk v1.38.0
@@ -23,4 +23,4 @@ require (
 	golang.org/x/sys v0.37.0 // indirect
 )
 
-replace github.com/petenewcomb/psg-go => ../
+replace github.com/petenewcomb/streampool => ../

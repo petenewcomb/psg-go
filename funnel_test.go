@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,7 +18,7 @@ import (
 type passthroughTestAccumulator[T any] struct {
 	t       *testing.T
 	value   T
-	skimmer psg.Skimmer[T]
+	skimmer streampool.Skimmer[T]
 }
 
 func (c *passthroughTestAccumulator[T]) Accumulate(
@@ -35,9 +35,9 @@ func (c *passthroughTestAccumulator[T]) Flush(ctx context.Context) error {
 
 //nolint:thelper // not a test helper, but a factory function for creating a test accumulator
 func newPassthroughTestFunnelFactory[T any](
-	t *testing.T, skimmer psg.Skimmer[T],
-) psg.AccumulatorFactoryFunc[T] {
-	return func() psg.Accumulator[T] {
+	t *testing.T, skimmer streampool.Skimmer[T],
+) streampool.AccumulatorFactoryFunc[T] {
+	return func() streampool.Accumulator[T] {
 		return &passthroughTestAccumulator[T]{t: t, skimmer: skimmer}
 	}
 }
@@ -50,13 +50,13 @@ func newPassthroughTestFunnelFactory[T any](
 // see funnelOp.unref() for the refcount details.
 func TestFunnelFactoryCloseFires(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	funnelPool := wave
 	closeCount := 0
-	factory := psg.NewAccumulatorFactory(func() psg.Accumulator[int] {
-		return psg.FuncAccumulator[int]{
+	factory := streampool.NewAccumulatorFactory(func() streampool.Accumulator[int] {
+		return streampool.FuncAccumulator[int]{
 			AccumulateFn: func(_ context.Context, _ int, _ error) (time.Time, error) {
 				return time.Time{}, nil
 			},
@@ -65,7 +65,7 @@ func TestFunnelFactoryCloseFires(t *testing.T) {
 		closeCount++
 		return nil
 	})
-	funnel := psg.NewFunnel(funnelPool, factory)
+	funnel := streampool.NewFunnel(funnelPool, factory)
 	chk.Equal(0, closeCount, "Close should not fire while funnel is open")
 	funnel.Close()
 	chk.NoError(wave.CloseAndSkimAll(ctx))
@@ -76,12 +76,12 @@ func TestFunnelFactoryCloseFires(t *testing.T) {
 // err-aggregating funnel shape end-to-end.
 func TestNewErrFunnel(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	funnelPool := wave
 	var seen []error
-	funnel := psg.NewErrFunnel(
+	funnel := streampool.NewErrFunnel(
 		funnelPool,
 		func(_ context.Context, err error) (time.Time, error) {
 			seen = append(seen, err)
@@ -90,7 +90,7 @@ func TestNewErrFunnel(t *testing.T) {
 		nil, // no flush
 		nil, // no close
 	)
-	var _ psg.ErrFunnel = funnel //nolint:staticcheck // intentional alias type-check
+	var _ streampool.ErrFunnel = funnel //nolint:staticcheck // intentional alias type-check
 	chk.NoError(funnel.SubmitErr(ctx, errors.New("first")))
 	chk.NoError(funnel.SubmitErr(ctx, errors.New("second")))
 	funnel.Close()
@@ -100,36 +100,36 @@ func TestNewErrFunnel(t *testing.T) {
 
 func TestFunnelScatterNilSkimPanic(t *testing.T) {
 	ctx := context.Background()
-	_, wave := psg.NewWave(ctx)
+	_, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	assert.PanicsWithValue(t, "handler must be non-nil", func() {
-		psg.NewSkimmer[int](wave, nil)
+		streampool.NewSkimmer[int](wave, nil)
 	})
 }
 
 func TestFunnelScatterFromTask(t *testing.T) {
 	chk := assert.New(t)
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(wave,
+	skimmer := streampool.NewFnSkimmer(wave,
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
 	)
 	funnelPool := wave
-	funnelOp := psg.NewFunnel(
+	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	innerRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
 	})
-	outerRunner := psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {
@@ -144,13 +144,13 @@ func TestFunnelScatterFromTask(t *testing.T) {
 
 func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 	chk := assert.New(t)
-	ctx, parentWave := psg.NewWave(context.Background())
+	ctx, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
 	// Variable to track execution flow
 	subJobTaskRan := false
 
-	skimmer := psg.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -158,25 +158,25 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 		},
 	)
 	funnelPool := parentWave
-	funnelOp := psg.NewFunnel(
+	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		// Create a sub-wave inside the task
-		subCtx, subWave := psg.NewWave(ctx)
+		subCtx, subWave := streampool.NewWave(ctx)
 		defer subWave.CancelAndWait()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
-		subSkimmer := psg.NewFnSkimmer(subWave,
+		subSkimmer := streampool.NewFnSkimmer(subWave,
 			func(ctx context.Context, result bool, err error) error {
 				chk.NoError(err)
 				chk.True(result)
 				return nil
 			},
 		)
-		subRunner := psg.NewTaskLauncher(subWave, func(ctx context.Context) error {
+		subRunner := streampool.NewTaskLauncher(subWave, func(ctx context.Context) error {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
 		})
@@ -197,10 +197,10 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 
 func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 	chk := assert.New(t)
-	ctx, parentWave := psg.NewWave(context.Background())
+	ctx, parentWave := streampool.NewWave(context.Background())
 	defer parentWave.CancelAndWait()
 
-	skimmer := psg.NewFnSkimmer(parentWave,
+	skimmer := streampool.NewFnSkimmer(parentWave,
 		func(ctx context.Context, result bool, err error) error {
 			chk.NoError(err)
 			chk.True(result)
@@ -208,16 +208,16 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 		},
 	)
 	funnelPool := parentWave
-	funnelOp := psg.NewFunnel(
+	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	defer funnelOp.Close()
-	innerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	innerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.Fail("Should not get here - parent task pool task should not run")
 		return nil
 	})
-	outerRunner := psg.NewTaskLauncher(parentWave, func(ctx context.Context) error {
+	outerRunner := streampool.NewTaskLauncher(parentWave, func(ctx context.Context) error {
 		chk.PanicsWithValue(
 			"Start called from task context but allowed only by top-level, skim, or funnel context",
 			func() {

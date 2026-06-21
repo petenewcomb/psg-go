@@ -7,8 +7,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 // Listener provides a reusable notification subscription that can be added to

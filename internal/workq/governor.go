@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 type Governor struct {

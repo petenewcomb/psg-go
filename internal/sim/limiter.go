@@ -31,7 +31,7 @@ type LimiterConfig struct {
 	Permits BiasedIntConfig
 	// Inherit is the probability that a limiter generated for a nested
 	// (subjob) Plan aliases a same-kind limiter of the parent Plan
-	// instead of being fresh — sharing the parent's psg.Limiter and
+	// instead of being fresh — sharing the parent's streampool.Limiter and
 	// concurrency tracker across the subjob boundary. Ignored at top
 	// level.
 	Inherit BiasedBoolConfig
@@ -44,7 +44,7 @@ type Limiter struct {
 	Permits int
 	// InheritFromParent, when >= 0, marks this entry as an alias of the
 	// parent Plan's same-kind limiter at that index: the runtime shares
-	// the parent's psg.Limiter and its concurrency tracker instead of
+	// the parent's streampool.Limiter and its concurrency tracker instead of
 	// constructing fresh ones, exercising permit-holding across the
 	// subjob boundary (the shared-limiter deadlock witnesses in
 	// docs/limiter-suspend-resume.md). -1 means fresh. ID and Permits

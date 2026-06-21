@@ -1,9 +1,9 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
-import "github.com/petenewcomb/psg-go/internal/cerr"
+import "github.com/petenewcomb/streampool/internal/cerr"
 
 const ErrTaskPanicked = cerr.Error("task panicked")
 const ErrFunnelPanicked = cerr.Error("funnel panicked")

@@ -12,7 +12,7 @@
 // locality-ordered acquire, idle-steal) and docs/dispatch-execution-split.md
 // ("Permits: managed off the executor") for where and how permits are acquired.
 
-package psg
+package streampool
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DRAFT SKETCH — the uniform dispatch. NOT wired in; references conceptual
@@ -25,7 +25,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/workq"
+	"github.com/petenewcomb/streampool/internal/workq"
 )
 
 // submit is the single dispatch path for every op. There is no task / funnel /

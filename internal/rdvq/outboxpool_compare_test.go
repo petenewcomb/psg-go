@@ -30,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/nbcq"
 	"github.com/stretchr/testify/require"
 )
 

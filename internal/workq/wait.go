@@ -7,10 +7,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
 type Waiters = rdvq.Waiters

@@ -6,12 +6,12 @@ package otpsg
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 )
 
 // InstrumentedTask funnels tracing, metrics, and logging for tasks into a
 // single wrapper. Returns a value-producing task body; pair it with a sink
-// Skimmer via [Scatter] (or build your own [psg.Launcher]) to dispatch.
+// Skimmer via [Scatter] (or build your own [streampool.Launcher]) to dispatch.
 func InstrumentedTask[T any](
 	operationName string,
 	taskFn func(ctx context.Context) (T, error),
@@ -32,10 +32,10 @@ func InstrumentedTask[T any](
 //
 // wave may be nil to defer wave binding to the dispatching ctx.
 func InstrumentedSkim[T any](
-	wave *psg.Wave,
+	wave *streampool.Wave,
 	operationName string,
 	skimFn func(ctx context.Context, result T, err error) error,
-) psg.Skimmer[PropagatedResult[T]] {
+) streampool.Skimmer[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedSkim := LoggedSkim(operationName, skimFn)
@@ -52,8 +52,8 @@ func InstrumentedSkim[T any](
 func InstrumentedFunnel[T any](
 	funnelOpName string,
 	flushOpName string,
-	funnelFactory psg.AccumulatorFactory[T],
-) psg.AccumulatorFactory[PropagatedResult[T]] {
+	funnelFactory streampool.AccumulatorFactory[T],
+) streampool.AccumulatorFactory[PropagatedResult[T]] {
 	// Apply wrappers inside-out:
 	// 1. First add logging
 	loggedFunnel := LoggedFunnel(funnelOpName, flushOpName, funnelFactory)
@@ -65,11 +65,11 @@ func InstrumentedFunnel[T any](
 	return TracedFunnel(funnelOpName, flushOpName, metricsFunnel)
 }
 
-// Scatter wraps the value-producing task in a one-shot [psg.TaskLauncher]
+// Scatter wraps the value-producing task in a one-shot [streampool.TaskLauncher]
 // that submits the result to skim, and dispatches it. The Launcher is
 // constructed with a nil wave and resolves the dispatching wave from
-// ctx at Start time (see [psg.NewLauncher0]). Pass psg op options
-// (e.g. [psg.WithLimits]) via opts to throttle dispatch.
+// ctx at Start time (see [streampool.NewLauncher0]). Pass psg op options
+// (e.g. [streampool.WithLimits]) via opts to throttle dispatch.
 //
 // Example:
 //
@@ -78,11 +78,11 @@ func InstrumentedFunnel[T any](
 //	err := otpsg.Scatter(ctx, skimmer, task)
 func Scatter[T any](
 	ctx context.Context,
-	skim psg.Skimmer[PropagatedResult[T]],
+	skim streampool.Skimmer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
-	opts ...psg.OpOption,
+	opts ...streampool.OpOption,
 ) error {
-	runner := psg.NewTaskLauncher(nil, func(ctx context.Context) error {
+	runner := streampool.NewTaskLauncher(nil, func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitResult(ctx, result, err)
 	}, opts...)

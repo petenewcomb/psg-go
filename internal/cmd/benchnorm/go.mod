@@ -1,4 +1,4 @@
-module github.com/petenewcomb/psg-go/internal/cmd/benchnorm
+module github.com/petenewcomb/streampool/internal/cmd/benchnorm
 
 go 1.25
 

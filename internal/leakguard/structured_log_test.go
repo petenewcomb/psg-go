@@ -92,7 +92,7 @@ func TestLogLeakStructured(t *testing.T) {
 		require.Regexp(t, `^\+0x[0-9a-f]+$`, frame["offset"], "offset should be in +0xHEX format")
 		if idx == 0 {
 			// Verify frame 0 points to this test function at the New() call
-			require.Equal(t, "github.com/petenewcomb/psg-go/internal/leakguard.TestLogLeakStructured.func2",
+			require.Equal(t, "github.com/petenewcomb/streampool/internal/leakguard.TestLogLeakStructured.func2",
 				frame["function"], "frame 0 should be in TestLogLeakStructured.func2")
 			require.Equal(t, "structured_log_test.go", filepath.Base(frame["file"].(string)),
 				"frame 0 should be in structured_log_test.go")

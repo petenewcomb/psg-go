@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 // OpOption configures an op (Launcher, Funnel, Skimmer) at
 // construction time. Users obtain OpOption values from framework

@@ -11,19 +11,19 @@ import (
 
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
-	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool/psgwf"
 )
 
 // Example demonstrates workflow context for API request handling where
 // client disconnection cancels only that request's operations.
 func Example() {
 	// Create a long-running wave for the API server
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := psg.NewSemaphore(nil, 10)
+	poolLimit := streampool.NewSemaphore(nil, 10)
 	_ = ctx
 
 	// Track completed operations for ordered output
@@ -55,7 +55,7 @@ func Example() {
 				case <-wf.Ctx().Done():
 					return "", fmt.Errorf("[%s] cancelled", requestID)
 				}
-			}, psg.WithLimits(poolLimit))
+			}, streampool.WithLimits(poolLimit))
 		err := runner.Start(clientCtx)
 
 		if err != nil {

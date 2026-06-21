@@ -10,7 +10,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
 	"go.opentelemetry.io/otel/trace"
 )
@@ -28,7 +28,7 @@ type PropagatedResult[T any] struct {
 // PropagateTask wraps a value-returning task body so its result carries
 // the trace context from the calling ctx. The returned function is the
 // raw value-producing body — pair it with [Scatter] (or build your own
-// [psg.Launcher]) to dispatch.
+// [streampool.Launcher]) to dispatch.
 func PropagateTask[T any](
 	taskFn func(ctx context.Context) (T, error),
 ) func(ctx context.Context) (PropagatedResult[T], error) {
@@ -52,12 +52,12 @@ func PropagateTask[T any](
 // set, allowing spans created in the skim function to be properly parented.
 //
 // wave may be nil to defer wave binding to the dispatching ctx
-// (see [psg.NewSkimmer]).
+// (see [streampool.NewSkimmer]).
 func PropagateSkim[T any](
-	wave *psg.Wave,
+	wave *streampool.Wave,
 	skimFn func(ctx context.Context, result T, err error) error,
-) psg.Skimmer[PropagatedResult[T]] {
-	return psg.NewSkimmer(wave, psg.HandlerFunc[PropagatedResult[T]](
+) streampool.Skimmer[PropagatedResult[T]] {
+	return streampool.NewSkimmer(wave, streampool.HandlerFunc[PropagatedResult[T]](
 		func(ctx context.Context, wrapped PropagatedResult[T], err error) error {
 			// Create context with propagated trace data
 			propagatedCtx := ctx
@@ -72,17 +72,17 @@ func PropagateSkim[T any](
 }
 
 // PropagateFunnel wraps an accumulator factory to create accumulators that
-// propagate trace context. After Wave 2 the psg.Accumulator has no output type;
+// propagate trace context. After Wave 2 the streampool.Accumulator has no output type;
 // the wrapper just rehydrates the trace span from the incoming
 // PropagatedResult[T] into ctx so any Submit calls inside the user's
 // Accumulate body carry the right trace context downstream.
 func PropagateFunnel[T any](
-	funnelFactory psg.AccumulatorFactory[T],
-) psg.AccumulatorFactory[PropagatedResult[T]] {
-	return psg.AccumulatorFactoryFunc[PropagatedResult[T]](func() psg.Accumulator[PropagatedResult[T]] {
+	funnelFactory streampool.AccumulatorFactory[T],
+) streampool.AccumulatorFactory[PropagatedResult[T]] {
+	return streampool.AccumulatorFactoryFunc[PropagatedResult[T]](func() streampool.Accumulator[PropagatedResult[T]] {
 		innerFunnel := funnelFactory.NewAccumulator()
 
-		return psg.FuncAccumulator[PropagatedResult[T]]{
+		return streampool.FuncAccumulator[PropagatedResult[T]]{
 			AccumulateFn: func(
 				ctx context.Context,
 				input PropagatedResult[T],

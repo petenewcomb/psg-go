@@ -3,7 +3,7 @@
 
 package workq
 
-import "github.com/petenewcomb/psg-go/internal/rdvq"
+import "github.com/petenewcomb/streampool/internal/rdvq"
 
 // Listeners is an alias for rdvq.Listeners for convenience
 type Listeners = rdvq.Listeners

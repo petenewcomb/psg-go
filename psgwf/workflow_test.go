@@ -8,14 +8,14 @@ import (
 	"sync"
 	"testing"
 
-	psg "github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/psgwf"
 	"github.com/stretchr/testify/assert"
 )
 
 // TestWorkflowAfterFunc verifies that AfterFuncs are called after workflow completion
 func TestWorkflowAfterFunc(t *testing.T) {
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 	_ = ctx
 
@@ -47,7 +47,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	}
 
 	// Create a simple task to ensure workflow is used
-	poolLimit := psg.NewSemaphore(nil, 1)
+	poolLimit := streampool.NewSemaphore(nil, 1)
 	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
@@ -55,7 +55,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	runner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
-		}, psg.WithLimits(poolLimit))
+		}, streampool.WithLimits(poolLimit))
 	err := runner.Start(context.Background())
 	assert.NoError(t, err)
 
@@ -91,10 +91,10 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 // TestWorkflowAfterFuncWithNewTasks verifies AfterFuncs can scatter new tasks
 func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 	_ = ctx
-	poolLimit := psg.NewSemaphore(nil, 2)
+	poolLimit := streampool.NewSemaphore(nil, 2)
 
 	// Track execution
 	var afterFuncRan, newTaskRan bool
@@ -123,7 +123,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		runner := psgwf.NewGenericLauncher(wave, skimmer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
-			}, psg.WithLimits(poolLimit))
+			}, streampool.WithLimits(poolLimit))
 		err := runner.Start(ctx)
 		assert.NoError(t, err)
 	})
@@ -136,7 +136,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	outerRunner := psgwf.NewGenericLauncher(wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
-		}, psg.WithLimits(poolLimit))
+		}, streampool.WithLimits(poolLimit))
 	err := outerRunner.Start(context.Background())
 	assert.NoError(t, err)
 

@@ -1,13 +1,13 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/petenewcomb/psg-go/psgopt"
+	"github.com/petenewcomb/streampool/psgopt"
 )
 
 // funnelEngine returns this Wave's lazily-created funnel engine, building it on

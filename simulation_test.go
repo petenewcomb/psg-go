@@ -1,16 +1,16 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/sim"
+	"github.com/petenewcomb/streampool/internal/sim"
 	"github.com/stretchr/testify/assert"
 	"pgregory.net/rapid"
 )
@@ -35,17 +35,17 @@ func TestBySimulation(t *testing.T) {
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Path.Count = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 		// planConfig.Path.Length = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
-		// planConfig.psg.Task.UseFunnel.Probability = 0
+		// planConfig.streampool.Task.UseFunnel.Probability = 0
 		// planConfig.Funnel.Flush.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.psg.Task.Func.ReturnError.Probability = 0
+		// planConfig.streampool.Task.Func.ReturnError.Probability = 0
 		// planConfig.Funnel.Func.ReturnError.Probability = 0
 		// planConfig.Skim.Func.ReturnError.Probability = 0
 
 		//nolint:gocritic // ignore commented-out code
 		// planConfig.Subjob.MaxDepth = 0
-		// planConfig.psg.Task.Func.Subjob.Add.Probability = 0
+		// planConfig.streampool.Task.Func.Subjob.Add.Probability = 0
 		// planConfig.Funnel.Func.Subjob.Add.Probability = 0
 		// planConfig.Skim.Func.Subjob.Add.Probability = 0
 
@@ -58,7 +58,7 @@ func TestBySimulation(t *testing.T) {
 		// planConfig.FunnelPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.psg.Task.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.streampool.Task.Func.SelfTime = sim.BiasedDurationConfig{}
 		// planConfig.Funnel.Func.SelfTime = sim.BiasedDurationConfig{}
 		// planConfig.Skim.Func.SelfTime = sim.BiasedDurationConfig{}
 

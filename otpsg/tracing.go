@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
 	"go.opentelemetry.io/otel"
 )
@@ -42,10 +42,10 @@ func TracedTask[T any](
 //
 // wave may be nil to defer wave binding to the dispatching ctx.
 func TracedSkim[T any](
-	wave *psg.Wave,
+	wave *streampool.Wave,
 	operationName string,
 	skimFn func(ctx context.Context, result T, err error) error,
-) psg.Skimmer[PropagatedResult[T]] {
+) streampool.Skimmer[PropagatedResult[T]] {
 	// Create a skim function that adds tracing
 	tracedSkimFn := func(ctx context.Context, result T, err error) error {
 		// Create span with meaningful name
@@ -67,13 +67,13 @@ func TracedSkim[T any](
 func TracedFunnel[T any](
 	funnelOpName string,
 	flushOpName string,
-	funnelFactory psg.AccumulatorFactory[T],
-) psg.AccumulatorFactory[PropagatedResult[T]] {
+	funnelFactory streampool.AccumulatorFactory[T],
+) streampool.AccumulatorFactory[PropagatedResult[T]] {
 	// Create an accumulator factory that adds tracing
-	tracedFactory := psg.NewAccumulatorFactory(func() psg.Accumulator[T] {
+	tracedFactory := streampool.NewAccumulatorFactory(func() streampool.Accumulator[T] {
 		innerFunnel := funnelFactory.NewAccumulator()
 
-		return psg.FuncAccumulator[T]{
+		return streampool.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				// Create span with meaningful name
 				tracer := otel.Tracer("otpsg")

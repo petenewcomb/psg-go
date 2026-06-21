@@ -7,7 +7,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
 type GenericAfterFunc[C any] func(ctx context.Context, wf *GenericWorkflow[C])

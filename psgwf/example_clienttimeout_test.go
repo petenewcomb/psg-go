@@ -10,10 +10,10 @@ import (
 
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
-	psg "github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 
-	"github.com/petenewcomb/psg-go/internal/exmpclk"
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool/internal/exmpclk"
+	"github.com/petenewcomb/streampool/psgwf"
 )
 
 // Demonstrates workflow-specific cancellation in case of API client
@@ -21,10 +21,10 @@ import (
 func Example_clientTimeout() {
 
 	// Create a long-running wave for the API server
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
-	poolLimit := psg.NewSemaphore(nil, 10)
+	poolLimit := streampool.NewSemaphore(nil, 10)
 
 	var clock exmpclk.ExampleClock
 	clock.Start()
@@ -61,7 +61,7 @@ func Example_clientTimeout() {
 		wf := psgwf.New(clientCtx)
 		// Launch operation
 		runner := psgwf.NewGenericLauncher(wave, skimmer, wf, newRequestTaskFn(requestID),
-			psg.WithLimits(poolLimit))
+			streampool.WithLimits(poolLimit))
 		err := runner.Start(ctx)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)

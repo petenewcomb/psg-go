@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 import (
 	"context"
@@ -10,17 +10,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/trace"
 
-	"github.com/petenewcomb/psg-go/internal/cerr"
-	"github.com/petenewcomb/psg-go/internal/ctxmap"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/opts"
-	"github.com/petenewcomb/psg-go/internal/rdvq"
-	"github.com/petenewcomb/psg-go/internal/timerp"
-	"github.com/petenewcomb/psg-go/internal/wavestate"
-	"github.com/petenewcomb/psg-go/internal/workq"
-	"github.com/petenewcomb/psg-go/psgopt"
+	"github.com/petenewcomb/streampool/internal/cerr"
+	"github.com/petenewcomb/streampool/internal/ctxmap"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/opts"
+	"github.com/petenewcomb/streampool/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/timerp"
+	"github.com/petenewcomb/streampool/internal/wavestate"
+	"github.com/petenewcomb/streampool/internal/workq"
+	"github.com/petenewcomb/streampool/psgopt"
 )
 
 // Wave is the unit that admits, drains, and cancels a batch of scatter-gather

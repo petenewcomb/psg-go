@@ -56,7 +56,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
 // Trait provides cleanup operations for a resource type R.

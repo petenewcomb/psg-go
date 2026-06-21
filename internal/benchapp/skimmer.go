@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/influxdata/tdigest"
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 )
 
 type Skimmer[T any] struct {
 	controller *Controller
-	wrappedFn  psg.HandlerFunc[T]
+	wrappedFn  streampool.HandlerFunc[T]
 
 	taskStartLatenciesSec *tdigest.TDigest
 	taskDurationsSec      *tdigest.TDigest
@@ -21,10 +21,10 @@ type Skimmer[T any] struct {
 	skimStartLatenciesSec *tdigest.TDigest
 	skimDurationsSec      *tdigest.TDigest
 
-	skimFn psg.HandlerFunc[TaskResult[T]]
+	skimFn streampool.HandlerFunc[TaskResult[T]]
 }
 
-func NewSkimmer[T any](c *Controller, skimFn psg.HandlerFunc[T]) {
+func NewSkimmer[T any](c *Controller, skimFn streampool.HandlerFunc[T]) {
 	// TODO: pool
 	g := &Skimmer[T]{
 		controller: c,
@@ -33,7 +33,7 @@ func NewSkimmer[T any](c *Controller, skimFn psg.HandlerFunc[T]) {
 	g.skimFn = g.skim
 }
 
-func (g *Skimmer[T]) SkimFn() psg.HandlerFunc[TaskResult[T]] {
+func (g *Skimmer[T]) SkimFn() streampool.HandlerFunc[TaskResult[T]] {
 	if g.skimFn == nil {
 		g.skimFn = g.skim
 	}

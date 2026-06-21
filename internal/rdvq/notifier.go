@@ -6,8 +6,8 @@ package rdvq
 import (
 	"context"
 
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/internal/trace"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 // A Notifier routes notifications to its embedded Listeners and Waiters. It

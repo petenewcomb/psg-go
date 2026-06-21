@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -11,10 +11,10 @@ import (
 
 	// Superfluous alias needed to work around
 	// https://github.com/golang/go/issues/12794
-	psg "github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/internal/exmpclk"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/internal/exmpclk"
 
-	"github.com/petenewcomb/psg-go/psgopt"
+	"github.com/petenewcomb/streampool/psgopt"
 )
 
 // ExampleFunnel demonstrates how funnels can efficiently aggregate
@@ -42,27 +42,27 @@ func ExampleFunnel() {
 	ctx := context.Background()
 
 	// Create a scatter-gather wave with flush listener to observe when all tasks have completed
-	ctx, wave := psg.NewWave(ctx, psg.WithPoolOptions(psgopt.WithFlushListener(func() {
+	ctx, wave := streampool.NewWave(ctx, streampool.WithPoolOptions(psgopt.WithFlushListener(func() {
 		fmt.Printf("%3dms: flush: all tasks completed, waiting for funnels\n", msSinceStart())
 	})))
 	defer wave.CancelAndWait()
 
 	// Limit concurrent tasks to 2.
-	taskLimit := psg.NewSemaphore(nil, 2)
+	taskLimit := streampool.NewSemaphore(nil, 2)
 
 	// Create a funnel pool and disable the idle timeout
 	funnelPool := wave
 
 	// Define a result aggregation function and create a funneld skim/funnel operation
-	skimmer := psg.NewSkimmer(wave, psg.HandlerFunc[map[string]int](skimFn))
+	skimmer := streampool.NewSkimmer(wave, streampool.HandlerFunc[map[string]int](skimFn))
 
-	// After Wave 2, the psg.Accumulator factory captures the downstream
+	// After Wave 2, the streampool.Accumulator factory captures the downstream
 	// skimmer in its closure and Submits the aggregated map from
 	// inside FlushFn — there is no framework-routed output type.
-	newAccumulator := psg.NewAccumulatorFactory(func() psg.Accumulator[string] {
+	newAccumulator := streampool.NewAccumulatorFactory(func() streampool.Accumulator[string] {
 		var counts map[string]int
 
-		return psg.FuncAccumulator[string]{
+		return streampool.FuncAccumulator[string]{
 			AccumulateFn: func(ctx context.Context, result string, err error) (time.Time, error) {
 				clock.Sleep(10 * time.Millisecond)
 				if counts == nil {
@@ -80,21 +80,21 @@ func ExampleFunnel() {
 		}
 	}, nil)
 
-	// Create a Funnel operation. No Skimmer arg — the psg.Accumulator
+	// Create a Funnel operation. No Skimmer arg — the streampool.Accumulator
 	// body routes results downstream via Submit.
-	funnelOp := psg.NewFunnel(funnelPool, newAccumulator)
+	funnelOp := streampool.NewFunnel(funnelPool, newAccumulator)
 	defer funnelOp.Close()
 
 	// Build a Launcher factory: the task body submits its result to
 	// funnelOp from inside the task context.
-	newRunner := func(number int, delay time.Duration, result string) psg.TaskLauncher {
-		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+	newRunner := func(number int, delay time.Duration, result string) streampool.TaskLauncher {
+		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 			// Simulate a long-running task
 			clock.Sleep(delay)
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
 			return funnelOp.Submit(ctx, result)
-		}, psg.WithLimits(taskLimit))
+		}, streampool.WithLimits(taskLimit))
 	}
 
 	// Launch some tasks

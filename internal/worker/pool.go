@@ -39,9 +39,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/trace"
-	"github.com/petenewcomb/psg-go/internal/wavestate"
-	"github.com/petenewcomb/psg-go/internal/workq"
+	"github.com/petenewcomb/streampool/internal/trace"
+	"github.com/petenewcomb/streampool/internal/wavestate"
+	"github.com/petenewcomb/streampool/internal/workq"
 )
 
 // Pool is a demand-driven pool of goroutines that drive a shared workq.Queue,

@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 )
 
 // Pipeline demonstrates the use of multiple psg pools to re-implement the
@@ -40,17 +40,17 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 
 	// Create the scatter-gather wave, setting up a deferred call to
 	// Cancel to terminate outstanding tasks in case of error.
-	ctx, wave := psg.NewWave(ctx)
+	ctx, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	// Cap concurrent digesting tasks at the number of cores available
 	// to the program, since they should be CPU-bound.
-	digestLimit := psg.NewSemaphore(nil, runtime.GOMAXPROCS(-1))
+	digestLimit := streampool.NewSemaphore(nil, runtime.GOMAXPROCS(-1))
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestSkimmer := func(path string) psg.Skimmer[[md5.Size]byte] {
-		return psg.NewSkimmer(wave, psg.HandlerFunc[[md5.Size]byte](
+	newDigestSkimmer := func(path string) streampool.Skimmer[[md5.Size]byte] {
+		return streampool.NewSkimmer(wave, streampool.HandlerFunc[[md5.Size]byte](
 			func(ctx context.Context, sum [md5.Size]byte, err error) error {
 				m[path] = sum
 				return nil
@@ -58,18 +58,18 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		))
 	}
 
-	newDigestingRunner := func(path string, data []byte) psg.TaskLauncher {
+	newDigestingRunner := func(path string, data []byte) streampool.TaskLauncher {
 		skimmer := newDigestSkimmer(path)
-		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return skimmer.Submit(ctx, md5.Sum(data))
-		}, psg.WithLimits(digestLimit))
+		}, streampool.WithLimits(digestLimit))
 	}
 
 	// Creates a skimmer for a reading task whose handler dispatches a
 	// digesting task with the bytes that were read.
-	newReadSkimmer := func(path string) psg.Skimmer[[]byte] {
-		return psg.NewSkimmer(wave, psg.HandlerFunc[[]byte](
+	newReadSkimmer := func(path string) streampool.Skimmer[[]byte] {
+		return streampool.NewSkimmer(wave, streampool.HandlerFunc[[]byte](
 			func(ctx context.Context, data []byte, err error) error {
 				return newDigestingRunner(path, data).Start(ctx)
 			},
@@ -79,9 +79,9 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 	// No need for a pool to limit how many file reading tasks run concurrently
 	// since they should be I/O-bound and will be subject to backpressure from
 	// the digesters.
-	newReadingRunner := func(path string) psg.TaskLauncher {
+	newReadingRunner := func(path string) streampool.TaskLauncher {
 		skimmer := newReadSkimmer(path)
-		return psg.NewTaskLauncher(wave, func(ctx context.Context) error {
+		return streampool.NewTaskLauncher(wave, func(ctx context.Context) error {
 			//nolint:gosec // path from known source
 			data, err := os.ReadFile(path)
 			return skimmer.SubmitResult(ctx, data, err)

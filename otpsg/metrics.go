@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 	"go.opentelemetry.io/otel"
 )
 
@@ -50,7 +50,7 @@ func MetricsTask[T any](
 func MetricsSkim[T any](
 	metricName string,
 	skimFn func(ctx context.Context, result T, err error) error,
-) psg.HandlerFunc[T] {
+) streampool.HandlerFunc[T] {
 	return func(ctx context.Context, result T, err error) error {
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")
@@ -84,9 +84,9 @@ func MetricsSkim[T any](
 func MetricsFunnel[T any](
 	funnelMetricName string,
 	flushMetricName string,
-	funnelFactory psg.AccumulatorFactory[T],
-) psg.AccumulatorFactory[T] {
-	return psg.NewAccumulatorFactory(func() psg.Accumulator[T] {
+	funnelFactory streampool.AccumulatorFactory[T],
+) streampool.AccumulatorFactory[T] {
+	return streampool.NewAccumulatorFactory(func() streampool.Accumulator[T] {
 		innerFunnel := funnelFactory.NewAccumulator()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
@@ -100,7 +100,7 @@ func MetricsFunnel[T any](
 		flushDuration, _ := meter.Float64Histogram(flushMetricName + ".duration")
 		flushErrorCounter, _ := meter.Int64Counter(flushMetricName + ".errors")
 
-		return psg.FuncAccumulator[T]{
+		return streampool.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				startTime := time.Now()
 

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/influxdata/tdigest"
-	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/internal/omnipool"
-	"github.com/petenewcomb/psg-go/psgwf"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/psgwf"
 )
 
 type FunnelResult[T any] struct {
@@ -102,7 +102,7 @@ func (c *Funnel[T, C]) Flush(ctx context.Context) error {
 
 type FunnelSkimmer[T any] struct {
 	controller *Controller
-	wrappedFn  psg.HandlerFunc[T]
+	wrappedFn  streampool.HandlerFunc[T]
 
 	taskStartLatenciesSec   *tdigest.TDigest
 	taskDurationsSec        *tdigest.TDigest
@@ -116,10 +116,10 @@ type FunnelSkimmer[T any] struct {
 
 	cumulativeFunnelTime atomic.Int64 // time.Duration
 
-	skimFn psg.HandlerFunc[FunnelResult[T]]
+	skimFn streampool.HandlerFunc[FunnelResult[T]]
 }
 
-func NewFunnelSkimmer[T any](c *Controller, skimFn psg.HandlerFunc[T]) {
+func NewFunnelSkimmer[T any](c *Controller, skimFn streampool.HandlerFunc[T]) {
 	// TODO: pool
 	g := &FunnelSkimmer[T]{
 		controller: c,
@@ -128,7 +128,7 @@ func NewFunnelSkimmer[T any](c *Controller, skimFn psg.HandlerFunc[T]) {
 	g.skimFn = g.skim
 }
 
-func (g *FunnelSkimmer[T]) SkimFn() psg.HandlerFunc[FunnelResult[T]] {
+func (g *FunnelSkimmer[T]) SkimFn() streampool.HandlerFunc[FunnelResult[T]] {
 	if g.skimFn == nil {
 		g.skimFn = g.skim
 	}

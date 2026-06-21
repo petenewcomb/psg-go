@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petenewcomb/psg-go/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/petenewcomb/psg-go"
-	"github.com/petenewcomb/psg-go/otpsg"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/otpsg"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -32,7 +32,7 @@ func Example_tracing() {
 	defer rootSpan.End()
 
 	// Create a PSG wave
-	ctx, wave := psg.NewWave(ctx)
+	ctx, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	// Define a traced task for data loading
@@ -102,7 +102,7 @@ func Example_instrumentedTask() {
 	}()
 
 	// Create a PSG wave
-	ctx, wave := psg.NewWave(context.Background())
+	ctx, wave := streampool.NewWave(context.Background())
 	defer wave.CancelAndWait()
 
 	// Create fully instrumented task and skim

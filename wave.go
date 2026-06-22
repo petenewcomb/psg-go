@@ -96,7 +96,7 @@ func resolveWave(opWave *Wave, ctx context.Context) *Wave {
 	if opWave != nil {
 		return opWave
 	}
-	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	meta, ok := metaFromContext(ctx)
 	if !ok || meta.wave == nil {
 		panic("op constructed with nil wave dispatched from a ctx with no wave (call NewWave first)")
 	}

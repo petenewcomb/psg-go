@@ -317,6 +317,16 @@ func (ee *topLevelExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Executi
 
 type ctxMetaValueKey struct{}
 
+// metaFromContext returns the ctxMeta stamped on ctx (and whether one was found).
+// It is the single READ seam for the meta-on-context lookup. Today the meta is
+// stamped under ctxMetaValueKey (by ctxmap.Map.WithValue and the execShell); the
+// ctxpool adoption (B3) flips this body to ctxpool.GetValue[*ctxMeta] once metas are
+// pooled and stamped through ctxpool, at which point ctxMetaValueKey retires.
+func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
+	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	return meta, ok
+}
+
 func (j *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.ctxMeta"
 

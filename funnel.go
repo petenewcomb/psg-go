@@ -807,7 +807,7 @@ func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) er
 	// IncrementCompleted metric are dropped (the end-of-work flush is the per-wave
 	// flusher; IncrementCompleted was write-only).
 	return runInShell(ctx, w.wave, funnelContext, w.req, func(shellCtx context.Context) error {
-		meta, _ := shellCtx.Value(ctxMetaValueKey{}).(*ctxMeta)
+		meta, _ := metaFromContext(shellCtx)
 		meta.PushGroup(w.Group())
 		defer meta.PopGroup()
 		w.Funnel(shellCtx)

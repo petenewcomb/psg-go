@@ -340,7 +340,7 @@ func (j *Wave) shouldBlock(ctx context.Context) workq.BlockFunc {
 	// worker whose ctx carries NO ctxMeta — and such work is never a TOP-LEVEL
 	// dispatch (top-level runs on the user goroutine, where the meta is present).
 	// So "no matching meta → not top-level → don't block" is correct.
-	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	meta, ok := metaFromContext(ctx)
 	if ok && meta.job == j && meta.IsTopLevel() {
 		return j.blockFn
 	}
@@ -795,7 +795,7 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	// a missing meta): a producer only postpones onto the global queue in LISTEN
 	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta —
 	// so "no matching meta → shouldBlock=false" matches the original dispatch.
-	meta, _ := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	meta, _ := metaFromContext(ctx)
 	shouldBlock := meta != nil && meta.job == w.job && meta.ShouldBlock()
 	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.task, nil)
 	if posted {

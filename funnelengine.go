@@ -211,7 +211,7 @@ func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error 
 	// shouldBlock is read directly from the ctx (not via j.ctxMeta, which panics on
 	// a missing meta): a producer only postpones onto the global queue in LISTEN
 	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta.
-	meta, _ := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
+	meta, _ := metaFromContext(ctx)
 	shouldBlock := meta != nil && meta.job == w.fEngine.job && meta.ShouldBlock()
 	onWait := func() { w.work.Waiting(&w.fEngine.job.governor) }
 	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.work, onWait)

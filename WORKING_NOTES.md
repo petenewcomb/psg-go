@@ -90,6 +90,15 @@ stance: **ctx is DRIVER-SPECIFIC.** Like the internal Pool, a Wave owns NO ctx.
 - Wave stays `*Wave` (no value conversion); bind with `op.In(&w)`. The user owns
   pooling (`sync.Pool[*Wave]` or reuse a var). 3b (single-return NewWave) and 3c
   (value handle) are MOOT.
+- **Context mechanism CONVERGED (2026-06-21, w/ PN) → `docs/decisions/body-context-pool.md`.**
+  How "Wave owns no ctx" actually works: the `ctxmap` value per source ctx becomes a
+  **pool of `{ctxMeta, childCtx}`** (wave-agnostic meta, stamped per borrow; childCtx a
+  stdlib descendant of the source ctx → cancellation pure ancestry). Borrow → stamp wave
+  + call-specific fields → run body → return. Three disciplines: **A** per-execution
+  (async: work-item `Free`; inline: scope `defer`), **B** per-drive (skim), **C**
+  per-lifetime (flusher). Collapses `waveCtx`/`execShell`/`Cancel`/`CancelAndWait` +
+  the per-wave ctxMetaMaps. Plain ownership + GC, no refcount. Borrow-site map (#1–#4)
+  in the note.
 
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new

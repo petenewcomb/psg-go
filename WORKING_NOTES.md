@@ -99,6 +99,13 @@ stance: **ctx is DRIVER-SPECIFIC.** Like the internal Pool, a Wave owns NO ctx.
   per-lifetime (flusher). Collapses `waveCtx`/`execShell`/`Cancel`/`CancelAndWait` +
   the per-wave ctxMetaMaps. Plain ownership + GC, no refcount. Borrow-site map (#1–#4)
   in the note.
+  - **IMPL STATUS:** **B1 LANDED** (`c159d25`) — `bodyctx.go`: `bodyCtxPool`
+    (source-ctx-keyed, `nbcq.Queue[*ctxMeta]`); the `ctxMeta` IS the reusable unit
+    (gained `ctx` + `pool` fields), so the ctxmap value stays `*ctxMeta` (ctx.Value
+    contract intact). Unadopted, test-only, green. **NEXT B2:** ctxmap integration —
+    the cached per-source-ctx meta holds the pool (minted in `computeFn`); open: anchor
+    meta (pool-holder) vs the borrowed body metas. Then migrate borrow sites #1–#4,
+    then drop `waveCtx`/`Cancel`/`execShell` + zero-value Wave + `ensureInit`.
 
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new

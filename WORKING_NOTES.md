@@ -90,22 +90,37 @@ stance: **ctx is DRIVER-SPECIFIC.** Like the internal Pool, a Wave owns NO ctx.
 - Wave stays `*Wave` (no value conversion); bind with `op.In(&w)`. The user owns
   pooling (`sync.Pool[*Wave]` or reuse a var). 3b (single-return NewWave) and 3c
   (value handle) are MOOT.
-- **Context mechanism CONVERGED (2026-06-21, w/ PN) → `docs/decisions/body-context-pool.md`.**
-  How "Wave owns no ctx" actually works: the `ctxmap` value per source ctx becomes a
-  **pool of `{ctxMeta, childCtx}`** (wave-agnostic meta, stamped per borrow; childCtx a
-  stdlib descendant of the source ctx → cancellation pure ancestry). Borrow → stamp wave
-  + call-specific fields → run body → return. Three disciplines: **A** per-execution
-  (async: work-item `Free`; inline: scope `defer`), **B** per-drive (skim), **C**
-  per-lifetime (flusher). Collapses `waveCtx`/`execShell`/`Cancel`/`CancelAndWait` +
-  the per-wave ctxMetaMaps. Plain ownership + GC, no refcount. Borrow-site map (#1–#4)
-  in the note.
-  - **IMPL STATUS:** **B1 LANDED** (`c159d25`) — `bodyctx.go`: `bodyCtxPool`
-    (source-ctx-keyed, `nbcq.Queue[*ctxMeta]`); the `ctxMeta` IS the reusable unit
-    (gained `ctx` + `pool` fields), so the ctxmap value stays `*ctxMeta` (ctx.Value
-    contract intact). Unadopted, test-only, green. **NEXT B2:** ctxmap integration —
-    the cached per-source-ctx meta holds the pool (minted in `computeFn`); open: anchor
-    meta (pool-holder) vs the borrowed body metas. Then migrate borrow sites #1–#4,
-    then drop `waveCtx`/`Cancel`/`execShell` + zero-value Wave + `ensureInit`.
+- **Context mechanism CONVERGED (2026-06-21/22, w/ PN) → `docs/decisions/body-context-pool.md`.**
+  How "Wave owns no ctx" actually works. **The model converged on TWO decoupled pools**
+  (a deliberate shift away from the single fused `{ctxMeta, childCtx}` unit the note's
+  body still describes — reconcile the note on the next doc pass):
+  1. **`internal/ctxpool`** reuses the **child `context.Context`** objects: a
+     process-wide map of parent ctx → `childPool`, each handing out reusable
+     `WithValue`-descendants of the parent (found by direct `ctx.Value`), auto-evicted
+     via `AfterFunc` on parent cancel. Children pooled per-`childPool` (`nbcq`); the
+     `childPool` struct itself is GC'd, not pooled (cold-path alloc; safe recycle would
+     need a hot-path refcount — see the in-code comment).
+  2. **A separate `*ctxMeta` pool** (streampool layer, B3) reuses the **values**:
+     borrow a meta, stamp it (wave/ctxType/parent/heldRequest/parentJobs via
+     `parentJobsFor`), set as the child ctx's value; return to its own pool on `Free`.
+  Values pooled INDEPENDENTLY of contexts. Cancellation = pure source-ctx ancestry.
+  Borrow → stamp → run → return. Three disciplines: **A** per-execution (async:
+  work-item `Free`; inline: scope `defer`), **B** per-drive (skim), **C** per-lifetime
+  (flusher). Collapses `waveCtx`/`execShell`/`Cancel`/`CancelAndWait` + the per-wave
+  ctxMetaMaps. Plain ownership + GC, no refcount. Borrow-site map (#1–#4) in the note.
+  - **IMPL STATUS (2026-06-22):**
+    - **`ctxpool` LANDED** (`51554d5`) — generic child-ctx reuse + eviction; tested,
+      unadopted. (Caught+fixed a draft bug: embedded zero-value omnipool silently
+      defeated ctx reuse → per-`childPool` `nbcq`.)
+    - **`bodyCtxPool` DROPPED** (`b7c132d`) — the fused single-pool design (`c159d25`);
+      reverted the `ctx`/`pool` fields on `ctxMeta`. Stamp logic (`parentJobsFor`)
+      preserved in history at `c159d25` for B3 re-derivation.
+    - **NEXT — B3 (adoption, first live-code change):** (1) `metaPool` +
+      `metaFromContext = ctxpool.GetValue[*ctxMeta]`; migrate the ~8
+      `ctx.Value(ctxMetaValueKey{})` lookups; **retire `ctxMetaValueKey`**. (2) re-derive
+      borrow-stamp onto `ctxpool`. (3) migrate borrow sites #1–#4 (task/funnel
+      `runInShell`=A, skim=B, flusher=C). (4) drop `waveCtx`/`Cancel`/`CancelAndWait`/
+      `execShell` → zero-value `Wave` + `ensureInit`.
 
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new

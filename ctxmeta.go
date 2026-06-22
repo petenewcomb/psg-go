@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/trace"
 
@@ -317,12 +318,17 @@ func (ee *topLevelExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Executi
 
 type ctxMetaValueKey struct{}
 
-// metaFromContext returns the ctxMeta stamped on ctx (and whether one was found).
-// It is the single READ seam for the meta-on-context lookup. Today the meta is
-// stamped under ctxMetaValueKey (by ctxmap.Map.WithValue and the execShell); the
-// ctxpool adoption (B3) flips this body to ctxpool.GetValue[*ctxMeta] once metas are
-// pooled and stamped through ctxpool, at which point ctxMetaValueKey retires.
+// metaFromContext returns the ctxMeta stamped on ctx (and whether one was found). It
+// is the single READ seam for the meta-on-context lookup. During the ctxpool adoption
+// (B3) two write paths coexist: a body ctx borrowed through ctxpool carries its meta as
+// the ctxpool child's value, while legacy ctxmap/execShell ctxs stamp it under
+// ctxMetaValueKey. ctxpool is checked first so a borrowed body ctx wins over any legacy
+// meta on an ancestor. The legacy branch (and the key) retire once every write path is
+// on ctxpool.
 func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
+	if m, ok := ctxpool.GetValue[*ctxMeta](ctx); ok {
+		return m, true
+	}
 	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
 	return meta, ok
 }

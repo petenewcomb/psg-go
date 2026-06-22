@@ -49,6 +49,17 @@ type ctxMeta struct {
 	parentJobs  map[*Wave]struct{}
 	ctxType     contextType
 	executionEnvironment
+	// ctx is this meta's own body context — WithValue(sourceCtx, ctxMetaValueKey{},
+	// cm), minted once when a bodyCtxPool creates the meta and reused across borrows
+	// (the body ctx is the "inner context for the meta"). Cancellation/deadline/value
+	// propagation ride this ctx's ancestry from the source ctx. Nil for metas not
+	// minted by a pool (e.g. the ensureCtxMeta-derived metas on the legacy path).
+	ctx context.Context //nolint:containedctx // the reusable body ctx this meta carries
+	// pool is the bodyCtxPool this meta was borrowed from; release returns the meta to
+	// it. Nil for metas not minted by a pool. The cached value the body-context map
+	// holds per source ctx always carries this pointer (alongside the per-borrow
+	// stamped fields), so any meta can be returned without a separate handle.
+	pool *bodyCtxPool
 }
 
 // vetNotNestedInSkim panics if a blocking gather (Skim/SkimAll, hence

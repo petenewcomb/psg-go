@@ -135,9 +135,15 @@ Net: **less** context machinery, not more — B is a simplification.
    stamped ctx, assuming the value *is* what rides the ctx. A pool needs a purpose-built
    variant: the map yields the pool; the pool mints per-meta child ctxs.
 2. **Per-borrow stamping vs. per-mint derivation.** The `parentJobs` accumulation and
-   parent-linking that `ensureCtxMeta` does at mint move into the stamp. `parentJobs` is
-   source-ctx-determined (cache it on the pool); `job`/`wave`/`parent`/`ctxType`/
-   `heldRequest`/exEnv are per-borrow.
+   parent-linking that `ensureCtxMeta` does at mint move into the stamp. The
+   source-ctx *ancestry basis* (`srcJob` = the source ctx's own wave, `srcParentJobs` =
+   its accumulated parentJobs) is fixed per pool and cached at Init; but the
+   **effective `parentJobs` depends on the target wave** (`parentJobsFor`): same-wave
+   passes the basis through, cross-wave joins `srcJob` into it (mirroring
+   `ensureCtxMeta`). `job`/`wave`/`parent`/`ctxType`/`heldRequest`/exEnv are per-borrow.
+   The cross-wave branch allocates a fresh map per call — cache it on the pool if one
+   source ctx repeatedly targets the same other wave (deferred; steady state is
+   same-wave, which is alloc-free).
 3. **Skim-driver (B) and flusher (C) sources.** Confirm the skim driver borrows per
    drive from the user `Skim` ctx's pool, and the flusher mints from `defaultPool`'s ctx.
 4. **Behavior change (user-visible).** `ExampleWave_Cancel` (`example_cancel_test.go`)

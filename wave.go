@@ -75,11 +75,6 @@ func NewWave(parent context.Context, opts ...WaveOption) (waveCtx context.Contex
 	})
 	meta.wave = w
 
-	// Build the per-wave execShell pool, stamping the wave's ancestry
-	// (meta.parentJobs, computed by ensureCtxMeta when this wave descends from a
-	// body in another wave) onto every shell so the cross-wave guards fire.
-	w.shells.Init(w.waveCtx, w, w, meta.parentJobs)
-
 	return ctx, w
 }
 

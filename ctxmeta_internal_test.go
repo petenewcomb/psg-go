@@ -48,22 +48,46 @@ func TestPermitScopingChains(t *testing.T) {
 	require.Equal(t, topLevelContext, topMeta.ctxType)
 	assert.Nil(t, topMeta.parent, "root wave context has no parent")
 
-	var skimMeta *ctxMeta
+	// Body/funnel/skim metas are pooled (bodyMetaPool / derived) and recycled when
+	// their work frees, so capture the chain properties DURING execution — a pointer
+	// held past drain reads a recycled (or reused) meta. Identity comparisons
+	// (parent links) are likewise evaluated while both ends are live.
+	var (
+		skimSeen, bodySeen, subBodySeen                                      bool
+		skimCtxType, bodyCtxType, subTopCtxType, subBodyCtxType              contextType
+		skimParentIsTop, bodyParentNil, subTopParentIsBody, subBodyParentNil bool
+		subTopNoHeld                                                         bool
+	)
+
 	skimmer := NewFnSkimmer(func(sctx context.Context, _ int, _ error) error {
-		_, skimMeta = wave.ctxMeta(sctx)
+		_, skimMeta := wave.ctxMeta(sctx)
+		skimSeen = true
+		skimCtxType = skimMeta.ctxType
+		skimParentIsTop = skimMeta.parent == topMeta
 		return nil
 	})
 
-	var bodyMeta, subTopMeta, subBodyMeta *ctxMeta
 	launcher := NewTaskLauncher(func(bodyCtx context.Context) error {
-		_, bodyMeta = wave.ctxMeta(bodyCtx)
+		_, bodyMeta := wave.ctxMeta(bodyCtx)
+		bodySeen = true
+		bodyCtxType = bodyMeta.ctxType
+		bodyParentNil = bodyMeta.parent == nil
 
 		// Drive a subwave synchronously from inside the body — the
 		// telescoping path the suspend brackets rely on.
 		subCtx, subWave := NewWave(bodyCtx)
-		_, subTopMeta = subWave.ctxMeta(subCtx)
+		_, subTopMeta := subWave.ctxMeta(subCtx)
+		subTopCtxType = subTopMeta.ctxType
+		subTopParentIsBody = subTopMeta.parent == bodyMeta
+		// The chain a subwave parking point would walk: from the subjob's
+		// top-level meta up to the body — where a handle will be stamped
+		// (task #3) — and no further handle beyond it.
+		subTopNoHeld = subTopMeta.currentHeldRequest() == nil
 		subLauncher := NewTaskLauncher(func(subBodyCtx context.Context) error {
-			_, subBodyMeta = subWave.ctxMeta(subBodyCtx)
+			_, subBodyMeta := subWave.ctxMeta(subBodyCtx)
+			subBodySeen = true
+			subBodyCtxType = subBodyMeta.ctxType
+			subBodyParentNil = subBodyMeta.parent == nil
 			return nil
 		})
 		if err := subLauncher.Start(subCtx); err != nil {
@@ -79,31 +103,22 @@ func TestPermitScopingChains(t *testing.T) {
 	require.NoError(t, launcher.Start(ctx))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
-	require.NotNil(t, bodyMeta)
-	assert.Equal(t, taskContext, bodyMeta.ctxType)
-	assert.Nil(t, bodyMeta.parent,
-		"task worker context must be a fresh permit-root")
+	require.True(t, bodySeen)
+	assert.Equal(t, taskContext, bodyCtxType)
+	assert.True(t, bodyParentNil, "task worker context must be a fresh permit-root")
 
-	require.NotNil(t, subTopMeta)
-	assert.Equal(t, topLevelContext, subTopMeta.ctxType)
-	assert.Same(t, bodyMeta, subTopMeta.parent,
-		"body→NewWave derivation must chain parent to the body's meta")
+	assert.Equal(t, topLevelContext, subTopCtxType)
+	assert.True(t, subTopParentIsBody, "body→NewWave derivation must chain parent to the body's meta")
+	assert.True(t, subTopNoHeld, "no handle stamped yet anywhere on the chain")
 
-	require.NotNil(t, subBodyMeta)
-	assert.Equal(t, taskContext, subBodyMeta.ctxType)
-	assert.Nil(t, subBodyMeta.parent,
+	require.True(t, subBodySeen)
+	assert.Equal(t, taskContext, subBodyCtxType)
+	assert.True(t, subBodyParentNil,
 		"subjob worker must be fresh-rooted even though the subjob's base ctx carries the parent body's meta")
 
-	require.NotNil(t, skimMeta)
-	assert.Equal(t, skimContext, skimMeta.ctxType)
-	assert.Same(t, topMeta, skimMeta.parent,
-		"top-level→skim derivation must chain parent")
-
-	// The chain a subwave parking point would walk: from the subjob's
-	// top-level meta up to the body — where a handle will be stamped
-	// (task #3) — and no further handle beyond it.
-	assert.Nil(t, subTopMeta.currentHeldRequest(),
-		"no handle stamped yet anywhere on the chain")
+	require.True(t, skimSeen)
+	assert.Equal(t, skimContext, skimCtxType)
+	assert.True(t, skimParentIsTop, "top-level→skim derivation must chain parent")
 }
 
 // TestHeldRequestStampedDuringBodies pins the #2+#3 end-to-end property:
@@ -166,11 +181,19 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	defer wave.CancelAndWait()
 
 	fp := wave
-	var funnelMeta *ctxMeta
+	// The funnel worker meta is pooled (bodyMetaPool) and recycled when the work is
+	// freed, so capture its properties DURING the body, not via a pointer held past
+	// drain.
+	var funnelSeen bool
+	var funnelCtxType contextType
+	var funnelParentNil bool
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
-				_, funnelMeta = wave.ctxMeta(fctx)
+				_, funnelMeta := wave.ctxMeta(fctx)
+				funnelSeen = true
+				funnelCtxType = funnelMeta.ctxType
+				funnelParentNil = funnelMeta.parent == nil
 				return time.Time{}, nil
 			},
 			FlushFn: func(context.Context) error { return nil },
@@ -181,8 +204,8 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	require.NoError(t, f.Submit(ctx, 1))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
-	require.NotNil(t, funnelMeta)
-	assert.Equal(t, funnelContext, funnelMeta.ctxType)
-	assert.Nil(t, funnelMeta.parent,
+	require.True(t, funnelSeen)
+	assert.Equal(t, funnelContext, funnelCtxType)
+	assert.True(t, funnelParentNil,
 		"funnel worker context must be a fresh permit-root")
 }

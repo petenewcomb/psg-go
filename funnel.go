@@ -630,7 +630,7 @@ func (c *funnel[T]) submit(
 	value T,
 	err error,
 ) error {
-	funnelWork := c.newFunnelWork(group, value, err, meta.wave)
+	funnelWork := c.newFunnelWork(ctx, group, value, err, meta.wave)
 	postWork := c.fEngine.newFunnelPostWork(group, funnelWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
@@ -644,7 +644,7 @@ func (c *funnel[T]) trySubmit(
 	deadline time.Time,
 ) (bool, error) {
 	// Create funnel work directly with values
-	funnelWork := c.newFunnelWork(group, value, err, meta.wave)
+	funnelWork := c.newFunnelWork(ctx, group, value, err, meta.wave)
 	postWork := c.fEngine.newFunnelPostWork(group, funnelWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
@@ -672,10 +672,15 @@ type funnelWork[T any] struct {
 	// The funnelWork owns its lifecycle: released at body end in Execute
 	// (or idempotently in Free for never-executed work), recycled in Free.
 	req request
-	// wave is the dispatching wave; stamped onto the funnel worker's
-	// ctxMeta during executeInner so nil-wave dispatches from the
-	// Accumulate / Flush body can resolve it.
+	// wave is the dispatching wave; stamped onto the body ctxMeta so nil-wave
+	// dispatches from the Accumulate / Flush body can resolve it.
 	wave *Wave
+	// bodyCtx is the body context borrowed at dispatch (descended from the submit
+	// ctx); the funnel body runs under it and Free returns it. bodyMeta is the
+	// meta it carries — executeInner stamps the worker's E and the held request
+	// (acquired on the worker, not at dispatch) onto it.
+	bodyCtx  context.Context //nolint:containedctx // the borrowed body ctx, released in Free
+	bodyMeta *ctxMeta
 }
 
 // funnelWork is the applicant its Limiter request is opened for:
@@ -692,18 +697,27 @@ func (w *funnelWork[T]) Err() error {
 	return w.inputErr
 }
 
-func (c *funnel[T]) newFunnelWork(group workq.GroupID, value T, err error, wave *Wave) *funnelWork[T] {
+func (c *funnel[T]) newFunnelWork(
+	submitCtx context.Context, group workq.GroupID, value T, err error, wave *Wave,
+) *funnelWork[T] {
 	w := c.funnelWorkPool.Get()
-	w.Init(group, c, value, err, wave)
+	w.Init(submitCtx, group, c, value, err, wave)
 	return w
 }
 
-func (w *funnelWork[T]) Init(group workq.GroupID, f *funnel[T], input T, inputErr error, wave *Wave) {
+//nolint:contextcheck // submitCtx is the borrow source for the body ctx, not a propagated arg
+func (w *funnelWork[T]) Init(
+	submitCtx context.Context, group workq.GroupID, f *funnel[T], input T, inputErr error, wave *Wave,
+) {
 	w.poolWork.Init(group, f.fEngine.job)
 	w.funnel = f
 	w.input = input
 	w.inputErr = inputErr
 	w.wave = wave
+	// Borrow the body context at dispatch (descended from the submit ctx). The
+	// permit (heldRequest) is acquired on the worker in executeInner, the worker's
+	// E stamped there too; both nil here. Worker bodies are fresh permit-roots.
+	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, wave, funnelContext, nil, nil, nil)
 	f.ref() // Add reference for the funnel work
 }
 
@@ -799,20 +813,17 @@ func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 
 func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	// Run the funnel body on a global-pool worker under a borrowed per-wave
-	// execShell (mirrors taskWork.Execute). runInShell supplies the body context +
-	// ctxMeta (wave + worker E + the held limiter request); we push the funnel's
-	// group onto that exEnv so nil-wave dispatches from inside the Accumulate /
-	// Flush body resolve to it. The legacy cpWorker flush-signal subscription and
-	// IncrementCompleted metric are dropped (the end-of-work flush is the per-wave
-	// flusher; IncrementCompleted was write-only).
-	return runInShell(ctx, w.wave, funnelContext, w.req, func(shellCtx context.Context) error {
-		meta, _ := metaFromContext(shellCtx)
-		meta.PushGroup(w.Group())
-		defer meta.PopGroup()
-		w.Funnel(shellCtx)
-		return nil
-	})
+	// The body context was borrowed at dispatch; stamp the pieces only known on
+	// the worker — the held limiter request (acquired in Execute) and this worker's
+	// E — and push the funnel's group so nil-wave dispatches from inside the
+	// Accumulate / Flush body resolve to it. Run the body under the borrowed ctx.
+	w.bodyMeta.heldRequest = w.req
+	w.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
+	w.bodyMeta.PushGroup(w.Group())
+	defer w.bodyMeta.PopGroup()
+	//nolint:contextcheck // the body runs under the borrowed body ctx by design
+	w.Funnel(w.bodyCtx)
+	return nil
 }
 
 func (w *funnelWork[T]) Free() {
@@ -828,6 +839,13 @@ func (w *funnelWork[T]) Free() {
 		w.req.release()
 		freeRequest(w.req)
 		w.req = nil
+	}
+
+	// Return the body context borrowed at dispatch (whether or not the body ran).
+	if w.bodyCtx != nil {
+		releaseBodyContext(w.bodyCtx)
+		w.bodyCtx = nil
+		w.bodyMeta = nil
 	}
 
 	w.DownstreamWork.Close()

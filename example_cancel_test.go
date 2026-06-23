@@ -13,15 +13,18 @@ import (
 	"github.com/petenewcomb/streampool"
 )
 
-// Demonstrates job cancellation from the outer layer.
+// Demonstrates cancellation from the outer layer. A Wave owns no context;
+// cancellation is driven through the context you pass to the wave's drive and
+// dispatch calls — cancel it and the drain returns, leaving in-flight bodies to
+// observe their own (descendant) contexts.
 func ExampleWave_Cancel() {
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	ctx, wave := streampool.NewWave(ctx)
-	// This is the standard deferred call to Wave.CancelAndWait that should
-	// almost always follow creation of a new Wave to ensure cleanup. It is
-	// not the call to Wave.Cancel that is the subject of this example.
+	// The standard deferred cleanup call that should almost always follow
+	// creation of a new Wave.
 	defer wave.CancelAndWait()
 
 	limit := streampool.NewSemaphore(1)
@@ -56,11 +59,11 @@ func ExampleWave_Cancel() {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
-	// Cancel the wave after skimming starts but before the second task
-	// finishes.
+	// Cancel the drive context after skimming starts but before the second
+	// task finishes.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		wave.Cancel()
+		cancel()
 	}()
 
 	// Wait for all tasks to complete
@@ -75,15 +78,18 @@ func ExampleWave_Cancel() {
 	// Error while skimming: context canceled
 }
 
-// Demonstrates job cancellation from inside a task.
+// Demonstrates cancellation triggered from inside a task — a way to cut the
+// overall wave short on a fatal error without waiting for results to be skimmed.
+// The task cancels the drive context (captured in a closure); the drain then
+// returns context.Canceled.
 func ExampleWave_Cancel_task() {
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	ctx, wave := streampool.NewWave(ctx)
-	// This is the standard deferred call to Wave.CancelAndWait that should
-	// almost always follow creation of a new Wave to ensure cleanup. It is
-	// not the call to Wave.Cancel that is the subject of this example.
+	// The standard deferred cleanup call that should almost always follow
+	// creation of a new Wave.
 	defer wave.CancelAndWait()
 
 	limit := streampool.NewSemaphore(1)
@@ -111,10 +117,8 @@ func ExampleWave_Cancel_task() {
 	// result to be skimmed.
 	fmt.Println("Launching second task")
 	secondRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
-		// Force cancellation from inside the task. This is a way to cut
-		// short the overall wave due to a fatal error within a task without
-		// even waiting for the task result to be skimmed.
-		wave.Cancel()
+		// Cancel the drive context from inside the task to cut the wave short.
+		cancel()
 		time.Sleep(10 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
 	}, streampool.WithLimits(limit))

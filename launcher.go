@@ -208,7 +208,7 @@ func (r Launcher[T]) dispatch(
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(pool, group, deadline, value, callerErr, wave)
+	work := r.newScatterWork(ctx, pool, group, deadline, value, callerErr, wave)
 	if isTry {
 		ok, err := meta.TryExecuteNow(ctx, deadline, work)
 		if !ok {
@@ -220,15 +220,16 @@ func (r Launcher[T]) dispatch(
 	return err == nil, err
 }
 
+//nolint:contextcheck // submitCtx is the body-ctx borrow source threaded to newTaskWork, not a propagated arg
 func (r Launcher[T]) newScatterWork(
-	pool *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
+	submitCtx context.Context, pool *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
 ) *launcherScatterWork {
 	inner := r.newTask(pool, group, value, callerErr)
 	var req request
 	if r.limiter.impl != nil {
 		req = r.limiter.impl.newRequest(inner)
 	}
-	taskWork := pool.newTaskWork(group, inner, req, wave)
+	taskWork := pool.newTaskWork(submitCtx, group, inner, req, wave)
 	postWork := pool.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if req != nil {

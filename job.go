@@ -54,21 +54,18 @@ type Wave struct {
 	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
 
-	// wave-5b per-Wave substrate (absorbed from the former thin Wave wrapper as
-	// part of folding Wave into Wave). waveCtx = WithCancel(defaultPool.PoolCtx());
-	// shells hands out the per-wave borrowed execution contexts; fEngine is the
-	// lazily-created funnel engine. ownsPool is vestigial (every wave now owns its
-	// own substrate over the global defaultPool) and is removed with WithPool.
-	ownsPool   bool
-	waveCtx    context.Context //nolint:containedctx // per-wave cancellation root
-	waveCancel context.CancelFunc
-	shells     execShellPool
-	fEngineMu  sync.Mutex
-	fEngine    atomic.Pointer[funnelEngine]
+	// fEngine is the lazily-created funnel engine (nil until the first NewFunnel).
+	// Body contexts are no longer per-wave: task/funnel bodies borrow them from
+	// ctxpool keyed on the submit ctx (see bodyctx.go), so the wave owns no waveCtx
+	// or execShell pool — cancellation rides the submit ctx by ancestry.
+	fEngineMu sync.Mutex
+	fEngine   atomic.Pointer[funnelEngine]
 }
 
-//nolint:contextcheck // background context used only for tracing
-func (j *Wave) newTaskWork(group workq.GroupID, task boundTask, req request, wave *Wave) *taskWork {
+//nolint:contextcheck // background context for tracing; submitCtx is the body-ctx borrow source
+func (j *Wave) newTaskWork(
+	submitCtx context.Context, group workq.GroupID, task boundTask, req request, wave *Wave,
+) *taskWork {
 	traceRegion := "Wave.newTaskWork"
 
 	w := taskWorkPool.Get()
@@ -82,6 +79,10 @@ func (j *Wave) newTaskWork(group workq.GroupID, task boundTask, req request, wav
 		w.completedFn = req.release
 	}
 	w.wave = wave
+	// Borrow the body context at dispatch (descended from the submit ctx, so
+	// cancellation rides ancestry). Async worker bodies are fresh permit-roots
+	// (parent nil); the worker's E is stamped at Execute, not known yet here.
+	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, wave, taskContext, nil, req, nil)
 
 	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", j, w)
 	return w
@@ -100,10 +101,15 @@ type taskWork struct {
 	// in Free.
 	req         request
 	completedFn func() // req.release, captured once at creation
-	// wave is the dispatching Wave; stamped onto the worker's
-	// ctxMeta during Execute so nil-wave op dispatches from the task
-	// body can resolve it.
+	// wave is the dispatching Wave; stamped onto the body
+	// ctxMeta so nil-wave op dispatches from the task body can resolve it.
 	wave *Wave
+	// bodyCtx is the body context borrowed at dispatch (borrowBodyContext),
+	// descended from the submit ctx and carrying bodyMeta; the task body runs
+	// under it and Free returns it. bodyMeta is the same meta the ctx carries,
+	// kept so Execute can stamp the worker's E without a ctx.Value lookup.
+	bodyCtx  context.Context //nolint:containedctx // the borrowed body ctx, released in Free
+	bodyMeta *ctxMeta
 }
 
 func (w *taskWork) Reset() {
@@ -113,23 +119,24 @@ func (w *taskWork) Reset() {
 	w.req = nil
 	w.completedFn = nil
 	w.wave = nil
+	w.bodyCtx = nil
+	w.bodyMeta = nil
 }
 
-// Execute is the workq.Work entry run by a global-pool worker. It borrows a
-// per-wave execShell (supplying the body's context + ctxMeta with this worker's E),
-// stamps the held limiter request, and runs the task body under the shell ctx. The
-// permit was already acquired at dispatch (limiterScatterWork, transitional), so
-// runInShell only stamps w.req as heldRequest so framework parking points inside
-// the body can suspend it.
+// Execute is the workq.Work entry run by a global-pool worker. The body context
+// (bodyCtx) was borrowed at dispatch; this stamps the running worker's E onto the
+// body meta (the only piece not known at dispatch) and runs the task body under
+// bodyCtx. The held limiter request was stamped at borrow. Free returns the body
+// context.
 func (w *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ex.Starting()
-	return runInShell(ctx, w.wave, taskContext, w.req, func(shellCtx context.Context) error {
-		w.task.Execute(shellCtx, w.Group(), w.completedFn)
-		return nil
-	})
+	w.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
+	//nolint:contextcheck // the body runs under the borrowed body ctx by design
+	w.task.Execute(w.bodyCtx, w.Group(), w.completedFn)
+	return nil
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -149,6 +156,14 @@ func (w *taskWork) Free() {
 		freeRequest(w.req)
 		w.req = nil
 	}
+	// Return the body context borrowed at dispatch — its child ctx to ctxpool and
+	// its meta to bodyMetaPool. Runs whether or not the body executed (a task freed
+	// without running still borrowed at dispatch).
+	if w.bodyCtx != nil {
+		releaseBodyContext(w.bodyCtx)
+		w.bodyCtx = nil
+		w.bodyMeta = nil
+	}
 	w.Close(job)
 	taskWorkPool.Put(w)
 }
@@ -167,7 +182,6 @@ func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wav
 	w := &Wave{
 		ctx:      poolCtx,
 		cancelFn: cancelFn,
-		ownsPool: true,
 	}
 
 	w.protoBB.ShouldBlock = w.shouldBlock
@@ -184,9 +198,6 @@ func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wav
 	w.governor.Init()
 	w.workQueue.Init(nil)
 	w.SetOptions(options...)
-
-	// wave-5b: per-wave cancellation root, derived from the global pool's teardown ctx.
-	w.waveCtx, w.waveCancel = context.WithCancel(defaultPool.PoolCtx())
 
 	return w
 }
@@ -213,10 +224,11 @@ func (j *Wave) Cancel() {
 	traceRegion := "Wave.Cancel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Wave=%p", j)
-	// wave-5b: cancel the per-wave context too (absorbed from the thin Wave). Once
-	// work runs under borrowed shells (descendants of waveCtx) this reaches running
-	// bodies; the pool-ctx cancel below does the rest of teardown.
-	j.waveCancel()
+	// Cancel the wave's internal ctx. This tears down wave machinery (the funnel
+	// flusher roots at j.ctx; ensureCtxMeta-derived skim ctxs are linked to it via
+	// AfterFunc) and so unblocks an outstanding Skim. It NO LONGER force-aborts
+	// running task/funnel bodies: those run under contexts descended from their
+	// submit ctx (borrowBodyContext), so cancel the submit ctx to stop them.
 	j.cancelFn()
 }
 
@@ -228,13 +240,10 @@ func (j *Wave) CancelAndWait() {
 	traceRegion := "Wave.CancelAndWait"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	// wave-5b: release the per-wave execShells last (absorbed from the thin Wave).
-	defer j.shells.release()
-
-	// Cancel (which now also cancels waveCtx) drives this wave's funnel flusher
-	// toward exit; JOIN it BEFORE the map-clearing teardown below, because the
-	// flusher reads the ctxMetaMaps (ensureCtxMeta, flush bodies) — clearing them
-	// while it still runs is a data race. (Preserves the ordering fix from a9776db.)
+	// Cancel (j.ctx) drives this wave's funnel flusher toward exit; JOIN it BEFORE
+	// the map-clearing teardown below, because the flusher reads the ctxMetaMaps
+	// (ensureCtxMeta, flush bodies) — clearing them while it still runs is a data
+	// race. (Preserves the ordering fix from a9776db.)
 	j.Cancel()
 	if fe := j.fEngine.Load(); fe != nil {
 		fe.joinFlusher()

@@ -116,6 +116,43 @@ shared queue need no serialization beyond what `workq` provides.
 3. **Reconcile** `ExampleWave_Cancel(_task)` + the sim to submit-ctx-rooted cancellation.
 4. Confirm `topLevelExEnv.Lock` removal; drop dead derivation code.
 
+## Implementation strategy (incremental, green at each step)
+
+Key insight that lets this land green *before* the body migration: at the current
+checkpoint bodies use `execShell`, which **reuses one meta pointer** (re-stamped in
+place), so `ctxMetaMap`'s ctx-keyed cache is harmless. ctxpool hands a **fresh meta
+pointer per borrow**, so the same cache would alias — but only *after* the body
+migration. So the machinery can be made ctxpool-ready incrementally now.
+
+The unified entry logic (replaces the `ensureCtxMeta`/`topLevelCtxMeta`/`skimCtxMeta`
++ `ctxMetaMap` derivation) at a dispatch/skim entry with source `ctx`, target wave `W`,
+desired driver `ctxType`:
+
+```
+if m, ok := metaFromContext(ctx); ok {
+    if m.job == W { return ctx, m }              // 1a reuse (body self-dispatch / re-entrant driver)
+    // 1b cross-wave: driver meta for W, parentJobs += m.job, EPHEMERAL (no cache)
+    return borrowDriver(ctx, W, ctxType, parentJobsForSource(ctx, W))
+}
+// 2 no source meta: fresh top-level driver for W from a STABLE user ctx
+return borrowDriver(ctx, W, ctxType, nil)   // (or ctxMetaMap until per-call borrows land)
+```
+
+`parentJobsForSource` (already in `bodyctx.go`) covers 1b's ancestry and 2's nil. The
+cross-job derivation that `ensureCtxMeta` did is exactly this — it **dissolves** here.
+
+Increments (each builds + suite + vet + lint green):
+1. **`ctxMeta` → `metaFromContext`** — DONE (`bc8040e`). Pure read+validate; drops one
+   `ctxMetaMap` use.
+2. **`ensureCtxMeta`/`topLevelCtxMeta`/`skimCtxMeta` → the entry logic above.** The
+   risky core: source via `metaFromContext`; reuse on same-wave; ephemeral derive on
+   cross-wave (no caching); `ctxMetaMap` only for case 2 (stable user ctx) until step 4.
+   Validate against `TestPermitScopingChains` + the sim (race).
+3. Re-apply the stash (bodies → ctxpool; remove `execShell`) — now unblocked by step 2.
+4. Per-call driver borrows (the two-nested-borrows for top-level trySkim) +
+   `topLevelExEnv.Lock` removal; retire `ctxMetaValueKey`/`ctxMetaMap`/`skimCtxMetaMap`.
+5. Reconcile examples + sim (B3.D).
+
 ## WIP status
 
 Task/funnel borrow migration + `execShell`/`waveCtx` removal + `Cancel` gut is **stashed**

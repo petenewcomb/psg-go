@@ -1,10 +1,13 @@
 # Body-Context Pool (ctxMeta reuse, source-ctx-keyed)
 
 > **DESIGN — converged with PN 2026-06-21. Anchors thread B (the 2026-06-21b Wave
-> lifecycle).** Authoritative for the context model until reflected into code. This
-> is the target-state mechanism that replaces the per-wave `waveCtx` + `execShell`
-> machinery; see `WORKING_NOTES.md` (top banner) for the surrounding lifecycle and
-> `context-metadata.md` for the (dated) prior caching record this evolves.
+> lifecycle). LANDED in the B3 cutover (`e740d33`) + B3.C.** Authoritative for the
+> context model. This is the mechanism that replaced the per-wave `waveCtx` +
+> `execShell` machinery — so the "Today … a Wave owns three ctx handles" snapshot in
+> the Problem section below is the **pre-change** state (now removed; kept for
+> rationale). See `WORKING_NOTES.md` (top banner) for the surrounding lifecycle,
+> `surface-lineage.md` for the superseded forms, and `context-metadata.md` for the
+> (dated) prior caching record this evolves.
 
 ## Problem
 

@@ -3,6 +3,11 @@
 > Decision/evidence doc. "psg-go" below is the current code; "streampool" is the
 > repositioned target name (see `docs/decisions/API_DESIGN.md`) — the source-level
 > analysis is of the current `psg-go` internals and holds under either name.
+>
+> The illustrative `streampool` code snippets in this doc predate the locked surface
+> (they still show `NewWave`, `NewLauncher(wave)`, `WithLimit`, `CancelAndWait`).
+> They are kept as contention/allocation illustrations only — for the current surface
+> see `API_DESIGN.md` and `surface-lineage.md`; do not read them as current API.
 
 Source-based architectural analysis of how the library compares against the
 closest competitors on two performance axes used in the README comparison table:

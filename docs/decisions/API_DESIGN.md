@@ -17,9 +17,12 @@ often unravels several.
 > - **Ops are wave-agnostic** — constructors take no wave. The target is the body's
 >   ambient wave, or `op.In(wave)` to place/redirect. No bind-at-construction, no
 >   sentinel.
-> - **Wave and Flow are value handles.** Wave has a single-owner lifecycle (no
->   `Dup`; Close/Cancel non-refcounted). Flow keeps `Dup`/`Close` (the one cross-wave
->   refcount) and is the lone ctx-borne type.
+> - **Wave: no constructor (zero-value, lazy-init).** SUPERSEDED LATER (2026-06-21b):
+>   the value-handle / `NewWave` / `Cancel`-`CancelAndWait` shape this doc still
+>   describes in places gave way to a zero-value `var w streampool.Wave` (`*Wave`),
+>   lazy `ensureInit`, drain-only lifecycle (no Cancel), bound via `op.In(&w)`. Full
+>   evolution + rationale: `surface-lineage.md`. Flow stays a refcounted, ctx-borne
+>   value handle (keeps `Dup`/`Close`) — the lone ctx-borne type.
 > - **Funnel is wave-scoped** — `Flush` / `FlushTo`, no `Close` / `Dup`;
 >   finalization is wave-driven.
 > - **Limiters are standalone values** — `WithLimits` jointly admits in a global
@@ -106,11 +109,13 @@ sizing. Keeping these concerns separate is what removes the API friction this
 design exists to remove.
 
 1. **Wave** — *the* user-facing primary type: a batch of work to complete
-   together, a **value handle** over internal per-batch state. Ops route work
-   into a wave (ambient inside a body, or `op.In(wave)` to place/redirect);
-   `wave.Skim` / `SkimAll` / `CloseAndSkimAll` drain it. Waves nest via
-   `NewChild` — a parent's drain waits for its children — and run concurrently.
-   **Single-owner lifecycle**: no `Dup`; `Close`/`Cancel` are not refcounted.
+   together. A zero-value `var w streampool.Wave` (`*Wave`) is ready to use — no
+   constructor — and owns no context. Ops route work into a wave (ambient inside a
+   body, or `op.In(&w)` to place/redirect); `wave.Skim` / `SkimAll` /
+   `CloseAndSkimAll` drain it, returning `ErrWaveDone` when complete. Waves nest (a
+   sub-wave is just a zero-value Wave first used inside a body; its body's drain
+   keeps the parent drain waiting, transitively) and run concurrently. The lifecycle
+   is the drain — no `Cancel`, no `Dup`; cancellation rides the driving context.
 
 2. **Flow** *(optional)* — one logical thread of related work: a refcounted,
    ctx-borne **value handle** that can span multiple Waves. Use a Flow to attach
@@ -139,36 +144,32 @@ package streampool
 // all work, sized automatically (adaptive under demand; idle workers retire;
 // refcount-driven lifecycle tied to active Waves). There is no NewPool / WithPool
 // / PoolOption. Per-op concurrency is expressed with Limiters (below); a narrower
-// cancellation domain comes from the ctx passed to NewWave / NewFlow.
+// cancellation domain comes from the ctx you dispatch/drive a Wave with.
 
 // ===== Wave: the batch of work the user awaits =====
 
-// Wave is a value handle over internal per-batch state. Ops are wave-AGNOSTIC
-// (constructed without a wave); work is routed to a wave at dispatch — the body's
-// ambient wave by default, or op.In(wave) to place/redirect (see "Routing").
-// Waves nest via NewChild (a parent's drain waits for its children) and run
-// concurrently. Single-owner lifecycle: no Dup, and Close/Cancel are not
-// refcounted.
+// Wave is per-batch state with an internal lifecycle, used as *Wave. There is NO
+// constructor: a zero-value Wave (var w streampool.Wave) is ready to use and owns no
+// context — it self-inits on first ctx-bearing use (op dispatch into it, or a drain),
+// capturing the DRIVING ancestry. Ops are wave-AGNOSTIC (constructed without a wave);
+// work is routed to a wave at dispatch — the body's ambient wave by default, or
+// op.In(&w) to place/redirect (see "Routing"). A sub-wave is just a zero-value Wave
+// first used inside a body; the body's drain of it keeps the parent drain waiting,
+// transitively. No Dup.
+//
+// (Superseded forms — NewWave (two-return, then value-handle), NewChild, and
+// Cancel/CancelAndWait — and why they were dropped: surface-lineage.md.)
 type Wave struct { /* ... */ }
 
-// NewWave creates a top-level Wave on the internal default Pool. It returns a
-// value handle and does NOT return a ctx — a Wave is a routing target, not
-// propagation (see Flow for the ctx-borne concept).
-func NewWave(parent context.Context, opts ...WaveOption) Wave
+func (*Wave) Skim(ctx context.Context) error            // process one ready result through its Skimmer
+func (*Wave) SkimAll(ctx context.Context) error         // drain without sealing (for a pure drainer)
+func (*Wave) CloseAndSkimAll(ctx context.Context) error // seal + drain to completion — the terminal call
+func (*Wave) Close()                                    // seal: no more top-level entries to this Wave
 
-// NewChild creates a Wave whose drain rolls up into the receiver's drain: the
-// parent's SkimAll / CloseAndSkimAll waits for all child Waves to complete.
-func (Wave) NewChild(parent context.Context, opts ...WaveOption) Wave
-
-func (Wave) Skim(ctx context.Context) error            // process one ready result through its Skimmer
-func (Wave) SkimAll(ctx context.Context) error         // drain to completion without sealing (for a pure drainer)
-func (Wave) CloseAndSkimAll(ctx context.Context) error // seal + drain to completion — the terminal call
-func (Wave) Close()                                    // seal: no more top-level entries to this Wave
-func (Wave) CancelAndWait()                            // cancel the Wave's ctx, wait for all work to exit
-
-type WaveOption interface { /* ... */ }
-// (No WithPool — the Pool is internal; a narrower cancellation domain comes from
-// the ctx passed to NewWave.)
+// All drains return ErrWaveDone once in-flight==0 and the wave is sealed. There is no
+// Cancel and no framework force-abort: a Wave owns no context. Cancellation rides the
+// driving ctx — cancel the ctx you drive/dispatch with; a drain then returns that
+// ctx's error, and in-flight bodies stop via their own submit ctxs.
 
 // ===== Flow: one logical thread of work (optional) =====
 
@@ -628,8 +629,9 @@ confront the base-time choice; the `For` sugar would actively hide it.
 ```go
 ctx := context.Background()
 
-// Wave: the batch of work this function awaits. The worker pool is internal.
-wave := streampool.NewWave(ctx)
+// Wave: the batch of work this function awaits. Zero value is ready to use; the
+// worker pool is internal.
+var wave streampool.Wave
 
 // Skimmer (terminal sink): runs on the draining goroutine as results arrive.
 printer := streampool.NewSkimmer(streampool.HandlerFunc[*User](
@@ -650,9 +652,9 @@ fetcher := streampool.NewLauncher(streampool.HandlerFunc[UserID](
     },
 ))
 
-// Top level has no ambient wave, so route explicitly with In(wave):
+// Top level has no ambient wave, so route explicitly with In(&wave):
 for _, id := range userIDs {
-    fetcher.In(wave).Submit(ctx, id)
+    fetcher.In(&wave).Submit(ctx, id)
 }
 
 wave.CloseAndSkimAll(ctx) // seal + drain to completion
@@ -670,7 +672,7 @@ ctx, flow := streampool.NewFlow(ctx, streampool.WithAfterFunc(func() {
 defer flow.Close() // releases the caller's reference; framework refs come from work items
 
 // Dispatch with this ctx; the Flow rides it onto every work item and across waves.
-fetcher.In(wave).Submit(ctx, id)
+fetcher.In(&wave).Submit(ctx, id)
 ```
 
 ## With a funnel
@@ -868,8 +870,8 @@ an un-routed top-level `Submit` panics, naming the fix.
 
 | Old (psg-go) | New (streampool) | Notes |
 |---|---|---|
-| `psg.NewJob(ctx)` (the post-rename `psg.New(ctx)`) | **Splits** into `streampool.NewWave(ctx)` (user-primary; uses default Pool) + optionally `streampool.NewPool(ctx, opts...)` (only for non-default ctx or tuning) | The conflated Pool-as-bounded-context becomes two types. Wave is the user-facing handle for a batch of work; Pool is the fungible worker container, mostly implicit. |
-| `*Job` / `*Pool` (conflated) | `*Pool` (workers, fungible) + `*Wave` (batch, user-primary) | See three-type model above. |
+| `psg.NewJob(ctx)` (the post-rename `psg.New(ctx)`) | a zero-value `var w streampool.Wave` (no constructor; the worker Pool is internal) | The conflated Pool-as-bounded-context dissolves: Wave is the user-facing handle for a batch of work; the Pool is internal and auto-sized (no `NewPool`). |
+| `*Job` / `*Pool` (conflated) | `*Wave` (batch, user-primary) + internal `*Pool` (workers, not user-facing) | See three-type model above. |
 | `psg.NewPool` / `psg.NewTaskPool` | (removed) | Per-op concurrency limits move to Limiters; workers are managed by the Pool. |
 | `psg.NewCombinerPool` | (removed) | Same — funnel workloads run in the Pool's goroutine pool, bounded by Limiters. |
 | `psg.NewGatherOp(handler)` | `streampool.NewSkimmer(wave, handler)` | Wave bound at construction (or AtDispatch to defer to dispatch-ctx). Handler is `Handler[T]` (renamed from psgfn.Gather). |
@@ -1427,8 +1429,11 @@ These are real and need answers before implementation locks in.
     three-type model section at the top of this doc for details.
 
 11. ~~**Pool lifecycle semantics.**~~ **Resolved (2026-05-25, refined
-    2026-05-25 to refcount-driven model).** Pool has no `Shutdown` or
-    `Wait` methods. Lifecycle is implicit:
+    2026-05-25 to refcount-driven model).** *(Superseded surface: there is no
+    user-facing `NewPool` or `CancelAndWait`, and a Wave is constructor-less and
+    owns no ctx — see `surface-lineage.md`. The refcount-driven, drain-completes-
+    lifecycle principle below still holds; the named entry points do not.)* Pool has
+    no `Shutdown` or `Wait` methods. Lifecycle is implicit:
 
     - **Construction**: `NewPool(ctx, opts...)` creates a custom Pool.
       A package-level default Pool exists implicitly for users who

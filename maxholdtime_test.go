@@ -45,7 +45,6 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 			},
 		}
 	}, nil))
-	defer funnelOp.Close()
 
 	newRunner := func(value int) streampool.TaskLauncher {
 		return streampool.NewTaskLauncher(func(ctx context.Context) error {

@@ -127,7 +127,6 @@ func TestSkimmerNilWaveResolvesFromAccumulateBodyCtx(t *testing.T) {
 			},
 		}
 	}, nil))
-	defer funnel.Close()
 	chk.NoError(funnel.Submit(ctx, 100))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.Equal(101, got)

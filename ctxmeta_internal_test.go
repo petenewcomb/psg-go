@@ -183,7 +183,6 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 			FlushFn: func(context.Context) error { return nil },
 		}
 	}, nil, WithLimits(NewSemaphore(1)))
-	defer f.Close()
 	require.NoError(t, f.Submit(ctx2, 1))
 	require.NoError(t, wave2.CloseAndSkimAll(ctx2))
 	require.NotNil(t, funnelReq, "limited Accumulate body must see its stamped handle")
@@ -212,7 +211,6 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 			FlushFn: func(context.Context) error { return nil },
 		}
 	}, nil)
-	defer f.Close()
 
 	require.NoError(t, f.Submit(ctx, 1))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))

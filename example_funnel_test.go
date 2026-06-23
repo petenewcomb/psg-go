@@ -78,7 +78,6 @@ func ExampleFunnel() {
 	// Create a Funnel operation. No Skimmer arg — the streampool.Accumulator
 	// body routes results downstream via Submit.
 	funnelOp := streampool.NewFunnel(funnelPool, newAccumulator)
-	defer funnelOp.Close()
 
 	// Build a Launcher factory: the task body submits its result to
 	// funnelOp from inside the task context.

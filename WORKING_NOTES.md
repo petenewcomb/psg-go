@@ -2,6 +2,12 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► WAVE-DRIVEN FUNNEL FINALIZATION LANDED (2026-06-23).** Funnel has no `Close`/
+`Dup`: `Funnel[T]` is a plain value (no leakguard), finalized by the wave at the
+end-of-work flush sweep (`factory.Close` + recycle, holding one per-wave reference so
+it lands before Done and errors surface via SkimAll). `internal/leakguard` deleted.
+Plan + design: `docs/plan/funnel-lifecycle.md`.
+
 **►►► ZERO-VALUE WAVE LANDED (2026-06-23).** The 2026-06-21b Wave lifecycle (below)
 is now implemented. `NewWave`/`Cancel`/`CancelAndWait` are gone; a zero-value
 `var w streampool.Wave` self-inits on first use (`ensureInit`) and re-arms after a

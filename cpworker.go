@@ -175,6 +175,11 @@ func (cw *cpWorker) flushAll(ctx context.Context) {
 	for _, w := range cw.fEngine.workQueue.DrainAllScheduled(nil) {
 		w.(scheduledFlusher).forceFlush(ctx)
 	}
+	// Every instance is now flushed (above); finalize the wave's funnels —
+	// factory.Close + recycle + drop each funnel's per-wave reference. The last
+	// such reference advances the wave to Done, so this must run after the instance
+	// sweep and is what lets factory-close errors surface via the still-running drain.
+	cw.fEngine.finalizeFunnels(ctx)
 	cw.nextJobFlushCh = nil
 }
 

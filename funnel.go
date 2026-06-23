@@ -10,30 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/streampool/internal/leakguard"
 	"github.com/petenewcomb/streampool/internal/nbcq"
 	"github.com/petenewcomb/streampool/internal/trace"
 
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
-
-// funnelHandleTrait implements leakguard.DupTrait for funnel resources.
-// It manages the lifecycle of funnel instances through reference counting.
-type funnelHandleTrait[T any] struct{}
-
-func (funnelHandleTrait[T]) Close(c *funnel[T]) {
-	c.unref()
-}
-
-func (funnelHandleTrait[T]) Dup(c *funnel[T]) (*funnel[T], error) {
-	c.ref()
-	return c, nil
-}
-
-func (funnelHandleTrait[T]) String(c *funnel[T]) string {
-	return fmt.Sprintf("Funnel(%p)", c)
-}
 
 // Funnel represents a stateful aggregation operation. Inputs flow in through
 // [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks);
@@ -49,13 +31,14 @@ func (funnelHandleTrait[T]) String(c *funnel[T]) string {
 // copies share the same funnel identity and will route work to the
 // same Accumulator instances.
 //
-// Resource management: each Funnel must be explicitly closed via
-// Close(). Dup() creates independent handles that share the same
-// underlying state. The funnel resource is cleaned up when the last
-// handle is closed and all internal references (from tasks and work
-// items) are released.
+// Resource management: a Funnel is wave-scoped and needs no explicit close. Its
+// per-(funnel,wave) accumulator instances are owned by the wave and force-flushed
+// when the wave drains; the funnel's factory-level state (AccumulatorFactory.Close)
+// is finalized by the wave at the end of that drain. A Funnel value may be copied
+// freely; all copies share the same underlying funnel and stay alive as long as
+// their wave does.
 type Funnel[T any] struct {
-	h leakguard.Handle[funnel[T], funnelHandleTrait[T]]
+	inner *funnel[T]
 }
 
 // NewFunnel creates a new Funnel operation. Pass [WithLimits] in
@@ -91,9 +74,6 @@ func NewFunnel[T any](
 	innerPool := omnipool.For[funnel[T]]()
 	inner := innerPool.Get()
 
-	if inner.refCount.Load() != 0 {
-		panic("unexpected nonzero inner.refCount")
-	}
 	if inner.fEngine != nil {
 		panic("unexpected non-nil inner.fEngine")
 	}
@@ -104,7 +84,6 @@ func NewFunnel[T any](
 		panic("unexpected nonzero inner.instanceCount")
 	}
 
-	inner.refCount.Store(1)
 	// Framework-owned error sink: Accumulator errors flow through this
 	// ErrSkimmer whose handler returns err as-is, surfacing via the
 	// Wave's SkimAll path.
@@ -116,14 +95,19 @@ func NewFunnel[T any](
 	inner.limiter = cfg.singleLimiter()
 	inner.innerPool = innerPool
 
-	h := leakguard.New[funnel[T], funnelHandleTrait[T]](inner)
+	// Wave-scoped lifetime: hold one per-wave reference for the funnel's whole life
+	// (the proper replacement for the old handle-baseline refcount). It keeps the
+	// wave out of Done until the funnel is finalized at the end-of-work flush sweep
+	// (cpWorker.flushAll → funnel.finalize), so factory-close errors surface via the
+	// still-running SkimAll. Register with the engine so the sweep can find it.
+	wave.state.IncrementReference()
+	fe.registerFunnel(inner)
 
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "Funnel(%p), handleID=%d, pool=%p",
-			inner, h.HandleID(), fe)
+		trace.Logf(context.Background(), traceRegion, "Funnel(%p), pool=%p", inner, fe)
 	}
 
-	return Funnel[T]{h: h}
+	return Funnel[T]{inner: inner}
 }
 
 // NewFnFunnel binds closure-based factory functions to a Funnel.
@@ -202,8 +186,7 @@ func (c *Funnel[T]) SubmitResult(
 ) error {
 	traceRegion := "Funnel.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	inner := c.refInner()
-	defer inner.unref()
+	inner := c.inner
 	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
 	inner.fEngine.job.ensureArmed() // dispatch entry: re-arm a drained wave
@@ -254,8 +237,7 @@ func (c *Funnel[T]) TrySubmitResult(
 ) (bool, error) {
 	traceRegion := "Funnel.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	inner := c.refInner()
-	defer inner.unref()
+	inner := c.inner
 	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
 	inner.fEngine.job.ensureArmed() // dispatch entry: re-arm a drained wave
@@ -275,40 +257,7 @@ func (c *Funnel[T]) TrySubmitResult(
 	return inner.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
-// Dup creates a duplicate handle to the same underlying Funnel.
-// Like file descriptor duplication, this creates a new handle that shares
-// the same underlying funnel state but requires its own Close() call.
-// This is useful for passing Funnel handles to different goroutines
-// or async operations that need their own lifecycle management.
-func (c *Funnel[T]) Dup() Funnel[T] {
-	h, err := leakguard.Dup(c.h)
-	if err != nil {
-		panic(fmt.Sprintf("Dup() failed: %v", err))
-	}
-	return Funnel[T]{h: h}
-}
-
-// Close releases this handle to the Funnel. Each handle (including dups)
-// must be closed exactly once. The underlying funnel state is cleaned up
-// when the last handle is closed.
-func (c *Funnel[T]) Close() {
-	c.h.Close()
-}
-
-// refInner gets the inner funnel, checks if closed, and adds a reference.
-// Panics if the Funnel has been closed.
-// The caller must ensure a matching unref() is called.
-func (c *Funnel[T]) refInner() *funnel[T] {
-	inner := c.h.Get()
-	if inner == nil {
-		panic("Funnel has been closed")
-	}
-	inner.ref()
-	return inner
-}
-
 type funnel[T any] struct {
-	refCount atomic.Int64
 
 	// errSink is framework-owned. Accumulator errors are routed through
 	// it; its handler returns err as-is so it surfaces via SkimAll.
@@ -337,99 +286,77 @@ func (c *funnel[T]) Init() {
 }
 
 func (c *funnel[T]) Reset() {
-	// Reset logic is now handled in unref() when refCount hits zero.
-	// We keep this empty method to satisfy the Resetter interface - if we didn't,
-	// omnipool would zero the entire struct including pool pointers set by Init().
+	// Reset logic is handled in finalize(). We keep this empty method to satisfy the
+	// Resetter interface - if we didn't, omnipool would zero the entire struct
+	// including pool pointers set by Init().
 }
 
-// ref increments the refCount to track handle ownership and internal references.
-// It is called by leakguard when a handle is created via Dup(), and also used
-// for internal refs (tasks, work items).
-func (c *funnel[T]) ref() {
-	newCount := c.refCount.Add(1)
-	if newCount <= 1 {
-		panic("ref() called with no existing references")
-	}
-}
-
-// dropInstanceLiveness drops the funnel-liveness reference an instance holds
-// from creation until its flush: it decrements the live-instance count
-// and unrefs the funnel. Called by the party that performs an instance's
-// flush, after releasing that instance's c.mu (so a teardown it triggers
-// never recycles an instance whose c.mu is still held).
+// dropInstanceLiveness decrements the live-instance count when an instance flushes.
+// Called by the party that performs the flush, after releasing that instance's c.mu.
+// (The per-instance wave barrier reference is dropped separately in flush().)
 func (c *funnel[T]) dropInstanceLiveness() {
 	c.instanceCount.Add(-1)
-	c.unref()
 }
 
-// unref is called by leakguard when a handle is closed.
-// It decrements refCount and cleans up if this was the last reference.
-//
-//nolint:contextcheck // cleanup runs via refcount, not on a caller ctx; framework-internal ctx is correct
-func (c *funnel[T]) unref() {
-	newCount := c.refCount.Add(-1)
-	if newCount < 0 {
-		panic("reference count underflow")
-	}
+// funnelFinalizer is the heterogeneous-T view of a funnel the engine holds in its
+// registry so the end-of-work flush sweep can finalize every funnel on the wave.
+type funnelFinalizer interface {
+	finalize(ctx context.Context)
+}
 
-	if newCount != 0 {
-		return
-	}
+// finalize tears the funnel down at the end of the wave's drain: it runs from the
+// end-of-work flush sweep (cpWorker.flushAll) AFTER every instance has been
+// force-flushed, so by now instanceCount is zero. It drains the instance reuse cache,
+// calls funnelFactory.Close() (errors → errSink → the still-running SkimAll, because
+// the funnel's own wave reference — dropped LAST here — keeps the wave out of Done
+// until this returns), recycles the funnel, then drops that wave reference.
+func (c *funnel[T]) finalize(ctx context.Context) {
+	traceRegion := "funnel.finalize"
+	defer trace.StartRegion(ctx, traceRegion).End()
 
-	// Last reference - we now have exclusive access, no mutex needed.
-	// funnel-liveness drops at flush, so by now every instance has flushed.
 	if c.instanceCount.Load() != 0 {
-		panic("instance count is not zero")
+		panic("instance count is not zero at funnel finalize")
 	}
+	wave := c.fEngine.job
 
-	// Drain the reuse cache: spent shells linger in instanceQueue (an nbcq
-	// has no mid-queue removal) after their flush dropped funnel-liveness, so
-	// the funnel can reach teardown with them still cached. Return them to the
-	// pool here — pure cache cleanup, since they hold no live references.
-	// No instance c.mu can be held now: any active funnelWork would hold an
-	// funnel reference, so refCount would not have reached zero.
+	// Drain the reuse cache: spent shells linger in instanceQueue (an nbcq has no
+	// mid-queue removal) after their flush. Return them to the pool — pure cache
+	// cleanup, no live references (every instance flushed before this sweep step).
 	for {
 		inst, ok := c.instanceQueue.TryPopFront()
 		if !ok {
 			break
 		}
 		if inst.accumulator != nil {
-			panic("live instance in queue at funnel teardown")
+			panic("live instance in queue at funnel finalize")
 		}
 		c.funnelInstancePool.Put(inst)
 	}
 
-	// Call factory.Close() to release factory-level state. Errors
-	// route through the framework's err path (the errSink) so they
-	// surface via SkimAll.
+	// Call factory.Close() to release factory-level state. Errors route through the
+	// err sink so they surface via SkimAll (the wave is not yet Done — see below).
 	if c.funnelFactory != nil {
 		if closeErr := c.funnelFactory.Close(); closeErr != nil {
-			// The Wave owns no ctx; mint a fresh top-level meta over Background to
-			// route the factory-close error through the err sink.
-			ctx, meta := c.fEngine.job.topLevelCtxMeta(
-				context.Background(), func(contextType) {})
+			cctx, meta := wave.topLevelCtxMeta(ctx, func(contextType) {})
 			intErr := c.errSink.submit(
-				ctx, meta, c.fEngine.job, workq.InvalidGroupID,
-				struct{}{}, closeErr,
-			)
-			if intErr != nil && ctx.Err() == nil {
+				cctx, meta, wave, workq.InvalidGroupID, struct{}{}, closeErr)
+			if intErr != nil && cctx.Err() == nil {
 				panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
 			}
 		}
 	}
 
-	// Save innerPool before clearing
 	innerPool := c.innerPool
-
-	// Clear all fields
 	c.errSink = ErrSkimmer{}
 	c.fEngine = nil
 	c.funnelFactory = nil
 	c.limiter = Limiter{}
-	// Keep c.innerPool - it's metadata about where to return this object
+	innerPool.Put(c) // c.innerPool kept (metadata for where to return)
 
-	// Return to pool
-	innerPool.Put(c)
+	// Drop the funnel's per-wave reference LAST: this is the DecrementReference that
+	// (for the last funnel) advances the wave to Done, after the factory-close error
+	// above is already queued for SkimAll.
+	wave.state.DecrementReference()
 }
 
 type funnelInstance[T any] struct {
@@ -733,7 +660,6 @@ func (w *funnelWork[T]) Init(
 	// permit (heldRequest) is acquired on the worker in executeInner, the worker's
 	// E stamped there too; both nil here. Worker bodies are fresh permit-roots.
 	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, wave, funnelContext, nil, nil, nil)
-	f.ref() // Add reference for the funnel work
 }
 
 func (w *funnelWork[T]) Funnel(ctx context.Context) {
@@ -762,9 +688,8 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 	if hbc == nil {
 		hbc = w.funnel.funnelInstancePool.Get()
 		hbc.mu.Lock()
-		// funnel-liveness: one reference per instance, taken at creation and
-		// dropped at flush (see [funnel.dropInstanceLiveness]).
-		w.funnel.ref()
+		// funnel-liveness: instanceCount tracks live instances, incremented at
+		// creation and decremented at flush (see [funnel.dropInstanceLiveness]).
 		// Per-instance flush barrier: hold one job reference for the
 		// instance's whole live lifetime (until flush() runs). This keeps
 		// the job out of Done while the accumulator is unflushed,
@@ -867,7 +792,6 @@ func (w *funnelWork[T]) Free() {
 	w.poolWork.Close(w.funnel.fEngine.job)
 
 	pool := w.funnel.funnelWorkPool
-	w.funnel.unref()
 	pool.Put(w)
 }
 

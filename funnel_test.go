@@ -65,11 +65,10 @@ func TestFunnelFactoryCloseFires(t *testing.T) {
 		closeCount++
 		return nil
 	})
-	funnel := streampool.NewFunnel(funnelPool, factory)
-	chk.Equal(0, closeCount, "Close should not fire while funnel is open")
-	funnel.Close()
+	_ = streampool.NewFunnel(funnelPool, factory)
+	chk.Equal(0, closeCount, "factory Close must not fire before the wave drains")
 	chk.NoError(wave.CloseAndSkimAll(ctx))
-	chk.Equal(1, closeCount, "Close should fire exactly once on funnel teardown")
+	chk.Equal(1, closeCount, "factory Close fires exactly once, wave-driven, at drain")
 }
 
 // NewErrFunnel convenience constructor — exercises the
@@ -93,7 +92,6 @@ func TestNewErrFunnel(t *testing.T) {
 	var _ streampool.ErrFunnel = funnel //nolint:staticcheck // intentional alias type-check
 	chk.NoError(funnel.SubmitErr(ctx, errors.New("first")))
 	chk.NoError(funnel.SubmitErr(ctx, errors.New("second")))
-	funnel.Close()
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 	chk.Len(seen, 2)
 }
@@ -120,7 +118,6 @@ func TestFunnelScatterFromTask(t *testing.T) {
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
 	)
-	defer funnelOp.Close()
 	innerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		chk.Fail("should not get here")
 		return nil
@@ -158,7 +155,6 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
-	defer funnelOp.Close()
 	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
 		var subWave streampool.Wave
@@ -207,7 +203,6 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
-	defer funnelOp.Close()
 	innerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		chk.Fail("Should not get here - parent task pool task should not run")
 		return nil

@@ -75,7 +75,6 @@ func TestWaveReuseAfterDrain(t *testing.T) {
 					t.Errorf("drain: %v", err)
 					return
 				}
-				aggregator.Close()
 
 				if got := cycleSum.Load(); got != 15 {
 					t.Errorf("cycle sum = %d, want 15 (no cross-cycle bleed)", got)

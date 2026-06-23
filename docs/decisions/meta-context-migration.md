@@ -1,126 +1,130 @@
 # Meta-Context Migration (ctxpool adoption — the meta-derivation half)
 
-> **DESIGN — for review (PN), 2026-06-22.** Surfaced by the B3 scope discovery:
-> migrating task/funnel bodies to `borrowBodyContext` (ctxpool) breaks the
-> dispatch/skim-from-body paths, because the meta-derivation machinery is not
-> ctxpool-aware. This note designs that machinery's migration. Companion to
-> `body-context-pool.md` (the borrow primitive) and the WORKING_NOTES Wave-lifecycle
-> banner. Anchors thread B3; no code until ratified.
+> **DESIGN — for review (PN), 2026-06-22 (rev 2).** Surfaced by the B3 scope
+> discovery: migrating task/funnel bodies to `borrowBodyContext` (ctxpool) breaks the
+> dispatch/skim-from-body paths because the meta-derivation machinery is not
+> ctxpool-aware. **Rev 2 retracts the "lifecycle fork" of rev 1** (driver metas are NOT
+> stable singletons — see below); the model is now a single unified per-call/per-execution
+> borrow. Companion to `body-context-pool.md`; anchors thread B3. No code until ratified.
 
 ## The discovery
 
 The borrow-site migration (task/funnel bodies borrow a ctxpool body ctx at dispatch,
 run under it) works in isolation. It panics (`Context belongs to a child job`) the
 moment **a body dispatches or skims**, because that path runs through
-`ensureCtxMeta` / `topLevelCtxMeta` / `skimCtxMeta` (via `ctxMetaMap`), which:
+`ensureCtxMeta`/`topLevelCtxMeta`/`skimCtxMeta` (via `ctxMetaMap`), which (1) finds the
+source meta with `ctx.Value(ctxMetaValueKey{})` — but a ctxpool body ctx carries its
+meta under ctxpool's `childKey`, so the lookup walks *past* it to an ancestor's meta;
+and (2) caches derived metas keyed by ctx identity — which ctxpool's **ctx reuse**
+aliases.
 
-1. **finds the source meta with `ctx.Value(ctxMetaValueKey{})`** — but a ctxpool body
-   ctx carries its meta under ctxpool's `childKey`, so the lookup walks *past* it to
-   an ancestor's meta; and
-2. **caches derived metas keyed by ctx identity** — which ctxpool's **ctx reuse**
-   would alias (same reused ctx object, different meta across borrows).
+## Retraction of rev 1's "lifecycle fork"
 
-## Current model (as built)
+Rev 1 claimed driver metas (top-level/skim) are *stable singletons per source ctx* and
+so don't fit ctxpool. **That was wrong**, on two counts (PN):
 
-Four `ctxType`s of meta: `topLevel`, `task`, `funnel`, `skim`. The **unifying
-invariant** the current code maintains: *every* meta is findable via one lookup,
-`ctx.Value(ctxMetaValueKey{})` — `ctxMetaMap` stamps top-level/skim metas under it;
-the (old) `execShell` stamped task/funnel metas under it too. So a dispatch from any
-context resolves its meta with one mechanism.
+- **Call-scoped, not wave-scoped.** A driver meta is needed only for the duration of one
+  `Skim`/`SkimAll` (or top-level `Start`/`Submit`) *call*, held across the handler
+  bodies that call runs, then released. That is a plain borrow/hold/return.
+- **Pooled, not 1:1.** Driving is supported from multiple goroutines concurrently (each
+  its own ctx, or even the same ctx), so there are N live driver metas at once — one per
+  in-flight call. That is ctxpool's pool-per-source, same as body metas. "One stable
+  meta per ctx" was an artifact of `ctxMetaMap` caching, which per-call borrowing
+  replaces.
 
-A dispatch carries **two** metas, easy to conflate:
-- **The dispatcher meta** (`meta` from `vetStart` → `topLevelCtxMeta`): used to
-  *enqueue* the new work — `meta.Lock()`, `meta.Group()`, `meta.ExecuteNowOrQueue`.
-  For a top-level dispatch it is the top-level meta; for a dispatch from inside a
-  body it is that **body's** meta.
-- **The work's body meta** (borrowed in `newTaskWork`/`newFunnelWork`): stamped onto
-  the ctx the body later *runs* under.
+A bonus falls out: each driver meta is then **single-threaded** (one call, one
+goroutine), which is what makes the `topLevelExEnv.Lock` removable (below).
 
-The break is in resolving the **dispatcher** meta when the dispatcher is a body.
+## The unified model
 
-## The lifecycle fork (why one mechanism doesn't fit all)
+**One mechanism.** `metaFromContext(ctx)` = `ctxpool.GetValue[*ctxMeta](ctx)` — a single
+lookup. `ctxMetaValueKey`, `ctxMetaMap`, and `skimCtxMetaMap` all retire. Every meta is a
+ctxpool borrow; they differ only in **hold scope** and **ctxType stamp**:
 
-| Meta kind | Lifecycle | Keyed by | Mechanism |
-|---|---|---|---|
-| **topLevel / skim** (driver) | **stable singleton** — one per source ctx, reused for every dispatch from it, lives until the ctx is done | the **parent/user ctx** | `ctxMetaMap` (parent-ctx-keyed cache) |
-| **task / funnel** (body) | **pooled, per-execution** — many per source ctx, transient | the borrowed **child ctx** | `ctxpool` (child-ctx-keyed pool) |
+| Meta | ctxType | Borrowed at | Held until | Discipline |
+|---|---|---|---|---|
+| body (task/funnel) | task/funnel | dispatch (`newTaskWork`/`newFunnelWork`) | work `Free` | per-execution |
+| skim driver | skim | `Skim`/`SkimAll` entry | call return | per-call |
+| top-level driver | topLevel | `Start`/`Submit` entry | call return | per-call |
 
-Two hard constraints make these genuinely different, not unifiable by fiat:
+**Lookup rule: borrow at entry, read while nested.** A raw user ctx appears only at the
+*entry* of a top-level `Start`/`Submit` or a `Skim` call — where `ctxpool.WithValue`
+borrows (its parent-keyed pool selection handles the raw ctx). Everywhere nested, the
+ctx is already a borrowed child and `GetValue` reads it. There is no parent-keyed
+"singleton" lookup; rev 1's point (b) was muddled and is withdrawn.
 
-- **Driver metas must be stable singletons.** `topLevelExEnv` carries a `sync.Mutex`
-  and the shared dispatch `workQueue`. Concurrent top-level dispatches from the same
-  ctx **serialize on that one lock** and enqueue onto that one queue. Pooling a fresh
-  meta per dispatch (ctxpool's model) would hand each dispatch its own lock/queue —
-  a correctness bug. So driver metas cannot be ctxpool-pooled.
-- **ctxpool is child-keyed, not parent-keyed.** `ctxpool.GetValue` resolves the meta
-  on a *child* ctx (the borrowed one). A top-level dispatch arrives with the *user*
-  (parent) ctx and must find/create the one stable driver meta for it — a
-  parent-ctx-keyed lookup ctxpool does not provide. That is exactly `ctxMetaMap`.
+**Cross-wave derivation is subsumed by the borrow.** `ensureCtxMeta`'s cross-job
+`parentJobs` accumulation is exactly what `borrowBodyContext` + `parentJobsForSource`
+already compute. So the derive-and-cache machinery doesn't move to ctxpool — it
+*dissolves*; the borrow does it.
 
-So: **driver metas stay parent-ctx-keyed singletons; body metas are ctxpool-pooled.**
-They are two mechanisms by nature.
+## Borrow/return points per entry (the detail that bit us)
 
-## Proposed design
+**A top-level `Start`/`Submit` is not one borrow — it drives a backpressure skim.** The
+top-level dispatch (`ctxMeta.ExecuteNowOrQueue`, `TryExecuteNow`) calls `wave.yield`,
+which `trySkim`s completed work and **runs skim handler bodies** before enqueuing the
+submitted work. So one top-level call touches THREE meta concerns:
 
-**1. Split the dispatcher-meta lookup by whether the source ctx already carries a
-meta.** Rework `ensureCtxMeta` (and `ctxMeta`) so the source meta is found via
-`metaFromContext` (ctxpool-aware), not `ctxMetaMap`'s internal `ctx.Value`:
+1. **the top-level driver meta** — drives the call; `ShouldBlock()=true` (backpressure
+   may block on a permit) and enqueues the submitted work via its `topLevelExEnv`.
+2. **a skim meta for the backpressure `trySkim`** — the handlers it runs must be in
+   **skim** context: `ShouldBlock()=false` (a skim handler must not block-dispatch) and
+   the nested-skim guard must fire. (Today `yield`→`skimCtxMeta` derives this.)
+3. **the submitted work's body meta** — borrowed at `newTaskWork`, run later on a
+   worker, released at `Free`. Distinct ctxType (task), distinct time. **Not** unifiable
+   with 1 or 2.
 
-- **Source has a meta** (a ctxpool body meta, or an existing driver meta on a
-  re-entrant call): use it directly — same-wave returns it as-is; cross-wave derives
-  a fresh meta accumulating `parentJobs`. **Do not cache** this in `ctxMetaMap` (the
-  body ctx is reused — caching by it is the aliasing bug). No cache is needed: the
-  body meta is already in hand, and the cross-wave derived meta is exactly what
-  `borrowBodyContext` + `parentJobsForSource` already produce for the work's body
-  meta — i.e. **`ensureCtxMeta`'s cross-job derivation is subsumed by the borrow.**
-- **Source has no meta** (a fresh top-level dispatch from a user ctx): create the
-  stable top-level meta (with `topLevelExEnv`) and cache it in `ctxMetaMap` keyed by
-  the **user ctx** (stable — never a reused body ctx). Unchanged from today.
+**Open sub-question (PN): can 1 and 2 be one borrow?** They differ in `ShouldBlock` and
+ctxType, but they run in *sequence* on the same goroutine within the call (skim phase,
+then enqueue phase), never concurrently. Options:
 
-This confines `ctxMetaMap` to what it is good at — stable, parent-ctx-keyed driver
-metas — and routes body-sourced dispatches through the ctxpool meta without caching.
+- **(i) Two borrows, nested.** The top-level borrow (ctxType=topLevel) drives the call;
+  for the `yield` phase it makes a short nested skim borrow (child, ctxType=skim) under
+  which handlers run, returned when `yield` returns; then it enqueues. Mirrors today's
+  top-level⊃skim parent/child. Cleanest separation; two borrows per blocking call.
+- **(ii) One borrow, phased ctxType.** A single driver meta whose ctxType is `skim`
+  while `yield` runs its handlers and `topLevel` for the enqueue. Fewer borrows, but the
+  handler's captured ctx carries a meta whose ctxType mutates mid-call — fragile unless
+  the handler invocation is handed a distinct skim *view*. Effectively collapses back
+  toward (i).
 
-**2. `skim` metas** stay on `ctxMetaMap` + `skimCtxMetaMap` (the second map marks "this
-ctx is a skim ctx for wave j", for the re-entrancy guard). A skim is driven from a
-user/driver ctx (stable), so the singleton model fits. A body that drives a *sub-wave*
-skim passes its body ctx as the drive ctx; `skimCtxMeta` derives the skim meta from it
-— same "source has a meta, derive without caching" path as (1).
+Recommendation: **(i)** — the skim phase is genuinely a nested skim scope; model it as
+one. The extra borrow is cheap (pool hit) and keeps `ShouldBlock`/nesting honest.
+`TryStart`/`TrySubmit` are the same minus the blocking enqueue. A plain `Skim`/`SkimAll`
+is just concern 2 standalone (borrow skim meta, hold across handlers, return).
 
-**3. Body metas** via `ctxpool` (the committed `borrowBodyContext`), unchanged.
+**Funnel `Submit`** mirrors the launcher: a dispatcher meta (the body's, when submitted
+from inside a body; or a top-level borrow at top level) enqueues; the funnel work's body
+meta is borrowed at `newFunnelWork`.
 
-## The open decision: does `ctxMetaValueKey` actually retire?
+**Nested (dispatch/skim from inside a body):** the body ctx is already a borrowed,
+self-describing child — `GetValue` resolves its meta directly; no entry borrow.
 
-Full retirement of `ctxMetaValueKey` (the stated B3 goal) requires **driver** metas to
-leave it too. But driver metas are parent-ctx-keyed singletons that ctxpool
-(child-keyed, pooled) does not host. Options:
+## `topLevelExEnv.Lock` — what it guards, and why it's removable
 
-- **(A) Keep `ctxMetaValueKey` as the driver-meta key (recommend; rename for clarity,
-  e.g. `driverMetaKey`).** `ctxMetaMap` keeps stamping driver metas under it;
-  `metaFromContext` stays **dual** (ctxpool child first, then driver key). Honest and
-  small: it reflects that there genuinely are two meta lifecycles. "ctxMetaValueKey
-  goes away" becomes "the *body* path leaves it; the driver path keeps a (renamed)
-  key." Body ctxs are pure ctxpool; only driver ctxs use the key.
-- **(B) Build a parent-ctx-keyed singleton variant in/around ctxpool** so driver metas
-  also resolve through ctxpool and the key fully retires. More machinery (a
-  singleton-per-parent mode distinct from the pool-per-parent mode) for a mostly
-  cosmetic unification; the two lifecycles still exist underneath.
-
-Recommendation: **(A)** — it matches the real structure (driver vs body), keeps the
-change surgical, and avoids contorting ctxpool into a singleton store it is not.
+`ctxMeta.Lock()` (only when `IsTopLevel`) takes `topLevelExEnv.mu` around the whole
+dispatch (`launcher.dispatch`: `Lock` → `Group` → `ExecuteNowOrQueue` → `Unlock`). It
+guards the meta's **own** mutable `exEnv` state — `groupStack`, `queueFnStack` — against
+concurrent dispatches that **share** that meta (today: two goroutines on the same
+top-level ctx → same cached meta). The shared dispatch `workQueue` it points at is the
+wave's and already thread-safe; admission is governed by the limiter/governor, not this
+lock. Under per-call borrows each driver meta is single-threaded, so nothing shares the
+stacks → **the Lock has nothing to guard and can be dropped.** *Verify* there is no
+second consumer of `topLevelExEnv.mu` and that concurrent backpressure `yield`s on the
+shared queue need no serialization beyond what `workq` provides.
 
 ## Sequencing (once ratified)
 
-1. Rework `ensureCtxMeta`/`ctxMeta` per design point (1): source-meta via
-   `metaFromContext`; no caching on the body-source path; `ctxMetaMap` only for the
-   fresh-top-level case. Land green **before** re-applying the borrow migration.
-2. Re-apply the stashed task/funnel borrow migration + execShell removal + Cancel gut.
-3. Reconcile `ExampleWave_Cancel(_task)` + the sim to submit-ctx-rooted cancellation.
-4. (Decision A) rename `ctxMetaValueKey` → `driverMetaKey`; confirm `metaFromContext`
-   dual lookup is the single read seam.
+1. **Meta machinery → ctxpool, single lookup.** Replace `ensureCtxMeta`/`ctxMeta`/
+   `topLevelCtxMeta`/`skimCtxMeta` + `ctxMetaMap`/`skimCtxMetaMap` with ctxpool borrows
+   at the entry points (top-level dispatch, skim drive) per the table; `metaFromContext`
+   becomes pure `ctxpool.GetValue`; retire `ctxMetaValueKey`. Land green standalone.
+2. **Re-apply** the stashed task/funnel body borrow migration + `execShell`/`waveCtx`
+   removal + `Cancel` gut (it composes once 1 lands).
+3. **Reconcile** `ExampleWave_Cancel(_task)` + the sim to submit-ctx-rooted cancellation.
+4. Confirm `topLevelExEnv.Lock` removal; drop dead derivation code.
 
-## Status of the WIP
+## WIP status
 
-The task/funnel borrow migration + `execShell`/`waveCtx` removal + `Cancel` gut is
-**stashed** (`git stash`, message "WIP B3 task+funnel borrow-at-dispatch …"), reset to
-the green checkpoint `1a8d404`. It is reusable for step 2 above once the meta machinery
-(step 1) lands.
+Task/funnel borrow migration + `execShell`/`waveCtx` removal + `Cancel` gut is **stashed**
+(`git stash@{0}`), tree reset to the green checkpoint `1a8d404`. Reusable for step 2.

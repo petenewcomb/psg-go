@@ -42,11 +42,14 @@ hierarchical lifetime, like structured control flow. The properties that follow:
 Two user-facing types — **Wave** and **Flow** — plus the ops (the verbs); the worker
 **Pool** is internal.
 
-- **Wave** — *the primary user-facing type*: a batch of work to complete together, a
-  value handle over internal per-batch state. Ops route work into a wave (ambient
-  inside a body, or `op.In(wave)`); `wave.Skim` / `SkimAll` / `CloseAndSkimAll` drain
-  it. Waves **nest** via `NewChild` (a parent's drain waits for its children) and run
-  concurrently. Single-owner lifecycle: no `Dup`, and Close/Cancel are not refcounted.
+- **Wave** — *the primary user-facing type*: a batch of work to complete together.
+  A zero-value `var w streampool.Wave` is ready to use — there is no constructor, and
+  a Wave owns no context. Ops route work into a wave (ambient inside a body, or
+  `op.In(&w)`); `wave.Skim` / `SkimAll` / `CloseAndSkimAll` drain it, returning
+  `ErrWaveDone` when complete. Waves **nest** (a sub-wave is just a zero-value Wave
+  first used inside a body; the body's drain of it keeps the parent drain waiting,
+  transitively) and run concurrently. The lifecycle is the drain — there is no
+  `Cancel` and no `Dup`; cancellation rides the driving context (below).
 - **Flow** *(optional)* — one logical thread of related work: a refcounted, ctx-borne
   value handle that can span multiple waves. Reach for a Flow to attach metadata
   (trace, audit) or a cleanup hook to work that may cross wave boundaries. It is the
@@ -83,7 +86,7 @@ from its output — Launcher: `fetcher`; Funnel: `aggregator` (+ `totals`); Skim
 ```go
 ctx := context.Background()
 
-wave := streampool.NewWave(ctx) // the worker pool is internal
+var wave streampool.Wave // zero value is ready to use; the worker pool is internal
 
 // Terminal sink: runs serially on the draining goroutine as results arrive.
 printer := streampool.NewSkimmer(streampool.HandlerFunc[*User](
@@ -110,9 +113,9 @@ fetcher := streampool.NewLauncher(streampool.HandlerFunc[UserID](
     },
 ))
 
-// Top level has no ambient wave, so route with In(wave):
+// Top level has no ambient wave, so route with In(&wave):
 for _, id := range userIDs {
-    fetcher.In(wave).Submit(ctx, id)
+    fetcher.In(&wave).Submit(ctx, id)
 }
 
 wave.CloseAndSkimAll(ctx) // seal + drain to completion
@@ -161,9 +164,10 @@ instances at its drain. Finalize early or snapshot into another wave with
 ### Nested workflows and reentrancy
 
 Any body — a Launcher handler, a Funnel accumulate/flush, or a Skimmer handler — may
-submit more work and may drive a **child** wave it owns (create one with `NewChild`,
-submit to it, and `CloseAndSkimAll` it). This lets a workflow branch dynamically on
-intermediate results while keeping structured-concurrency guarantees.
+submit more work and may drive a **sub-wave** it owns (declare a zero-value
+`var sub streampool.Wave`, route into it with `op.In(&sub)`, and `CloseAndSkimAll`
+it). This lets a workflow branch dynamically on intermediate results while keeping
+structured-concurrency guarantees.
 
 ## Key rules
 
@@ -214,8 +218,9 @@ drain from ever waiting on a permit. Worker-pool sizing is automatic — limiter
 
 - **Body errors** propagate to the wave; a Skimmer body can inspect the `err`
   argument alongside the value and decide whether to surface or absorb it.
-- **Context cancellation** propagates through all in-flight work; cancel the ctx
-  given to the wave to abort.
+- **Context cancellation** propagates through all in-flight work by context
+  ancestry; cancel the ctx you dispatched the work with (usually the same ctx you
+  drive the wave with) to abort. The Wave owns no context of its own.
 - **Panics** in a body are recovered and converted to errors.
 - **Cleanup is guaranteed**: a wave's drain does not return until its work (and its
   child waves) complete, even under cancellation — no leaked goroutines.

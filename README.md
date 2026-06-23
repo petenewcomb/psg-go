@@ -26,7 +26,7 @@ one of these walls:
 ``` go
 ctx := context.Background()
 
-wave := streampool.NewWave(ctx)   // a batch of work to await; the worker pool is internal
+var wave streampool.Wave   // zero value is ready to use; the worker pool is internal
 
 var results []string
 collector := streampool.NewSkimmer(streampool.HandlerFunc[string](
@@ -45,8 +45,8 @@ greeter := streampool.NewLauncher(streampool.HandlerFunc[string](
     },
 ))
 
-greeter.In(wave).Submit(ctx, "Hello")     // top level: route with In(wave)
-greeter.In(wave).Submit(ctx, "world!")
+greeter.In(&wave).Submit(ctx, "Hello")    // top level: route with In(&wave)
+greeter.In(&wave).Submit(ctx, "world!")
 
 wave.CloseAndSkimAll(ctx)                  // seal + drain to completion
 fmt.Println(strings.Join(results, " "))
@@ -64,9 +64,12 @@ in hierarchical waves with granular visibility and control of individual
 flows. Three types compose:
 
 - **`Wave`** — a batch of work to be completed together; the user-primary
-  type, a value handle. Ops route work into a wave (the ambient wave inside a
-  body, or `op.In(wave)`); `wave.Skim` / `wave.SkimAll` / `wave.CloseAndSkimAll`
-  drain it. Waves nest (`wave.NewChild`) and may overlap freely.
+  type. A zero-value `var w streampool.Wave` is ready to use (no constructor);
+  it owns no context and has no `Cancel` — the lifecycle is the **drain**.
+  Ops route work into a wave (the ambient wave inside a body, or `op.In(&w)`);
+  `wave.Skim` / `wave.SkimAll` / `wave.CloseAndSkimAll` drain it, returning
+  `ErrWaveDone` when complete. Waves nest (a sub-wave is just a zero-value Wave
+  first used inside a body) and may overlap freely.
 - **`Flow`** — optional, ctx-borne lifecycle entity for a single
   workflow instance. Refcounted, can span multiple Waves. Use a Flow
   to attach trace context, audit metadata, or cleanup hooks to a
@@ -131,8 +134,9 @@ routing never disturbs the ctx, so a Flow rides along across the hop.
   dispatch loop runs near zero allocations per call — see the
   allocation-sensitive dispatch section in the reference docs.
 - **Type-safe.** Generics throughout; no `interface{}` round trips.
-- **Context-aware.** Cancellation propagates; bodies see the wave's
-  context.
+- **Context-aware.** Cancellation propagates by context ancestry: a body runs
+  under a context descended from the `ctx` that dispatched it, so cancelling that
+  ctx stops the work. The Wave owns no context of its own.
 - **Panic-safe.** Panics in user code don't crash the process.
 
 ## How it compares

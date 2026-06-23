@@ -1,104 +1,63 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-// Package psg provides an API for launching (scattering) tasks and aggregating
-// (skimming) their results. It separates these stages so that the tasks can
-// run concurrently while aggregation remains sequential. This reduces the
-// wall-clock time required for an overall operation (job) as compared to
-// executing the tasks serially, without adding synchronization complexity to
-// the aggregation logic.
+// Package streampool is a Go worker pool whose tasks return values — and can
+// submit more tasks without deadlocking. Results stream back to your code as
+// they complete, through bodies that run concurrently while aggregation stays
+// as sequential (or as parallel) as you choose.
 //
-// Since tasks require resources to execute, and those resources are limited,
-// psg also provides a way to model pools of resources as limits on the number
-// of tasks allowed to run at the same time. Different classes of task, for
-// instance compute-bound or I/O-bound, can be executed in the context of
-// different pools and therefore subject to different concurrency constraints.
+// # Model
 //
-// Non-trivial tasks often involve different stages that use different kinds of
-// resources, for instance I/O to retrieve a chunk of data followed by compute
-// to process it. The psg package therefore allows skim functions to launch
-// new tasks into the same or different pools all within the context of the same
-// job, creating incremental pipelines that are free of unnecessary
-// synchronization barriers between stages and that neither over- nor
-// under-utilize multiple distinct groups of resources.
+// Three types compose:
 //
-// # Context Usage
+//   - [Wave] — a batch of work you await. A zero-value Wave (var w streampool.Wave)
+//     is ready to use; there is no constructor and the Wave owns no context.
+//     Drain it with [Wave.Skim], [Wave.SkimAll], or [Wave.CloseAndSkimAll], which
+//     return [ErrWaveDone] once the wave is complete. A sub-wave is just a
+//     zero-value Wave first used inside a body.
+//   - Flow — an optional, refcounted, context-borne handle for one logical unit
+//     of work that may cross wave boundaries (trace context, audit metadata,
+//     cleanup hooks). Most programs never construct one.
+//   - Pool — the workers. Internal and fungible: a single process-wide pool is
+//     used implicitly and sized automatically. You do not construct or tune it;
+//     per-op concurrency is expressed with Limiters (see [WithLimits]).
 //
-// The psg library relies heavily on Go's context.Context for cancellation,
-// deadline propagation, and tracking relationships between components. Proper
-// context handling is essential for correct operation:
+// Work is performed by wave-agnostic ops, defined once and reusable:
+// [NewLauncher] (stateless dispatch), [NewFunnel] (stateful aggregation), and
+// [NewSkimmer] (terminal sink). A body routes values by calling Submit on a
+// downstream op; there is no separate wiring step.
 //
-// # Context Propagation in User Code
+// # Routing
 //
-//  1. Task Functions: The context passed to Task should be respected for
-//     cancellation. User code should propagate this context to any operations
-//     performed within the task, rather than creating new, disconnected
-//     contexts. While the job will still function if a task ignores
-//     cancellation, such tasks may continue running until they complete
-//     naturally, even after the job has been canceled.
+// Ops carry no wave at construction. Inside a body, op.Submit(ctx, v) targets the
+// body's ambient (framework-supplied) wave. At top level — or to redirect into a
+// different wave — bind a wave with op.In(&w), e.g. launcher.In(&w).Submit(ctx, v).
+// Routing is handle-level and never alters the ctx, so a Flow (and trace context)
+// rides along across a redirect.
 //
-//  2. Skim Functions: The context passed to Skim is the context from
-//     the calling Start or Skim* method, not the job's context. User code
-//     should propagate this context, especially when calling Start to create
-//     new tasks.
+// # Context and cancellation
 //
-//  3. Funnel Functions: Both Funnel and Flush methods receive contexts that
-//     should be respected for cancellation and passed to the emit function.
+// Cancellation rides context ancestry, not the Wave. A body runs under a context
+// descended from the ctx passed to the dispatching Submit/Start call, so
+// cancelling that ctx (usually the same ctx you drive the wave with) stops the
+// work. There is no Wave.Cancel and no framework force-abort: a Wave has no
+// context to cancel. Cancelling the ctx passed to a drain (SkimAll/CloseAndSkimAll)
+// makes the drain return that ctx's error; in-flight bodies keep running under
+// their own submit ctxs until they return, and the framework cleans up as they do.
 //
-// # Cancellation Behavior
+// User code should propagate the context it is given rather than creating a fresh
+// root (context.Background()) inside a body — doing so breaks cancellation,
+// backpressure pacing, and the reentrancy guard.
 //
-// When a job is canceled via Wave.Cancel or its context is canceled:
+// # Safety
 //
-//  1. All running Tasks receive context cancellation but will run until
-//     they return. The library will correctly clean up once they complete.
-//
-//  2. Funnels will be flushed to ensure no data is lost.
-//
-//  3. Wave.CancelAndWait guarantees that all task goroutines exit before
-//     returning.
-//
-// # Context Safety Features
-//
-// The library implements safeguards to prevent common errors:
-//
-//  1. Reentrancy Protection: Context values are used to detect and prevent
-//     dangerous calling patterns. For example, calling Start from within a
-//     Task of the same job will panic with a helpful error message.
-//
-//  2. Skim Queuing: Skim operations are queued rather than processed
-//     recursively to prevent stack overflow when skim functions launch new
-//     tasks.
-//
-// # Potential Issues with Improper Context Handling
-//
-// If user code fails to properly propagate contexts:
-//
-//  1. Cancellation signals may not reach all operations, potentially causing
-//     delayed cleanup.
-//
-//  2. Reentrancy detection might fail, potentially allowing calls that could
-//     lead to deadlocks.
-//
-//  3. Backpressure mechanisms may not function correctly, potentially leading
-//     to resource exhaustion.
-//
-//  4. Skim operations might process in incorrect order or recursively rather
-//     than sequentially.
-//
-// # Best Practices
-//
-//  1. Always use the provided context in Task, Skim, and Funnel
-//     methods.
-//
-//  2. Follow the pattern of checking ctx.Done() regularly in long-running tasks.
-//
-//  3. Don't create new root contexts (e.g., context.Background()) within
-//     functions that receive a context from the library.
-//
-//  4. Launch new tasks from Skim or Funnel methods, not from Task.
-//
-//  5. For tasks that need to create internal concurrency, consider creating a
-//     sub-job within the task rather than calling Start directly.
+//   - Reentrancy guard: you cannot Skim a wave you are part of (its own or an
+//     ancestor body) — exactly the cycle that would deadlock. Such a call panics
+//     with a descriptive message.
+//   - Skim queuing: skim work is queued rather than run recursively, so a body
+//     that submits more work cannot overflow the stack.
+//   - Panic-safe: a panic in user code is recovered and surfaced as an error
+//     rather than crashing the process.
 package streampool
 
 //go:generate go build -C internal/cmd/benchnorm -o ../../bin/benchnorm

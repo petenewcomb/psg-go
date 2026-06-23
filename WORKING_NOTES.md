@@ -37,12 +37,13 @@ organization. These SUPERSEDE earlier surface notes (incl. the 2026-06-20 "SURFA
 PINNED" line below) where they conflict. Authoritative until reflected into the docs.
 
 **Surface (locked):**
-- **Wave = value handle**, `wave := NewWave(ctx)` — single return, NO ctx out
-  (returning a ctx was rejected: per-wave alloc, ctx-juggling, and it would conflate
-  *routing* with *propagation*). Value receivers. **Single-owner lifecycle, NO Dup**;
-  Close/Cancel non-refcounted. `Skim` / `SkimAll` / `CloseAndSkimAll` / `Close` /
-  `CancelAndWait`. `CloseAndSkimAll` = terminal (seal+drain); `SkimAll` = drain
-  without sealing.
+- **Wave construction + lifecycle:** see the **WAVE LIFECYCLE FINALIZED (2026-06-21b)**
+  block below — it SUPERSEDES the value-handle / `NewWave` / `Cancel`-`CancelAndWait`
+  thinking that earlier versions of this bullet described. Net: **no constructor**
+  (zero-value `var w Wave`, `*Wave`, lazy `ensureInit`), **drain-only** lifecycle
+  (`Skim`/`SkimAll`/`CloseAndSkimAll` → `ErrWaveDone`; `CloseAndSkimAll` = terminal
+  seal+drain, `SkimAll` = drain without sealing), no `Dup`. Surface evolution +
+  rationale: `docs/decisions/surface-lineage.md`.
 - **Ops are wave-agnostic** — `NewLauncher(h)` / `NewSkimmer(h)` / `NewFunnel(factory)`,
   no construction wave, no sentinel. Reusable specs definable before any wave (no
   wave-lifetime/creation-order coupling).

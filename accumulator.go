@@ -14,42 +14,29 @@ import (
 // the first instance and again after any prior instance flushes
 // and is discarded.
 //
-// [AccumulatorFactory.Close] is called exactly once when the bound
-// Funnel's refcount hits zero (Funnel.Close on the last Dup),
-// giving the factory a hook to release factory-level state (shared
-// connections, registries, etc.). If the implementation has no
-// factory-level state, return nil; the [AccumulatorFactoryFunc]
-// adapter provides a no-op Close for closure-based factories.
-//
-// Errors returned from Close surface through [Wave.SkimAll], the
-// same channel used for Accumulator errors.
+// There is no factory-level Close hook. A factory is wave-scoped and
+// the framework guarantees a well-defined instance lifetime (see
+// [Accumulator]): an instance is never touched after its Flush, and
+// every outstanding instance is flushed before the wave drains to
+// Done. So any factory-level resources (shared connections,
+// registries, pooled allocations) can be released by the owner after
+// the drain returns — the user owns the factory and has that sync
+// point — without a framework-mediated callback.
 type AccumulatorFactory[T any] interface {
 	NewAccumulator() Accumulator[T]
-	Close() error
 }
 
-// AccumulatorFactoryFunc[T] is the minimal function adapter for
-// [AccumulatorFactory] when the factory has no factory-level state.
-// Its Close is a no-op. For factories that need cleanup, use
-// [FuncAccumulatorFactory] (or [NewAccumulatorFactory] for the
-// type-inference-friendly constructor).
+// AccumulatorFactoryFunc[T] is the minimal function adapter that makes
+// a bare `func() Accumulator[T]` satisfy [AccumulatorFactory].
 type AccumulatorFactoryFunc[T any] func() Accumulator[T]
 
 // NewAccumulator satisfies [AccumulatorFactory].
 func (f AccumulatorFactoryFunc[T]) NewAccumulator() Accumulator[T] { return f() }
 
-// Close satisfies [AccumulatorFactory]; closure-based factories
-// declared via AccumulatorFactoryFunc have no factory-level state
-// to release.
-func (f AccumulatorFactoryFunc[T]) Close() error { return nil }
-
-// FuncAccumulatorFactory implements [AccumulatorFactory] using
-// function fields. Convenient for the common case where factory
-// state lives in a closure shared between NewAccumulatorFn and
-// CloseFn. CloseFn is optional; if nil, Close is a no-op.
+// FuncAccumulatorFactory implements [AccumulatorFactory] using a
+// function field.
 type FuncAccumulatorFactory[T any] struct {
 	NewAccumulatorFn func() Accumulator[T]
-	CloseFn          func() error
 }
 
 // NewAccumulator satisfies [AccumulatorFactory]; delegates to
@@ -58,25 +45,13 @@ func (f FuncAccumulatorFactory[T]) NewAccumulator() Accumulator[T] {
 	return f.NewAccumulatorFn()
 }
 
-// Close satisfies [AccumulatorFactory]; calls CloseFn if non-nil,
-// otherwise no-op.
-func (f FuncAccumulatorFactory[T]) Close() error {
-	if f.CloseFn == nil {
-		return nil
-	}
-	return f.CloseFn()
-}
-
 // NewAccumulatorFactory is the type-inference-friendly constructor
 // for a closure-based [AccumulatorFactory]. T is inferred from
-// newAccumulator's return type, sparing the user the [T]
-// annotation. Pass nil for closeFn if the factory has no
-// factory-level state to release.
+// newAccumulator's return type, sparing the user the [T] annotation.
 func NewAccumulatorFactory[T any](
 	newAccumulator func() Accumulator[T],
-	closeFn func() error,
 ) FuncAccumulatorFactory[T] {
-	return FuncAccumulatorFactory[T]{NewAccumulatorFn: newAccumulator, CloseFn: closeFn}
+	return FuncAccumulatorFactory[T]{NewAccumulatorFn: newAccumulator}
 }
 
 // Accumulator instances perform stateful partial aggregation of
@@ -215,7 +190,6 @@ func NewErrAccumulator(
 type FuncErrAccumulatorFactory struct {
 	AccumulateFn func(ctx context.Context, err error) (time.Time, error)
 	FlushFn      func(ctx context.Context) error
-	CloseFn      func() error
 }
 
 // NewAccumulator satisfies [AccumulatorFactory][struct{}]; returns
@@ -225,23 +199,13 @@ func (f FuncErrAccumulatorFactory) NewAccumulator() Accumulator[struct{}] {
 	return FuncErrAccumulator{AccumulateFn: f.AccumulateFn, FlushFn: f.FlushFn}
 }
 
-// Close satisfies [AccumulatorFactory][struct{}]; calls CloseFn if
-// non-nil, otherwise no-op.
-func (f FuncErrAccumulatorFactory) Close() error {
-	if f.CloseFn == nil {
-		return nil
-	}
-	return f.CloseFn()
-}
-
 // NewErrAccumulatorFactory is the convenience constructor for an
 // err-only [AccumulatorFactory][struct{}] that stores per-
 // accumulator fns directly (no factory closure overhead). Pass nil
-// for flush / closeFn if not needed.
+// for flush if not needed.
 func NewErrAccumulatorFactory(
 	accumulate func(ctx context.Context, err error) (time.Time, error),
 	flush func(ctx context.Context) error,
-	closeFn func() error,
 ) FuncErrAccumulatorFactory {
-	return FuncErrAccumulatorFactory{AccumulateFn: accumulate, FlushFn: flush, CloseFn: closeFn}
+	return FuncErrAccumulatorFactory{AccumulateFn: accumulate, FlushFn: flush}
 }

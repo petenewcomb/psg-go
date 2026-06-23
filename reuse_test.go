@@ -58,7 +58,7 @@ func TestWaveReuseAfterDrain(t *testing.T) {
 						},
 						FlushFn: func(fctx context.Context) error { return collector.Submit(fctx, s) },
 					}
-				}, nil)
+				})
 
 				fetcher := streampool.NewLauncher(streampool.HandlerFunc[int](
 					func(fctx context.Context, v int, _ error) error {

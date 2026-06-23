@@ -534,7 +534,7 @@ func (c *controller) newFunnelFactory(
 				return err
 			},
 		}
-	}, nil)
+	})
 }
 
 // executeFunc walks a Func's Steps from a context where new tasks may

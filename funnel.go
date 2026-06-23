@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/streampool/internal/nbcq"
@@ -31,12 +30,13 @@ import (
 // copies share the same funnel identity and will route work to the
 // same Accumulator instances.
 //
-// Resource management: a Funnel is wave-scoped and needs no explicit close. Its
-// per-(funnel,wave) accumulator instances are owned by the wave and force-flushed
-// when the wave drains; the funnel's factory-level state (AccumulatorFactory.Close)
-// is finalized by the wave at the end of that drain. A Funnel value may be copied
-// freely; all copies share the same underlying funnel and stay alive as long as
-// their wave does.
+// Resource management: a Funnel is wave-scoped and needs no explicit close (there is
+// no Close or Dup, and no factory Close). Its per-(funnel,wave) accumulator instances
+// are owned by the wave and force-flushed when the wave drains; the framework
+// guarantees an instance is never touched after its Flush, so the owner may release
+// any factory-level state after the drain returns (see [AccumulatorFactory]). A Funnel
+// value may be copied freely; all copies share the same underlying funnel and stay
+// alive as long as their wave does.
 type Funnel[T any] struct {
 	inner *funnel[T]
 }
@@ -71,18 +71,13 @@ func NewFunnel[T any](
 
 	cfg := resolveOpConfig(opts)
 
-	innerPool := omnipool.For[funnel[T]]()
-	inner := innerPool.Get()
-
-	if inner.fEngine != nil {
-		panic("unexpected non-nil inner.fEngine")
-	}
-	if inner.funnelFactory != nil {
-		panic("unexpected non-nil inner.funnelFactory")
-	}
-	if inner.instanceCount.Load() != 0 {
-		panic("unexpected nonzero inner.instanceCount")
-	}
+	// The funnel is plain per-batch state with no explicit teardown: it owns no
+	// reference and is not registered anywhere. Its accumulator instances each hold
+	// their own per-wave reference until they flush (force-flushed at the wave's
+	// drain), which is what keeps the wave open until aggregation completes. The
+	// funnel value itself is GC'd when it (and its copies) fall out of scope.
+	inner := &funnel[T]{}
+	inner.Init()
 
 	// Framework-owned error sink: Accumulator errors flow through this
 	// ErrSkimmer whose handler returns err as-is, surfacing via the
@@ -93,35 +88,22 @@ func NewFunnel[T any](
 	inner.fEngine = fe
 	inner.funnelFactory = funnelFactory
 	inner.limiter = cfg.singleLimiter()
-	inner.innerPool = innerPool
-
-	// Wave-scoped lifetime: hold one per-wave reference for the funnel's whole life
-	// (the proper replacement for the old handle-baseline refcount). It keeps the
-	// wave out of Done until the funnel is finalized at the end-of-work flush sweep
-	// (cpWorker.flushAll → funnel.finalize), so factory-close errors surface via the
-	// still-running SkimAll. Register with the engine so the sweep can find it.
-	wave.state.IncrementReference()
-	fe.registerFunnel(inner)
 
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "Funnel(%p), pool=%p", inner, fe)
+		trace.Logf(context.Background(), traceRegion, "Funnel(%p), engine=%p", inner, fe)
 	}
 
 	return Funnel[T]{inner: inner}
 }
 
-// NewFnFunnel binds closure-based factory functions to a Funnel.
-// Convenience wrapper for
-// `NewFunnel(wave, NewAccumulatorFactory(newAccumulator, closeFn), opts...)`.
-// Pass nil for closeFn if the factory has no factory-level state
-// to release.
+// NewFnFunnel binds a closure-based factory function to a Funnel. Convenience
+// wrapper for `NewFunnel(wave, NewAccumulatorFactory(newAccumulator), opts...)`.
 func NewFnFunnel[T any](
 	wave *Wave,
 	newAccumulator func() Accumulator[T],
-	closeFn func() error,
 	opts ...OpOption,
 ) Funnel[T] {
-	return NewFunnel(wave, NewAccumulatorFactory(newAccumulator, closeFn), opts...)
+	return NewFunnel(wave, NewAccumulatorFactory(newAccumulator), opts...)
 }
 
 // ErrFunnel is the [Funnel][struct{}] case viewed as an err
@@ -140,19 +122,16 @@ type ErrFunnel = Funnel[struct{}]
 // accumulate is called for every [Funnel.SubmitErr] (and matching
 // SubmitResult-with-non-nil-err); it returns the flush deadline
 // (zero for "no specific deadline") and any error.
-// flush is optional (pass nil for a no-op flush). closeFn is the
-// factory-level cleanup hook (see [AccumulatorFactory.Close]); pass
-// nil for no-op. For per-instance state, use [NewFunnel] +
-// [NewAccumulatorFactory] with a [NewErrAccumulator] inside the
-// factory closure.
+// flush is optional (pass nil for a no-op flush). For per-instance
+// state, use [NewFunnel] + [NewAccumulatorFactory] with a
+// [NewErrAccumulator] inside the factory closure.
 func NewErrFunnel(
 	wave *Wave,
 	accumulate func(ctx context.Context, err error) (time.Time, error),
 	flush func(ctx context.Context) error,
-	closeFn func() error,
 	opts ...OpOption,
 ) ErrFunnel {
-	return NewFunnel(wave, NewErrAccumulatorFactory(accumulate, flush, closeFn), opts...)
+	return NewFunnel(wave, NewErrAccumulatorFactory(accumulate, flush), opts...)
 }
 
 // Submit posts a value to the Funnel. Sugar for
@@ -271,11 +250,9 @@ type funnel[T any] struct {
 	// completes.
 	limiter Limiter
 
-	innerPool          *omnipool.Pool[funnel[T]]
 	funnelInstancePool *omnipool.Pool[funnelInstance[T]]
 	funnelWorkPool     *omnipool.Pool[funnelWork[T]]
 
-	instanceCount atomic.Int32
 	instanceQueue nbcq.Queue[*funnelInstance[T]]
 }
 
@@ -283,80 +260,6 @@ func (c *funnel[T]) Init() {
 	c.funnelInstancePool = omnipool.For[funnelInstance[T]]()
 	c.funnelWorkPool = omnipool.For[funnelWork[T]]()
 	c.instanceQueue.Init()
-}
-
-func (c *funnel[T]) Reset() {
-	// Reset logic is handled in finalize(). We keep this empty method to satisfy the
-	// Resetter interface - if we didn't, omnipool would zero the entire struct
-	// including pool pointers set by Init().
-}
-
-// dropInstanceLiveness decrements the live-instance count when an instance flushes.
-// Called by the party that performs the flush, after releasing that instance's c.mu.
-// (The per-instance wave barrier reference is dropped separately in flush().)
-func (c *funnel[T]) dropInstanceLiveness() {
-	c.instanceCount.Add(-1)
-}
-
-// funnelFinalizer is the heterogeneous-T view of a funnel the engine holds in its
-// registry so the end-of-work flush sweep can finalize every funnel on the wave.
-type funnelFinalizer interface {
-	finalize(ctx context.Context)
-}
-
-// finalize tears the funnel down at the end of the wave's drain: it runs from the
-// end-of-work flush sweep (cpWorker.flushAll) AFTER every instance has been
-// force-flushed, so by now instanceCount is zero. It drains the instance reuse cache,
-// calls funnelFactory.Close() (errors → errSink → the still-running SkimAll, because
-// the funnel's own wave reference — dropped LAST here — keeps the wave out of Done
-// until this returns), recycles the funnel, then drops that wave reference.
-func (c *funnel[T]) finalize(ctx context.Context) {
-	traceRegion := "funnel.finalize"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	if c.instanceCount.Load() != 0 {
-		panic("instance count is not zero at funnel finalize")
-	}
-	wave := c.fEngine.job
-
-	// Drain the reuse cache: spent shells linger in instanceQueue (an nbcq has no
-	// mid-queue removal) after their flush. Return them to the pool — pure cache
-	// cleanup, no live references (every instance flushed before this sweep step).
-	for {
-		inst, ok := c.instanceQueue.TryPopFront()
-		if !ok {
-			break
-		}
-		if inst.accumulator != nil {
-			panic("live instance in queue at funnel finalize")
-		}
-		c.funnelInstancePool.Put(inst)
-	}
-
-	// Call factory.Close() to release factory-level state. Errors route through the
-	// err sink so they surface via SkimAll (the wave is not yet Done — see below).
-	if c.funnelFactory != nil {
-		if closeErr := c.funnelFactory.Close(); closeErr != nil {
-			cctx, meta := wave.topLevelCtxMeta(ctx, func(contextType) {})
-			intErr := c.errSink.submit(
-				cctx, meta, wave, workq.InvalidGroupID, struct{}{}, closeErr)
-			if intErr != nil && cctx.Err() == nil {
-				panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
-			}
-		}
-	}
-
-	innerPool := c.innerPool
-	c.errSink = ErrSkimmer{}
-	c.fEngine = nil
-	c.funnelFactory = nil
-	c.limiter = Limiter{}
-	innerPool.Put(c) // c.innerPool kept (metadata for where to return)
-
-	// Drop the funnel's per-wave reference LAST: this is the DecrementReference that
-	// (for the last funnel) advances the wave to Done, after the factory-close error
-	// above is already queued for SkimAll.
-	wave.state.DecrementReference()
 }
 
 type funnelInstance[T any] struct {
@@ -413,16 +316,9 @@ func (c *funnelInstance[T]) Free() {}
 // instance object once c.mu is released (rule R2): the spent shell is
 // then safe for an owner reuse-pop to recycle concurrently.
 func (c *funnelInstance[T]) forceFlush(ctx context.Context) {
-	f := c.funnel
-	var didFlush bool
-	func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		didFlush = c.flush(ctx)
-	}()
-	if didFlush {
-		f.dropInstanceLiveness()
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flush(ctx)
 }
 
 func (c *funnelInstance[T]) allocate(
@@ -688,15 +584,12 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 	if hbc == nil {
 		hbc = w.funnel.funnelInstancePool.Get()
 		hbc.mu.Lock()
-		// funnel-liveness: instanceCount tracks live instances, incremented at
-		// creation and decremented at flush (see [funnel.dropInstanceLiveness]).
-		// Per-instance flush barrier: hold one job reference for the
-		// instance's whole live lifetime (until flush() runs). This keeps
-		// the job out of Done while the accumulator is unflushed,
-		// regardless of which worker eventually flushes it. Released in
-		// flush().
+		// Per-instance flush barrier: hold one job reference for the instance's whole
+		// live lifetime (until flush() runs). This keeps the job out of Done while the
+		// accumulator is unflushed, regardless of which worker eventually flushes it,
+		// and is what guarantees every outstanding instance is flushed before the wave
+		// drains. Released in flush().
 		w.funnel.fEngine.job.state.IncrementReference()
-		w.funnel.instanceCount.Add(1)
 		hbc.funnel = w.funnel
 		// Reset and re-Init the embedded work item: a fresh work ID, the
 		// flush group, and a zeroed (never-scheduled) heap position. The
@@ -712,13 +605,12 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 	defer func() {
 		// If funnel() flushed inline, it did so via ClaimForFlush, which
 		// guarantees no deadline-driven Execute also holds this instance —
-		// so this lineage owns the spent shell outright: drop funnel-liveness
-		// and recycle. Otherwise the instance is still live; cache it.
+		// so this lineage owns the spent shell outright: recycle it.
+		// Otherwise the instance is still live; cache it.
 		spent := hbc.accumulator == nil
 		f := hbc.funnel
 		hbc.mu.Unlock()
 		if spent {
-			f.dropInstanceLiveness()
 			f.funnelInstancePool.Put(hbc)
 		} else {
 			f.instanceQueue.PushBack(hbc)

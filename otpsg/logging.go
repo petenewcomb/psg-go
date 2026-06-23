@@ -150,5 +150,5 @@ func LoggedFunnel[T any](
 				return err
 			},
 		}
-	}, nil)
+	})
 }

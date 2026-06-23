@@ -134,7 +134,7 @@ to reason about.
 To aggregate related results before emitting them:
 
 ```go
-aggregator := streampool.NewFnFunnel(
+aggregator := streampool.NewFnFunnel(&wave,
     func() streampool.Accumulator[int] {
         var sum int
         return streampool.NewAccumulator(
@@ -148,12 +148,11 @@ aggregator := streampool.NewFnFunnel(
             func(ctx context.Context) error { return results.Submit(ctx, sum) }, // final flush
         )
     },
-    nil, // no factory-level Close
 )
 ```
 
-`NewFnFunnel` takes the factory closure directly (plus a factory-level `closeFn`,
-`nil` here); `NewFunnel` takes the `AccumulatorFactory` interface instead. Each
+`NewFnFunnel` takes the factory closure directly; `NewFunnel` takes the
+`AccumulatorFactory` interface instead. Each
 accumulator instance owns its own state (here `sum`); the framework creates instances
 on demand by concurrency, so partial-aggregate memory is bounded by concurrency.
 Flushing is the instance's job — a downstream `Submit` from the accumulate step

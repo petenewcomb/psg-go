@@ -48,29 +48,6 @@ func newPassthroughTestFunnelFactory[T any](
 // When Submits create funnelInstances, the factory remains
 // referenced until those instances are fully flushed and freed —
 // see funnelOp.unref() for the refcount details.
-func TestFunnelFactoryCloseFires(t *testing.T) {
-	chk := assert.New(t)
-	ctx := context.Background()
-	var wave streampool.Wave
-
-	funnelPool := &wave
-	closeCount := 0
-	factory := streampool.NewAccumulatorFactory(func() streampool.Accumulator[int] {
-		return streampool.FuncAccumulator[int]{
-			AccumulateFn: func(_ context.Context, _ int, _ error) (time.Time, error) {
-				return time.Time{}, nil
-			},
-		}
-	}, func() error {
-		closeCount++
-		return nil
-	})
-	_ = streampool.NewFunnel(funnelPool, factory)
-	chk.Equal(0, closeCount, "factory Close must not fire before the wave drains")
-	chk.NoError(wave.CloseAndSkimAll(ctx))
-	chk.Equal(1, closeCount, "factory Close fires exactly once, wave-driven, at drain")
-}
-
 // NewErrFunnel convenience constructor — exercises the
 // err-aggregating funnel shape end-to-end.
 func TestNewErrFunnel(t *testing.T) {
@@ -87,7 +64,6 @@ func TestNewErrFunnel(t *testing.T) {
 			return time.Time{}, nil
 		},
 		nil, // no flush
-		nil, // no close
 	)
 	var _ streampool.ErrFunnel = funnel //nolint:staticcheck // intentional alias type-check
 	chk.NoError(funnel.SubmitErr(ctx, errors.New("first")))

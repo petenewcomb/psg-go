@@ -44,7 +44,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 				return skimmer.Submit(ctx, 42)
 			},
 		}
-	}, nil))
+	}))
 
 	newRunner := func(value int) streampool.TaskLauncher {
 		return streampool.NewTaskLauncher(func(ctx context.Context) error {

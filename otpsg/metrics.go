@@ -146,5 +146,5 @@ func MetricsFunnel[T any](
 				return err
 			},
 		}
-	}, nil)
+	})
 }

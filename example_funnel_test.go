@@ -73,7 +73,7 @@ func ExampleFunnel() {
 				return skimmer.Submit(ctx, counts)
 			},
 		}
-	}, nil)
+	})
 
 	// Create a Funnel operation. No Skimmer arg — the streampool.Accumulator
 	// body routes results downstream via Submit.

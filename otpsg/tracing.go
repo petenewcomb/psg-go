@@ -93,7 +93,7 @@ func TracedFunnel[T any](
 				return innerFunnel.Flush(ctx)
 			},
 		}
-	}, nil)
+	})
 
 	// Then use the base propagation
 	return PropagateFunnel(tracedFactory)

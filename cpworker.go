@@ -175,6 +175,10 @@ func (cw *cpWorker) flushAll(ctx context.Context) {
 	for _, w := range cw.fEngine.workQueue.DrainAllScheduled(nil) {
 		w.(scheduledFlusher).forceFlush(ctx)
 	}
+	// Every instance is now flushed; return each funnel's spent instance shells to
+	// its pool (the lock-free instanceQueue couldn't eject them mid-stream). Pure
+	// pooling cleanup — no factory close, no references.
+	cw.fEngine.recycleFunnelInstances()
 	cw.nextJobFlushCh = nil
 }
 

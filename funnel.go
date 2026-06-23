@@ -71,11 +71,12 @@ func NewFunnel[T any](
 
 	cfg := resolveOpConfig(opts)
 
-	// The funnel is plain per-batch state with no explicit teardown: it owns no
-	// reference and is not registered anywhere. Its accumulator instances each hold
-	// their own per-wave reference until they flush (force-flushed at the wave's
-	// drain), which is what keeps the wave open until aggregation completes. The
-	// funnel value itself is GC'd when it (and its copies) fall out of scope.
+	// The funnel is plain per-batch state with no explicit teardown: it owns no wave
+	// reference. Its accumulator instances each hold their own per-wave reference
+	// until they flush (force-flushed at the wave's drain), which keeps the wave open
+	// until aggregation completes. The funnel value itself is GC'd when it (and its
+	// copies) fall out of scope. It is registered with the engine only so the
+	// end-of-work flush sweep can return its spent instance shells to the pool.
 	inner := &funnel[T]{}
 	inner.Init()
 
@@ -88,6 +89,7 @@ func NewFunnel[T any](
 	inner.fEngine = fe
 	inner.funnelFactory = funnelFactory
 	inner.limiter = cfg.singleLimiter()
+	fe.registerFunnel(inner)
 
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), traceRegion, "Funnel(%p), engine=%p", inner, fe)
@@ -260,6 +262,31 @@ func (c *funnel[T]) Init() {
 	c.funnelInstancePool = omnipool.For[funnelInstance[T]]()
 	c.funnelWorkPool = omnipool.For[funnelWork[T]]()
 	c.instanceQueue.Init()
+}
+
+// instanceRecycler is the heterogeneous-T view the engine holds so the end-of-work
+// flush sweep can return each funnel's spent instance shells to its pool.
+type instanceRecycler interface {
+	recycleSpentInstances()
+}
+
+// recycleSpentInstances drains the funnel's instanceQueue back to the instance pool.
+// Mid-wave, spent shells are recycled lazily on the next reuse-pop, but the lock-free
+// nbcq has no mid-queue removal, so instances flushed by the end-of-work sweep (or a
+// deadline flush a quiet funnel never re-pops) linger here. This runs from
+// cpWorker.flushAll at Flushing — inFlightWork==0, so no funnelWork is concurrently
+// touching the queue, and every instance has already been flushed (accumulator==nil).
+func (c *funnel[T]) recycleSpentInstances() {
+	for {
+		inst, ok := c.instanceQueue.TryPopFront()
+		if !ok {
+			return
+		}
+		if inst.accumulator != nil {
+			panic("live instance in queue at end-of-work recycle")
+		}
+		c.funnelInstancePool.Put(inst)
+	}
 }
 
 type funnelInstance[T any] struct {

@@ -27,16 +27,23 @@ framework-mediated finalization.
 - `Funnel[T]` wraps `*funnel[T]` directly (no leakguard handle). Copy it freely; it
   shares one `funnel` and is alive as long as its wave is. No `refCount`, no `ref`/
   `unref`, no `Close`/`Dup`.
-- The funnel holds **no** per-wave reference and is **not** registered anywhere. The
-  funnel value is GC'd when it (and its copies) fall out of scope.
+- The funnel holds **no** per-wave reference. The funnel value is GC'd when it (and its
+  copies) fall out of scope.
 - Each accumulator **instance** holds one per-wave reference (`IncrementReference` at
   creation, `DecrementReference` in `flush`). That per-instance barrier is the entire
-  mechanism: the wave cannot reach Done while any accumulator is unflushed, and the
-  end-of-work flush sweep (`cpWorker.flushAll`) force-flushes every outstanding instance
-  at drain — which *is* guarantee (2).
-- Spent instance shells are recycled to the instance pool incrementally (on the next
-  reuse-pop) during normal operation; any still cached at drain are simply GC'd with the
-  funnel. No teardown drain needed.
+  lifetime mechanism: the wave cannot reach Done while any accumulator is unflushed, and
+  the end-of-work flush sweep (`cpWorker.flushAll`) force-flushes every outstanding
+  instance at drain — which *is* guarantee (2).
+- **Instance-pool recycling.** `funnelInstance[T]` wrapper structs are pooled
+  (`funnelInstancePool`, a per-type `omnipool`). Mid-wave, spent shells recycle lazily on
+  the next reuse-pop. But the lock-free `instanceQueue` (`nbcq`) can't eject a flushed
+  instance mid-stream, so instances flushed by the end-of-work sweep (or by a deadline
+  flush a quiet funnel never re-pops) would otherwise GC instead of returning to the
+  pool. So the engine keeps a **recycle-only registry**: `NewFunnel` registers, and
+  `flushAll` calls `recycleFunnelInstances` after the instance sweep to drain each
+  funnel's spent `instanceQueue` back to the pool. This is the funnels' *only* tie to
+  the engine — no reference, no factory close, no ordering. (Per-cycle pooling matters
+  for the reused/pooled-`*Wave` benchmark case.)
 
 ### How we got here
 
@@ -44,9 +51,10 @@ The first cut (commit `a2fceba`) kept `AccumulatorFactory.Close` and built wave-
 finalization to call it: an engine funnel registry, a per-funnel wave reference, and a
 `finalize` step in the flush sweep that closed the factory before dropping the
 reference (so close errors surfaced via the still-running SkimAll). Then we questioned
-whether factories need closing at all — they don't, given the contract above — so all
-of that (registry, `finalize`, the funnel-level wave reference, `factory.Close`, and
-`internal/leakguard`) was removed.
+whether factories need closing at all — they don't, given the contract above — so
+`finalize`, the funnel-level wave reference, `factory.Close`, and `internal/leakguard`
+were removed. The engine registry was kept but **stripped to recycle-only** (return
+instance wrappers to the pool at drain; no reference, no close).
 
 ## Migration
 - Removed `AccumulatorFactory.Close()` from the interface and every adapter

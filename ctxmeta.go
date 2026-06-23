@@ -333,26 +333,23 @@ func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
 	return meta, ok
 }
 
+// ctxMeta returns the ctxMeta already stamped on ctx (for wave j), validating
+// ownership. It never creates a meta — callers use it where one must already be
+// present (a body or driver ctx). The lookup is the unified read seam
+// (metaFromContext, ctxpool-aware); no ctxMetaMap caching, which would alias a reused
+// ctxpool body ctx. (Step toward retiring ctxMetaMap; see meta-context-migration.md.)
 func (j *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.ctxMeta"
 
-	ctx, meta := j.ctxMetaMap.WithValue(ctx,
-		func(sourceMeta *ctxMeta, _ bool) (context.Context, *ctxMeta) {
-			if sourceMeta == nil {
-				panic("Context not associated with a job")
-			}
-			if sourceMeta.job != j {
-				if _, isParentJob := sourceMeta.parentJobs[j]; isParentJob {
-					panic("Context belongs to a child job")
-				} else {
-					panic("Context belongs to a different job")
-				}
-			}
-			return ctx, sourceMeta
-		},
-	)
-	if meta != nil && meta.job != j {
-		panic(fmt.Sprintf("Context metadata does not match job: expected %p, got %p", j, meta.job))
+	meta, ok := metaFromContext(ctx)
+	if !ok {
+		panic("Context not associated with a job")
+	}
+	if meta.job != j {
+		if _, isParentJob := meta.parentJobs[j]; isParentJob {
+			panic("Context belongs to a child job")
+		}
+		panic("Context belongs to a different job")
 	}
 
 	trace.Logf(ctx, traceRegion, "ctxMeta=%v", meta)

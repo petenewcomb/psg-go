@@ -316,21 +316,12 @@ func (ee *topLevelExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Executi
 	return ee.workQueue.ExecuteNowOrQueue(ctx, ex, work)
 }
 
-type ctxMetaValueKey struct{}
-
 // metaFromContext returns the ctxMeta stamped on ctx (and whether one was found). It
-// is the single READ seam for the meta-on-context lookup. During the ctxpool adoption
-// (B3) two write paths coexist: a body ctx borrowed through ctxpool carries its meta as
-// the ctxpool child's value, while legacy ctxmap ctxs stamp it under
-// ctxMetaValueKey. ctxpool is checked first so a borrowed body ctx wins over any legacy
-// meta on an ancestor. The legacy branch (and the key) retire once every write path is
-// on ctxpool.
+// is the single READ seam for the meta-on-context lookup: every meta is carried as a
+// ctxpool child's value (body borrows and the derivations in ensureCtxMeta alike), so
+// the lookup is a single ctxpool.GetValue — the nearest child wins.
 func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
-	if m, ok := ctxpool.GetValue[*ctxMeta](ctx); ok {
-		return m, true
-	}
-	meta, ok := ctx.Value(ctxMetaValueKey{}).(*ctxMeta)
-	return meta, ok
+	return ctxpool.GetValue[*ctxMeta](ctx)
 }
 
 // ctxMeta returns the ctxMeta already stamped on ctx (for wave j), validating
@@ -363,10 +354,8 @@ func (j *Wave) ensureCtxMeta(
 ) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.ensureCtxMeta"
 
-	// Source/parent meta via the unified read seam (ctxpool first, then legacy key
-	// during the migration). The derived meta below is stamped onto a fresh ctxpool
-	// child so a later metaFromContext resolves IT (nearest child wins) — no
-	// ctxMetaValueKey stamping that a ctxpool body meta would shadow.
+	// Source/parent meta via the read seam. The derived meta below is stamped onto a
+	// fresh ctxpool child so a later metaFromContext resolves IT (nearest child wins).
 	sourceMeta, _ := metaFromContext(ctx)
 
 	ctxType := topLevelContext

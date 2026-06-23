@@ -1,5 +1,14 @@
 # TODO
 
+## streampool.Wait should clear ctxpool caches (2026-06-23)
+
+`streampool.Wait()` joins the global pool's worker goroutines on definitive teardown.
+After that join it should also clear all cached child contexts in `internal/ctxpool`
+(the process-wide parent-ctx→childPool map): with no live workers there are no
+borrowers, so the reuse caches only pin contexts (and their values) until their parent
+ctx is GC'd via AfterFunc. Needs a `ctxpool` "clear all" entry point (it currently only
+evicts per-parent on AfterFunc) wired into `Wait` after the worker join.
+
 ## Sim generalization / rationalization (post-B3-hang, 2026-06-23)
 
 Surfaced while hunting the B3 cutover hang (`internal/sim`): the harness is hard to

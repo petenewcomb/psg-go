@@ -1,5 +1,11 @@
 # Meta-Context Migration (ctxpool adoption — the meta-derivation half)
 
+> **LANDED 2026-06-23.** The single-lookup target below is implemented:
+> `metaFromContext` is now `ctxpool.GetValue[*ctxMeta](ctx)` and nothing else;
+> `ctxMetaValueKey`, `ctxMetaMap`, `skimCtxMetaMap`, and their backing package
+> `internal/ctxmap` are deleted. `ensureCtxMeta`/`topLevelCtxMeta`/`skimCtxMeta` remain
+> as the derivation functions (they stamp ctxpool children), per the unified model.
+
 > **DESIGN — for review (PN), 2026-06-22 (rev 2).** Surfaced by the B3 scope
 > discovery: migrating task/funnel bodies to `borrowBodyContext` (ctxpool) breaks the
 > dispatch/skim-from-body paths because the meta-derivation machinery is not

@@ -1,5 +1,24 @@
 # TODO
 
+## Sim generalization / rationalization (post-B3-hang, 2026-06-23)
+
+Surfaced while hunting the B3 cutover hang (`internal/sim`): the harness is hard to
+*target* — fine for broad random coverage, awkward for reproducing a specific scenario.
+After the hang is fixed, generalize:
+
+- **Op-mix / topology controls.** Generation is `Count`/`MaxDepth` + structural DAG
+  wiring only (funnels→shallower sinks, fan-out from bodies). No knob to dial the op
+  *mix* or force a specific shape (e.g. a funnel under a subjob, a particular fan-out).
+- **No cross-wave op submits.** Subjobs only inherit limiters (`run.go` `ensurePools`);
+  the generator never exercises child→parent or parent→child op submits, though the API
+  supports it (ParentExposedOps). Coverage gap *and* a missing control.
+- **Deterministic hand-built `Plan` path.** Everything routes through `rapid` + the
+  generator; add a clean "construct a fixed `Plan` literal and run it via `sim.Run`"
+  entry point for repro/debugging (would have saved much of the hang hunt).
+- **Stale bits from the rename/cutover:** `extract-sim-*.sh` markers (see the
+  sim-trace-debugging skill — they grep pre-rename strings); commented diagnostic knobs
+  in `simulation_test.go` use stale names (`planConfig.streampool.Task...`).
+
 ## Refactor status (2026-06)
 
 The combiner branch has progressed substantially beyond its original scope. See `WORKING_NOTES.md` for the live status of the in-flight reshape. Highlights of what's complete on the branch as of `aab904c`:

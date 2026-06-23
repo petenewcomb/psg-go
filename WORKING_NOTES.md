@@ -115,12 +115,28 @@ stance: **ctx is DRIVER-SPECIFIC.** Like the internal Pool, a Wave owns NO ctx.
     - **`bodyCtxPool` DROPPED** (`b7c132d`) — the fused single-pool design (`c159d25`);
       reverted the `ctx`/`pool` fields on `ctxMeta`. Stamp logic (`parentJobsFor`)
       preserved in history at `c159d25` for B3 re-derivation.
-    - **NEXT — B3 (adoption, first live-code change):** (1) `metaPool` +
-      `metaFromContext = ctxpool.GetValue[*ctxMeta]`; migrate the ~8
-      `ctx.Value(ctxMetaValueKey{})` lookups; **retire `ctxMetaValueKey`**. (2) re-derive
-      borrow-stamp onto `ctxpool`. (3) migrate borrow sites #1–#4 (task/funnel
-      `runInShell`=A, skim=B, flusher=C). (4) drop `waveCtx`/`Cancel`/`CancelAndWait`/
-      `execShell` → zero-value `Wave` + `ensureInit`.
+    - **`metaFromContext` read-seam LANDED** (`a8f05e8`) + **body-context borrow
+      primitive LANDED** (`1a8d404`, `bodyMetaPool`/`borrowBodyContext`, unadopted).
+    - **B3 SCOPE DISCOVERY + DESIGN CONVERGED → `docs/decisions/meta-context-migration.md`
+      (rev 2, `c7abcdc`).** Migrating bodies to ctxpool is inseparable from migrating the
+      meta-derivation machinery (ensureCtxMeta family): it finds source metas via
+      ctxMetaValueKey (ctxpool bodies use childKey) and caches by ctx identity (ctxpool
+      reuses ctxs). Design CONVERGED (w/ PN) to ONE unified model — **no lifecycle fork**:
+      every meta is a ctxpool borrow differing only in hold scope (per-execution bodies /
+      **per-call drivers** — NOT singletons; pooled N-at-once under concurrent driving)
+      and ctxType. One lookup (`metaFromContext`=`GetValue`); `ctxMetaValueKey`/
+      `ctxMetaMap`/`skimCtxMetaMap` all retire; cross-job derivation dissolves into the
+      borrow. Rule: **borrow-at-entry, read-while-nested**. Decided: top-level
+      Start/Submit drives a backpressure trySkim → **two nested borrows** (top-level ⊃
+      skim) + the submitted work's separate body meta. `topLevelExEnv.Lock` removable
+      (per-call metas are single-threaded — verify).
+    - **WIP STASHED** (`git stash@{0}`) — task/funnel borrow + execShell/waveCtx removal +
+      Cancel gut; reset to green `1a8d404`. Re-applies after B3.meta.
+    - **NEXT — B3.meta (the rework, do FIRST, land green standalone):** replace
+      ensureCtxMeta/ctxMeta/topLevelCtxMeta/skimCtxMeta + the two maps with ctxpool
+      entry-point borrows per the note's table; `metaFromContext`→pure `GetValue`; retire
+      `ctxMetaValueKey`. THEN re-apply the stash (B3.A/B/C), then reconcile examples+sim
+      (B3.D).
 
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new

@@ -74,22 +74,14 @@ submitted work. So one top-level call touches THREE meta concerns:
    worker, released at `Free`. Distinct ctxType (task), distinct time. **Not** unifiable
    with 1 or 2.
 
-**Open sub-question (PN): can 1 and 2 be one borrow?** They differ in `ShouldBlock` and
-ctxType, but they run in *sequence* on the same goroutine within the call (skim phase,
-then enqueue phase), never concurrently. Options:
-
-- **(i) Two borrows, nested.** The top-level borrow (ctxType=topLevel) drives the call;
-  for the `yield` phase it makes a short nested skim borrow (child, ctxType=skim) under
-  which handlers run, returned when `yield` returns; then it enqueues. Mirrors today's
-  top-level⊃skim parent/child. Cleanest separation; two borrows per blocking call.
-- **(ii) One borrow, phased ctxType.** A single driver meta whose ctxType is `skim`
-  while `yield` runs its handlers and `topLevel` for the enqueue. Fewer borrows, but the
-  handler's captured ctx carries a meta whose ctxType mutates mid-call — fragile unless
-  the handler invocation is handed a distinct skim *view*. Effectively collapses back
-  toward (i).
-
-Recommendation: **(i)** — the skim phase is genuinely a nested skim scope; model it as
-one. The extra borrow is cheap (pool hit) and keeps `ShouldBlock`/nesting honest.
+**DECIDED (PN, 2026-06-22): (i) two nested borrows, at least for now.** Concerns 1 and
+2 differ in `ShouldBlock` and ctxType but run in *sequence* on the same goroutine within
+the call (skim phase, then enqueue phase), never concurrently. The top-level borrow
+(ctxType=topLevel) drives the call; for the `yield` phase it makes a short **nested skim
+borrow** (child, ctxType=skim) under which the backpressure handlers run, returned when
+`yield` returns; then it enqueues. This mirrors today's top-level⊃skim parent/child,
+keeps `ShouldBlock`/nesting honest, and the extra borrow is a pool hit. (Rejected (ii)
+one-borrow-phased-ctxType: a meta whose ctxType mutates mid-call is fragile.)
 `TryStart`/`TrySubmit` are the same minus the blocking enqueue. A plain `Skim`/`SkimAll`
 is just concern 2 standalone (borrow skim meta, hold across handlers, return).
 

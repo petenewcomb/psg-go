@@ -83,7 +83,7 @@ type childPool struct {
 	stopMu    sync.Mutex
 	stop      func() bool // from context.AfterFunc
 	// free is this pool's reuse cache of spent children, the same lock-free
-	// nbcq pattern as execShellPool.free / the funnel instanceQueue. Storage is
+	// nbcq pattern as the funnel instanceQueue. Storage is
 	// per-pool (not a type-global omnipool.For) because each child's ctx is
 	// derived from THIS pool's parentCtx and cannot be reused under another.
 	//

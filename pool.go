@@ -17,8 +17,8 @@ import (
 //
 // SEAM (Wave wiring, not yet landed): Wave dispatch will defaultPool.Acquire on
 // NewWave, defaultPool.Release when its drain completes, and defaultPool.Post
-// work; the per-execution worker context that stamps the unified exEnv into the
-// work's borrowed wave context is wave-5b. Until a Wave Acquires it the pool is
+// work; the per-execution worker context stamps the unified exEnv into the
+// work's borrowed body context. Until a Wave Acquires it the pool is
 // dormant (nothing Posts → no demand → no workers), so newWorkerState's
 // placeholder context is never exercised.
 var defaultPool = worker.NewPool(newWorkerState)
@@ -35,7 +35,7 @@ func Wait() { defaultPool.Wait() }
 // worker holds: the integration surface (pooled rdvq sender + receiver + group/
 // queue stacks) that task and funnel bodies run against. It is deliberately
 // job/wave-agnostic — per-execution context (job, wave, cancellation) rides the
-// work item, which the worker runs under its borrowed wave context (wave-5b),
+// work item, which the worker runs under its borrowed body context,
 // stamping this exEnv in. taskExEnv + cpWorker collapse into this as the task and
 // funnel engines are cut over onto the shared pool. Lock/Unlock are no-ops: the
 // exEnv is per-goroutine and runs one body at a time.
@@ -57,16 +57,16 @@ func (ee *workerExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution
 
 // workerEnvKey carries the worker's execution environment E on its worker context
 // so a body executing on this worker can retrieve E (to stamp into the borrowed
-// per-wave execShell) without it living in a ctxMeta. The worker ctx itself holds
-// NO ctxMeta — bodies run under a borrowed shell's ctx, never the worker ctx.
+// body context's meta) without it living in a ctxMeta. The worker ctx itself holds
+// NO ctxMeta — bodies run under a borrowed body ctx, never the worker ctx.
 type workerEnvKey struct{}
 
 // newWorkerState builds a fresh worker environment plus the worker context it runs
 // idle/cancel selects under. The context derives from the global pool's poolCtx
 // (so definitive teardown cancels idle workers by ancestry) and carries E under
-// workerEnvKey. Bodies do NOT run under this context — they run under a per-wave
-// execShell borrowed at execution; this context is only the worker's own
-// idle/cancel signal.
+// workerEnvKey. Bodies do NOT run under this context — they run under a body
+// context borrowed at dispatch (borrowBodyContext); this context is only the
+// worker's own idle/cancel signal.
 func newWorkerState(poolCtx context.Context) (*workerExEnv, context.Context, context.CancelFunc) {
 	ee := &workerExEnv{}
 	ctx, cancel := context.WithCancel(poolCtx)

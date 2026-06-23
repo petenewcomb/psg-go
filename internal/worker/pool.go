@@ -27,11 +27,11 @@
 //     referrers to finish on their own (so it blocks forever if one never
 //     Releases, like sync.WaitGroup.Wait). The pool is reusable afterward.
 //
-// The pool owns a poolCtx (exposed via PoolCtx) that is cancelled on definitive
-// teardown (Wait → workers exit) and re-armed on reuse; Waves derive their waveCtx
-// from it so teardown propagates down the wave tree by context ancestry (wave-5b).
-// Per-execution cancellation is separate: work runs under the worker context built
-// by newState (and, in wave-5b, a borrowed per-wave exec context).
+// The pool owns a poolCtx that is cancelled on definitive teardown (Wait →
+// workers exit) and re-armed on reuse; each worker derives its idle/cancel
+// context from it (via newState). Per-execution cancellation is separate: a
+// body runs under a context borrowed at dispatch (descended from its submit
+// ctx), not under the worker context.
 package worker
 
 import (
@@ -81,14 +81,12 @@ type Pool[E workq.ExecEnv] struct {
 	//   poolCtx    — the pool's context; cancelled to tell workers to exit, and
 	//                re-armed (fresh WithCancel) for reuse. Each worker captures
 	//                the current poolCtx at spawn (race-free), so a re-arm never
-	//                reaches an already-running worker. Exposed via PoolCtx so
-	//                Waves derive their waveCtx from it: cancellation propagates
-	//                pool teardown down the wave tree by stdlib ancestry (wave-5b).
+	//                reaches an already-running worker.
 	//   poolCancel — cancels poolCtx.
 	mu         sync.Mutex
 	refs       int
 	waiting    bool
-	poolCtx    context.Context //nolint:containedctx // the pool teardown signal; see PoolCtx
+	poolCtx    context.Context //nolint:containedctx // the pool teardown signal workers derive their ctx from
 	poolCancel context.CancelFunc
 }
 
@@ -171,18 +169,6 @@ func (p *Pool[E]) rearmStopLocked() {
 		//nolint:gosec // G118: prior poolCancel already called (poolCtx cancelled)
 		p.poolCtx, p.poolCancel = context.WithCancel(context.Background())
 	}
-}
-
-// PoolCtx returns the pool's current context. It is cancelled when the pool tears
-// down definitively (the last Release with a Wait outstanding, or Wait while idle)
-// and re-armed on reuse. Waves derive their waveCtx from it so pool teardown
-// propagates down the wave tree by stdlib context ancestry (wave-5b). The returned
-// context is valid for the current Acquire/Release cycle; callers Acquire before
-// reading it (Acquire re-arms after a prior teardown).
-func (p *Pool[E]) PoolCtx() context.Context {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.poolCtx
 }
 
 // ── Spawning ────────────────────────────────────────────────────────────────

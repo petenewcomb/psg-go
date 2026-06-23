@@ -159,13 +159,25 @@ stance: **ctx is DRIVER-SPECIFIC.** Like the internal Pool, a Wave owns NO ctx.
       Start/Submit drives a backpressure trySkim → **two nested borrows** (top-level ⊃
       skim) + the submitted work's separate body meta. `topLevelExEnv.Lock` removable
       (per-call metas are single-threaded — verify).
-    - **WIP STASHED** (`git stash@{0}`) — task/funnel borrow + execShell/waveCtx removal +
-      Cancel gut; reset to green `1a8d404`. Re-applies after B3.meta.
-    - **NEXT — B3.meta (the rework, do FIRST, land green standalone):** replace
-      ensureCtxMeta/ctxMeta/topLevelCtxMeta/skimCtxMeta + the two maps with ctxpool
-      entry-point borrows per the note's table; `metaFromContext`→pure `GetValue`; retire
-      `ctxMetaValueKey`. THEN re-apply the stash (B3.A/B/C), then reconcile examples+sim
-      (B3.D).
+    - **CUTOVER LANDED (`e740d33`, 2026-06-23):** B3.meta + B3.A/B in one step —
+      `metaFromContext` is ctxpool-aware; task and funnel bodies borrow via
+      `borrowBodyContext`; `ensureCtxMeta` stamps a ctxpool child (no `AfterFunc(j.ctx)`).
+      Note this took the INCREMENTAL path, not the full unified-model retirement: the
+      legacy `ctxMetaValueKey` read branch + `ctxMetaMap`/`skimCtxMetaMap` REMAIN (the
+      read seam is a dual lookup, ctxpool-first), staged to retire once every write path
+      is on ctxpool. `metaFromContext` is not yet pure `GetValue`.
+    - **POST-CUTOVER HANG FIXED (`00f7abc`, 2026-06-23):** flush-signal subscription race
+      in the funnel flusher (see the top banner). 300/300 + 40/40 -race green.
+    - **B3.C LANDED (2026-06-23):** runtime force-abort gutting was already in the cutover
+      (Wave owns no `waveCtx`/`execShell` pool; `Cancel`/`CancelAndWait` no longer
+      force-abort bodies). This pass removed the residue: the dead `worker.Pool.PoolCtx()`
+      method (zero callers — it existed only so waves could derive a teardown `waveCtx`),
+      the stale `Cancel` doc (it claimed it cancels task contexts), and `execShell`/
+      `wave-5b` comment references across pool.go/job.go/ctxmeta.go/ctxpool.go.
+    - **NEXT — B3.D:** reconcile examples + sim to the new cancellation model (cancel the
+      submit ctx to stop a body; `Cancel` only tears down wave machinery). Later/optional:
+      the full B3.meta unified-model retirement (`metaFromContext`→pure `GetValue`, drop
+      `ctxMetaValueKey` + the two maps).
 
 **►►► DOC CONSISTENCY SWEEP (in progress, 2026-06-20).** Bringing all docs in line
 with the converged target design. Committed so far this session: permit-core.md (new

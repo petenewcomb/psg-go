@@ -172,8 +172,9 @@ var taskWorkPool = omnipool.For[taskWork]()
 
 // newWaveSubstrate initializes the per-wave lifecycle substrate (formerly the
 // New() constructor, now folded into the Wave). parent is the caller's root
-// context; the wave-5b execShell pool is Init'd by NewWave once the top-level
-// meta gives the wave its ancestry.
+// context; the wave's internal ctx descends from it (cancelled by Cancel to tear
+// down wave-owned goroutines). Body contexts are not wave-owned — they are
+// borrowed per dispatch from ctxpool (see bodyctx.go).
 func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wave {
 	traceRegion := "newWaveSubstrate"
 	defer trace.StartRegion(parent, traceRegion).End()
@@ -202,19 +203,16 @@ func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wav
 	return w
 }
 
-// Cancel terminates any in-flight tasks and forfeits any unskimed results.
-// Outstanding calls to [Start], [Wave.Skim], [Wave.TrySkim],
-// [Wave.SkimAll], or [Wave.TrySkimAll] using the job or any of its task pools will
-// fail with [context.Canceled] or other error returned by a [Skim].
+// Cancel abandons the wave: it tears down wave-owned machinery and unblocks any
+// outstanding [Start], [Wave.Skim], [Wave.TrySkim], [Wave.SkimAll], or
+// [Wave.TrySkimAll], which will fail with [context.Canceled] (or another error
+// returned by a [Skim]). Unskimmed results are forfeited.
 //
-// While Cancel always returns immediately, any running [Task] or
-// [Skim] will delay termination of their independent goroutine or caller
-// until it returns. This method cancels the context passed to each [Task],
-// but not the context passed to each [Skim]. Skim functions instead
-// receive the context passed to the calling [Start], [Wave.Skim],
-// [Wave.TrySkim], [Wave.SkimAll], or [Wave.TrySkimAll] function. If it is
-// desirable to transmit a cancelation signal to a running [Skim], one
-// must also cancel any contexts being passed to those callers.
+// Cancel does NOT force-abort running task or funnel bodies. Those run under
+// contexts descended from the ctx passed to the dispatching [Start]/Submit call,
+// not from the wave — so to signal a running body, cancel that submit context.
+// Cancel returns immediately, but a running [Task] or [Skim] delays the exit of
+// its goroutine/caller until it returns.
 //
 // Cancel is always thread-safe and calling it more than once has no additional
 // effect.
@@ -224,11 +222,10 @@ func (j *Wave) Cancel() {
 	traceRegion := "Wave.Cancel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Wave=%p", j)
-	// Cancel the wave's internal ctx. This tears down wave machinery (the funnel
-	// flusher roots at j.ctx; ensureCtxMeta-derived skim ctxs are linked to it via
-	// AfterFunc) and so unblocks an outstanding Skim. It NO LONGER force-aborts
-	// running task/funnel bodies: those run under contexts descended from their
-	// submit ctx (borrowBodyContext), so cancel the submit ctx to stop them.
+	// Cancel the wave's internal ctx. The funnel flusher roots at j.ctx, so this
+	// drives it toward exit; it also unblocks an outstanding Skim. It does NOT
+	// force-abort running task/funnel bodies — those descend from their submit
+	// ctx (borrowBodyContext), so cancel the submit ctx to stop them.
 	j.cancelFn()
 }
 

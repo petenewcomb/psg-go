@@ -321,7 +321,7 @@ type ctxMetaValueKey struct{}
 // metaFromContext returns the ctxMeta stamped on ctx (and whether one was found). It
 // is the single READ seam for the meta-on-context lookup. During the ctxpool adoption
 // (B3) two write paths coexist: a body ctx borrowed through ctxpool carries its meta as
-// the ctxpool child's value, while legacy ctxmap/execShell ctxs stamp it under
+// the ctxpool child's value, while legacy ctxmap ctxs stamp it under
 // ctxMetaValueKey. ctxpool is checked first so a borrowed body ctx wins over any legacy
 // meta on an ancestor. The legacy branch (and the key) retire once every write path is
 // on ctxpool.

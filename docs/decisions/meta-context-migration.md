@@ -141,17 +141,35 @@ return borrowDriver(ctx, W, ctxType, nil)   // (or ctxMetaMap until per-call bor
 `parentJobsForSource` (already in `bodyctx.go`) covers 1b's ancestry and 2's nil. The
 cross-job derivation that `ensureCtxMeta` did is exactly this — it **dissolves** here.
 
-Increments (each builds + suite + vet + lint green):
+Increments:
 1. **`ctxMeta` → `metaFromContext`** — DONE (`bc8040e`). Pure read+validate; drops one
-   `ctxMetaMap` use.
-2. **`ensureCtxMeta`/`topLevelCtxMeta`/`skimCtxMeta` → the entry logic above.** The
-   risky core: source via `metaFromContext`; reuse on same-wave; ephemeral derive on
-   cross-wave (no caching); `ctxMetaMap` only for case 2 (stable user ctx) until step 4.
-   Validate against `TestPermitScopingChains` + the sim (race).
-3. Re-apply the stash (bodies → ctxpool; remove `execShell`) — now unblocked by step 2.
-4. Per-call driver borrows (the two-nested-borrows for top-level trySkim) +
-   `topLevelExEnv.Lock` removal; retire `ctxMetaValueKey`/`ctxMetaMap`/`skimCtxMetaMap`.
-5. Reconcile examples + sim (B3.D).
+   `ctxMetaMap` use. Green standalone.
+
+**FINDING (2026-06-22, attempting increment 2): the meta-machinery rewrite and the body
+migration are ONE coupled cutover, not separable.** Two reasons:
+
+- **Stamping ambiguity.** A body-sourced derivation whose result nested code looks up
+  via the ctx — specifically a **skim meta** (handlers run under the skim ctx) when
+  skimming a sub-wave *from a body* — must be stamped onto a ctx that
+  `metaFromContext` resolves to it. Post-migration the source is a ctxpool body ctx.
+  Stamping the derived meta via `context.WithValue(ctx, ctxMetaValueKey, m)` is
+  **shadowed**: `metaFromContext` checks ctxpool first and `GetValue` returns the
+  *body's* meta on the ancestor child. Flipping the lookup order breaks plain body
+  ctxs. The only stamp that wins is a **ctxpool borrow** of the derived meta — i.e. the
+  per-call driver borrow. (A cross-wave *dispatch* meta is used transiently for the
+  enqueue and is NOT looked up via ctx by nested code, so it needs no stamp — only
+  ctx-resolved metas, skim especially, force the borrow.)
+- **Can't build/test before bodies migrate.** At the current checkpoint bodies are
+  `execShell` ctxs (under `ctxMetaValueKey`, reusing one meta pointer), so there are no
+  ctxpool body ctxs to exercise the new path; a separate "increment 2" would be dead
+  code. The ctxpool-body-source handling must land *with* the body migration, gated by
+  the sim.
+
+**Revised plan — increments 2+3+4 collapse into one cutover** (do with fresh context;
+the sim/`-race` is the gate): re-apply the stashed body migration AND make the meta
+machinery resolve+stamp driver metas through ctxpool per-call borrows (entry logic
+above), retiring `ctxMetaValueKey`/`ctxMetaMap`/`skimCtxMetaMap` together. Then B3.D
+(examples/sim reconcile). The `bc8040e` `ctxMeta` change stands either way.
 
 ## WIP status
 

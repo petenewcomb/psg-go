@@ -15,12 +15,10 @@ import (
 	"github.com/petenewcomb/streampool/internal/cerr"
 	"github.com/petenewcomb/streampool/internal/ctxmap"
 	"github.com/petenewcomb/streampool/internal/omnipool"
-	"github.com/petenewcomb/streampool/internal/opts"
 	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/petenewcomb/streampool/internal/timerp"
 	"github.com/petenewcomb/streampool/internal/wavestate"
 	"github.com/petenewcomb/streampool/internal/workq"
-	"github.com/petenewcomb/streampool/psgopt"
 )
 
 // Wave is the unit that admits, drains, and cancels a batch of scatter-gather
@@ -175,7 +173,7 @@ var taskWorkPool = omnipool.For[taskWork]()
 // context; the wave's internal ctx descends from it (cancelled by Cancel to tear
 // down wave-owned goroutines). Body contexts are not wave-owned — they are
 // borrowed per dispatch from ctxpool (see bodyctx.go).
-func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wave {
+func newWaveSubstrate(parent context.Context) *Wave {
 	traceRegion := "newWaveSubstrate"
 	defer trace.StartRegion(parent, traceRegion).End()
 
@@ -198,7 +196,6 @@ func newWaveSubstrate(parent context.Context, options ...psgopt.PoolOption) *Wav
 	w.skimQueue.Init()
 	w.governor.Init()
 	w.workQueue.Init(nil)
-	w.SetOptions(options...)
 
 	return w
 }
@@ -252,8 +249,7 @@ func (j *Wave) CancelAndWait() {
 
 // Skim processes outstanding task results and then waits for the next
 // task result from a task previously launched via [Start]. It will block until
-// a completed task is available, the provided context or job is canceled, or
-// another event causes a wake-up (e.g. a call to [TaskPool.SetOptions]).
+// a completed task is available or the provided context or job is canceled.
 // If the job is closed and no tasks remain in flight, it will return immediately.
 // See [Wave.TrySkim] for a non-blocking alternative.
 //
@@ -893,31 +889,4 @@ func (j *Wave) CloseAndSkimAll(ctx context.Context) error {
 
 	j.Close()
 	return j.SkimAll(ctx)
-}
-
-// poolConfigWrapper wraps a Wave to implement the poolConfig interface for options
-type poolConfigWrapper struct {
-	job *Wave
-}
-
-func (w poolConfigWrapper) Update(changes opts.PoolConfigChanges) {
-	// TRANSITIONAL: the task-worker idle/jitter/spawn-limit options are now no-ops
-	// (the global worker.Pool owns worker lifecycle; its idle/spawn behavior is
-	// fixed, not per-job tunable). The option API is still accepted for source
-	// compatibility; removing WithTaskWorker* from psgopt is the options-fallout
-	// cleanup. See docs/plan/global-substrate-activation.md.
-	if changes.FlushListener != nil {
-		w.job.state.SetFlushListener(*changes.FlushListener)
-	}
-}
-
-// SetOptions applies the given configuration options to the job.
-// This method is safe to call at any time and changes take effect immediately.
-//
-//nolint:contextcheck // background context used only for tracing
-func (j *Wave) SetOptions(options ...psgopt.PoolOption) {
-	traceRegion := "Wave.SetOptions"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	opts.ApplyToPool(poolConfigWrapper{job: j}, options...)
 }

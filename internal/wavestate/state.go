@@ -35,7 +35,6 @@ type WaveState struct {
 	totalReferences InFlightCounter // Tracks both work and funnels
 	nextFlushChan   atomic.Value    // Stores chan struct{} for flush signals
 	doneChan        chan struct{}
-	flushListener   atomic.Value // Stores func() callback for flush events
 }
 
 // Init initializes an uninitialized WaveState to the Open stage, and must be
@@ -162,13 +161,6 @@ func (ws *WaveState) Done() <-chan struct{} {
 	return ws.doneChan
 }
 
-// SetFlushListener sets the function to be called when all work has completed
-// and the wave is waiting for funnels to emit their results. Pass nil to remove
-// any existing listener.
-func (ws *WaveState) SetFlushListener(fn func()) {
-	ws.flushListener.Store(fn)
-}
-
 // PanicIfDone panics if the wave is in the done stage
 func (ws *WaveState) PanicIfDone() {
 	if lifecycleStage(ws.currentStage.Load()) == stageDone {
@@ -206,11 +198,6 @@ func (ws *WaveState) noMoreWork() {
 
 	// Handle flush channel for flushing state
 	if currentStage == stageFlushing {
-		// Call the flushListener callback if set (before closing the channel)
-		if fn, ok := ws.flushListener.Load().(func()); ok && fn != nil {
-			trace.WithRegion(context.Background(), traceRegion+".flushListener", fn)
-		}
-
 		// Create new channel and swap with old one
 		newCh := make(chan struct{})
 		oldCh := ws.nextFlushChan.Swap(newCh).(chan struct{})

@@ -13,8 +13,6 @@ import (
 	// https://github.com/golang/go/issues/12794
 	"github.com/petenewcomb/streampool"
 	"github.com/petenewcomb/streampool/internal/exmpclk"
-
-	"github.com/petenewcomb/streampool/psgopt"
 )
 
 // ExampleFunnel demonstrates how funnels can efficiently aggregate
@@ -41,10 +39,8 @@ func ExampleFunnel() {
 
 	ctx := context.Background()
 
-	// Create a scatter-gather wave with flush listener to observe when all tasks have completed
-	ctx, wave := streampool.NewWave(ctx, streampool.WithPoolOptions(psgopt.WithFlushListener(func() {
-		fmt.Printf("%3dms: flush: all tasks completed, waiting for funnels\n", msSinceStart())
-	})))
+	// Create a scatter-gather wave.
+	ctx, wave := streampool.NewWave(ctx)
 	defer wave.CancelAndWait()
 
 	// Limit concurrent tasks to 2.
@@ -149,7 +145,6 @@ func ExampleFunnel() {
 	//  80ms:   funneld "D", result counts now: map[A:1 B:1 C:1 D:1]
 	//  90ms:   task 5 (40ms -> "A") complete, in-flight count now 0
 	// 100ms:   funneld "A", result counts now: map[A:2 B:1 C:1 D:1]
-	// 100ms: flush: all tasks completed, waiting for funnels
 	// 100ms:   flushing result counts: map[A:2 B:1 C:1 D:1]
 	// 100ms:   skimming result counts: map[A:2 B:1 C:1 D:1]
 	// 100ms: skimming complete

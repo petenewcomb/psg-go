@@ -175,7 +175,6 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - Investigate and fix workflow cancellation test flakiness in psgwf (observed timing-dependent failures in example tests)
 - Make sure that combiner pools scale down to zero
 - Test automatic flushing behavior based on timeout settings somewhere other than just benchmarks
-- Test TaskPool.SetOptions and CombinerPool.SetOptions functionality, especially dynamic pool resizing
 - Ensure no goroutine leaks in any scenario
 - Test and ensure correct ongoing behavior when user code recovers from panics that propagated through the framework
 - Test edge cases with cross-job context propagation

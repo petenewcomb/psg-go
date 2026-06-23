@@ -6,8 +6,6 @@ package streampool
 import (
 	"context"
 	"fmt"
-
-	"github.com/petenewcomb/streampool/psgopt"
 )
 
 // funnelEngine returns this Wave's lazily-created funnel engine, building it on
@@ -28,39 +26,12 @@ func (w *Wave) funnelEngine() *funnelEngine {
 	return fe
 }
 
-// WaveOption configures a Wave at construction time.
-type WaveOption interface {
-	applyToWaveConfig(*waveConfig)
-}
-
-type waveConfig struct {
-	poolOpts []psgopt.PoolOption
-}
-
-// WithPoolOptions forwards construction options to the Wave's substrate.
-func WithPoolOptions(opts ...psgopt.PoolOption) WaveOption {
-	return withPoolOptionsOption{opts: opts}
-}
-
-type withPoolOptionsOption struct {
-	opts []psgopt.PoolOption
-}
-
-func (o withPoolOptionsOption) applyToWaveConfig(c *waveConfig) {
-	c.poolOpts = append(c.poolOpts, o.opts...)
-}
-
 // NewWave constructs a Wave and returns it together with a Wave-augmented
 // context callers should pass to op dispatches (Start, Submit). The Wave owns
 // its substrate over the global worker pool and is torn down by
 // [Wave.CancelAndWait].
-func NewWave(parent context.Context, opts ...WaveOption) (waveCtx context.Context, wave *Wave) {
-	var cfg waveConfig
-	for _, opt := range opts {
-		opt.applyToWaveConfig(&cfg)
-	}
-
-	w := newWaveSubstrate(parent, cfg.poolOpts...)
+func NewWave(parent context.Context) (waveCtx context.Context, wave *Wave) {
+	w := newWaveSubstrate(parent)
 
 	// Inject the Wave into the ctxMeta of the returned ctx so op dispatches can
 	// find it. topLevelCtxMeta also populates the cached meta's executionEnvironment

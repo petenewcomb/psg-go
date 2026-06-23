@@ -5,51 +5,115 @@ description: Diagnose an intermittent hang, livelock, deadlock, or "never-Done" 
 
 # Debugging psg-go simulation hangs with execution traces
 
-`TestBySimulation` (psg root package, `simulation_test.go`) runs `rapid`-generated
-plans through `internal/sim`, exercising Pools/Waves/Funnels/Skimmers/Limiters and
-nested subjobs concurrently. Concurrency bugs show up as **intermittent** hangs.
-This skill is the end-to-end method to root-cause them.
+`TestBySimulation` (root package, `simulation_test.go`) runs `rapid`-generated plans
+through `internal/sim`, exercising Pools/Waves/Funnels/Skimmers/Limiters and nested
+subjobs concurrently. Concurrency bugs surface as **intermittent** hangs/livelocks —
+Heisenbugs.
 
-## 0. Mindset / what kind of bug is it?
+The method, in order. Do the cheap, high-leverage steps *first*:
 
-Read the goroutine dump signature first (a plain `-timeout` panic dumps all goroutines):
+1. **Classify** the failure from the goroutine dump (picks the diagnosis technique).
+2. **Bias and bisect the sim config to a minimal repro** — *before* capturing any trace.
+   This is the highest-leverage step (see §2): biasing the sim makes a rare Heisenbug
+   *frequent*, and bisecting the plan makes it *small* — which makes the eventual trace
+   short and the analysis tractable.
+3. **Capture a trace** of that minimized repro.
+4. **Post-process the trace**; if it doesn't yet reveal the bug, **add trace logging** and
+   re-capture. Iterate.
 
-- **`sync.Mutex` / `semacquire` waiters present** → a blocking deadlock; find the lock cycle.
-- **Zero mutex waiters, goroutines `runnable`/spinning** → a **busy-spin livelock** (CPU-bound). Confirm via a counter that climbs in the trace (e.g. `nbcq.PushBack item=N`).
-- **All workers exited, only `SkimAll` parked on `j.state.Done()`** → job never reached Done = a **leaked/stuck job reference** (work or funnel-instance barrier Init'd but never Closed/flushed).
+Favor post-processing data you collect in the trace over building diagnostic machinery
+(watchdogs, analyzers, parallel stderr tracers) in the code. The one exception is
+**panics that assert invalid state** — those are cheap, they convert a silent wedge into
+a loud, located failure, and they should generally be left in the code permanently.
 
-Reproduce-then-trace beats staring at one dump: the dump is the *final state*; only the **trace** shows the *interleaving* that produced it.
+## Toolset
 
-## 1. Reproduce reliably (reduce variability — but know which knob matters)
+- **`internal/sim` + `TestBySimulation`** — the simulation. `planConfig` (a
+  `sim.Config`) parameterizes plan generation: op counts, path length/count, subjob
+  depth, per-op `SelfTime` delays, error/scatter probabilities. These knobs are how you
+  bias and shrink (see §2). `internal/sim/run.go` (`ensurePools`) wires the limiters.
+- **`rapid`** — the property-based generator driving plan generation. Note: rapid
+  **shrinking does not work** for non-deterministic concurrency bugs (a seed that hangs
+  one run passes the next), so don't rely on seeds/shrinking — you bisect `planConfig`
+  by hand instead. Always `-count=1` (and `-rapid.checks=N`) to defeat go-test caching.
+- **Tracing** — `internal/trace` wraps `runtime/trace`. Enable internal trace logging
+  with env `PSGTRACEINTERNALS` set (value is a prefix filter; empty matches all, `=+`
+  strips the leading `+`); capture the runtime trace with `go test -trace=…`. A
+  `-timeout` hang flushes enough trace to read the lead-up. Existing `trace.Logf` points
+  stamp lifecycle events with object pointers (`funnelEngine=%p`, `worker=%p`,
+  `WaveState=%p`, channel pointers, limiter `lim=%p`) — these are what make a trace
+  *correlatable* (§4).
+- **`internal/cmd/fmttrace`** — its own module (uses `golang.org/x/exp/trace`); renders a
+  raw trace to text with goroutine IDs, timing, regions, and log messages. Helpers in
+  that dir: `find-goroutines.sh '/<sed-pattern>/' < text` (gids whose events match) and
+  `extract-goroutine.sh <gid> < text` (one goroutine's events).
+  - Caveat: the higher-level `analyze-sim-trace.sh` / `extract-sim-*.sh` op-diff scripts
+    grep markers that drifted in the rename (`sim.Run: Test plan:`, `step M/M: done`) and
+    may not run as-is. The manual pipeline below and the §4 techniques don't need them.
 
-`rapid` shrinking is **unreliable for non-deterministic concurrency bugs** (same plan
-hangs one run, passes the next), so don't rely on seeds/shrinking. Instead reduce the
-plan config in `simulation_test.go` to make the hang frequent, and loop `go test`.
+## 1. Classify from the goroutine dump
 
-Knobs (temporary edits in `TestBySimulation`, REVERT before finishing):
-- `planConfig.<Launcher.Body|Funnel.Accumulate|Funnel.Flush|Skimmer.Handle>.SelfTime = sim.BiasedDurationConfig{}` — **zero delays**; biggest lever: makes cases fast AND tightens concurrency windows, surfacing races.
-- `planConfig.Subjob.MaxDepth` — recursion; **many bugs require subjobs** (set 0 to test if recursion is needed).
-- `planConfig.{Path,Funnel,Skimmer}.Count` — scale; some bugs need near-default scale, others reproduce small.
+A plain `-timeout` panic dumps all goroutines. Read the signature first — it selects the
+technique:
 
-Beware **go-test result caching** — always use `-count=1` (or `-rapid.checks=N`).
+- **`sync.Mutex` / `semacquire` waiters present** → a blocking **deadlock**; find the
+  lock/permit cycle (who holds what while waiting for what).
+- **Zero mutex waiters, goroutines `runnable`/spinning** → a **busy-spin livelock**
+  (CPU-bound); confirm with a counter that climbs in the trace, and look for a
+  hold-and-wait on a resource (a permit held by a parked holder while another spins).
+- **All workers exited, only `SkimAll` parked on `j.state.Done()`** → the job never
+  reached Done = a **leaked/stuck reference** (a work or funnel-instance barrier was
+  taken but never released — either the release logic never ran, or a driver goroutine
+  that should run it is parked having missed its wake signal).
 
-Loop until a hang (each hang costs the `-timeout`):
+The dump is the *final state*. Only the **trace** shows the *interleaving* that produced
+it — but get to a small, frequent repro before you capture one.
+
+## 2. Bias and bisect the sim to a minimal repro (do this BEFORE tracing)
+
+Since rapid shrinking is useless here, you reduce variability by hand — and you get two
+wins at once: **bias** the config so the bug reproduces *frequently*, and **bisect** it so
+the reproducing plan is *small*. Heisenbugs often become dramatically more frequent and
+much simpler under the right bias, and a simple plan yields a short, readable trace.
+
+Work in `TestBySimulation` (temporary edits — **REVERT before finishing**), looping
+`go test` to *measure the hit rate* so you can tell whether a change helped:
+
 ```bash
 for i in $(seq 1 300); do
   go test -run TestBySimulation -count=1 -rapid.checks=1 -timeout 20s . >/tmp/h_$i.log 2>&1
-  grep -q "test timed out" /tmp/h_$i.log && { echo "HANG inv $i"; break; }
+  grep -q "test timed out" /tmp/h_$i.log && echo "HANG inv $i"
 done
 ```
-Useful discriminating experiments: make all limiters unlimited (`internal/sim/run.go`
-`ensurePools`: `psg.NewSemaphore(-1)`) to test "is a limiter the gate?"; toggle
-subjobs/funnels/delays to isolate the trigger.
 
-## 2. Capture an execution trace
+Quote the rate (e.g. "≈3/300" vs "0/300") to compare configs quantitatively.
 
-Enable internal tracing (`PSGTRACEINTERNALS` set, value is a prefix — empty is fine;
-`=+` is equivalent, the leading `+` is stripped) AND `-trace`. A `-timeout` hang flushes
-enough trace to use. Keep cases small (`-rapid.checks=1`) so the trace is one top-level
-case (still large — hundreds of MB to GB; the tooling streams, that's OK):
+The knobs, and what each one buys you:
+
+- `planConfig.<Launcher.Body|Funnel.Accumulate|Funnel.Flush|Skimmer.Handle>.SelfTime =
+  sim.BiasedDurationConfig{}` — **zero delays**. The biggest lever: cases run fast *and*
+  concurrency windows tighten, so races fire far more often.
+- `planConfig.Subjob.MaxDepth` — recursion depth. Many bugs need subjobs (set 0 to test
+  whether recursion is required).
+- `planConfig.{Path,Funnel,Skimmer}.Count`, `Path.Length`, `ScatterCount` — scale and
+  shape. Shrink toward the smallest counts that still reproduce.
+- Unlimited limiters (`internal/sim/run.go` `ensurePools`: `NewSemaphore(-1)`) — tests
+  "is a limiter the gate?".
+- Error/scatter probabilities → 0 — remove orthogonal variation.
+
+Bisect like delta-debugging: starting from a config that reproduces, turn off or shrink
+**one dimension at a time** and re-measure.
+
+- If the bug **persists**, keep that dimension off/smaller — the repro just got simpler.
+- If the bug **vanishes**, that dimension is part of the trigger — turn it back on and
+  record it. This doubles as a **discriminator**: "needs funnels", "needs subjobs", "not
+  the limiter" each narrow the cause *before* you read a single trace event.
+
+Converge on the minimal set of enabled features and smallest counts that still hangs
+frequently. That config is the thing you trace.
+
+## 3. Capture a trace (of the minimized repro)
+
 ```bash
 for i in $(seq 1 300); do
   PSGTRACEINTERNALS= go test -run TestBySimulation -trace=/tmp/trace.out -rapid.checks=1 -timeout 25s . >/tmp/c_$i.log 2>&1
@@ -57,66 +121,64 @@ for i in $(seq 1 300); do
 done
 ```
 
-## 3. Analyze with the toolkit
+A minimized repro keeps this trace small (un-minimized zero-delay cases can run to ~1 GB;
+fmttrace streams them, but a small one is the difference between seconds and minutes of
+analysis). `-rapid.checks=1` keeps it to a single top-level case. Don't fear the trace
+overhead masking the bug — capture and see; if a particular bug only reproduces untraced,
+that itself is a clue, but usually tracing reproduces fine.
 
-The formatter is `internal/cmd/fmttrace` (its own module; uses `golang.org/x/exp/trace`).
-It prints events as text with goroutine IDs/timing/regions/log messages.
+Render to text:
 
-Full pipeline (creates plan/started/completed/incomplete in CWD):
 ```bash
-mkdir -p /tmp/an && cd /tmp/an
-<psg>/internal/sim/analyze-sim-trace.sh /tmp/trace_hang.out
-```
-`incomplete.txt` = ops that started (`step 1/M`) but never completed (`step M/M: done`) — the wedge.
-
-Manual / when scripts misbehave (see gotchas):
-```bash
-SIM=<psg>/internal/sim
-zstd -dc trace.out.zst | go run -C <psg>/internal/cmd/fmttrace ./... | zstd -T0 -3 > trace.txt.zst   # text (slow, ~minutes on GB)
-zstd -dc trace.txt.zst | $SIM/extract-sim-started.sh   | sort -u > started.txt
-zstd -dc trace.txt.zst | $SIM/extract-sim-completed.sh | sort -u > completed.txt
-comm -23 started.txt completed.txt    # wedged ops (use plain sort for comm)
-zstd -dc trace.txt.zst | tail -3000    # the tail is the interleaving right before the wedge
+go run -C <psg>/internal/cmd/fmttrace ./... < /tmp/trace_hang.out > /tmp/trace.txt
+# huge traces: stream through zstd, e.g.
+#   zstd -dc trace.out.zst | go run -C <psg>/internal/cmd/fmttrace ./... | zstd -T0 -3 > trace.txt.zst
 ```
 
-Drill into a goroutine (`<psg>/internal/cmd/fmttrace/`):
-- `find-goroutines.sh '/<sed-pattern>/' < text` — goroutine IDs whose events match.
-- `extract-goroutine.sh <gid> < text` — all events for one goroutine.
+## 4. Post-process the trace
 
-Read limiter/governor behavior directly: the existing `trace.Logf` points (Governor
-downstream±/backpressure, `Pool.block`) plus any you add (e.g. limiter acquire/release
-with the `lim=%p` pointer) reveal hold-and-wait. To prove a held resource: count
-`acquire-OK` vs `release` for a `lim=%p` — `acquire-OK == release+1` means **held**;
-`find-goroutines.sh` on the acquire vs the spin shows holder-vs-spinner.
+General techniques, roughly in order of leverage. They lean on the pointer-stamped
+lifecycle logs already in the code — prefer extracting from the trace over adding code:
 
-## 4. Adding info to the trace
+- **Op started-vs-completed diff** — find *which op* wedged: collect op-start lines and
+  op-done lines, `comm`/`sort -u` the difference. (The `extract-sim-*.sh` scripts mean to
+  do this but have stale markers; a manual grep of the start/done log strings works.)
+- **Single-goroutine-to-wedge** — a parked goroutine's **last event is the wedge**.
+  `extract-goroutine.sh <gid> | tail`. If its final line is a `select` ("entering
+  select: … =0x…"), it died parked there, and the printed channel pointers say exactly
+  what it was (and wasn't) waiting on. Get the gid by grepping a per-object lifecycle log
+  line and reading its `G=NNN`.
+- **Pointer correlation** — `%p` stamps tie objects to goroutines to channels. Follow an
+  object (a wave, a funnel engine, a limiter) across goroutines by its pointer to
+  reconstruct who touched it.
+- **Pair-tally** — count two paired lifecycle events globally (`grep -c`). An off-by-one
+  between a "take" and its matching "release"/"signal" pinpoints that *exactly one*
+  instance leaked, ruling out broad accounting bugs and pointing at a single race.
+- **Held-resource proof** — for hold-and-wait, count `acquire-OK` vs `release` for a
+  `lim=%p`: `acquire == release+1` means **held**; `find-goroutines.sh` on the acquire
+  vs. the spin separates holder from spinner.
+- **Timestamp-ordering** — every event carries an absolute ns stamp. Comparing the
+  stamps of a racing pair (e.g. a state transition vs. the moment another goroutine
+  subscribed/read shared state) can directly **prove a happens-before violation**.
 
-Use the **existing** facility (`internal/trace` → runtime/trace) — add `trace.Logf(ctx,
-"<region>", "<fmt>", ...)` at the points of interest (gated by `trace.IsEnabled()` for
-hot paths). Don't build a parallel stderr tracer; `fmttrace` already renders these. The
-trace flushes enough on a `-timeout` hang to read the lead-up.
+## Adding instrumentation when the trace isn't enough
 
-## Gotchas / known issues
+Add `trace.Logf(ctx, "<region>", "<fmt>", …)` at the points of interest (gate hot paths
+on `trace.IsEnabled()`), re-capture, and iterate until the bug reveals itself. `fmttrace`
+already renders these — don't build a parallel stderr tracer, an in-code watchdog, or a
+bespoke analyzer. The exception, again: an **invalid-state `panic`** is a fine and durable
+addition — it turns a silent wedge into a located failure and earns its keep in the code.
 
-- **Stale extract-script markers (combiner rename):** `extract-sim-trace.sh` greps
-  `sim.Run: Test plan:` but the sim now logs the plan as `%v` (`Plan#N…`);
-  `extract-sim-completed.sh` greps `step M/M: done` but the sim logs `… ends at`. Either
-  fix the scripts or restore the markers in `internal/sim/run.go`. Until fixed, bypass
-  with the manual pipeline above (with `-rapid.checks=1` there's one top-level case, so
-  you don't need `extract-sim-trace.sh`'s "isolate the last plan" step).
-- **rapid shrinking does not work** for these (non-deterministic). A per-case watchdog
-  that cancels ctx to convert a hang into a `t.Fatal` for shrinking is also fragile —
-  `sim.Run` may not unwind cleanly on cancel (`CancelAndWait` can itself block). Prefer
-  loop-until-hang + trace.
-- **Trace files are huge** (a single zero-delay case can be ~1 GB). That's expected; the
-  tooling streams. `fmttrace` on 1 GB takes ~2 min. Don't delete a captured hang trace.
-- Always `-count=1` to defeat go-test caching.
+## Gotchas
 
-## Worked example (2026-06-07, the bug this skill came from)
-
-Intermittent `TestBySimulation -race` hang → no mutex waiters → busy-spin in
-`rdvq.Waiters.WaitFunc`/`block-and-help` (item counter ~920k). Trace showed a `limit=1`
-limiter held (`acquire-OK == release+1`) while its holder was parked in a gather; same
--(sub)job work needing that permit spun. Confirmed by unlimited-limiter test (0/250 vs
-~1/25). Root cause + fix (limiter suspend/resume around gathers) are written up at the
-top of `WORKING_NOTES.md`.
+- **rapid shrinking does not work** here (non-deterministic). A per-case watchdog that
+  cancels ctx to force a shrinkable `t.Fatal` is also fragile — `sim.Run` may not unwind
+  cleanly on cancel (`CancelAndWait` can itself block), and a per-case timer left running
+  on the (mostly passing) cases leaks many sleeping goroutines that pollute the dump.
+  Bisect the config (§2) + loop-until-hang + trace instead.
+- **Stale op-diff script markers** (rename drift): `analyze-sim-trace.sh` /
+  `extract-sim-*.sh` grep strings the sim no longer logs verbatim. Fix the scripts/markers
+  or use the manual §4 techniques (which don't depend on them).
+- **Traces are huge** unless you minimize first (§2) — another reason §2 precedes §3.
+- Always **`-count=1`** to defeat go-test result caching.
+- **Don't delete a captured hang trace** until the bug is fixed and verified.

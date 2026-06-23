@@ -2,6 +2,35 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► B3 CUTOVER INTERMITTENT HANG — ROOT-CAUSED AND FIXED (2026-06-23).**
+The ctxpool body+meta cutover (`e740d33`) intermittently wedged a wave at
+`stage=Flushing inFlightWork=0 totalRefs=1` — one funnel instance never flushed, so its
+per-instance barrier reference never dropped and the wave never reached Done (`SkimAll`
+parked on `state.Done()`).
+- **Root cause — a flush-signal subscription race in the funnel flusher.** The
+  per-wave flusher goroutine read its end-of-work flush channel *inside* the goroutine
+  (`worker.nextJobFlushCh = j.state.FlushChan()` at `funnelengine.go:161`). The wave's
+  `Closed→Flushing` transition (`wavestate.noMoreWork`) *rotates* that channel — closes
+  the old one (the flush signal) and installs a fresh one. When a funnel is created very
+  late and its wave reaches Flushing within ~microseconds, the flusher goroutine can be
+  scheduled to run its body *after* the rotation, so it subscribes to the **post-rotation**
+  channel (never closed again) and parks forever, missing the wave's one end-of-work
+  flush signal. The cutover didn't introduce the race but **widened the window**: the
+  flusher's startup now does more work (`ensureCtxMeta` via ctxpool, ~29µs in the trace).
+- **Proof (execution trace `trace.out`):** Wave `0x3c80014e2708` did its Flushing CAS at
+  t=`005605053696`; its flusher `G=25814` didn't begin executing until `005605111488`
+  (~58µs later) and ended its entire trace parked in `popSelect` on the post-rotation
+  `nextJobFlushCh=0x3c8001c9e070`. Global tally: 4287 Accumulate vs 4286
+  "received job flush signal" — exactly one instance's signal lost.
+- **Fix:** capture `FlushChan()` **synchronously in `newFunnelEngine`** (which always
+  runs during the wave's Open phase, strictly before any Flushing rotation) and pass it
+  into the flusher. The pre-rotation channel is exactly the one closed at the first
+  Flushing transition, and a closed channel always fires in `select` — so the signal
+  can't be missed no matter how late the goroutine is scheduled.
+- **Verification:** 300/300 plain + 40/40 `-race` of the reduced zero-delay repro (was
+  reliably hanging pre-fix; pre-cutover baseline 0/150), full `./...` suite + linter
+  green. All `TEMP B3.hang` diagnostics reverted.
+
 **►►► SURFACE REDESIGN + DOC-ORG TARGET (LOCKED, 2026-06-21, design review w/ PN).**
 A deep design pass converged the user-facing `streampool` surface and the target doc
 organization. These SUPERSEDE earlier surface notes (incl. the 2026-06-20 "SURFACE

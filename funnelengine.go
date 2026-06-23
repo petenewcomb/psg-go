@@ -70,23 +70,36 @@ func newFunnelEngine(job *Wave) *funnelEngine {
 	// on the global pool via defaultPool.Post). One persistent flusher drives it.
 	fe.workQueue.Init(nil)
 
+	// Capture the end-of-work flush channel HERE, synchronously, before
+	// spawning the flusher goroutine. newFunnelEngine always runs during the
+	// wave's Open phase (funnels are created before CloseAndSkimAll), strictly
+	// before any Closed→Flushing rotation, so this is the pre-rotation channel
+	// that noMoreWork closes at the first Flushing transition. If we instead
+	// read FlushChan() inside the flusher goroutine, an arbitrarily-delayed
+	// goroutine could read the POST-rotation channel and park on it forever,
+	// missing the wave's one end-of-work flush signal (the funnel-instance
+	// reference-leak hang; see WORKING_NOTES.md).
+	flushCh := job.state.FlushChan()
+
 	// Run the single persistent flush driver (drains deadline-driven +
 	// end-of-work funnelInstance flushes until the job reaches Done).
-	fe.spawnFlusher()
+	fe.spawnFlusher(flushCh)
 
 	return fe
 }
 
-// spawnFlusher starts the single persistent flush driver goroutine.
+// spawnFlusher starts the single persistent flush driver goroutine. flushCh is
+// the end-of-work flush channel captured synchronously by the caller (before
+// any Flushing rotation can occur); see newFunnelEngine.
 //
 //nolint:contextcheck // goroutine will use job context
-func (fe *funnelEngine) spawnFlusher() {
+func (fe *funnelEngine) spawnFlusher(flushCh <-chan struct{}) {
 	traceRegion := "funnelEngine.spawnFlusher"
 	trace.Logf(context.Background(), traceRegion,
 		"funnelEngine=%p starting flush driver", fe)
 	go func() {
 		defer close(fe.flusherDone)
-		fe.flusher()
+		fe.flusher(flushCh)
 	}()
 }
 
@@ -98,7 +111,7 @@ func (fe *funnelEngine) joinFlusher() {
 	<-fe.flusherDone
 }
 
-func (fe *funnelEngine) flusher() {
+func (fe *funnelEngine) flusher(flushCh <-chan struct{}) {
 	var doneWg sync.WaitGroup
 	doneCh := make(chan struct{})
 	var doneErr error
@@ -154,11 +167,16 @@ func (fe *funnelEngine) flusher() {
 
 	trace.Logf(ctx, traceRegion, "cpWorker=%p", worker)
 
-	// Subscribe to the job's end-of-work flush signal up front. Legacy did this
-	// lazily in executeFunnel (when the cpWorker ran a funnel body), but the body
-	// now runs on the global pool, so this persistent flusher must subscribe at
-	// startup or it would never wake to run the end-of-work flush sweep.
-	worker.nextJobFlushCh = j.state.FlushChan()
+	// Subscribe to the job's end-of-work flush signal. The channel was captured
+	// synchronously at engine creation (newFunnelEngine), before any Flushing
+	// rotation could occur — NOT read here, because this goroutine may be
+	// scheduled arbitrarily late and would otherwise read the post-rotation
+	// channel and miss the wave's end-of-work flush signal forever (the
+	// funnel-instance reference-leak hang). Legacy subscribed lazily in
+	// executeFunnel (when the cpWorker ran a funnel body), but the body now runs
+	// on the global pool, so this persistent flusher must subscribe up front or
+	// it would never wake to run the end-of-work flush sweep.
+	worker.nextJobFlushCh = flushCh
 
 	addWorkFn := worker.AddWork
 

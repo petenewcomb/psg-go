@@ -20,18 +20,16 @@ import (
 // client disconnection cancels only that request's operations.
 func Example() {
 	// Create a long-running wave for the API server
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
+	var wave streampool.Wave
 
 	poolLimit := streampool.NewSemaphore(10)
-	_ = ctx
 
 	// Track completed operations for ordered output
 	var mu sync.Mutex
 	completed := []string{}
 
 	// Create a skim for collecting results
-	resultSkim := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	resultSkim := psgwf.NewSkimmer(&wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -47,7 +45,7 @@ func Example() {
 		wf := psgwf.New(clientCtx)
 
 		// Launch operation for this request
-		runner := psgwf.NewGenericLauncher(wave, resultSkim, wf,
+		runner := psgwf.NewGenericLauncher(&wave, resultSkim, wf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				select {
 				case <-time.After(sleepTime):

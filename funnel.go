@@ -206,7 +206,13 @@ func (c *Funnel[T]) SubmitResult(
 	defer inner.unref()
 	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
-	ctx, meta := inner.fEngine.job.ctxMeta(ctx)
+	inner.fEngine.job.ensureArmed() // dispatch entry: re-arm a drained wave
+	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
+	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// cross-wave submit redirects into the funnel's wave, recording the source as
+	// parent). No ctx-type restriction — a value may be submitted to a funnel from
+	// anywhere.
+	ctx, meta := inner.fEngine.job.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -252,7 +258,13 @@ func (c *Funnel[T]) TrySubmitResult(
 	defer inner.unref()
 	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
 
-	ctx, meta := inner.fEngine.job.ctxMeta(ctx)
+	inner.fEngine.job.ensureArmed() // dispatch entry: re-arm a drained wave
+	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
+	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// cross-wave submit redirects into the funnel's wave, recording the source as
+	// parent). No ctx-type restriction — a value may be submitted to a funnel from
+	// anywhere.
+	ctx, meta := inner.fEngine.job.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -392,7 +404,10 @@ func (c *funnel[T]) unref() {
 	// surface via SkimAll.
 	if c.funnelFactory != nil {
 		if closeErr := c.funnelFactory.Close(); closeErr != nil {
-			ctx, meta := c.fEngine.job.ctxMeta(c.fEngine.job.ctx)
+			// The Wave owns no ctx; mint a fresh top-level meta over Background to
+			// route the factory-close error through the err sink.
+			ctx, meta := c.fEngine.job.topLevelCtxMeta(
+				context.Background(), func(contextType) {})
 			intErr := c.errSink.submit(
 				ctx, meta, c.fEngine.job, workq.InvalidGroupID,
 				struct{}{}, closeErr,

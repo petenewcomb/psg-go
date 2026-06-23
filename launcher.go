@@ -328,6 +328,7 @@ func vetStart(
 	ctx context.Context,
 	pool *Wave,
 ) (context.Context, *ctxMeta) {
+	pool.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
 	ctx, meta := pool.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
 		case topLevelContext, skimContext, funnelContext:

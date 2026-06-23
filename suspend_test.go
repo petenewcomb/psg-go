@@ -24,14 +24,14 @@ import (
 // CloseAndSkimAll, unit 2 runs and unblocks the subwave, and unit 1
 // reclaims and completes.
 func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave streampool.Wave
 
 	gate := make(chan struct{})
 	launcher := streampool.NewFnLauncher(func(ctx context.Context, unit int, _ error) error {
 		switch unit {
 		case 1:
-			subCtx, subWave := streampool.NewWave(ctx)
+			var subWave streampool.Wave
 			sub := streampool.NewTaskLauncher(func(ctx context.Context) error {
 				select {
 				case <-gate:
@@ -40,18 +40,18 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 					return ctx.Err()
 				}
 			})
-			if err := sub.Start(subCtx); err != nil {
+			if err := sub.In(&subWave).Start(ctx); err != nil {
 				return err
 			}
-			return subWave.CloseAndSkimAll(subCtx)
+			return subWave.CloseAndSkimAll(ctx)
 		case 2:
 			close(gate)
 		}
 		return nil
 	}, streampool.WithLimits(streampool.NewSemaphore(1)))
 
-	require.NoError(t, launcher.Submit(ctx, 1))
-	require.NoError(t, launcher.Submit(ctx, 2))
+	require.NoError(t, launcher.In(&wave).Submit(ctx, 1))
+	require.NoError(t, launcher.In(&wave).Submit(ctx, 2))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 }
 
@@ -60,16 +60,15 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 // sole serial skim driver and deadlock). Subwork from a skim handler must
 // go through a funnel or a launched task instead.
 func TestSkimHandlerDrivingSubwavePanics(t *testing.T) {
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave streampool.Wave
 
 	skimmer := streampool.NewFnSkimmer(func(ctx context.Context, _ int, _ error) error {
-		subCtx, subWave := streampool.NewWave(ctx)
-		defer subWave.CancelAndWait()
-		return subWave.CloseAndSkimAll(subCtx) // disallowed: gather from a skim handler
+		var subWave streampool.Wave
+		return subWave.CloseAndSkimAll(ctx) // disallowed: gather from a skim handler
 	})
 
-	require.NoError(t, skimmer.Submit(ctx, 1))
+	require.NoError(t, skimmer.In(&wave).Submit(ctx, 1))
 	require.Panics(t, func() {
 		_ = wave.CloseAndSkimAll(ctx)
 	})

@@ -74,10 +74,14 @@ func InstrumentedFunnel[T any](
 // Example:
 //
 //	task := otpsg.InstrumentedTask("process-data", myTaskFn)
-//	skimmer := otpsg.InstrumentedSkim(wave, "handle-result", mySkimFn)
-//	err := otpsg.Scatter(ctx, skimmer, task)
+//	skimmer := otpsg.InstrumentedSkim(&wave, "handle-result", mySkimFn)
+//	err := otpsg.Scatter(ctx, &wave, skimmer, task)
+//
+// wave is the Wave the launched task is part of; it is bound explicitly because a
+// top-level ctx carries no ambient wave.
 func Scatter[T any](
 	ctx context.Context,
+	wave *streampool.Wave,
 	skim streampool.Skimmer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
 	opts ...streampool.OpOption,
@@ -86,5 +90,5 @@ func Scatter[T any](
 		result, err := task(ctx)
 		return skim.SubmitResult(ctx, result, err)
 	}, opts...)
-	return runner.Start(ctx)
+	return runner.In(wave).Start(ctx)
 }

@@ -39,18 +39,17 @@ func ExampleFunnel() {
 
 	ctx := context.Background()
 
-	// Create a scatter-gather wave.
-	ctx, wave := streampool.NewWave(ctx)
-	defer wave.CancelAndWait()
+	// A zero-value Wave is ready to use; it owns no context and drains via
+	// CloseAndSkimAll below.
+	var wave streampool.Wave
 
 	// Limit concurrent tasks to 2.
 	taskLimit := streampool.NewSemaphore(2)
 
-	// Create a funnel pool and disable the idle timeout
-	funnelPool := wave
+	funnelPool := &wave
 
 	// Define a result aggregation function and create a funneld skim/funnel operation
-	skimmer := streampool.NewFnSkimmer(skimFn).In(wave)
+	skimmer := streampool.NewFnSkimmer(skimFn).In(&wave)
 
 	// After Wave 2, the streampool.Accumulator factory captures the downstream
 	// skimmer in its closure and Submits the aggregated map from
@@ -105,7 +104,7 @@ func ExampleFunnel() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, funnel at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, funnel at 100ms
 	} {
-		err := newRunner(i+1, spec.delay, spec.result).Start(ctx)
+		err := newRunner(i+1, spec.delay, spec.result).In(&wave).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

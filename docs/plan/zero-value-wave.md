@@ -1,5 +1,16 @@
 # Plan — zero-value Wave implementation
 
+> **LANDED 2026-06-23.** Implemented as planned, with two refinements found in
+> verification: (1) re-arm had to be split out of `ensureInit` into a dispatch-only
+> `ensureArmed` — a `CloseAndSkimAll` drives an empty wave to Done during `Close`, so
+> a unified init re-armed the wave during its *own* skim and blocked forever; skim now
+> observes Done, only dispatch re-arms. (2) Two `meta.wave == nil` gaps that `NewWave`
+> used to cover had to be re-stamped explicitly: on the minted top-level meta in
+> `topLevelCtxMeta` (else funnel submit borrows a `wave=nil` body → "child job" panic),
+> and on the flusher's ctx meta (else a `FlushFn`'s ambient `op.Submit` panics, unlike
+> an accumulate body's). Verified: full suite + `-race` suite + `reuse_test.go` + 40×
+> `-race` `TestBySimulation`.
+
 > **Path-to-target doc.** Implements the 2026-06-21b locked Wave lifecycle
 > (`WORKING_NOTES.md` top banner; surface in `docs/decisions/surface-lineage.md`).
 > Decisions (2026-06-23, w/ PN): **reuse-after-drain is in scope from the start**, and
@@ -67,6 +78,34 @@ context.WithCancel(context.Background())` (was `j.ctx`). Exit stays governed by
 (`funnel.go` factory-close error submit) with `context.Background()`. Net: the Wave
 holds no ctx; cancellation rides the caller's ctx by ancestry; no force-abort.
 
+### M5 — Dispatch unification (top-level submit for all ops; cross-wave redirect)
+Dispatch is currently non-uniform: **Launcher** routes through `vetStart` →
+`topLevelCtxMeta(ctx)`, which **mints** a top-level meta when the ctx carries none —
+so `launcher.In(&w).Submit(bareCtx)` works. **Skimmer/Funnel** `SubmitResult` /
+`TrySubmitResult` use `target.ctxMeta(ctx)`, which **panics if the ctx carries no
+meta** — so top-level `skimmer.In(&w).Submit(bareCtx)` / `funnel…Submit(bareCtx)`
+would panic. Top-level direct submit to skimmers/funnels is a real, tested pattern
+(it works today only because the `NewWave` ctx carries the meta), so the zero-value
+model needs all three ops to mint a top-level meta from a bare ctx.
+
+Fix: route Skimmer/Funnel submit through `topLevelCtxMeta`'s mint-or-reuse (same as
+Launcher), with a permissive ctx-type check (preserving today's no-restriction
+behavior). `topLevelCtxMeta` reuses a same-wave meta already on the ctx (in-body
+ambient submit — unchanged) and mints a fresh top-level meta otherwise (top-level
+submit — newly works).
+
+**Cross-wave = redirect (decided 2026-06-23, w/ PN).** Where `ctxMeta` panicked when
+the ctx's meta belonged to a *different* wave, `topLevelCtxMeta`→`ensureCtxMeta`
+instead mints a fresh meta recording the source wave as parent — turning a cross-wave
+submit into a working **redirect** into the bound wave, matching the locked
+`op.In(wave)` "place/redirect" intent. This is a behavior change: cases that
+previously panicked now succeed. (Verify no test depends on the old panic.)
+
+Bonus: hooking `ensureInit` at the top of `topLevelCtxMeta` then covers **all**
+dispatch and skim in one chokepoint (Launcher via `vetStart`, Skimmer/Funnel via the
+unified path, skim via `skimCtxMeta`) — only `Close` and `funnelEngine()` need a
+separate `ensureInit` call.
+
 ### M3 — Surface removal
 Delete `NewWave`, `Cancel`, `CancelAndWait` (and `newWaveSubstrate`, folded into
 `ensureInit`). `Close` stays (it's the seal, distinct from a ctx Cancel).
@@ -102,12 +141,18 @@ Built into M1's `ensureInit`. The re-arm correctness argument:
 
 ## Build order (toward one green landing)
 1. `WaveState.IsDone()`; `ensureInit` + `initialized`/`initMu` fields; fold
-   `newWaveSubstrate` into `ensureInit`; hook the four entry points.
-2. M2: re-home flusher off `j.ctx`; remove `ctx`/`cancelFn` fields; `funnel.go` →
+   `newWaveSubstrate` into `ensureInit`. Also drop the now-vestigial `wg`,
+   `ctxMetaMap`, `skimCtxMetaMap` fields (never written/read; only `CancelAndWait`
+   `Clear`ed them) + the unused `skimCtxMetaValueKey` type + the `ctxmap` import — so
+   the reuse path has no caches to clear, only the flusher join + substrate re-Init.
+2. M5: unify dispatch — route Skimmer/Funnel submit through `topLevelCtxMeta`; hook
+   `ensureInit` at the top of `topLevelCtxMeta` (covers all dispatch + skim) + in
+   `Close` and `funnelEngine()`.
+3. M2: re-home flusher off `j.ctx`; remove `ctx`/`cancelFn` fields; `funnel.go` →
    `Background`.
-3. M3: delete `NewWave`/`Cancel`/`CancelAndWait`.
-4. Migrate all call sites (tests, sim, examples).
-5. Verify.
+4. M3: delete `NewWave`/`Cancel`/`CancelAndWait`.
+5. Migrate all call sites (tests, sim, examples).
+6. Verify.
 
 ## Verification
 - Full `./...` suite + linter.

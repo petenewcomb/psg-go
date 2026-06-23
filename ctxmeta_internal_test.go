@@ -36,13 +36,17 @@ func TestCurrentHeldRequest_Walk(t *testing.T) {
 }
 
 // TestPermitScopingChains pins the parent-link topology through real
-// dispatch flows: derivations chain (top-level→skim, body→NewWave→subwave
+// dispatch flows: derivations chain (top-level→skim, body→subwave
 // top-level), and worker contexts are fresh permit-roots even when the
 // pool's base ctx carries a foreign pool's meta.
 func TestPermitScopingChains(t *testing.T) {
-	ctx, wave := NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave Wave
 
+	// Mint (or fetch) the wave's top-level meta from ctx. A zero-value Wave
+	// self-initializes on this first topLevelCtxMeta call; ctxMeta below then
+	// reads back the meta now stamped on ctx.
+	ctx, _ = wave.topLevelCtxMeta(ctx, func(contextType) {})
 	_, topMeta := wave.ctxMeta(ctx)
 	require.NotNil(t, topMeta)
 	require.Equal(t, topLevelContext, topMeta.ctxType)
@@ -74,9 +78,14 @@ func TestPermitScopingChains(t *testing.T) {
 		bodyParentNil = bodyMeta.parent == nil
 
 		// Drive a subwave synchronously from inside the body — the
-		// telescoping path the suspend brackets rely on.
-		subCtx, subWave := NewWave(bodyCtx)
-		_, subTopMeta := subWave.ctxMeta(subCtx)
+		// telescoping path the suspend brackets rely on. A zero-value
+		// subWave mints its top-level meta on first dispatch/skim into it;
+		// topLevelCtxMeta is that chokepoint. Driving it from bodyCtx (which
+		// carries the body's meta of a DIFFERENT wave) makes ensureCtxMeta
+		// record the body meta as parent — the body→subwave chaining the
+		// assertions below pin.
+		var subWave Wave
+		subCtx, subTopMeta := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subTopCtxType = subTopMeta.ctxType
 		subTopParentIsBody = subTopMeta.parent == bodyMeta
 		// The chain a subwave parking point would walk: from the subjob's
@@ -90,7 +99,7 @@ func TestPermitScopingChains(t *testing.T) {
 			subBodyParentNil = subBodyMeta.parent == nil
 			return nil
 		})
-		if err := subLauncher.Start(subCtx); err != nil {
+		if err := subLauncher.In(&subWave).Start(subCtx); err != nil {
 			return err
 		}
 		if err := subWave.CloseAndSkimAll(subCtx); err != nil {
@@ -100,7 +109,7 @@ func TestPermitScopingChains(t *testing.T) {
 		return skimmer.Submit(bodyCtx, 1)
 	})
 
-	require.NoError(t, launcher.Start(ctx))
+	require.NoError(t, launcher.In(&wave).Start(ctx))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
 	require.True(t, bodySeen)
@@ -108,7 +117,7 @@ func TestPermitScopingChains(t *testing.T) {
 	assert.True(t, bodyParentNil, "task worker context must be a fresh permit-root")
 
 	assert.Equal(t, topLevelContext, subTopCtxType)
-	assert.True(t, subTopParentIsBody, "body→NewWave derivation must chain parent to the body's meta")
+	assert.True(t, subTopParentIsBody, "body→subwave derivation must chain parent to the body's meta")
 	assert.True(t, subTopNoHeld, "no handle stamped yet anywhere on the chain")
 
 	require.True(t, subBodySeen)
@@ -126,20 +135,24 @@ func TestPermitScopingChains(t *testing.T) {
 // subwave context inside that body finds the SAME handle via the parent
 // walk — exactly what the suspend brackets (#4) will rely on.
 func TestHeldRequestStampedDuringBodies(t *testing.T) {
-	ctx, wave := NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave Wave
 
 	var bodyReq, subwaveSeenReq request
 	limited := NewTaskLauncher(func(bodyCtx context.Context) error {
 		_, bodyMeta := wave.ctxMeta(bodyCtx)
 		bodyReq = bodyMeta.currentHeldRequest()
 
-		subCtx, subWave := NewWave(bodyCtx)
-		_, subTopMeta := subWave.ctxMeta(subCtx)
+		// A zero-value subWave mints its top-level meta on first
+		// dispatch/skim; topLevelCtxMeta is that chokepoint and chains the
+		// derived meta's parent to bodyCtx's (cross-wave) body meta, so the
+		// subwave context finds the body's held handle via the parent walk.
+		var subWave Wave
+		subCtx, subTopMeta := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subwaveSeenReq = subTopMeta.currentHeldRequest()
 		return subWave.CloseAndSkimAll(subCtx)
 	}, WithLimits(NewSemaphore(1)))
-	require.NoError(t, limited.Start(ctx))
+	require.NoError(t, limited.In(&wave).Start(ctx))
 
 	var unlimitedReq request = &directRequest{} // sentinel, overwritten
 	unlimited := NewTaskLauncher(func(bodyCtx context.Context) error {
@@ -147,7 +160,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 		unlimitedReq = bodyMeta.currentHeldRequest()
 		return nil
 	})
-	require.NoError(t, unlimited.Start(ctx))
+	require.NoError(t, unlimited.In(&wave).Start(ctx))
 
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
@@ -157,9 +170,9 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 	require.Nil(t, unlimitedReq, "unlimited body must see no handle")
 
 	var funnelReq request
-	ctx2, wave2 := NewWave(context.Background())
-	defer wave2.CancelAndWait()
-	fp := wave2
+	ctx2 := context.Background()
+	var wave2 Wave
+	fp := &wave2
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
@@ -177,10 +190,10 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 }
 
 func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
-	ctx, wave := NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave Wave
 
-	fp := wave
+	fp := &wave
 	// The funnel worker meta is pooled (bodyMetaPool) and recycled when the work is
 	// freed, so capture its properties DURING the body, not via a pointer held past
 	// drain.

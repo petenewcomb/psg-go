@@ -17,15 +17,12 @@ import (
 // cancellation is driven through the context you pass to the wave's drive and
 // dispatch calls — cancel it and the drain returns, leaving in-flight bodies to
 // observe their own (descendant) contexts.
-func ExampleWave_Cancel() {
+func ExampleWave_cancellation() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ctx, wave := streampool.NewWave(ctx)
-	// The standard deferred cleanup call that should almost always follow
-	// creation of a new Wave.
-	defer wave.CancelAndWait()
+	var wave streampool.Wave
 
 	limit := streampool.NewSemaphore(1)
 
@@ -43,7 +40,7 @@ func ExampleWave_Cancel() {
 		time.Sleep(20 * time.Millisecond)
 		return printResult.Submit(ctx, "first task result")
 	}, streampool.WithLimits(limit))
-	if err := firstRunner.Start(ctx); err != nil {
+	if err := firstRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
@@ -55,7 +52,7 @@ func ExampleWave_Cancel() {
 		time.Sleep(100 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
 	}, streampool.WithLimits(limit))
-	if err := secondRunner.Start(ctx); err != nil {
+	if err := secondRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
@@ -82,15 +79,12 @@ func ExampleWave_Cancel() {
 // overall wave short on a fatal error without waiting for results to be skimmed.
 // The task cancels the drive context (captured in a closure); the drain then
 // returns context.Canceled.
-func ExampleWave_Cancel_task() {
+func ExampleWave_cancellation_task() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ctx, wave := streampool.NewWave(ctx)
-	// The standard deferred cleanup call that should almost always follow
-	// creation of a new Wave.
-	defer wave.CancelAndWait()
+	var wave streampool.Wave
 
 	limit := streampool.NewSemaphore(1)
 
@@ -106,7 +100,7 @@ func ExampleWave_Cancel_task() {
 	firstRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		return printResult.Submit(ctx, "first task result")
 	}, streampool.WithLimits(limit))
-	if err := firstRunner.Start(ctx); err != nil {
+	if err := firstRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
@@ -122,7 +116,7 @@ func ExampleWave_Cancel_task() {
 		time.Sleep(10 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
 	}, streampool.WithLimits(limit))
-	if err := secondRunner.Start(ctx); err != nil {
+	if err := secondRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 

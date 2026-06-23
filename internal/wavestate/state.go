@@ -168,6 +168,14 @@ func (ws *WaveState) PanicIfDone() {
 	}
 }
 
+// IsDone reports whether the wave has reached the Done stage. It reads only the
+// atomic stage, so it is safe on a zero-value (uninitialized) WaveState — which
+// reads as Open (stageOpen == 0) — letting a Wave's lazy init distinguish a fresh
+// zero value from one whose prior cycle has fully drained (and so must re-arm).
+func (ws *WaveState) IsDone() bool {
+	return lifecycleStage(ws.currentStage.Load()) == stageDone
+}
+
 // noMoreWork attempts to transition from Closed to Flushing, and will also
 // advance to Done by calling noMoreReferences if appropriate
 //

@@ -41,10 +41,11 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller)
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
 
-	ctx, wave := streampool.NewWave(ctx)
-	defer wave.CancelAndWait()
+	// Zero-value Wave: no constructor, owns no ctx; it drains via CloseAndSkimAll
+	// (below in controller.Run). Cancellation rides the drive ctx.
+	var wave streampool.Wave
 
-	c := newController(plan, wave, parent)
+	c := newController(plan, &wave, parent)
 	if plan.CancelTriggerRunnerID >= 0 {
 		// Plan-baked mid-flight cancellation: the designated launcher's body
 		// (see newLauncher) calls c.cancel while holding its permit, with
@@ -409,7 +410,9 @@ func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx
 	chk := assert.New(t)
 	runner := &c.Launchers[runnerIdx]
 	for {
-		err := runner.Start(ctx)
+		// Top-level dispatch binds the wave (a bare top-level ctx carries no ambient
+		// wave). Nil-wave launchers stay exercised for their in-body submits.
+		err := runner.In(c.Wave).Start(ctx)
 		switch classify(err) {
 		case dispRetry:
 			continue

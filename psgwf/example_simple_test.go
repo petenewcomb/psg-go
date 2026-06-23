@@ -17,13 +17,13 @@ import (
 // Example demonstrates basic workflow context usage.
 func Example_simple() {
 	// Create a wave
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave streampool.Wave
 
 	poolLimit := streampool.NewSemaphore(10)
 
 	// Create a skim
-	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(&wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		} else {
@@ -36,7 +36,7 @@ func Example_simple() {
 	wf := psgwf.New(ctx)
 
 	// Start a task
-	runner := psgwf.NewGenericLauncher(wave, skimmer, wf,
+	runner := psgwf.NewGenericLauncher(&wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
 		}, streampool.WithLimits(poolLimit))

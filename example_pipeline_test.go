@@ -38,10 +38,8 @@ func Example_pipeline() {
 // fails or any read operation fails, MD5All returns an error.
 func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error) {
 
-	// Create the scatter-gather wave, setting up a deferred call to
-	// Cancel to terminate outstanding tasks in case of error.
-	ctx, wave := streampool.NewWave(ctx)
-	defer wave.CancelAndWait()
+	// Create the scatter-gather wave.
+	var wave streampool.Wave
 
 	// Cap concurrent digesting tasks at the number of cores available
 	// to the program, since they should be CPU-bound.
@@ -96,7 +94,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadingRunner(path).Start(ctx)
+		return newReadingRunner(path).In(&wave).Start(ctx)
 	})
 	if err != nil {
 		return nil, err

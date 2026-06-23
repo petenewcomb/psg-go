@@ -15,9 +15,7 @@ import (
 
 // TestWorkflowAfterFunc verifies that AfterFuncs are called after workflow completion
 func TestWorkflowAfterFunc(t *testing.T) {
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
-	_ = ctx
+	var wave streampool.Wave
 
 	// Track which AfterFuncs were called
 	var called sync.Map
@@ -48,11 +46,11 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 	// Create a simple task to ensure workflow is used
 	poolLimit := streampool.NewSemaphore(1)
-	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(&wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	runner := psgwf.NewGenericLauncher(wave, skimmer, wf,
+	runner := psgwf.NewGenericLauncher(&wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
 		}, streampool.WithLimits(poolLimit))
@@ -91,9 +89,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 
 // TestWorkflowAfterFuncWithNewTasks verifies AfterFuncs can scatter new tasks
 func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
-	_ = ctx
+	var wave streampool.Wave
 	poolLimit := streampool.NewSemaphore(2)
 
 	// Track execution
@@ -112,7 +108,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		// Create new workflow for new tasks
 		newWf := psgwf.New(ctx)
 
-		skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+		skimmer := psgwf.NewSkimmer(&wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 			mu.Lock()
 			newTaskRan = true
 			mu.Unlock()
@@ -120,7 +116,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		})
 
 		// Start a new task from within the AfterFunc
-		runner := psgwf.NewGenericLauncher(wave, skimmer, newWf,
+		runner := psgwf.NewGenericLauncher(&wave, skimmer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
 			}, streampool.WithLimits(poolLimit))
@@ -129,11 +125,11 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	})
 
 	// Run a simple task to use the workflow
-	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
+	skimmer := psgwf.NewSkimmer(&wave, func(ctx context.Context, wf *psgwf.Workflow, msg string, err error) error {
 		return nil
 	})
 
-	outerRunner := psgwf.NewGenericLauncher(wave, skimmer, wf,
+	outerRunner := psgwf.NewGenericLauncher(&wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
 		}, streampool.WithLimits(poolLimit))

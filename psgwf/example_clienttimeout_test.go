@@ -21,8 +21,8 @@ import (
 func Example_clientTimeout() {
 
 	// Create a long-running wave for the API server
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave streampool.Wave
 
 	poolLimit := streampool.NewSemaphore(10)
 
@@ -33,7 +33,7 @@ func Example_clientTimeout() {
 	}
 
 	// Create a skim for collecting results
-	skimmer := psgwf.NewSkimmer(wave, func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
+	skimmer := psgwf.NewSkimmer(&wave, func(ctx context.Context, wf *psgwf.Workflow, requestID string, err error) error {
 		fmt.Printf("%2dms [%s] result skimmed\n", msSinceStart(), requestID)
 		return nil
 	})
@@ -60,7 +60,7 @@ func Example_clientTimeout() {
 		fmt.Printf("%2dms [%s] launching workflow\n", msSinceStart(), requestID)
 		wf := psgwf.New(clientCtx)
 		// Launch operation
-		runner := psgwf.NewGenericLauncher(wave, skimmer, wf, newRequestTaskFn(requestID),
+		runner := psgwf.NewGenericLauncher(&wave, skimmer, wf, newRequestTaskFn(requestID),
 			streampool.WithLimits(poolLimit))
 		err := runner.Start(ctx)
 		if err != nil {

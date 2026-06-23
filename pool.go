@@ -16,7 +16,7 @@ import (
 // exported pool type and no settings — the only public lifecycle surface is Wait.
 //
 // SEAM (Wave wiring, not yet landed): Wave dispatch will defaultPool.Acquire on
-// NewWave, defaultPool.Release when its drain completes, and defaultPool.Post
+// first use, defaultPool.Release when its drain completes, and defaultPool.Post
 // work; the per-execution worker context stamps the unified exEnv into the
 // work's borrowed body context. Until a Wave Acquires it the pool is
 // dormant (nothing Posts → no demand → no workers), so newWorkerState's

@@ -19,8 +19,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ctx, wave := streampool.NewWave(ctx)
-	defer wave.CancelAndWait()
+	var wave streampool.Wave
 
 	var flushCount atomic.Int32
 	var skimCount atomic.Int32
@@ -30,9 +29,9 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		skimCount.Add(1)
 		chk.NoError(err)
 		return nil
-	}).In(wave)
+	}).In(&wave)
 
-	funnelPool := wave // NOTE: WithMaxConcurrency(1) dropped (no-op now); serialization must move to a limiter
+	funnelPool := &wave // NOTE: WithMaxConcurrency(1) dropped (no-op now); serialization must move to a limiter
 
 	funnelOp := streampool.NewFunnel(funnelPool, streampool.NewAccumulatorFactory(func() streampool.Accumulator[int] {
 		return streampool.FuncAccumulator[int]{
@@ -55,14 +54,14 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 	}
 
 	// Send one input
-	err := newRunner(1).Start(ctx)
+	err := newRunner(1).In(&wave).Start(ctx)
 	chk.NoError(err)
 
 	// Wait a bit to let the first task be processed
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a second input to potentially trigger timer checking
-	err = newRunner(2).Start(ctx)
+	err = newRunner(2).In(&wave).Start(ctx)
 	chk.NoError(err)
 
 	// Wait for flush to happen due to maxHoldTime

@@ -2,6 +2,17 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► ZERO-VALUE WAVE LANDED (2026-06-23).** The 2026-06-21b Wave lifecycle (below)
+is now implemented. `NewWave`/`Cancel`/`CancelAndWait` are gone; a zero-value
+`var w streampool.Wave` self-inits on first use (`ensureInit`) and re-arms after a
+drain (`ensureArmed`, dispatch-only) so a `*Wave` is reusable/poolable; the Wave owns
+no ctx (flusher roots at Background, exits on `state.Done()`); top-level dispatch binds
+via `op.In(&w)`; dispatch is unified through `topLevelCtxMeta` (cross-wave = redirect).
+Plan + the two bugs found in verification: `docs/plan/zero-value-wave.md`. Verified:
+full suite + `-race` suite + `reuse_test.go` + 40× `-race` `TestBySimulation`, all green.
+Key subtlety: re-arm must be **dispatch-only** — a `CloseAndSkimAll` drives an empty
+wave to Done during `Close`, so if skim re-armed on Done it would block forever.
+
 **►►► B3 CUTOVER INTERMITTENT HANG — ROOT-CAUSED AND FIXED (2026-06-23).**
 The ctxpool body+meta cutover (`e740d33`) intermittently wedged a wave at
 `stage=Flushing inFlightWork=0 totalRefs=1` — one funnel instance never flushed, so its

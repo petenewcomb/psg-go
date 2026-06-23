@@ -133,7 +133,12 @@ func (g Skimmer[T]) SubmitResult(
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	target := resolveWave(g.wave, ctx)
-	ctx, meta := target.ctxMeta(ctx)
+	target.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
+	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
+	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// cross-wave submit redirects into target, recording the source as parent). No
+	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
+	ctx, meta := target.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 
@@ -178,7 +183,12 @@ func (g Skimmer[T]) TrySubmitResult(
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	target := resolveWave(g.wave, ctx)
-	ctx, meta := target.ctxMeta(ctx)
+	target.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
+	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
+	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// cross-wave submit redirects into target, recording the source as parent). No
+	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
+	ctx, meta := target.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 

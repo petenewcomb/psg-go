@@ -32,8 +32,7 @@ func Example_tracing() {
 	defer rootSpan.End()
 
 	// Create a PSG wave
-	ctx, wave := streampool.NewWave(ctx)
-	defer wave.CancelAndWait()
+	var wave streampool.Wave
 
 	// Define a traced task for data loading
 	loadDataTask := otpsg.TracedTask("load-data", func(ctx context.Context) ([]int, error) {
@@ -50,7 +49,7 @@ func Example_tracing() {
 	})
 
 	// Define a skim function that processes loaded data
-	dataSkim := otpsg.TracedSkim(wave, "handle-loaded-data",
+	dataSkim := otpsg.TracedSkim(&wave, "handle-loaded-data",
 		func(ctx context.Context, data []int, err error) error {
 			if err != nil {
 				return err
@@ -59,7 +58,7 @@ func Example_tracing() {
 			fmt.Println("Handling loaded data:", data)
 
 			// Launch a processing task for the loaded data
-			processSkim := otpsg.TracedSkim(wave, "handle-processed-data",
+			processSkim := otpsg.TracedSkim(&wave, "handle-processed-data",
 				func(ctx context.Context, result int, err error) error {
 					if err != nil {
 						return err
@@ -68,11 +67,11 @@ func Example_tracing() {
 					return nil
 				})
 
-			return otpsg.Scatter(ctx, processSkim, processDataTask)
+			return otpsg.Scatter(ctx, &wave, processSkim, processDataTask)
 		})
 
 	// Start the pipeline by loading data
-	if err := otpsg.Scatter(ctx, dataSkim, loadDataTask); err != nil {
+	if err := otpsg.Scatter(ctx, &wave, dataSkim, loadDataTask); err != nil {
 		fmt.Println("Error:", err)
 	}
 
@@ -102,8 +101,8 @@ func Example_instrumentedTask() {
 	}()
 
 	// Create a PSG wave
-	ctx, wave := streampool.NewWave(context.Background())
-	defer wave.CancelAndWait()
+	ctx := context.Background()
+	var wave streampool.Wave
 
 	// Create fully instrumented task and skim
 	task := otpsg.InstrumentedTask("calculate-sum",
@@ -115,14 +114,14 @@ func Example_instrumentedTask() {
 			return sum, nil
 		})
 
-	skimmer := otpsg.InstrumentedSkim(wave, "handle-sum",
+	skimmer := otpsg.InstrumentedSkim(&wave, "handle-sum",
 		func(ctx context.Context, sum int, err error) error {
 			fmt.Println("Sum:", sum)
 			return nil
 		})
 
 	// Use convenience scatter function
-	err := otpsg.Scatter(ctx, skimmer, task)
+	err := otpsg.Scatter(ctx, &wave, skimmer, task)
 	if err != nil {
 		fmt.Println("Error:", err)
 	}

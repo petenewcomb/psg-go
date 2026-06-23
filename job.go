@@ -13,7 +13,6 @@ import (
 	"github.com/petenewcomb/streampool/internal/trace"
 
 	"github.com/petenewcomb/streampool/internal/cerr"
-	"github.com/petenewcomb/streampool/internal/ctxmap"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/petenewcomb/streampool/internal/timerp"
@@ -23,17 +22,23 @@ import (
 
 // Wave is the unit that admits, drains, and cancels a batch of scatter-gather
 // work together. It owns the batch lifecycle — wavestate (Open→Done), the
-// admission governor, the skim queue, cancellation, the ctxMetaMap — and
-// dispatches op bodies onto the global worker pool (defaultPool). [NewWave]
-// returns a Wave together with a Wave-augmented context that callers pass to op
-// dispatches (Start, Submit) so every dispatch associates with this batch.
+// admission governor, the skim queue — and dispatches op bodies onto the global
+// worker pool (defaultPool). A zero-value Wave is ready to use (no constructor);
+// it self-inits on first use and owns no context. Bind ops to it with op.In(&w)
+// at top level, or dispatch from inside a body (the ambient wave). It is reusable
+// after a drain (see [Wave.ensureArmed]).
 //
 //nolint:contextcheck // background context used only for tracing
 type Wave struct {
-	ctx      context.Context //nolint:containedctx // used as parent for contexts in job-owned goroutines
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
-	state    wavestate.WaveState
+	// initialized is set once the substrate (below) has been brought up for the
+	// current cycle; initMu guards (re)initialization. A zero-value Wave is usable:
+	// ensureInit lazily brings up the substrate on first ctx-bearing use and
+	// re-arms it after a drain (see ensureInit). The Wave owns NO context — it is
+	// driver-specific; cancellation rides the caller's ctx by ancestry.
+	initialized atomic.Bool
+	initMu      sync.Mutex
+
+	state wavestate.WaveState
 
 	skimQueue workq.Pending
 
@@ -44,18 +49,15 @@ type Wave struct {
 
 	workQueue workq.Accepted
 
-	ctxMetaMap     ctxmap.Map[ctxMetaValueKey, *ctxMeta]
-	skimCtxMetaMap ctxmap.Map[skimCtxMetaValueKey, *Wave]
-
 	protoBB      workq.BlockBehavior  // avoid closure reallocation
 	blockFn      workq.BlockFunc      // avoid closure reallocation
 	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
 
 	// fEngine is the lazily-created funnel engine (nil until the first NewFunnel).
-	// Body contexts are no longer per-wave: task/funnel bodies borrow them from
-	// ctxpool keyed on the submit ctx (see bodyctx.go), so the wave owns no waveCtx
-	// or execShell pool — cancellation rides the submit ctx by ancestry.
+	// Body contexts are not per-wave: task/funnel bodies borrow them from ctxpool
+	// keyed on the submit ctx (see bodyctx.go), so the wave owns no context —
+	// cancellation rides the submit ctx by ancestry.
 	fEngineMu sync.Mutex
 	fEngine   atomic.Pointer[funnelEngine]
 }
@@ -168,83 +170,70 @@ func (w *taskWork) Free() {
 
 var taskWorkPool = omnipool.For[taskWork]()
 
-// newWaveSubstrate initializes the per-wave lifecycle substrate (formerly the
-// New() constructor, now folded into the Wave). parent is the caller's root
-// context; the wave's internal ctx descends from it (cancelled by Cancel to tear
-// down wave-owned goroutines). Body contexts are not wave-owned — they are
-// borrowed per dispatch from ctxpool (see bodyctx.go).
-func newWaveSubstrate(parent context.Context) *Wave {
-	traceRegion := "newWaveSubstrate"
-	defer trace.StartRegion(parent, traceRegion).End()
-
-	poolCtx, cancelFn := context.WithCancel(parent)
-	w := &Wave{
-		ctx:      poolCtx,
-		cancelFn: cancelFn,
+// ensureInit lazily brings up the Wave's lifecycle substrate (state, queues,
+// governor, closure fields) the FIRST time a zero-value Wave is used, so it is
+// usable with no constructor. It is idempotent and does NOT re-arm a drained wave —
+// re-arming is [Wave.ensureArmed], reached only from dispatch entries. This split is
+// essential: a drain (Skim/SkimAll/Close) routes through here too, and a CloseAndSkimAll
+// drives an empty wave to Done during Close() before SkimAll runs — if init re-armed
+// on Done, that skim would reset the wave to Open and block forever instead of
+// observing Done. Skimming a Done wave must return ErrWaveDone, not re-arm.
+//
+// A zero-value Wave's state reads as Open (stageOpen == 0) but with nil channels, so
+// init keys off the explicit initialized flag, not the stage. The common case (an
+// already-initialized wave) is a single atomic load.
+func (w *Wave) ensureInit() {
+	if w.initialized.Load() {
+		return
 	}
+	w.initMu.Lock()
+	defer w.initMu.Unlock()
+	if w.initialized.Load() {
+		return
+	}
+	w.initState()
+	w.initialized.Store(true)
+}
 
-	w.protoBB.ShouldBlock = w.shouldBlock
-	w.blockFn = w.block
-	w.tryAddWorkFn = w.tryAddWork
-	w.addWorkFn = w.addWork
-
-	trace.Logf(parent, traceRegion,
-		"Wave=%p, state=%p, skimQueue=%p, governor=%p, workQueue=%p",
-		w, &w.state, &w.skimQueue, &w.governor, &w.workQueue)
-
+// initState (re)initializes the substrate to a fresh Open cycle. Caller holds initMu.
+func (w *Wave) initState() {
 	w.state.Init()
 	w.skimQueue.Init()
 	w.governor.Init()
 	w.workQueue.Init(nil)
-
-	return w
+	w.protoBB.ShouldBlock = w.shouldBlock
+	w.blockFn = w.block
+	w.tryAddWorkFn = w.tryAddWork
+	w.addWorkFn = w.addWork
 }
 
-// Cancel abandons the wave: it tears down wave-owned machinery and unblocks any
-// outstanding [Start], [Wave.Skim], [Wave.TrySkim], [Wave.SkimAll], or
-// [Wave.TrySkimAll], which will fail with [context.Canceled] (or another error
-// returned by a [Skim]). Unskimmed results are forfeited.
+// ensureArmed brings the Wave up for NEW work: it first-time-inits (ensureInit) and,
+// if the wave's prior cycle has drained to Done, re-arms it to a fresh Open cycle. It
+// is called only from dispatch entries (op Start/Submit, funnelEngine) — never from a
+// skim/drain — so that reusing a drained Wave by dispatching into it (e.g. a *Wave
+// pooled via sync.Pool for allocation-free sub-waves) starts a new cycle, while
+// skimming a drained wave still observes Done.
 //
-// Cancel does NOT force-abort running task or funnel bodies. Those run under
-// contexts descended from the ctx passed to the dispatching [Start]/Submit call,
-// not from the wave — so to signal a running body, cancel that submit context.
-// Cancel returns immediately, but a running [Task] or [Skim] delays the exit of
-// its goroutine/caller until it returns.
-//
-// Cancel is always thread-safe and calling it more than once has no additional
-// effect.
-//
-//nolint:contextcheck // background context used only for tracing
-func (j *Wave) Cancel() {
-	traceRegion := "Wave.Cancel"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Wave=%p", j)
-	// Cancel the wave's internal ctx. The funnel flusher roots at j.ctx, so this
-	// drives it toward exit; it also unblocks an outstanding Skim. It does NOT
-	// force-abort running task/funnel bodies — those descend from their submit
-	// ctx (borrowBodyContext), so cancel the submit ctx to stop them.
-	j.cancelFn()
-}
-
-// CancelAndWait cancels like [Wave.Cancel], but then blocks until any
-// outstanding task goroutines exit.
-//
-//nolint:contextcheck // background context used only for tracing
-func (j *Wave) CancelAndWait() {
-	traceRegion := "Wave.CancelAndWait"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-
-	// Cancel (j.ctx) drives this wave's funnel flusher toward exit; JOIN it BEFORE
-	// the map-clearing teardown below, because the flusher reads the ctxMetaMaps
-	// (ensureCtxMeta, flush bodies) — clearing them while it still runs is a data
-	// race. (Preserves the ordering fix from a9776db.)
-	j.Cancel()
-	if fe := j.fEngine.Load(); fe != nil {
-		fe.joinFlusher()
+// The prior cycle's flusher is joined before re-Init: a Done stage means every
+// work/funnel-instance reference drained, so the flusher's done-watcher has fired and
+// the goroutine is exiting — the join is bounded and acts as a barrier ensuring nothing
+// reads the old WaveState while we overwrite it. Reuse is sequential (a new cycle
+// begins after the prior drain returns); a dispatch racing a concurrent self-drain
+// stays a misuse guarded by panicIfDone.
+func (w *Wave) ensureArmed() {
+	w.ensureInit()
+	if !w.state.IsDone() {
+		return // fast path: live (or freshly inited)
 	}
-	j.wg.Wait()
-	j.skimCtxMetaMap.Clear()
-	j.ctxMetaMap.Clear()
+	w.initMu.Lock()
+	defer w.initMu.Unlock()
+	if !w.state.IsDone() {
+		return // another dispatch re-armed it
+	}
+	if fe := w.fEngine.Swap(nil); fe != nil {
+		fe.joinFlusher() // barrier: prior flusher fully exited before re-Init
+	}
+	w.initState()
 }
 
 // Skim processes outstanding task results and then waits for the next
@@ -878,6 +867,7 @@ func (j *Wave) Close() {
 	traceRegion := "Wave.Close"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
+	j.ensureInit()
 	j.state.Close()
 }
 

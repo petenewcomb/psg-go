@@ -30,10 +30,10 @@ const (
 
 type ctxMeta struct {
 	job  *Wave
-	wave *Wave // set by NewWave; nil for ctxs not derived through a Wave
+	wave *Wave // the meta's ambient wave (topLevelCtxMeta / borrowBodyContext); nil for ctxs not derived through a Wave
 	// parent links to the ctxMeta this one was derived from along the
 	// context value chain — the synchronous, same-goroutine derivations
-	// (top-level→skim, body→NewWave→subwave contexts) that
+	// (top-level→skim, body→subwave contexts) that
 	// currentHeldRequest walks to find a held limiter permit. Worker
 	// contexts are fresh permit-roots (parent == nil), severed
 	// explicitly at creation: the pool's base ctx may carry a foreign
@@ -415,13 +415,17 @@ func (j *Wave) ensureCtxMeta(
 	return ctx, meta
 }
 
-type skimCtxMetaValueKey struct{}
-
 // checkCtxType should panic if the type is not allowed
 func (j *Wave) topLevelCtxMeta(
 	ctx context.Context, checkCtxType func(ctxType contextType),
 ) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.topLevelCtxMeta"
+
+	// Lazy-init chokepoint: every dispatch (Launcher via vetStart, Skimmer/Funnel
+	// via their unified submit path) and every skim (via skimCtxMeta) lands here, so
+	// a zero-value Wave is brought up — or re-armed after a prior drain — exactly
+	// once before its substrate is touched.
+	j.ensureInit()
 
 	// Reuse a same-wave meta already on ctx — a body's own meta (dispatching from
 	// inside a Skim/Accumulate body), or this wave's top-level/skim meta — rather
@@ -443,6 +447,12 @@ func (j *Wave) topLevelCtxMeta(
 				meta.executionEnvironment = exEnv
 				trace.Logf(ctx, traceRegion, "created new topLevelExEnv=%p, ctxMeta=%v", exEnv, meta)
 			}
+			// Stamp this wave as the meta's ambient wave (formerly done by NewWave on
+			// its returned ctx). A minted top-level meta — from a bare ctx, or a
+			// cross-wave redirect into j — must resolve nil-wave ambient dispatch and
+			// supply meta.wave to funnel/skimmer submit as j, not nil. ensureCtxMeta
+			// only copies wave from a same-wave source, so set it explicitly here.
+			meta.wave = j
 			return ctx
 		},
 	)

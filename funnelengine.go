@@ -38,9 +38,10 @@ type funnelEngine struct {
 	// goroutines, which now live on the global defaultPool). Funnel-flush
 	// completion is governed by wavestate reference counts — CloseAndSkimAll/SkimAll
 	// block on state.Done until every funnelInstance has flushed — so a wave's
-	// drain already waits for the flush work itself. This channel only lets
-	// Wave.CancelAndWait join the goroutine, closing the exit window before
-	// teardown returns.
+	// drain already waits for the flush work itself. This channel lets
+	// Wave.ensureArmed join the prior cycle's flusher before re-arming a reused
+	// (e.g. pooled) wave, ensuring the old goroutine has exited before the
+	// WaveState it reads is re-Init'd.
 	flusherDone chan struct{}
 }
 
@@ -130,16 +131,23 @@ func (fe *funnelEngine) flusher(flushCh <-chan struct{}) {
 
 	j := fe.job
 
-	// Create the base goroutine context
-	ctx, cancel := context.WithCancel(j.ctx)
+	// Create the base goroutine context. The Wave owns no context, so this roots at
+	// Background: the flusher's lifetime is governed by the wave reaching Done (the
+	// done-watcher below selects state.Done()), not by a wave-owned cancel. cancel
+	// only tears down this goroutine's own derived ctx on exit.
+	ctx, cancel := context.WithCancel(context.Background())
 	ctx, _ = j.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			meta.ctxType = funnelContext
 			meta.executionEnvironment = worker
-			// Worker contexts are fresh permit-roots: for a subjob, j.ctx
-			// carries the dispatching body's meta from a foreign pool, and
-			// inheriting the parent link would let this worker find that
-			// body's held limiter permit across the goroutine boundary.
+			// The flusher belongs to wave j: stamp it as the ambient wave so a
+			// flush body can dispatch nil-wave ops (op.Submit) the same way an
+			// accumulate body can. The flusher ctx roots at Background (the wave
+			// owns no ctx), so ensureCtxMeta has no source to copy this from.
+			meta.wave = j
+			// Worker contexts are fresh permit-roots: inheriting a parent link
+			// would let this worker find a dispatching body's held limiter permit
+			// across the goroutine boundary, so sever it.
 			meta.parent = nil
 			return ctx
 		},

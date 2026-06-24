@@ -54,12 +54,15 @@ type Wave struct {
 	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
 
-	// fEngine is the lazily-created funnel engine (nil until the first NewFunnel).
-	// Body contexts are not per-wave: task/funnel bodies borrow them from ctxpool
-	// keyed on the submit ctx (see bodyctx.go), so the wave owns no context —
-	// cancellation rides the submit ctx by ancestry.
-	fEngineMu sync.Mutex
-	fEngine   atomic.Pointer[funnelEngine]
+	// funnelInstances holds this wave's per-funnel accumulator-instance caches, keyed
+	// by funnel id (funnelID → *funnelInstanceQueue[T], stored as the funnelSweep
+	// interface for the heterogeneous-T sweep). It replaces the per-funnel engine:
+	// funnels are plain values, and the wave owns their live instances. The end-of-work
+	// sweep (sweepFunnels, wired as wavestate's onFlushing callback) ranges this map.
+	// Body contexts are not per-wave: task/funnel bodies borrow them from ctxpool keyed
+	// on the submit ctx (see bodyctx.go), so the wave owns no context — cancellation
+	// rides the submit ctx by ancestry.
+	funnelInstances sync.Map
 }
 
 //nolint:contextcheck // background context for tracing; submitCtx is the body-ctx borrow source
@@ -197,7 +200,15 @@ func (w *Wave) ensureInit() {
 
 // initState (re)initializes the substrate to a fresh Open cycle. Caller holds initMu.
 func (w *Wave) initState() {
-	w.state.Init()
+	// Drop any prior cycle's funnel-instance caches so a reused/pooled *Wave does not
+	// accumulate stale per-funnel entries (funnel ids are unique per NewFunnel). By the
+	// time a wave re-arms it has reached Done, so the end-of-work sweep has already
+	// drained every queue and recycled its instances — this is a quiescent map clear.
+	w.funnelInstances.Range(func(k, _ any) bool {
+		w.funnelInstances.Delete(k)
+		return true
+	})
+	w.state.Init(w.sweepFunnels)
 	w.skimQueue.Init()
 	w.governor.Init()
 	w.workQueue.Init(nil)
@@ -207,19 +218,39 @@ func (w *Wave) initState() {
 	w.addWorkFn = w.addWork
 }
 
+// sweepFunnels is the wave's enqueue-only end-of-work flush sweep, wired as
+// wavestate's onFlushing callback: it fires synchronously on each Closed→Flushing
+// transition (with references outstanding), on whatever goroutine drove the last work
+// to completion or called Close. It pushes each funnel's pending flushes to the global
+// pool — running NO user code — so the transition goroutine never re-enters the
+// framework; the flushes themselves run later on pool workers.
+//
+// The IncrementReference/DecrementReference bracket holds the wave open across the
+// ranging: a deadline-driven Execute that drained before this sweep (and which the
+// per-instance sweep skips via ClaimForFlush==false) could otherwise drop the last
+// barrier mid-sweep, drive the wave to Done, and let a concurrent re-arm clear the map
+// under us. This is the analogue of the old joinFlusher-before-rearm barrier.
+func (w *Wave) sweepFunnels() {
+	w.state.IncrementReference()
+	defer w.state.DecrementReference()
+	w.funnelInstances.Range(func(_, v any) bool {
+		v.(funnelSweep).sweepFlush()
+		return true
+	})
+}
+
 // ensureArmed brings the Wave up for NEW work: it first-time-inits (ensureInit) and,
 // if the wave's prior cycle has drained to Done, re-arms it to a fresh Open cycle. It
-// is called only from dispatch entries (op Start/Submit, funnelEngine) — never from a
+// is called only from dispatch entries (op Start/Submit, funnel Submit) — never from a
 // skim/drain — so that reusing a drained Wave by dispatching into it (e.g. a *Wave
 // pooled via sync.Pool for allocation-free sub-waves) starts a new cycle, while
 // skimming a drained wave still observes Done.
 //
-// The prior cycle's flusher is joined before re-Init: a Done stage means every
-// work/funnel-instance reference drained, so the flusher's done-watcher has fired and
-// the goroutine is exiting — the join is bounded and acts as a barrier ensuring nothing
-// reads the old WaveState while we overwrite it. Reuse is sequential (a new cycle
-// begins after the prior drain returns); a dispatch racing a concurrent self-drain
-// stays a misuse guarded by panicIfDone.
+// A Done stage means every work and funnel-instance reference has drained, so every
+// flush Execute has completed (the barrier drops inside flush) — the wave is quiescent.
+// initState then clears the funnel-instance map and re-Inits the WaveState. Reuse is
+// sequential (a new cycle begins after the prior drain returns); a dispatch racing a
+// concurrent self-drain stays a misuse guarded by panicIfDone.
 func (w *Wave) ensureArmed() {
 	w.ensureInit()
 	if !w.state.IsDone() {
@@ -229,9 +260,6 @@ func (w *Wave) ensureArmed() {
 	defer w.initMu.Unlock()
 	if !w.state.IsDone() {
 		return // another dispatch re-armed it
-	}
-	if fe := w.fEngine.Swap(nil); fe != nil {
-		fe.joinFlusher() // barrier: prior flusher fully exited before re-Init
 	}
 	w.initState()
 }

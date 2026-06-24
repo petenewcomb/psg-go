@@ -240,7 +240,12 @@ func (p *Pool[E]) runWorker(poolCtx context.Context) {
 	// is race-free.
 	w := workq.NewWorker(&p.sharedQueue, state, ctx,
 		workq.WithStop(poolCtx.Done()), workq.WithIdleExit(workerIdleTimeout),
-		workq.WithOnSecure(func() { releaseSpawn(true) }))
+		workq.WithOnSecure(func() { releaseSpawn(true) }),
+		// A worker that parks (no immediate work) has settled out of the spawn
+		// stampede: release the spawn slot without extending the chain. Critical with
+		// DECISION B, which keeps a deadline-watching worker parked past the idle
+		// timeout — without this it would hold the slot forever and starve new spawns.
+		workq.WithOnWait(func() { releaseSpawn(false) }))
 	defer w.Release()
 
 	for {

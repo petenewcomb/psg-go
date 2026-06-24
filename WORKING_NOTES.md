@@ -2,6 +2,25 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► FUNNEL ENGINE REMOVED — FLUSHES ON THE SHARED POOL (2026-06-24).** The per-Wave
+`funnelEngine` + flusher goroutine + `cpworker.go` are gone. `Funnel[T]` is now a plain
+value `{wave, factory, limiter, id, instancePool, workPool}` (no inner heap object);
+accumulator instances live in a per-Wave `funnelInstances sync.Map` keyed by funnel id.
+Deadline flushes ride the global `defaultPool`'s scheduled queue; the end-of-work sweep is
+a synchronous **enqueue-only** `wavestate.onFlushing` callback (replacing the `FlushChan`
+close) that `ClaimForFlush`+`ForceFresh`es each live instance — the flush itself runs on a
+pool worker via the same `funnelInstance.Execute` path as a deadline flush. No-deadline
+instances are not scheduled (no 24h placeholder). Recycle rides the pop (rule R2);
+`initState` clears the map. **Two spawn regressions found+fixed during verification:**
+(1) DECISION B's deadline-parked worker pinned the `spawnConcurrencyLimit` token →
+release it at the park point (`workq.WithOnWait`); (2) `ForceFresh`'s `Notify(demand)` was
+a no-op with no parked waiter → spawn directly when `Notify` finds none. After both, the
+`-race` `TestBySimulation` hang rate is **~1/120 — baseline parity**; the residual is a
+**pre-existing** nested-drain deadlock (the dispatch/execution conflation, the split's
+domain), not introduced here. Plan + full write-up: `docs/plan/funnel-engine-removal.md`.
+Verified: full `./...`, `-race` suite, 120× `-race` `TestBySimulation` (parity),
+`reuse_test.go`, alloc tests. (`Example_observable` is independently flaky — known.)
+
 **►►► WAVE-SCOPED FUNNELS, NO EXPLICIT LIFECYCLE LANDED (2026-06-23).** Funnel has no
 `Close`/`Dup` and no teardown: `Funnel[T]` is a plain value (no leakguard), and
 `AccumulatorFactory` has no `Close` either. The whole mechanism is a contract — the

@@ -6,6 +6,7 @@ package streampool_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,11 +57,16 @@ func TestNewErrFunnel(t *testing.T) {
 	var wave streampool.Wave
 
 	funnelPool := &wave
+	// The funnel is unlimited, so its two SubmitErr inputs may be accumulated
+	// concurrently on distinct instances; guard the shared slice accordingly.
+	var seenMu sync.Mutex
 	var seen []error
 	funnel := streampool.NewErrFunnel(
 		funnelPool,
 		func(_ context.Context, err error) (time.Time, error) {
+			seenMu.Lock()
 			seen = append(seen, err)
+			seenMu.Unlock()
 			return time.Time{}, nil
 		},
 		nil, // no flush

@@ -86,6 +86,12 @@ per-execution (wave-5b):
 
 ## 2. The wave-5b context model (settled in WORKING_NOTES; restated)
 
+> **PARTLY SUPERSEDED (2026-06-23 zero-value-Wave).** The **Wave owns no context** — no
+> `waveCtx`, no per-wave cancel. Cancellation rides the caller's submit ctx by ancestry;
+> body contexts are borrowed from `ctxpool` keyed on the submit ctx (`bodyctx.go`). The
+> `poolCtx` (global teardown) survives; `waveCtx`/`execCtx`-as-`WithCancel(waveCtx)` do
+> not. Read the ancestry model below as historical.
+
 Three contexts by ancestry `poolCtx → waveCtx → execCtx`:
 
 - **`poolCtx`** — the global pool's context. Cancels ONLY when `Wait()` is
@@ -198,6 +204,16 @@ Body-entry sites that move from per-engine exEnv to the borrowed shell + unified
 ---
 
 ## 6. The flusher (validated design; now per-Wave, not per-pool)
+
+> **SUPERSEDED (2026-06-24) by `docs/plan/funnel-engine-removal.md`.** There is **no
+> per-Wave flusher goroutine**. Deadline-driven flushes ride the global pool's workers
+> (the shared Queue's `deadlineCh` + `wakeScheduled`); the end-of-work force-flush of
+> not-yet-due instances runs on the **draining `SkimAll` goroutine**, which wakes on
+> `state.FlushChan()` and walks the wave's per-funnel-id instanceQueue `sync.Map`
+> (`ClaimForFlush` + `forceFlush` per live instance — per-wave, not `DrainAllScheduled`,
+> since the scheduled heap is now shared across waves). The `waveCtx`/own-sender pieces
+> below are also gone: the zero-value Wave owns no context. The rest of this section is
+> retained as historical design record. See the new doc for the live design.
 
 End-of-work force-flush of not-yet-due funnel instances moves OFF the worker loop
 (legacy: `cpWorker.flushAll` via `nextJobFlushCh`) to a **dedicated per-Wave

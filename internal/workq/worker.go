@@ -55,6 +55,14 @@ type Worker[E ExecEnv] struct {
 	onSecure func()
 	secured  bool
 
+	// onWait, if set, fires each time this worker is about to commit to a blocking
+	// wait (no immediately-available work). worker.Pool wires it to the SAME spawn-slot
+	// release as onSecure: a worker that parks — including one held alive by DECISION
+	// B's idle suppression to watch a deadline — has settled out of the spawn stampede
+	// and must not pin the spawn-concurrency slot. The pool side is idempotent, so
+	// repeated waits are harmless.
+	onWait func()
+
 	// reusable scratch (avoid per-drive alloc)
 	pullFn    AddWorkFunc
 	securedFn func() // bound markSecured passed to driveOne; nil when onSecure is nil
@@ -73,6 +81,7 @@ type workerOpts struct {
 	idle     time.Duration
 	done     <-chan struct{}
 	onSecure func()
+	onWait   func()
 }
 
 // WithIdleExit makes the worker exit after d with nothing to do (pool workers
@@ -88,6 +97,12 @@ func WithStop(done <-chan struct{}) WorkerOption { return func(o *workerOpts) { 
 // at work-secure rather than post-body.
 func WithOnSecure(fn func()) WorkerOption { return func(o *workerOpts) { o.onSecure = fn } }
 
+// WithOnWait registers a callback fired when the worker is about to commit to a
+// blocking wait. worker.Pool wires it to the same spawn-slot release as onSecure, so a
+// parked worker (including one DECISION B keeps alive on a deadline) does not pin the
+// spawn-concurrency slot. Must be idempotent (it may fire on every park).
+func WithOnWait(fn func()) WorkerOption { return func(o *workerOpts) { o.onWait = fn } }
+
 // NewWorker binds a worker to q with per-worker state and the already-wired
 // worker ctx (E is its ctxMeta executionEnvironment).
 func NewWorker[E ExecEnv](q *Queue, state E, workerCtx context.Context, opts ...WorkerOption) *Worker[E] {
@@ -95,7 +110,7 @@ func NewWorker[E ExecEnv](q *Queue, state E, workerCtx context.Context, opts ...
 	for _, opt := range opts {
 		opt(&o)
 	}
-	w := &Worker[E]{q: q, state: state, ctx: workerCtx, idle: o.idle, done: o.done, onSecure: o.onSecure}
+	w := &Worker[E]{q: q, state: state, ctx: workerCtx, idle: o.idle, done: o.done, onSecure: o.onSecure, onWait: o.onWait}
 	w.pullFn = w.pull
 	if o.onSecure != nil {
 		w.securedFn = w.markSecured
@@ -176,7 +191,27 @@ func (w *Worker[E]) pull(
 	}
 
 	w.renotify, w.selErr, w.exit = nil, nil, false
-	idleCh := w.armIdle()
+	// DECISION B (funnel-engine-removal): do not idle-exit while a scheduled-flush
+	// deadline is pending. deadlineCh is non-nil exactly when the queue has a pending
+	// scheduled item; if we armed idle anyway, idleCh would race deadlineCh and a
+	// deadline further out than the idle timeout would fire idleCh first, the worker
+	// would exit, and the scheduled flush would be left with no watcher. Suppressing
+	// idle keeps one worker warm until the deadline (or new work) arrives; the worker
+	// scales to zero once nothing is scheduled.
+	var idleCh <-chan time.Time
+	if deadlineCh == nil {
+		idleCh = w.armIdle()
+	}
+
+	// About to commit to a blocking wait (for work, a deadline, or idle): this worker
+	// has SETTLED — it is no longer part of a spawn stampede — so release its spawn
+	// token now (onWait), exactly as an idle-exit would. Without this, a worker parked
+	// on a deadline under DECISION B (which suppresses idle-exit) would hold the
+	// spawn-concurrency token forever, pinning spawnConcurrencyLimit and starving the
+	// spawn a Close-triggered funnel flush needs. Fires once; idempotent on the pool side.
+	if w.onWait != nil {
+		w.onWait()
+	}
 
 	// Register on the queue's work waiters before parking on the incoming
 	// handoff: WaitFunc supplies workWaitCh, which fires when postponed/fresh

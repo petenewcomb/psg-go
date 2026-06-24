@@ -33,24 +33,31 @@ type WaveState struct {
 	currentStage    atomic.Int32    // Contains a lifecycleStage value
 	inFlightWork    InFlightCounter // Tracks only executing work
 	totalReferences InFlightCounter // Tracks both work and funnels
-	nextFlushChan   atomic.Value    // Stores chan struct{} for flush signals
 	doneChan        chan struct{}
+
+	// onFlushing, if non-nil, is invoked synchronously each time the wave enters (or
+	// re-enters) the Flushing stage with references still outstanding — the signal to
+	// force pending funnel flushes. It replaces the former rotated flush channel: the
+	// wave wires it to an enqueue-only sweep that pushes flush work to the global pool.
+	// It must not block or run user code (it runs inside the work-completion path).
+	onFlushing func()
 }
 
 // Init initializes an uninitialized WaveState to the Open stage, and must be
-// called exactly once before any other methods. An Init method is provided
-// instead of a New function because WaveState is expected to be an embedded
-// field of Wave.
+// called exactly once before any other methods (and again to re-arm a drained
+// state). An Init method is provided instead of a New function because WaveState
+// is expected to be an embedded field of Wave. onFlushing (may be nil) is invoked
+// on each Closed→Flushing transition with references outstanding; see the field.
 //
 //nolint:contextcheck // background context used only for tracing
-func (ws *WaveState) Init() {
+func (ws *WaveState) Init(onFlushing func()) {
 	traceRegion := "WaveState.Init"
 	trace.Logf(context.Background(), traceRegion,
 		"WaveState=%p, inFlightWork=%p, totalReferences=%p",
 		ws, &ws.inFlightWork, &ws.totalReferences)
 
 	ws.currentStage.Store(int32(stageOpen))
-	ws.nextFlushChan.Store(make(chan struct{}))
+	ws.onFlushing = onFlushing
 	ws.doneChan = make(chan struct{})
 }
 
@@ -124,18 +131,6 @@ func (ws *WaveState) DecrementReference() {
 	}
 }
 
-// FlushChan returns the channel that is closed the next time all
-// in-flight work drains to zero and the wave enters (or re-enters) the
-// Flushing stage — the signal for funnel workers to force their
-// pending flushes. It adds no reference: the flush barrier is carried
-// per-instance via [WaveState.IncrementReference] /
-// [WaveState.DecrementReference]. The channel is rotated on each
-// Flushing cycle (see [WaveState.noMoreWork]), so a worker re-reads it
-// after handling a signal to wait for the next cycle.
-func (ws *WaveState) FlushChan() <-chan struct{} {
-	return ws.nextFlushChan.Load().(chan struct{})
-}
-
 // Close attempts to transition from Open to Closed.
 //
 //nolint:contextcheck // background context used only for tracing
@@ -204,13 +199,11 @@ func (ws *WaveState) noMoreWork() {
 		return
 	}
 
-	// Handle flush channel for flushing state
-	if currentStage == stageFlushing {
-		// Create new channel and swap with old one
-		newCh := make(chan struct{})
-		oldCh := ws.nextFlushChan.Swap(newCh).(chan struct{})
-		// Close old channel after replacing it
-		close(oldCh)
+	// Signal the flush sweep for the flushing state. The wave's callback is an
+	// enqueue-only sweep (push pending funnel flushes to the global pool); it fires on
+	// each Flushing entry/re-entry, mirroring the former flush-channel rotation.
+	if currentStage == stageFlushing && ws.onFlushing != nil {
+		ws.onFlushing()
 	}
 }
 

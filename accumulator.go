@@ -196,7 +196,7 @@ type FuncErrAccumulatorFactory struct {
 // a fresh [FuncErrAccumulator] with this factory's AccumulateFn /
 // FlushFn fields copied in.
 func (f FuncErrAccumulatorFactory) NewAccumulator() Accumulator[struct{}] {
-	return FuncErrAccumulator{AccumulateFn: f.AccumulateFn, FlushFn: f.FlushFn}
+	return FuncErrAccumulator(f)
 }
 
 // NewErrAccumulatorFactory is the convenience constructor for an

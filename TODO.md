@@ -1,5 +1,19 @@
 # TODO
 
+## Pre-existing nested-drain `-race` hang (~1/120) — needs the dispatch/execution split (2026-06-24)
+
+`TestBySimulation -race` wedges intermittently (~1 in 120 runs at default config) in a
+nested-drain deadlock: pool workers all parked inside blocking bodies (nested
+`CloseAndSkimAll`, or a funnel accumulate blocked in the wave governor while holding the
+instance mutex), so the innermost subwave's relief path (a flush or skim) starves of
+workers. **This is pre-existing** — confirmed at the same rate on the pre-`combiner`
+baseline (whose dump shows `funnelEngine.flusher`/`cpWorker` + nested `CloseAndSkimAll`).
+It is the dispatch/execution **conflation** (a pool worker both dispatches and runs
+blocking user code), which `docs/dispatch-execution-split.md`'s manager/executor split is
+designed to eliminate. Not introduced by the funnel-engine removal (that cut is at
+baseline parity after fixing two spawn regressions; see `docs/plan/funnel-engine-removal.md`).
+Resolve as part of the executor/manager split.
+
 ## streampool.Wait should clear ctxpool caches (2026-06-23)
 
 `streampool.Wait()` joins the global pool's worker goroutines on definitive teardown.

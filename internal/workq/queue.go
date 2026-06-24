@@ -180,6 +180,10 @@ func (q *Queue) ExecuteNowOrQueue(ctx context.Context, ex Execution, w Work) err
 func (q *Queue) Schedule(w ScheduledWork, at time.Time)        { q.accepted.Schedule(w, at) }
 func (q *Queue) Reschedule(w ScheduledWork, at time.Time) bool { return q.accepted.Reschedule(w, at) }
 func (q *Queue) ClaimForFlush(w ScheduledWork) bool            { return q.accepted.ClaimForFlush(w) }
+
+// ForceFresh promotes w into the fresh queue and fires demand — the end-of-work funnel
+// sweep's push for an instance it has won via ClaimForFlush. See [Accepted.ForceFresh].
+func (q *Queue) ForceFresh(w Work) { q.accepted.ForceFresh(w) }
 func (q *Queue) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
 	return q.accepted.DrainAllScheduled(dst)
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/streampool/internal/nbcq"
@@ -17,38 +18,72 @@ import (
 )
 
 // Funnel represents a stateful aggregation operation. Inputs flow in through
-// [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks);
-// the user-supplied [Accumulator] processes them inside a
-// funnelEngine worker. Downstream emission is the Accumulator body's
-// responsibility — it calls Submit on whatever downstream sinks it has
-// captured. There is no framework-mediated output type; Accumulator
-// errors are surfaced via the Wave's SkimAll path.
+// [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks); the
+// user-supplied [Accumulator] processes them inside a funnel-body worker on the
+// shared pool. Downstream emission is the Accumulator body's responsibility — it
+// calls Submit on whatever downstream sinks it has captured. There is no
+// framework-mediated output type; Accumulator errors are surfaced via the Wave's
+// SkimAll path.
 //
-// Thread-safety and copying: a Funnel value is designed to be copied.
-// While a single Funnel value does not support concurrent calls to
-// Start or TryStart, copies of a Funnel can be used concurrently. All
-// copies share the same funnel identity and will route work to the
-// same Accumulator instances.
+// Thread-safety and copying: a Funnel value is designed to be copied. While a
+// single Funnel value does not support concurrent calls to Start or TryStart,
+// copies of a Funnel can be used concurrently. All copies share the same funnel
+// identity (a unique id) and route work to the same Accumulator instances, which
+// are owned by the wave (keyed by that id) — so a Funnel is a plain value holding
+// only its wave, factory, limiter, id, and (cached) instance/work pools; it has no
+// internal heap object.
 //
 // Resource management: a Funnel is wave-scoped and needs no explicit close (there is
 // no Close or Dup, and no factory Close). Its per-(funnel,wave) accumulator instances
 // are owned by the wave and force-flushed when the wave drains; the framework
 // guarantees an instance is never touched after its Flush, so the owner may release
-// any factory-level state after the drain returns (see [AccumulatorFactory]). A Funnel
-// value may be copied freely; all copies share the same underlying funnel and stay
-// alive as long as their wave does.
+// any factory-level state after the drain returns (see [AccumulatorFactory]).
 type Funnel[T any] struct {
-	inner *funnel[T]
+	wave    *Wave
+	factory AccumulatorFactory[T]
+
+	// limiter caps how many funnel-body executions this Funnel runs concurrently.
+	// The zero Limiter (impl == nil) means unlimited. Acquired in funnelWork.Execute
+	// and released when Execute completes.
+	limiter Limiter
+
+	// id uniquely identifies this Funnel so its accumulator instances are keyed in the
+	// owning wave's funnelInstances map. Copies share it (and so the same instances).
+	id funnelID
+
+	// instancePool / workPool are the cached per-type omnipools (omnipool.For). Holding
+	// them on the Funnel keeps the instance/work handling fully typed — instances are
+	// *funnelInstance[T], never boxed — so the Accumulator[T] call path stays generic.
+	instancePool *omnipool.Pool[funnelInstance[T]]
+	workPool     *omnipool.Pool[funnelWork[T]]
 }
 
-// NewFunnel creates a new Funnel operation. Pass [WithLimits] in
-// opts to bind a [Limiter] (e.g. via [NewSemaphore]) that caps the
-// number of concurrent funnel-work executions for this Funnel.
+// funnelErrSink is the framework-owned, wave-agnostic error sink for all funnels.
+// Accumulator errors are routed through it; its handler returns the error as-is so it
+// surfaces via the target wave's SkimAll path. It carries no wave — emitErr calls
+// submit with the explicit target wave — so a single package-level sink serves every
+// funnel on every wave.
+var funnelErrSink = newInternalSkimmer[struct{}](NewErrHandler(func(_ context.Context, err error) error {
+	return err
+}))
+
+// funnelID uniquely identifies a Funnel within the process so its accumulator
+// instances can be keyed in the owning wave's funnelInstances map. A package-global
+// monotonic counter; copies of a Funnel share the same id.
+type funnelID uint64
+
+var nextFunnelID atomic.Uint64
+
+func newFunnelID() funnelID { return funnelID(nextFunnelID.Add(1)) }
+
+// NewFunnel creates a new Funnel operation. Pass [WithLimits] in opts to bind a
+// [Limiter] (e.g. via [NewSemaphore]) that caps the number of concurrent funnel-work
+// executions for this Funnel.
 //
-// The framework manages an internal error sink that surfaces
-// Accumulator errors through the Wave's SkimAll path; the user's
-// Accumulator body is responsible for routing successful results via
-// Submit on whatever downstream sinks it captures.
+// The framework manages an internal error sink (owned by the wave) that surfaces
+// Accumulator errors through the Wave's SkimAll path; the user's Accumulator body is
+// responsible for routing successful results via Submit on whatever downstream sinks
+// it captures.
 //
 //nolint:contextcheck // background context used only for tracing
 func NewFunnel[T any](
@@ -65,37 +100,23 @@ func NewFunnel[T any](
 	if funnelFactory == nil {
 		panic("funnelFactory must be non-nil")
 	}
-	// The funnel engine is an internal per-WAVE detail (batch-scoped flush +
-	// backpressure), shared by all funnels on this wave; lazily created here.
-	fe := wave.funnelEngine()
 
 	cfg := resolveOpConfig(opts)
 
-	// The funnel is plain per-batch state with no explicit teardown: it owns no wave
-	// reference. Its accumulator instances each hold their own per-wave reference
-	// until they flush (force-flushed at the wave's drain), which keeps the wave open
-	// until aggregation completes. The funnel value itself is GC'd when it (and its
-	// copies) fall out of scope. It is registered with the engine only so the
-	// end-of-work flush sweep can return its spent instance shells to the pool.
-	inner := &funnel[T]{}
-	inner.Init()
-
-	// Framework-owned error sink: Accumulator errors flow through this
-	// ErrSkimmer whose handler returns err as-is, surfacing via the
-	// Wave's SkimAll path.
-	inner.errSink = newInternalSkimmer(NewErrHandler(func(_ context.Context, err error) error {
-		return err
-	}))
-	inner.fEngine = fe
-	inner.funnelFactory = funnelFactory
-	inner.limiter = cfg.singleLimiter()
-	fe.registerFunnel(inner)
-
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "Funnel(%p), engine=%p", inner, fe)
+	c := Funnel[T]{
+		wave:         wave,
+		factory:      funnelFactory,
+		limiter:      cfg.singleLimiter(),
+		id:           newFunnelID(),
+		instancePool: omnipool.For[funnelInstance[T]](),
+		workPool:     omnipool.For[funnelWork[T]](),
 	}
 
-	return Funnel[T]{inner: inner}
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion, "Funnel(id=%d), wave=%p", c.id, wave)
+	}
+
+	return c
 }
 
 // NewFnFunnel binds a closure-based factory function to a Funnel. Convenience
@@ -167,16 +188,15 @@ func (c *Funnel[T]) SubmitResult(
 ) error {
 	traceRegion := "Funnel.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	inner := c.inner
-	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
+	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
-	inner.fEngine.job.ensureArmed() // dispatch entry: re-arm a drained wave
+	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
 	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into the funnel's wave, recording the source as
 	// parent). No ctx-type restriction — a value may be submitted to a funnel from
 	// anywhere.
-	ctx, meta := inner.fEngine.job.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -184,7 +204,7 @@ func (c *Funnel[T]) SubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return inner.submit(ctx, meta, group, value, err)
+	return c.submit(ctx, meta, group, value, err)
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
@@ -218,16 +238,10 @@ func (c *Funnel[T]) TrySubmitResult(
 ) (bool, error) {
 	traceRegion := "Funnel.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	inner := c.inner
-	trace.Logf(ctx, traceRegion, "Funnel(%p)", inner)
+	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
-	inner.fEngine.job.ensureArmed() // dispatch entry: re-arm a drained wave
-	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
-	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
-	// cross-wave submit redirects into the funnel's wave, recording the source as
-	// parent). No ctx-type restriction — a value may be submitted to a funnel from
-	// anywhere.
-	ctx, meta := inner.fEngine.job.topLevelCtxMeta(ctx, func(contextType) {})
+	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
+	ctx, meta := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -235,57 +249,88 @@ func (c *Funnel[T]) TrySubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return inner.trySubmit(ctx, meta, group, value, err, deadline)
+	return c.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
-type funnel[T any] struct {
-
-	// errSink is framework-owned. Accumulator errors are routed through
-	// it; its handler returns err as-is so it surfaces via SkimAll.
-	errSink       ErrSkimmer
-	fEngine       *funnelEngine
-	funnelFactory AccumulatorFactory[T]
-
-	// limiter caps how many funnelWorks this Funnel processes
-	// concurrently. The zero Limiter (impl == nil) means unlimited.
-	// Acquired in funnelWork.Execute and released when Execute
-	// completes.
-	limiter Limiter
-
-	funnelInstancePool *omnipool.Pool[funnelInstance[T]]
-	funnelWorkPool     *omnipool.Pool[funnelWork[T]]
-
-	instanceQueue nbcq.Queue[*funnelInstance[T]]
+func (c *Funnel[T]) submit(
+	ctx context.Context,
+	meta *ctxMeta,
+	group workq.GroupID,
+	value T,
+	err error,
+) error {
+	funnelWork := c.newFunnelWork(ctx, group, value, err)
+	postWork := newFunnelPostWork(group, c.wave, funnelWork)
+	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-func (c *funnel[T]) Init() {
-	c.funnelInstancePool = omnipool.For[funnelInstance[T]]()
-	c.funnelWorkPool = omnipool.For[funnelWork[T]]()
-	c.instanceQueue.Init()
+func (c *Funnel[T]) trySubmit(
+	ctx context.Context,
+	meta *ctxMeta,
+	group workq.GroupID,
+	value T,
+	err error,
+	deadline time.Time,
+) (bool, error) {
+	funnelWork := c.newFunnelWork(ctx, group, value, err)
+	postWork := newFunnelPostWork(group, c.wave, funnelWork)
+	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
+	if !ok {
+		postWork.Free()
+	}
+	return ok, err
 }
 
-// instanceRecycler is the heterogeneous-T view the engine holds so the end-of-work
-// flush sweep can return each funnel's spent instance shells to its pool.
-type instanceRecycler interface {
-	recycleSpentInstances()
+// funnelInstanceQueue is the per-(funnel,wave) state the owning wave keeps in its
+// funnelInstances map, keyed by funnel id. It caches live accumulator instances for
+// reuse (the lock-free queue) and holds the instance pool for recycling. The map
+// value is this typed object; the only type erasure is at the map boundary (the wave
+// reaches it through the funnelSweep interface), so per-item handling stays [T] and
+// T is never boxed.
+type funnelInstanceQueue[T any] struct {
+	queue        nbcq.Queue[*funnelInstance[T]]
+	instancePool *omnipool.Pool[funnelInstance[T]]
 }
 
-// recycleSpentInstances drains the funnel's instanceQueue back to the instance pool.
-// Mid-wave, spent shells are recycled lazily on the next reuse-pop, but the lock-free
-// nbcq has no mid-queue removal, so instances flushed by the end-of-work sweep (or a
-// deadline flush a quiet funnel never re-pops) linger here. This runs from
-// cpWorker.flushAll at Flushing — inFlightWork==0, so no funnelWork is concurrently
-// touching the queue, and every instance has already been flushed (accumulator==nil).
-func (c *funnel[T]) recycleSpentInstances() {
+// funnelSweep is the heterogeneous-T view the wave holds in its funnelInstances map
+// so the end-of-work sweep can drive each funnel's pending flushes without knowing T.
+type funnelSweep interface {
+	sweepFlush()
+}
+
+// sweepFlush is the enqueue-only end-of-work sweep for one funnel's instances, run
+// synchronously from the wave's onFlushing callback (single-threaded per Flushing
+// transition; no accumulate runs concurrently because inFlightWork is zero). It drains
+// the cache queue and, per instance: a spent shell is recycled (rule R2 — its flusher
+// already detached); a live instance is arbitrated via ClaimForFlush and, if won,
+// marked detached and pushed to the global pool as flush work (its Execute flushes and
+// recycles it, since it is no longer cached); if lost, a due Execute already owns the
+// flush, so it is dropped (that Execute drops the barrier — never a leak, only a rare
+// pooling miss). It runs no user code, so the transition goroutine never re-enters.
+func (q *funnelInstanceQueue[T]) sweepFlush() {
 	for {
-		inst, ok := c.instanceQueue.TryPopFront()
+		inst, ok := q.queue.TryPopFront()
 		if !ok {
 			return
 		}
-		if inst.accumulator != nil {
-			panic("live instance in queue at end-of-work recycle")
+		inst.mu.Lock()
+		switch {
+		case inst.accumulator == nil:
+			// Already flushed (a deadline Execute or owner). R2 guarantees the flusher
+			// no longer references it; we hold it exclusively, so recycle now.
+			inst.mu.Unlock()
+			q.instancePool.Put(inst)
+		case defaultPool.ClaimForFlush(inst):
+			// Won the flush: no due Execute owns it. Enqueue it (its Execute flushes
+			// and self-recycles via detached, since it is no longer cached here).
+			inst.detached = true
+			inst.mu.Unlock()
+			defaultPool.ForceFresh(inst)
+		default:
+			// Lost: a due Execute already claimed it and will flush + drop the barrier.
+			// We popped it out, so it won't be recycled (rare GC), but never leaks.
+			inst.mu.Unlock()
 		}
-		c.funnelInstancePool.Put(inst)
 	}
 }
 
@@ -302,7 +347,11 @@ type funnelInstance[T any] struct {
 	// delayq's mutex from ever waiting on c.mu (the deadlock fix).
 	workq.ScheduledWorkItem
 
-	funnel *funnel[T]
+	// wave owns this instance (the per-wave flush barrier, the error sink, ctxMeta).
+	// factory builds the accumulator. Both are copied from the Funnel value at
+	// creation; the instance carries no funnel back-pointer.
+	wave    *Wave
+	factory AccumulatorFactory[T]
 
 	mu            sync.Mutex
 	earliestGroup workq.GroupID
@@ -312,41 +361,53 @@ type funnelInstance[T any] struct {
 	// signal — there is no per-instance reference count. Mutated only
 	// under mu.
 	accumulator Accumulator[T]
+
+	// detached marks an instance the end-of-work sweep popped out of the cache queue
+	// and enqueued as flush work: its Execute must recycle it (it is no longer cached,
+	// so the owner lineage won't). A deadline-driven Execute leaves detached false and
+	// leaves the spent shell cached for the owner/sweep to recycle. Set under mu by the
+	// sweep before ForceFresh; read under mu by Execute.
+	detached bool
 }
 
 // Execute implements [workq.Work]: it runs the scheduled flush once the
-// instance's deadline has come due and the scheduled-work queue has
-// surfaced it as fresh work. Any funnel worker may run it. This is party "D"
-// in the lifetime model: it flushes and drops funnel-liveness, then never touches
-// the instance again (see [funnelInstance.forceFlush]), so an owner
-// reuse-pop is free to recycle the spent shell the instant Execute
-// releases c.mu.
+// instance's deadline has come due and the shared queue has surfaced it as fresh
+// work — either a deadline drained by a worker, or the end-of-work sweep's
+// ForceFresh. Any pool worker may run it. It flushes (dropping the per-instance
+// barrier in flush) and then, only if the sweep detached it from the cache,
+// recycles the spent shell — never touching the instance after releasing c.mu
+// otherwise (rule R2), so an owner reuse-pop is free to recycle a non-detached
+// shell the instant Execute releases c.mu.
+//
+//nolint:contextcheck // ctx is the borrow source for the flush body ctx, not a propagated arg
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	workerCtx, _ := c.funnel.fEngine.job.ctxMeta(ctx)
-	c.forceFlush(workerCtx)
+	// The flush runs on a fungible pool worker whose ctx carries no ctxMeta, so borrow
+	// a funnel-body ctx for it (mirroring accumulate-body dispatch): stamp the wave as
+	// ambient (so a Flush body's downstream Submit resolves it), the worker's E, and the
+	// funnel ctxType. Cancellation rides the worker ctx by ancestry; the wave owns none.
+	ee := workerEnvFromContext(ctx)
+	bodyCtx, _ := borrowBodyContext(ctx, c.wave, funnelContext, nil, nil, ee)
+	defer releaseBodyContext(bodyCtx)
+	c.mu.Lock()
+	c.flush(bodyCtx)
+	detached := c.detached
+	c.mu.Unlock()
+	if detached {
+		// The sweep removed this from the cache queue, so no owner will reclaim it;
+		// R2 guarantees we hold it exclusively now. Recycle the spent shell.
+		omnipool.For[funnelInstance[T]]().Put(c)
+	}
 	return nil
 }
 
-// Free implements [workq.Work] as a no-op. A deadline-driven flush
-// completes everything it needs — the user flush, the job barrier, and
-// funnel-liveness — inside [funnelInstance.Execute] before releasing c.mu and
-// never touches the instance again. Because an owner reuse-pop may recycle
-// the spent shell the instant c.mu is released (before the controller
-// gets here to call Free), Free must not read any instance field.
+// Free implements [workq.Work] as a no-op. A flush completes everything it needs —
+// the user flush, the job barrier, and (if detached) recycling — inside
+// [funnelInstance.Execute] before releasing c.mu and never touches the instance
+// again. Because an owner reuse-pop may recycle a non-detached spent shell the
+// instant c.mu is released (before the controller gets here to call Free), Free must
+// not read any instance field.
 func (c *funnelInstance[T]) Free() {}
-
-// forceFlush flushes the instance out-of-band — for a deadline-driven
-// [funnelInstance.Execute] or the end-of-work sweep — and, if this call
-// performed the flush, drops funnel-liveness. It captures the funnel before taking
-// c.mu and uses only that local afterward, so it never touches the
-// instance object once c.mu is released (rule R2): the spent shell is
-// then safe for an owner reuse-pop to recycle concurrently.
-func (c *funnelInstance[T]) forceFlush(ctx context.Context) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.flush(ctx)
-}
 
 func (c *funnelInstance[T]) allocate(
 	ctx context.Context,
@@ -369,15 +430,14 @@ func (c *funnelInstance[T]) allocate(
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "Funnel(%p) returning new accumulator=%v", c.funnel, c.accumulator)
+		trace.Logf(ctx, traceRegion, "Funnel returning new accumulator=%v", c.accumulator)
 	}
 }
 
-// emitErr surfaces an Accumulator error through the framework-owned error
-// sink. The errSink's handler returns the error to the caller of
-// Wave.SkimAll. Successful results are not surfaced this way — the
-// Accumulator body is expected to Submit those to user-owned downstream
-// sinks directly.
+// emitErr surfaces an Accumulator error through the wave-owned error sink. The
+// errSink's handler returns the error to the caller of Wave.SkimAll. Successful
+// results are not surfaced this way — the Accumulator body is expected to Submit
+// those to user-owned downstream sinks directly.
 func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
 	traceRegion := "funnelInstance.emitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -385,9 +445,9 @@ func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
 	if accErr == nil {
 		return
 	}
-	ctx, meta := c.funnel.fEngine.job.ctxMeta(ctx)
-	err := c.funnel.errSink.submit(
-		ctx, meta, c.funnel.fEngine.job, c.earliestGroup, struct{}{}, accErr)
+	ctx, meta := c.wave.ctxMeta(ctx)
+	err := funnelErrSink.submit(
+		ctx, meta, c.wave, c.earliestGroup, struct{}{}, accErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
@@ -418,41 +478,33 @@ func (c *funnelInstance[T]) accumulate(
 		c.emitErr(ctx, err)
 	}
 
-	workQueue := &c.funnel.fEngine.workQueue
 	switch {
-	case !newFlushDeadline.IsZero() && time.Until(newFlushDeadline) <= 0:
-		// Already-past deadline — flush inline, but only if no
-		// deadline-driven Execute has already claimed this instance.
-		// ClaimForFlush removes any pending heap entry and grants the
-		// flush; if it returns false the instance was already drained, so
-		// its pending Execute will flush the data just accumulated and we
-		// leave the accumulator live (rule R1).
-		if workQueue.ClaimForFlush(c) {
+	case newFlushDeadline.IsZero():
+		// No deadline: do NOT schedule. The instance stays live in the cache queue
+		// and is flushed by the end-of-work sweep (which finds it via the wave's
+		// funnel map, not the scheduled queue). No far-future placeholder.
+	case time.Until(newFlushDeadline) <= 0:
+		// Already-past deadline — flush inline, but only if no deadline-driven
+		// Execute has already claimed this instance. ClaimForFlush removes any pending
+		// scheduled entry and grants the flush; if it returns false the instance was
+		// already drained, so its pending Execute will flush the data just accumulated
+		// and we leave the accumulator live (rule R1).
+		if defaultPool.ClaimForFlush(c) {
 			c.flush(ctx)
 		}
 	default:
-		// Either a future deadline or no deadline (zero). In the
-		// no-deadline case the accumulator stays alive until the
-		// pool's job-end flush sweep picks it up; we still schedule
-		// the instance on the scheduled work queue — with a far-future
-		// placeholder deadline — so that sweep finds it.
-		//
-		// Reschedule re-adds (or updates) the heap entry unless the
-		// instance was already drained, in which case it returns false and
-		// we leave it to the pending Execute (rule R1).
-		deadline := newFlushDeadline
-		if deadline.IsZero() {
-			deadline = time.Now().Add(maxFlushAllSkew)
-		}
-		workQueue.Reschedule(c, deadline)
+		// Future deadline: (re)schedule on the shared pool's queue, where a worker
+		// runs the flush when due. Reschedule re-adds (or updates) the entry unless the
+		// instance was already drained, in which case it returns false and we leave it
+		// to the pending Execute (rule R1).
+		defaultPool.Reschedule(c, newFlushDeadline)
 	}
 }
 
-// Must already hold c.mu. Returns whether this call performed the flush
+// flush must already hold c.mu. Returns whether this call performed the flush
 // (false if the instance was already flushed). Drops the per-instance job
-// barrier reference, but NOT funnel-liveness or the pooled object — the caller
-// does that after releasing c.mu (the flusher drops funnel-liveness; the owner
-// lineage recycles).
+// barrier reference, but NOT the pooled object — the caller does that after
+// releasing c.mu (an owner reuse-pop, a detached Execute, or the end-of-work sweep).
 func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	traceRegion := "funnelInstance.flush"
 
@@ -468,8 +520,10 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	// ordered after the accumulator.Flush body below so that any
 	// downstream Submit performed by Flush takes its work reference
 	// before this reference drops — totalReferences cannot transiently
-	// reach zero across an emitting flush.
-	defer c.funnel.fEngine.job.state.DecrementReference()
+	// reach zero across an emitting flush. (c.wave is read here, while
+	// c.mu is held, so the deferred call captures the state pointer, not
+	// the instance.)
+	defer c.wave.state.DecrementReference()
 
 	panicked := true // Assume the worst
 	defer func() {
@@ -488,36 +542,6 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	return true
 }
 
-func (c *funnel[T]) submit(
-	ctx context.Context,
-	meta *ctxMeta,
-	group workq.GroupID,
-	value T,
-	err error,
-) error {
-	funnelWork := c.newFunnelWork(ctx, group, value, err, meta.wave)
-	postWork := c.fEngine.newFunnelPostWork(group, funnelWork)
-	return meta.ExecuteNowOrQueue(ctx, postWork)
-}
-
-func (c *funnel[T]) trySubmit(
-	ctx context.Context,
-	meta *ctxMeta,
-	group workq.GroupID,
-	value T,
-	err error,
-	deadline time.Time,
-) (bool, error) {
-	// Create funnel work directly with values
-	funnelWork := c.newFunnelWork(ctx, group, value, err, meta.wave)
-	postWork := c.fEngine.newFunnelPostWork(group, funnelWork)
-	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
-	if !ok {
-		postWork.Free()
-	}
-	return ok, err
-}
-
 // boundFunnelWork interface allows type erasure for funnelWork instances
 type boundFunnelWork interface {
 	workq.Work
@@ -528,7 +552,9 @@ type boundFunnelWork interface {
 type funnelWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	funnel   *funnel[T]
+	// fn is the Funnel value (config), copied at dispatch: wave, factory, limiter, id,
+	// and the cached pools. All copies share identity via fn.id.
+	fn       Funnel[T]
 	input    T
 	inputErr error
 	// req is the Limiter request handle this work's admission runs
@@ -537,9 +563,6 @@ type funnelWork[T any] struct {
 	// The funnelWork owns its lifecycle: released at body end in Execute
 	// (or idempotently in Free for never-executed work), recycled in Free.
 	req request
-	// wave is the dispatching wave; stamped onto the body ctxMeta so nil-wave
-	// dispatches from the Accumulate / Flush body can resolve it.
-	wave *Wave
 	// bodyCtx is the body context borrowed at dispatch (descended from the submit
 	// ctx); the funnel body runs under it and Free returns it. bodyMeta is the
 	// meta it carries — executeInner stamps the worker's E and the held request
@@ -551,7 +574,7 @@ type funnelWork[T any] struct {
 // funnelWork is the applicant its Limiter request is opened for:
 // accessors box lazily, only when a sizing limiter actually reads them.
 func (w *funnelWork[T]) Processor() any {
-	return w.funnel.funnelFactory
+	return w.fn.factory
 }
 
 func (w *funnelWork[T]) Value() any {
@@ -562,35 +585,48 @@ func (w *funnelWork[T]) Err() error {
 	return w.inputErr
 }
 
-func (c *funnel[T]) newFunnelWork(
-	submitCtx context.Context, group workq.GroupID, value T, err error, wave *Wave,
+func (c *Funnel[T]) newFunnelWork(
+	submitCtx context.Context, group workq.GroupID, value T, err error,
 ) *funnelWork[T] {
-	w := c.funnelWorkPool.Get()
-	w.Init(submitCtx, group, c, value, err, wave)
+	w := c.workPool.Get()
+	w.Init(submitCtx, group, *c, value, err)
 	return w
 }
 
 //nolint:contextcheck // submitCtx is the borrow source for the body ctx, not a propagated arg
 func (w *funnelWork[T]) Init(
-	submitCtx context.Context, group workq.GroupID, f *funnel[T], input T, inputErr error, wave *Wave,
+	submitCtx context.Context, group workq.GroupID, fn Funnel[T], input T, inputErr error,
 ) {
-	w.poolWork.Init(group, f.fEngine.job)
-	w.funnel = f
+	w.poolWork.Init(group, fn.wave)
+	w.fn = fn
 	w.input = input
 	w.inputErr = inputErr
-	w.wave = wave
 	// Borrow the body context at dispatch (descended from the submit ctx). The
 	// permit (heldRequest) is acquired on the worker in executeInner, the worker's
 	// E stamped there too; both nil here. Worker bodies are fresh permit-roots.
-	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, wave, funnelContext, nil, nil, nil)
+	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, nil, nil, nil)
+}
+
+// instanceQueue returns the wave's per-funnel instance cache for this work's funnel,
+// creating it on first use. The map value is the typed *funnelInstanceQueue[T]; the
+// only type erasure is the sync.Map's any boundary.
+func (w *funnelWork[T]) instanceQueue() *funnelInstanceQueue[T] {
+	if v, ok := w.fn.wave.funnelInstances.Load(w.fn.id); ok {
+		return v.(*funnelInstanceQueue[T])
+	}
+	q := &funnelInstanceQueue[T]{instancePool: w.fn.instancePool}
+	q.queue.Init()
+	actual, _ := w.fn.wave.funnelInstances.LoadOrStore(w.fn.id, q)
+	return actual.(*funnelInstanceQueue[T])
 }
 
 func (w *funnelWork[T]) Funnel(ctx context.Context) {
-	// This is the owner lineage ("A"/"C"): an instance is either cached in
-	// instanceQueue or being processed here, never both.
+	// This is the owner lineage ("A"/"C"): an instance is either cached in the
+	// queue or being processed here, never both.
+	q := w.instanceQueue()
 	var hbc *funnelInstance[T]
 	for {
-		hbc, _ = w.funnel.instanceQueue.TryPopFront()
+		hbc, _ = q.queue.TryPopFront()
 		if hbc == nil {
 			break
 		}
@@ -601,23 +637,24 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 			}
 			break // still holding hbc.mu lock — reuse this live instance
 		}
-		// Spent shell: a deadline-driven Execute already flushed it (which
-		// dropped funnel-liveness and the barrier) and left it cached here. As
-		// the owner, recycle it and keep looking for a live instance.
-		f := hbc.funnel
+		// Spent shell: a deadline-driven Execute already flushed it (which dropped
+		// the barrier) and left it cached. As the owner, recycle it and keep looking
+		// for a live instance.
 		hbc.mu.Unlock()
-		f.funnelInstancePool.Put(hbc)
+		q.instancePool.Put(hbc)
 	}
 	if hbc == nil {
-		hbc = w.funnel.funnelInstancePool.Get()
+		hbc = q.instancePool.Get()
 		hbc.mu.Lock()
 		// Per-instance flush barrier: hold one job reference for the instance's whole
 		// live lifetime (until flush() runs). This keeps the job out of Done while the
 		// accumulator is unflushed, regardless of which worker eventually flushes it,
 		// and is what guarantees every outstanding instance is flushed before the wave
 		// drains. Released in flush().
-		w.funnel.fEngine.job.state.IncrementReference()
-		hbc.funnel = w.funnel
+		w.fn.wave.state.IncrementReference()
+		hbc.wave = w.fn.wave
+		hbc.factory = w.fn.factory
+		hbc.detached = false
 		// Reset and re-Init the embedded work item: a fresh work ID, the
 		// flush group, and a zeroed (never-scheduled) heap position. The
 		// reset matters for reuse — a pooled instance retains the negative
@@ -627,7 +664,7 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 		hbc.ScheduledWorkItem = workq.ScheduledWorkItem{}
 		hbc.Init(w.Group())
 		hbc.earliestGroup = w.Group()
-		hbc.allocate(ctx, w.funnel.funnelFactory)
+		hbc.allocate(ctx, w.fn.factory)
 	}
 	defer func() {
 		// If funnel() flushed inline, it did so via ClaimForFlush, which
@@ -635,12 +672,11 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 		// so this lineage owns the spent shell outright: recycle it.
 		// Otherwise the instance is still live; cache it.
 		spent := hbc.accumulator == nil
-		f := hbc.funnel
 		hbc.mu.Unlock()
 		if spent {
-			f.funnelInstancePool.Put(hbc)
+			q.instancePool.Put(hbc)
 		} else {
-			f.instanceQueue.PushBack(hbc)
+			q.queue.PushBack(hbc)
 		}
 	}()
 	hbc.accumulate(ctx, w.input, w.inputErr)
@@ -651,14 +687,14 @@ func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", w, w)
 
-	if w.funnel.limiter.impl == nil {
+	if w.fn.limiter.impl == nil {
 		return w.executeInner(ctx, ex)
 	}
 
 	if w.req == nil {
-		w.req = w.funnel.limiter.impl.newRequest(w)
+		w.req = w.fn.limiter.impl.newRequest(w)
 	}
-	held, err := acquireOrWait(ctx, ex, time.Time{}, w.funnel.fEngine.job.protoBB, w.req)
+	held, err := acquireOrWait(ctx, ex, time.Time{}, w.fn.wave.protoBB, w.req)
 	if err != nil || !held {
 		return err
 	}
@@ -707,11 +743,80 @@ func (w *funnelWork[T]) Free() {
 		w.bodyMeta = nil
 	}
 
+	wave := w.fn.wave
 	w.DownstreamWork.Close()
-	w.poolWork.Close(w.funnel.fEngine.job)
+	w.poolWork.Close(wave)
 
-	pool := w.funnel.funnelWorkPool
+	pool := w.fn.workPool
+	var zero Funnel[T]
+	w.fn = zero
 	pool.Put(w)
+}
+
+// funnelPostWork is the producer that hands a funnelWork off to the shared pool's
+// queue (mirrors taskPostWork). The governor still applies: onWait registers the
+// funnel work's downstream saturation on the wave's governor — the same one top-level
+// task admission gates on and skim registers on — so funnel backpressure is unified
+// with the rest of the wave's sources.
+type funnelPostWork struct {
+	poolWork
+	wave *Wave
+	work boundFunnelWork
+}
+
+func (w *funnelPostWork) Init(group workq.GroupID, wave *Wave, work boundFunnelWork) {
+	w.poolWork.Init(group, wave)
+	w.wave = wave
+	w.work = work
+}
+
+func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error {
+	traceRegion := "funnelPostWork.Execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", w)
+
+	// Handoff to the GLOBAL pool's shared work queue (mirrors taskPostWork).
+	// shouldBlock is read directly from the ctx (not via wave.ctxMeta, which panics on
+	// a missing meta): a producer only postpones onto the global queue in LISTEN
+	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta.
+	meta, _ := metaFromContext(ctx)
+	shouldBlock := meta != nil && meta.job == w.wave && meta.ShouldBlock()
+	onWait := func() { w.work.Waiting(&w.wave.governor) }
+	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.work, onWait)
+	if posted {
+		w.work = nil // ownership transferred to the queue
+	}
+	return err
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (w *funnelPostWork) Free() {
+	traceRegion := "funnelPostWork.Free"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "%v", w)
+
+	// Free the nested work item if we still own it
+	if w.work != nil {
+		trace.Logf(context.Background(), traceRegion, "w.work.Free()")
+		w.work.Free()
+		w.work = nil
+	}
+
+	w.Close(w.wave)
+	funnelPostWorkPool.Put(w)
+}
+
+var funnelPostWorkPool = omnipool.For[funnelPostWork]()
+
+//nolint:contextcheck // background context used only for tracing
+func newFunnelPostWork(group workq.GroupID, wave *Wave, bc boundFunnelWork) *funnelPostWork {
+	traceRegion := "newFunnelPostWork"
+
+	w := funnelPostWorkPool.Get()
+	w.Init(group, wave, bc)
+
+	trace.Logf(context.Background(), traceRegion, "created %v", w)
+	return w
 }
 
 // errAccumulator is the framework's substitute Accumulator used when a user

@@ -140,6 +140,27 @@ func (q *Accepted) Expedite(w ScheduledWork) {
 	q.waiters.Notify(q.unmetDemandFn)
 }
 
+// ForceFresh promotes w straight into the fresh queue so the next worker runs it
+// now, and fires demand (spawning a worker if none is idle). Unlike [Accepted.Expedite]
+// it does NOT consult the scheduled queue, so it works for work that was never scheduled
+// — e.g. a no-deadline funnel instance the end-of-work sweep flushes. The caller is
+// responsible for any admission/arbitration (the funnel sweep gates each push behind
+// ClaimForFlush); this is purely the promote-and-signal step.
+func (q *Accepted) ForceFresh(w Work) {
+	q.fresh.PushBack(w)
+	// Wake a parked worker if one is waiting; otherwise spawn one directly. Notify
+	// only *delivers* the demand signal to a parked waiter — TryPushBack returns false
+	// (and does NOT invoke the fn) when no worker inbox is waiting — so a Notify alone
+	// strands w in fresh whenever every worker is busy inside a body and none is parked
+	// (the funnel-sweep wedge). The direct unmetDemandFn call guarantees a driver,
+	// mirroring Queue.Post's fireDemand. (queueFresh can rely on Notify-only because it
+	// runs inside a live drive whose own worker handles the base case; ForceFresh is
+	// fired from outside any drive — the end-of-work sweep — so it must spawn itself.)
+	if !q.waiters.Notify(q.unmetDemandFn) && q.unmetDemandFn != nil {
+		q.unmetDemandFn()
+	}
+}
+
 // drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllScheduled]
 // so every scheduled item — including far-future no-deadline placeholders —
 // is treated as due. Matches the funnel pool's no-deadline placeholder skew.

@@ -27,15 +27,15 @@ func TestRootUnitLifecycle(t *testing.T) {
 	pm, got := c.Acquire()
 	require.True(t, got)
 	require.Same(t, c, pm.backing, "a top-level acquire backs from the unit's own cache")
-	assert.Equal(t, 1, p.checkedOut)
+	assert.Equal(t, 1, p.totalHeld())
 	ok(t, p)
 
 	pm.Release() // body completes; permit stays cached (held=1, inUse=0)
-	assert.Equal(t, 1, p.checkedOut, "cache-don't-return: release does not give the permit back")
+	assert.Equal(t, 1, p.totalHeld(), "cache-don't-return: release does not give the permit back")
 	ok(t, p)
 
 	require.True(t, c.ReleaseRef(), "the unit's last reference destroys the cache")
-	assert.Equal(t, 0, p.checkedOut, "destruction returns the permit to the Resource")
+	assert.Equal(t, 0, p.totalHeld(), "destruction returns the permit to the Resource")
 	ok(t, p)
 }
 
@@ -56,12 +56,12 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	cp, got := sub.Acquire() // the old livelock — now a step-2 ancestor inherit
 	require.True(t, got, "child must inherit the parked parent's idle permit, not deadlock")
 	require.Same(t, parent, cp.backing, "the child is backed by the parent's permit, unmoved")
-	assert.Equal(t, 1, p.checkedOut, "no second permit is checked out")
+	assert.Equal(t, 1, p.totalHeld(), "no second permit is checked out")
 	ok(t, p)
 
 	cp.Release()                      // child body completes
 	require.True(t, sub.ReleaseRef()) // sub-wave drains; its cache is destroyed
-	assert.Equal(t, 1, p.checkedOut)  // parent still holds its cached permit
+	assert.Equal(t, 1, p.totalHeld()) // parent still holds its cached permit
 	ok(t, p)
 
 	pp2, got := parent.Acquire() // parent resumes (reacquire): step-1 own-cache hit
@@ -69,7 +69,7 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	require.Same(t, parent, pp2.backing)
 	pp2.Release()
 	require.True(t, parent.ReleaseRef())
-	assert.Equal(t, 0, p.checkedOut)
+	assert.Equal(t, 0, p.totalHeld())
 	ok(t, p)
 }
 
@@ -91,7 +91,7 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 	c2, ok2 := sub.Acquire() // ancestors exhausted → step 3: delta from the Resource
 	require.True(t, ok2)
 	require.Same(t, sub, c2.backing, "the second concurrent child takes a delta into its own cache")
-	assert.Equal(t, 2, p.checkedOut)
+	assert.Equal(t, 2, p.totalHeld())
 	ok(t, p)
 
 	_, ok3 := sub.Acquire() // capacity exhausted, both in use
@@ -102,7 +102,7 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 	c2.Release()
 	require.True(t, sub.ReleaseRef())
 	require.True(t, parent.ReleaseRef())
-	assert.Equal(t, 0, p.checkedOut)
+	assert.Equal(t, 0, p.totalHeld())
 	ok(t, p)
 }
 
@@ -120,15 +120,15 @@ func TestCrossWaveSteal(t *testing.T) {
 	bp, got := b.Acquire() // own/ancestor miss, Resource full → step 4 steals from A
 	require.True(t, got, "B steals A's idle permit rather than deadlocking")
 	require.Same(t, b, bp.backing)
-	assert.Equal(t, 1, p.checkedOut, "a steal is a transfer, not a new checkout")
-	assert.Equal(t, 0, a.held, "the victim simply loses the cached permit")
-	assert.Equal(t, 1, b.held)
+	assert.Equal(t, 1, p.totalHeld(), "a steal is a transfer, not a new checkout")
+	assert.Equal(t, uint64(0), a.held(), "the victim simply loses the cached permit")
+	assert.Equal(t, uint64(1), b.held())
 	ok(t, p)
 
 	bp.Release()
 	require.True(t, b.ReleaseRef())
 	require.True(t, a.ReleaseRef())
-	assert.Equal(t, 0, p.checkedOut)
+	assert.Equal(t, 0, p.totalHeld())
 	ok(t, p)
 }
 
@@ -150,13 +150,13 @@ func TestNestedDriveSinglePermitChain(t *testing.T) {
 	gp, ok2 := grand.Acquire() // walk grand → child(held=0) → parent(borrowable=1): inherit
 	require.True(t, ok2)
 	require.Same(t, parent, gp.backing, "the grandchild reaches the parent's permit up the chain")
-	assert.Equal(t, 1, p.checkedOut)
+	assert.Equal(t, 1, p.totalHeld())
 	ok(t, p)
 
 	gp.Release()
 	require.True(t, grand.ReleaseRef())
 	require.True(t, child.ReleaseRef())
 	require.True(t, parent.ReleaseRef())
-	assert.Equal(t, 0, p.checkedOut)
+	assert.Equal(t, 0, p.totalHeld())
 	ok(t, p)
 }

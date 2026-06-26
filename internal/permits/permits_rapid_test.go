@@ -94,7 +94,7 @@ func TestPermitsModel(t *testing.T) {
 					// should have succeeded — a deadlock-freedom bug.
 					require.False(t, p.HasBorrowable(),
 						"Acquire blocked while a permit was borrowable")
-					require.Equal(t, sem.capacity, sem.inFlight,
+					require.Equal(t, int64(sem.capacity), sem.inFlight.Load(),
 						"Acquire blocked while Resource capacity remained")
 				}
 				check()
@@ -144,8 +144,8 @@ func TestPermitsModel(t *testing.T) {
 			}
 		}
 		require.NoError(t, p.CheckInvariants())
-		require.Equal(t, 0, p.checkedOut, "every permit returns to the Resource after a full drain (no leak)")
-		require.Equal(t, 0, sem.inFlight, "the Resource is fully released after a full drain")
+		require.Equal(t, 0, p.totalHeld(), "every permit returns to the Resource after a full drain (no leak)")
+		require.Equal(t, int64(0), sem.inFlight.Load(), "the Resource is fully released after a full drain")
 		require.Empty(t, p.roots, "every cache is destroyed after a full drain")
 	})
 }

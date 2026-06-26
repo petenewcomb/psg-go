@@ -3,40 +3,53 @@
 
 package permits
 
-import "fmt"
+import (
+	"fmt"
+	"sync/atomic"
+)
 
 // This file holds test-only fixtures and oracles, compiled only under `go test`.
 
-// semaphore is the weight-1 test Resource: a fixed capacity and an in-flight count.
+// semaphore is the weight-1 test Resource: a fixed capacity and an atomic in-flight
+// count (atomic so the -race concurrency harness can share it).
 type semaphore struct {
 	capacity int
-	inFlight int
+	inFlight atomic.Int64
 }
 
 func (s *semaphore) TryAcquire(n int) bool {
-	if s.inFlight+n > s.capacity {
-		return false
+	for {
+		cur := s.inFlight.Load()
+		if cur+int64(n) > int64(s.capacity) {
+			return false
+		}
+		if s.inFlight.CompareAndSwap(cur, cur+int64(n)) {
+			return true
+		}
 	}
-	s.inFlight += n
-	return true
 }
 
-func (s *semaphore) Release(n int) { s.inFlight -= n }
+func (s *semaphore) Release(n int) { s.inFlight.Add(-int64(n)) }
 
 // CheckInvariants verifies the model-check targets across the whole pool and returns
-// the first violation found, or nil (permit-core.md "Invariants"). It cross-checks
-// three independent views of Σheld — the caches, the Pool's mirror, and the
-// Resource's in-flight count — which must all agree and stay within capacity.
+// the first violation found, or nil. It takes the Pool lock and so observes a
+// structurally stable forest; it is meant to be called at a quiescent point (no
+// acquire mid-flight), where the three views of Σheld — the caches, and the
+// Resource's in-flight count — must agree and stay within capacity.
 func (p *Pool) CheckInvariants() error {
 	sem := p.resource.(*semaphore)
-	sumHeld, sumInUse := 0, 0
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var sumHeld, sumInUse uint64
 	var walk func(c *Cache) error
 	walk = func(c *Cache) error {
-		if c.inUse < 0 || c.held < 0 || c.inUse > c.held {
-			return fmt.Errorf("per-cache: 0 ≤ inUse ≤ held violated (held=%d inUse=%d)", c.held, c.inUse)
+		h, u := c.counts.load()
+		if u > h {
+			return fmt.Errorf("per-cache: inUse > held (held=%d inUse=%d)", h, u)
 		}
-		sumHeld += c.held
-		sumInUse += c.inUse
+		sumHeld += h
+		sumInUse += u
 		for _, ch := range c.children {
 			if err := walk(ch); err != nil {
 				return err
@@ -49,38 +62,52 @@ func (p *Pool) CheckInvariants() error {
 			return err
 		}
 	}
-	if sumHeld != p.checkedOut {
-		return fmt.Errorf("conservation: Σheld=%d != Pool.checkedOut=%d", sumHeld, p.checkedOut)
+	//nolint:gosec // G115: in-flight and capacity are small non-negative test values
+	inFlight, capacity := uint64(sem.inFlight.Load()), uint64(sem.capacity)
+	if sumHeld != inFlight {
+		return fmt.Errorf("conservation: Σheld=%d != Resource.inFlight=%d", sumHeld, inFlight)
 	}
-	if p.checkedOut != sem.inFlight {
-		return fmt.Errorf("resource mismatch: Pool.checkedOut=%d != Resource.inFlight=%d", p.checkedOut, sem.inFlight)
+	if inFlight > capacity {
+		return fmt.Errorf("conservation: inFlight=%d > capacity=%d", inFlight, capacity)
 	}
-	if sem.inFlight > sem.capacity {
-		return fmt.Errorf("conservation: inFlight=%d > capacity=%d", sem.inFlight, sem.capacity)
-	}
-	if sumInUse > sem.capacity {
-		return fmt.Errorf("concurrency bound: ΣinUse=%d > capacity=%d", sumInUse, sem.capacity)
+	if sumInUse > capacity {
+		return fmt.Errorf("concurrency bound: ΣinUse=%d > capacity=%d", sumInUse, capacity)
 	}
 	return nil
 }
 
-// HasBorrowable reports whether ANY cache in the forest has an idle (borrowable)
-// permit, by an independent exhaustive walk. It deliberately does NOT reuse the
-// production steal search (findStealVictim): the liveness assertion — Acquire must
-// not block while HasBorrowable is true — is meant to cross-check that the guided,
-// early-terminating descent never misses a borrowable permit, so the oracle must be
-// an independent witness, not the same code.
+// HasBorrowable reports whether ANY cache holds an idle (borrowable) permit, by an
+// independent exhaustive walk — deliberately NOT the production findBorrowable — so
+// the liveness assertion (Acquire must not block while HasBorrowable is true)
+// cross-checks the production steal search rather than echoing it.
 func (p *Pool) HasBorrowable() bool {
-	found := false
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return hasBorrowableWalk(p.roots)
+}
+
+func hasBorrowableWalk(caches []*Cache) bool {
+	for _, c := range caches {
+		if h, u := c.counts.load(); h > u {
+			return true
+		}
+		if hasBorrowableWalk(c.children) {
+			return true
+		}
+	}
+	return false
+}
+
+// totalHeld returns Σheld across the forest — the count of permits checked out of the
+// Resource (the test replacement for the dropped Pool.checkedOut mirror).
+func (p *Pool) totalHeld() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var sum uint64
 	var walk func(c *Cache)
 	walk = func(c *Cache) {
-		if found {
-			return
-		}
-		if c.held > c.inUse {
-			found = true
-			return
-		}
+		h, _ := c.counts.load()
+		sum += h
 		for _, ch := range c.children {
 			walk(ch)
 		}
@@ -88,5 +115,11 @@ func (p *Pool) HasBorrowable() bool {
 	for _, r := range p.roots {
 		walk(r)
 	}
-	return found
+	return int(sum)
+}
+
+// held returns a cache's current held, for tests.
+func (c *Cache) held() uint64 {
+	h, _ := c.counts.load()
+	return h
 }

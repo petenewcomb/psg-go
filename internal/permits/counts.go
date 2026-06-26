@@ -30,6 +30,13 @@ func (c *counts) load() (held, inUse uint64) {
 	return p[0], p[1]
 }
 
+// store overwrites (held, inUse). Used only by destroy, under the Pool lock, on a
+// quiescent cache (no live acquirer — refs have reached zero), to zero out the
+// counters as its held returns to the Resource.
+func (c *counts) store(held, inUse uint64) {
+	atomic128.StoreUint128(&c.w, [2]uint64{held, inUse})
+}
+
 // acquireLocal occupies one borrowable permit (inUse++ when inUse < held) and
 // reports success; false means this cache has nothing idle to lend right now. The
 // lock-free step-1 (own cache) / step-2 (ancestor) hit.

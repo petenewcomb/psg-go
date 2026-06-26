@@ -34,7 +34,7 @@ func Wait() { defaultPool.Wait() }
 // workerExEnv is the context-free unified execution environment each default-pool
 // worker holds: the integration surface (pooled rdvq sender + receiver + group/
 // queue stacks) that task and funnel bodies run against. It is deliberately
-// job/wave-agnostic — per-execution context (job, wave, cancellation) rides the
+// wave-agnostic — per-execution context (wave, cancellation) rides the
 // work item, which the worker runs under its borrowed body context,
 // stamping this exEnv in. taskExEnv + cpWorker collapse into this as the task and
 // funnel engines are cut over onto the shared pool. Lock/Unlock are no-ops: the

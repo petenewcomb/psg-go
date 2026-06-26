@@ -147,7 +147,7 @@ func (g Skimmer[T]) SubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return g.submit(ctx, meta, target, group, value, err)
+	return g.submit(ctx, meta, group, value, err)
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
@@ -197,7 +197,7 @@ func (g Skimmer[T]) TrySubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return g.trySubmit(ctx, meta, target, group, value, err, deadline)
+	return g.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
 // boundSkimWork interface allows type erasure for skimWork instances
@@ -209,7 +209,7 @@ type boundSkimWork interface {
 type skimWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	job     *Wave
+	wave    *Wave
 	pool    *omnipool.Pool[skimWork[T]]
 	handler Handler[T]
 	value   T
@@ -217,64 +217,64 @@ type skimWork[T any] struct {
 }
 
 // newSkimWork creates a new skim work item with the provided values
-func (g Skimmer[T]) newSkimWork(group workq.GroupID, job *Wave, value T, err error) *skimWork[T] {
-	w := g.workPool.Get()
-	w.Init(g.workPool, group, job, g.handler, value, err)
-	return w
+func (g Skimmer[T]) newSkimWork(group workq.GroupID, wv *Wave, value T, err error) *skimWork[T] {
+	wk := g.workPool.Get()
+	wk.Init(g.workPool, group, wv, g.handler, value, err)
+	return wk
 }
 
-func (w *skimWork[T]) Init(
+func (wk *skimWork[T]) Init(
 	pool *omnipool.Pool[skimWork[T]],
 	group workq.GroupID,
-	job *Wave,
+	wv *Wave,
 	handler Handler[T],
 	value T,
 	err error,
 ) {
-	w.poolWork.Init(group, job)
-	w.job = job
-	w.pool = pool
-	w.handler = handler
-	w.value = value
-	w.err = err
+	wk.poolWork.Init(group, wv)
+	wk.wave = wv
+	wk.pool = pool
+	wk.handler = handler
+	wk.value = value
+	wk.err = err
 }
 
-func (w *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "skimWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
+	trace.Logf(ctx, traceRegion, "%v", wk)
 
 	ex.Starting()
-	ctx, meta := w.job.ctxMeta(ctx)
+	ctx, meta := wk.wave.ctxMeta(ctx)
 
-	meta.PushGroup(w.Group())
+	meta.PushGroup(wk.Group())
 	defer meta.PopGroup()
 
-	return w.handler.Handle(ctx, w.value, w.err)
+	return wk.handler.Handle(ctx, wk.value, wk.err)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *skimWork[T]) Free() {
+func (wk *skimWork[T]) Free() {
 	traceRegion := "skimWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
-	w.DownstreamWork.Close()
-	w.poolWork.Close(w.job)
-	w.pool.Put(w)
+	wk.DownstreamWork.Close()
+	wk.poolWork.Close(wk.wave)
+	wk.pool.Put(wk)
 }
 
-// submit creates skim work and posts it to the skim queue
+// submit creates skim work and posts it to the skim queue. The target wave is read
+// from meta.wave (the resolved dispatch target the meta was minted for).
 func (g Skimmer[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
-	job *Wave,
 	group workq.GroupID,
 	value T,
 	err error,
 ) error {
-	skimWork := g.newSkimWork(group, job, value, err)
-	postWork := job.newSkimPostWork(group, skimWork, meta.ShouldBlock())
+	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
@@ -282,14 +282,13 @@ func (g Skimmer[T]) submit(
 func (g Skimmer[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
-	job *Wave,
 	group workq.GroupID,
 	value T,
 	err error,
 	deadline time.Time,
 ) (bool, error) {
-	skimWork := g.newSkimWork(group, job, value, err)
-	postWork := job.newSkimPostWork(group, skimWork, meta.ShouldBlock())
+	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()

@@ -88,7 +88,7 @@ func TestPermitScopingChains(t *testing.T) {
 		subCtx, subTopMeta := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subTopCtxType = subTopMeta.ctxType
 		subTopParentIsBody = subTopMeta.parent == bodyMeta
-		// The chain a subwave parking point would walk: from the subjob's
+		// The chain a subwave parking point would walk: from the subwave's
 		// top-level meta up to the body — where a handle will be stamped
 		// (task #3) — and no further handle beyond it.
 		subTopNoHeld = subTopMeta.currentHeldRequest() == nil
@@ -123,7 +123,7 @@ func TestPermitScopingChains(t *testing.T) {
 	require.True(t, subBodySeen)
 	assert.Equal(t, taskContext, subBodyCtxType)
 	assert.True(t, subBodyParentNil,
-		"subjob worker must be fresh-rooted even though the subjob's base ctx carries the parent body's meta")
+		"subwave worker must be fresh-rooted even though the subwave's base ctx carries the parent body's meta")
 
 	require.True(t, skimSeen)
 	assert.Equal(t, skimContext, skimCtxType)

@@ -33,28 +33,29 @@ import (
 var bodyMetaPool = omnipool.For[ctxMeta]()
 
 // borrowBodyContext returns a body context for running an op body of the given ctxType,
-// bound to wave and descended from srcCtx, together with the *ctxMeta it carries. The
+// bound to wv and descended from srcCtx, together with the *ctxMeta it carries. The
 // meta is stamped:
-//   - job/wave    = wave (the dispatch target)
+//   - wave        = wv (the dispatch target)
 //   - ctxType     = ctxType
-//   - parent      = parent (nil severs the permit-root chain for an async body run on a
-//     fungible worker; the enclosing meta for an inline/nested borrow)
 //   - heldRequest = req (the limiter handle, nil for unlimited ops)
-//   - parentJobs  = parentJobsForSource(srcCtx, wave)
+//   - parentWaves = parentWavesForSource(srcCtx, wv)
+//
+// parent stays nil: a borrowed body is always a fresh permit-root, severing the
+// permit-root chain for an async body that runs on a fungible worker (it must not
+// inherit a dispatcher's permit across the goroutine boundary). The pooled meta is
+// zeroed on release, so parent needs no explicit stamp.
 //
 // The caller runs the body under the returned ctx and then calls releaseBodyContext.
 func borrowBodyContext(
-	srcCtx context.Context, wave *Wave, ctxType contextType, parent *ctxMeta,
+	srcCtx context.Context, wv *Wave, ctxType contextType,
 	req request, exEnv executionEnvironment,
 ) (context.Context, *ctxMeta) {
 	m := bodyMetaPool.Get()
-	m.job = wave
-	m.wave = wave
+	m.wave = wv
 	m.ctxType = ctxType
-	m.parent = parent
 	m.heldRequest = req
 	m.executionEnvironment = exEnv
-	m.parentJobs = parentJobsForSource(srcCtx, wave)
+	m.parentWaves = parentWavesForSource(srcCtx, wv)
 	return ctxpool.WithValue(srcCtx, m), m
 }
 
@@ -69,22 +70,22 @@ func releaseBodyContext(ctx context.Context) {
 	}
 }
 
-// parentJobsForSource computes the cross-wave ancestry a body bound to wave should
+// parentWavesForSource computes the cross-wave ancestry a body bound to wv should
 // carry, derived from srcCtx's own meta (mirrors ensureCtxMeta): a top-level source
-// (no meta) carries none; a same-wave source passes its parentJobs through unchanged;
-// a cross-wave source joins its own wave into its parentJobs (the body reaches across a
+// (no meta) carries none; a same-wave source passes its parentWaves through unchanged;
+// a cross-wave source joins its own wave into its parentWaves (the body reaches across a
 // wave boundary). The cross-wave branch allocates a fresh map per call — see
 // docs/decisions/body-context-pool.md on caching this for a hot redirect.
-func parentJobsForSource(srcCtx context.Context, wave *Wave) map[*Wave]struct{} {
+func parentWavesForSource(srcCtx context.Context, wv *Wave) map[*Wave]struct{} {
 	srcMeta, ok := metaFromContext(srcCtx)
-	if !ok || srcMeta.job == nil || srcMeta.job == wave {
+	if !ok || srcMeta.wave == nil || srcMeta.wave == wv {
 		if ok {
-			return srcMeta.parentJobs
+			return srcMeta.parentWaves
 		}
 		return nil
 	}
-	pj := make(map[*Wave]struct{}, len(srcMeta.parentJobs)+1)
-	maps.Copy(pj, srcMeta.parentJobs)
-	pj[srcMeta.job] = struct{}{}
-	return pj
+	pw := make(map[*Wave]struct{}, len(srcMeta.parentWaves)+1)
+	maps.Copy(pw, srcMeta.parentWaves)
+	pw[srcMeta.wave] = struct{}{}
+	return pw
 }

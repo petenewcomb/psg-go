@@ -29,15 +29,18 @@ const (
 )
 
 type ctxMeta struct {
-	job  *Wave
-	wave *Wave // the meta's ambient wave (topLevelCtxMeta / borrowBodyContext); nil for ctxs not derived through a Wave
+	// wave is the Wave this meta belongs to: both the dispatch/ownership identity
+	// (validated by Wave.ctxMeta) and the ambient wave a nil-wave op dispatched from
+	// this context resolves to (resolveWave). Always set on a live meta; nil only on
+	// a zero-value meta not derived through a Wave.
+	wave *Wave
 	// parent links to the ctxMeta this one was derived from along the
 	// context value chain — the synchronous, same-goroutine derivations
 	// (top-level→skim, body→subwave contexts) that
 	// currentHeldRequest walks to find a held limiter permit. Worker
 	// contexts are fresh permit-roots (parent == nil), severed
 	// explicitly at creation: the pool's base ctx may carry a foreign
-	// pool's meta (a subjob created inside a body), and inheriting the
+	// wave's meta (a subwave created inside a body), and inheriting the
 	// link there would let a worker find its dispatcher's permit across
 	// the goroutine boundary. See docs/limiter-suspend-resume.md,
 	// "Serialization and scoping".
@@ -47,7 +50,7 @@ type ctxMeta struct {
 	// framework parking points. A stamped handle is only ever HELD or
 	// SUSPENDED: POSTPONED is pre-body, DONE is post-unstamp.
 	heldRequest request
-	parentJobs  map[*Wave]struct{}
+	parentWaves map[*Wave]struct{}
 	ctxType     contextType
 	executionEnvironment
 }
@@ -93,7 +96,7 @@ func (cm *ctxMeta) currentHeldRequest() request {
 }
 
 func (cm *ctxMeta) String() string {
-	return fmt.Sprintf("{%v Wave=%p exEnv=%p}", cm.ctxType, cm.job, cm.executionEnvironment)
+	return fmt.Sprintf("{%v Wave=%p exEnv=%p}", cm.ctxType, cm.wave, cm.executionEnvironment)
 }
 
 func (cm *ctxMeta) IsTopLevel() bool {
@@ -154,7 +157,7 @@ func (cm *ctxMeta) TryExecuteNow(
 		wait()
 
 		// Apply backpressure at top level by processing some outstanding work first
-		err := cm.job.yield(ctx, deadline)
+		err := cm.wave.yield(ctx, deadline)
 		if err != nil {
 			return false, err
 		}
@@ -199,21 +202,21 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 			// Suspend-class episode: the WHOLE blocking dispatch — the
 			// backpressure yield, any governor/limiter block-and-help
 			// waits, and the inner post — is one episode for an
-			// enclosing body's held limiter permit (a subjob dispatch
+			// enclosing body's held limiter permit (a subwave dispatch
 			// runs on the body's goroutine). The reclaim must come
 			// after the inner post: on self-acquisition (the dispatched
 			// op shares the holder's limiter), reclaiming any earlier
 			// waits on a task that hasn't been queued yet. Interior
 			// brackets (Wave.block) no-op via re-entrancy.
 			if r := suspendForEpisode(cm); r != nil {
-				defer reclaimRequest(ctx, cm.job.blockFn, r)
+				defer reclaimRequest(ctx, cm.wave.blockFn, r)
 			}
 
 			// Make sure existing work has a chance to run before we add more.
 			wait()
 
 			// Apply backpressure at top level by processing some outstanding work first
-			err := cm.job.yield(ctx, time.Time{})
+			err := cm.wave.yield(ctx, time.Time{})
 			if err != nil {
 				work.Free()
 				return err
@@ -324,23 +327,23 @@ func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
 	return ctxpool.GetValue[*ctxMeta](ctx)
 }
 
-// ctxMeta returns the ctxMeta already stamped on ctx (for wave j), validating
+// ctxMeta returns the ctxMeta already stamped on ctx (for wave wv), validating
 // ownership. It never creates a meta — callers use it where one must already be
 // present (a body or driver ctx). The lookup is the unified read seam
 // (metaFromContext, ctxpool-aware); no ctxMetaMap caching, which would alias a reused
 // ctxpool body ctx. (Step toward retiring ctxMetaMap; see meta-context-migration.md.)
-func (j *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+func (wv *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.ctxMeta"
 
 	meta, ok := metaFromContext(ctx)
 	if !ok {
-		panic("Context not associated with a job")
+		panic("Context not associated with a wave")
 	}
-	if meta.job != j {
-		if _, isParentJob := meta.parentJobs[j]; isParentJob {
-			panic("Context belongs to a child job")
+	if meta.wave != wv {
+		if _, isParentWave := meta.parentWaves[wv]; isParentWave {
+			panic("Context belongs to a child wave")
 		}
-		panic("Context belongs to a different job")
+		panic("Context belongs to a different wave")
 	}
 
 	trace.Logf(ctx, traceRegion, "ctxMeta=%v", meta)
@@ -348,7 +351,7 @@ func (j *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	return ctx, meta
 }
 
-func (j *Wave) ensureCtxMeta(
+func (wv *Wave) ensureCtxMeta(
 	ctx context.Context,
 	updateFn func(context.Context, *ctxMeta) context.Context,
 ) (context.Context, *ctxMeta) {
@@ -359,35 +362,32 @@ func (j *Wave) ensureCtxMeta(
 	sourceMeta, _ := metaFromContext(ctx)
 
 	ctxType := topLevelContext
-	var parentJobs map[*Wave]struct{}
+	var parentWaves map[*Wave]struct{}
 	var exEnv executionEnvironment
 	if sourceMeta != nil {
-		if sourceMeta.job == j {
-			parentJobs = sourceMeta.parentJobs
+		if sourceMeta.wave == wv {
+			parentWaves = sourceMeta.parentWaves
 			ctxType = sourceMeta.ctxType
 			exEnv = sourceMeta.executionEnvironment
 		} else {
-			if _, isParentJob := sourceMeta.parentJobs[j]; isParentJob {
-				panic("Context belongs to a child job")
+			if _, isParentWave := sourceMeta.parentWaves[wv]; isParentWave {
+				panic("Context belongs to a child wave")
 			}
-			parentJobs = make(map[*Wave]struct{}, len(sourceMeta.parentJobs)+1)
-			maps.Copy(parentJobs, sourceMeta.parentJobs)
-			parentJobs[sourceMeta.job] = struct{}{}
+			parentWaves = make(map[*Wave]struct{}, len(sourceMeta.parentWaves)+1)
+			maps.Copy(parentWaves, sourceMeta.parentWaves)
+			parentWaves[sourceMeta.wave] = struct{}{}
 		}
 	}
 
+	// wave is the owning/ambient wave for the derived meta; it equals wv on every
+	// transition (same-wave keeps it, a cross-wave redirect re-roots it on wv and
+	// records the source wave in parentWaves above).
 	meta := &ctxMeta{
-		job:                  j,
+		wave:                 wv,
 		parent:               sourceMeta,
-		parentJobs:           parentJobs,
+		parentWaves:          parentWaves,
 		ctxType:              ctxType,
 		executionEnvironment: exEnv,
-	}
-	// Preserve the wave across same-job ctx transitions (e.g. top-level → skim) so
-	// nil-wave op dispatch from inside a Skim/Accumulate body can still resolve.
-	// Across-job transitions intentionally drop the wave.
-	if sourceMeta != nil && sourceMeta.job == j {
-		meta.wave = sourceMeta.wave
 	}
 
 	// Stamp the derived meta onto a ctxpool child of ctx. The child descends from
@@ -405,7 +405,7 @@ func (j *Wave) ensureCtxMeta(
 }
 
 // checkCtxType should panic if the type is not allowed
-func (j *Wave) topLevelCtxMeta(
+func (wv *Wave) topLevelCtxMeta(
 	ctx context.Context, checkCtxType func(ctxType contextType),
 ) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.topLevelCtxMeta"
@@ -414,34 +414,28 @@ func (j *Wave) topLevelCtxMeta(
 	// via their unified submit path) and every skim (via skimCtxMeta) lands here, so
 	// a zero-value Wave is brought up — or re-armed after a prior drain — exactly
 	// once before its substrate is touched.
-	j.ensureInit()
+	wv.ensureInit()
 
 	// Reuse a same-wave meta already on ctx — a body's own meta (dispatching from
 	// inside a Skim/Accumulate body), or this wave's top-level/skim meta — rather
 	// than re-deriving a copy. Keeps the parent chain short and skips a needless
 	// borrow. ensureCtxMeta below handles the no-meta (fresh top-level) and
 	// cross-wave cases (where a topLevelExEnv must be stamped).
-	if m, ok := metaFromContext(ctx); ok && m.job == j && m.executionEnvironment != nil {
+	if m, ok := metaFromContext(ctx); ok && m.wave == wv && m.executionEnvironment != nil {
 		checkCtxType(m.ctxType)
 		return ctx, m
 	}
 
-	ctx, meta := j.ensureCtxMeta(ctx,
+	ctx, meta := wv.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			checkCtxType(meta.ctxType) // Avoid stamping if invalid
 			if meta.executionEnvironment == nil {
 				exEnv := &topLevelExEnv{
-					workQueue: &j.workQueue,
+					workQueue: &wv.workQueue,
 				}
 				meta.executionEnvironment = exEnv
 				trace.Logf(ctx, traceRegion, "created new topLevelExEnv=%p, ctxMeta=%v", exEnv, meta)
 			}
-			// Stamp this wave as the meta's ambient wave (formerly done by NewWave on
-			// its returned ctx). A minted top-level meta — from a bare ctx, or a
-			// cross-wave redirect into j — must resolve nil-wave ambient dispatch and
-			// supply meta.wave to funnel/skimmer submit as j, not nil. ensureCtxMeta
-			// only copies wave from a same-wave source, so set it explicitly here.
-			meta.wave = j
 			return ctx
 		},
 	)
@@ -449,10 +443,10 @@ func (j *Wave) topLevelCtxMeta(
 	return ctx, meta
 }
 
-func (j *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+func (wv *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.skimCtxMeta"
 
-	ctx, meta := j.topLevelCtxMeta(ctx, func(ctxType contextType) {
+	ctx, meta := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		if ctxType != topLevelContext && ctxType != skimContext {
 			panic(fmt.Sprintf("Skim called from %v context but allowed only by top-level or skim context", ctxType))
 		}
@@ -464,7 +458,7 @@ func (j *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	// ensureCtxMeta mints a fresh ctxpool child for the skim meta, so it has a
 	// distinct identity from the top-level meta automatically — the old
 	// skimCtxMetaMap identity-fork is no longer needed.
-	ctx, meta = j.ensureCtxMeta(ctx,
+	ctx, meta = wv.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			if meta.ctxType != topLevelContext {
 				panic(fmt.Sprintf("context type %v is not valid for skim, expected top-level context", meta.ctxType))

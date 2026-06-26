@@ -24,7 +24,7 @@ import (
 // work together. It owns the batch lifecycle — wavestate (Open→Done), the
 // admission governor, the skim queue — and dispatches op bodies onto the global
 // worker pool (defaultPool). A zero-value Wave is ready to use (no constructor);
-// it self-inits on first use and owns no context. Bind ops to it with op.In(&w)
+// it self-inits on first use and owns no context. Bind ops to it with op.In(&wv)
 // at top level, or dispatch from inside a body (the ambient wave). It is reusable
 // after a drain (see [Wave.ensureArmed]).
 //
@@ -74,36 +74,32 @@ type boundTask interface {
 }
 
 //nolint:contextcheck // background context for tracing; submitCtx is the body-ctx borrow source
-func (j *Wave) newTaskWork(
-	submitCtx context.Context, group workq.GroupID, task boundTask, req request, wave *Wave,
+func (wv *Wave) newTaskWork(
+	submitCtx context.Context, group workq.GroupID, task boundTask, req request,
 ) *taskWork {
 	traceRegion := "Wave.newTaskWork"
 
-	w := taskWorkPool.Get()
-	w.Init(group, j)
-	w.job = j
-	w.task = task
-	w.req = req
+	wk := taskWorkPool.Get()
+	wk.Init(group, wv)
+	wk.task = task
+	wk.req = req
 	if req != nil {
 		// Stored once so the per-execution completion callback doesn't
 		// allocate a fresh method value.
-		w.completedFn = req.release
+		wk.completedFn = req.release
 	}
-	w.wave = wave
+	wk.wave = wv
 	// Borrow the body context at dispatch (descended from the submit ctx, so
 	// cancellation rides ancestry). Async worker bodies are fresh permit-roots
 	// (parent nil); the worker's E is stamped at Execute, not known yet here.
-	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, wave, taskContext, nil, req, nil)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, wv, taskContext, req, nil)
 
-	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", j, w)
-	return w
+	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", wv, wk)
+	return wk
 }
 
 type taskWork struct {
 	poolWork
-	// job is stored so Free() satisfies workq.Work (no-arg); taskWork is now a
-	// workq.Work run by the global pool's workers.
-	job  *Wave
 	task boundTask
 	// req is the Limiter request handle this task's admission was granted
 	// through; nil for unlimited ops. The taskWork owns the handle's
@@ -112,8 +108,9 @@ type taskWork struct {
 	// in Free.
 	req         request
 	completedFn func() // req.release, captured once at creation
-	// wave is the dispatching Wave; stamped onto the body
-	// ctxMeta so nil-wave op dispatches from the task body can resolve it.
+	// wave is the dispatching Wave; stored so Free() satisfies workq.Work (no-arg)
+	// and stamped onto the body ctxMeta so nil-wave op dispatches from the task body
+	// can resolve it.
 	wave *Wave
 	// bodyCtx is the body context borrowed at dispatch (borrowBodyContext),
 	// descended from the submit ctx and carrying bodyMeta; the task body runs
@@ -123,15 +120,14 @@ type taskWork struct {
 	bodyMeta *ctxMeta
 }
 
-func (w *taskWork) Reset() {
-	w.poolWork = poolWork{}
-	w.job = nil
-	w.task = nil
-	w.req = nil
-	w.completedFn = nil
-	w.wave = nil
-	w.bodyCtx = nil
-	w.bodyMeta = nil
+func (wk *taskWork) Reset() {
+	wk.poolWork = poolWork{}
+	wk.task = nil
+	wk.req = nil
+	wk.completedFn = nil
+	wk.wave = nil
+	wk.bodyCtx = nil
+	wk.bodyMeta = nil
 }
 
 // Execute is the workq.Work entry run by a global-pool worker. The body context
@@ -139,44 +135,44 @@ func (w *taskWork) Reset() {
 // body meta (the only piece not known at dispatch) and runs the task body under
 // bodyCtx. The held limiter request was stamped at borrow. Free returns the body
 // context.
-func (w *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ex.Starting()
-	w.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
+	wk.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
 	//nolint:contextcheck // the body runs under the borrowed body ctx by design
-	w.task.Execute(w.bodyCtx, w.Group(), w.completedFn)
+	wk.task.Execute(wk.bodyCtx, wk.Group(), wk.completedFn)
 	return nil
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *taskWork) Free() {
+func (wk *taskWork) Free() {
 	traceRegion := "taskWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
-	job := w.job
-	w.task.Free()
-	if w.req != nil {
+	wave := wk.wave
+	wk.task.Free()
+	if wk.req != nil {
 		// Normal completion already released (completedFn); release here
 		// is the idempotent backstop for tasks freed without executing
 		// (dispatch failure, cancellation drain) — by-state: abandon a
 		// PENDING request, discard a POSTPONED one, give back a HELD one.
-		w.req.release()
-		freeRequest(w.req)
-		w.req = nil
+		wk.req.release()
+		freeRequest(wk.req)
+		wk.req = nil
 	}
 	// Return the body context borrowed at dispatch — its child ctx to ctxpool and
 	// its meta to bodyMetaPool. Runs whether or not the body executed (a task freed
 	// without running still borrowed at dispatch).
-	if w.bodyCtx != nil {
-		releaseBodyContext(w.bodyCtx)
-		w.bodyCtx = nil
-		w.bodyMeta = nil
+	if wk.bodyCtx != nil {
+		releaseBodyContext(wk.bodyCtx)
+		wk.bodyCtx = nil
+		wk.bodyMeta = nil
 	}
-	w.Close(job)
-	taskWorkPool.Put(w)
+	wk.Close(wave)
+	taskWorkPool.Put(wk)
 }
 
 var taskWorkPool = omnipool.For[taskWork]()
@@ -193,37 +189,37 @@ var taskWorkPool = omnipool.For[taskWork]()
 // A zero-value Wave's state reads as Open (stageOpen == 0) but with nil channels, so
 // init keys off the explicit initialized flag, not the stage. The common case (an
 // already-initialized wave) is a single atomic load.
-func (w *Wave) ensureInit() {
-	if w.initialized.Load() {
+func (wv *Wave) ensureInit() {
+	if wv.initialized.Load() {
 		return
 	}
-	w.initMu.Lock()
-	defer w.initMu.Unlock()
-	if w.initialized.Load() {
+	wv.initMu.Lock()
+	defer wv.initMu.Unlock()
+	if wv.initialized.Load() {
 		return
 	}
-	w.initState()
-	w.initialized.Store(true)
+	wv.initState()
+	wv.initialized.Store(true)
 }
 
 // initState (re)initializes the substrate to a fresh Open cycle. Caller holds initMu.
-func (w *Wave) initState() {
+func (wv *Wave) initState() {
 	// Drop any prior cycle's funnel-instance caches so a reused/pooled *Wave does not
 	// accumulate stale per-funnel entries (funnel ids are unique per NewFunnel). By the
 	// time a wave re-arms it has reached Done, so the end-of-work sweep has already
 	// drained every queue and recycled its instances — this is a quiescent map clear.
-	w.funnelInstances.Range(func(k, _ any) bool {
-		w.funnelInstances.Delete(k)
+	wv.funnelInstances.Range(func(k, _ any) bool {
+		wv.funnelInstances.Delete(k)
 		return true
 	})
-	w.state.Init(w.sweepFunnels)
-	w.skimQueue.Init()
-	w.governor.Init()
-	w.workQueue.Init(nil)
-	w.protoBB.ShouldBlock = w.shouldBlock
-	w.blockFn = w.block
-	w.tryAddWorkFn = w.tryAddWork
-	w.addWorkFn = w.addWork
+	wv.state.Init(wv.sweepFunnels)
+	wv.skimQueue.Init()
+	wv.governor.Init()
+	wv.workQueue.Init(nil)
+	wv.protoBB.ShouldBlock = wv.shouldBlock
+	wv.blockFn = wv.block
+	wv.tryAddWorkFn = wv.tryAddWork
+	wv.addWorkFn = wv.addWork
 }
 
 // sweepFunnels is the wave's enqueue-only end-of-work flush sweep, wired as
@@ -238,10 +234,10 @@ func (w *Wave) initState() {
 // per-instance sweep skips via ClaimForFlush==false) could otherwise drop the last
 // barrier mid-sweep, drive the wave to Done, and let a concurrent re-arm clear the map
 // under us. This is the analogue of the old joinFlusher-before-rearm barrier.
-func (w *Wave) sweepFunnels() {
-	w.state.IncrementReference()
-	defer w.state.DecrementReference()
-	w.funnelInstances.Range(func(_, v any) bool {
+func (wv *Wave) sweepFunnels() {
+	wv.state.IncrementReference()
+	defer wv.state.DecrementReference()
+	wv.funnelInstances.Range(func(_, v any) bool {
 		v.(funnelSweep).sweepFlush()
 		return true
 	})
@@ -259,33 +255,33 @@ func (w *Wave) sweepFunnels() {
 // initState then clears the funnel-instance map and re-Inits the WaveState. Reuse is
 // sequential (a new cycle begins after the prior drain returns); a dispatch racing a
 // concurrent self-drain stays a misuse guarded by panicIfDone.
-func (w *Wave) ensureArmed() {
-	w.ensureInit()
-	if !w.state.IsDone() {
+func (wv *Wave) ensureArmed() {
+	wv.ensureInit()
+	if !wv.state.IsDone() {
 		return // fast path: live (or freshly inited)
 	}
-	w.initMu.Lock()
-	defer w.initMu.Unlock()
-	if !w.state.IsDone() {
+	wv.initMu.Lock()
+	defer wv.initMu.Unlock()
+	if !wv.state.IsDone() {
 		return // another dispatch re-armed it
 	}
-	w.initState()
+	wv.initState()
 }
 
 // Skim processes outstanding task results and then waits for the next
 // task result from a task previously launched via [Start]. It will block until
-// a completed task is available or the provided context or job is canceled.
-// If the job is closed and no tasks remain in flight, it will return immediately.
+// a completed task is available or the provided context or wave is canceled.
+// If the wave is closed and no tasks remain in flight, it will return immediately.
 // See [Wave.TrySkim] for a non-blocking alternative.
 //
 // Returns an error if one occurred:
 //
 //   - nil: a task completed and was successfully skimmed
-//   - ErrWaveDone: the job is done and therefore nothing is left to skim
+//   - ErrWaveDone: the wave is done and therefore nothing is left to skim
 //   - other error: a task's skim function returned a non-nil error, or the
-//     argument or job-internal context was canceled
+//     argument or wave-internal context was canceled
 //
-// If a skim function returns an error, the job continues running and you can
+// If a skim function returns an error, the wave continues running and you can
 // keep calling Skim to process more tasks (and errors, if any) until you
 // receive ErrWaveDone.
 //
@@ -296,11 +292,11 @@ func (w *Wave) ensureArmed() {
 //
 // NOTE: If a task result is skimmed, this method will call the task's
 // [Skim] and wait until it returns.
-func (j *Wave) Skim(ctx context.Context) error {
+func (wv *Wave) Skim(ctx context.Context) error {
 	traceRegion := "Wave.Skim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := j.vetSkim(ctx)
+	ctx, meta := wv.skimCtxMeta(ctx)
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
@@ -308,45 +304,41 @@ func (j *Wave) Skim(ctx context.Context) error {
 	// holding its limiter permit; give the slot back for the duration
 	// and reclaim (help-shaped) on return.
 	if r := suspendForEpisode(meta); r != nil {
-		defer reclaimRequest(ctx, j.blockFn, r)
+		defer reclaimRequest(ctx, wv.blockFn, r)
 	}
-	_, err := j.skim(ctx, meta)
+	_, err := wv.skim(ctx)
 	return err
 }
 
-func (j *Wave) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
+func (wv *Wave) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
 	traceRegion := "Wave.tryAddWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Wave=%p", j)
-	if workFn, ok := j.skimQueue.TryPopFront(); ok {
+	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
+	if workFn, ok := wv.skimQueue.TryPopFront(); ok {
 		queueFn(workFn)
 	}
 	return nil
 }
 
-func (j *Wave) vetSkim(ctx context.Context) (context.Context, *ctxMeta) {
-	return j.skimCtxMeta(ctx)
+func (wv *Wave) trySkim(ctx context.Context) (bool, error) {
+	return wv.workQueue.TryExecuteOne(ctx, wv.tryAddWorkFn)
 }
 
-func (j *Wave) trySkim(ctx context.Context, _ *ctxMeta) (bool, error) {
-	return j.workQueue.TryExecuteOne(ctx, j.tryAddWorkFn)
-}
-
-func (j *Wave) skim(ctx context.Context, meta *ctxMeta) (bool, error) {
-	return true, j.workQueue.ExecuteOne(ctx, j.addWorkFn, nil)
+func (wv *Wave) skim(ctx context.Context) (bool, error) {
+	return true, wv.workQueue.ExecuteOne(ctx, wv.addWorkFn, nil)
 }
 
 // This function is designed to be called before scattering a new task to
 // preemptively skim or skim results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
-func (j *Wave) yield(ctx context.Context, deadline time.Time) error {
+func (wv *Wave) yield(ctx context.Context, deadline time.Time) error {
 	traceRegion := "Wave.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := j.vetSkim(ctx)
+	ctx, _ = wv.skimCtxMeta(ctx)
 	for {
-		ok, err := j.trySkim(ctx, meta)
+		ok, err := wv.trySkim(ctx)
 		if err != nil {
 			return err
 		}
@@ -360,21 +352,21 @@ func (j *Wave) yield(ctx context.Context, deadline time.Time) error {
 
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
 
-func (j *Wave) shouldBlock(ctx context.Context) workq.BlockFunc {
-	// Read the meta directly (not via j.ctxMeta, which panics on a missing meta).
+func (wv *Wave) shouldBlock(ctx context.Context) workq.BlockFunc {
+	// Read the meta directly (not via wv.ctxMeta, which panics on a missing meta).
 	// A dispatch chain (launcherScatterWork governor gate / limiterScatterWork
 	// acquire) that postponed onto the global shared queue is re-run by a global
 	// worker whose ctx carries NO ctxMeta — and such work is never a TOP-LEVEL
 	// dispatch (top-level runs on the user goroutine, where the meta is present).
 	// So "no matching meta → not top-level → don't block" is correct.
 	meta, ok := metaFromContext(ctx)
-	if ok && meta.job == j && meta.IsTopLevel() {
-		return j.blockFn
+	if ok && meta.wave == wv && meta.IsTopLevel() {
+		return wv.blockFn
 	}
 	return nil
 }
 
-func (j *Wave) block(
+func (wv *Wave) block(
 	ctx context.Context,
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
@@ -382,28 +374,28 @@ func (j *Wave) block(
 ) (workq.RenotifyFunc, error) {
 	traceRegion := "Wave.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Wave=%p", j)
-	ctx, meta := j.vetSkim(ctx)
+	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
+	ctx, meta := wv.skimCtxMeta(ctx)
 	// Suspend-class episode: the block-and-help wait both parks and
 	// synchronously runs other framework-gated work. Bracketing here is
 	// correctness-required, not just utilization — without it, a
-	// subjob-top-level dispatch acquiring a limiter held by this same
+	// subwave-top-level dispatch acquiring a limiter held by this same
 	// goroutine's enclosing body self-deadlocks (see "Where suspend
 	// fires" in docs/limiter-suspend-resume.md). Re-entrant: the
 	// reclaim's own block-and-help finds the handle already SUSPENDED
 	// and no-ops.
 	if r := suspendForEpisode(meta); r != nil {
-		defer reclaimRequest(ctx, j.blockFn, r)
+		defer reclaimRequest(ctx, wv.blockFn, r)
 	}
 	adder := blockingWorkAdderPool.Get()
 	defer blockingWorkAdderPool.Put(adder)
-	adder.job = j
+	adder.wave = wv
 	adder.meta = meta
 	adder.blockDeadline = blockDeadline
 	adder.blockWaiters = blockWaiters
 	adder.confirmBlockWaitFn = confirmBlockWaitFn
 
-	err := j.workQueue.ExecuteOne(ctx, adder.addWorkFn, nil)
+	err := wv.workQueue.ExecuteOne(ctx, adder.addWorkFn, nil)
 	if errors.Is(err, errBlockWaitSignaled) {
 		err = nil
 	}
@@ -413,7 +405,7 @@ func (j *Wave) block(
 var blockingWorkAdderPool = omnipool.For[blockingWorkAdder]()
 
 type blockingWorkAdder struct {
-	job                 *Wave
+	wave                *Wave
 	meta                *ctxMeta
 	blockDeadline       time.Time
 	blockWaiters        *workq.Waiters
@@ -442,12 +434,12 @@ func (a *blockingWorkAdder) addWork(
 ) (workq.RenotifyFunc, error) {
 	var workReadyRenotifyFn workq.RenotifyFunc
 	var err error
-	workReadyRenotifyFn, a.blockWaitRenotifyFn, err = a.job.addWorkWhileMaybeBlocking(
+	workReadyRenotifyFn, a.blockWaitRenotifyFn, err = a.wave.addWorkWhileMaybeBlocking(
 		ctx, a.meta, queueFn, workWaiters, confirmWorkWaitFn, a.blockDeadline, a.blockWaiters, a.confirmBlockWaitFn)
 	return workReadyRenotifyFn, err
 }
 
-func (j *Wave) addWork(
+func (wv *Wave) addWork(
 	ctx context.Context,
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
@@ -456,14 +448,14 @@ func (j *Wave) addWork(
 ) (workq.RenotifyFunc, error) {
 	traceRegion := "Wave.addWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Wave=%p", j)
-	ctx, meta := j.ctxMeta(ctx)
-	workReadyRenotifyFn, _, err := j.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
+	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
+	ctx, meta := wv.ctxMeta(ctx)
+	workReadyRenotifyFn, _, err := wv.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
 		confirmWaitFn, time.Time{}, nil, nil)
 	return workReadyRenotifyFn, err
 }
 
-func (j *Wave) addWorkWhileMaybeBlocking(
+func (wv *Wave) addWorkWhileMaybeBlocking(
 	ctx context.Context,
 	meta *ctxMeta,
 	queueFn workq.QueueWorkFunc,
@@ -478,9 +470,9 @@ func (j *Wave) addWorkWhileMaybeBlocking(
 
 	var workRf, blockRf rdvq.RenotifyFunc
 	if workWaiters == nil {
-		err = j.tryAddWork(ctx, queueFn)
+		err = wv.tryAddWork(ctx, queueFn)
 	} else {
-		work, ok := j.skimQueue.PopFrontFunc(
+		work, ok := wv.skimQueue.PopFrontFunc(
 			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
 				// Declared per invocation: skimSelect (which is the only thing
 				// that populates this) is skipped on any iteration where the
@@ -494,7 +486,7 @@ func (j *Wave) addWorkWhileMaybeBlocking(
 					func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 						var innerWorkRf rdvq.RenotifyFunc
 						if blockWaiters == nil {
-							psResult, innerWorkRf, _, err = j.skimSelect(
+							psResult, innerWorkRf, _, err = wv.skimSelect(
 								ctx, inboxCh, outboxWaitCh, workWaitCh, nil, nil,
 							)
 						} else {
@@ -519,7 +511,7 @@ func (j *Wave) addWorkWhileMaybeBlocking(
 										blockTimerCh = blockTimer.C
 									}
 									var innerBlockRf rdvq.RenotifyFunc
-									psResult, innerWorkRf, innerBlockRf, err = j.skimSelect(
+									psResult, innerWorkRf, innerBlockRf, err = wv.skimSelect(
 										ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh,
 									)
 									return innerBlockRf
@@ -539,7 +531,7 @@ func (j *Wave) addWorkWhileMaybeBlocking(
 	return workRf, blockRf, err
 }
 
-func (j *Wave) skimSelect(
+func (wv *Wave) skimSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
 	outboxWaitCh <-chan rdvq.RenotifyFunc,
@@ -566,8 +558,8 @@ func (j *Wave) skimSelect(
 	case blockRf = <-blockWaitCh:
 		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
 		err = errBlockWaitSignaled
-	case <-j.state.Done():
-		trace.Logf(ctx, traceRegion, "received job done signal")
+	case <-wv.state.Done():
+		trace.Logf(ctx, traceRegion, "received wave done signal")
 		err = ErrWaveDone
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
@@ -578,37 +570,37 @@ func (j *Wave) skimSelect(
 
 type skimPostWork struct {
 	poolWork
-	job  *Wave
+	wave *Wave
 	work boundSkimWork
 	// shouldBlock is captured at dispatch (from the dispatching meta) rather than
 	// re-derived from the run ctx: when this producer postpones onto the global
 	// shared queue, a global worker re-runs it under the worker ctx, which carries
 	// no ctxMeta — so ctxMeta(ctx) would panic ("Context not associated with a
-	// job"). The post only needs ShouldBlock + the ctx for cancellation.
+	// wave"). The post only needs ShouldBlock + the ctx for cancellation.
 	shouldBlock bool
 }
 
-func (w *skimPostWork) Init(group workq.GroupID, job *Wave, work boundSkimWork, shouldBlock bool) {
-	w.poolWork.Init(group, job)
-	w.job = job
-	w.work = work
-	w.shouldBlock = shouldBlock
+func (wk *skimPostWork) Init(group workq.GroupID, wv *Wave, work boundSkimWork, shouldBlock bool) {
+	wk.poolWork.Init(group, wv)
+	wk.wave = wv
+	wk.work = work
+	wk.shouldBlock = shouldBlock
 }
 
-func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "skimPostWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
+	trace.Logf(ctx, traceRegion, "%v", wk)
 
 	posted, err := func() (bool, error) {
 		waiting := func() {
 			// Call Waiting on the nested skimWork to notify the governor
-			w.work.Waiting(&w.job.governor)
+			wk.work.Waiting(&wk.wave.governor)
 		}
 
 		tryPost := func() bool {
 			// Try non-blocking post - can be retried if it fails
-			return w.job.skimQueue.TryPushBack(w.work, nil)
+			return wk.wave.skimQueue.TryPushBack(wk.work, nil)
 		}
 
 		for {
@@ -620,9 +612,9 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 				return false, nil
 			}
 
-			if !w.shouldBlock {
+			if !wk.shouldBlock {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(w.job.skimQueue.ListenersFor())
+				ex.AddToListeners(wk.wave.skimQueue.ListenersFor())
 
 				// Check again after registering for notification, but return
 				// and expect to be called again if needed
@@ -637,7 +629,7 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 			// Use blocking post
 			posted := true
 			var err error
-			w.job.skimQueue.PushBackFunc(w.work, nil, func(outboxCh chan<- workq.Work) bool {
+			wk.wave.skimQueue.PushBackFunc(wk.work, nil, func(outboxCh chan<- workq.Work) bool {
 				posted = false
 
 				// Slow path, really going to block now
@@ -646,7 +638,7 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 				waiting()
 
 				var sent bool
-				sent, err = rdvq.BasicPushSelect[workq.Work](ctx, outboxCh, w.work)
+				sent, err = rdvq.BasicPushSelect[workq.Work](ctx, outboxCh, wk.work)
 				if sent {
 					posted = true
 				}
@@ -661,39 +653,39 @@ func (w *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 	if posted {
 		ex.Starting() // Signal success only if we actually posted
-		w.work = nil  // Clear the work reference since it's now owned by the queue
+		wk.work = nil // Clear the work reference since it's now owned by the queue
 	}
 	return err
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *skimPostWork) Free() {
+func (wk *skimPostWork) Free() {
 	traceRegion := "skimPostWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
 	// Free the nested work item if we still own it
-	if w.work != nil {
-		trace.Logf(context.Background(), traceRegion, "w.work.Free()")
-		w.work.Free()
-		w.work = nil
+	if wk.work != nil {
+		trace.Logf(context.Background(), traceRegion, "wk.work.Free()")
+		wk.work.Free()
+		wk.work = nil
 	}
 
-	w.Close(w.job)
-	skimPostWorkPool.Put(w)
+	wk.Close(wk.wave)
+	skimPostWorkPool.Put(wk)
 }
 
 var skimPostWorkPool = omnipool.For[skimPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (j *Wave) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
+func (wv *Wave) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
 	traceRegion := "Wave.newSkimPostWork"
 
-	w := skimPostWorkPool.Get()
-	w.Init(group, j, skimWork, shouldBlock)
+	wk := skimPostWorkPool.Get()
+	wk.Init(group, wv, skimWork, shouldBlock)
 
-	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", j, w)
-	return w
+	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", wv, wk)
+	return wk
 }
 
 // TrySkim processes outstanding task results and then attempts to process
@@ -705,33 +697,33 @@ func (j *Wave) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shou
 //
 // The error indicates:
 //   - nil: no skim function returned an error
-//   - ErrWaveDone: the job is done and no more tasks will ever be available
+//   - ErrWaveDone: the wave is done and no more tasks will ever be available
 //   - other error: a skim function returned an error or the context was canceled
 //
-// If a skim function returns an error, the job continues running and you can
+// If a skim function returns an error, the wave continues running and you can
 // keep calling TrySkim to process more tasks (and errors, if any) until you
 // receive ErrWaveDone.
 //
 // See Skim for additional details.
-func (j *Wave) TrySkim(ctx context.Context) (bool, error) {
+func (wv *Wave) TrySkim(ctx context.Context) (bool, error) {
 	traceRegion := "Wave.TrySkim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := j.vetSkim(ctx)
-	return j.trySkim(ctx, meta)
+	ctx, _ = wv.skimCtxMeta(ctx)
+	return wv.trySkim(ctx)
 }
 
-// SkimAll processes task results until the job completes or an error occurs.
-// If the job has not been closed, SkimAll will block indefinitely, as new
+// SkimAll processes task results until the wave completes or an error occurs.
+// If the wave has not been closed, SkimAll will block indefinitely, as new
 // tasks might be added at any time. It will return an error if the provided context
-// or job is canceled. After the job is closed, SkimAll will continue processing
+// or wave is canceled. After the wave is closed, SkimAll will continue processing
 // tasks until all work completes (including tasks spawned during result processing)
 // and then return.
 //
-// Returns nil when the job is done, or an error if the context is canceled or a
+// Returns nil when the wave is done, or an error if the context is canceled or a
 // task's [Skim] returns a non-nil error. If a skim function returns an
 // error, you can call SkimAll again to continue processing more tasks (and
-// errors, if any) until the job is done (i.e., SkimAll returns nil).
+// errors, if any) until the wave is done (i.e., SkimAll returns nil).
 //
 // If all skim functions are thread-safe, then SkimAll is thread-safe and
 // can be called concurrently from multiple goroutines. In this case they will
@@ -741,7 +733,7 @@ func (j *Wave) TrySkim(ctx context.Context) (bool, error) {
 //
 // NOTE: This method will serially call each skimmed task's [Skim] and
 // wait until it returns.
-func (j *Wave) SkimAll(ctx context.Context) error {
+func (wv *Wave) SkimAll(ctx context.Context) error {
 	traceRegion := "Wave.SkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -749,15 +741,15 @@ func (j *Wave) SkimAll(ctx context.Context) error {
 	// body driving this drain — e.g. a subwave's CloseAndSkimAll —
 	// parks here while holding its limiter permit; give the slot back
 	// for the whole drain and reclaim (help-shaped) on return.
-	ctx, meta := j.vetSkim(ctx)
+	ctx, meta := wv.skimCtxMeta(ctx)
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
 	if r := suspendForEpisode(meta); r != nil {
-		defer reclaimRequest(ctx, j.blockFn, r)
+		defer reclaimRequest(ctx, wv.blockFn, r)
 	}
 
-	err := j.skimAll(ctx, j.skim)
+	err := wv.skimAll(ctx, wv.skim)
 	if errors.Is(err, ErrWaveDone) {
 		return nil
 	}
@@ -766,11 +758,11 @@ func (j *Wave) SkimAll(ctx context.Context) error {
 
 // TrySkimAll processes all currently available task results without blocking.
 // Unlike [Wave.SkimAll], TrySkimAll will return immediately if there are no
-// completed tasks ready to process, regardless of whether the job is closed or
+// completed tasks ready to process, regardless of whether the wave is closed or
 // whether there are still tasks in flight.
 //
 // Returns nil when all immediately available tasks have been processed, ErrWaveDone
-// when the job is done, or an error if the context is canceled or a task's
+// when the wave is done, or an error if the context is canceled or a task's
 // [Skim] returns a non-nil error. If a skim function returns an error,
 // you can call TrySkimAll again to continue processing more tasks (and errors,
 // if any) until you receive ErrWaveDone.
@@ -779,17 +771,17 @@ func (j *Wave) SkimAll(ctx context.Context) error {
 //
 // NOTE: If completed tasks are available, this method must still call each
 // task's [Skim] and wait until it finishes processing.
-func (j *Wave) TrySkimAll(ctx context.Context) error {
+func (wv *Wave) TrySkimAll(ctx context.Context) error {
 	traceRegion := "Wave.TrySkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	return j.skimAll(ctx, j.trySkim)
+	return wv.skimAll(ctx, wv.trySkim)
 }
 
-func (j *Wave) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMeta) (bool, error)) error {
-	ctx, meta := j.vetSkim(ctx)
+func (wv *Wave) skimAll(ctx context.Context, skimFn func(context.Context) (bool, error)) error {
+	ctx, _ = wv.skimCtxMeta(ctx)
 	for {
-		ok, err := skimFn(ctx, meta)
+		ok, err := skimFn(ctx)
 		if err != nil {
 			return err
 		}
@@ -801,15 +793,15 @@ func (j *Wave) skimAll(ctx context.Context, skimFn func(context.Context, *ctxMet
 
 type taskPostWork struct {
 	poolWork
-	job  *Wave
+	wave *Wave
 	task *taskWork
 }
 
-func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskPostWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "%v", w)
+		trace.Logf(ctx, traceRegion, "%v", wk)
 	}
 
 	// Handoff to the GLOBAL pool's shared work queue: the unified Queue.Post
@@ -818,34 +810,34 @@ func (w *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	// trySpawnTaskWorker. Spawn/governor are handled elsewhere (governor at
 	// launcherScatterWork, spawn at defaultPool). onWait is nil for task (no
 	// downstream governor registration here).
-	// shouldBlock is read directly from the ctx (not via j.ctxMeta, which panics on
+	// shouldBlock is read directly from the ctx (not via wv.ctxMeta, which panics on
 	// a missing meta): a producer only postpones onto the global queue in LISTEN
 	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta —
 	// so "no matching meta → shouldBlock=false" matches the original dispatch.
 	meta, _ := metaFromContext(ctx)
-	shouldBlock := meta != nil && meta.job == w.job && meta.ShouldBlock()
-	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.task, nil)
+	shouldBlock := meta != nil && meta.wave == wk.wave && meta.ShouldBlock()
+	posted, err := defaultPool.Post(ctx, ex, shouldBlock, wk.task, nil)
 	if posted {
 		// Ownership transferred to the queue; the worker will run + Free it.
-		w.task = nil
+		wk.task = nil
 	}
 	return err
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *taskPostWork) Free() {
+func (wk *taskPostWork) Free() {
 	traceRegion := "taskPostWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
 	// Free the nested task work if we still own it
-	if w.task != nil {
-		trace.Logf(context.Background(), traceRegion, "w.task.Free()")
-		w.task.Free()
+	if wk.task != nil {
+		trace.Logf(context.Background(), traceRegion, "wk.task.Free()")
+		wk.task.Free()
 	}
 
-	w.Close(w.job)
-	taskPostWorkPool.Put(w)
+	wk.Close(wk.wave)
+	taskPostWorkPool.Put(wk)
 }
 
 var taskPostWorkPool = omnipool.For[taskPostWork]()
@@ -854,42 +846,42 @@ type poolWork struct {
 	workq.WorkItem
 }
 
-func (w *poolWork) Init(group workq.GroupID, job *Wave) {
-	w.WorkItem.Init(group)
-	trace.Logf(context.Background(), "poolWork.Init", "%v", &w.WorkItem)
-	job.state.IncrementWork()
+func (wk *poolWork) Init(group workq.GroupID, wv *Wave) {
+	wk.WorkItem.Init(group)
+	trace.Logf(context.Background(), "poolWork.Init", "%v", &wk.WorkItem)
+	wv.state.IncrementWork()
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *poolWork) Close(job *Wave) {
-	if w.ID() == 0 {
+func (wk *poolWork) Close(wv *Wave) {
+	if wk.ID() == 0 {
 		// This check and panic is best-effort only as it may also be a race if
 		// Close() is called from multiple goroutines -- which it should not be.
 		panic("already closed")
 	}
-	trace.Logf(context.Background(), "poolWork.Close", "%v", &w.WorkItem)
-	job.state.DecrementWork()
+	trace.Logf(context.Background(), "poolWork.Close", "%v", &wk.WorkItem)
+	wv.state.DecrementWork()
 }
 
-func (j *Wave) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
-	w := taskPostWorkPool.Get()
-	w.Init(group, j)
-	w.job = j
-	w.task = task
-	return w
+func (wv *Wave) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
+	wk := taskPostWorkPool.Get()
+	wk.Init(group, wv)
+	wk.wave = wv
+	wk.task = task
+	return wk
 }
 
-// panicIfDone panics if the job is in the done state
-func (j *Wave) panicIfDone() {
-	j.state.PanicIfDone()
+// panicIfDone panics if the wave is in the done state
+func (wv *Wave) panicIfDone() {
+	wv.state.PanicIfDone()
 }
 
-// Close changes the job's state from open to closed, which allows it to eventually
-// progress to the done state once all tasks complete. When a job is closed,
+// Close changes the wave's state from open to closed, which allows it to eventually
+// progress to the done state once all tasks complete. When a wave is closed,
 // [Wave.SkimAll] will return after processing all existing tasks and any tasks
 // they spawn, rather than blocking indefinitely.
 //
-// After a job is closed and all tasks have completed, launching new tasks will panic.
+// After a wave is closed and all tasks have completed, launching new tasks will panic.
 // Skimming operations will continue to work normally but will always return
 // immediately with no results.
 //
@@ -899,22 +891,22 @@ func (j *Wave) panicIfDone() {
 // Close may be called from any goroutine and may safely be called more than once.
 //
 //nolint:contextcheck // background context used only for tracing
-func (j *Wave) Close() {
+func (wv *Wave) Close() {
 	traceRegion := "Wave.Close"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	j.ensureInit()
-	j.state.Close()
+	wv.ensureInit()
+	wv.state.Close()
 }
 
-// CloseAndSkimAll closes the job via [Wave.Close] and then waits for and
+// CloseAndSkimAll closes the wave via [Wave.Close] and then waits for and
 // skims the results of all in-flight tasks via [Wave.SkimAll].
-func (j *Wave) CloseAndSkimAll(ctx context.Context) error {
+func (wv *Wave) CloseAndSkimAll(ctx context.Context) error {
 	traceRegion := "Wave.CloseAndSkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	j.Close()
-	return j.SkimAll(ctx)
+	wv.Close()
+	return wv.SkimAll(ctx)
 }
 
 // resolveWave returns the op's bound wave if non-nil, otherwise the ambient wave

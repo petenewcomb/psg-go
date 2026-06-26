@@ -475,7 +475,7 @@ func TestTaskCannotSkimParentJob(t *testing.T) {
 			},
 		)
 		subRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
-			chk.PanicsWithValue("Context belongs to a child job", func() {
+			chk.PanicsWithValue("Context belongs to a child wave", func() {
 				_, _ = parentWave.TrySkim(ctx)
 			})
 			return subSkimmer.Submit(ctx, true)

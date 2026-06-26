@@ -17,18 +17,16 @@ func TestBorrowBodyContext_StampsMeta(t *testing.T) {
 	src := context.Background()
 	wave := &Wave{}
 	ee := &topLevelExEnv{}
-	parent := &ctxMeta{}
 
-	ctx, m := borrowBodyContext(src, wave, funnelContext, parent, nil, ee)
+	ctx, m := borrowBodyContext(src, wave, funnelContext, nil, ee)
 	require.NotNil(t, m)
 
 	got, ok := metaFromContext(ctx)
 	require.True(t, ok)
 	require.Same(t, m, got, "metaFromContext must resolve the borrowed meta")
-	assert.Same(t, wave, m.job)
 	assert.Same(t, wave, m.wave)
 	assert.Equal(t, funnelContext, m.ctxType)
-	assert.Same(t, parent, m.parent)
+	assert.Nil(t, m.parent, "a borrowed body is always a fresh permit-root")
 	assert.Same(t, ee, m.executionEnvironment)
 
 	releaseBodyContext(ctx)
@@ -41,9 +39,9 @@ func TestBorrowBodyContext_ReusesChildCtx(t *testing.T) {
 	w1 := &Wave{}
 	w2 := &Wave{}
 
-	ctx1, _ := borrowBodyContext(src, w1, taskContext, nil, nil, &topLevelExEnv{})
+	ctx1, _ := borrowBodyContext(src, w1, taskContext, nil, &topLevelExEnv{})
 	releaseBodyContext(ctx1)
-	ctx2, m2 := borrowBodyContext(src, w2, taskContext, nil, nil, &topLevelExEnv{})
+	ctx2, m2 := borrowBodyContext(src, w2, taskContext, nil, &topLevelExEnv{})
 	require.Same(t, ctx1, ctx2, "the child ctx must be reused across borrows of one source")
 	assert.Same(t, w2, m2.wave, "the reused child must carry the freshly stamped wave")
 	releaseBodyContext(ctx2)
@@ -53,7 +51,7 @@ func TestBorrowBodyContext_ReusesChildCtx(t *testing.T) {
 // no waveCtx in the path.
 func TestBorrowBodyContext_CancellationByAncestry(t *testing.T) {
 	src, cancel := context.WithCancel(context.Background())
-	ctx, _ := borrowBodyContext(src, &Wave{}, taskContext, nil, nil, &topLevelExEnv{})
+	ctx, _ := borrowBodyContext(src, &Wave{}, taskContext, nil, &topLevelExEnv{})
 	select {
 	case <-ctx.Done():
 		t.Fatal("body ctx should not be done before the source ctx is cancelled")
@@ -68,35 +66,35 @@ func TestParentJobsForSource(t *testing.T) {
 	has := func(m map[*Wave]struct{}, w *Wave) bool { _, ok := m[w]; return ok }
 
 	t.Run("top-level source (no meta) carries none", func(t *testing.T) {
-		assert.Nil(t, parentJobsForSource(context.Background(), &Wave{}))
+		assert.Nil(t, parentWavesForSource(context.Background(), &Wave{}))
 	})
 
-	t.Run("same-wave source passes parentJobs through", func(t *testing.T) {
+	t.Run("same-wave source passes parentWaves through", func(t *testing.T) {
 		srcWave := &Wave{}
 		ancestor := &Wave{}
 		// A source ctx whose meta is bound to srcWave with one ancestor.
-		srcCtx, _ := borrowBodyContext(context.Background(), srcWave, taskContext, nil, nil, &topLevelExEnv{})
+		srcCtx, _ := borrowBodyContext(context.Background(), srcWave, taskContext, nil, &topLevelExEnv{})
 		m, _ := metaFromContext(srcCtx)
-		m.parentJobs = map[*Wave]struct{}{ancestor: {}}
+		m.parentWaves = map[*Wave]struct{}{ancestor: {}}
 
-		got := parentJobsForSource(srcCtx, srcWave)
+		got := parentWavesForSource(srcCtx, srcWave)
 		assert.True(t, has(got, ancestor))
 		assert.False(t, has(got, srcWave), "same-wave must not add the source wave")
 		releaseBodyContext(srcCtx)
 	})
 
-	t.Run("cross-wave source joins its wave into parentJobs", func(t *testing.T) {
+	t.Run("cross-wave source joins its wave into parentWaves", func(t *testing.T) {
 		srcWave := &Wave{}
 		target := &Wave{}
 		ancestor := &Wave{}
-		srcCtx, _ := borrowBodyContext(context.Background(), srcWave, taskContext, nil, nil, &topLevelExEnv{})
+		srcCtx, _ := borrowBodyContext(context.Background(), srcWave, taskContext, nil, &topLevelExEnv{})
 		m, _ := metaFromContext(srcCtx)
-		m.parentJobs = map[*Wave]struct{}{ancestor: {}}
+		m.parentWaves = map[*Wave]struct{}{ancestor: {}}
 
-		got := parentJobsForSource(srcCtx, target)
+		got := parentWavesForSource(srcCtx, target)
 		assert.True(t, has(got, ancestor), "the source's own ancestry carries over")
 		assert.True(t, has(got, srcWave), "the source wave joins the ancestry")
-		assert.False(t, has(m.parentJobs, srcWave), "the source meta's map must not be mutated")
+		assert.False(t, has(m.parentWaves, srcWave), "the source meta's map must not be mutated")
 		releaseBodyContext(srcCtx)
 	})
 }

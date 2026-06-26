@@ -198,9 +198,16 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, er
 func (r Launcher[T]) dispatch(
 	ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool,
 ) (bool, error) {
-	wave := resolveWave(r.wave, ctx)
-	pool := wave
-	ctx, meta := vetStart(ctx, pool)
+	wv := resolveWave(r.wave, ctx)
+	// Borrow the task body from the ORIGINAL (caller) ctx, not the meta-stamped ctx
+	// vetStart returns: the meta-stamped ctx is a fresh ctxpool child each dispatch, so
+	// rooting the body there defeats ctxpool's per-source-ctx reuse (newChildPool +
+	// AfterFunc + a fresh child every call). The caller ctx is stable across a batch, so
+	// its child pool and body children recycle. Cancellation/meta/parent are unaffected:
+	// the meta-stamped ctx adds no cancellation, the body meta is self-contained
+	// (parent is a field), and metaFromContext resolves the nearest child either way.
+	srcCtx := ctx
+	ctx, meta := vetStart(ctx, wv)
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -208,7 +215,7 @@ func (r Launcher[T]) dispatch(
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(ctx, pool, group, deadline, value, callerErr, wave)
+	work := r.newScatterWork(srcCtx, wv, group, deadline, value, callerErr)
 	if isTry {
 		ok, err := meta.TryExecuteNow(ctx, deadline, work)
 		if !ok {
@@ -222,37 +229,37 @@ func (r Launcher[T]) dispatch(
 
 //nolint:contextcheck // submitCtx is the body-ctx borrow source threaded to newTaskWork, not a propagated arg
 func (r Launcher[T]) newScatterWork(
-	submitCtx context.Context, pool *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error, wave *Wave,
+	submitCtx context.Context, wv *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error,
 ) *launcherScatterWork {
-	inner := r.newTask(pool, group, value, callerErr)
+	inner := r.newTask(wv, group, value, callerErr)
 	var req request
 	if r.limiter.impl != nil {
 		req = r.limiter.impl.newRequest(inner)
 	}
-	taskWork := pool.newTaskWork(submitCtx, group, inner, req, wave)
-	postWork := pool.newTaskPostWork(group, deadline, taskWork)
+	taskWork := wv.newTaskWork(submitCtx, group, inner, req)
+	postWork := wv.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
 	if req != nil {
-		gated = newLimiterScatterWork(pool, deadline, gated, req)
+		gated = newLimiterScatterWork(wv, deadline, gated, req)
 	}
-	return newLauncherScatterWork(pool, deadline, gated)
+	return newLauncherScatterWork(wv, deadline, gated)
 }
 
-func (r Launcher[T]) newTask(pool *Wave, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
-	w := r.workPool.Get()
-	w.pool = r.workPool
-	w.job = pool
-	w.group = group
-	w.handler = r.handler
-	w.value = value
-	w.callerErr = callerErr
-	w.errSink = r.errSink
-	return w
+func (r Launcher[T]) newTask(wv *Wave, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
+	wk := r.workPool.Get()
+	wk.pool = r.workPool
+	wk.wave = wv
+	wk.group = group
+	wk.handler = r.handler
+	wk.value = value
+	wk.callerErr = callerErr
+	wk.errSink = r.errSink
+	return wk
 }
 
 type launcherWork[T any] struct {
 	pool      *omnipool.Pool[launcherWork[T]]
-	job       *Wave
+	wave      *Wave
 	group     workq.GroupID
 	handler   Handler[T]
 	value     T
@@ -260,7 +267,7 @@ type launcherWork[T any] struct {
 	errSink   ErrSkimmer
 }
 
-func (w *launcherWork[T]) Execute(
+func (wk *launcherWork[T]) Execute(
 	ctx context.Context,
 	group workq.GroupID,
 	completedFn func(),
@@ -278,37 +285,37 @@ func (w *launcherWork[T]) Execute(
 			return
 		}
 		trace.Logf(ctx, traceRegion, "routing handler err=%v to errSink", err)
-		ctx2, meta := w.job.ctxMeta(ctx)
-		intErr := w.errSink.submit(ctx2, meta, w.job, w.group, struct{}{}, err)
+		ctx2, meta := wk.wave.ctxMeta(ctx)
+		intErr := wk.errSink.submit(ctx2, meta, wk.group, struct{}{}, err)
 		if intErr != nil && ctx2.Err() == nil {
 			panic(fmt.Sprintf("unexpected non-cancelation error: %v", intErr))
 		}
 	}()
 
 	trace.WithRegion(ctx, traceRegion+".handler", func() {
-		err = w.handler.Handle(ctx, w.value, w.callerErr)
+		err = wk.handler.Handle(ctx, wk.value, wk.callerErr)
 	})
 }
 
-func (w *launcherWork[T]) Free() {
+func (wk *launcherWork[T]) Free() {
 	var zero T
-	w.value = zero
-	w.callerErr = nil
-	w.pool.Put(w)
+	wk.value = zero
+	wk.callerErr = nil
+	wk.pool.Put(wk)
 }
 
 // launcherWork is the applicant its Limiter request is opened for:
 // accessors box lazily, only when a sizing limiter actually reads them.
-func (w *launcherWork[T]) Processor() any {
-	return w.handler
+func (wk *launcherWork[T]) Processor() any {
+	return wk.handler
 }
 
-func (w *launcherWork[T]) Value() any {
-	return w.value
+func (wk *launcherWork[T]) Value() any {
+	return wk.value
 }
 
-func (w *launcherWork[T]) Err() error {
-	return w.callerErr
+func (wk *launcherWork[T]) Err() error {
+	return wk.callerErr
 }
 
 // newTaskErrSink returns an ErrSkimmer whose handler returns the
@@ -320,16 +327,16 @@ func newTaskErrSink() ErrSkimmer {
 	}))
 }
 
-// vetStart validates that the given pool and ctx are suitable for
+// vetStart validates that the given wave and ctx are suitable for
 // dispatching a handler. It checks that the calling ctx is one of
-// the allowed types (top-level, skim, or funnel) and that the pool
+// the allowed types (top-level, skim, or funnel) and that the wave
 // is not yet done. Panics on misuse.
 func vetStart(
 	ctx context.Context,
-	pool *Wave,
+	wv *Wave,
 ) (context.Context, *ctxMeta) {
-	pool.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
-	ctx, meta := pool.topLevelCtxMeta(ctx, func(ctxType contextType) {
+	wv.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
+	ctx, meta := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
 		case topLevelContext, skimContext, funnelContext:
 			// These are valid for starting a task
@@ -340,7 +347,7 @@ func vetStart(
 		}
 	})
 
-	pool.panicIfDone()
+	wv.panicIfDone()
 
 	return ctx, meta
 }
@@ -350,43 +357,43 @@ func vetStart(
 // skimScatterWork's role in the pre-Wave-3 codepath.
 type launcherScatterWork struct {
 	workq.Work
-	job      *Wave
+	wave     *Wave
 	deadline time.Time
 }
 
 func newLauncherScatterWork(
-	job *Wave,
+	wv *Wave,
 	deadline time.Time,
 	targetScatterWork workq.Work,
 ) *launcherScatterWork {
-	w := launcherScatterWorkPool.Get()
-	w.Work = targetScatterWork
-	w.job = job
-	w.deadline = deadline
-	return w
+	wk := launcherScatterWorkPool.Get()
+	wk.Work = targetScatterWork
+	wk.wave = wv
+	wk.deadline = deadline
+	return wk
 }
 
-func (w *launcherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *launcherScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "launcherScatterWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
+	trace.Logf(ctx, traceRegion, "%v", wk)
 
-	workFn := w.Work.Execute
-	bb := w.job.protoBB
+	workFn := wk.Work.Execute
+	bb := wk.wave.protoBB
 	if bb.ShouldBlock(ctx) != nil {
-		return w.job.governor.Execute(ctx, ex, w.deadline, bb, workFn)
+		return wk.wave.governor.Execute(ctx, ex, wk.deadline, bb, workFn)
 	}
 	return workFn(ctx, ex)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *launcherScatterWork) Free() {
+func (wk *launcherScatterWork) Free() {
 	traceRegion := "launcherScatterWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
-	w.Work.Free()
-	launcherScatterWorkPool.Put(w)
+	wk.Work.Free()
+	launcherScatterWorkPool.Put(wk)
 }
 
 var launcherScatterWorkPool = omnipool.For[launcherScatterWork]()

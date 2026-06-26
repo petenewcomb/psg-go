@@ -387,7 +387,7 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 	// ambient (so a Flush body's downstream Submit resolves it), the worker's E, and the
 	// funnel ctxType. Cancellation rides the worker ctx by ancestry; the wave owns none.
 	ee := workerEnvFromContext(ctx)
-	bodyCtx, _ := borrowBodyContext(ctx, c.wave, funnelContext, nil, nil, ee)
+	bodyCtx, _ := borrowBodyContext(ctx, c.wave, funnelContext, nil, ee)
 	defer releaseBodyContext(bodyCtx)
 	c.mu.Lock()
 	c.flush(bodyCtx)
@@ -402,7 +402,7 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 }
 
 // Free implements [workq.Work] as a no-op. A flush completes everything it needs —
-// the user flush, the job barrier, and (if detached) recycling — inside
+// the user flush, the wave barrier, and (if detached) recycling — inside
 // [funnelInstance.Execute] before releasing c.mu and never touches the instance
 // again. Because an owner reuse-pop may recycle a non-detached spent shell the
 // instant c.mu is released (before the controller gets here to call Free), Free must
@@ -447,7 +447,7 @@ func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
 	}
 	ctx, meta := c.wave.ctxMeta(ctx)
 	err := funnelErrSink.submit(
-		ctx, meta, c.wave, c.earliestGroup, struct{}{}, accErr)
+		ctx, meta, c.earliestGroup, struct{}{}, accErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
@@ -502,7 +502,7 @@ func (c *funnelInstance[T]) accumulate(
 }
 
 // flush must already hold c.mu. Returns whether this call performed the flush
-// (false if the instance was already flushed). Drops the per-instance job
+// (false if the instance was already flushed). Drops the per-instance wave
 // barrier reference, but NOT the pooled object — the caller does that after
 // releasing c.mu (an owner reuse-pop, a detached Execute, or the end-of-work sweep).
 func (c *funnelInstance[T]) flush(ctx context.Context) bool {
@@ -573,57 +573,57 @@ type funnelWork[T any] struct {
 
 // funnelWork is the applicant its Limiter request is opened for:
 // accessors box lazily, only when a sizing limiter actually reads them.
-func (w *funnelWork[T]) Processor() any {
-	return w.fn.factory
+func (wk *funnelWork[T]) Processor() any {
+	return wk.fn.factory
 }
 
-func (w *funnelWork[T]) Value() any {
-	return w.input
+func (wk *funnelWork[T]) Value() any {
+	return wk.input
 }
 
-func (w *funnelWork[T]) Err() error {
-	return w.inputErr
+func (wk *funnelWork[T]) Err() error {
+	return wk.inputErr
 }
 
 func (c *Funnel[T]) newFunnelWork(
 	submitCtx context.Context, group workq.GroupID, value T, err error,
 ) *funnelWork[T] {
-	w := c.workPool.Get()
-	w.Init(submitCtx, group, *c, value, err)
-	return w
+	wk := c.workPool.Get()
+	wk.Init(submitCtx, group, *c, value, err)
+	return wk
 }
 
 //nolint:contextcheck // submitCtx is the borrow source for the body ctx, not a propagated arg
-func (w *funnelWork[T]) Init(
+func (wk *funnelWork[T]) Init(
 	submitCtx context.Context, group workq.GroupID, fn Funnel[T], input T, inputErr error,
 ) {
-	w.poolWork.Init(group, fn.wave)
-	w.fn = fn
-	w.input = input
-	w.inputErr = inputErr
+	wk.poolWork.Init(group, fn.wave)
+	wk.fn = fn
+	wk.input = input
+	wk.inputErr = inputErr
 	// Borrow the body context at dispatch (descended from the submit ctx). The
 	// permit (heldRequest) is acquired on the worker in executeInner, the worker's
 	// E stamped there too; both nil here. Worker bodies are fresh permit-roots.
-	w.bodyCtx, w.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, nil, nil, nil)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, nil, nil)
 }
 
 // instanceQueue returns the wave's per-funnel instance cache for this work's funnel,
 // creating it on first use. The map value is the typed *funnelInstanceQueue[T]; the
 // only type erasure is the sync.Map's any boundary.
-func (w *funnelWork[T]) instanceQueue() *funnelInstanceQueue[T] {
-	if v, ok := w.fn.wave.funnelInstances.Load(w.fn.id); ok {
+func (wk *funnelWork[T]) instanceQueue() *funnelInstanceQueue[T] {
+	if v, ok := wk.fn.wave.funnelInstances.Load(wk.fn.id); ok {
 		return v.(*funnelInstanceQueue[T])
 	}
-	q := &funnelInstanceQueue[T]{instancePool: w.fn.instancePool}
+	q := &funnelInstanceQueue[T]{instancePool: wk.fn.instancePool}
 	q.queue.Init()
-	actual, _ := w.fn.wave.funnelInstances.LoadOrStore(w.fn.id, q)
+	actual, _ := wk.fn.wave.funnelInstances.LoadOrStore(wk.fn.id, q)
 	return actual.(*funnelInstanceQueue[T])
 }
 
-func (w *funnelWork[T]) Funnel(ctx context.Context) {
+func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 	// This is the owner lineage ("A"/"C"): an instance is either cached in the
 	// queue or being processed here, never both.
-	q := w.instanceQueue()
+	q := wk.instanceQueue()
 	var hbc *funnelInstance[T]
 	for {
 		hbc, _ = q.queue.TryPopFront()
@@ -632,8 +632,8 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 		}
 		hbc.mu.Lock()
 		if hbc.accumulator != nil {
-			if w.Group() < hbc.earliestGroup {
-				hbc.earliestGroup = w.Group()
+			if wk.Group() < hbc.earliestGroup {
+				hbc.earliestGroup = wk.Group()
 			}
 			break // still holding hbc.mu lock — reuse this live instance
 		}
@@ -646,14 +646,14 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 	if hbc == nil {
 		hbc = q.instancePool.Get()
 		hbc.mu.Lock()
-		// Per-instance flush barrier: hold one job reference for the instance's whole
-		// live lifetime (until flush() runs). This keeps the job out of Done while the
+		// Per-instance flush barrier: hold one wave reference for the instance's whole
+		// live lifetime (until flush() runs). This keeps the wave out of Done while the
 		// accumulator is unflushed, regardless of which worker eventually flushes it,
 		// and is what guarantees every outstanding instance is flushed before the wave
 		// drains. Released in flush().
-		w.fn.wave.state.IncrementReference()
-		hbc.wave = w.fn.wave
-		hbc.factory = w.fn.factory
+		wk.fn.wave.state.IncrementReference()
+		hbc.wave = wk.fn.wave
+		hbc.factory = wk.fn.factory
 		hbc.detached = false
 		// Reset and re-Init the embedded work item: a fresh work ID, the
 		// flush group, and a zeroed (never-scheduled) heap position. The
@@ -662,9 +662,9 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 		// the position tri-state honest so a stray Expedite of a fresh
 		// instance is caught (see delayq.Item).
 		hbc.ScheduledWorkItem = workq.ScheduledWorkItem{}
-		hbc.Init(w.Group())
-		hbc.earliestGroup = w.Group()
-		hbc.allocate(ctx, w.fn.factory)
+		hbc.Init(wk.Group())
+		hbc.earliestGroup = wk.Group()
+		hbc.allocate(ctx, wk.fn.factory)
 	}
 	defer func() {
 		// If funnel() flushed inline, it did so via ClaimForFlush, which
@@ -679,22 +679,22 @@ func (w *funnelWork[T]) Funnel(ctx context.Context) {
 			q.queue.PushBack(hbc)
 		}
 	}()
-	hbc.accumulate(ctx, w.input, w.inputErr)
+	hbc.accumulate(ctx, wk.input, wk.inputErr)
 }
 
-func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "funnelWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", w, w)
+	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", wk, wk)
 
-	if w.fn.limiter.impl == nil {
-		return w.executeInner(ctx, ex)
+	if wk.fn.limiter.impl == nil {
+		return wk.executeInner(ctx, ex)
 	}
 
-	if w.req == nil {
-		w.req = w.fn.limiter.impl.newRequest(w)
+	if wk.req == nil {
+		wk.req = wk.fn.limiter.impl.newRequest(wk)
 	}
-	held, err := acquireOrWait(ctx, ex, time.Time{}, w.fn.wave.protoBB, w.req)
+	held, err := acquireOrWait(ctx, ex, time.Time{}, wk.fn.wave.protoBB, wk.req)
 	if err != nil || !held {
 		return err
 	}
@@ -702,55 +702,55 @@ func (w *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	// starts, so the postpone-after-grant case doesn't arise here.
 	// Released on return (panic-inclusive); Free's release is then an
 	// idempotent no-op before the recycle.
-	defer w.req.release()
-	return w.executeInner(ctx, ex)
+	defer wk.req.release()
+	return wk.executeInner(ctx, ex)
 }
 
-func (w *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
+func (wk *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	// The body context was borrowed at dispatch; stamp the pieces only known on
 	// the worker — the held limiter request (acquired in Execute) and this worker's
 	// E — and push the funnel's group so nil-wave dispatches from inside the
 	// Accumulate / Flush body resolve to it. Run the body under the borrowed ctx.
-	w.bodyMeta.heldRequest = w.req
-	w.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
-	w.bodyMeta.PushGroup(w.Group())
-	defer w.bodyMeta.PopGroup()
+	wk.bodyMeta.heldRequest = wk.req
+	wk.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
+	wk.bodyMeta.PushGroup(wk.Group())
+	defer wk.bodyMeta.PopGroup()
 	//nolint:contextcheck // the body runs under the borrowed body ctx by design
-	w.Funnel(w.bodyCtx)
+	wk.Funnel(wk.bodyCtx)
 	return nil
 }
 
-func (w *funnelWork[T]) Free() {
+func (wk *funnelWork[T]) Free() {
 	traceRegion := "funnelWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", w, w)
+	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", wk, wk)
 
-	if w.req != nil {
+	if wk.req != nil {
 		// Normal completion already released at body end; this is the
 		// idempotent backstop for work freed without executing
 		// (cancellation drain) — by-state: abandon PENDING / give back
 		// HELD.
-		w.req.release()
-		freeRequest(w.req)
-		w.req = nil
+		wk.req.release()
+		freeRequest(wk.req)
+		wk.req = nil
 	}
 
 	// Return the body context borrowed at dispatch (whether or not the body ran).
-	if w.bodyCtx != nil {
-		releaseBodyContext(w.bodyCtx)
-		w.bodyCtx = nil
-		w.bodyMeta = nil
+	if wk.bodyCtx != nil {
+		releaseBodyContext(wk.bodyCtx)
+		wk.bodyCtx = nil
+		wk.bodyMeta = nil
 	}
 
-	wave := w.fn.wave
-	w.DownstreamWork.Close()
-	w.poolWork.Close(wave)
+	wave := wk.fn.wave
+	wk.DownstreamWork.Close()
+	wk.poolWork.Close(wave)
 
-	pool := w.fn.workPool
+	pool := wk.fn.workPool
 	var zero Funnel[T]
-	w.fn = zero
-	pool.Put(w)
+	wk.fn = zero
+	pool.Put(wk)
 }
 
 // funnelPostWork is the producer that hands a funnelWork off to the shared pool's
@@ -764,46 +764,46 @@ type funnelPostWork struct {
 	work boundFunnelWork
 }
 
-func (w *funnelPostWork) Init(group workq.GroupID, wave *Wave, work boundFunnelWork) {
-	w.poolWork.Init(group, wave)
-	w.wave = wave
-	w.work = work
+func (wk *funnelPostWork) Init(group workq.GroupID, wave *Wave, work boundFunnelWork) {
+	wk.poolWork.Init(group, wave)
+	wk.wave = wave
+	wk.work = work
 }
 
-func (w *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error {
+func (wk *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "funnelPostWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "%v", w)
+	trace.Logf(ctx, traceRegion, "%v", wk)
 
 	// Handoff to the GLOBAL pool's shared work queue (mirrors taskPostWork).
 	// shouldBlock is read directly from the ctx (not via wave.ctxMeta, which panics on
 	// a missing meta): a producer only postpones onto the global queue in LISTEN
 	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta.
 	meta, _ := metaFromContext(ctx)
-	shouldBlock := meta != nil && meta.job == w.wave && meta.ShouldBlock()
-	onWait := func() { w.work.Waiting(&w.wave.governor) }
-	posted, err := defaultPool.Post(ctx, ex, shouldBlock, w.work, onWait)
+	shouldBlock := meta != nil && meta.wave == wk.wave && meta.ShouldBlock()
+	onWait := func() { wk.work.Waiting(&wk.wave.governor) }
+	posted, err := defaultPool.Post(ctx, ex, shouldBlock, wk.work, onWait)
 	if posted {
-		w.work = nil // ownership transferred to the queue
+		wk.work = nil // ownership transferred to the queue
 	}
 	return err
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (w *funnelPostWork) Free() {
+func (wk *funnelPostWork) Free() {
 	traceRegion := "funnelPostWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "%v", w)
+	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
 	// Free the nested work item if we still own it
-	if w.work != nil {
-		trace.Logf(context.Background(), traceRegion, "w.work.Free()")
-		w.work.Free()
-		w.work = nil
+	if wk.work != nil {
+		trace.Logf(context.Background(), traceRegion, "wk.work.Free()")
+		wk.work.Free()
+		wk.work = nil
 	}
 
-	w.Close(w.wave)
-	funnelPostWorkPool.Put(w)
+	wk.Close(wk.wave)
+	funnelPostWorkPool.Put(wk)
 }
 
 var funnelPostWorkPool = omnipool.For[funnelPostWork]()
@@ -812,11 +812,11 @@ var funnelPostWorkPool = omnipool.For[funnelPostWork]()
 func newFunnelPostWork(group workq.GroupID, wave *Wave, bc boundFunnelWork) *funnelPostWork {
 	traceRegion := "newFunnelPostWork"
 
-	w := funnelPostWorkPool.Get()
-	w.Init(group, wave, bc)
+	wk := funnelPostWorkPool.Get()
+	wk.Init(group, wave, bc)
 
-	trace.Logf(context.Background(), traceRegion, "created %v", w)
-	return w
+	trace.Logf(context.Background(), traceRegion, "created %v", wk)
+	return wk
 }
 
 // errAccumulator is the framework's substitute Accumulator used when a user

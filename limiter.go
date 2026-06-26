@@ -419,7 +419,7 @@ func reclaimRequest(ctx context.Context, blockFn workq.BlockFunc, req request) {
 				// completion release discards it (no double give-back).
 				return
 			case errors.Is(err, ErrWaveDone):
-				// Help domain exhausted — e.g. the drained subjob this
+				// Help domain exhausted — e.g. the drained subwave this
 				// goroutine was driving reports end-of-work. The reclaim
 				// becomes vacuously plain: keep waiting on the notifier
 				// without help. Abandoning here instead would let the
@@ -613,44 +613,44 @@ func (s *semaphoreResource) setMaxConcurrency(limit int) {
 // taskWork the request travels with across the queue hand-off.
 type limiterScatterWork struct {
 	workq.Work
-	job      *Wave
+	wave     *Wave
 	req      request
 	deadline time.Time
 }
 
 func newLimiterScatterWork(
-	job *Wave, deadline time.Time, inner workq.Work, req request,
+	wv *Wave, deadline time.Time, inner workq.Work, req request,
 ) *limiterScatterWork {
-	w := limiterScatterWorkPool.Get()
-	w.Work = inner
-	w.job = job
-	w.req = req
-	w.deadline = deadline
-	return w
+	wk := limiterScatterWorkPool.Get()
+	wk.Work = inner
+	wk.wave = wv
+	wk.req = req
+	wk.deadline = deadline
+	return wk
 }
 
-func (w *limiterScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
-	held, err := acquireOrWait(ctx, ex, w.deadline, w.job.protoBB, w.req)
+func (wk *limiterScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
+	held, err := acquireOrWait(ctx, ex, wk.deadline, wk.wave.protoBB, wk.req)
 	if err != nil || !held {
 		return err
 	}
-	err = w.Work.Execute(ctx, ex)
+	err = wk.Work.Execute(ctx, ex)
 	if !ex.Started() {
 		// Granted, but the inner post couldn't start (downstream queue
 		// full under postpone discipline): yield the grant while the work
 		// waits for queue space, keeping the request's identity for the
 		// re-grant on retry. See "The POSTPONED state" in
 		// docs/limiter-suspend-resume.md.
-		w.req.postpone()
+		wk.req.postpone()
 	}
 	return err
 }
 
-func (w *limiterScatterWork) Free() {
-	w.Work.Free()
-	// w.req is owned by the taskWork (released and recycled in
+func (wk *limiterScatterWork) Free() {
+	wk.Work.Free()
+	// wk.req is owned by the taskWork (released and recycled in
 	// taskWork.Free); just drop the reference via the pool's zeroing Put.
-	limiterScatterWorkPool.Put(w)
+	limiterScatterWorkPool.Put(wk)
 }
 
 var limiterScatterWorkPool = omnipool.For[limiterScatterWork]()

@@ -6,7 +6,7 @@ separation of the goroutines that run blocking user bodies (**executors**) from 
 goroutines that own admission, queues, and scheduling (**managers**). It supersedes
 the goroutine-level block-and-help and the *eager* limiter suspend/reclaim protocol
 of `limiter-suspend-resume.md`. The permit *allocation* model that rides on this
-split — pools, the locality-ordered acquire, idle-stealing, cache-don't-return — is
+split — caches, the locality-ordered acquire, idle-stealing, cache-don't-return — is
 specified separately in `permit-core.md`; this document covers only how the split
 shapes, and is shaped by, that model. It deliberately keeps the load-bearing
 constraints of the limiter design (intake/drain split; the narrowed skim-cycle rule
@@ -87,7 +87,7 @@ managers feeding executors, not by the blocked producer helping.
 
 The split's rule for permits is simple: **the executor never manages them.** It
 requests the permits its body needs, runs, and parks; all allocation logic — the
-pools, the locality-ordered acquire, idle-stealing, the cache-don't-return flow —
+caches, the locality-ordered acquire, idle-stealing, the cache-don't-return flow —
 lives below that request interface and is specified in `permit-core.md`. That
 document carries the model and its central result: the permit core is
 **deadlock-free per-limiter, with no cycle graph and no global coordinator**, so
@@ -100,7 +100,7 @@ What *this* document owns is how the split **drives** that acquire, in two modes
 that differ only in what they do on a miss:
 
 - **Manager-side, at admission — non-blocking.** A manager makes a body *ready* by
-  running the acquire without its waiting step (own pool → ancestor → free L →
+  running the acquire without its waiting step (own cache → ancestor → free Resource →
   steal): on success the body is handed to an executor; on a miss the work is held
   un-admitted and retried when a permit frees. The manager never blocks, so the
   always-live-dispatcher invariant holds.
@@ -133,7 +133,7 @@ is per-limiter and local (`permit-core.md`). Joint admission of a multi-limiter
 When the prioritized arbiter is built it must not become a global lock per acquire:
 
 - An **uncontended acquire/release** touches only *that limiter's own* per-limiter
-  state — its pool counters, the per-wave governor counter, a push to the executor
+  state — its cache counters, the per-wave governor counter, a push to the executor
   queue. It scales per-limiter and never serializes across limiters or cores.
 - Only **cross-limiter** work — the multi-limiter atomic-fit (the prioritized
   whole-vector grant) — routes through the arbiter, and only under saturation, which
@@ -168,7 +168,7 @@ Two cases, opposite answers:
   spurious error. Wait; rely on the deadlock-free machinery. The only thing
   forbidden is silently waiting forever.
 
-(The "satisfiable only alone" request — `W ≤ C` but needing the whole pool — is not
+(The "satisfiable only alone" request — `W ≤ C` but needing the whole Pool — is not
 an allow-over-capacity case; it is the prioritized scheduler's withholding/
 anti-starvation path granting it once everything else clears.)
 
@@ -195,7 +195,7 @@ This design **changes**:
 - **Eager suspend/reclaim → the hierarchical permit cache** (`permit-core.md`). The
   two-class park rule and its bracket/reclaim machinery on the body path are retired;
   permits are held through parks and cached idle rather than suspended, and the only
-  give-back is an idle *steal* by a pool that genuinely needs the permit — no
+  give-back is an idle *steal* by a cache that genuinely needs the permit — no
   suspend, no eager release, no cycle-breaker.
 - **Per-op / per-domain scheduler → a per-limiter permit core, no coordinator.** The
   core is deadlock-free per-limiter on its own; `WithLimits`'s "all limiters resolve
@@ -203,7 +203,7 @@ This design **changes**:
   feature, where a single coordinator (process-global or per-group) owns the
   atomic-fit.
 - **Terminology.** That doc's "reservation" is a *PriorityScheduler withholding
-  policy* and is unrelated to anything here; this design speaks of *pools*
+  policy* and is unrelated to anything here; this design speaks of *caches*
   (`held`/`inUse`) and *deltas*, never a "reservation," to avoid the collision.
 
 ## What this deletes
@@ -222,7 +222,7 @@ This design **changes**:
 
 ## Open / next
 
-- The permit core (pools, acquire, idle-steal) is specified and has its own
+- The permit core (caches, acquire, idle-steal) is specified and has its own
   build/model-check plan in `permit-core.md`, "Open / next". This document's
   remaining work is the **dispatch side**:
 - Map the **manager and executor pools** onto the existing `worker.Pool` +

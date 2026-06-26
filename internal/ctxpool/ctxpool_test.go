@@ -54,6 +54,41 @@ func TestGetValue_Missing(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// Clear drops every cached child pool so its child contexts (and stamped values) can
+// be GC'd without waiting for each parent ctx's AfterFunc — the eager reclaim that
+// streampool.Wait performs after joining the workers. The pool map ends empty, and
+// the pool stays immediately reusable (a later borrow repopulates a fresh map; a
+// child cached before Clear is not handed back out).
+func TestClear_DropsAllPoolsAndStaysReusable(t *testing.T) {
+	countPools := func() int {
+		n := 0
+		childPools.Load().Range(func(_, _ any) bool { n++; return true })
+		return n
+	}
+
+	a := context.Background()
+	b := context.WithValue(context.Background(), struct{ k int }{}, 1)
+
+	// Populate: two distinct parents → two child pools, with a Free'd child cached
+	// under a so its (non-)reuse across Clear is observable.
+	ca := WithValue(a, 1)
+	Free(ca)
+	_ = WithValue(b, 2)
+	require.NotZero(t, countPools(), "precondition: child pools are cached")
+
+	Clear()
+	assert.Zero(t, countPools(), "Clear must drop every cached child pool")
+
+	// Reusable: a fresh borrow works and repopulates the swapped-in map. The child is
+	// newly minted, not the pre-Clear cached one (that pool was dropped, not reused).
+	ca2 := WithValue(a, 3)
+	assert.NotSame(t, ca, ca2, "a child cached before Clear must not survive it")
+	got, ok := GetValue[int](ca2)
+	require.True(t, ok)
+	assert.Equal(t, 3, got)
+	assert.NotZero(t, countPools(), "the pool is reusable after Clear")
+}
+
 // A child of a cancelled parent is not re-pooled (its ctx is done); Free is a no-op
 // rather than recycling a doomed child. This is the in-flight-vs-eviction contract
 // that keeps a cancelled child from being handed to a later borrower.

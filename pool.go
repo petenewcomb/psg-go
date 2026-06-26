@@ -6,6 +6,7 @@ package streampool
 import (
 	"context"
 
+	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/worker"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
@@ -28,8 +29,18 @@ var defaultPool = worker.NewPool(newWorkerState)
 // workers — it does NOT cancel running work (a Wave that never drains makes Wait
 // block forever, like sync.WaitGroup.Wait). The pool is reusable afterward.
 //
+// The worker join makes this the one quiescent point at which clearing the
+// process-wide ctxpool reuse caches is safe: with no workers left there are no
+// body-context borrowers, so the caches now only pin cached child contexts (and
+// their values) until each parent ctx is GC'd via AfterFunc. Clearing reclaims
+// them eagerly. ctxpool.Clear swaps in a fresh map, so a Wave dispatched after
+// Wait returns (the pool is reusable) simply repopulates clean.
+//
 // (Under the planned package rename this becomes streampool.Wait.)
-func Wait() { defaultPool.Wait() }
+func Wait() {
+	defaultPool.Wait()
+	ctxpool.Clear()
+}
 
 // workerExEnv is the context-free unified execution environment each default-pool
 // worker holds: the integration surface (pooled rdvq sender + receiver + group/

@@ -5,13 +5,20 @@ package permits
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
+
+	"github.com/stretchr/testify/require"
 )
 
 // This file holds test-only fixtures and oracles, compiled only under `go test`.
+//
+// The forest's nbcq queues can't be walked non-destructively, so the oracles take an
+// explicit slice of every cache the test created (the tests track that anyway). They
+// read each cache's atomic counter, so they are meant to run at a quiescent point.
 
 // semaphore is the weight-1 test Resource: a fixed capacity and an atomic in-flight
-// count (atomic so the -race concurrency harness can share it).
+// count (atomic so the concurrency harness can share it).
 type semaphore struct {
 	capacity int
 	inFlight atomic.Int64
@@ -31,36 +38,18 @@ func (s *semaphore) TryAcquire(n int) bool {
 
 func (s *semaphore) Release(n int) { s.inFlight.Add(-int64(n)) }
 
-// CheckInvariants verifies the model-check targets across the whole pool and returns
-// the first violation found, or nil. It takes the Pool lock and so observes a
-// structurally stable forest; it is meant to be called at a quiescent point (no
-// acquire mid-flight), where the three views of Σheld — the caches, and the
-// Resource's in-flight count — must agree and stay within capacity.
-func (p *Pool) CheckInvariants() error {
-	sem := p.resource.(*semaphore)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+// checkInvariants verifies the model-check targets over the given caches: per-cache
+// inUse ≤ held; Σheld equals the Resource's in-flight count (cross-checking the two
+// independent views); and both stay within capacity. (permit-core.md "Invariants".)
+func checkInvariants(sem *semaphore, caches []*Cache) error {
 	var sumHeld, sumInUse uint64
-	var walk func(c *Cache) error
-	walk = func(c *Cache) error {
+	for _, c := range caches {
 		h, u := c.counts.load()
 		if u > h {
 			return fmt.Errorf("per-cache: inUse > held (held=%d inUse=%d)", h, u)
 		}
 		sumHeld += h
 		sumInUse += u
-		for _, ch := range c.children {
-			if err := walk(ch); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	for _, r := range p.roots {
-		if err := walk(r); err != nil {
-			return err
-		}
 	}
 	//nolint:gosec // G115: in-flight and capacity are small non-negative test values
 	inFlight, capacity := uint64(sem.inFlight.Load()), uint64(sem.capacity)
@@ -76,44 +65,23 @@ func (p *Pool) CheckInvariants() error {
 	return nil
 }
 
-// HasBorrowable reports whether ANY cache holds an idle (borrowable) permit, by an
-// independent exhaustive walk — deliberately NOT the production findBorrowable — so
-// the liveness assertion (Acquire must not block while HasBorrowable is true)
-// cross-checks the production steal search rather than echoing it.
-func (p *Pool) HasBorrowable() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return hasBorrowableWalk(p.roots)
-}
-
-func hasBorrowableWalk(caches []*Cache) bool {
+// hasBorrowable reports whether any of the given caches holds an idle permit.
+func hasBorrowable(caches []*Cache) bool {
 	for _, c := range caches {
 		if h, u := c.counts.load(); h > u {
-			return true
-		}
-		if hasBorrowableWalk(c.children) {
 			return true
 		}
 	}
 	return false
 }
 
-// totalHeld returns Σheld across the forest — the count of permits checked out of the
-// Resource (the test replacement for the dropped Pool.checkedOut mirror).
-func (p *Pool) totalHeld() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// totalHeld returns Σheld over the given caches — the permits checked out of the
+// Resource.
+func totalHeld(caches []*Cache) int {
 	var sum uint64
-	var walk func(c *Cache)
-	walk = func(c *Cache) {
+	for _, c := range caches {
 		h, _ := c.counts.load()
 		sum += h
-		for _, ch := range c.children {
-			walk(ch)
-		}
-	}
-	for _, r := range p.roots {
-		walk(r)
 	}
 	return int(sum)
 }
@@ -123,3 +91,43 @@ func (c *Cache) held() uint64 {
 	h, _ := c.counts.load()
 	return h
 }
+
+// testPool wraps a Pool, tracking every cache created through it so the oracles have
+// the full set to sum over. The tracking slice is guarded for the concurrency tests.
+type testPool struct {
+	*Pool
+	sem *semaphore
+
+	mu     sync.Mutex
+	caches []*Cache
+}
+
+func newTestPool(capacity int) *testPool {
+	sem := &semaphore{capacity: capacity}
+	return &testPool{Pool: NewPool(sem), sem: sem}
+}
+
+func (tp *testPool) track(c *Cache) *Cache {
+	tp.mu.Lock()
+	tp.caches = append(tp.caches, c)
+	tp.mu.Unlock()
+	return c
+}
+
+func (tp *testPool) NewCache() *Cache { return tp.track(tp.Pool.NewCache()) }
+
+func (tp *testPool) newChild(parent *Cache) *Cache { return tp.track(parent.NewChild()) }
+
+// snapshot returns a copy of the tracked caches for the oracles to read.
+func (tp *testPool) snapshot() []*Cache {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return append([]*Cache(nil), tp.caches...)
+}
+
+func (tp *testPool) check(t require.TestingT) {
+	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
+}
+
+func (tp *testPool) totalHeld() int      { return totalHeld(tp.snapshot()) }
+func (tp *testPool) hasBorrowable() bool { return hasBorrowable(tp.snapshot()) }

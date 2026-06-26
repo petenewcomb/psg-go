@@ -15,20 +15,20 @@ import (
 // goroutines hammer balanced acquire/release on their own caches. Every acquire
 // contends for the same scarce capacity through three concurrent paths at once —
 // inheritance (the shared root's idle base, a lock-free up-walk), a fresh delta (the
-// Resource's atomic counter), and a cross-child steal (the locked down-walk vs other
-// children's releases). Run under -race; the balance means inUse returns to zero, and
-// the drain must leak nothing.
+// Resource's atomic counter), and a cross-child steal (the lock-free nbcq walk vs
+// other children's releases). Run under -race; balance means inUse returns to zero,
+// and the drain must leak nothing.
 func TestConcurrentInheritDeltaSteal(t *testing.T) {
 	const capacity, children, iters = 4, 8, 20000
-	p := NewPool(&semaphore{capacity: capacity})
+	tp := newTestPool(capacity)
 
-	root := p.NewCache()
+	root := tp.NewCache()
 	rp, _ := root.Acquire() // root runs, then parks → its base (held=1) is borrowable
 	rp.Release()
 
 	kids := make([]*Cache, children)
 	for i := range kids {
-		kids[i] = root.NewChild()
+		kids[i] = tp.newChild(root)
 	}
 
 	var invViolated atomic.Bool // set if inUse > held is ever observed (a CAS bug)
@@ -51,36 +51,32 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 	wg.Wait()
 	require.False(t, invViolated.Load(), "inUse ≤ held held at every observed snapshot")
 
-	require.NoError(t, p.CheckInvariants(), "invariants hold once quiescent")
+	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()), "invariants hold once quiescent")
 
-	// Drain: exit every child then the root; nothing should be running, so all held
-	// returns to the Resource.
+	// Drain: exit every child then the root; nothing running, so all held returns.
 	for _, kid := range kids {
 		require.True(t, kid.ReleaseRef())
 	}
 	require.True(t, root.ReleaseRef())
-	require.NoError(t, p.CheckInvariants())
-	require.Equal(t, 0, p.totalHeld(), "no permit leaked")
-	require.Empty(t, p.roots)
+	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 }
 
 // Concurrent structural churn vs steal: while one set of goroutines runs the
 // acquire/steal hot path on a fixed subtree, another set repeatedly creates a
 // sub-wave (NewChild), runs+releases a body in it, and drains it (ReleaseRef) — so
-// destroy (which mutates children and returns capacity) runs concurrently with the
-// steal down-walk and lock-free acquires. Exercises the per-Pool lock's
-// serialization of structure against steal, and destroy's return-to-Resource.
+// destroy (which mutates the forest and returns capacity) runs concurrently with the
+// steal walk and lock-free acquires. Exercises lazy reaping of dead caches by the
+// steal, the CAS-drain return-to-Resource, and lock-free refcount teardown.
 func TestConcurrentChurnVsSteal(t *testing.T) {
 	const capacity = 4
-	p := NewPool(&semaphore{capacity: capacity})
+	tp := newTestPool(capacity)
 
-	// A fixed subtree with a parked, lending root.
-	root := p.NewCache()
+	root := tp.NewCache()
 	rp, _ := root.Acquire()
 	rp.Release()
 	fixed := make([]*Cache, 4)
 	for i := range fixed {
-		fixed[i] = root.NewChild()
+		fixed[i] = tp.newChild(root)
 	}
 
 	var wg sync.WaitGroup
@@ -104,7 +100,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 4000 {
-				sub := root.NewChild()
+				sub := tp.newChild(root)
 				if pm, ok := sub.Acquire(); ok {
 					pm.Release()
 				}
@@ -115,11 +111,10 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 
 	wg.Wait()
 
-	require.NoError(t, p.CheckInvariants())
+	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
 	for _, c := range fixed {
 		require.True(t, c.ReleaseRef())
 	}
 	require.True(t, root.ReleaseRef())
-	require.Equal(t, 0, p.totalHeld(), "no permit leaked after churn")
-	require.Empty(t, p.roots)
+	require.Equal(t, 0, tp.totalHeld(), "no permit leaked after churn")
 }

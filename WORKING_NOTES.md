@@ -2,6 +2,42 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► PERMIT CORE SKETCH BUILT + MODEL-CHECKED — `internal/permits` (2026-06-26).**
+Phase 1 of the dispatch/execution split: the isolated, model-checked hierarchical permit
+cache that both `docs/permit-core.md` and `docs/dispatch-execution-split.md` mandate
+building **before any cutover**. Isolated — nothing imports it yet, so zero risk to the
+live limiter (the eager `directRequest`/`suspendForEpisode`/`reclaimRequest` in
+`limiter.go` stay load-bearing until Phase 3). Four types with a real behavioral split:
+`Resource` (pluggable accounting — the only thing that knows capacity; `TryAcquire(n)`/
+`Release(n)`, weight-1 for now), `Pool` (the Resource boundary + forest root — the only
+place permits cross in/out of the Resource; owns the steal; never caches), `Cache`
+(per-unit forest node, cache-don't-return; `Acquire` does steps 1–2, delegates 3–4 to the
+Pool), `Permit` (transient run-segment handle, alloc-free). Steal telemetry is structural
+sibling-list order (**move-to-back**, no logical clock); `touch` fires only on an
+*unsatisfied* pass (a hit pays nothing). Validated: 5 deterministic anchors (incl. the
+canonical `limit==1` parked-parent-lends-to-sub-wave hang, dissolved) + 100k `rapid`
+adversarial sequences + `-race`; `CheckInvariants` triangulates Σheld across caches / Pool
+mirror / Resource in-flight, and an *independent* `HasBorrowable` oracle asserts liveness
+vs the guided steal search. This is the structural fix for the pre-existing ~1/120 `-race`
+`TestBySimulation` nested-drain hang: a parked holder's permit is idle hence borrowable,
+so its sub-wave inherits it instead of livelocking.
+
+  **PHASE 2 ENTRY POINT (next):** map the **manager and executor pools** onto
+  `internal/worker.Pool` + `internal/workq.Queue`, with `internal/permits` as the
+  foundation — managers admit *non-blocking* (acquire steps 1–4, postpone on miss),
+  executors reacquire *blocking* (steps 1–5, wait). **The permit core's one open piece —
+  the step-5 wait/wake trigger (event-based: wake when a contended permit frees) — is
+  *defined by* those two callers, so co-design it in Phase 2, not standalone.** Place the
+  governor's per-wave gate on the manager admission path. Phase 3 then sequences the
+  migration off the eager `limiter.go` code (no flag day). Deferred: weighted amounts (the
+  `Resource` `n` param already allows it) and cross-limiter joint admission. Spec +
+  sequencing: `docs/dispatch-execution-split.md` and `docs/permit-core.md` "Open / next".
+
+  Supporting refactors landed alongside: `ctxMeta.job` retired + the `wv`(`*Wave`)/
+  `wk`(Work) naming convention applied package-wide, with redundant/dead params pruned
+  across the dispatch + skim paths; `streampool.Wait` now clears the `internal/ctxpool`
+  reuse caches after the worker join.
+
 **►►► FUNNEL ENGINE REMOVED — FLUSHES ON THE SHARED POOL (2026-06-24).** The per-Wave
 `funnelEngine` + flusher goroutine + `cpworker.go` are gone. `Funnel[T]` is now a plain
 value `{wave, factory, limiter, id, instancePool, workPool}` (no inner heap object);

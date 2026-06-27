@@ -158,19 +158,51 @@ is inheritable via the plain `Cache.parent` up-walk with no re-parenting.
   idle permit; the permit **does not move** (`permit-core.md`). The descendant's own cache
   is untouched. Re-finding it on the next acquire is a short, lock-free up-walk
   (O(nesting depth) atomic loads).
-- **Suspend (park to drive a sub-wave):** `Permit.Release` the body's own permit(s) to
-  **whatever cache backs them** — its own wave cache for a checked-out permit, an ancestor
-  cache for an inherited one. The permit goes idle/borrowable there; the sub-wave inherits
-  it via the up-walk. No "suspended" state in the cache — a parked body simply isn't
-  occupying its permit. "Suspended" is just the body's record of *its own* backings to
-  reacquire (a subset of what its sub-waves acquired).
-- **Reclaim (resume to compute):** `C_W^L.AcquireWait` — the full locality-ordered search
-  from the body's wave cache outward. Usually a cheap step-1/step-2 hit on the very permit
-  it released; may block/steal under contention (fine — it runs on the executor).
+- **Suspend / reclaim is COARSE, per *drive call* — a body holds its permit only while
+  running *its own user code*.** When a body enters a drive (`Skim`/`SkimAll`/
+  `CloseAndSkimAll`) it `Permit.Release`s its permit(s) to **whatever cache backs them**
+  (its own wave cache for a checked-out permit, an ancestor cache for an inherited one) and
+  **stays lent for the entire drive — including while running that sub-wave's skim
+  handlers**, because handlers are *drain*, not the driving body's own code (they're
+  limiter-free w.r.t. the driver). It reacquires (`C_W^L.AcquireWait`, the full
+  locality-ordered search from its wave cache outward — usually a cheap step-1 hit on the
+  permit it released, may block/steal under contention) **only when the drive call returns
+  control to the body's own code**. So bracket the *whole* `SkimAll`, not each internal
+  `Skim` (a standalone manual `Skim()` keeps its per-call bracket — control does return to
+  the body after it). **NOT a per-handler alternation** — that contradicts both "limiters
+  gate intake, not drain" and the `ΣinUse` bound's correct meaning (running = executing own
+  code, *not* a skim handler). No "suspended" state in the cache — a parked body just isn't
+  occupying its permit; "suspended" is only the body's record of *its own* backings to
+  reacquire (a subset of what its sub-waves acquired). **`permit-core.md` needs a fix here:
+  its "Driving is an alternation → reacquire before each skim handler" and the
+  concurrency-bound's "or a skim handler" both contradict this and must be struck.**
 - **Multi-limiter (`WithLimits`):** one held cache per limiter; joint acquire in the
   **global canonical order** at admission; on **any** miss, **release the partial and
   postpone the whole** body (so a postponed body holds no `inUse` permit — preserving the
   deadlock-freedom assumption).
+
+### Drain limiting — Skimmer `WithLimits` / Funnel `WithFlushLimits` (opt-in)
+
+The intake-vs-drain dichotomy *for limiting* dissolves: **every op may carry limits, and
+limited drain is allowed** — `NewSkimmer(h, WithLimits(...))` limits the skim handler, and
+`NewFunnel(factory, WithLimits(...), WithFlushLimits(...))` limits accumulate (`WithLimits`,
+intake) and flush (`WithFlushLimits`, drain) **separately**. **Opt-in:** with no such opt,
+a handler/flush is limiter-free drain (holds no permit, lends the parent nothing) — the
+unchanged common path.
+
+A limited handler/flush acquires its **own** limiters (its own cache(s) in the forest,
+parented by the wave nesting), **not** the driving body's permit — so it's just another
+limited body, and the forest construction above covers it with no new machinery; a free
+handler/flush gets no cache. This revises the locked "limiters gate intake, not drain"
+principle to "**drain depends on a permit only if it opted in, and then it's deadlock-free
+by the same per-limiter machinery**" (a limited handler lends when it parks; others inherit
+its idle permit — e.g. it inherits the *driving body's* lent permit when same-limiter — and
+steal across limiters; the "can't skim a wave you're part of" rule, now *more* load-bearing,
+closes the self-cycle; always-live-managers is untouched since managers don't run handlers).
+**This lifts a conservative restriction *because* the foundation got stronger, so limited
+drain MUST be exercised in the permit-core model-check** (a parked holder whose drain itself
+needs a permit — same-limiter-inherit and cross-limiter cases). It's also a **surface
+change** (`WithLimits` on `NewSkimmer`, `WithFlushLimits` on `NewFunnel`) to ratify.
 
 ### Lifetime / refcount
 
@@ -213,18 +245,60 @@ the handoff intact:
 
 ## Open / next — more detail to settle
 
-- **Mode mapping.** `acquireOrWait`'s one-shot/postpone/block switches (`limiter.go:340`)
-  → `Cache.Acquire` (manager, postpone) / `Permit.Release` + `Cache.AcquireWait`
-  (executor reacquire, block); `suspendForEpisode`/`reclaimRequest` (`limiter.go:499`/
-  `397`) bracket placement.
-- **Governor placement.** The per-wave governor gate (`wave.go:48`, `workq/governor.go`)
-  moves onto the scheduler admission path.
-- **Inbox-stack lock-freedom.** See note below.
-- **Migration sequencing (no flag day, gut-before-removing).** (1) Reimplement the
-  `request`/`directRequest` *internals* on `permits.Cache`, keeping `acquireOrWait`/
-  `suspendForEpisode`/`reclaimRequest` signatures + call sites → land green. (2)
-  Restructure dispatch into the scheduler/executor pools on top → land green. (3) Strip
-  the dead eager types (`requestState`, `suspend`/`tryResume`, …) last.
+- **Mode mapping — SETTLED.** Three submit kinds → three modes: nested same-wave →
+  scheduler **non-blocking `Cache.Acquire`, postpone on miss**; mid-body reacquire →
+  **blocking `Cache.AcquireWait`**; top-level → inline **skim-retry** (non-blocking
+  `Acquire` + skim-own-wave on miss = backpressure; the block-and-help now bounded to
+  `wv.skim`). The drive suspend/reclaim is the **coarse per-drive bracket** (see "Acquire /
+  inherit / suspend / reclaim").
+- **Governor placement — SETTLED.** The per-wave `Governor` + `downstream` counter +
+  `DownstreamWork` mechanism is unchanged in purpose; the gate is checked on **both
+  admission paths** against the admitted item's wave-governor — top-level **skims** if
+  clogged, the scheduler **postpones** if clogged. `decrementDownstream`'s relief notify
+  becomes a **wake of the scheduler** (not a spawn). So the scheduler has **two retry
+  triggers** — permit-free (`permits.Pool`) and governor-clear (`Governor`) — feeding the
+  one `Accepted` waiter set; a woken scheduler just re-runs admission (re-checks both gates).
+- **Inbox-stack lock-freedom — DEFERRED** (measurement-gated; the `inboxStack` mutex works).
+  See note below.
+
+## Migration sequencing (no flag day, gut-before-removing)
+
+Every step builds and passes its gate; old and new coexist; any regression falls back to
+the prior green commit. **De-risking key:** C1 (permit core into the live limiter) *is* the
+deadlock fix and is validated by `TestBySimulation` **before** any pool-split risk, so the
+pool split lands on a known-good base.
+
+0. **Permit-core hardening** (`internal/permits` + docs, isolated). Pool `Cache` via
+   omnipool; add model-check coverage for **limited drain** + **multi-limiter joint
+   admission**; fix `permit-core.md` (strike the per-handler alternation + the bound's "or a
+   skim handler"). *Gate: permits rapid + `-race`.*
+1. **C1 — permit core into the live limiter, single pool (gut, don't remove).** Wave gains
+   per-limiter `C_W^L` (lazy mkdir-p at first L-admission, `ReleaseRef` at wave-Done);
+   `ctxMeta.heldRequest` → a `Permit`; `acquireOrWait` → `Cache.Acquire` (the modes);
+   `suspendForEpisode`/`reclaimRequest` → coarse per-drive `Release`/`AcquireWait`. Keep the
+   call sites and the single `worker.Pool` (admission still inline in
+   `limiterScatterWork.Execute`); gut the eager `requestState`/`suspend`/`tryResume` to
+   vestigial delegators — don't delete. *Gate: full suite + `-race` + **`TestBySimulation`
+   reliably green** — the deadlock-fix milestone.*
+2. **B — dispatch infra** (independent of C1; can overlap). The new unbuffered rdvq
+   primitive (`inboxOnlyQueue` + `inboxWaiters`, blocking `PushBack`, no `TryPopFront`);
+   refactor `worker.Pool` into the generic lifecycle + pluggable per-worker loop. *Gate:
+   rdvq + worker unit tests, in isolation (not yet wired).*
+3. **C2 — the pool-split cutover.** Two pool instances (scheduler + executor); move
+   admission off the executor — scheduler drains `Accepted`, admits (`Acquire` non-blocking
+   + governor, postpone), hands the body to the executor via the unbuffered primitive
+   (block-as-demand); top-level admission stays inline on the driver (skim-retry); executors
+   run bodies (the drive alternation). *Gate: full suite + `-race` + `TestBySimulation` +
+   the **latency/alloc benchmarks** (use the real methodology — heavy-tailed blocking-I/O
+   work, P99/max, swept P:D ratios — not a throughput microbench) — the architecture +
+   latency milestone.*
+4. **C3 — drain limiting** (anytime after C1). `WithLimits` on `NewSkimmer`,
+   `WithFlushLimits` on `NewFunnel`; limited handlers/flushes acquire their own permits
+   (forest bodies); default = free drain. *Gate: suite + `-race` + the model-check now
+   exercising limited drain.*
+5. **C4 — strip the dead eager code.** Delete `requestState`/`suspend`/`tryResume`/
+   `reclaimRequest` residue + superseded block-and-help + vestigial `directRequest`.
+   Mechanical. *Gate: suite + `-race`.*
 
 ## Note: the inbox stack is not lock-free
 

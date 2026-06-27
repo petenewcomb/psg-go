@@ -69,10 +69,34 @@ keep ancestors alive for sub-sub-waves). Multi-limiter: joint acquire in canonic
 partial-miss → release+postpone. Rejected: per-body nodes+transfer, hoist-on-inherit
 (alternation churn), skip-ancestors (re-parenting), Cache-as-single-permit/held-replication.
 Pool all `Cache` allocs. Full write-up in the plan doc's "Forest construction" section.
-STILL OPEN: mode mapping (`acquireOrWait`→`Acquire`/`AcquireWait` bracket placement),
-governor placement, the inbox-stack lock-freedom (the `inboxStack` mutex — Treiber-stack or
-simpler), and the no-flag-day migration sequencing. **Phase 2c** = the governor gate on the
-admission path. See the plan doc.
+**DRIVE RULE (settled):** a body holds its permit ONLY while running *its own user code*;
+it lends for the **whole drive** (incl. running that sub-wave's skim handlers — handlers are
+drain) and reacquires only when the drive call returns to its own code — **coarse, per
+drive-call, NOT per-handler**. (Fix `permit-core.md`: strike "reacquire before each skim
+handler" + the bound's "or a skim handler".) **DRAIN LIMITING (settled, opt-in):** dissolve
+intake-vs-drain for limiting — `NewSkimmer(h, WithLimits)` limits a handler;
+`NewFunnel(factory, WithLimits, WithFlushLimits)` limits accumulate (intake) and flush
+(drain) separately. Default = limiter-free drain (common path unchanged). A limited
+handler/flush acquires its OWN limiters (own cache, not the driver's permit) → just another
+forest body. Revises "limiters gate intake, not drain"; deadlock-free by the per-limiter
+machinery + "can't skim a wave you're part of" — **but MUST be model-checked** (parked
+holder whose drain needs a permit, same-limiter-inherit + cross-limiter). Surface change to
+ratify (WithLimits on Skimmer, WithFlushLimits on Funnel).
+**GOVERNOR PLACEMENT (settled):** the per-wave `Governor`+`downstream` mechanism is
+unchanged in purpose; the gate is checked on **both admission paths** (top-level skims if
+clogged, scheduler postpones if clogged); `decrementDownstream` relief **wakes the
+scheduler, never spawns**. Two retry triggers — permit-free + governor-clear — feed the one
+`Accepted` waiter set.
+**MIGRATION SEQUENCE (settled, no flag day, full detail in the plan doc):** 0) permit-core
+hardening (pool `Cache`, model-check limited-drain + multi-limiter, fix `permit-core.md`);
+1) **C1** permit core into the live limiter on the **single pool** (gut, don't remove) —
+gated on **`TestBySimulation` reliably green = the deadlock-fix milestone**; 2) **B** the
+dispatch infra (unbuffered rdvq primitive + generic-pool refactor), isolated; 3) **C2** the
+pool-split cutover — gated on suite + sim + **latency benchmarks (real methodology)** = the
+architecture+latency milestone; 4) **C3** drain limiting; 5) **C4** strip the dead eager
+code. Key insight: C1 fixes the deadlock and is validated **before** any pool-split risk.
+DESIGN COMPLETE — only the inbox-stack lock-freedom is deferred (measurement-gated). **NEXT =
+implement step 0** (permit-core hardening). See the plan doc.
 
 **►►► PERMIT CORE SKETCH BUILT + MODEL-CHECKED — `internal/permits` (2026-06-26).**
 Phase 1 of the dispatch/execution split: the isolated, model-checked hierarchical permit

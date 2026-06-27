@@ -4,9 +4,11 @@
 package permits
 
 import (
+	"context"
 	"sync/atomic"
 
 	"github.com/petenewcomb/streampool/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
 // Concurrency model (Phase 2a-ii, lock-free)
@@ -44,6 +46,13 @@ type Resource interface {
 type Pool struct {
 	resource Resource
 	roots    nbcq.Queue[*Cache]
+
+	// waiters parks executors blocked in AcquireWait; a permit freed by Release (back
+	// to a cache, borrowable) or destroy (back to the Resource) wakes them to
+	// re-search. numWaiters gates the wake so the no-contention Release hot path is a
+	// single atomic load, not a queue push.
+	waiters    rdvq.Waiters
+	numWaiters atomic.Int64
 }
 
 // NewPool returns a Pool drawing permits from r.
@@ -53,6 +62,7 @@ func NewPool(r Resource) *Pool {
 	}
 	p := &Pool{resource: r}
 	p.roots.Init()
+	p.waiters.Init()
 	return p
 }
 
@@ -120,6 +130,38 @@ func (c *Cache) Acquire() (Permit, bool) {
 	return Permit{}, false
 }
 
+// AcquireWait is the blocking acquire — for an executor reacquiring mid-body. It does
+// the non-blocking Acquire and, on a miss, parks on the Pool's waiters until a permit
+// frees (Release or destroy wakes it), re-searching each time, until it succeeds or
+// ctx is cancelled. The confirm callback re-runs Acquire AFTER registering as a
+// waiter, so a permit freed between the miss and the park is taken immediately rather
+// than lost — and if it succeeds there, that is the one acquisition (no double-take).
+// (The non-blocking Acquire stays the manager's admit path, which postpones on a
+// miss; that postpone hook lands with the manager/executor split.)
+func (c *Cache) AcquireWait(ctx context.Context) (Permit, error) {
+	for {
+		if pm, ok := c.Acquire(); ok {
+			return pm, nil
+		}
+		p := c.pool
+		p.numWaiters.Add(1)
+		var pm Permit
+		var ok bool
+		_, err := p.waiters.Wait(ctx, func() bool {
+			pm, ok = c.Acquire()
+			return !ok // park only if still no permit
+		})
+		p.numWaiters.Add(-1)
+		if ok {
+			return pm, nil
+		}
+		if err != nil {
+			return Permit{}, err
+		}
+		// Woken by a freed permit; loop and retry.
+	}
+}
+
 // acquireInto runs steps 3–4 for c, landing the permit in c's own held. Returns c on
 // success or nil if both miss (the caller waits). The loop re-checks the Resource each
 // turn (a concurrent destroy may free capacity) and retries the search when a steal
@@ -181,14 +223,24 @@ type Permit struct {
 }
 
 // Release ends the run segment the Permit backed; the permit stays cached in held
-// (cache-don't-return), now borrowable.
+// (cache-don't-return), now borrowable — and may satisfy a parked AcquireWait, so it
+// wakes one waiter. Every release wakes (not just a borrowable 0→1 crossing): a
+// multi-held cache freeing its second idle permit is no crossing, yet a second waiter
+// could take it.
 func (pm Permit) Release() {
 	if pm.backing == nil {
 		panic("permits: Release of a zero Permit")
 	}
 	pm.backing.counts.release()
-	// 2a-iii will Notify the Pool's waiters on the borrowable 0→1 crossing release
-	// reports.
+	pm.backing.pool.wakeOne()
+}
+
+// wakeOne wakes a single parked waiter if any are parked. The numWaiters gate keeps
+// the uncontended path (no waiters) to one atomic load.
+func (p *Pool) wakeOne() {
+	if p.numWaiters.Load() > 0 {
+		p.waiters.Notify(nil)
+	}
 }
 
 // ReleaseRef drops one reference on c. The last reference (unit exited AND all
@@ -214,6 +266,11 @@ func (c *Cache) destroy() {
 	if held := c.counts.drain(); held > 0 {
 		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
 		c.pool.resource.Release(int(held))
+		// Returning held permits to the Resource frees that much capacity, which can
+		// satisfy several parked waiters at step 3 — wake them all.
+		if c.pool.numWaiters.Load() > 0 {
+			c.pool.waiters.NotifyAll()
+		}
 	}
 	if c.parent != nil {
 		c.parent.ReleaseRef() // the sub-wave's draw on the parent ends

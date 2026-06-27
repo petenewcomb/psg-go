@@ -2,6 +2,38 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► PERMIT CORE: FULLY LOCK-FREE + WAIT/WAKE — `internal/permits` (Phase 2a, 2026-06-26).**
+The sketch below is now a fully lock-free concurrent core — no mutex anywhere — with both
+acquire modes the manager/executor split needs. `docs/permit-core.md` is reconciled to
+match.
+- **2a-i** packed the `(held, inUse)` into one 128-bit atomic word (`atomic128`, the
+  primitive nbcq uses; no GC-shadow since both halves are scalars). Both halves are
+  `uint64` amounts — a weighted Resource (memory limiter >4 GiB) is representable; weight-1
+  ops now, the width is headroom. Gated CAS transitions keep `0 ≤ inUse ≤ held` atomic.
+- **2a-ii** made the forest lock-free: the acquire up-walk (steps 1–2) is lock-free,
+  ancestors **pinned by refcounts**; each cache's children and the Pool roots are
+  lock-free `nbcq` queues; `destroy` **CAS-drains** held back to the Resource (coordinating
+  with a concurrent steal so conservation holds without a lock); refs/alive are atomic.
+  **The move-to-back steal telemetry was DROPPED** — reordering a shared sibling list can't
+  be lock-free — for the exhaustive **sentinel-cycle** steal (cycle each level's queue once,
+  bounded by a per-pass sentinel; rotate examined caches; lazily reap dead caches the queue
+  can't remove). The per-cache `next`-pointer LRU fast lane is the planned step-2
+  optimization (O(depth) straight-down to the hot victim; the cycle is its fallback).
+- **2a-iii** added the rdvq wait/wake: non-blocking `Acquire` (manager admit) + blocking
+  `AcquireWait(ctx)` (executor reacquire — parks, re-searches on each freed permit, confirm
+  callback re-runs Acquire after registering = the lost-wakeup guard). Every `Release` and
+  the capacity a `destroy` returns wake parked waiters (gated by a waiter count so the
+  uncontended release is one atomic load). Closes the steal's transient-miss gap.
+- Validated: 50k `rapid` (algorithm, sequential) + `-race` stress (concurrency:
+  contended inherit/delta/steal, structural churn vs steal, `AcquireWait` liveness with
+  steal-handoff). Commits `50d0c06`/`e5b20b0`/`6ba8833`/`9738ada`.
+
+REMAINING 2a: the `next`-pointer fast lane (step 2); a light reap-on-`NewChild` for the
+long-lived-parent-churn case. Then **Phase 2b** (map manager/executor onto
+`internal/worker.Pool` + the executor `rdvq.Queue`, wiring `Acquire`/`AcquireWait` to the
+two roles — the managers own `workq.Accepted`+`Pending`, executors are a dumb scaling pool)
+and **2c** (governor gate on the manager admission path).
+
 **►►► PERMIT CORE SKETCH BUILT + MODEL-CHECKED — `internal/permits` (2026-06-26).**
 Phase 1 of the dispatch/execution split: the isolated, model-checked hierarchical permit
 cache that both `docs/permit-core.md` and `docs/dispatch-execution-split.md` mandate

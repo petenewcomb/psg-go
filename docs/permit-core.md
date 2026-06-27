@@ -1,9 +1,12 @@
 # The Permit Core: A Hierarchical Permit Cache
 
-**Status: the isolated core is implemented and model-checked in
-`internal/permits`; not yet wired into the live limiter.** This document specifies
-the permit allocation model at the heart of the limiter — a **hierarchical cache of
-permits** in which caches hold capacity locally and let it flow only on demand. It
+**Status: the fully lock-free concurrent core — the locality-ordered acquire,
+cache-don't-return, the exhaustive steal, and the non-blocking / blocking acquire
+modes with rdvq wait/wake — is implemented and `-race`-validated in
+`internal/permits`; not yet wired into the live limiter (the manager/executor split
+of `dispatch-execution-split.md`).** This document specifies the permit allocation
+model at the heart of the limiter — a **hierarchical cache of permits** in which
+caches hold capacity locally and let it flow only on demand. It
 refines the permit section of `dispatch-execution-split.md` (which framed permits as
 per-unit "base holds" with a *last-resort* zero-leaf suspend) and supersedes the
 *eager* suspend/reclaim protocol of `limiter-suspend-resume.md`. The headline
@@ -33,10 +36,31 @@ The model maps onto four types (`internal/permits`, the source of truth for name
 - **`Permit`** — the transient handle a running body holds for one occupied permit;
   `Release` ends a run segment.
 
-Two mechanism details below were superseded by the sketch and are flagged inline: the
-steal telemetry is **structural sibling-list order (move-to-back)**, not a
-`lastAscendedAt` logical clock; and a cache is touched (moved) only when an acquire
-passes through it **without being satisfied**.
+### Concurrency (as implemented)
+
+The core is **fully lock-free** — no mutex anywhere:
+
+- A `Cache`'s `(held, inUse)` is one 128-bit atomic word (`atomic128`, the primitive
+  `internal/nbcq` uses), so each transition preserves `0 ≤ inUse ≤ held` as a single
+  CAS; both halves are `uint64` *amounts*, so a weighted Resource is representable.
+- The acquire up-walk (steps 1–2) is lock-free: ancestors are **pinned by refcounts**
+  (a live cache holds a reference on its parent), so the chain is stable without a
+  lock.
+- Each cache's children, and the Pool's roots, are lock-free `nbcq.Queue`s. There is
+  no interior removal — a destroyed cache is **reaped lazily** when the steal pops it,
+  and a drained subtree's whole queue is GC'd with its parent.
+- `destroy` runs only at `refs == 0` and **CAS-drains** `held` back to the Resource,
+  coordinating with a concurrent steal's `held−−` so conservation holds without a lock.
+- Two acquire modes ride the same search: **non-blocking** `Acquire` (the manager's
+  admit; postpones on a miss) and **blocking** `AcquireWait` (the executor's reacquire;
+  parks on the Pool's `rdvq` waiters). Every `Release` and the capacity a `destroy`
+  returns **wake** parked waiters (gated by a waiter count so the uncontended release
+  is a single atomic load).
+
+One sequential-sketch mechanism did **not** survive: the move-to-back steal telemetry
+(see "The steal search") reorders a shared sibling list, which cannot be lock-free, so
+the implemented baseline is the exhaustive steal with the per-cache fast lane as a
+lock-free replacement.
 
 ## The problem, and why inheritance replaces eager-suspend
 
@@ -255,32 +279,36 @@ next freed permit wakes it. The take is always a CAS at the leaf, so any guidanc
 a *hint*: at worst it costs a backtrack or a re-search, never a wrong grant and never
 a permanent miss.
 
-**Required — victim quality from free walk order.** As the acquisition up-walk passes
-a cache *without being satisfied by it*, it moves that cache to the back
-(most-recently-passed end) of its sibling list — a single O(1) splice, no logical
-clock. (The sketch validated this as a structural **move-to-back**, replacing the
-earlier `lastAscendedAt` seqno stamp; a satisfied hit, including the common step-1
-own-cache hit, pays nothing and is not moved — it had spare, so its remaining idle
-stays a fair steal target.) That free reordering does double duty:
+**Implemented — the exhaustive lock-free baseline.** Each cache's children, and the
+Pool's roots, are lock-free `nbcq` queues. The steal cycles each level's queue once:
+pop a cache; if borrowable, take it with a **revalidating CAS** (a concurrent acquire
+may have consumed its idle permit since the walk saw it); else recurse into its
+subtree; else rotate it to the rear; drop a dead cache (lazy reaping — the queue has
+no interior removal). One pass is bounded by a **per-pass sentinel** the walk pushes
+and pops back (a concurrent search's sentinel is bounced). This is the exhaustive
+fallback liveness rests on, paid in full only under saturation; with wake-on-free (a
+parked `AcquireWait` re-searches on every freed permit), no borrowable is permanently
+missed.
 
-- it *routes* the steal: descend each level front-first, toward the **stalest** cache
-  — the front is the one no unsatisfied acquisition has passed lately, i.e.
-  quiescent, i.e. where finished work has likely left cached idle;
-- it *chooses* the victim: the stalest cache is also the coldest, the least likely to
-  re-demand, so the steal becomes an **LRU eviction** of the permit cache. The walk
-  returns the first borrowable cache it finds, terminating early, and covers the
-  forest in full only under saturation (the liveness fallback).
+**Planned — the per-cache fast lane (victim quality + cost).** A per-cache `next`
+`atomic.Pointer` caches the hop toward the most-recently-used borrowable victim, so
+the steal follows the `next` chain **straight down** to the hot victim in O(depth),
+branching into the queue cycle only where a hop turns up exhausted or dead, then
+re-pointing the broken segment. Because the victim's location is encoded *distributed*
+along the chain, a victim that moves invalidates only the broken segment — not every
+ancestor's pointer, the way a direct-to-victim pointer would. It is a pure **hint**,
+validated by the `stealOut` CAS at the bottom: a stale chain costs a backtrack into
+the cycle, never a wrong grant or a permanent miss, so it needs **no exact
+maintenance**. This supersedes the sequential sketch's *move-to-back* (which reordered
+a shared sibling slice and so could not be lock-free); a real clock is reserved only
+for a duration-*threshold* policy, never for this ordering.
 
-A real clock is reserved only for a duration-*threshold* policy (e.g. proactively
-evicting permits idle beyond a bound), not for the ordering — list position already
-gives that for free.
-
-**Staged — and deliberately left open.** The order-guided descent is a heuristic that
-can dead-end (a stale branch whose idle was already stolen), costing a backtrack;
-its safety net is the exhaustive fallback above, *not* any index. Whether to add
-bookkeeping that prunes those backtracks is an open, measurement-gated question — and
-the obvious candidate, an exact "is there borrowable below me" bit per cache, is
-*not* an easy win, on either of its two possible uses:
+**Staged — and deliberately left open.** The `next`-chain fast lane is a heuristic
+that can dead-end (a stale hop whose idle was already stolen), costing a backtrack
+into the cycle; its safety net is the exhaustive fallback above, *not* any index.
+Whether to add bookkeeping that prunes those backtracks is an open, measurement-gated
+question — and the obvious candidate, an exact "is there borrowable below me" bit per
+cache, is *not* an easy win, on either of its two possible uses:
 
 - **As a filter** (skip a subtree whose bit reads empty) the bit's maintenance must
   be **exact**. A single missed or reordered update that leaves a subtree marked
@@ -295,10 +323,10 @@ the obvious candidate, an exact "is there borrowable below me" bit per cache, is
   — a magnitude or recency — i.e. still more cost.
 
 Given how rare steals are by construction, it is genuinely unclear this ever pays
-for itself. So the design commits only to the free walk order and leaves the door
-open to *some* additional bookkeeping — the subtree-idle aggregate being one
-candidate, under the constraints above — to be introduced only if measurement shows
-the heuristic search too lossy.
+for itself. So the design commits only to the exhaustive baseline plus the free
+`next`-chain hint, and leaves the door open to *some* additional bookkeeping — the
+subtree-idle aggregate being one candidate, under the constraints above — to be
+introduced only if measurement shows the search too lossy.
 
 ## Driving is an alternation: lend while waiting, reacquire to compute
 
@@ -488,20 +516,27 @@ through any cross-limiter coordination.
 
 ## Open / next
 
-- **Done:** the isolated permit-core sketch — caches (`held`/`inUse`), the
-  locality-ordered acquire (own → ancestor → free Resource → steal → wait),
-  cache-until-pulled flow, and the steal's free move-to-back walk order with an
-  exhaustive fallback — for a single Resource, model-checked under
-  `pgregory.net/rapid` with adversarial nesting and cross-wave Resource sharing
-  (`internal/permits`). No global coordinator, no idle index.
-- Decide the wait step's wake trigger (event-based preferred — wake when a
-  contended permit frees — consistent with the rest of the design; never a timer
-  for something observable).
-- Leave the steal-search bookkeeping open: ship the free walk order; measure the
-  backtrack/re-steal rate; introduce an idle index (subtree-idle bit or richer)
-  only if measurement justifies it — and only with exact maintenance if it filters.
+- **Done (`internal/permits`):** the fully lock-free core for a single Resource —
+  caches as the atomic128 `(held, inUse)` counter; the locality-ordered acquire
+  (own → ancestor → free Resource → steal → wait) with a refcount-pinned lock-free
+  up-walk; cache-until-pulled flow; the exhaustive `nbcq` sentinel-cycle steal with
+  CAS-drain destroy; and both acquire modes (non-blocking `Acquire`, blocking
+  `AcquireWait`) with `rdvq` wake-on-free. Model-checked under `pgregory.net/rapid`
+  (the algorithm, sequentially) and `-race`-stress-tested (the concurrency: contended
+  inherit/delta/steal, structural churn vs steal, and AcquireWait liveness). No global
+  coordinator, no idle index.
+- **The per-cache `next`-chain fast lane** ("The steal search" → Planned): the O(depth)
+  hot path to the most-recent victim over the exhaustive cycle. Pure optimization now
+  that liveness is solid.
+- **Lazy-reap mitigation:** a long-lived parent with churning sub-waves and no steals
+  accumulates dead children until reaped — a light reap-on-`NewChild` is the planned
+  fix.
+- Leave the further steal-search bookkeeping open: measure the backtrack/re-steal rate;
+  introduce an idle index (subtree-idle bit or richer) only if measurement justifies
+  it — and only with exact maintenance if it filters.
 - Defer the cross-limiter coordinator and any cycle detection until a measured
   churn number, or the joint-acquisition feature, justifies them.
-- Map the manager/executor pools and the governor's per-wave gate around the core,
-  then sequence the migration off the live eager code in `limiter.go`.
-</content>
+- Map the manager/executor pools and the governor's per-wave gate around the core
+  (`dispatch-execution-split.md`, Phase 2b/2c), then sequence the migration off the
+  live eager code in `limiter.go`.
+

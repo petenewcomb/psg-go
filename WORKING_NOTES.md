@@ -2,37 +2,50 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► PERMIT CORE: FULLY LOCK-FREE + WAIT/WAKE — `internal/permits` (Phase 2a, 2026-06-26).**
-The sketch below is now a fully lock-free concurrent core — no mutex anywhere — with both
-acquire modes the manager/executor split needs. `docs/permit-core.md` is reconciled to
-match.
-- **2a-i** packed the `(held, inUse)` into one 128-bit atomic word (`atomic128`, the
-  primitive nbcq uses; no GC-shadow since both halves are scalars). Both halves are
-  `uint64` amounts — a weighted Resource (memory limiter >4 GiB) is representable; weight-1
-  ops now, the width is headroom. Gated CAS transitions keep `0 ≤ inUse ≤ held` atomic.
-- **2a-ii** made the forest lock-free: the acquire up-walk (steps 1–2) is lock-free,
-  ancestors **pinned by refcounts**; each cache's children and the Pool roots are
-  lock-free `nbcq` queues; `destroy` **CAS-drains** held back to the Resource (coordinating
-  with a concurrent steal so conservation holds without a lock); refs/alive are atomic.
-  **The move-to-back steal telemetry was DROPPED** — reordering a shared sibling list can't
-  be lock-free — for the exhaustive **sentinel-cycle** steal (cycle each level's queue once,
-  bounded by a per-pass sentinel; rotate examined caches; lazily reap dead caches the queue
-  can't remove). The per-cache `next`-pointer LRU fast lane is the planned step-2
-  optimization (O(depth) straight-down to the hot victim; the cycle is its fallback).
-- **2a-iii** added the rdvq wait/wake: non-blocking `Acquire` (manager admit) + blocking
-  `AcquireWait(ctx)` (executor reacquire — parks, re-searches on each freed permit, confirm
-  callback re-runs Acquire after registering = the lost-wakeup guard). Every `Release` and
-  the capacity a `destroy` returns wake parked waiters (gated by a waiter count so the
-  uncontended release is one atomic load). Closes the steal's transient-miss gap.
-- Validated: 50k `rapid` (algorithm, sequential) + `-race` stress (concurrency:
-  contended inherit/delta/steal, structural churn vs steal, `AcquireWait` liveness with
-  steal-handoff). Commits `50d0c06`/`e5b20b0`/`6ba8833`/`9738ada`.
+**►►► PERMIT CORE: HYBRID (LOCK-FREE HOT PATH, LOCKED FOREST) + WAIT/WAKE —
+`internal/permits` (Phase 2a, 2026-06-26).** The concurrent core is a hybrid: the hot
+acquire path is lock-free (atomic128 counter), the forest structure is an intrusive
+doubly-linked list guarded by per-`Cache` mutexes. This **supersedes the fully-lock-free
+`nbcq` forest** (`6ba8833`): that port had to drop the original move-to-back LRU
+(reordering a shared lock-free queue isn't possible) and grew a sentinel-cycle steal +
+lazy reaping + (planned) gen-tagged entries / a `next`-pointer fast lane just to claw the
+LRU back. A per-`Cache` mutex around a DLL gives **O(1) interior move-to-back** (the
+original LRU, restored), **exact removal** (no lazy reaping), and **direct front-to-back
+traversal** (order-based camping, no sentinel/fast-lane) — far simpler. The lock is OFF
+the common hot path; if a specific list ever shows up as a tail-latency bottleneck, swap
+that list internal for lock-free without touching `Acquire`/`Release` (localized, gated on
+measurement). This is essentially `e5b20b0`'s "lock-free hot path, locked steal/destroy",
+chosen deliberately over the lock-free redux.
+- **2a-i** packed `(held, inUse)` into one 128-bit atomic word (`atomic128`; no GC-shadow
+  since both halves are scalars). Both halves are `uint64` amounts — a weighted Resource
+  (memory limiter >4 GiB) is representable; weight-1 ops now, the width is headroom. Gated
+  CAS transitions keep `0 ≤ inUse ≤ held` atomic. **(Unchanged by the hybrid pivot.)**
+- **2a-ii (hybrid)** the acquire up-walk (steps 1–2) stays lock-free, ancestors **pinned
+  by refcounts**. Each cache's children and the Pool roots are an intrusive `cacheList`
+  (DLL) under a per-list mutex, kept coldest-first by **`touch`** (an acquire up-walk that
+  passes a cache *unsatisfied* moves it to the back — O(1) relink under one lock; a
+  satisfied hit pays nothing). The **steal** is a front-to-back DFS taking the first
+  borrowable cache (the coldest), left in place so a still-borrowable victim is re-picked
+  (order-based camping). **Deadlock-free:** the steal is the only op holding two list locks
+  at once and always descends root→leaf; every other op (touch/pushBack/remove) takes a
+  single list lock, so no cycle can form. `destroy` **unlinks exactly** then CAS-drains
+  held to the Resource (`counts.drain` still coordinates with a concurrent `stealOut`).
+- **2a-iii** the rdvq wait/wake (unchanged): non-blocking `Acquire` (manager admit) +
+  blocking `AcquireWait(ctx)` (executor reacquire — parks, re-searches on each freed
+  permit, confirm callback re-runs Acquire after registering = the lost-wakeup guard).
+  Every `Release` and the capacity a `destroy` returns wake parked waiters (gated by a
+  waiter count so the uncontended release is one atomic load).
+- Validated: 50k `rapid` (algorithm, sequential) + `-race` stress ×10 (contended
+  inherit/delta/steal, structural churn vs steal, `AcquireWait` liveness) + order-camping /
+  `touch`-redirect / exact-removal unit tests; build + `golangci-lint` clean. The
+  fully-lock-free `nbcq` forest, sentinel-cycle, lazy reap, and fast-lane are GONE.
+- **NOT yet committed** — working tree change on top of `9738ada`/`44a0136`.
 
-REMAINING 2a: the `next`-pointer fast lane (step 2); a light reap-on-`NewChild` for the
-long-lived-parent-churn case. Then **Phase 2b** (map manager/executor onto
-`internal/worker.Pool` + the executor `rdvq.Queue`, wiring `Acquire`/`AcquireWait` to the
-two roles — the managers own `workq.Accepted`+`Pending`, executors are a dumb scaling pool)
-and **2c** (governor gate on the manager admission path).
+Then **Phase 2b** (map manager/executor onto `internal/worker.Pool` + the executor
+`rdvq.Queue`, wiring `Acquire`/`AcquireWait` to the two roles — the managers own
+`workq.Accepted`+`Pending`, executors are a dumb scaling pool) and **2c** (governor gate on
+the manager admission path). `docs/permit-core.md` still describes the lock-free forest and
+needs reconciling to the hybrid.
 
 **►►► PERMIT CORE SKETCH BUILT + MODEL-CHECKED — `internal/permits` (2026-06-26).**
 Phase 1 of the dispatch/execution split: the isolated, model-checked hierarchical permit

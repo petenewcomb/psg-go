@@ -5,34 +5,41 @@ package permits
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
-	"github.com/petenewcomb/streampool/internal/nbcq"
 	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
-// Concurrency model (Phase 2a-ii, lock-free)
+// Concurrency model (Phase 2a-ii, hybrid: lock-free hot path, locked forest)
 //
-// There is no lock anywhere. Per-cache (held, inUse) is the atomic128 counter
-// (counts.go); the forest structure is built from lock-free nbcq queues and atomic
-// refs/alive.
+// The hot acquire path is lock-free; the forest structure is guarded by per-list
+// mutexes. The two are independently synchronized and meet only through the atomic
+// counter.
 //
-//   - Acquire steps 1–2 walk UP the ancestor chain — pinned by refcounts (a live
-//     cache holds a reference on its parent), so each hop is a lock-free gated CAS.
-//     Step 3 is the Resource's own atomic. Release is one CAS.
-//   - Each cache's children, and the Pool's roots, are nbcq.Queue[*Cache] (lock-free
-//     MS-queues). NewChild/NewCache PushBack; there is no removal — a destroyed cache
-//     is reaped lazily when a steal pops it, and a drained subtree's whole queue is
-//     GC'd with its parent.
-//   - The steal (step 4) is the exhaustive forest walk that liveness rests on. It
-//     cycles each level's queue once, bounded by a per-pass SENTINEL cache it pushes
-//     and pops back; it rotates examined caches to the rear (LRU) and recurses into
-//     subtrees. The take is a revalidating CAS (a concurrent acquire may consume the
-//     idle permit between the walk and the take).
-//   - destroy runs only at refs==0 (unit exited AND all sub-waves drained → the cache
-//     is quiescent). It CAS-drains held to the Resource (counts.drain), coordinating
-//     with a concurrent stealOut so conservation holds without a lock, marks the cache
-//     dead (for lazy reaping), and decrements the parent's refs (cascade).
+//   - Per-cache (held, inUse) is the atomic128 counter (counts.go). Acquire steps 1–2
+//     (own cache, then the ancestor chain) are a lock-free gated CAS up-walk; ancestors
+//     are pinned by refcounts (a live cache refs its parent), so the walk reads parent
+//     pointers without a lock. Step 3 is the Resource's own atomic. Release is one CAS.
+//   - Each cache's children, and the Pool's roots, are an intrusive doubly-linked
+//     cacheList guarded by a per-list mutex. A cache's prev/next links are guarded by
+//     the mutex of the list that contains it (its parent's children, or the roots).
+//   - touch (move-to-back) is an O(1) interior relink under that one lock: an acquire
+//     up-walk that passes a cache WITHOUT being satisfied marks it hot by moving it to
+//     the back of its sibling list, so the list stays coldest-first and the steal's
+//     front-to-back walk is least-recently-active-first. A satisfied hit pays nothing.
+//   - The steal (step 4) is the exhaustive forest walk liveness rests on: a front-to-
+//     back DFS taking the FIRST borrowable cache (the coldest, by touch order; left in
+//     place, so a still-borrowable victim stays at the front and is re-picked — order-
+//     based camping, no churn). The take is a revalidating atomic CAS (a concurrent
+//     acquire may consume the idle permit between the walk and the take). It holds each
+//     level's lock while scanning and descends holding the parent's lock too — nested,
+//     but ALWAYS root→leaf, and it is the only operation that holds two list locks at
+//     once, so no lock-order cycle can form (every other op takes a single list lock).
+//   - destroy runs only at refs==0 (unit exited AND all sub-waves drained → quiescent).
+//     It unlinks the cache from its list (exact removal under the list lock), CAS-drains
+//     held back to the Resource (counts.drain, coordinating with a concurrent stealOut
+//     so conservation holds), and decrements the parent's refs (cascade).
 
 // Resource is the pluggable accounting object permits are drawn from — the open
 // extension point (semaphore, memory, rate, weighted); n carries the weight (always
@@ -42,10 +49,71 @@ type Resource interface {
 	Release(n int)
 }
 
+// cacheList is an intrusive doubly-linked list of caches guarded by its own mutex,
+// kept in coldest-first (front) → hottest-last (back) order by touch. The members'
+// prev/next links are guarded by this mutex. The unexported helpers (linkTail,
+// unlink) assume mu is held; the exported-shape methods take it.
+type cacheList struct {
+	mu   sync.Mutex
+	head *Cache // front: least-recently-touched (coldest, preferred steal victim)
+	tail *Cache // back: most-recently-touched (hottest)
+}
+
+// linkTail appends c at the back; mu must be held and c must not be in any list.
+func (l *cacheList) linkTail(c *Cache) {
+	c.prev = l.tail
+	c.next = nil
+	if l.tail != nil {
+		l.tail.next = c
+	} else {
+		l.head = c
+	}
+	l.tail = c
+}
+
+// unlink removes c from this list; mu must be held and c must be a member.
+func (l *cacheList) unlink(c *Cache) {
+	if c.prev != nil {
+		c.prev.next = c.next
+	} else {
+		l.head = c.next
+	}
+	if c.next != nil {
+		c.next.prev = c.prev
+	} else {
+		l.tail = c.prev
+	}
+	c.prev = nil
+	c.next = nil
+}
+
+func (l *cacheList) pushBack(c *Cache) {
+	l.mu.Lock()
+	l.linkTail(c)
+	l.mu.Unlock()
+}
+
+func (l *cacheList) remove(c *Cache) {
+	l.mu.Lock()
+	l.unlink(c)
+	l.mu.Unlock()
+}
+
+// moveToBack marks c hot by moving it to the back, an O(1) interior relink. A no-op if
+// c is already the tail.
+func (l *cacheList) moveToBack(c *Cache) {
+	l.mu.Lock()
+	if l.tail != c {
+		l.unlink(c)
+		l.linkTail(c)
+	}
+	l.mu.Unlock()
+}
+
 // Pool is the Resource boundary and the root of a forest of caches.
 type Pool struct {
 	resource Resource
-	roots    nbcq.Queue[*Cache]
+	roots    cacheList
 
 	// waiters parks executors blocked in AcquireWait; a permit freed by Release (back
 	// to a cache, borrowable) or destroy (back to the Resource) wakes them to
@@ -61,7 +129,6 @@ func NewPool(r Resource) *Pool {
 		panic("permits: nil Resource")
 	}
 	p := &Pool{resource: r}
-	p.roots.Init()
 	p.waiters.Init()
 	return p
 }
@@ -69,32 +136,43 @@ func NewPool(r Resource) *Pool {
 // NewCache creates a top-level cache (a tree root drawing on the Pool).
 func (p *Pool) NewCache() *Cache {
 	c := newCache(p, nil)
-	p.roots.PushBack(c)
+	p.roots.pushBack(c)
 	return c
 }
 
 // Cache is a per-unit node in the Pool's forest. Its (held, inUse) is the lock-free
-// atomic counter; its children form a lock-free queue; refs/alive are atomic. parent
-// is immutable after construction, so the acquire up-walk reads it lock-free.
+// atomic counter; its membership in a list (prev/next) and its own children list are
+// guarded by mutexes (see cacheList). parent is immutable after construction, so the
+// acquire up-walk reads it lock-free.
 type Cache struct {
-	pool     *Pool
-	parent   *Cache
-	counts   counts
-	children nbcq.Queue[*Cache]
-	refs     atomic.Int64
-	alive    atomic.Bool
+	pool   *Pool
+	parent *Cache
+	counts counts
 
-	// sentinel marks a per-pass terminator pushed by the steal walk (not a real
-	// cache); see searchQueue.
-	sentinel bool
+	// prev, next are this cache's links in the list that contains it (parent.children,
+	// or pool.roots for a root); guarded by THAT list's mutex.
+	prev, next *Cache
+
+	// children is this cache's own sub-wave caches.
+	children cacheList
+
+	refs  atomic.Int64
+	alive atomic.Bool
 }
 
 func newCache(p *Pool, parent *Cache) *Cache {
 	c := &Cache{pool: p, parent: parent}
-	c.children.Init()
 	c.refs.Store(1)
 	c.alive.Store(true)
 	return c
+}
+
+// list returns the cacheList that contains c (its parent's children, or the roots).
+func (c *Cache) list() *cacheList {
+	if c.parent != nil {
+		return &c.parent.children
+	}
+	return &c.pool.roots
 }
 
 // NewChild creates a sub-wave's cache drawing on parent. The sub-wave takes a
@@ -106,8 +184,16 @@ func (parent *Cache) NewChild() *Cache {
 	}
 	c := newCache(parent.pool, parent)
 	parent.refs.Add(1) // the sub-wave draws on parent
-	parent.children.PushBack(c)
+	parent.children.pushBack(c)
 	return c
+}
+
+// touch marks c hot — an acquire up-walk passed it without being satisfied, so its
+// subtree is actively demanding through it — by moving it to the back of its sibling
+// list, keeping the list coldest-first for the steal. c is an ancestor of the
+// acquirer (or the acquirer itself), hence pinned by refcounts and live in its list.
+func (c *Cache) touch() {
+	c.list().moveToBack(c)
 }
 
 // Acquire makes one permit available for a body in c to run and returns a Permit
@@ -121,6 +207,10 @@ func (c *Cache) Acquire() (Permit, bool) {
 		if a.counts.acquireLocal() {
 			return Permit{a}, true
 		}
+		// Walked past a without being satisfied: a had nothing to lend, so it is hot —
+		// move it to the back of its sibling list so the steal prefers quiescent caches.
+		// A satisfied hit (above) pays nothing: its remaining idle stays a fair victim.
+		a.touch()
 	}
 	// Steps 3–4: free Resource, then steal.
 	if backing := c.pool.acquireInto(c); backing != nil {
@@ -172,7 +262,7 @@ func (p *Pool) acquireInto(c *Cache) *Cache {
 			c.counts.checkout()
 			return c
 		}
-		v := searchQueue(&p.roots)
+		v := searchList(&p.roots)
 		if v == nil {
 			return nil // step 5: nothing free, nothing borrowable
 		}
@@ -180,41 +270,32 @@ func (p *Pool) acquireInto(c *Cache) *Cache {
 			c.counts.checkout()
 			return c
 		}
+		// The candidate's idle permit was consumed (a lock-free acquire, or another
+		// steal) between the search and the take. Loop and re-search.
 	}
 }
 
-// searchQueue cycles q once, returning a borrowable cache or nil. It is bounded by a
-// per-pass sentinel it pushes and pops back; examined caches rotate to the rear (LRU);
-// dead caches are dropped (lazy reap); a non-borrowable live cache is recursed into.
-// Another concurrent search's sentinel is bounced back unexamined.
-func searchQueue(q *nbcq.Queue[*Cache]) *Cache {
-	mine := &Cache{sentinel: true}
-	q.PushBack(mine)
-	for {
-		c, ok := q.TryPopFront()
-		switch {
-		case !ok:
-			// Transient: every entry is momentarily held by concurrent searches.
-			// Report nothing this pass; the caller's loop / the wake retries.
-			return nil
-		case c == mine:
-			return nil // a full pass with nothing borrowable
-		case c.sentinel:
-			q.PushBack(c) // another search's terminator — bounce it
-			continue
-		case !c.alive.Load():
-			continue // reap dead lazily
-		}
+// searchList finds a borrowable cache to steal from in the forest rooted at l, or nil
+// if none is borrowable anywhere. It is a front-to-back DFS returning the FIRST
+// borrowable cache — coldest-first by touch order, so the common case both picks the
+// least-recently-active victim and terminates early; the victim is left in place, so a
+// still-borrowable one stays at the front and is re-picked (order-based camping). It
+// holds l's lock while scanning and descends into a child's list while still holding
+// l's lock, so the locks nest root→leaf. searchList is the ONLY holder of two list
+// locks at once and always in that one order, so no lock-order cycle can form. The
+// returned candidate is a hint; acquireInto's stealOut CAS is the authority.
+func searchList(l *cacheList) *Cache {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for c := l.head; c != nil; c = c.next {
 		if h, u := c.counts.load(); h > u {
-			q.PushBack(c)
-			return c
+			return c // borrowable victim, left in place
 		}
-		if v := searchQueue(&c.children); v != nil {
-			q.PushBack(c)
+		if v := searchList(&c.children); v != nil {
 			return v
 		}
-		q.PushBack(c)
 	}
+	return nil
 }
 
 // Permit is the transient handle for a body occupying one permit.
@@ -257,12 +338,14 @@ func (c *Cache) ReleaseRef() bool {
 	return true
 }
 
-// destroy marks the cache dead, returns its held to the Resource, and ends its draw
-// on the parent (cascade). It is lock-free: counts.drain coordinates the return with
-// any concurrent stealOut; the cache stays in its parent's children queue until a
-// steal reaps it (or the parent is destroyed, GCing the whole queue).
+// destroy unlinks the cache from its list, returns its held to the Resource, and ends
+// its draw on the parent (cascade). It runs only at refs==0 (quiescent). Removal is
+// exact under the list lock; counts.drain coordinates the return to the Resource with
+// any concurrent stealOut (a steal that took the cache as a candidate before removal),
+// so conservation holds without a lock on the counter.
 func (c *Cache) destroy() {
 	c.alive.Store(false)
+	c.list().remove(c)
 	if held := c.counts.drain(); held > 0 {
 		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
 		c.pool.resource.Release(int(held))

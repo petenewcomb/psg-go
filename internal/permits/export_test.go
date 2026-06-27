@@ -92,11 +92,41 @@ func (c *Cache) held() uint64 {
 	return h
 }
 
+// listSlice returns the members of l front-to-back (coldest-first). It takes l's lock,
+// so it is safe to call concurrently, but reads a snapshot that may be stale the
+// instant it returns.
+func listSlice(l *cacheList) []*Cache {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []*Cache
+	for c := l.head; c != nil; c = c.next {
+		out = append(out, c)
+	}
+	return out
+}
+
+// childrenLen reports how many caches are in c's children list.
+func (c *Cache) childrenLen() int { return len(listSlice(&c.children)) }
+
+// rootsLen reports how many caches are in the Pool's roots list.
+func (p *Pool) rootsLen() int { return len(listSlice(&p.roots)) }
+
+// childrenContains reports whether target is currently in c's children list.
+func (c *Cache) childrenContains(target *Cache) bool {
+	for _, e := range listSlice(&c.children) {
+		if e == target {
+			return true
+		}
+	}
+	return false
+}
+
 // testPool wraps a Pool, tracking every cache created through it so the oracles have
 // the full set to sum over. The tracking slice is guarded for the concurrency tests.
 type testPool struct {
 	*Pool
 	sem *semaphore
+	tb  require.TestingT // set by tests that use makeIdle
 
 	mu     sync.Mutex
 	caches []*Cache

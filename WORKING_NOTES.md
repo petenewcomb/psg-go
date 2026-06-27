@@ -39,13 +39,40 @@ chosen deliberately over the lock-free redux.
   inherit/delta/steal, structural churn vs steal, `AcquireWait` liveness) + order-camping /
   `touch`-redirect / exact-removal unit tests; build + `golangci-lint` clean. The
   fully-lock-free `nbcq` forest, sentinel-cycle, lazy reap, and fast-lane are GONE.
-- **NOT yet committed** — working tree change on top of `9738ada`/`44a0136`.
+- Committed `9af3d13` (includes the `docs/permit-core.md` reconciliation to the hybrid).
 
-Then **Phase 2b** (map manager/executor onto `internal/worker.Pool` + the executor
-`rdvq.Queue`, wiring `Acquire`/`AcquireWait` to the two roles — the managers own
-`workq.Accepted`+`Pending`, executors are a dumb scaling pool) and **2c** (governor gate on
-the manager admission path). `docs/permit-core.md` still describes the lock-free forest and
-needs reconciling to the hybrid.
+**►►► PHASE 2b DESIGN IN PROGRESS (2026-06-27) → `docs/plan/dispatch-execution-split-phase2b.md`.**
+The dispatch-side design is being worked out in discussion; the plan doc holds the current
+state. Converged so far: **one generic worker pool** (the current `worker.Pool` lifecycle —
+demand-spawn + idle-exit + refcount/`Wait` — with a pluggable per-worker loop) instantiated
+**twice** — an **executor pool** (runs user bodies, may block; simple `PopFront`→`Run` loop)
+and a **scheduler pool** (`workq.Worker`-style over a shared `workq.Accepted`; non-blocking
+permit acquire + governor, then hands off). The **scheduler→executor handoff is a NEW
+unbuffered rdvq primitive** = `inboxOnlyQueue` + a sender-side `inboxWaiters` (= today's
+`rdvq.Queue` minus the whole outbox tier, plus blocking `PushBack`; **no `TryPopFront`**) —
+pure rendezvous, zero buffer dwell. The **body→scheduler intake stays the buffered
+`Accepted`** (nested submit is non-blocking drop-and-go; postponed/scheduled are necessary
+buffering). Key invariants: **LIFO consumer selection is load-bearing for scale-to-zero**
+(FIFO would pin the pool); **a buffer-push and a spawn are the same event** (block-as-demand
+→ P99 win); **demand fires only for spawn-gap buffering, never for backpressure**
+(permit-free/governor-clear *wake* a parked scheduler, never spawn).
+**FOREST CONSTRUCTION SETTLED:** one `permits.Cache` per `(wave, limiter)` (`C_W^L`),
+**bodies are occupants** (a `Permit`, not a node); the L-forest mirrors wave nesting. At a
+wave's first L-admission, **lazily mkdir -p the ancestor L-cache chain** (held=0
+pass-throughs up to the nearest existing L-cache or Pool root — *don't* skip non-L
+ancestors, else concurrent re-parenting), then acquire into the wave's own `C_W^L`.
+Inheritance is **occupy-in-place** (`inUse++` on the ancestor, permit doesn't move);
+**suspend = `Release` the body's own permit to its backing cache** (own wave for
+checked-out, ancestor for inherited), **reclaim = `AcquireWait` from the wave cache
+outward**. Cache refcount is **separate** (self-ref dropped at wave-Done; descendant refs
+keep ancestors alive for sub-sub-waves). Multi-limiter: joint acquire in canonical order,
+partial-miss → release+postpone. Rejected: per-body nodes+transfer, hoist-on-inherit
+(alternation churn), skip-ancestors (re-parenting), Cache-as-single-permit/held-replication.
+Pool all `Cache` allocs. Full write-up in the plan doc's "Forest construction" section.
+STILL OPEN: mode mapping (`acquireOrWait`→`Acquire`/`AcquireWait` bracket placement),
+governor placement, the inbox-stack lock-freedom (the `inboxStack` mutex — Treiber-stack or
+simpler), and the no-flag-day migration sequencing. **Phase 2c** = the governor gate on the
+admission path. See the plan doc.
 
 **►►► PERMIT CORE SKETCH BUILT + MODEL-CHECKED — `internal/permits` (2026-06-26).**
 Phase 1 of the dispatch/execution split: the isolated, model-checked hierarchical permit

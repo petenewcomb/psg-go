@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
@@ -121,6 +122,12 @@ type Pool struct {
 	// single atomic load, not a queue push.
 	waiters    rdvq.Waiters
 	numWaiters atomic.Int64
+
+	// cachePool recycles Cache nodes (the process-wide shared pool for the type; caches
+	// are fungible across Pools — newCache re-stamps pool/parent). Safe to recycle on
+	// destroy only because the steal ref-pins its victim, so a Cache is never reclaimed
+	// while another goroutine still references it (see tryPin / searchList).
+	cachePool *omnipool.Pool[Cache]
 }
 
 // NewPool returns a Pool drawing permits from r.
@@ -128,7 +135,7 @@ func NewPool(r Resource) *Pool {
 	if r == nil {
 		panic("permits: nil Resource")
 	}
-	p := &Pool{resource: r}
+	p := &Pool{resource: r, cachePool: omnipool.For[Cache]()}
 	p.waiters.Init()
 	return p
 }
@@ -160,8 +167,22 @@ type Cache struct {
 	alive atomic.Bool
 }
 
+// Reset clears a Cache for recycling through the Pool's omnipool (Resetter). It nils
+// the pointer fields so a pooled node holds nothing live; counts is already (0,0) from
+// destroy's drain, refs is 0 (destroy ran at refs==0), alive is false, the list links
+// are nil (unlink), and children is empty (refs==0 ⟹ all sub-waves drained) — newCache
+// re-stamps the live fields.
+func (c *Cache) Reset() {
+	c.pool = nil
+	c.parent = nil
+	c.prev = nil
+	c.next = nil
+}
+
 func newCache(p *Pool, parent *Cache) *Cache {
-	c := &Cache{pool: p, parent: parent}
+	c := p.cachePool.Get()
+	c.pool = p
+	c.parent = parent
 	c.refs.Store(1)
 	c.alive.Store(true)
 	return c
@@ -262,12 +283,16 @@ func (p *Pool) acquireInto(c *Cache) *Cache {
 			c.counts.checkout()
 			return c
 		}
-		v := searchList(&p.roots)
+		v := searchList(&p.roots) // returns a ref-pinned candidate (or nil)
 		if v == nil {
 			return nil // step 5: nothing free, nothing borrowable
 		}
-		if v.counts.stealOut() {
+		ok := v.counts.stealOut()
+		if ok {
 			c.counts.checkout()
+		}
+		v.ReleaseRef() // unpin the candidate (may be the call that destroys it)
+		if ok {
 			return c
 		}
 		// The candidate's idle permit was consumed (a lock-free acquire, or another
@@ -284,15 +309,31 @@ func (p *Pool) acquireInto(c *Cache) *Cache {
 // l's lock, so the locks nest root→leaf. searchList is the ONLY holder of two list
 // locks at once and always in that one order, so no lock-order cycle can form. The
 // returned candidate is a hint; acquireInto's stealOut CAS is the authority.
+//
+// A non-nil candidate is returned **ref-pinned** (`refs++`), taken under the list lock
+// where the cache is known linked and alive — so it cannot be destroyed (its memory
+// reclaimed) between the search and the caller's stealOut. The caller MUST ReleaseRef
+// it. The victim is cross-subtree (off the acquirer's ancestor chain, so not pinned by
+// the acquirer's refs); without this pin only GC keeps it alive across the take, which
+// is fine for a GC'd cache but not for a pooled one.
 func searchList(l *cacheList) *Cache {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for c := l.head; c != nil; c = c.next {
+		if !c.alive.Load() {
+			// Being destroyed: destroy clears alive before its locked remove, which is
+			// blocked on this very lock, so a dying cache is still linked here. Skip it
+			// (its children are already drained).
+			continue
+		}
 		if h, u := c.counts.load(); h > u {
-			return c // borrowable victim, left in place
+			if c.tryPin() {
+				return c // borrowable victim, pinned across the steal; caller ReleaseRefs
+			}
+			continue // raced into destroy after the alive check; skip
 		}
 		if v := searchList(&c.children); v != nil {
-			return v
+			return v // already pinned by the recursive hit
 		}
 	}
 	return nil
@@ -321,6 +362,24 @@ func (pm Permit) Release() {
 func (p *Pool) wakeOne() {
 	if p.numWaiters.Load() > 0 {
 		p.waiters.Notify(nil)
+	}
+}
+
+// tryPin adds a reference only if the cache is still referenced (refs > 0), reporting
+// success. It is the steal's safe weak-upgrade: a cache whose last reference already
+// dropped is committed to destroy (it may have set alive=false and be blocked on its
+// list lock, still linked), so an unconditional refs++ would resurrect it and cause a
+// double-destroy. The CAS refuses that. Used under the list lock, where a pin success
+// then keeps the cache from being destroyed/recycled until the matching ReleaseRef.
+func (c *Cache) tryPin() bool {
+	for {
+		n := c.refs.Load()
+		if n <= 0 {
+			return false // committed to destroy — do not resurrect
+		}
+		if c.refs.CompareAndSwap(n, n+1) {
+			return true
+		}
 	}
 }
 
@@ -355,7 +414,14 @@ func (c *Cache) destroy() {
 			c.pool.waiters.NotifyAll()
 		}
 	}
-	if c.parent != nil {
-		c.parent.ReleaseRef() // the sub-wave's draw on the parent ends
+	// Recycle c. Safe now and only now: refs==0 (destroy's precondition) with tryPin
+	// refusing to resurrect, c is unlinked, inUse==0, and no Permit backs it — so no
+	// goroutine still references c. Capture parent/pool first; Put resets c, after which
+	// c must not be touched. The parent cascade uses the captured parent, not c.
+	parent := c.parent
+	pool := c.pool
+	pool.cachePool.Put(c)
+	if parent != nil {
+		parent.ReleaseRef() // the sub-wave's draw on the parent ends
 	}
 }

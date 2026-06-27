@@ -95,8 +95,16 @@ dispatch infra (unbuffered rdvq primitive + generic-pool refactor), isolated; 3)
 pool-split cutover — gated on suite + sim + **latency benchmarks (real methodology)** = the
 architecture+latency milestone; 4) **C3** drain limiting; 5) **C4** strip the dead eager
 code. Key insight: C1 fixes the deadlock and is validated **before** any pool-split risk.
-DESIGN COMPLETE — only the inbox-stack lock-freedom is deferred (measurement-gated). **NEXT =
-implement step 0** (permit-core hardening). See the plan doc.
+DESIGN COMPLETE — only the inbox-stack lock-freedom is deferred (measurement-gated).
+**STEP 0 IN PROGRESS:** the steal now **ref-pins its victim** across `stealOut`
+(`tryPin` — a conditional CAS that refuses to resurrect a cache committed to destroy;
+`searchList` skips dying caches) — fixing a real near-bug (the victim is cross-subtree,
+so only GC kept it alive across the take) and unblocking pooling; **`Cache` is now pooled**
+via omnipool (recycled in `destroy`, safe only because of the pin); `permit-core.md`'s
+"Driving is an alternation" + the concurrency-bound invariant are corrected. Validated:
+`-race` ×10 + 50k rapid + lint. Remaining step-0 model-check items (limited drain,
+multi-limiter) fold into C1/C3 where those patterns get wired. **NEXT = C1** (permit core
+into the live limiter, single pool). See the plan doc.
 
 **►►► PERMIT CORE SKETCH BUILT + MODEL-CHECKED — `internal/permits` (2026-06-26).**
 Phase 1 of the dispatch/execution split: the isolated, model-checked hierarchical permit

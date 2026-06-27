@@ -148,11 +148,27 @@ func (tp *testPool) NewCache() *Cache { return tp.track(tp.Pool.NewCache()) }
 
 func (tp *testPool) newChild(parent *Cache) *Cache { return tp.track(parent.NewChild()) }
 
-// snapshot returns a copy of the tracked caches for the oracles to read.
+// snapshot returns the DISTINCT tracked caches for the oracles to read. Caches are
+// pooled (recycled on destroy), so a destroyed cache's *Cache can be handed back out by
+// a later NewCache/NewChild and tracked again — the same pointer then appears twice in
+// the tracking slice. The oracles sum held/inUse per cache, so a duplicated pointer
+// would double-count its current incarnation; dedup by pointer here. A pointer sitting
+// idle in the pool contributes 0 (drained on destroy), and a reused one contributes its
+// current incarnation's counts exactly once — so the deduped sum equals Σ over live
+// caches = the Resource's in-flight count.
 func (tp *testPool) snapshot() []*Cache {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
-	return append([]*Cache(nil), tp.caches...)
+	seen := make(map[*Cache]struct{}, len(tp.caches))
+	out := make([]*Cache, 0, len(tp.caches))
+	for _, c := range tp.caches {
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
 }
 
 func (tp *testPool) check(t require.TestingT) {

@@ -340,20 +340,20 @@ exhaustive fallback, and leaves the door open to *some* additional bookkeeping �
 subtree-idle aggregate being one candidate, under the constraints above — to be
 introduced only if measurement shows the search too lossy.
 
-## Driving is an alternation: lend while waiting, reacquire to compute
+## Driving is an alternation: lend while driving, hold while running own code
 
-"Driving" a sub-wave — calling submit, or a skim/`CloseAndSkimAll` on it — is not
-a single monolithic park. The driving body alternates between two phases, and its
-base allocation follows which phase it is in:
+"Driving" a sub-wave — a skim/`CloseAndSkimAll` on it — is not a single monolithic
+park. The driving body alternates between two phases, and its base allocation follows
+which phase it is in. **The boundary is whose code is running, not waiting-vs-handling:**
 
-- **Blocked-waiting** — parked on the sub-wave's queue with no result to process,
-  or stalled in a submit's governor/permit gate. The body is not computing, so its
-  base is idle, lent to the sub-wave's units exactly as the inheritance model
-  describes.
-- **Computing** — the instant the body resumes to run a **skim handler** on a
-  drained result, or to **return from the drive call** back into its own body, it
-  is computing again and must hold its full base. So it **reacquires its base
-  before invoking each skim handler and before returning** from the drive.
+- **Driving** — parked on the sub-wave's queue *and* running that sub-wave's skim
+  handlers on drained results. Throughout the drive the body is not running *its own*
+  code, so its base is idle, **lent** to the sub-wave's units (inheritance). A skim
+  handler is *drain*, limiter-free with respect to the driver, so the base stays lent
+  **while handlers run** — the body does **not** reacquire it per handler.
+- **Running its own code** — the instant the drive call **returns control to the
+  body's own code**, the body is computing again and must hold its full base. So it
+  **reacquires its base only on return from the drive** — never per skim handler.
 
 Reacquisition is not special machinery — it is the ordinary locality-ordered
 acquire (own cache → ancestors → free Resource → steal → wait), and in the common
@@ -362,27 +362,27 @@ bespoke help-shaped reclaim collapses into "a body that wants to compute needs i
 permits; get them the normal way." Reacquire can block (waiting for a sub-unit to
 release), can reach the free Resource or steal to compute now, and by taking its
 permits back it legitimately denies them to others — that is the limiter doing its
-job. The "at most N computing" bound is preserved precisely because a computing
-body — its own code *including* a skim-handler invocation — always holds its full
-base, while only a purely blocked-waiting body lends it.
+job. The "at most N computing" bound is preserved precisely because a body holds its
+full base whenever it runs **its own code**, and lends it for the **entire drive** of
+a sub-wave (skim handlers included) — drain concurrency is bounded by the number of
+waves being driven, not by the limiter.
 
 A body drives **at most one sub-wave at a time** (it is one goroutine, parked on
-one queue), but driving can **nest**: a body driving wave A may, inside a handler,
-drive a further wave B (`CloseAndSkimAll(B)`). The base then follows the computation
-locus *down* the nesting — held while the body computes, lent to B's units while it
-waits on B, reacquired to run B's handler — and unwinds back out as each drive
-completes. Interleaved or nested driving is just the alternation applied at each
-level; no level holds the base while a deeper level needs to lend it. (A *skim*
-handler may nest a drive too, but it is limiter-free, so it holds no base to lend —
-B's units simply acquire their own permits; the only restriction is that B not be a
-wave the handler is part of — its own wave or an ancestor.)
+one queue), but driving can **nest**: a skim handler of wave A may itself drive a
+further wave B (`CloseAndSkimAll(B)`). Each op follows the **same alternation with
+respect to its *own* permit** — a handler holds its own permit (if any) while running
+its own code and lends it while driving B, while the outer body's base stays lent for
+the whole A-drive regardless. The only restriction is that a body may not skim a wave
+it is **part of** — its own wave or an ancestor.
 
-The deadlock-freedom argument below already accommodates this: a skim-handler
-invocation is itself a running computation that eventually completes (returns to
-the wait, freeing its base) or parks (a nested drive, lending it). The isolated
-sketch must exercise these reacquire-before-handler and reacquire-before-return
-points, and the nested-drive scenario, in its model-checked state space — they are
-where the base's lend/reacquire churn and any reacquire contention actually live.
+(**Drain may now be limited — opt-in.** A skim handler / funnel flush is limiter-free
+*by default*; `WithLimits` on `NewSkimmer` / `WithFlushLimits` on `NewFunnel` gives it
+its own limiters, in which case it is just another limited body in the forest, holding
+*its own* permit — never the driver's. Lifting the old "drain is always limiter-free"
+restriction is safe only *because* the per-limiter deadlock-freedom below is strong
+enough to cover a parked holder whose drain itself needs a permit; that case — and the
+reacquire-on-return point and the nested drive — **must be exercised in the model
+check**. See `dispatch-execution-split.md` for the surface change.)
 
 ## Deadlock-freedom, with no cycle graph
 
@@ -456,9 +456,10 @@ sharing:
   fresh check-out (step 3) raises it, and only cache destruction lowers it. Caching
   drives `Σ held` toward `C`, but the cap is never exceeded.
 - **Concurrency bound:** `#running bodies = Σ inUse ≤ capacity`, where "running"
-  counts a body only while it executes its own code or a skim handler — a body that
-  is purely blocked-waiting on a sub-wave it drives is lending, not running (see
-  "Driving is an alternation").
+  counts a body only while it executes **its own code** — a body driving a sub-wave
+  (parked, *and* while running that sub-wave's drain/skim handlers) is lending, not
+  running (see "Driving is an alternation"). A skim handler is drain: it counts only
+  under its own limiter if it opted into `WithLimits`, never under the driver's.
 - **No silent infinite wait:** every blocked delta eventually acquires, steals,
   or surfaces (see "Infeasible demand" in `dispatch-execution-split.md` — a demand
   exceeding total capacity fails fast; a demand within capacity always resolves).

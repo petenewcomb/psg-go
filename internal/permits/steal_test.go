@@ -44,14 +44,16 @@ func TestStealCampsOnFrontVictim(t *testing.T) {
 	// Each search returns the same front victim; draining it (stealOut, which does not
 	// touch) leaves it at the front while it stays borrowable, so it is re-picked.
 	for range 3 {
-		v := searchList(&tp.roots)
+		v := searchList(&tp.roots) // ref-pinned; release after
 		require.Same(t, fat, v, "the steal camps on the coldest front victim")
 		require.True(t, v.counts.stealOut())
+		v.ReleaseRef()
 	}
 	// Exhausted now (held 0): the search abandons it for the next source.
 	v := searchList(&tp.roots)
 	require.NotSame(t, fat, v, "an exhausted victim is skipped")
 	require.NotNil(t, v)
+	v.ReleaseRef()
 	// (No conservation check: bare stealOut without a destination checkout deliberately
 	// unbalances Σheld; the rapid/concurrent tests cover conservation via Acquire.)
 }
@@ -66,12 +68,16 @@ func TestTouchRedirectsSteal(t *testing.T) {
 	x := makeIdle(tp, 1) // roots front-to-back: [x, y]
 	y := makeIdle(tp, 1)
 
-	require.Same(t, x, searchList(&tp.roots), "x is the coldest (front) victim")
+	v := searchList(&tp.roots) // ref-pinned; release after
+	require.Same(t, x, v, "x is the coldest (front) victim")
+	v.ReleaseRef()
 
 	x.touch() // x became active → moves to the back
 
 	require.Equal(t, []*Cache{y, x}, listSlice(&tp.roots), "touch moved x to the back")
-	require.Same(t, y, searchList(&tp.roots), "the steal now prefers y, the coldest")
+	v = searchList(&tp.roots)
+	require.Same(t, y, v, "the steal now prefers y, the coldest")
+	v.ReleaseRef()
 }
 
 // An unsatisfied acquire up-walk touches the ancestors it passes (move-to-back),

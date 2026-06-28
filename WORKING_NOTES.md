@@ -47,6 +47,36 @@ earlier "uncapped executor" and "execpool forks worker.Core" sketches.
     methodology).*
   - **CP4**: delete `internal/worker`; trim workq's exported API.
 
+**►► SESSION 2026-06-28c — TOPOLOGY PINNED (PN), supersedes the CP framing above where it conflicts:**
+- **`worker.Pool` / `worker.Core` is OBSOLETE** — both pools are `execpool`. Scheduler =
+  `execpool.Pool[*schedulerWorker]`; executor = `execpool.Executor[*workerExEnv]`. `internal/worker`
+  gets deleted.
+- **`workq.Queue.incoming` (the `Pending` field, the scheduler's intake where AddWork pulls work)
+  becomes an `rdvq.Handoff[Work]`** — the producer→scheduler rendezvous. Its **block-as-demand IS
+  the scheduler pool's spawn signal** (the producer's `PushBackFunc` selectFn fires
+  `scheduler.pool.RegisterUnmetDemand`, exactly mirroring `execpool.Executor.PushBack`). So there is
+  **no separate demand-counter to invent** — the Handoff supplies it. Handoff has `TryPushBack`
+  (direct handoff, non-blocking miss) but **no `TryPopFront`**, so the controller's non-blocking
+  pull probe (`TryAddNew` with nil waiters) becomes a no-op for `incoming`; the blocking
+  `WaitForNew` path does `incoming.PopFrontFunc` composing the Accepted waiters' workWaitCh +
+  scheduled deadline + execpool idle + stop. Schedulers never run bodies, so a scheduler is always
+  promptly available to take from `incoming` (nested rendezvous is short — always-live-dispatcher).
+- **The executor's Handoff is SEPARATE** from `incoming` (scheduler→executor, inside
+  `execpool.Executor`).
+- **The scheduler REUSES the controller** — `schedulerWorker.Wait` = `accepted.ExecuteOne` (pull
+  from `incoming` Handoff, composing execpool's idle), `Work` = no-op. NO `ExecuteOne`
+  decomposition and **NO env-on-ctx reconciliation**: the scheduler runs only admission
+  scatter-works (`launcherScatterWork`/`limiterScatterWork`/`*PostWork`), which never need E; E is
+  passed directly to the body's `run(ee)` on the executor. The body→executor hop lives inside
+  `taskPostWork.Execute`/`funnelPostWork.Execute` (`→ executorPool.PushBack(body)`), and the
+  existing `wk.task = nil` ownership-transfer means the executor owns+frees the body (no
+  `HandedOff` signal needed).
+- **Dispatch:** the admission scatter-work is PushBacked to `incoming` for the scheduler to admit
+  (governor + non-blocking permit `Acquire`; success → `executorPool.PushBack(body)`; miss →
+  postpone to Accepted). Bodies (`taskWork`/`funnelWork`) gain `Run(ee)` + self-`Free`; their
+  `Execute(ctx,ex)` is deleted. Funnel-gate hoist (Wrinkle 1) folds in. `streampool.Wait()` reaps
+  both pools.
+
 - **`internal/execpool` FINAL SHAPE (landed, `fa17a48` + `f031f71`; isolated, unimported).**
   `Pool[W Worker]` is the **single shared spawn/lifecycle foundation** (NOT a fork that
   duplicates worker.Core — worker.Core is to be deleted; the scheduler reuses THIS). It owns

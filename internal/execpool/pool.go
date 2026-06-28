@@ -196,6 +196,22 @@ func (p *Pool[W]) maybeSpawn() {
 	}
 }
 
+// Nudge spawns one worker (capped by spawnConcurrencyLimit) regardless of the demand
+// counter — for demand sources that are NOT counter-balanced. A counter-balanced source
+// (RegisterUnmetDemand/UnregisterUnmetDemand) records work awaiting a worker and the
+// worker that takes it un-records it; some sources can't pair that way and only need
+// "ensure a worker exists to drain what's ready." A scheduler's Accepted engine is the
+// canonical case: a batch promoted to fresh, or a flush coming due after the pool scaled
+// to zero, needs a worker even though no Post registered demand. An over-nudge is
+// self-correcting — the spawned worker establishes, drains whatever is ready, and idles
+// out if there is nothing — so there is no counter to drift. (This is the execpool analog
+// of the obsolete worker.Pool's fire-and-forget TrySpawn.)
+func (p *Pool[W]) Nudge() {
+	if p.spawning.IncrementIfUnder(spawnConcurrencyLimit) {
+		p.spawnWorker()
+	}
+}
+
 func (p *Pool[W]) spawnWorker() {
 	// Capture the current poolCtx so a later re-arm (reuse after Wait) never reaches this
 	// worker — it will have exited on the context it was born with.

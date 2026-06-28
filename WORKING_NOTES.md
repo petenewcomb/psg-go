@@ -53,6 +53,26 @@ earlier "uncapped executor" and "execpool forks worker.Core" sketches.
     scheduler's bodies (`work.Execute`) fetch their env via `workerEnvFromContext`/
     `workerEnvKey`. Step 2 reconciles: either the scheduler's `W` stamps the env under
     `workerEnvKey` in `Work`, or `workerEnvFromContext` migrates to `ctxpool.GetValue[W](ctx).env`.
+  - **SCAFFOLD ALREADY EXISTS — `internal/workq/worker.go` is a DRAFT of exactly this** (its
+    header: "DRAFT — first cut of the Worker driver"). It has `Worker[E]` with `selectWork`
+    (the ONE canonical AddWork block: inbox/outbox/workWait/deadline/idle/done/ctx), `pull`
+    (drain `incoming` → fresh), idle/onSecure/onWait, and a `Help` nested-drive sketch (the
+    block-and-help the limiter reclaim path wants). Its `DriveOne` still delegates to the
+    legacy `ExecuteOne` as a stopgap (line ~140: "the native driveOne will return the pair
+    directly"). **Step 2 = finish this draft natively and reshape it to the `Pool[W]` Worker:**
+    `Wait` = `DriveOne`'s find half (drainScheduled → fresh; collect fresh/postponed; else
+    `pull`→`selectWork` block at AddWork); `Work` = `controller.execute` on the stashed item
+    **minus `onSecure`** (Pool.establish does that now). Verified split point: `collectAccepted`
+    (find) vs `execute` (run) in `accepted.go` cleave cleanly; `onSecure` (accepted.go:605,
+    release spawn token before body) maps onto `Pool.establish` at the Wait→Work boundary and
+    leaves the controller.
+  - **APPROACH = additive, no red window:** build `workq.Scheduler` + scheduler `Worker` in
+    `workq` ALONGSIDE the legacy `ExecuteOne`/`worker.Pool` (both stay green), test Scheduler
+    in isolation, THEN cut over (step 3), THEN delete legacy `ExecuteOne` + `worker` (backward
+    compat intentionally dropped — PN: `ExecuteOne`'s buffer/postpone-loop complexity existed
+    to protect `Accepted` from externally-pushed work; with `Scheduler` the public face it can
+    be decomposed to fit `Worker` naturally). The other session also edits `workq`/`funnel` —
+    ideally quiesce the tree for this build.
 
 - **STEP 3 = cutover:** `defaultPool` → `workq.Scheduler`; the two body-running posts
   (`taskPostWork`/`funnelPostWork`, the only `defaultPool.Post` callsites) → `executor.PushBack`;

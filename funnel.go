@@ -33,6 +33,15 @@ import (
 // only its wave, factory, limiter, id, and (cached) instance/work pools; it has no
 // internal heap object.
 //
+// Concurrency: a Funnel is parallel by default — the framework may run several
+// [Accumulator] instances for one (Funnel, Wave) at once, spreading inputs across
+// them. Each instance must therefore own all the state it touches; nothing is
+// shared or ordered across instances. For strict-serial "reducer" behavior — a
+// single instance that folds every input over shared state, such as a running
+// aggregate or an ordering window — cap the op to one in-flight execution with
+// WithLimits(NewSemaphore(1)). A stateful accumulator that assumes serial
+// delivery will race or stall without that cap.
+//
 // Resource management: a Funnel is wave-scoped and needs no explicit close (there is
 // no Close or Dup, and no factory Close). Its per-(funnel,wave) accumulator instances
 // are owned by the wave and force-flushed when the wave drains; the framework

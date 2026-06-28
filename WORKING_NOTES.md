@@ -2,6 +2,81 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► C2 IN PROGRESS — `execpool.Pool[W]` FOUNDATION LANDED; SCHEDULER (workq.Scheduler)
+NEXT (Phase 2b, 2026-06-28).** The pool-split is being built bottom-up: one shared
+goroutine-pool foundation, two pools on it (executor + scheduler), then the live cutover.
+Design converged through a long review with PN this session — the notes below SUPERSEDE the
+earlier "uncapped executor" and "execpool forks worker.Core" sketches.
+
+- **`internal/execpool` FINAL SHAPE (landed, `fa17a48` + `f031f71`; isolated, unimported).**
+  `Pool[W Worker]` is the **single shared spawn/lifecycle foundation** (NOT a fork that
+  duplicates worker.Core — worker.Core is to be deleted; the scheduler reuses THIS). It owns
+  the loop `for { Wait; Work } ; Close`, the capped demand-driven spawn, the refcount/`Wait`
+  lifecycle, the **pooled idle timer** (`internal/timerp`), and the **reused worker ctx**
+  (`internal/ctxpool.WithValue(poolCtx, w)` — carries `W`, `Done()` == poolCtx == stop). The
+  worker is a `Worker` interface:
+  - `Wait(workerCtx, idle <-chan time.Time) bool` — become idle / block for work (composing
+    the supplied `idle` + ctx.Done stop), stash it, return false on idle-out/stop. **Idle is
+    supplied by Pool** so it keeps idle-timeout policy.
+  - `Work(workerCtx)` — execute what Wait stashed.
+  - `Close(workerCtx)` — teardown; **Pool never touches W after Close** (poolable).
+  - Spawn model = **demand counter, not edge+chain-heuristic**: `RegisterUnmetDemand` /
+    `UnregisterUnmetDemand` (a source records work it couldn't place on a waiting worker, and
+    un-records it when taken/withdrawn); `maybeSpawn` spawns while `unmetDemand > spawning`,
+    capped by `spawnConcurrencyLimit` (=1), re-evaluated when a worker establishes (frees a
+    spin-up slot). Precise ramp, **no over-shoot tail**; `Wait`'s bool is just continue/stop.
+    The cap is load-bearing **independent of backpressure** (spin-up cost / goroutine glut,
+    NOT throttling admitted work — admission already happened upstream).
+  - `Executor[E]` = the concrete executor on `Pool[*executorWorker[E]]`: its Worker waits on
+    an `rdvq.Handoff` (PopFront), runs `Task[E]`. `PushBack` is block-as-demand —
+    RegisterUnmetDemand on the first park, Unregister on return (delivered/cancelled).
+  - **No `Locked`-suffixed methods** (PN standing pref; lock contract in comments).
+  - Verified each commit through the FULL pre-commit hook (suite + -race + golangci 0).
+
+- **STEP 2 = `workq.Scheduler` on `execpool.Pool[W]` (NEXT).** Build the scheduler as a
+  second pool on the SAME `Pool[W]`, **in package workq** (the pool is a workq impl detail;
+  this also lets workq's exported API shrink). The scheduler's `Worker` decomposes the
+  existing `Accepted.ExecuteOne` (settled with PN):
+  - `Wait` = ExecuteOne's **find** phase (fresh → postponed → scheduled priority). Found
+    ready work → stash + return immediately (busy, not idle). Nothing ready → call
+    **`AddWork`** (register as an available waiter) and **block** there (composing the pool's
+    `idle` + ctx stop); return the pushed item, or false on idle-out/stop. **AddWork
+    registration IS the idle/available point.**
+  - `Work` = ExecuteOne's **execute** phase on the stashed item (controller `work.Execute` +
+    `Starting`/postpone bookkeeping + `onSecure`). One ExecuteOne = one Wait + one Work; the
+    only blocking point is AddWork. VERIFY the **postpone path** (work that registers a
+    listener and doesn't Start) lives in Work and re-queues, so the worker loops back to Wait.
+  - Demand wiring = workq's existing `unmetDemandFn` re-expressed: a `Post` that can't hand
+    off to an AddWork-waiting worker → `pool.RegisterUnmetDemand`; a worker whose Wait returns
+    work → `UnregisterUnmetDemand`.
+  - **Env-on-ctx reconciliation (open):** the worker ctx carries `W` (ctxpool), but the
+    scheduler's bodies (`work.Execute`) fetch their env via `workerEnvFromContext`/
+    `workerEnvKey`. Step 2 reconciles: either the scheduler's `W` stamps the env under
+    `workerEnvKey` in `Work`, or `workerEnvFromContext` migrates to `ctxpool.GetValue[W](ctx).env`.
+
+- **STEP 3 = cutover:** `defaultPool` → `workq.Scheduler`; the two body-running posts
+  (`taskPostWork`/`funnelPostWork`, the only `defaultPool.Post` callsites) → `executor.PushBack`;
+  fold `Free` into `taskWork`/`funnelWork.run`; delete `taskWork`/`funnelWork.Execute`; wire
+  `streampool.Wait()` to reap both pools. **STEP 4 = delete `worker`; trim workq's exported
+  API** (unexport Worker/NewWorker/With*/ExecEnv behind Scheduler; keep the producer + gate
+  types). *Gate: full suite + -race + `TestBySimulation` + latency/alloc benchmarks (real
+  methodology).*
+
+- **C2a STATUS:** `run(ee)` extraction LANDED (`a107270`) — `taskWork`/`funnelWork` expose
+  the Execution-free, ctx-free `run(ee *workerExEnv)` C2c needs. The **funnel-gate hoist was
+  REVERTED** — it is NOT a clean mirror of the task path: the task gate sits inside
+  `launcherScatterWork` (governor wraps it), but the funnel's governor rides
+  `funnelPostWork.onWait`, so wrapping `funnelPostWork` with `limiterScatterWork` puts the
+  gate OUTSIDE the governor and a top-level blocking submit hits the `ExecuteNowOrQueue`
+  block-guard. **Deferred to C2c**, where the funnel seam-flip happens anyway (gate inside
+  `funnelPostWork.Execute` before the post, preserving governor→gate order — needs sim
+  validation).
+
+- **MULTI-SESSION CAVEAT:** a concurrent session (session_011…) committed `a5abde3` +
+  `bc187f3` (Resequencer/RangeResequencer + edge/edgegrpc demos) into this same working tree
+  mid-session, and edits `funnel.go`/`edge*` live. Watch `git status` before committing;
+  serialize on shared files (esp. `funnel.go`/`workq` for step 2).
+
 **►►► B LANDED — DISPATCH INFRA (ISOLATED, NOT WIRED) (Phase 2b, 2026-06-27).** The two
 building blocks the pool-split (C2) needs, both standalone with no live consumer yet:
 - **B1: `rdvq.Handoff[T]`** (`internal/rdvq/handoff.go`) — the lock-free **unbuffered**

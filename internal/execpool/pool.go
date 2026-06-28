@@ -1,37 +1,25 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-// Package execpool provides a demand-spawned, idle-exiting pool of executor goroutines
-// that run blocking [Task] bodies handed to them over an unbuffered rendezvous. It is the
-// execution half of the dispatch/execution split: schedulers admit work and PushBack it
-// here; an executor takes each task and runs it to completion — it may block, that is its
-// job — so the schedulers are never stuck behind a blocking body.
+// Package execpool provides a demand-spawned, idle-exiting goroutine pool whose per-worker
+// behavior is supplied as a [Worker]. The pool owns the hard part — the spawn ramp, the
+// idle scale-to-zero, the refcount/[Pool.Wait] lifecycle, and the reused per-worker context
+// — and drives each worker through a fixed loop: Wait for work, Work it, repeat, Close on
+// exit. The work source, what "work" means, and how the worker finds its environment all
+// live in the Worker, so one [Pool] backs both halves of the dispatch/execution split: the
+// [Executor] here (its Worker waits on an rdvq.Handoff) and the scheduler (its Worker waits
+// on a workq.Queue — built on this same Pool in package workq).
 //
-// It forks the lifecycle of internal/worker (demand spawn + idle-exit + refcount/Wait) but
-// is deliberately simpler:
-//
-//   - the work source is an [rdvq.Handoff] (an unbuffered rendezvous), not a workq.Queue;
-//   - the per-worker loop is fixed — PopFront → [Task.Run] — not pluggable;
-//   - there is no governor or workq machinery — admission (limiters, backpressure) is the
-//     scheduler's job, upstream of the handoff, so by the time work arrives here there is
-//     nothing left to throttle against; an executor's only job is to run it fast.
-//
-// Spawning mirrors internal/worker.Core's demand-driven, CAPPED ramp. Every PushBack that
-// finds no waiting executor fires demand (block-as-demand), but a spawn-concurrency cap
-// (spawnConcurrencyLimit) bounds simultaneous spin-ups and a freshly established executor
+// Spawning is demand-driven and CAPPED. A demand source calls [Pool.TrySpawn] (the
+// Executor's is block-as-demand: a PushBack that finds no waiting worker); a
+// spawn-concurrency cap bounds simultaneous spin-ups, and a freshly established worker
 // extends the spawn chain only while demand persists. The cap matters independently of any
 // upstream backpressure: goroutine spin-up has real latency, so committing a burst at once
 // steals CPU from in-flight work, delays the very pickup it is spawning for, and leaves a
-// glut of parked goroutines — because during spin-up existing executors finish and become
-// ready to absorb the demand. A parked, not-yet-established executor is itself standby
-// capacity (a later sender's direct handoff finds its registered inbox), so holding the
-// slot until it receives its first task is what lets that capacity soak up demand before
-// more goroutines are committed.
-//
-// E is the per-worker execution environment: built once per executor by the newState
-// passed to [NewPool] and handed to every [Task.Run] that executor runs. A Task carries
-// its own context (the body it runs is closed over its own ctx), so the pool threads no
-// ctx into Run — the worker context exists only for the executor's own idle/teardown wait.
+// glut of parked goroutines — because during spin-up existing workers finish and become
+// ready to absorb the demand. A parked, not-yet-established worker is itself standby
+// capacity, so holding the spawn slot until its first Wait returns work is what lets that
+// capacity soak up demand before more goroutines are committed.
 package execpool
 
 import (
@@ -39,41 +27,52 @@ import (
 	"sync"
 	"time"
 
-	"github.com/petenewcomb/streampool/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/ctxpool"
+	"github.com/petenewcomb/streampool/internal/timerp"
 	"github.com/petenewcomb/streampool/internal/trace"
 	"github.com/petenewcomb/streampool/internal/wavestate"
 )
 
-// Task is a unit of executable work. Run executes the body against the per-worker
-// execution environment E and is responsible for ALL of its own cleanup (a Task that pools
-// itself does so at the end of Run). The pool calls Run exactly once per handed-off Task
-// and never touches the Task otherwise — Run is the entire contract.
-type Task[E any] interface {
-	Run(ee E)
+// Worker is the per-worker behavior a [Pool] drives. The pool runs the loop
+// `for { Wait; Work } ; Close` on one goroutine, so a Worker is single-threaded and may
+// hold mutable state between calls (e.g. the work item Wait received, to run in Work).
+//
+//   - Wait blocks until work is available — the point at which the worker is idle and
+//     ready (for the scheduler this is where work is added to it) — composing its own
+//     select with the supplied idle channel and workerCtx.Done() (definitive stop). It
+//     stashes the received work for Work and returns true; on idle-timeout or stop it
+//     returns false and the pool exits the loop.
+//   - Work executes the work Wait received.
+//   - Close tears the worker down. The pool guarantees it never touches the Worker after
+//     Close, so a Worker may recycle itself there.
+//
+// workerCtx is reused across the pool's scale-to-zero churn (see ctxpool) and carries the
+// Worker as its value; its Done() is the pool's definitive-stop signal.
+type Worker interface {
+	Wait(workerCtx context.Context, idle <-chan time.Time) bool
+	Work(workerCtx context.Context)
+	Close(workerCtx context.Context)
 }
 
-// Pool is the executor pool. Construct with [NewPool]; the zero value is not usable.
-type Pool[E any] struct {
-	// newState builds a fresh per-worker execution environment, held for an executor's
-	// lifetime and passed to each Task.Run. Supplied by the constructing package.
-	newState func() E
+// Pool is the demand-spawned, idle-exiting goroutine pool. Construct with [NewPool]; the
+// zero value is not usable.
+type Pool[W Worker] struct {
+	// newWorker builds a fresh Worker for a spawning goroutine (it may return a pooled one,
+	// since Close releases the prior occupant). Supplied by the concrete pool.
+	newWorker func() W
 
-	// handoff is the unbuffered scheduler→executor rendezvous. PushBack parks a producer
-	// (firing demand) until an executor PopFronts the task.
-	handoff rdvq.Handoff[Task[E]]
+	workers sync.WaitGroup // every live worker goroutine
 
-	workers sync.WaitGroup // every live executor goroutine
-
-	// spawning counts executors between spawn and the result of their first PopFront
-	// (a de-stampede that bounds simultaneous spin-ups, not the total executor count).
+	// spawning counts workers between spawn and the result of their first Wait (a
+	// de-stampede that bounds simultaneous spin-ups, not the total worker count).
 	spawning wavestate.InFlightCounter
 
-	// lifecycle, all guarded by mu (mirrors internal/worker.Core):
-	//   refs       — number of active referrers.
-	//   waiting    — a Wait is outstanding; stop workers when refs hits zero.
-	//   poolCtx    — cancelled to tell workers to exit, re-armed for reuse. Each worker
-	//                captures the current poolCtx at spawn, so a re-arm never reaches an
-	//                already-running one.
+	// lifecycle, all guarded by mu:
+	//   refs    — number of active referrers.
+	//   waiting — a Wait is outstanding; stop workers when refs hits zero.
+	//   poolCtx — cancelled to tell workers to exit, re-armed for reuse. Each worker
+	//             captures the current poolCtx at spawn, so a re-arm never reaches an
+	//             already-running one.
 	mu         sync.Mutex
 	refs       int
 	waiting    bool
@@ -81,78 +80,55 @@ type Pool[E any] struct {
 	poolCancel context.CancelFunc
 }
 
-// NewPool constructs an executor pool. Per-worker environments are built by newState. It
+// NewPool constructs a pool whose goroutines are driven through newWorker's Workers. It
 // takes no settings: worker behavior is fixed (see workerIdleTimeout / spawnConcurrencyLimit).
 //
 //nolint:contextcheck // background context used only for tracing
-func NewPool[E any](newState func() E) *Pool[E] {
+func NewPool[W Worker](newWorker func() W) *Pool[W] {
 	traceRegion := "execpool.NewPool"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
-	// poolCancel is stored on the Pool and called by stopWorkersLocked (Wait/Release
-	// teardown); gosec's intraprocedural check can't see that cross-method call.
-	//nolint:gosec // G118: poolCancel stored and called in stopWorkersLocked
+	// poolCancel is stored on the Pool and called by stopWorkers (Wait/Release teardown);
+	// gosec's intraprocedural check can't see that cross-method call.
+	//nolint:gosec // G118: poolCancel stored and called in stopWorkers
 	poolCtx, poolCancel := context.WithCancel(context.Background())
-	p := &Pool[E]{newState: newState, poolCtx: poolCtx, poolCancel: poolCancel}
-	p.handoff.Init()
+	p := &Pool[W]{newWorker: newWorker, poolCtx: poolCtx, poolCancel: poolCancel}
 	trace.Logf(context.Background(), traceRegion, "Pool=%p", p)
 	return p
 }
 
-// PushBack hands task to an executor, blocking until one takes it or ctx is cancelled. If
-// no executor is waiting it fires demand (block-as-demand): the producer parks holding the
-// task and TrySpawn (capped) brings up an executor, which takes it directly — no buffer
-// dwell. The cap means a burst of producers does not spawn a goroutine glut; the chain
-// (see runWorker) ramps as fast as executors actually pick work up.
-func (p *Pool[E]) PushBack(ctx context.Context, task Task[E]) error {
-	var err error
-	if p.handoff.PushBackFunc(task, func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-		// selectFn runs only when no executor was waiting — i.e. we are about to park — so
-		// fire demand. TrySpawn is capped, so this is a kick that the spawn chain ramps
-		// from, not a spawn-per-producer; most parks under load find the cap saturated and
-		// rely on the chain (or an existing parked executor) instead.
-		p.TrySpawn()
-		var rf rdvq.RenotifyFunc
-		rf, err = rdvq.BasicWaitSelect(ctx, waitCh)
-		return rf
-	}) {
-		return nil
-	}
-	return err
-}
-
-// ── Refcount + definitive quiesce (forked from internal/worker.Core) ─────────
+// ── Refcount + definitive quiesce ────────────────────────────────────────────
 
 // Acquire registers a new referrer. On a 0→1 transition it re-arms a poolCtx a prior Wait
 // cancelled, so freshly spawned workers aren't instantly stopped.
-func (p *Pool[E]) Acquire() {
+func (p *Pool[W]) Acquire() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.refs == 0 {
-		p.rearmStopLocked()
+		p.rearmStop()
 	}
 	p.refs++
 }
 
 // Release drops a referrer. It stops the workers only when this is the last referrer AND a
 // Wait is outstanding; otherwise workers persist and idle-scale-to-zero on their own.
-func (p *Pool[E]) Release() {
+func (p *Pool[W]) Release() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refs--
 	if p.refs == 0 && p.waiting {
-		p.stopWorkersLocked()
+		p.stopWorkers()
 	}
 }
 
-// Wait performs the definitive quiesce+join: if no referrer is outstanding it stops the
-// idle workers now, otherwise the final Release stops them; either way it blocks until
-// every executor goroutine has exited. It does NOT cancel running tasks — it waits for
-// referrers to finish on their own (so a referrer that never releases blocks it forever,
-// like sync.WaitGroup.Wait). The pool is reusable afterward.
-func (p *Pool[E]) Wait() {
+// Wait performs the definitive quiesce+join: if no referrer is outstanding it stops the idle
+// workers now, otherwise the final Release stops them; either way it blocks until every
+// worker goroutine has exited. It does NOT cancel running work — it waits for referrers to
+// finish on their own (so a referrer that never releases blocks it forever, like
+// sync.WaitGroup.Wait). The pool is reusable afterward.
+func (p *Pool[W]) Wait() {
 	p.mu.Lock()
 	if p.refs == 0 {
-		p.stopWorkersLocked() // nothing in flight: stop idle workers now
+		p.stopWorkers() // nothing in flight: stop idle workers now
 	} else {
 		p.waiting = true // the last Release will stop them
 	}
@@ -162,37 +138,40 @@ func (p *Pool[E]) Wait() {
 
 	p.mu.Lock()
 	p.waiting = false
-	p.rearmStopLocked() // ready for reuse
+	p.rearmStop() // ready for reuse
 	p.mu.Unlock()
 }
 
-// stopWorkersLocked cancels poolCtx (idempotent), waking idle/blocked workers to exit.
-func (p *Pool[E]) stopWorkersLocked() {
+// stopWorkers cancels poolCtx (idempotent), waking idle/blocked workers to exit. Caller
+// holds p.mu.
+func (p *Pool[W]) stopWorkers() {
 	p.poolCancel()
 }
 
-// rearmStopLocked replaces a cancelled poolCtx with a fresh one so the pool can be reused.
-func (p *Pool[E]) rearmStopLocked() {
+// rearmStop replaces a cancelled poolCtx with a fresh one so the pool can be reused. Caller
+// holds p.mu.
+func (p *Pool[W]) rearmStop() {
 	if p.poolCtx.Err() != nil {
 		//nolint:gosec // G118: prior poolCancel already called (poolCtx cancelled)
 		p.poolCtx, p.poolCancel = context.WithCancel(context.Background())
 	}
 }
 
-// ── Spawning (capped + chain, forked from internal/worker.Core) ──────────────
+// ── Spawning (capped + chain) ─────────────────────────────────────────────────
 
-// TrySpawn fires demand: it spawns an executor unless the spawn-concurrency cap is already
-// saturated (a spin-up is in flight). It is called by PushBack (block-as-demand) and by the
-// chain extension in runWorker; the cap de-stampedes both so simultaneous spin-ups stay
-// bounded while existing/parked executors absorb demand.
-func (p *Pool[E]) TrySpawn() {
+// TrySpawn fires demand: it spawns a worker unless the spawn-concurrency cap is already
+// saturated (a spin-up is in flight). It is called by the concrete pool's demand source
+// (the Executor's block-as-demand) and by the chain extension in runWorker; the cap
+// de-stampedes both so simultaneous spin-ups stay bounded while existing/parked workers
+// absorb demand.
+func (p *Pool[W]) TrySpawn() {
 	if !p.spawning.IncrementIfUnder(spawnConcurrencyLimit) {
-		return // a spin-up is already in flight; the chain or a later park ramps further
+		return // a spin-up is already in flight; the chain or a later demand ramps further
 	}
 	p.spawnWorker()
 }
 
-func (p *Pool[E]) spawnWorker() {
+func (p *Pool[W]) spawnWorker() {
 	// Capture the current poolCtx so a later re-arm (reuse after Wait) never reaches this
 	// worker — it will have exited on the context it was born with.
 	p.mu.Lock()
@@ -203,22 +182,26 @@ func (p *Pool[E]) spawnWorker() {
 }
 
 //nolint:contextcheck // poolCtx is the captured spawn-time pool context by design
-func (p *Pool[E]) runWorker(poolCtx context.Context) {
+func (p *Pool[W]) runWorker(poolCtx context.Context) {
 	defer p.workers.Done()
 	traceRegion := "execpool.Pool.runWorker"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	state := p.newState()
-	ctx, cancel := context.WithCancel(poolCtx)
-	defer cancel()
+	w := p.newWorker()
 
-	// Hold the spawn-concurrency slot from spawn until this worker establishes (receives
-	// its first task) or settles (idles/stops). releaseSpawn frees the slot exactly once
-	// (latched); on establishment WITH a task it extends the chain — spawning a successor
-	// to check for further demand, exactly like internal/worker.Core. Holding the slot
-	// across the first park is deliberate: a parked, not-yet-established executor is standby
-	// capacity that a later direct handoff can use, so the cap should suppress new spawns
-	// while it waits.
+	// The worker context: a ctxpool child of poolCtx, reused across the pool's scale-to-zero
+	// churn, carrying the Worker as its value, with Done() == poolCtx.Done() (definitive
+	// stop). No independent cancel — the worker exits on stop or idle, and its work runs
+	// under its own borrowed context, not this one.
+	ctx := ctxpool.WithValue(poolCtx, w)
+	defer ctxpool.Free(ctx)
+
+	// Hold the spawn-concurrency slot from spawn until this worker establishes (its first
+	// Wait returns work) or settles (idles/stops). releaseSpawn frees the slot exactly once
+	// (latched); on establishment WITH work it extends the chain — spawning a successor to
+	// check for further demand. Holding the slot across the first Wait is deliberate: a
+	// parked, not-yet-established worker is standby capacity, so the cap should suppress new
+	// spawns while it waits.
 	spawning := true
 	releaseSpawn := func(extendChain bool) {
 		if spawning {
@@ -231,56 +214,36 @@ func (p *Pool[E]) runWorker(poolCtx context.Context) {
 	}
 	defer releaseSpawn(false) // safety: settle the slot if we exit before establishing
 
-	// One reused idle timer (no per-pop alloc). It is armed only while parked in
-	// PopFrontFunc; a long Task.Run leaves it to fire into the channel, drained on the next
-	// loop before re-arming, so busy time never counts toward the idle window.
-	idle := time.NewTimer(workerIdleTimeout)
-	defer idle.Stop()
+	// One pooled idle timer (no per-Wait alloc). It is armed before each Wait and counts
+	// only while the worker is idle; a long Work leaves it to fire into the channel, drained
+	// by the next Reset, so busy time never counts toward the idle window.
+	idle := timerp.Get()
+	defer timerp.Put(idle)
 
-	established := false
-	for {
-		if !idle.Stop() {
-			select {
-			case <-idle.C:
-			default:
-			}
-		}
-		idle.Reset(workerIdleTimeout)
-
-		task, ok := p.handoff.PopFrontFunc(func(inboxCh <-chan Task[E]) (Task[E], bool) {
-			select {
-			case t := <-inboxCh:
-				return t, true
-			case <-idle.C:
-				return nil, false // idle scale-to-zero
-			case <-ctx.Done():
-				return nil, false // definitive teardown (Wait)
-			}
-		})
-
-		if !established {
-			// The first PopFront establishes the worker and decides the chain: a task means
+	for first := true; ; first = false {
+		timerp.Reset(idle, workerIdleTimeout)
+		ok := w.Wait(ctx, idle.C)
+		if first {
+			// The first Wait establishes the worker and decides the chain: work means
 			// demand was present, so extend (spawn a successor to check for more); idle/stop
-			// means none, so end the chain. Keyed on ok (not the select case) so an orphan
-			// recovered by PopFrontFunc still counts as established-with-demand.
-			established = true
+			// means none, so end the chain.
 			releaseSpawn(ok)
 		}
 		if !ok {
-			return
+			break // idled out or stopped
 		}
-		task.Run(state)
+		w.Work(ctx)
 	}
+	w.Close(ctx)
 }
 
 // ── Fixed worker-behavior tuning (not user-facing) ──────────────────────────
 
-// workerIdleTimeout is how long an executor waits with no task before exiting
-// (scale-to-zero). Fixed, not tunable; mirrors internal/worker.workerIdleTimeout.
+// workerIdleTimeout is how long a worker waits with no work before exiting (scale-to-zero).
+// Fixed, not tunable — a sensible default serves all workloads.
 const workerIdleTimeout = 1 * time.Second
 
-// spawnConcurrencyLimit caps how many executors may be spinning up simultaneously (bounds
-// burst spawn, not total executors). The slot is held from spawn until the worker receives
-// its first task or settles, so the chain ramps the count as fast as work is actually
-// picked up and no faster. Mirrors internal/worker.spawnConcurrencyLimit.
+// spawnConcurrencyLimit caps how many workers may be spinning up simultaneously (bounds
+// burst spawn, not total workers). The slot is held from spawn until the worker's first Wait
+// returns, so the chain ramps the count as fast as work is actually picked up and no faster.
 const spawnConcurrencyLimit = 1

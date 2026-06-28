@@ -28,11 +28,11 @@ type funcTask func(env)
 
 func (f funcTask) Run(ee env) { f(ee) }
 
-// TestPool_RunsTask: a single pushed task runs on an executor.
-func TestPool_RunsTask(t *testing.T) {
+// TestExecutor_RunsTask: a single pushed task runs on an executor.
+func TestExecutor_RunsTask(t *testing.T) {
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	ran := make(chan struct{})
 	chk.NoError(p.PushBack(context.Background(), funcTask(func(env) { close(ran) })))
@@ -46,12 +46,13 @@ func TestPool_RunsTask(t *testing.T) {
 	p.Wait()
 }
 
-// TestPool_ManyConcurrent: N blocking tasks all run at once — concurrency is uncapped, so
-// every task gets its own executor (block-as-demand), and a barrier proves they overlap.
-func TestPool_ManyConcurrent(t *testing.T) {
+// TestExecutor_ManyConcurrent: N blocking tasks all run at once — the spawn cap bounds the
+// spin-up RATE, not total concurrency, so every task still gets its own executor
+// (block-as-demand ramped by the chain), and a barrier proves they overlap.
+func TestExecutor_ManyConcurrent(t *testing.T) {
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	const n = 16
 	var running atomic.Int64
@@ -76,12 +77,12 @@ func TestPool_ManyConcurrent(t *testing.T) {
 	p.Wait()
 }
 
-// TestPool_WaitJoinsThenReusable: Wait stops idle executors and joins them, and the pool
+// TestExecutor_WaitJoinsThenReusable: Wait stops idle executors and joins them, and the pool
 // works again afterward (the poolCtx re-arm).
-func TestPool_WaitJoinsThenReusable(t *testing.T) {
+func TestExecutor_WaitJoinsThenReusable(t *testing.T) {
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	run := func() {
 		ran := make(chan struct{})
@@ -96,15 +97,15 @@ func TestPool_WaitJoinsThenReusable(t *testing.T) {
 	p.Wait()
 }
 
-// TestPool_ScaleToZeroAndReuse: after the idle timeout an executor with no work exits, so a
+// TestExecutor_ScaleToZeroAndReuse: after the idle timeout an executor with no work exits, so a
 // later push spawns a fresh one. Observed via the spawn counter. Slow (real idle window).
-func TestPool_ScaleToZeroAndReuse(t *testing.T) {
+func TestExecutor_ScaleToZeroAndReuse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("scale-to-zero exercises the real idle timeout")
 	}
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	run := func() {
 		ran := make(chan struct{})
@@ -125,14 +126,14 @@ func TestPool_ScaleToZeroAndReuse(t *testing.T) {
 	p.Wait()
 }
 
-// TestPool_CapBoundsSpawns: a long run of instant tasks is served by a reused executor, so
+// TestExecutor_CapBoundsSpawns: a long run of instant tasks is served by a reused executor, so
 // the spawn-concurrency cap + chain + idle-reuse keep the spawn count far below one-per-task
 // (the no-goroutine-glut property the cap exists for). Sequential, so there is never
 // concurrent demand — one established executor handles essentially all of it.
-func TestPool_CapBoundsSpawns(t *testing.T) {
+func TestExecutor_CapBoundsSpawns(t *testing.T) {
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	const total = 500
 	for range total {
@@ -144,13 +145,13 @@ func TestPool_CapBoundsSpawns(t *testing.T) {
 	p.Wait()
 }
 
-// TestPool_PushBackCtxCancel: a producer parked with no executor available (none spawned to
+// TestExecutor_PushBackCtxCancel: a producer parked with no executor available (none spawned to
 // take it) unblocks with ctx.Err(). Uses a pool whose executors are kept busy so the new
 // push has to park; cancelling its ctx must release it.
-func TestPool_PushBackCtxCancel(t *testing.T) {
+func TestExecutor_PushBackCtxCancel(t *testing.T) {
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -175,12 +176,12 @@ func TestPool_PushBackCtxCancel(t *testing.T) {
 	p.Wait()
 }
 
-// TestPool_ConcurrentExactlyOnce: under many concurrent producers every task runs exactly
+// TestExecutor_ConcurrentExactlyOnce: under many concurrent producers every task runs exactly
 // once and the pool quiesces. Run with -race for the memory-ordering check.
-func TestPool_ConcurrentExactlyOnce(t *testing.T) {
+func TestExecutor_ConcurrentExactlyOnce(t *testing.T) {
 	chk := require.New(t)
 	var spawns atomic.Int64
-	p := NewPool(newEnvFactory(&spawns))
+	p := NewExecutor(newEnvFactory(&spawns))
 
 	const producers, perProducer = 24, 64
 	const total = producers * perProducer

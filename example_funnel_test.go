@@ -18,7 +18,10 @@ import (
 // ExampleFunnel demonstrates how funnels can efficiently aggregate
 // results from multiple tasks before emitting a funneld result.
 func ExampleFunnel() {
-	var clock exmpclk.ExampleClock
+	// VirtualClock: the timeline is driven entirely by clock.Sleep, so virtual time keeps
+	// the printed timestamps deterministic regardless of real-sleep jitter or co-running
+	// test load (the framework still runs the work concurrently for real).
+	var clock exmpclk.VirtualClock
 	clock.Start()
 	msSinceStart := func() int64 {
 		return clock.Elapsed(10 * time.Millisecond).Milliseconds()

@@ -47,6 +47,31 @@ earlier "uncapped executor" and "execpool forks worker.Core" sketches.
     methodology).*
   - **CP4**: delete `internal/worker`; trim workq's exported API.
 
+**►► EXECUTOR WIRING LANDED (2026-06-28c) — the dispatch/execution split is LIVE.** Bodies
+now run on `bodyExecutorPool` (`execpool.Executor[*workerExEnv]`, `pool.go`), handed off from
+scheduler workers; `defaultPool` (still `worker.Pool` — the scheduler cutover is the NEXT step)
+no longer runs user bodies. Mechanism = **HandedOff** (the incremental split that keeps
+`defaultPool` functional — redirecting the producer-side `*PostWork` instead would strand
+`defaultPool` with no Post callers → no spawn → postponed-admission deadlock):
+- `taskWork.Execute`/`funnelWork.Execute` run on a scheduler worker: `ex.Starting()` (releases
+  the controller buffer) → `bodyExecutorPool.PushBack(ctx, wk)` (blocking rendezvous,
+  block-as-demand) → `ex.HandedOff()`. The worker is freed the instant an executor takes the
+  body, not when it completes. On handoff failure (ctx cancel) the controller Frees (abandon).
+- `taskWork.Run(ee)`/`funnelWork.Run(ee)` (new, satisfy `execpool.Task[*workerExEnv]`) = run the
+  body + self-`Free`; the executor is sole owner post-handoff (E passed directly, no
+  `workerEnvKey` walk).
+- New `Execution.HandedOff()` + `Executor.WasHandedOff()`; `controller.execute` skips `Free` when
+  handed off (executor owns it) — avoids the double-free/use-after-recycle race.
+- **Wrinkle 1 dissolved:** the funnel gate stays in `funnelWork.Execute` (scheduler); only the
+  body (`run`) crosses to the executor. The held permit travels with the body and releases in
+  `Free` (now the body-completion release point, called by `Run`). No `funnelPostWork` hoist.
+- **Wrinkle 2 (accepted for C2):** the scheduled-flush `funnelInstance` still runs inline on the
+  scheduler (`workerEnvFromContext`, `funnel.go:398`) — a blocking flush still pins a scheduler;
+  revisit in C3.
+- `streampool.Wait()` reaps both pools (scheduler then executor).
+- Verified: build + vet + golangci 0 + `-short ./...` + `TestBySimulation` ×5 (no-race) + ×3
+  (-race) + reuse/example/alloc (allocs within thresholds). (≥25× `-race` batch in flight.)
+
 **►► SESSION 2026-06-28c — TOPOLOGY PINNED (PN), supersedes the CP framing above where it conflicts:**
 - **`worker.Pool` / `worker.Core` is OBSOLETE** — both pools are `execpool`. Scheduler =
   `execpool.Pool[*schedulerWorker]`; executor = `execpool.Executor[*workerExEnv]`. `internal/worker`

@@ -139,18 +139,32 @@ func (wk *taskWork) Reset() {
 	wk.bodyMeta = nil
 }
 
-// Execute is the workq.Work entry run by a global-pool worker (the scheduler-side
-// controller path). It confirms execution (ex.Starting) and delegates to run, the
-// Execution-free body. When dispatch moves to the executor pool (C2c), the executor calls
-// run directly with the worker E and Execute is dropped — the body never needs Execution.
+// Execute runs on a scheduler worker (the controller path): it confirms execution
+// (ex.Starting, which also releases the controller's buffer) and hands the body to the
+// executor pool over the unbuffered rendezvous (block-as-demand). The scheduler worker is
+// freed the instant an executor takes the body, not when the body completes — so a
+// blocking body never pins a scheduler. On a successful handoff it declares HandedOff so
+// the controller leaves ownership (Free) to the executor; a failed handoff (ctx cancelled)
+// is left for the controller to Free (abandon — the body never ran).
 func (wk *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ex.Starting()
-	//nolint:contextcheck // run uses ctx only to fetch the worker E; the body runs under bodyCtx
-	wk.run(workerEnvFromContext(ctx))
+	if err := bodyExecutorPool.PushBack(ctx, wk); err != nil {
+		return err
+	}
+	ex.HandedOff()
 	return nil
+}
+
+// Run is the executor pool's entry (execpool.Task[*workerExEnv]): it runs the task body
+// against the executor's environment and Frees the work, since the executor is its sole
+// owner after the handoff. run takes ee directly — no workerEnvKey ctx walk — and the body
+// still executes under its borrowed body ctx.
+func (wk *taskWork) Run(ee *workerExEnv) {
+	wk.run(ee)
+	wk.Free()
 }
 
 // run executes the task body against the per-worker environment ee. The body context

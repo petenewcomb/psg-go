@@ -6,6 +6,7 @@ module github.com/petenewcomb/streampool/edge
 go 1.25.0
 
 require (
+	github.com/lxzan/gws v1.9.1
 	github.com/petenewcomb/streampool v0.0.1
 	github.com/valyala/fasthttp v1.71.0
 	golang.org/x/net v0.56.0

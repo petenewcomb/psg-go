@@ -466,6 +466,28 @@ conservation — no thundering herd.)
 
 ## C2 implementation mapping (the pool-split cutover)
 
+> **SUPERSEDED IN PART (2026-06-28, design review w/ PN).** This section's recipe — "the whole
+> split reduces to redirecting the two body-running posts" — is the *producer-side* redirect,
+> and it is **insufficient for nested submits**. `executorPool.PushBack` is a **blocking**
+> rendezvous (no `TryPushBack`, by design). A nested same-wave submit runs the admission chain
+> **inline on its body's (executor) goroutine** (via `ExecuteNowOrQueue`), so redirecting
+> `taskPostWork.Execute` itself to `PushBack` would **block the body** — violating the
+> load-bearing "nested intake is non-blocking drop-and-go" invariant (and risking the executor
+> glut the buffered `Accepted` exists to prevent). The blocking handoff therefore belongs on the
+> **scheduler's `Work` phase**, not the producer: a nested submit drops its admitted body onto
+> the buffered `Accepted` intake non-blocking; a **scheduler worker** does the blocking
+> `PushBack` to the executor. That is precisely the **WORKING_NOTES STEP 2–4** design (the
+> scheduler rebuilt on `execpool.Pool[W]` by decomposing `ExecuteOne` into `Wait` = non-blocking
+> admit / `Work` = blocking handoff; `worker` deleted), which **supersedes** the
+> keep-`worker.Pool` / redirect-only mapping below. The body-needs / executor-body-interface /
+> wrinkle analysis below remains accurate and is still the reference for those pieces.
+>
+> **Top-level executor fast lane (DEFERRED, decided 2026-06-28):** routing top-level dispatch
+> straight to `executorPool.PushBack` (skipping the scheduler queue, since top-level admission is
+> already inline and the caller can block) is a real P99 win but is a **follow-on** — landed and
+> benchmarked after the two-pool split is green. So in the first cut **all** bodies (top-level and
+> nested) go through the scheduler intake → scheduler `Work` `PushBack`.
+
 The concrete wiring, grounded in the current live code (2026-06-28, post-C1/B). Mirrors the
 C1 mapping above. **The whole split reduces to redirecting the two body-running posts onto
 an executor pool; the admission chain, gate, and governor already sit on the scheduler side

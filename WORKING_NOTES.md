@@ -8,6 +8,45 @@ goroutine-pool foundation, two pools on it (executor + scheduler), then the live
 Design converged through a long review with PN this session — the notes below SUPERSEDE the
 earlier "uncapped executor" and "execpool forks worker.Core" sketches.
 
+**►► SESSION 2026-06-28b DECISIONS (PN), refining the steps below:**
+- **MERGE steps 2+3** — build `workq.Scheduler` in its *real post-cutover shape* and flip the
+  live path in one landing, NOT a dormant inline-body intermediate first. Rationale: the
+  intermediate's postpone path is dead/untestable (scheduler-run `taskWork` always `Starting()`s);
+  the clean `Wait`/`Work` boundary only exists at cutover semantics; the executor foundation is
+  already proven (step 1), so merge = wire proven executor to new scheduler `Worker`, not bring
+  up both at once. Build the Scheduler ALONGSIDE legacy + test against the live executor in
+  isolation, THEN one cutover flip (mitigates the red window).
+- **KEY FINDING (the reason the scheduler decomposition is *required*, not optional):** the plan
+  doc's "just redirect the two `*PostWork.Execute` Posts → `executorPool.PushBack`" is the
+  *producer-side* redirect and is **WRONG for nested submits** — `PushBack` is a blocking
+  rendezvous (no `TryPushBack`), and a nested submit runs the admission chain inline on its
+  body's executor goroutine, so a producer-side `PushBack` blocks the body and violates
+  "nested intake = non-blocking drop-and-go." The blocking handoff MUST be the **scheduler's
+  `Work`** (nested drops to buffered `Accepted` non-blocking; a scheduler worker `PushBack`s).
+  ⇒ `Wait` = non-blocking admit (governor + `Acquire`, postpone missers), `Work` = blocking
+  `PushBack` of the admitted body. This requires **separating non-blocking admit from blocking
+  handoff in the admission chain** (`launcherScatterWork`/`limiterScatterWork`/`*PostWork`) —
+  the genuinely hard, concurrency-critical core of C2. (Recorded in the plan doc's C2-mapping
+  banner.)
+- **Top-level executor fast lane = DEFERRED follow-on** (see STEP 5 below): any-top-level (not
+  just no-limiter), landed + benchmarked AFTER the split is green. First cut: ALL bodies
+  (top-level + nested) go scheduler-intake → scheduler `Work` `PushBack`.
+- **MERGED CP SEQUENCE (each a green checkpoint):**
+  - **CP1** (additive, unwired): `workq.Scheduler` + scheduler `Worker` on `execpool.Pool[W]`,
+    finishing `internal/workq/worker.go`'s draft — `Wait`=drain+collect+ (none ready) block on
+    `Accepted` waiters composing pool idle+stop; `Work`=execute. Reconcile env-on-ctx
+    (`workerEnvFromContext` vs ctxpool `W`). Isolated test (incl. postpone/anti-spin via nested
+    scenarios + a real `execpool.Executor` for the handoff). Legacy `worker.Pool` untouched.
+  - **CP2** (the admit/handoff split): refactor the admission chain so non-blocking admit
+    (governor+`Acquire`, postpone-on-miss) is separable from the blocking `PushBack`; funnel-gate
+    hoist (Wrinkle 1) lands here (gate inside `funnelPostWork` before the handoff). Green under
+    single pool first if possible.
+  - **CP3** (cutover flip): `defaultPool` → `workq.Scheduler`; bodies → executor (`run(ee)` +
+    `defer Free`, delete `*Work.Execute`); `streampool.Wait()` reaps both pools. *Gate: full
+    suite + -race + `TestBySimulation` reliably green + latency/alloc benchmarks (real
+    methodology).*
+  - **CP4**: delete `internal/worker`; trim workq's exported API.
+
 - **`internal/execpool` FINAL SHAPE (landed, `fa17a48` + `f031f71`; isolated, unimported).**
   `Pool[W Worker]` is the **single shared spawn/lifecycle foundation** (NOT a fork that
   duplicates worker.Core — worker.Core is to be deleted; the scheduler reuses THIS). It owns
@@ -81,6 +120,25 @@ earlier "uncapped executor" and "execpool forks worker.Core" sketches.
   API** (unexport Worker/NewWorker/With*/ExecEnv behind Scheduler; keep the producer + gate
   types). *Gate: full suite + -race + `TestBySimulation` + latency/alloc benchmarks (real
   methodology).*
+
+- **STEP 5 (DEFERRED follow-on, decided w/ PN 2026-06-28) = top-level executor fast lane.**
+  At top-level dispatch BOTH gates already run inline on the caller's goroutine
+  (`meta.ExecuteNowOrQueue` → `launcherScatterWork.Execute` governor → `limiterScatterWork.Execute`
+  permit gate → `taskPostWork.Execute`), so the scheduler is a pure relay for top-level work.
+  Route top-level `taskWork`/`funnelWork` straight to `executor.PushBack`, bypassing the
+  scheduler queue (saves enqueue + scheduler-worker wake + dequeue on the hottest path — a
+  P99/max win). **Enabling condition is *top-level* (blocking-capable caller, admission done
+  inline), NOT no-limiter** — a top-level *limited* launch acquires its permit inline too, so
+  the lane is **any top-level dispatch** (PN, 2026-06-28; fairness is arbitrated at the permit
+  pool, not the scheduler queue; suspend/reclaim is wave-queue-driven regardless of routing).
+  Backpressure preserved: the governor's block-and-help still wraps dispatch inline; a full
+  executor applies block-as-demand. **Nested submits CANNOT take this lane** (must be
+  non-blocking drop-and-go; `executor.PushBack` is a blocking rendezvous, no `TryPushBack` by
+  design) → they keep the buffered scheduler intake. Net: after the lane lands the scheduler
+  handles ONLY nested + funnel-scheduled + postponed-limited-retry (the deferred/postponable
+  admission — also where the scheduler's postpone path is actually exercised). **DEFERRED to
+  AFTER the two-pool split (steps 2–4) is green + benchmarked**, so we measure the removed hop
+  rather than assume it and don't entangle the lane branch with the already-large cutover.
 
 - **C2a STATUS:** `run(ee)` extraction LANDED (`a107270`) — `taskWork`/`funnelWork` expose
   the Execution-free, ctx-free `run(ee *workerExEnv)` C2c needs. The **funnel-gate hoist was

@@ -302,8 +302,9 @@ pool split lands on a known-good base.
    exercising limited drain.*
 5. **C4 — strip the dead eager code. ~Absorbed into C1.** The eager request machinery was
    removed in C1 (native replacement); the `applicant` sizing went with it. What remains for
-   a later pass: the thundering-herd wake efficiency and any `BlockBehavior`/`shouldBlock`
-   plumbing once C2 reshapes dispatch. *Gate: suite + `-race`.*
+   a later pass: any dead `BlockBehavior`/`shouldBlock` plumbing once C2 reshapes dispatch.
+   *Gate: suite + `-race`.* (No wake-efficiency follow-up — the `Notifier` single-wake +
+   renotify conservation already wakes exactly one consumer, no thundering herd.)
 
 ## C1 implementation mapping (live limiter → native permits)
 
@@ -458,9 +459,10 @@ call sites flipped, and it would not even compile against the renamed `ctxMeta.h
 `NewSemaphore`/`SetMaxConcurrency` stay, re-pointed at the `permits.Pool` + the
 `semaphoreResource` (now a `permits.Resource`). `wv.block` and the `blockingWorkAdder`
 machinery are **kept** (retargeted onto the Pool's waiters — see the native gate). Net: C4
-is largely absorbed into C1; what remains for a later pass is the thundering-herd wake
-efficiency and any residual `BlockBehavior`/`shouldBlock` plumbing once C2 reshapes
-dispatch.
+is largely absorbed into C1; what remains for a later pass is any residual
+`BlockBehavior`/`shouldBlock` plumbing once C2 reshapes dispatch. (No wake-efficiency
+follow-up: the `Notifier` single-wake already wakes exactly one consumer with renotify
+conservation — no thundering herd.)
 
 ## Note: the inbox stack is not lock-free
 

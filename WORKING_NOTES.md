@@ -492,8 +492,9 @@ mode mapping, governor placement, migration sequencing). Shape:
 **Deferred backlog (after / alongside C2):**
 - **C3 — drain limiting** (`WithLimits` on `NewSkimmer`, `WithFlushLimits` on `NewFunnel`);
   needs the limited-drain model-check (parked holder whose drain needs a permit).
-- **C4 — residual cleanup**: thundering-herd wake efficiency (measurement-gated), any dead
-  `BlockBehavior`/`shouldBlock` plumbing once C2 reshapes dispatch.
+- **C4 — residual cleanup**: any dead `BlockBehavior`/`shouldBlock` plumbing once C2
+  reshapes dispatch. (No wake-efficiency item — the `Notifier` single-wake + renotify
+  conservation already wakes exactly one consumer, so there's no thundering herd to fix.)
 - **Multi-limiter** joint admission (currently panics at `opConfig.singleLimiter`); **weighted
   resources** (re-derive the removed `applicant` sizing natively).
 - **Thread C** — `Try*` honoring non-zero non-Forever deadlines via bounded-wait

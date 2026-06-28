@@ -35,7 +35,7 @@ func TestResequencer(t *testing.T) {
 	src := streampool.NewLauncher[int](streampool.HandlerFunc[int](
 		func(ctx context.Context, i int, _ error) error {
 			time.Sleep(time.Duration(i%7) * time.Millisecond)
-			return rs.Submit(ctx, uint64(i), i)
+			return rs.Submit(ctx, uint64(i), i) //nolint:gosec // G115: i is a non-negative loop index
 		}))
 
 	for i := n - 1; i >= 0; i-- { // submit in reverse to stress reordering
@@ -113,7 +113,7 @@ func TestResequencerStartOffset(t *testing.T) {
 	src := streampool.NewLauncher[int](streampool.HandlerFunc[int](
 		func(ctx context.Context, k int, _ error) error {
 			time.Sleep(time.Duration(k%5) * time.Millisecond)
-			return rs.Submit(ctx, uint64(base+k), base+k)
+			return rs.Submit(ctx, uint64(base+k), base+k) //nolint:gosec // G115: base+k is non-negative
 		}))
 
 	for k := n - 1; k >= 0; k-- {

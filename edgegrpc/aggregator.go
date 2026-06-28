@@ -104,7 +104,12 @@ func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*Aggrega
 // AggregateFullMethod is the wire method name.
 const AggregateFullMethod = "/edgegrpc.Aggregator/Aggregate"
 
-func aggregateHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+func aggregateHandler(
+	srv any,
+	ctx context.Context,
+	dec func(any) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (any, error) {
 	in := new(AggregateRequest)
 	if err := dec(in); err != nil {
 		return nil, err

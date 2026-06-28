@@ -11,6 +11,10 @@
 
 otpsg:.
 
+edge:.
+
+edgegrpc:.
+
 internal/cmd/chartgen:
 	golang.org/x/image/vector          # BSD-3-Clause
 	github.com/golang/freetype/raster  # BSD-ish FreeType License

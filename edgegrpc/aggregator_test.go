@@ -5,6 +5,7 @@ package edgegrpc_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -32,12 +33,12 @@ func TestSharedGateAcrossRPCs(t *testing.T) {
 
 	shared := streampool.NewSemaphore(gate)
 
-	var cur, max int64
+	var cur, peak int64
 	fetch := func(_ context.Context, key string) (string, error) {
 		n := atomic.AddInt64(&cur, 1)
 		for {
-			m := atomic.LoadInt64(&max)
-			if n <= m || atomic.CompareAndSwapInt64(&max, m, n) {
+			m := atomic.LoadInt64(&peak)
+			if n <= m || atomic.CompareAndSwapInt64(&peak, m, n) {
 				break
 			}
 		}
@@ -46,7 +47,7 @@ func TestSharedGateAcrossRPCs(t *testing.T) {
 		return strings.ToUpper(key), nil
 	}
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	lis, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestSharedGateAcrossRPCs(t *testing.T) {
 	keysFor := func(r int) []string {
 		ks := make([]string, keysPerRPC)
 		for k := range ks {
-			ks[k] = string(rune('a'+r)) + string(rune('0'+k))
+			ks[k] = fmt.Sprintf("%c%d", 'a'+r, k)
 		}
 		return ks
 	}
@@ -113,7 +114,7 @@ func TestSharedGateAcrossRPCs(t *testing.T) {
 	}
 
 	// The shared gate capped fan-out concurrency across ALL rpcs collectively.
-	if m := atomic.LoadInt64(&max); m > gate {
+	if m := atomic.LoadInt64(&peak); m > gate {
 		t.Fatalf("max concurrent fetch = %d, exceeds shared gate %d", m, gate)
 	} else if m < gate {
 		t.Fatalf("max concurrent fetch = %d; test did not exercise the gate (want %d)", m, gate)

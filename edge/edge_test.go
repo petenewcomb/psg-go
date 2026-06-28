@@ -27,6 +27,11 @@ import (
 	"golang.org/x/net/http2"
 )
 
+const (
+	ctTextPlain = "text/plain"
+	protoH1     = "http/1.1"
+)
+
 // TestBothTransports fires a burst of HTTP/1.1 and HTTP/2 requests at one Server
 // and verifies (a) both transports produce correct responses through the
 // fasthttp and x/net/http2 paths respectively, and (b) admission is NOT
@@ -35,41 +40,25 @@ import (
 func TestBothTransports(t *testing.T) {
 	const burst = 12
 
-	var cur, max int64
+	var cur, peak int64
 	app := func(_ context.Context, method, path string, _ []byte) edge.Response {
 		n := atomic.AddInt64(&cur, 1)
 		for { // record high-water mark
-			m := atomic.LoadInt64(&max)
-			if n <= m || atomic.CompareAndSwapInt64(&max, m, n) {
+			m := atomic.LoadInt64(&peak)
+			if n <= m || atomic.CompareAndSwapInt64(&peak, m, n) {
 				break
 			}
 		}
 		time.Sleep(40 * time.Millisecond) // overlap so concurrency is observable
 		atomic.AddInt64(&cur, -1)
-		return edge.Response{Status: 200, ContentType: "text/plain", Body: []byte(method + " " + path)}
+		return edge.Response{Status: http.StatusOK, ContentType: ctTextPlain, Body: []byte(method + " " + path)}
 	}
 
-	srv := edge.NewServer(app)
-	srv.SetTLSConfig(serverTLS(t))
+	addr, stop := start(t, edge.NewServer(app))
+	defer stop()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}()
-
-	addr := ln.Addr().String()
-	h1 := &http.Client{Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}}, //nolint:gosec
-	}}
-	h2 := &http.Client{Transport: &http2.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-	}}
+	h1 := &http.Client{Transport: &http.Transport{TLSClientConfig: insecureTLS(protoH1)}}
+	h2 := &http.Client{Transport: &http2.Transport{TLSClientConfig: insecureTLS()}}
 
 	type result struct {
 		proto string
@@ -79,7 +68,7 @@ func TestBothTransports(t *testing.T) {
 	}
 	results := make([]result, burst)
 	var wg sync.WaitGroup
-	start := make(chan struct{})
+	startGate := make(chan struct{})
 	for i := 0; i < burst; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -88,8 +77,13 @@ func TestBothTransports(t *testing.T) {
 			if i%2 == 1 {
 				client, path = h2, fmt.Sprintf("/h2/%d", i)
 			}
-			<-start // release all at once to force overlap
-			resp, err := client.Get("https://" + addr + path)
+			<-startGate // release all at once to force overlap
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+addr+path, http.NoBody)
+			if err != nil {
+				results[i] = result{err: err}
+				return
+			}
+			resp, err := client.Do(req)
 			if err != nil {
 				results[i] = result{err: err}
 				return
@@ -99,7 +93,7 @@ func TestBothTransports(t *testing.T) {
 			results[i] = result{proto: resp.Proto, body: string(b), code: resp.StatusCode}
 		}(i)
 	}
-	close(start)
+	close(startGate)
 	wg.Wait()
 
 	// (a) correctness across both transports
@@ -108,14 +102,14 @@ func TestBothTransports(t *testing.T) {
 		if r.err != nil {
 			t.Fatalf("request %d failed: %v", i, r.err)
 		}
-		if r.code != 200 {
+		if r.code != http.StatusOK {
 			t.Fatalf("request %d: status %d", i, r.code)
 		}
-		wantMethod, wantPath := "GET", fmt.Sprintf("/h1/%d", i)
+		wantPath := fmt.Sprintf("/h1/%d", i)
 		if i%2 == 1 {
 			wantPath = fmt.Sprintf("/h2/%d", i)
 		}
-		if want := wantMethod + " " + wantPath; r.body != want {
+		if want := "GET " + wantPath; r.body != want {
 			t.Fatalf("request %d: body = %q, want %q", i, r.body, want)
 		}
 		switch r.proto {
@@ -132,9 +126,8 @@ func TestBothTransports(t *testing.T) {
 	}
 
 	// (b) concurrency reflects the pool scaling connection tasks — not an
-	// artificial admission limiter. Log the high-water mark to observe how the
-	// pool absorbs connection workers blocked in the App.
-	got := atomic.LoadInt64(&max)
+	// artificial admission limiter.
+	got := atomic.LoadInt64(&peak)
 	t.Logf("max concurrent App execution across %d requests = %d", burst, got)
 	if got < 3 {
 		t.Fatalf("max concurrent App execution = %d; expected the pool to run several at once", got)
@@ -145,27 +138,10 @@ func TestBothTransports(t *testing.T) {
 // sequential requests on ONE connection (the keep-alive path — the second and
 // later iterations of serveH1's loop over the same bufio.Reader).
 func TestH1KeepAlive(t *testing.T) {
-	srv := edge.NewServer(func(_ context.Context, method, path string, _ []byte) edge.Response {
-		return edge.Response{Status: 200, ContentType: "text/plain", Body: []byte(method + " " + path)}
-	})
-	srv.SetTLSConfig(serverTLS(t))
+	addr, stop := start(t, edge.NewServer(echoApp))
+	defer stop()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}()
-
-	conn, err := tls.Dial("tcp", ln.Addr().String(),
-		&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}}) //nolint:gosec
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := dialH1(t, addr)
 	defer func() { _ = conn.Close() }()
 	br := bufio.NewReader(conn)
 
@@ -195,12 +171,12 @@ func TestFanOutLimiter(t *testing.T) {
 	const limit = 2
 	backend := streampool.NewSemaphore(limit)
 
-	var cur, max int64
+	var cur, peak int64
 	fetch := func(_ context.Context, in int) (int, error) {
 		n := atomic.AddInt64(&cur, 1)
 		for {
-			m := atomic.LoadInt64(&max)
-			if n <= m || atomic.CompareAndSwapInt64(&max, m, n) {
+			m := atomic.LoadInt64(&peak)
+			if n <= m || atomic.CompareAndSwapInt64(&peak, m, n) {
 				break
 			}
 		}
@@ -217,7 +193,7 @@ func TestFanOutLimiter(t *testing.T) {
 	if len(out) != len(inputs) {
 		t.Fatalf("got %d results, want %d", len(out), len(inputs))
 	}
-	if m := atomic.LoadInt64(&max); m > limit {
+	if m := atomic.LoadInt64(&peak); m > limit {
 		t.Fatalf("downstream concurrency = %d, exceeds external constraint %d", m, limit)
 	} else if m < limit {
 		t.Fatalf("downstream concurrency = %d; test did not exercise the limiter (want %d)", m, limit)
@@ -227,42 +203,26 @@ func TestFanOutLimiter(t *testing.T) {
 // TestH1Pipelining sends three requests back-to-back on one connection without
 // reading responses in between (pipelining). Request 0 is the slowest, so it
 // completes last — proving (a) responses are still delivered in request order
-// (the Funnel reorder window buffered 1 and 2 until 0 finished) and (b) the
-// requests processed concurrently (elapsed well under the serial sum).
+// (the resequencer buffered 1 and 2 until 0 finished) and (b) the requests
+// processed concurrently (elapsed well under the serial sum).
 func TestH1Pipelining(t *testing.T) {
 	app := func(_ context.Context, method, path string, _ []byte) edge.Response {
-		switch {
-		case path == "/p/0":
-			time.Sleep(80 * time.Millisecond) // slowest: finishes last
-		default:
-			time.Sleep(15 * time.Millisecond)
+		if path == "/p/0" {
+			time.Sleep(100 * time.Millisecond) // slowest: finishes last
+		} else {
+			time.Sleep(40 * time.Millisecond)
 		}
-		return edge.Response{Status: 200, ContentType: "text/plain", Body: []byte(method + " " + path)}
+		return edge.Response{Status: http.StatusOK, ContentType: ctTextPlain, Body: []byte(method + " " + path)}
 	}
 
-	srv := edge.NewServer(app, edge.WithPipelining())
-	srv.SetTLSConfig(serverTLS(t))
+	addr, stop := start(t, edge.NewServer(app, edge.WithPipelining()))
+	defer stop()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}()
-
-	conn, err := tls.Dial("tcp", ln.Addr().String(),
-		&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}}) //nolint:gosec
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := dialH1(t, addr)
 	defer func() { _ = conn.Close() }()
 
 	// Pipeline: write all three requests up front, before reading any response.
-	start := time.Now()
+	begin := time.Now()
 	for i := 0; i < 3; i++ {
 		if _, err := fmt.Fprintf(conn, "GET /p/%d HTTP/1.1\r\nHost: x\r\n\r\n", i); err != nil {
 			t.Fatalf("write %d: %v", i, err)
@@ -282,14 +242,63 @@ func TestH1Pipelining(t *testing.T) {
 			t.Fatalf("response %d out of order: got %q, want %q", i, b, want)
 		}
 	}
-	elapsed := time.Since(start)
+	elapsed := time.Since(begin)
 
-	// Serial processing would take 80+15+15 = 110ms. Concurrent ≈ 80ms (the
-	// slowest, since they overlap). Anything well under the serial sum proves
-	// the requests were processed concurrently, not one-at-a-time.
-	t.Logf("pipelined 3 requests (serial would be ~110ms) in %v", elapsed)
-	if elapsed >= 100*time.Millisecond {
+	// Serial processing would take 100+40+40 = 180ms. Concurrent ≈ 100ms (the
+	// slowest, since they overlap). A wide margin below the serial sum proves the
+	// requests were processed concurrently, not one-at-a-time (and keeps the
+	// assertion robust under -race timing variance).
+	t.Logf("pipelined 3 requests (serial would be ~180ms) in %v", elapsed)
+	if elapsed >= 150*time.Millisecond {
 		t.Fatalf("elapsed %v: no overlap — pipelined requests processed serially", elapsed)
+	}
+}
+
+// ── test helpers ─────────────────────────────────────────────────────────────
+
+func echoApp(_ context.Context, method, path string, _ []byte) edge.Response {
+	return edge.Response{Status: http.StatusOK, ContentType: ctTextPlain, Body: []byte(method + " " + path)}
+}
+
+// start gives srv a self-signed TLS config, serves it on a loopback port, and
+// returns the address plus a Shutdown func to defer.
+func start(t *testing.T, srv *edge.Server) (addr string, stop func()) {
+	t.Helper()
+	srv.SetTLSConfig(serverTLS(t))
+	ln := listen(t)
+	go func() { _ = srv.Serve(context.Background(), ln) }()
+	return ln.Addr().String(), func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}
+}
+
+func listen(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
+// dialH1 opens a TLS connection negotiating HTTP/1.1.
+func dialH1(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	d := &tls.Dialer{Config: insecureTLS(protoH1)}
+	conn, err := d.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+// insecureTLS is a client config that trusts the test's self-signed cert.
+func insecureTLS(protos ...string) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test accepts a self-signed cert
+		NextProtos:         protos,
 	}
 }
 
@@ -315,6 +324,6 @@ func serverTLS(t *testing.T) *tls.Config {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv}},
-		NextProtos:   []string{"h2", "http/1.1"},
+		NextProtos:   []string{"h2", protoH1},
 	}
 }

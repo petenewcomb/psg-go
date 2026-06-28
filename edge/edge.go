@@ -61,8 +61,7 @@ type Server struct {
 	app      App
 	tlsCfg   *tls.Config
 
-	baseCtx context.Context
-	cancel  context.CancelFunc
+	cancel context.CancelFunc // set by Serve; cancels conn ctxs on Shutdown
 
 	mu        sync.Mutex
 	ln        net.Listener
@@ -87,12 +86,9 @@ func WithPipelining() Option { return func(s *Server) { s.pipelined = true } }
 // from whatever real downstream constraint the App's fan-out limiters model.
 // There is deliberately no admission-limiter knob.
 func NewServer(app App, opts ...Option) *Server {
-	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		app:     app,
-		baseCtx: ctx,
-		cancel:  cancel,
-		conns:   make(map[net.Conn]struct{}),
+		app:   app,
+		conns: make(map[net.Conn]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -116,10 +112,13 @@ func NewServer(app App, opts ...Option) *Server {
 func (s *Server) SetTLSConfig(cfg *tls.Config) { s.tlsCfg = cfg }
 
 // Serve accepts connections until ln is closed or Shutdown is called, submitting
-// each as a task to the connection Wave.
-func (s *Server) Serve(ln net.Listener) error {
+// each as a task to the connection Wave. Connection tasks descend from ctx;
+// cancelling it (or calling Shutdown) unwinds them.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	ctx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.ln = ln
+	s.cancel = cancel
 	s.mu.Unlock()
 	for {
 		c, err := ln.Accept()
@@ -137,7 +136,7 @@ func (s *Server) Serve(ln net.Listener) error {
 
 		// Submit blocks (and the accept loop backpressures) when the pool is
 		// saturated. Under churn it returns promptly onto a recycled worker.
-		err = s.connOp.In(&s.connWave).Submit(s.baseCtx, c)
+		err = s.connOp.In(&s.connWave).Submit(ctx, c)
 		s.acceptWg.Done()
 		if err != nil {
 			_ = c.Close()
@@ -186,9 +185,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.ln != nil {
 		_ = s.ln.Close() // unblock Accept
 	}
+	cancel := s.cancel
 	s.mu.Unlock()
 
-	s.cancel()        // unblock any in-flight accept Submit; cancel conn ctxs
+	if cancel != nil {
+		cancel() // unblock any in-flight accept Submit; cancel conn ctxs
+	}
 	s.acceptWg.Wait() // no Submit in flight and none will start → Close is safe
 
 	s.mu.Lock()

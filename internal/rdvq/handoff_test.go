@@ -22,11 +22,8 @@ func TestHandoff_BasicRendezvous(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- h.PushBack(context.Background(), 42) }()
 
-	var got int
-	var ib inbox[int]
-	clean, err := h.PopFront(context.Background(), &ib, func(v int) { got = v })
+	got, err := h.PopFront(context.Background())
 	chk.NoError(err)
-	chk.True(clean, "a received inbox is clean")
 	chk.Equal(42, got)
 	chk.NoError(<-done, "PushBack returns once handed off")
 }
@@ -47,9 +44,7 @@ func TestHandoff_SenderBlocksThenDelivers(t *testing.T) {
 	case <-time.After(30 * time.Millisecond):
 	}
 
-	var got int
-	var ib inbox[int]
-	_, err := h.PopFront(context.Background(), &ib, func(v int) { got = v })
+	got, err := h.PopFront(context.Background())
 	chk.NoError(err)
 	chk.Equal(7, got)
 	chk.NoError(<-done)
@@ -79,8 +74,7 @@ func TestHandoff_PopFrontCtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		var ib inbox[int]
-		_, err := h.PopFront(ctx, &ib, func(int) {})
+		_, err := h.PopFront(ctx)
 		done <- err
 	}()
 
@@ -111,15 +105,13 @@ func TestHandoff_ConcurrentExactlyOnce(t *testing.T) {
 		rwg.Add(1)
 		go func() {
 			defer rwg.Done()
-			var ib inbox[int]
 			for {
-				_, err := h.PopFront(ctx, &ib, func(v int) {
-					seen[v].Add(1)
-					received.Add(1)
-				})
+				v, err := h.PopFront(ctx)
 				if err != nil {
 					return // ctx cancelled — no more work
 				}
+				seen[v].Add(1)
+				received.Add(1)
 			}
 		}()
 	}

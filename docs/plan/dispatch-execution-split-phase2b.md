@@ -281,10 +281,13 @@ pool split lands on a known-good base.
    Pool's waiters. Lost-wakeup fixed via `Pool.WakeAll`-on-release. Single `worker.Pool`,
    admission inline. *Gate MET: full suite + `-race` + `TestBySimulation` reliably green
    (≥300 `-race` runs) + lint.*
-2. **B — dispatch infra** (independent of C1; can overlap). The new unbuffered rdvq
-   primitive (`inboxOnlyQueue` + `inboxWaiters`, blocking `PushBack`, no `TryPopFront`);
-   refactor `worker.Pool` into the generic lifecycle + pluggable per-worker loop. *Gate:
-   rdvq + worker unit tests, in isolation (not yet wired).*
+2. **B — dispatch infra. ✅ DONE (2026-06-27).** `rdvq.Handoff[T]` (`handoff.go`) — the
+   unbuffered rendezvous = `inboxStackQueue` + sender-side `inboxWaiters`, blocking
+   `PushBack`, no `TryPopFront`. `worker.Core[E]` — the lifecycle+spawn factored out of
+   `worker.Pool` with a pluggable `WorkerLoop[E]` + decoupled demand (`TrySpawn`); `Pool`
+   (the scheduler pool) rebuilt as `Core + sharedQueue + driveQueue`. Both isolated, with
+   unit tests; live path unchanged. *Gate MET: rdvq + worker `-race` unit tests + full suite
+   + 60× `-race` sim.* The block-as-demand hook on `Handoff.PushBack` is deferred to C2.
 3. **C2 — the pool-split cutover.** Two pool instances (scheduler + executor); move
    admission off the executor — scheduler drains `Accepted`, admits (`Acquire` non-blocking
    + governor, postpone), hands the body to the executor via the unbuffered primitive

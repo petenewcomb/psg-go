@@ -2,6 +2,27 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► B LANDED — DISPATCH INFRA (ISOLATED, NOT WIRED) (Phase 2b, 2026-06-27).** The two
+building blocks the pool-split (C2) needs, both standalone with no live consumer yet:
+- **B1: `rdvq.Handoff[T]`** (`internal/rdvq/handoff.go`) — the lock-free **unbuffered**
+  rendezvous = the existing `inboxStackQueue` (inbox tier, LIFO warmest-first consumer
+  selection) + a new sender-side `inboxWaiters`. Blocking `PushBack(ctx,value)` (park on
+  `inboxWaiters` via the standard register-then-recheck confirm); receiver wakes one parked
+  sender after registering its inbox; **no `TryPopFront`** (no outbox tier to poll). Senders
+  are never stale (each actively sends), so NO renotify conservation is needed (unlike the
+  permit pool). Tested: concurrent exactly-once, sender-blocks-then-delivers, ctx-cancel
+  both sides; 20× `-race` + full rdvq `-race`.
+- **B2: generic `worker.Core[E]`** (`internal/worker/pool.go`) — the demand-spawn +
+  idle-exit + refcount/`Wait` lifecycle factored out of `worker.Pool`, with a **pluggable
+  `WorkerLoop[E]`** and the demand source decoupled (`TrySpawn`). `worker.Pool` (the
+  scheduler pool, `NewPool`) is rebuilt as `Core + sharedQueue + driveQueue` (the
+  workq.Worker loop) — `defaultPool` and all its promoted methods unchanged. Isolated `Core`
+  tests added (demand-spawn, Wait-join+reuse, scale-to-zero). Live path unchanged: full
+  suite + 60× `-race` sim green.
+- **Deferred to C2:** the **block-as-demand** hook (a `Handoff.PushBack` park → spawn an
+  executor) is intentionally NOT in B1 — it lands when the executor pool is wired. The
+  executor pool itself = `Core[E] + Handoff + a PopFront→Run loop` (C2).
+
 **►►► C1 LANDED — NATIVE PERMIT CORE IN THE LIVE LIMITER; THE DEADLOCK IS FIXED
 (Phase 2b, 2026-06-27).** The eager `limiter.go` request machinery (`directScheduler`/
 `directRequest`/`request`/`acquireOrWait`/`reclaimRequest`/`applicant`/the `resource`

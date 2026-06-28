@@ -719,6 +719,64 @@ reclaim's `wv.block` help-drain still reaches the right wave from an executor co
    reliably green + the latency/alloc benchmarks (real methodology).* The architecture+latency
    milestone.
 
+### CP1–CP3 implementation resolutions (2026-06-28b) — the merged scheduler-on-execpool
+
+The merged build (WN STEP 2–4 = rebuild the scheduler on `execpool.Pool[W]`, decompose
+`ExecuteOne`, redirect bodies to the executor, delete `worker`) does **NOT** decompose into
+small independently-green commits. It is **one coupled landing** spanning `workq` +
+`streampool`. The couplings, traced in the live code (2026-06-28), and their resolutions:
+
+- **Env-on-ctx reconciliation (workq ↔ streampool).** `execpool.Pool[W]` builds the worker
+  ctx as `ctxpool.WithValue(poolCtx, W)` — it carries the **Worker**, not E. The live inline
+  body path needs E under `workerEnvKey` (`workerEnvFromContext`, `pool.go:91`). Post-cutover
+  the executor already passes E directly to `run(ee)` (no ctx walk — `execpool.Task[E].Run`),
+  so the *body* side is fine. The remaining users of `workerEnvFromContext` are the
+  scheduler-resident drains (the flush `funnelInstance`, which keeps `Execution`/`Starting`).
+  **Resolution:** the scheduler is `Scheduler[E]` (generic, mirroring `worker.Pool[E]`); its
+  `schedulerWorker[E]` holds E; anything still run *on the scheduler* (flush) reaches E from
+  the worker rather than `workerEnvKey`. `workerEnvKey` survives only where a scheduler-resident
+  body still needs it; the executor path drops it.
+- **Demand counter (execpool) vs `unmetDemandFn` (queue).** execpool spawns on a **balanced**
+  `RegisterUnmetDemand`/`UnregisterUnmetDemand` counter; the queue's `unmetDemandFn` is
+  fire-and-forget (`waiters.Notify`). **Resolution:** re-express as the notes say — `Queue.Post`
+  registers one unit of unmet demand when an item **buffers** (no waiting worker took it);
+  the `schedulerWorker` `UnregisterUnmetDemand`s when its `Wait` **consumes** a buffered item;
+  withdrawal (cancel/free-without-consume) also unregisters. The live count = the unconsumed
+  backlog; spawn while `backlog > spawning`. Register and Unregister are in different goroutines
+  (producer buffers, consumer takes) but balance per item — unlike the executor's per-`PushBack`
+  balance. The retry-wake signals (permit-free, governor-clear, scheduled-deadline) **wake** a
+  parked scheduler via the `Accepted` waiters and must **not** touch the demand counter (they
+  are necessary-buffering relief, not spawn-gap — see "Demand vs backpressure").
+- **The body→executor seam is the PULL, not the producer Post and not the controller execute.**
+  A body posted to the scheduler intake (`incoming`) must be `PushBack`ed to the executor by a
+  **scheduler worker** (so nested submit stays non-blocking drop-and-go, and the blocking handoff
+  is on the scheduler goroutine, never the body's). It must **not** flow through the controller's
+  `execute` (the controller `Free`s on `Started` → double-free with the executor's `defer
+  wk.Free()`). **Resolution:** intercept at the pull — a body pulled from `incoming` is handed to
+  `executorPool.PushBack` and never enters `fresh`/`execute`/`Free`. The controller's
+  `fresh`/`postponed` then hold **only** admission scatter-works (`launcherScatterWork` etc.) +
+  scheduled flushes (run inline on the scheduler); bodies bypass it. This means the scheduler
+  `Wait`/`Work` split is: `Wait` drives admission + pulls the next runnable body (blocking on the
+  `Accepted` waiters, composing execpool's `idle`); `Work` `PushBack`s the pulled body. The
+  controller's "did I add work" accounting must distinguish "handed a body to the executor"
+  (progress, loop) from "executed admission work" — the one real surgery in `controller`.
+- **Lint forces one unit.** An unwired `executorPool` fails the `unused` linter, so the executor
+  `var` + the scheduler + the cutover are one golangci-green commit (no additive pre-step lands).
+- **Funnel gate hoist (Wrinkle 1)** still required (the gate is inside `funnelWork.Execute`; on
+  the executor it would run permit logic off the scheduler). It was reverted as a standalone
+  refactor (not a clean task-path mirror); it lands **inside this unit** (gate in
+  `funnelPostWork.Execute` before the handoff, preserving governor→gate order; sim-validate).
+
+**Landing guidance:** one focused pass with the tree quiesced (the other session live-edits
+`funnel.go`/`edge*`; this touches `funnel.go`/`wave.go`/`pool.go`/`workq`). Suggested internal
+order to reach green fastest: (1) `workq.Scheduler[E]` + `schedulerWorker[E]` on `execpool.Pool[W]`
+with the demand-counter wiring and the env reconciliation, **driving the existing `Accepted`/
+controller** with the body-pull intercept stubbed to the *current* inline run (compiles, but
+NOT committed — transient); (2) add `executorPool` + flip the pull intercept to
+`executorPool.PushBack` + body `run`+`defer Free`, delete `*Work.Execute`, hoist the funnel gate;
+(3) repoint `defaultPool` → `Scheduler`, wire `streampool.Wait()` to reap both pools; (4) delete
+`internal/worker`. Commit at (3) (functional cutover, full gate) and (4) (cleanup).
+
 ## Note: the inbox stack is not lock-free
 
 `inboxStack` (`internal/rdvq/inboxonly.go:259`) is a `sync.Mutex`-protected slice with an

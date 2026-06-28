@@ -2,6 +2,35 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**‼️ KNOWN REGRESSION — executor wiring (`71d8699`) introduced an intermittent `TestBySimulation`
+`-race` HANG (~1/25); NOT yet fixed (2026-06-28c).** Committed prematurely on a `-race ×3` pass; a
+`-race ×25` batch then deadlocked once. The branch tip is therefore RED under `-race` stress.
+Decide revert-to-green vs. fix-forward before relying on it.
+- **Dump signature (decisive):** at deadlock only **6 goroutines** — the timeout alarm, the test
+  goroutine, and **4 parked in `skimSelect`** (1 top-level `CloseAndSkimAll` + **3 executor bodies
+  driving nested `SkimAll`s**). **ZERO scheduler (`worker.Pool`) workers, ZERO `PushBack`-blocked,
+  ZERO mutex/semacquire.** = the skill's "all workers exited, only SkimAll parked → lost
+  wakeup / stuck reference" class, NOT a lock cycle.
+- **Diagnosis (hypothesis, unconfirmed):** before the wiring, bodies ran *on* scheduler workers,
+  keeping the scheduler pool warm while work was in flight. Now bodies run on the executor, so the
+  scheduler scales to zero aggressively. A nested sub-wave's work then needs a scheduler to admit
+  it (and an executor to run it), but the scheduler is gone and the re-spawn/re-wake is missed — OR
+  a sub-wave reached Done and the parked `SkimAll` missed the Done wake. The wiring moved
+  body-completion bookkeeping (`Free`→`DecrementWork`→Done/skim-wake) from the scheduler worker
+  onto the executor goroutine — a candidate lost-wake site to scrutinize.
+- **Repro is HARD (Heisenbug):** only reproduces under **`-race` at DEFAULT config (~1/25)**. Every
+  bias tried SUPPRESSED it: zero `SelfTime` 0/60 (no-race) + 0/40 (-race); 2ms idle-timeout 0/40
+  (no-race) + 0/30 (-race); `-race`+`-trace` 0/60 (trace overhead masks it). So it's timing-tight
+  and tied to the default 1s idle + µs–ms SelfTime. The captured-trace approach failed (trace masks
+  it); needs a different tactic — e.g. add invalid-state panics / targeted `trace.Logf` at the
+  scheduler spawn-on-demand and the wave Done/skim-wake, or an "op started-vs-completed" diff to
+  prove whether work is pending-unadmitted (lost spawn) vs. done-but-unwoken (lost Done-wake).
+- **Next:** confirm pending-work-vs-lost-wake (started/completed diff on a fresh dump), then fix the
+  missed scheduler spawn or the missed Done/skim wake. Fix likely lands with/near the scheduler
+  cutover (the execpool demand-counter model is more robust against lost spawns than worker.Pool's
+  TrySpawn). See `internal/cmd/fmttrace` + the `sim-trace-debugging` skill.
+
+
 **►►► C2 IN PROGRESS — `execpool.Pool[W]` FOUNDATION LANDED; SCHEDULER (workq.Scheduler)
 NEXT (Phase 2b, 2026-06-28).** The pool-split is being built bottom-up: one shared
 goroutine-pool foundation, two pools on it (executor + scheduler), then the live cutover.

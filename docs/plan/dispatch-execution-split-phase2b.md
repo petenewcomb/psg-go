@@ -464,6 +464,239 @@ is largely absorbed into C1; what remains for a later pass is any residual
 follow-up: the `Notifier` single-wake already wakes exactly one consumer with renotify
 conservation — no thundering herd.)
 
+## C2 implementation mapping (the pool-split cutover)
+
+The concrete wiring, grounded in the current live code (2026-06-28, post-C1/B). Mirrors the
+C1 mapping above. **The whole split reduces to redirecting the two body-running posts onto
+an executor pool; the admission chain, gate, and governor already sit on the scheduler side
+(C1).** Two structural wrinkles the high-level model glosses must be handled (below).
+
+### The seam: exactly two `defaultPool.Post` calls run user bodies
+
+`defaultPool.Post` has only two live callsites, and both hand a *body* work back to the pool
+after admission:
+
+| Callsite | Body work posted | Op |
+| --- | --- | --- |
+| `taskPostWork.Execute` (`wave.go:826`) | `wk.task` (`*taskWork` → user `Handle`) | Launcher / task |
+| `funnelPostWork.Execute` (`funnel.go:773`) | `wk.work` (`funnelWork[T]` → `Accumulate`) | Funnel intake |
+
+**C2 redirects both to `executorPool.PushBack(ctx, body)`** (the blocking unbuffered
+handoff, block-as-demand). Everything else stays put:
+
+- **Admission chain** — `launcherScatterWork` → `limiterScatterWork` (the task gate) →
+  `taskPostWork` (and the funnel equivalent) — keeps running on `defaultPool` (now **the
+  scheduler pool**) plus inline at top-level via `ExecuteNowOrQueue`. The **gate**
+  (`gateAcquire`, `permithandle.go:135`) and the **governor**
+  (`launcherScatterWork.Execute` → `wv.governor.Execute`, `launcher.go:375`) are already on
+  this admission side from C1. No move needed.
+- **Skim** — `skimPostWork.Execute` (`wave.go:597`) posts to the **per-wave `skimQueue`**
+  (`workq.Pending`), not `defaultPool`; skim handlers run on the *drive* goroutine
+  (`Skim`/`SkimAll` caller). Drain, not intake — unchanged by C2.
+- **Funnel scheduled flush** — `funnelInstance` rides `defaultPool`'s scheduled tier
+  (`ClaimForFlush`/`ForceFresh`/`Reschedule`, `funnel.go:323/328/492/500`). Drain on the
+  scheduler. **Wrinkle 2 (below).**
+
+### What a body needs on the executor — minimal, the design risk is closed
+
+`taskWork.Execute` (`wave.go:147`) and `funnelWork.executeInner` (`funnel.go:699`) use their
+`ex workq.Execution` **only for `ex.Starting()`**, plus `workerEnvFromContext(ctx)` to stamp
+the worker's `E` onto `bodyMeta.executionEnvironment`. Everything heavier on `ex`
+(`ShouldBlockOrPostpone`, `AddToListeners`, `Blocking`, `governor.Execute`) lives in the
+*admission* chain, which stays on the scheduler. So an executor runs bodies with:
+
+1. **A worker `*workerExEnv` (`E`)** — reuse `newWorkerState` (`pool.go:81`) verbatim. A
+   nested `op.Submit` from inside a body routes through
+   `workerExEnv.ExecuteNowOrQueue` → `defaultPool.ExecuteNowOrQueue` (`pool.go:65`) = the
+   **scheduler intake** (the buffered body→scheduler path the model mandates). This already
+   works — the executor's `E` is the same type, so nested submit lands on the scheduler with
+   zero new wiring.
+2. **No `Execution` at all — the handoff carries an Execution-free runnable.** `Starting()`
+   is the *scheduler-side* commit/postpone protocol — a body calls it to confirm it is
+   running (vs. postponing), and the `Accepted` controller reads `ex.Started()` to
+   consume-vs-requeue (`execution.go:51`, `work.go:12`). The executor has no such decision (a
+   body reaches it only post-admission, so it always runs) and never reads `Started()`. Since
+   `ex.Starting()` is the *sole* `Execution` dependency in both run paths (every other `ex.*`
+   is admission-side: the funnel gate, skim post, and the scheduler-resident flush
+   `funnelInstance`), the executor-bound body **sheds `Execution` entirely** rather than be
+   fed a stub. The handoff payload is a minimal interface:
+
+   ```go
+   type executorBody interface {
+       run(ee *workerExEnv) // void, NO ctx: the body's ctx (bodyCtx) is baked into the work;
+                            //   ee is the sole per-run input. At C2c run also defer-self-Frees.
+   }
+   // Handoff[executorBody] — no workq.Execution, no Free, no ctx, ever crosses the handoff
+   ```
+
+   **`run` takes no ctx.** The body already runs under its **baked-in** `wk.bodyCtx` (borrowed
+   at dispatch). Today the `ctx` param of `taskWork.Execute`/`funnelWork.executeInner` is used
+   for *one* thing — `workerEnvFromContext(ctx)` — because the scheduler smuggles `E` on the
+   worker ctx under `workerEnvKey` (the `workq.Work.Execute(ctx, ex)` signature has no slot for
+   it, `pool.go:69`). On the executor the loop *has* `E` in hand (the `WorkerLoop` `state`), so
+   it passes it directly: `run(ee)` does `wk.bodyMeta.executionEnvironment = ee` then calls the
+   already-Execution-free inner body (`boundTask.Execute(bodyCtx, group, completedFn)` /
+   `Funnel(bodyCtx)`). This **decouples the body from the worker ctx entirely** (its lifetime
+   is purely its submit ctx) and **drops the `workerEnvKey` `ctx.Value` walk** on the executor
+   hot path. (`workerEnvKey` survives only for the scheduler-resident flush `funnelInstance`.)
+
+   So the executor loop is just `body.run(ee)` — it never touches `Execution`, `Starting`,
+   `Free`, *or* a ctx for the body. `Free` stays a method (the producer's abandon path —
+   `taskPostWork.Free` → `wk.task.Free()` at `wave.go:835` — still frees a body never handed
+   off); it is simply not in the executor's contract. **The self-`Free` fold lands at C2c, not
+   C2a:** while the work is still controller-driven (C2a), the `Accepted` controller `Free`s it
+   after `Execute`, so a self-`Free` then would double-free. At the flip (C2c) the executor
+   becomes sole owner, so `run` gains `defer wk.Free()` and `Execute` is deleted. Exactly-once
+   `Free` holds by the existing ownership transfer (`if posted { wk.task = nil }`,
+   `wave.go:829`): handoff succeeds → executor owns → `run`'s defer frees; handoff fails
+   (cancel) → producer owns → `Free`s. Never both. The body may block for its whole runtime
+   inside `run`, which executes synchronously within `PopFront`'s process callback — so "one
+   executor runs one body to completion, then loops to `PopFront`" holds, `Free`-timing
+   included. A closure payload (`Handoff[func()]`) would read thinner but allocates per
+   dispatch; the single-method interface on the pooled work keeps it alloc-free (omnipool
+   discipline). WORK-SECURE is driven by the loop the instant `PopFront` delivers a body, not
+   by any body call. `funnelInstance` (the scheduled flush) stays controller-driven on the
+   scheduler and keeps its `Starting()` — it is drain, never handed off.
+
+### New pieces to build
+
+1. **Executor pool** = `worker.Core[*workerExEnv]` (from B) + `rdvq.Handoff[executorBody]`
+   (from B) + a `PopFront → run` loop (the pluggable `WorkerLoop`):
+   ```
+   loop(ctx, ee, releaseSpawn, stop):
+     ib := handoff.BorrowInbox()
+     for {
+       clean, err := handoff.PopFront(idleOrStop(ctx, stop), ib, func(body executorBody) {
+         body.run(ee)              // Execution-free, ctx-free; runs to completion + self-Frees (defer)
+       })
+       if err != nil { return }    // idle-exit or definitive stop
+       // re-pass ib (clean or not) per Handoff's contract
+     }
+   ```
+   - **Idle-exit is net-new here.** `Handoff.PopFront` only selects on `ctx`/inbox; it has no
+     `WithIdleExit`. The executor loop must wrap the pop in an idle-timeout + `stop` select
+     (return `ErrEndOfWork` on the timer) — the one bit of `workq.Worker` machinery the
+     executor doesn't inherit. (Decision A below.)
+2. **Block-as-demand + the executor spawn model — CAPPED, mirrors `worker.Core` (LANDED in
+   C2b, `internal/execpool`).** `PushBack`'s `selectFn` fires `TrySpawn` on every park (the
+   `Handoff` itself stays pure — demand lives in the producer's `selectFn`, not a `Handoff`
+   field). This is **the** latency win: the producer parks holding the body, an executor
+   spawns and takes it directly — no buffer dwell.
+
+   **The cap is load-bearing and INDEPENDENT of backpressure** (an earlier note here claimed
+   "uncapped" — wrong, reverted). Goroutine spin-up has real latency, so committing a burst at
+   once (a) steals CPU from in-flight work, (b) delays the very pickup it is spawning for, and
+   (c) leaves a glut of parked goroutines — because during spin-up existing executors finish
+   and become ready to absorb the demand. So spawning is `worker.Core`'s **capped ramp**:
+   `spawnConcurrencyLimit` (=1) bounds simultaneous spin-ups, and a freshly *established*
+   executor extends the chain only while demand persists. Backpressure is already applied
+   upstream (the scheduler admits under permits/governor *before* the handoff), so the cap is
+   purely about spawn cost, not throttling admitted work.
+
+   The chain signal needs **no `Handoff` change** and no `Notify`-result plumbing: an executor
+   holds its spawn slot from spawn until its first `PopFrontFunc` resolves, then
+   `releaseSpawn(extendChain)` once, with **`extendChain = ok`** (received a task ⟹ demand was
+   present ⟹ spawn a successor to check for more; idled/stopped ⟹ end the chain). Keying on
+   `ok` (not the select case) keeps an orphan-recovered task counted as established-with-demand.
+   Holding the slot across the first park is deliberate and *correct*: a parked, not-yet-
+   established executor is standby capacity (a later sender's direct handoff finds its inbox),
+   so the cap should suppress new spawns while it waits. Validated: `TestPool_CapBoundsSpawns`
+   (500 instant tasks → <50 spawns, no glut) + `-race`.
+3. **`executorBody` interface + `run` extraction** — extract `run(ee *workerExEnv)` from
+   `taskWork.Execute` / `funnelWork.executeInner` (the body minus `ex.Starting()`, taking `E`
+   directly instead of via `workerEnvFromContext(ctx)`); leave `Execute(ctx, ex)` as
+   `ex.Starting(); wk.run(workerEnvFromContext(ctx))` during the transition (pure refactor,
+   green now; controller still `Free`s — no self-`Free` yet). At the seam flip (C2c),
+   `taskWork`/`funnelWork` stop flowing through the controller, so `run` gains `defer
+   wk.Free()` and the now-dead `Execute(ctx, ex)` is deleted (gut-before-removing). No
+   `Execution` stub, and no worker ctx for the body, anywhere on the executor.
+4. **Lifecycle + teardown wiring** (`pool.go`): add a package-level `executorPool`. The
+   two `Post` seams call `executorPool.PushBack`. `streampool.Wait()` (`pool.go:40`) must
+   reap **both** pools (scheduler join, then executor join — order TBD vs in-flight bodies).
+   `Acquire`/`Release` refcounting: bodies only reach the executor *via* the scheduler, so
+   the executor can ref off the same Wave lifecycle, or be kept warm independently.
+
+### Wrinkle 1 — the funnel gate is on the body, not the admission chain (must hoist)
+
+Unlike the task path (gate in `limiterScatterWork.Execute`, a *scatter-work* before
+`taskPostWork`), **the funnel gates *inside* `funnelWork.Execute`** (`funnel.go:687`,
+`gateAcquire` then `executeInner`). If `funnelWork` runs on the executor, the permit gate
+(postpone / listener registration / potential help) would run on the **executor**, not the
+scheduler — violating "schedulers own permits, executors only run bodies." **C2 must hoist
+the funnel gate onto the scheduler-side admission** (a `limiterScatterWork`-equivalent for
+funnel, or fold it into `funnelPostWork.Execute` *before* the handoff), leaving the executor
+to run only `executeInner`. This makes task and funnel admission symmetric — an
+"upgrade-the-foundation, wrestle-the-seam-once" step that should land as a green refactor
+*before* (or as the first move of) the redirect.
+
+### Wrinkle 2 — a blocking scheduled flush would pin a scheduler
+
+A deadline-fired funnel flush (`funnelInstance`, `ScheduledWork`) runs the user `FlushFn`
+(may block) on a `defaultPool` worker today. After the split that worker is a **scheduler**,
+and a blocking flush there violates always-live-dispatcher. Options: (a) accept for C2 —
+flushes are comparatively rare and this is drain the model defers to C3; (b) route the
+scheduled-flush *execution* through the executor handoff too (the scheduler claims the
+deadline, then hands the flush body off). **Lean (a)** for the C2 cut, flag explicitly, and
+revisit in C3 (drain limiting) where flush already gets its own forest treatment. (Skim
+handlers do *not* have this problem — they run on the user's drive goroutine, never a
+scheduler.)
+
+### The drive alternation lands on the executor (unchanged mechanism)
+
+A body that drives a sub-wave (`Skim`/`SkimAll`) runs the coarse per-drive
+suspend/reclaim bracket (`suspendHeldPermit` / `heldPermit.reclaim`, `permithandle.go`)
+**on the executor goroutine** — exactly where the blocking happens. This is already how C1
+wrote it (per-drive-call bracket); the split just means "the body's goroutine" is now an
+executor rather than a shared-pool worker. No change to the bracket logic; verify the
+reclaim's `wv.block` help-drain still reaches the right wave from an executor context.
+
+### Open decisions — RESOLVED (2026-06-28 design pass)
+
+- **A. Executor idle-exit. SETTLED.** Thread a *reusable* idle deadline into the inbox-only
+  pop select (`basicInboxOnlyPopSelect` gains an idle case → distinguishable "idled out" →
+  loop exits = scale-to-zero). The executor loop owns one `time.Timer`, reset before each
+  park, so "busy" time inside `run` never counts as idle (timer armed only while parked).
+  Stop is already free — `workerCtx` is `poolCtx`-derived and `PopFront` watches `ctx.Done()`.
+  One small `rdvq` addition; everything else is in the loop. Reuses `workerIdleTimeout`.
+- **B. Scheduled flush on the scheduler.** Accept the blocking-flush-pins-a-scheduler edge
+  for C2 (revisit in C3), or offload flush execution to the executor now. *Lean: accept,
+  flag.*
+- **C. Funnel gate hoist (Wrinkle 1).** Land it as a standalone green refactor first
+  (symmetric task/funnel admission), then do the redirect. *Lean: yes, separate checkpoint.*
+- **D. Executor lifecycle/teardown. SETTLED.** No new refcount machinery: neither pool is
+  wave-refcounted today (the `pool.go:19` Wave `Acquire`/`Release` SEAM is unlanded; `Wait`
+  is the quiescent-teardown call — joining worker goroutines *is* the "wait for in-flight",
+  since a worker doesn't exit until its current body returns). `streampool.Wait()` becomes
+  `defaultPool.Wait(); executorPool.Wait(); ctxpool.Clear()`. Bodies are strictly downstream
+  of scheduler admission, so executor-quiesce is implied by scheduler-quiesce — ordering is
+  automatically safe, and if the Wave→pool ref seam later lands the executor refs the same way.
+
+### Migration sub-sequence (each a green checkpoint)
+
+1. **C2a — two independent green refactors, single pool, no behavior change:**
+   - **Hoist the funnel gate** to scheduler-side admission (Wrinkle 1); task/funnel
+     admission symmetric.
+   - **Extract `run(ee *workerExEnv)`** from `taskWork`/`funnelWork` (body minus
+     `ex.Starting()`, `E` passed directly); `Execute(ctx, ex)` becomes `ex.Starting();
+     wk.run(workerEnvFromContext(ctx))`. No self-`Free` yet (controller still frees).
+
+   *Gate: full suite + `-race` + sim.*
+2. **C2b — the executor pool. ✅ DONE (2026-06-28).** Landed as a standalone fork
+   `internal/execpool` (not `worker.Core` reuse — a clean `Pool[E]` + `Task[E]{ Run(E) }`
+   surface), preceded by the `Handoff` `*Func` refactor (`9564a75`): `PushBackFunc`/
+   `PopFrontFunc` with the caller's `selectFn` as the park/compose seam, internal inbox
+   borrow/reclaim, ctx-only conveniences. `execpool` (`7abc8d4`) = `rdvq.Handoff` + a fixed
+   PopFront→`Task.Run` loop + the capped block-as-demand spawn model above + idle-exit (reused
+   timer in the receive `selectFn`) + refcount/`Wait` lifecycle forked from `worker.Core`.
+   `Task.Run(E)` takes the env directly (no `workerEnvKey` ctx-smuggling). Isolated, unwired.
+   *Gate MET: execpool full suite + `-race` ×5 + golangci 0; `Handoff` `-race` ×3 + golangci 0.*
+3. **C2c — flip the two `Post` seams** to `executorPool.PushBack`; the executor calls
+   `body.run(ee)`; `run` gains `defer wk.Free()` and the now-dead `taskWork`/`funnelWork`
+   `Execute(ctx, ex)` is deleted (sole owner is the executor — no double-free); wire
+   `streampool.Wait()` to reap both pools. *Gate: full suite + `-race` + `TestBySimulation`
+   reliably green + the latency/alloc benchmarks (real methodology).* The architecture+latency
+   milestone.
+
 ## Note: the inbox stack is not lock-free
 
 `inboxStack` (`internal/rdvq/inboxonly.go:259`) is a `sync.Mutex`-protected slice with an

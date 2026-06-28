@@ -64,8 +64,7 @@ suite + `-race` + lint (golangci 0 issues) + `internal/permits` rapid/race.
   `close(doneChan)` so cache teardown completes before a re-arm can race it.
 - **Deferred to C4 / not yet done:** the `applicant` sizing (`Processor`/`Value`/`Err`)
   was removed (re-derive natively when weighted resources land); multi-limiter still panics
-  at construction (`opConfig.singleLimiter`); drain limiting (C3) untouched. **NEXT = B**
-  (dispatch infra) or **C2** (pool split) per the plan.
+  at construction (`opConfig.singleLimiter`); drain limiting (C3) untouched.
 
 **►►► PERMIT CORE: HYBRID (LOCK-FREE HOT PATH, LOCKED FOREST) + WAIT/WAKE —
 `internal/permits` (Phase 2a, 2026-06-26).** The concurrent core is a hybrid: the hot
@@ -468,29 +467,39 @@ lives in **`docs/decisions/development-history.md`**. This file keeps current st
 only. (Relative "above"/"below" cross-references in the sections below that point into
 that journal now resolve in the history doc.)
 
-### Next session pickup (in rough priority order)
+### Next session pickup
 
-1. **Pool / workq consolidation** — see "Pool consolidation — foundational
-   analysis (2026-06-06)" above. Checkpoint 1 progress: **1a, 1b-i, 1b-ii,
-   rename, and 1c-i (per-instance barrier ref) are DONE** (committed). 1c-ii
-   foundation (`6df4218`) + `delayUntil→at`/`timed→scheduled` rename (`2759116`)
-   committed. **NEXT = finish 1c-ii per the "1c-ii CONSOLIDATED DESIGN
-   (2026-06-07)" section above** — the design that fixes the **pre-existing
-   deadlock** (bisected to `63a4d57`, a test-only sim commit) via three
-   orthogonal concerns: heap-position under `delayq.mu`; atomic `admitted`
-   (+ `Schedule(w,0)` indefinite, reversing the zero-`at` panic); per-instance
-   lifetime ref with op-liveness-dropped-at-flush + `funnelOp.unref` draining
-   `instanceQueue`; then live-set/`forceAll`; then `accumulate()`/`Dispatch`
-   renames. **CAUTION:** the full `-race` sim was never reliably green
-   (intermittent pre-existing hang); it becomes the gate only after the
-   deadlock fix. Uncommitted WIP in the tree (`ScheduledWorkItem` embed +
-   `flushAll` orphan-hang fix) folds into sub-steps 1 and 5.
-   After 1c: checkpoint 2 (delete funnel `maxConcurrency` → demand-driven) then
-   3/4/5.
-2. **Thread C completion** — Try* honoring non-zero non-Forever deadlines via bounded-wait. Falls out of the consolidation; pick up the `Forever` sentinel and `dispatch (bool, error)` foundation from `5dc49c7`.
-3. **psgwf legacy-name retirement** — `psgwf.GenericTaskRunner` and friends still use pre-rename vocabulary. Done as a stand-alone pass or rolled into a broader psgwf migration.
-4. **bench.txt regeneration + chartgen alignment** — re-run benchmarks under the new metric names (`funnelLimit` instead of `combinerLimit`), then update chartgen to parse the new names. Required before the legacy bench file can come back online for chart generation.
-5. **CombinerPool retirement** — once Pool consolidation lands, the CombinerPool→FunnelPool transitional name can go away. Stand-alone follow-up if not folded into the consolidation pass.
+**►►► NEXT = C2 — the pool-split cutover.** Phase 2b migration steps 0/C1/B are landed
+(commits `ae6339f`, `551f4e6`, `cfdb039`); the example fix is `565b3b6`. C2 is the big one
+and reshapes the live dispatch path. Full design in
+`docs/plan/dispatch-execution-split-phase2b.md` ("The pool model", "The queue model",
+mode mapping, governor placement, migration sequencing). Shape:
+- **Executor pool** = `worker.Core[E]` (from B) + an `rdvq.Handoff[T]` (from B) + a simple
+  `PopFront → Run` per-worker loop (no `workq.Worker`, no `TryPopFront`). Its demand is
+  **block-as-demand**: a scheduler's `Handoff.PushBack` that finds no parked executor parks
+  and triggers `Core.TrySpawn` — wire this `PushBack`-park→spawn hook on the `Handoff`
+  (deferred from B; B1 left `Handoff` pure).
+- **Scheduler pool** = the existing `worker.Pool` over `workq.Accepted`; per item:
+  non-blocking `permits.Cache.Acquire` + governor check, then **blocking `Handoff.PushBack`**
+  the admitted body to the executor; postpone on a permit miss. Top-level admission stays
+  inline on the driver (skim-retry / block-and-help).
+- **Gate:** full suite + `-race` + `TestBySimulation` + the **latency/alloc benchmarks**
+  with the REAL methodology (heavy-tailed blocking-I/O work, P99/max, swept P:D ratios —
+  see `[[feedback_bench_methodology]]` / BENCHMARKING.md), not a throughput microbench.
+- **Recommended:** map it first (like C1/B did) before touching code — it's the
+  architecture+latency milestone.
+
+**Deferred backlog (after / alongside C2):**
+- **C3 — drain limiting** (`WithLimits` on `NewSkimmer`, `WithFlushLimits` on `NewFunnel`);
+  needs the limited-drain model-check (parked holder whose drain needs a permit).
+- **C4 — residual cleanup**: thundering-herd wake efficiency (measurement-gated), any dead
+  `BlockBehavior`/`shouldBlock` plumbing once C2 reshapes dispatch.
+- **Multi-limiter** joint admission (currently panics at `opConfig.singleLimiter`); **weighted
+  resources** (re-derive the removed `applicant` sizing natively).
+- **Thread C** — `Try*` honoring non-zero non-Forever deadlines via bounded-wait
+  (`Forever` sentinel + `dispatch (bool, error)` foundation at `5dc49c7`).
+- **psgwf legacy-name retirement**; **bench.txt regeneration + chartgen alignment** (new
+  metric names, e.g. `funnelLimit`).
 
 ## Open issues
 

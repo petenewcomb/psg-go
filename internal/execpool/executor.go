@@ -44,16 +44,28 @@ func NewExecutor[E any](newState func() E) *Executor[E] {
 // The cap means a burst of producers does not spawn a goroutine glut; the chain ramps as
 // fast as executors actually pick work up.
 func (x *Executor[E]) PushBack(ctx context.Context, task Task[E]) error {
+	registered := false
+	defer func() {
+		if registered {
+			// The demand this PushBack registered is now met (delivered) or withdrawn (ctx
+			// cancelled) — either way the producer is no longer waiting.
+			x.pool.UnregisterUnmetDemand()
+		}
+	}()
+
 	var err error
-	if x.handoff.PushBackFunc(task, func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+	delivered := x.handoff.PushBackFunc(task, func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
 		// selectFn runs only when no executor was waiting — i.e. the producer is about to
-		// park — so fire demand. TrySpawn is capped, so this is a kick the spawn chain ramps
-		// from, not a spawn-per-producer.
-		x.pool.TrySpawn()
+		// park. Register unmet demand once (on the first park) so the pool spawns toward it.
+		if !registered {
+			registered = true
+			x.pool.RegisterUnmetDemand()
+		}
 		var rf rdvq.RenotifyFunc
 		rf, err = rdvq.BasicWaitSelect(ctx, waitCh)
 		return rf
-	}) {
+	})
+	if delivered {
 		return nil
 	}
 	return err

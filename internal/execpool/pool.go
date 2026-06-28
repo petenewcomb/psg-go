@@ -10,16 +10,19 @@
 // [Executor] here (its Worker waits on an rdvq.Handoff) and the scheduler (its Worker waits
 // on a workq.Queue — built on this same Pool in package workq).
 //
-// Spawning is demand-driven and CAPPED. A demand source calls [Pool.TrySpawn] (the
-// Executor's is block-as-demand: a PushBack that finds no waiting worker); a
-// spawn-concurrency cap bounds simultaneous spin-ups, and a freshly established worker
-// extends the spawn chain only while demand persists. The cap matters independently of any
-// upstream backpressure: goroutine spin-up has real latency, so committing a burst at once
-// steals CPU from in-flight work, delays the very pickup it is spawning for, and leaves a
-// glut of parked goroutines — because during spin-up existing workers finish and become
-// ready to absorb the demand. A parked, not-yet-established worker is itself standby
-// capacity, so holding the spawn slot until its first Wait returns work is what lets that
-// capacity soak up demand before more goroutines are committed.
+// Spawning is demand-driven and CAPPED. A demand source registers unmet demand via
+// [Pool.RegisterUnmetDemand] when a work item can't be placed on a waiting worker (the
+// Executor's is block-as-demand: a PushBack that found no waiting executor) and
+// [Pool.UnregisterUnmetDemand] when that item is taken or withdrawn. The pool spawns while
+// unmet demand exceeds in-flight spin-ups, bounded by a spawn-concurrency cap; each worker
+// that establishes (its first Wait returns) frees a spin-up slot and re-evaluates, so the
+// ramp converges exactly on outstanding demand — no over-shoot. The cap matters
+// independently of any upstream backpressure: goroutine spin-up has real latency, so
+// committing a burst at once steals CPU from in-flight work, delays the very pickup it is
+// spawning for, and leaves a glut of parked goroutines — because during spin-up existing
+// workers finish and become ready to absorb the demand. A parked, not-yet-established worker
+// is itself standby capacity, so holding the spawn slot until its first Wait returns is what
+// lets that capacity soak up demand before more goroutines are committed.
 package execpool
 
 import (
@@ -62,6 +65,11 @@ type Pool[W Worker] struct {
 	newWorker func() W
 
 	workers sync.WaitGroup // every live worker goroutine
+
+	// demand counts registered units of unmet demand — work that couldn't be placed on a
+	// waiting worker and is awaiting one. The pool spawns toward it; sources balance
+	// Register/UnregisterUnmetDemand.
+	demand wavestate.InFlightCounter
 
 	// spawning counts workers between spawn and the result of their first Wait (a
 	// de-stampede that bounds simultaneous spin-ups, not the total worker count).
@@ -157,18 +165,35 @@ func (p *Pool[W]) rearmStop() {
 	}
 }
 
-// ── Spawning (capped + chain) ─────────────────────────────────────────────────
+// ── Spawning (capped, demand-driven) ──────────────────────────────────────────
 
-// TrySpawn fires demand: it spawns a worker unless the spawn-concurrency cap is already
-// saturated (a spin-up is in flight). It is called by the concrete pool's demand source
-// (the Executor's block-as-demand) and by the chain extension in runWorker; the cap
-// de-stampedes both so simultaneous spin-ups stay bounded while existing/parked workers
-// absorb demand.
-func (p *Pool[W]) TrySpawn() {
-	if !p.spawning.IncrementIfUnder(spawnConcurrencyLimit) {
-		return // a spin-up is already in flight; the chain or a later demand ramps further
+// RegisterUnmetDemand records one work item that couldn't be placed on a waiting worker and
+// spawns toward it (capped). Each call must be balanced by exactly one UnregisterUnmetDemand
+// when the item is taken by a worker or withdrawn (e.g. the producer's ctx is cancelled).
+func (p *Pool[W]) RegisterUnmetDemand() {
+	p.demand.Increment()
+	p.maybeSpawn()
+}
+
+// UnregisterUnmetDemand records that a unit of unmet demand was met (a worker took it) or
+// withdrawn. It does not stop an in-flight spin-up — a spawned worker that finds no work
+// idles out — it just keeps the demand count honest so the ramp stops at the right size.
+func (p *Pool[W]) UnregisterUnmetDemand() {
+	p.demand.Decrement()
+}
+
+// maybeSpawn spawns one worker if there is unmet demand and the spawn-concurrency cap has a
+// free slot. It is called on every demand event (RegisterUnmetDemand) and whenever a worker
+// frees a slot by establishing (runWorker), so the pool ramps one spin-up at a time toward
+// outstanding demand and no further. (A racy spawn for demand that just vanished simply
+// idles out — harmless.)
+func (p *Pool[W]) maybeSpawn() {
+	if p.demand.IsZero() {
+		return // no unmet demand
 	}
-	p.spawnWorker()
+	if p.spawning.IncrementIfUnder(spawnConcurrencyLimit) {
+		p.spawnWorker()
+	}
 }
 
 func (p *Pool[W]) spawnWorker() {
@@ -197,22 +222,20 @@ func (p *Pool[W]) runWorker(poolCtx context.Context) {
 	defer ctxpool.Free(ctx)
 
 	// Hold the spawn-concurrency slot from spawn until this worker establishes (its first
-	// Wait returns work) or settles (idles/stops). releaseSpawn frees the slot exactly once
-	// (latched); on establishment WITH work it extends the chain — spawning a successor to
-	// check for further demand. Holding the slot across the first Wait is deliberate: a
-	// parked, not-yet-established worker is standby capacity, so the cap should suppress new
-	// spawns while it waits.
+	// Wait returns) or settles. establish frees the slot exactly once (latched) and
+	// re-evaluates demand — spawning a successor only if unmet demand still exceeds in-flight
+	// spin-ups. Holding the slot across the first Wait is deliberate: a parked,
+	// not-yet-established worker is standby capacity, so the cap should suppress new spawns
+	// while it waits.
 	spawning := true
-	releaseSpawn := func(extendChain bool) {
+	establish := func() {
 		if spawning {
 			spawning = false
 			p.spawning.Decrement()
-			if extendChain {
-				p.TrySpawn()
-			}
+			p.maybeSpawn()
 		}
 	}
-	defer releaseSpawn(false) // safety: settle the slot if we exit before establishing
+	defer establish() // safety: settle the slot if we exit before establishing
 
 	// One pooled idle timer (no per-Wait alloc). It is armed before each Wait and counts
 	// only while the worker is idle; a long Work leaves it to fire into the channel, drained
@@ -224,10 +247,10 @@ func (p *Pool[W]) runWorker(poolCtx context.Context) {
 		timerp.Reset(idle, workerIdleTimeout)
 		ok := w.Wait(ctx, idle.C)
 		if first {
-			// The first Wait establishes the worker and decides the chain: work means
-			// demand was present, so extend (spawn a successor to check for more); idle/stop
-			// means none, so end the chain.
-			releaseSpawn(ok)
+			// The first Wait establishes the worker: free the spin-up slot and ramp toward
+			// any remaining unmet demand. (Whether this Wait got work is irrelevant to the
+			// ramp now — the demand counter drives it.)
+			establish()
 		}
 		if !ok {
 			break // idled out or stopped

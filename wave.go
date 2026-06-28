@@ -139,20 +139,30 @@ func (wk *taskWork) Reset() {
 	wk.bodyMeta = nil
 }
 
-// Execute is the workq.Work entry run by a global-pool worker. The body context
-// (bodyCtx) was borrowed at dispatch; this stamps the running worker's E onto the
-// body meta (the only piece not known at dispatch) and runs the task body under
-// bodyCtx. The held limiter request was stamped at borrow. Free returns the body
-// context.
+// Execute is the workq.Work entry run by a global-pool worker (the scheduler-side
+// controller path). It confirms execution (ex.Starting) and delegates to run, the
+// Execution-free body. When dispatch moves to the executor pool (C2c), the executor calls
+// run directly with the worker E and Execute is dropped — the body never needs Execution.
 func (wk *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "taskWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	ex.Starting()
-	wk.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
+	//nolint:contextcheck // run uses ctx only to fetch the worker E; the body runs under bodyCtx
+	wk.run(workerEnvFromContext(ctx))
+	return nil
+}
+
+// run executes the task body against the per-worker environment ee. The body context
+// (bodyCtx) was borrowed at dispatch; run stamps ee — the only piece not known until a
+// worker picks the task up — onto the body meta and runs the body under bodyCtx. The held
+// limiter request was stamped at borrow. It takes ee directly (not via the worker ctx), so
+// it carries no Execution and no ctx dependency — the shape the executor pool's Task.Run
+// needs.
+func (wk *taskWork) run(ee *workerExEnv) {
+	wk.bodyMeta.executionEnvironment = ee
 	//nolint:contextcheck // the body runs under the borrowed body ctx by design
 	wk.task.Execute(wk.bodyCtx, wk.Group(), wk.completedFn)
-	return nil
 }
 
 //nolint:contextcheck // background context used only for tracing

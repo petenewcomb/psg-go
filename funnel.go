@@ -698,16 +698,23 @@ func (wk *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error 
 
 func (wk *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	// The body context was borrowed at dispatch (carrying held = h already); stamp the
-	// one piece only known on the worker — this worker's E — and push the funnel's
-	// group so nil-wave dispatches from inside the Accumulate / Flush body resolve to
-	// it. Run the body under the borrowed ctx.
-	wk.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
+	//nolint:contextcheck // run uses ctx only to fetch the worker E; the body runs under bodyCtx
+	wk.run(workerEnvFromContext(ctx))
+	return nil
+}
+
+// run executes the funnel body against the per-worker environment ee. The body context was
+// borrowed at dispatch (carrying held = h already); run stamps ee — the one piece only
+// known once a worker picks the work up — onto the body meta and pushes the funnel's group
+// so nil-wave dispatches from inside the Accumulate / Flush body resolve to it, then runs
+// the body under the borrowed ctx. It takes ee directly (no Execution, no ctx dependency) —
+// the shape the executor pool's Task.Run needs (C2c).
+func (wk *funnelWork[T]) run(ee *workerExEnv) {
+	wk.bodyMeta.executionEnvironment = ee
 	wk.bodyMeta.PushGroup(wk.Group())
 	defer wk.bodyMeta.PopGroup()
 	//nolint:contextcheck // the body runs under the borrowed body ctx by design
 	wk.Funnel(wk.bodyCtx)
-	return nil
 }
 
 func (wk *funnelWork[T]) Free() {

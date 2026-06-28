@@ -272,14 +272,15 @@ pool split lands on a known-good base.
    omnipool; add model-check coverage for **limited drain** + **multi-limiter joint
    admission**; fix `permit-core.md` (strike the per-handler alternation + the bound's "or a
    skim handler"). *Gate: permits rapid + `-race`.*
-1. **C1 — permit core into the live limiter, single pool (gut, don't remove).** Wave gains
-   per-limiter `C_W^L` (lazy mkdir-p at first L-admission, `ReleaseRef` at wave-Done);
-   `ctxMeta.heldRequest` → a `Permit`; `acquireOrWait` → `Cache.Acquire` (the modes);
-   `suspendForEpisode`/`reclaimRequest` → coarse per-drive `Release`/`AcquireWait`. Keep the
-   call sites and the single `worker.Pool` (admission still inline in
-   `limiterScatterWork.Execute`); gut the eager `requestState`/`suspend`/`tryResume` to
-   vestigial delegators — don't delete. *Gate: full suite + `-race` + **`TestBySimulation`
-   reliably green** — the deadlock-fix milestone.*
+1. **C1 — permit core into the live limiter, single pool. ✅ DONE (2026-06-27).** Wave gains
+   per-limiter `C_W^L` (lazy mkdir-p along the driving chain, `ReleaseRef` at wave-Done via
+   a new `wavestate.onDone` hook); `ctxMeta.heldRequest` → `held *heldPermit`; `acquireOrWait`
+   → the three-mode `gateAcquire`; `suspendForEpisode`/`reclaimRequest` → coarse per-drive
+   `suspendHeldPermit`/help-shaped `reclaim`. The eager machinery was **removed** (native
+   replacement — see "Removal happened IN C1"); `wv.block` retained, retargeted onto the
+   Pool's waiters. Lost-wakeup fixed via `Pool.WakeAll`-on-release. Single `worker.Pool`,
+   admission inline. *Gate MET: full suite + `-race` + `TestBySimulation` reliably green
+   (≥300 `-race` runs) + lint.*
 2. **B — dispatch infra** (independent of C1; can overlap). The new unbuffered rdvq
    primitive (`inboxOnlyQueue` + `inboxWaiters`, blocking `PushBack`, no `TryPopFront`);
    refactor `worker.Pool` into the generic lifecycle + pluggable per-worker loop. *Gate:
@@ -296,9 +297,167 @@ pool split lands on a known-good base.
    `WithFlushLimits` on `NewFunnel`; limited handlers/flushes acquire their own permits
    (forest bodies); default = free drain. *Gate: suite + `-race` + the model-check now
    exercising limited drain.*
-5. **C4 — strip the dead eager code.** Delete `requestState`/`suspend`/`tryResume`/
-   `reclaimRequest` residue + superseded block-and-help + vestigial `directRequest`.
-   Mechanical. *Gate: suite + `-race`.*
+5. **C4 — strip the dead eager code. ~Absorbed into C1.** The eager request machinery was
+   removed in C1 (native replacement); the `applicant` sizing went with it. What remains for
+   a later pass: the thundering-herd wake efficiency and any `BlockBehavior`/`shouldBlock`
+   plumbing once C2 reshapes dispatch. *Gate: suite + `-race`.*
+
+## C1 implementation mapping (live limiter → native permits)
+
+The concrete wiring from `limiter.go`'s eager path onto `internal/permits`. **Ratified in
+design discussion (2026-06-27):** replace the `request`/`limiterImpl`/`resource` interfaces
+with a **native** permits integration (no in-place reimplementation behind the old seam);
+go **straight to the forest** (no flat-topology intermediate); keep the **single
+`worker.Pool`** with admission inline (no pool split — that is C2).
+
+### Confirmed simplification: single limiter per op
+
+`opConfig.singleLimiter()` (`opoption.go:33`) **panics on >1 limiter**, so every op carries
+exactly one `Limiter`. C1 is strictly single-limiter; multi-limiter joint admission is a
+later concern (C3 / follow-up). This removes the whole partial-acquire / canonical-order
+axis from C1.
+
+### Type correspondence
+
+| Eager (`limiter.go`) | Native permit-core |
+| --- | --- |
+| `Limiter.impl` / `directScheduler{res, notify}` | one `*permits.Pool` per Limiter (+ a `permits.Resource`) |
+| `semaphoreResource` (atomic counter) | a `permits.Resource` impl — near-direct (`TryAcquire(n)`/`Release(n)`) |
+| `directScheduler.notify` (`workq.Notifier`) | `Pool.waiters` (`rdvq.Waiters`) — internal to `Acquire`/`AcquireWait` |
+| `request` handle (PENDING→HELD→SUSPENDED→POSTPONED→DONE) | a held `Permit` + the body's own cache `C_W^L` |
+| `ctxMeta.heldRequest request` | a held-permit handle `{pool, ownCache, permit}` (below) |
+| `currentHeldRequest()` walk | `currentHeldCache(pool)` walk (same `ctxMeta.parent` chain) |
+| `newRequest(applicant)` + the gate's `tryAcquire` | `C_W^L.Acquire()` (own → ancestor inherit → free → steal) |
+| `req.suspend()` (lend to resource) | `permit.Release()` to its backing cache (own or inherited ancestor) |
+| `reclaimRequest` (help-shaped loop) | `C_W^L.AcquireWait(ctx)` — **plain park, no help loop** |
+| `req.release()` / `freeRequest` | `permit.Release()` final; cache `ReleaseRef` at wave-Done |
+| *(no analog — flat)* | **the forest**: `C_W^L` parented per driving ancestry; inheritance |
+
+### The three load-bearing seams
+
+1. **Lifecycle owner: per-work handle → per-wave cache + transient permit.** Today one
+   `request` is *shared* by the gate and the body. Natively there is no per-admission object:
+   the gate does `C_W^L.Acquire()` yielding a `Permit` that must reach the body. The held
+   handle becomes `{pool, ownCache, permit}` where `ownCache` is `C_W^L` (reacquire up-walks
+   from it) and `permit.backing` is `ownCache` or an inherited ancestor. The gate stamps the
+   acquired `Permit` onto `bodyMeta` *after* acquire (eager stamped at borrow, pre-acquire).
+
+2. **The forest is net-new and is *the* deadlock fix.** Nothing eager parents one admission
+   to another. The fix needs `C_V^L.parent → … → C_W^L` so a parked driver that `Release`s to
+   `C_W^L` is *inherited* by its sub-wave's `C_V^L.Acquire()` up-walk. Requires per-Wave lazy
+   `C_W^L`, **mkdir-p of the ancestor chain** keyed on the driving `ctxMeta.parent` chain,
+   refcount edges, `ReleaseRef` at wave-Done.
+
+3. **The `workq.Notifier` wait surface is replaced, not bridged.** Eager postpone/block wait
+   on `req.notifier()` (`workq.Notifier`); permits parks on `rdvq.Waiters` inside
+   `AcquireWait`. Native integration drops `acquireOrWait` and routes each mode to permits
+   directly (below).
+
+### The native gate (three modes) — block-and-help RETAINED
+
+**Implementation note (revises the earlier "no help loop" sketch).** `acquireOrWait`,
+`reclaimRequest`, and the `request`/`directScheduler` machinery are removed, but the
+block-and-help primitive `wv.block` is **kept and retargeted** onto the permit Pool's
+waiters. The plan originally expected the forest's inheritance to let both the top-level
+gate and the mid-body reclaim be plain parks (a bounded `wv.skim` retry / `AcquireWait`).
+That is **wrong**: validated against `TestBySimulation`, two help requirements survive —
+
+- **Mid-body reclaim MUST stay help-shaped.** A plain-wait reclaim deadlocks under shared
+  limiters exactly as the eager `reclaimRequest` warned: the permit-holder the reclaimer
+  waits on can be blocked posting a result to the skim queue, and only the reclaimer's
+  help-drain consumes it. Inheritance fixes the *acquire* side (a sub-wave inherits a
+  parked parent's idle permit), not this *reclaim* side. So reclaim ports the eager
+  help-loop verbatim — help-drain `wv` while waiting, fall back to a plain park on
+  `ErrWaveDone` (help domain exhausted).
+- **Top-level gate is block-and-help, not bounded skim-retry.** A bounded `wv.skim` loop
+  blocks in `skim` waiting for *work* and never sees a *permit-free* wake (they arrive on
+  the Pool's waiters), so a top-level submit blocked on a contended limiter hangs even
+  after the permit frees. `wv.block` already integrates both — it waits on the given
+  waiters *while* help-draining — so the gate waits on `Pool.Waiters()` with `h.acquire`
+  as the confirm.
+
+So the three modes are: **nested/queued** → non-blocking `Acquire`, on miss register on
+`Pool.ListenersFor()` and re-check (manager postpone); **top-level** → block-and-help on
+`Pool.Waiters()`; **mid-body reclaim** → help-shaped loop on `Pool.Waiters()`. The
+suspend/reclaim bracket is **coarse, per drive call** (whole `SkimAll`).
+
+### Lost-wakeup: a freed permit needs renotify conservation, not a single bare wake
+
+A residual `-race` `TestBySimulation` hang during the cutover turned out to be a **lost
+wakeup**, not a permit-accounting bug (forcing unlimited permits made 120/120 `-race` runs
+pass; the hang is purely in the wait/wake). The cause was a regression *introduced* by the
+cutover: the Pool's wake was split into two bare `Listeners.Notify(nil)` +
+`Waiters.Notify(nil)` calls, dropping the **renotify conservation** the eager scheduler's
+single `rdvq.Notifier` provided. A freed permit can be claimed by any waiter (acquire is a
+forest-wide search), so waking *one* is correct — *provided* a consumer that cannot use the
+wake re-delivers it. A postponed manager registers its idempotent, shared controller
+listener, then re-checks and succeeds, leaving a **stale listener**; a bare `Notify(nil)`
+that wakes it re-drives work which doesn't consume the permit and reports the wake
+delivered, so a genuinely-waiting executor is never notified and a borrowable permit sits
+idle forever.
+
+The fix is to keep the Pool's wait/wake as a single `rdvq.Notifier` and wake with
+`notify.Notify(nil)` — which hands the woken consumer a **wrapped renotify**, so a consumer
+that can't use the wake (a worker re-driven for the wrong queue, a stale listener)
+re-delivers it down the chain (`controller.go` forwards a permit listener to its Accepted
+queue's waiters and re-fires the renotify when the postponed work wasn't executed) until a
+real waiter takes the permit. Single wake + conservation — no thundering herd. (The forest's
+inheritance does not eliminate the postpone+wake dependency: a sub-wave body gates *before*
+its parent enters the drive and lends, so it postpones and relies on the lend's wake.)
+`WakeAll` (NotifyAll both) is reserved for events that free *several* permits at once — a
+`destroy` returning held to the Resource, or a `SetMaxConcurrency` raise.
+
+### The held-permit handle
+
+Replaces `ctxMeta.heldRequest request`:
+
+```go
+type heldPermit struct {
+    pool     *permits.Pool   // which limiter (nil for unlimited ops)
+    ownCache *permits.Cache  // C_W^L — reacquire target (up-walks to inherit)
+    permit   permits.Permit  // current occupation; zero-value backing == not occupying
+}
+```
+
+`permit.backing == nil` *is* the suspended/not-yet-acquired state — so the suspend
+re-entrancy no-op (nested brackets) falls out: `suspend` Releases only if `backing != nil`;
+`reclaim` is `ownCache.AcquireWait`. No separate state enum.
+
+### `ensureCache` / mkdir-p
+
+A Wave lazily owns one `C_W^L` per distinct Pool used by ops dispatched into it (a
+`map[*permits.Pool]*permits.Cache`, guarded). At W's first admission for pool P:
+
+1. If `wv.cacheFor(P) != nil`, return it.
+2. Otherwise walk the **driving** `ctxMeta.parent` chain collecting the distinct ancestor
+   *waves*; find the nearest ancestor wave that already has a `C_^P` (or the Pool root if
+   none). mkdir-p a `C_^P` for **each** intermediate ancestor wave that lacks one (held=0
+   pass-through — *don't* skip, else concurrent re-parent), chained parent→child, then create
+   `C_W^P` as the deepest child. Refcount edges come free from `Pool.NewCache`/`Cache.NewChild`.
+
+The driving ancestry is the *same* chain `currentHeldRequest` walks today, so this is
+consistent with existing inheritance scoping (async worker borrows sever `parent`; the
+synchronous `ensureCtxMeta` derivations rebuild it for sub-wave drives).
+
+### Lifetime
+
+`C_W^L`'s self-ref drops at wave-Done (gated on the wave's own completion); descendant
+`NewChild` refs keep it alive until the subtree drains. Wire `ReleaseRef` into the wave
+drain (alongside the existing barrier/in-flight bookkeeping).
+
+### Removal happened IN C1 (revises the gut-don't-remove plan)
+
+The native replacement was decided (not a reimplementation behind the old seam), so the
+eager `request`/`directScheduler`/`directRequest`/`requestState`/`acquireOrWait`/
+`reclaimRequest`/`applicant`/`resource`-interface code had **zero callers** the moment the
+call sites flipped, and it would not even compile against the renamed `ctxMeta.held`. So C1
+**removed** it rather than leaving vestigial delegators — there was no seam left to wrestle.
+`NewSemaphore`/`SetMaxConcurrency` stay, re-pointed at the `permits.Pool` + the
+`semaphoreResource` (now a `permits.Resource`). `wv.block` and the `blockingWorkAdder`
+machinery are **kept** (retargeted onto the Pool's waiters — see the native gate). Net: C4
+is largely absorbed into C1; what remains for a later pass is the thundering-herd wake
+efficiency and any residual `BlockBehavior`/`shouldBlock` plumbing once C2 reshapes
+dispatch.
 
 ## Note: the inbox stack is not lock-free
 

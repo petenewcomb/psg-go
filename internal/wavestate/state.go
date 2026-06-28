@@ -41,16 +41,23 @@ type WaveState struct {
 	// wave wires it to an enqueue-only sweep that pushes flush work to the global pool.
 	// It must not block or run user code (it runs inside the work-completion path).
 	onFlushing func()
+
+	// onDone, if non-nil, is invoked exactly once on the Flushing→Done transition (the
+	// goroutine that drops the last reference). The wave wires it to releaseCaches —
+	// dropping its self-ref on each permit cache it created. Like onFlushing it runs
+	// inside the work-completion path: it must not block or run user code.
+	onDone func()
 }
 
 // Init initializes an uninitialized WaveState to the Open stage, and must be
 // called exactly once before any other methods (and again to re-arm a drained
 // state). An Init method is provided instead of a New function because WaveState
-// is expected to be an embedded field of Wave. onFlushing (may be nil) is invoked
-// on each Closed→Flushing transition with references outstanding; see the field.
+// is expected to be an embedded field of Wave. onFlushing and onDone (either may be
+// nil) are invoked on the Closed→Flushing and Flushing→Done transitions respectively;
+// see the fields.
 //
 //nolint:contextcheck // background context used only for tracing
-func (ws *WaveState) Init(onFlushing func()) {
+func (ws *WaveState) Init(onFlushing, onDone func()) {
 	traceRegion := "WaveState.Init"
 	trace.Logf(context.Background(), traceRegion,
 		"WaveState=%p, inFlightWork=%p, totalReferences=%p",
@@ -58,6 +65,7 @@ func (ws *WaveState) Init(onFlushing func()) {
 
 	ws.currentStage.Store(int32(stageOpen))
 	ws.onFlushing = onFlushing
+	ws.onDone = onDone
 	ws.doneChan = make(chan struct{})
 }
 
@@ -220,7 +228,14 @@ func (ws *WaveState) noMoreReferences() {
 		swapped = ws.currentStage.CompareAndSwap(int32(stageFlushing), int32(stageDone))
 	})
 	if swapped {
-		// Successfully changed from Flushing to Done
+		// Successfully changed from Flushing to Done. Run onDone (the cache teardown)
+		// BEFORE closing doneChan: the close releases a CloseAndSkimAll waiter, which may
+		// immediately re-arm the wave (initState → Init re-writes onDone and the substrate),
+		// racing both the onDone field read here and the teardown itself. Running it first
+		// keeps the whole Done transition strictly before any reuse.
+		if ws.onDone != nil {
+			ws.onDone()
+		}
 		trace.WithRegion(context.Background(), traceRegion+".close(ws.doneChan)", func() {
 			close(ws.doneChan)
 		})

@@ -116,12 +116,15 @@ type Pool struct {
 	resource Resource
 	roots    cacheList
 
-	// waiters parks executors blocked in AcquireWait; a permit freed by Release (back
-	// to a cache, borrowable) or destroy (back to the Resource) wakes them to
-	// re-search. numWaiters gates the wake so the no-contention Release hot path is a
-	// single atomic load, not a queue push.
-	waiters    rdvq.Waiters
-	numWaiters atomic.Int64
+	// notify routes a freed permit to one waiting consumer with renotify conservation.
+	// Its embedded Listeners are non-blocking manager postpones (register a callback via
+	// ListenersFor, re-run admission when fired); its embedded Waiters are blocked
+	// executors — AcquireWait and the top-level block-and-help gate (which waits on
+	// Waiters() while help-draining). On a freed permit, Notify(nil) wakes ONE consumer
+	// (listeners before waiters) but hands it a renotify so a consumer that cannot use
+	// the wake re-delivers it to the next — the conservation that prevents a stale
+	// postpone listener from swallowing a wake a real waiter needed.
+	notify rdvq.Notifier
 
 	// cachePool recycles Cache nodes (the process-wide shared pool for the type; caches
 	// are fungible across Pools — newCache re-stamps pool/parent). Safe to recycle on
@@ -136,8 +139,30 @@ func NewPool(r Resource) *Pool {
 		panic("permits: nil Resource")
 	}
 	p := &Pool{resource: r, cachePool: omnipool.For[Cache]()}
-	p.waiters.Init()
+	p.notify.Init()
 	return p
+}
+
+// ListenersFor returns the Pool's manager-retry listener set. A manager that misses on
+// Acquire registers a callback here (via workq's AddToListeners) and returns; the next
+// freed permit invokes it to re-run admission. Pool-level (not per-cache) because a free
+// anywhere in the Pool can satisfy the miss through inherit/free/steal.
+func (p *Pool) ListenersFor() *rdvq.Listeners {
+	return &p.notify.Listeners
+}
+
+// Waiters returns the Pool's executor waiter set — the blocking park target a top-level
+// block-and-help gate waits on while help-draining its wave. A freed permit (Release /
+// destroy) wakes one. (AcquireWait uses the same set internally for the mid-body park.)
+func (p *Pool) Waiters() *rdvq.Waiters {
+	return &p.notify.Waiters
+}
+
+// Resource returns the Pool's backing Resource — the accounting object permits are drawn
+// from. Callers that constructed the Resource use it to reach Resource-specific controls
+// (e.g. a semaphore's dynamic capacity), type-asserting back to the concrete type.
+func (p *Pool) Resource() Resource {
+	return p.resource
 }
 
 // NewCache creates a top-level cache (a tree root drawing on the Pool).
@@ -186,6 +211,12 @@ func newCache(p *Pool, parent *Cache) *Cache {
 	c.refs.Store(1)
 	c.alive.Store(true)
 	return c
+}
+
+// Pool returns the Pool c draws permits from — the boundary that owns the manager
+// listener set (ListenersFor) and the executor waiters a body parks on.
+func (c *Cache) Pool() *Pool {
+	return c.pool
 }
 
 // list returns the cacheList that contains c (its parent's children, or the roots).
@@ -255,14 +286,12 @@ func (c *Cache) AcquireWait(ctx context.Context) (Permit, error) {
 			return pm, nil
 		}
 		p := c.pool
-		p.numWaiters.Add(1)
 		var pm Permit
 		var ok bool
-		_, err := p.waiters.Wait(ctx, func() bool {
+		_, err := p.notify.Wait(ctx, func() bool {
 			pm, ok = c.Acquire()
 			return !ok // park only if still no permit
 		})
-		p.numWaiters.Add(-1)
 		if ok {
 			return pm, nil
 		}
@@ -344,25 +373,45 @@ type Permit struct {
 	backing *Cache
 }
 
+// Held reports whether this Permit currently occupies a slot (a non-zero Permit). A
+// zero Permit (Held false) is the not-yet-acquired / suspended state — callers use it
+// to distinguish a lent-out permit from a held one without reaching into the backing.
+func (pm Permit) Held() bool {
+	return pm.backing != nil
+}
+
 // Release ends the run segment the Permit backed; the permit stays cached in held
-// (cache-don't-return), now borrowable — and may satisfy a parked AcquireWait, so it
-// wakes one waiter. Every release wakes (not just a borrowable 0→1 crossing): a
-// multi-held cache freeing its second idle permit is no crossing, yet a second waiter
-// could take it.
+// (cache-don't-return), now borrowable — and may satisfy a parked AcquireWait or a
+// postponed manager, so it wakes one consumer. Every release wakes (not just a
+// borrowable 0→1 crossing): a multi-held cache freeing its second idle permit is no
+// crossing, yet a second waiter could take it.
 func (pm Permit) Release() {
 	if pm.backing == nil {
 		panic("permits: Release of a zero Permit")
 	}
 	pm.backing.counts.release()
-	pm.backing.pool.wakeOne()
+	pm.backing.pool.wake()
 }
 
-// wakeOne wakes a single parked waiter if any are parked. The numWaiters gate keeps
-// the uncontended path (no waiters) to one atomic load.
-func (p *Pool) wakeOne() {
-	if p.numWaiters.Load() > 0 {
-		p.waiters.Notify(nil)
-	}
+// wake routes one freed permit to a single waiting consumer — a postponed manager
+// (listeners) first, since it represents in-process admission, else a parked executor
+// (waiters). It hands the consumer a renotify (Notifier.Notify's wrapped conservation)
+// so that a consumer which cannot use the wake RE-DELIVERS it to the next rather than
+// swallowing it: without that, a stale postpone listener (one whose work already
+// re-checked and ran, leaving its idempotent shared controller listener registered)
+// would consume the wake and report it delivered, and a genuinely-waiting executor
+// would never be notified — a borrowable permit idle forever (the residual ~1/120
+// -race TestBySimulation hang). Notify is cheap when both sets are empty, so the
+// uncontended release is unaffected.
+func (p *Pool) wake() {
+	p.notify.Notify(nil)
+}
+
+// WakeAll wakes EVERY waiting consumer so each re-runs its acquire. It is for events
+// that free MULTIPLE permits at once — a destroy returning held to the Resource, or an
+// out-of-band capacity raise (SetMaxConcurrency) — where one wake would under-notify.
+func (p *Pool) WakeAll() {
+	p.notify.NotifyAll()
 }
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting
@@ -409,10 +458,8 @@ func (c *Cache) destroy() {
 		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
 		c.pool.resource.Release(int(held))
 		// Returning held permits to the Resource frees that much capacity, which can
-		// satisfy several parked waiters at step 3 — wake them all.
-		if c.pool.numWaiters.Load() > 0 {
-			c.pool.waiters.NotifyAll()
-		}
+		// satisfy several postponed managers / parked waiters at step 3 — wake them all.
+		c.pool.WakeAll()
 	}
 	// Recycle c. Safe now and only now: refs==0 (destroy's precondition) with tryPin
 	// refusing to resurrect, c is unlinked, inUse==0, and no Permit backs it — so no

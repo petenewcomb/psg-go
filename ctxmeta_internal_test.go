@@ -12,26 +12,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCurrentHeldRequest_Walk(t *testing.T) {
-	_, s := newTestSemaphore(t, 2)
-	rOuter := s.newRequest(nil)
-	rInner := s.newRequest(nil)
+func TestCurrentHeldPermit_Walk(t *testing.T) {
+	hOuter := &heldPermit{}
+	hInner := &heldPermit{}
 
-	require.Nil(t, (&ctxMeta{}).currentHeldRequest())
+	require.Nil(t, (&ctxMeta{}).currentHeldPermit())
 
-	root := &ctxMeta{heldRequest: rOuter}
+	root := &ctxMeta{held: hOuter}
 	mid := &ctxMeta{parent: root}
 	leaf := &ctxMeta{parent: mid}
-	require.Same(t, rOuter, leaf.currentHeldRequest(),
+	require.Same(t, hOuter, leaf.currentHeldPermit(),
 		"walk must reach a handle stamped at the chain root")
-	require.Same(t, rOuter, root.currentHeldRequest())
+	require.Same(t, hOuter, root.currentHeldPermit())
 
-	// Stop-at-first: with a (hypothetical future) inner stamp, the
-	// innermost handle wins — the outer one belongs to an enclosing,
+	// Stop-at-first: an inner stamp wins — the outer one belongs to an enclosing,
 	// already-suspended episode.
-	mid2 := &ctxMeta{parent: root, heldRequest: rInner}
+	mid2 := &ctxMeta{parent: root, held: hInner}
 	leaf2 := &ctxMeta{parent: mid2}
-	require.Same(t, rInner, leaf2.currentHeldRequest(),
+	require.Same(t, hInner, leaf2.currentHeldPermit(),
 		"walk must stop at the first (innermost) stamped handle")
 }
 
@@ -89,9 +87,9 @@ func TestPermitScopingChains(t *testing.T) {
 		subTopCtxType = subTopMeta.ctxType
 		subTopParentIsBody = subTopMeta.parent == bodyMeta
 		// The chain a subwave parking point would walk: from the subwave's
-		// top-level meta up to the body — where a handle will be stamped
-		// (task #3) — and no further handle beyond it.
-		subTopNoHeld = subTopMeta.currentHeldRequest() == nil
+		// top-level meta up to the body. This launcher is unlimited, so no handle
+		// is stamped anywhere on the chain.
+		subTopNoHeld = subTopMeta.currentHeldPermit() == nil
 		subLauncher := NewTaskLauncher(func(subBodyCtx context.Context) error {
 			_, subBodyMeta := subWave.ctxMeta(subBodyCtx)
 			subBodySeen = true
@@ -130,18 +128,18 @@ func TestPermitScopingChains(t *testing.T) {
 	assert.True(t, skimParentIsTop, "top-level→skim derivation must chain parent")
 }
 
-// TestHeldRequestStampedDuringBodies pins the #2+#3 end-to-end property:
-// a limited body's request handle is stamped on the worker meta, and a
-// subwave context inside that body finds the SAME handle via the parent
-// walk — exactly what the suspend brackets (#4) will rely on.
-func TestHeldRequestStampedDuringBodies(t *testing.T) {
+// TestHeldPermitStampedDuringBodies pins the end-to-end stamp+walk property: a limited
+// body's permit handle is stamped on the worker meta, and a subwave context inside that
+// body finds the SAME handle via the parent walk — exactly what the suspend brackets
+// rely on.
+func TestHeldPermitStampedDuringBodies(t *testing.T) {
 	ctx := context.Background()
 	var wave Wave
 
-	var bodyReq, subwaveSeenReq request
+	var bodyHeld, subwaveSeenHeld *heldPermit
 	limited := NewTaskLauncher(func(bodyCtx context.Context) error {
 		_, bodyMeta := wave.ctxMeta(bodyCtx)
-		bodyReq = bodyMeta.currentHeldRequest()
+		bodyHeld = bodyMeta.currentHeldPermit()
 
 		// A zero-value subWave mints its top-level meta on first
 		// dispatch/skim; topLevelCtxMeta is that chokepoint and chains the
@@ -149,27 +147,27 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 		// subwave context finds the body's held handle via the parent walk.
 		var subWave Wave
 		subCtx, subTopMeta := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
-		subwaveSeenReq = subTopMeta.currentHeldRequest()
+		subwaveSeenHeld = subTopMeta.currentHeldPermit()
 		return subWave.CloseAndSkimAll(subCtx)
 	}, WithLimits(NewSemaphore(1)))
 	require.NoError(t, limited.In(&wave).Start(ctx))
 
-	var unlimitedReq request = &directRequest{} // sentinel, overwritten
+	var unlimitedHeld = &heldPermit{} // sentinel, overwritten
 	unlimited := NewTaskLauncher(func(bodyCtx context.Context) error {
 		_, bodyMeta := wave.ctxMeta(bodyCtx)
-		unlimitedReq = bodyMeta.currentHeldRequest()
+		unlimitedHeld = bodyMeta.currentHeldPermit()
 		return nil
 	})
 	require.NoError(t, unlimited.In(&wave).Start(ctx))
 
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
-	require.NotNil(t, bodyReq, "limited body must see its stamped handle")
-	require.Same(t, bodyReq, subwaveSeenReq,
+	require.NotNil(t, bodyHeld, "limited body must see its stamped handle")
+	require.Same(t, bodyHeld, subwaveSeenHeld,
 		"a subwave context inside the body must find the body's handle via the parent walk")
-	require.Nil(t, unlimitedReq, "unlimited body must see no handle")
+	require.Nil(t, unlimitedHeld, "unlimited body must see no handle")
 
-	var funnelReq request
+	var funnelHeld *heldPermit
 	ctx2 := context.Background()
 	var wave2 Wave
 	fp := &wave2
@@ -177,7 +175,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
 				_, m := wave2.ctxMeta(fctx)
-				funnelReq = m.currentHeldRequest()
+				funnelHeld = m.currentHeldPermit()
 				return time.Time{}, nil
 			},
 			FlushFn: func(context.Context) error { return nil },
@@ -185,7 +183,7 @@ func TestHeldRequestStampedDuringBodies(t *testing.T) {
 	}, WithLimits(NewSemaphore(1)))
 	require.NoError(t, f.Submit(ctx2, 1))
 	require.NoError(t, wave2.CloseAndSkimAll(ctx2))
-	require.NotNil(t, funnelReq, "limited Accumulate body must see its stamped handle")
+	require.NotNil(t, funnelHeld, "limited Accumulate body must see its stamped handle")
 }
 
 func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {

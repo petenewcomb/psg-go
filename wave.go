@@ -14,6 +14,7 @@ import (
 
 	"github.com/petenewcomb/streampool/internal/cerr"
 	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/permits"
 	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/petenewcomb/streampool/internal/timerp"
 	"github.com/petenewcomb/streampool/internal/wavestate"
@@ -54,6 +55,15 @@ type Wave struct {
 	tryAddWorkFn workq.TryAddWorkFunc // avoid closure reallocation
 	addWorkFn    workq.AddWorkFunc    // avoid closure reallocation
 
+	// caches holds this wave's per-Limiter permit caches (C_W^L), one per distinct
+	// permits.Pool used by ops dispatched into this wave — plus any held=0 pass-through
+	// nodes a descendant wave's mkdir-p created here (see wavepermits.go). Each entry
+	// holds this wave's self-ref on that cache, dropped at wave-Done (releaseCaches);
+	// descendant NewChild refs keep a node alive past Done until its subtree drains.
+	// Guarded by cachesMu; lazily allocated; nil between Done and the next re-arm.
+	caches   map[*permits.Pool]*permits.Cache
+	cachesMu sync.Mutex
+
 	// funnelInstances holds this wave's per-funnel accumulator-instance caches, keyed
 	// by funnel id (funnelID → *funnelInstanceQueue[T], stored as the funnelSweep
 	// interface for the heterogeneous-T sweep). It replaces the per-funnel engine:
@@ -75,24 +85,24 @@ type boundTask interface {
 
 //nolint:contextcheck // background context for tracing; submitCtx is the body-ctx borrow source
 func (wv *Wave) newTaskWork(
-	submitCtx context.Context, group workq.GroupID, task boundTask, req request,
+	submitCtx context.Context, group workq.GroupID, task boundTask, h *heldPermit,
 ) *taskWork {
 	traceRegion := "Wave.newTaskWork"
 
 	wk := taskWorkPool.Get()
 	wk.Init(group, wv)
 	wk.task = task
-	wk.req = req
-	if req != nil {
+	wk.h = h
+	if h != nil {
 		// Stored once so the per-execution completion callback doesn't
 		// allocate a fresh method value.
-		wk.completedFn = req.release
+		wk.completedFn = h.release
 	}
 	wk.wave = wv
 	// Borrow the body context at dispatch (descended from the submit ctx, so
 	// cancellation rides ancestry). Async worker bodies are fresh permit-roots
 	// (parent nil); the worker's E is stamped at Execute, not known yet here.
-	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, wv, taskContext, req, nil)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, wv, taskContext, h, nil)
 
 	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", wv, wk)
 	return wk
@@ -101,13 +111,12 @@ func (wv *Wave) newTaskWork(
 type taskWork struct {
 	poolWork
 	task boundTask
-	// req is the Limiter request handle this task's admission was granted
-	// through; nil for unlimited ops. The taskWork owns the handle's
-	// lifecycle: stamped on the worker's ctxMeta during Execute, released
-	// at body completion (completedFn) or in Free (idempotent), recycled
-	// in Free.
-	req         request
-	completedFn func() // req.release, captured once at creation
+	// h is the native limiter handle this task's admission runs through; nil for
+	// unlimited ops. The taskWork owns the handle's lifecycle: stamped on the body
+	// ctxMeta at borrow, the permit acquired at the gate, released at body completion
+	// (completedFn) or in Free (idempotent), recycled in Free.
+	h           *heldPermit
+	completedFn func() // h.release, captured once at creation
 	// wave is the dispatching Wave; stored so Free() satisfies workq.Work (no-arg)
 	// and stamped onto the body ctxMeta so nil-wave op dispatches from the task body
 	// can resolve it.
@@ -123,7 +132,7 @@ type taskWork struct {
 func (wk *taskWork) Reset() {
 	wk.poolWork = poolWork{}
 	wk.task = nil
-	wk.req = nil
+	wk.h = nil
 	wk.completedFn = nil
 	wk.wave = nil
 	wk.bodyCtx = nil
@@ -154,14 +163,14 @@ func (wk *taskWork) Free() {
 
 	wave := wk.wave
 	wk.task.Free()
-	if wk.req != nil {
-		// Normal completion already released (completedFn); release here
-		// is the idempotent backstop for tasks freed without executing
-		// (dispatch failure, cancellation drain) — by-state: abandon a
-		// PENDING request, discard a POSTPONED one, give back a HELD one.
-		wk.req.release()
-		freeRequest(wk.req)
-		wk.req = nil
+	if wk.h != nil {
+		// Normal completion already released (completedFn); release here is the
+		// idempotent backstop for tasks freed without executing (dispatch failure,
+		// cancellation drain) — a held permit is given back, a never-acquired handle
+		// no-ops. Then recycle the handle.
+		wk.h.release()
+		heldPermitPool.Put(wk.h)
+		wk.h = nil
 	}
 	// Return the body context borrowed at dispatch — its child ctx to ctxpool and
 	// its meta to bodyMetaPool. Runs whether or not the body executed (a task freed
@@ -212,7 +221,7 @@ func (wv *Wave) initState() {
 		wv.funnelInstances.Delete(k)
 		return true
 	})
-	wv.state.Init(wv.sweepFunnels)
+	wv.state.Init(wv.sweepFunnels, wv.releaseCaches)
 	wv.skimQueue.Init()
 	wv.governor.Init()
 	wv.workQueue.Init(nil)
@@ -300,11 +309,10 @@ func (wv *Wave) Skim(ctx context.Context) error {
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
-	// Suspend-class episode: a body driving this skim parks here while
-	// holding its limiter permit; give the slot back for the duration
-	// and reclaim (help-shaped) on return.
-	if r := suspendForEpisode(meta); r != nil {
-		defer reclaimRequest(ctx, wv.blockFn, r)
+	// Suspend-class episode: a body driving this skim lends its limiter permit for the
+	// duration (a sub-wave inherits it; deadlock-free) and reacquires on return.
+	if h := suspendHeldPermit(meta); h != nil {
+		defer h.reclaim(ctx, wv)
 	}
 	_, err := wv.skim(ctx)
 	return err
@@ -382,10 +390,9 @@ func (wv *Wave) block(
 	// subwave-top-level dispatch acquiring a limiter held by this same
 	// goroutine's enclosing body self-deadlocks (see "Where suspend
 	// fires" in docs/limiter-suspend-resume.md). Re-entrant: the
-	// reclaim's own block-and-help finds the handle already SUSPENDED
-	// and no-ops.
-	if r := suspendForEpisode(meta); r != nil {
-		defer reclaimRequest(ctx, wv.blockFn, r)
+	// reclaim's own suspend finds the handle already suspended and no-ops.
+	if h := suspendHeldPermit(meta); h != nil {
+		defer h.reclaim(ctx, wv)
 	}
 	adder := blockingWorkAdderPool.Get()
 	defer blockingWorkAdderPool.Put(adder)
@@ -745,8 +752,8 @@ func (wv *Wave) SkimAll(ctx context.Context) error {
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
-	if r := suspendForEpisode(meta); r != nil {
-		defer reclaimRequest(ctx, wv.blockFn, r)
+	if h := suspendHeldPermit(meta); h != nil {
+		defer h.reclaim(ctx, wv)
 	}
 
 	err := wv.skimAll(ctx, wv.skim)

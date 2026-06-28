@@ -557,32 +557,18 @@ type funnelWork[T any] struct {
 	fn       Funnel[T]
 	input    T
 	inputErr error
-	// req is the Limiter request handle this work's admission runs
-	// through; nil for unlimited operations, created lazily at the first gate
-	// attempt and persisting across postponed retries (stable identity).
-	// The funnelWork owns its lifecycle: released at body end in Execute
-	// (or idempotently in Free for never-executed work), recycled in Free.
-	req request
+	// h is the native limiter handle this work's admission runs through; nil for
+	// unlimited operations, created at dispatch (Init) and persisting across postponed
+	// retries (stable identity). The funnelWork owns its lifecycle: released at body
+	// end in Execute (or idempotently in Free for never-executed work), recycled in
+	// Free.
+	h *heldPermit
 	// bodyCtx is the body context borrowed at dispatch (descended from the submit
-	// ctx); the funnel body runs under it and Free returns it. bodyMeta is the
-	// meta it carries — executeInner stamps the worker's E and the held request
-	// (acquired on the worker, not at dispatch) onto it.
+	// ctx); the funnel body runs under it and Free returns it. bodyMeta is the meta it
+	// carries (with held = h, stamped at borrow) — executeInner stamps the worker's E
+	// onto it.
 	bodyCtx  context.Context //nolint:containedctx // the borrowed body ctx, released in Free
 	bodyMeta *ctxMeta
-}
-
-// funnelWork is the applicant its Limiter request is opened for:
-// accessors box lazily, only when a sizing limiter actually reads them.
-func (wk *funnelWork[T]) Processor() any {
-	return wk.fn.factory
-}
-
-func (wk *funnelWork[T]) Value() any {
-	return wk.input
-}
-
-func (wk *funnelWork[T]) Err() error {
-	return wk.inputErr
 }
 
 func (c *Funnel[T]) newFunnelWork(
@@ -601,10 +587,17 @@ func (wk *funnelWork[T]) Init(
 	wk.fn = fn
 	wk.input = input
 	wk.inputErr = inputErr
-	// Borrow the body context at dispatch (descended from the submit ctx). The
-	// permit (heldRequest) is acquired on the worker in executeInner, the worker's
-	// E stamped there too; both nil here. Worker bodies are fresh permit-roots.
-	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, nil, nil)
+	// For a limited funnel, resolve the body's own wave cache (mkdir-p'ing the forest
+	// along the dispatching ancestry) at dispatch, where that ancestry is available;
+	// the permit is acquired from it at the gate in Execute. Stamp the handle on the
+	// body meta now so currentHeldPermit finds it. Worker bodies are fresh permit-roots
+	// (the worker's E is stamped at Execute, not known here).
+	if fn.limiter.pool != nil {
+		m, _ := metaFromContext(submitCtx)
+		wk.h = heldPermitPool.Get()
+		wk.h.ownCache = fn.wave.ensureCache(m, fn.limiter.pool)
+	}
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, wk.h, nil)
 }
 
 // instanceQueue returns the wave's per-funnel instance cache for this work's funnel,
@@ -687,14 +680,11 @@ func (wk *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error 
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", wk, wk)
 
-	if wk.fn.limiter.impl == nil {
+	if wk.h == nil {
 		return wk.executeInner(ctx, ex)
 	}
 
-	if wk.req == nil {
-		wk.req = wk.fn.limiter.impl.newRequest(wk)
-	}
-	held, err := acquireOrWait(ctx, ex, time.Time{}, wk.fn.wave.protoBB, wk.req)
+	held, err := gateAcquire(ctx, ex, wk.fn.wave, wk.h)
 	if err != nil || !held {
 		return err
 	}
@@ -702,17 +692,16 @@ func (wk *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error 
 	// starts, so the postpone-after-grant case doesn't arise here.
 	// Released on return (panic-inclusive); Free's release is then an
 	// idempotent no-op before the recycle.
-	defer wk.req.release()
+	defer wk.h.release()
 	return wk.executeInner(ctx, ex)
 }
 
 func (wk *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	// The body context was borrowed at dispatch; stamp the pieces only known on
-	// the worker — the held limiter request (acquired in Execute) and this worker's
-	// E — and push the funnel's group so nil-wave dispatches from inside the
-	// Accumulate / Flush body resolve to it. Run the body under the borrowed ctx.
-	wk.bodyMeta.heldRequest = wk.req
+	// The body context was borrowed at dispatch (carrying held = h already); stamp the
+	// one piece only known on the worker — this worker's E — and push the funnel's
+	// group so nil-wave dispatches from inside the Accumulate / Flush body resolve to
+	// it. Run the body under the borrowed ctx.
 	wk.bodyMeta.executionEnvironment = workerEnvFromContext(ctx)
 	wk.bodyMeta.PushGroup(wk.Group())
 	defer wk.bodyMeta.PopGroup()
@@ -726,14 +715,13 @@ func (wk *funnelWork[T]) Free() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", wk, wk)
 
-	if wk.req != nil {
-		// Normal completion already released at body end; this is the
-		// idempotent backstop for work freed without executing
-		// (cancellation drain) — by-state: abandon PENDING / give back
-		// HELD.
-		wk.req.release()
-		freeRequest(wk.req)
-		wk.req = nil
+	if wk.h != nil {
+		// Normal completion already released at body end; this is the idempotent
+		// backstop for work freed without executing (cancellation drain) — a held
+		// permit is given back, a never-acquired handle no-ops. Then recycle.
+		wk.h.release()
+		heldPermitPool.Put(wk.h)
+		wk.h = nil
 	}
 
 	// Return the body context borrowed at dispatch (whether or not the body ran).

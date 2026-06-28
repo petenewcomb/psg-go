@@ -37,7 +37,7 @@ var bodyMetaPool = omnipool.For[ctxMeta]()
 // meta is stamped:
 //   - wave        = wv (the dispatch target)
 //   - ctxType     = ctxType
-//   - heldRequest = req (the limiter handle, nil for unlimited ops)
+//   - held        = h (the limiter handle, nil for unlimited ops)
 //   - parentWaves = parentWavesForSource(srcCtx, wv)
 //
 // parent stays nil: a borrowed body is always a fresh permit-root, severing the
@@ -48,12 +48,12 @@ var bodyMetaPool = omnipool.For[ctxMeta]()
 // The caller runs the body under the returned ctx and then calls releaseBodyContext.
 func borrowBodyContext(
 	srcCtx context.Context, wv *Wave, ctxType contextType,
-	req request, exEnv executionEnvironment,
+	h *heldPermit, exEnv executionEnvironment,
 ) (context.Context, *ctxMeta) {
 	m := bodyMetaPool.Get()
 	m.wave = wv
 	m.ctxType = ctxType
-	m.heldRequest = req
+	m.held = h
 	m.executionEnvironment = exEnv
 	m.parentWaves = parentWavesForSource(srcCtx, wv)
 	return ctxpool.WithValue(srcCtx, m), m

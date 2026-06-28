@@ -45,11 +45,12 @@ type ctxMeta struct {
 	// the goroutine boundary. See docs/limiter-suspend-resume.md,
 	// "Serialization and scoping".
 	parent *ctxMeta
-	// heldRequest is the limiter request handle stamped at body entry
-	// (prevWave-style save/restore) and found via currentHeldRequest at
-	// framework parking points. A stamped handle is only ever HELD or
-	// SUSPENDED: POSTPONED is pre-body, DONE is post-unstamp.
-	heldRequest request
+	// held is the native limiter handle (heldPermit) stamped at body entry and found
+	// via currentHeldPermit at framework parking points — the permit-core replacement
+	// for the eager heldRequest. A stamped handle holds a permit while the body runs
+	// its own code and is suspended (permit lent) across drive episodes. nil for an
+	// unlimited op.
+	held        *heldPermit
 	parentWaves map[*Wave]struct{}
 	ctxType     contextType
 	executionEnvironment
@@ -79,17 +80,16 @@ func (cm *ctxMeta) vetNotNestedInSkim() {
 	}
 }
 
-// currentHeldRequest returns the limiter request handle held by the body
-// this context is synchronously nested under, walking parent links and
-// stopping at the first stamped handle. Structurally there is at most one
-// per chain (every stamp site is a chain root — see the heldRequest field
-// doc); under help-execution nesting the first handle found is the
-// enclosing episode's, already SUSPENDED, so the suspend bracket's
-// `r != nil && r.suspend()` contract needs no state checks here.
-func (cm *ctxMeta) currentHeldRequest() request {
+// currentHeldPermit returns the limiter handle held by the body this context is
+// synchronously nested under, walking parent links and stopping at the first stamped
+// handle. Structurally there is at most one per chain (every stamp site is a chain
+// root — see the held field doc); under help-execution nesting the first handle found
+// is the enclosing episode's, already suspended, so the suspend bracket's
+// `h != nil && h.suspend()` contract needs no state checks here.
+func (cm *ctxMeta) currentHeldPermit() *heldPermit {
 	for m := cm; m != nil; m = m.parent {
-		if m.heldRequest != nil {
-			return m.heldRequest
+		if m.held != nil {
+			return m.held
 		}
 	}
 	return nil
@@ -208,8 +208,8 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 			// op shares the holder's limiter), reclaiming any earlier
 			// waits on a task that hasn't been queued yet. Interior
 			// brackets (Wave.block) no-op via re-entrancy.
-			if r := suspendForEpisode(cm); r != nil {
-				defer reclaimRequest(ctx, cm.wave.blockFn, r)
+			if h := suspendHeldPermit(cm); h != nil {
+				defer h.reclaim(ctx, cm.wave)
 			}
 
 			// Make sure existing work has a chance to run before we add more.

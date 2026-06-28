@@ -232,15 +232,20 @@ func (r Launcher[T]) newScatterWork(
 	submitCtx context.Context, wv *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error,
 ) *launcherScatterWork {
 	inner := r.newTask(wv, group, value, callerErr)
-	var req request
-	if r.limiter.impl != nil {
-		req = r.limiter.impl.newRequest(inner)
+	var h *heldPermit
+	if r.limiter.pool != nil {
+		// Resolve the body's own wave cache (mkdir-p'ing the forest along the
+		// dispatching ancestry) at dispatch, where that ancestry is available; the
+		// permit is acquired from it at the gate.
+		m, _ := metaFromContext(submitCtx)
+		h = heldPermitPool.Get()
+		h.ownCache = wv.ensureCache(m, r.limiter.pool)
 	}
-	taskWork := wv.newTaskWork(submitCtx, group, inner, req)
+	taskWork := wv.newTaskWork(submitCtx, group, inner, h)
 	postWork := wv.newTaskPostWork(group, deadline, taskWork)
 	gated := postWork
-	if req != nil {
-		gated = newLimiterScatterWork(wv, deadline, gated, req)
+	if h != nil {
+		gated = newLimiterScatterWork(wv, gated, h)
 	}
 	return newLauncherScatterWork(wv, deadline, gated)
 }
@@ -302,20 +307,6 @@ func (wk *launcherWork[T]) Free() {
 	wk.value = zero
 	wk.callerErr = nil
 	wk.pool.Put(wk)
-}
-
-// launcherWork is the applicant its Limiter request is opened for:
-// accessors box lazily, only when a sizing limiter actually reads them.
-func (wk *launcherWork[T]) Processor() any {
-	return wk.handler
-}
-
-func (wk *launcherWork[T]) Value() any {
-	return wk.value
-}
-
-func (wk *launcherWork[T]) Err() error {
-	return wk.callerErr
 }
 
 // newTaskErrSink returns an ErrSkimmer whose handler returns the

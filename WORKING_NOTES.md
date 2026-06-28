@@ -2,6 +2,50 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► C1 LANDED — NATIVE PERMIT CORE IN THE LIVE LIMITER; THE DEADLOCK IS FIXED
+(Phase 2b, 2026-06-27).** The eager `limiter.go` request machinery (`directScheduler`/
+`directRequest`/`request`/`acquireOrWait`/`reclaimRequest`/`applicant`/the `resource`
+interface) is **replaced** by a native `internal/permits` integration on the **single**
+`worker.Pool` (no pool split — that is C2). Surface unchanged. This is the
+deadlock-fix milestone: **`TestBySimulation` is reliably green, including ≥300 `-race`
+runs** (the pre-existing ~1/120 `-race` hang is gone). Verified: full `./...` `-short`
+suite + `-race` + lint (golangci 0 issues) + `internal/permits` rapid/race.
+
+- **Forest construction** (`wavepermits.go`): one `permits.Cache` per `(wave, Limiter)`
+  = `C_W^L`. A Wave lazily owns `map[*permits.Pool]*Cache` (guarded), mkdir-p'd along the
+  driving `ctxMeta.parent` chain at dispatch (`ensureCache`/`ensureCacheChain`/
+  `createCache`); the immediate forest parent is the dispatcher's wave (`M.wave`), so the
+  canonical "parked parent lends to sub-wave" case inherits directly and deeper gaps fall
+  back to a forest-wide steal (still correct). Self-ref dropped at **wave-Done** via a new
+  `wavestate` **`onDone`** hook → `releaseCaches`; descendant `NewChild` refs outlive.
+- **Native handle** (`permithandle.go`): `ctxMeta.heldRequest request` → `ctxMeta.held
+  *heldPermit` `{ownCache, permit}`; `currentHeldRequest` → `currentHeldPermit`. A zero
+  `permit` IS the suspended state (re-entrancy no-op falls out). Created at dispatch
+  (launcher `newScatterWork` / funnel `Init`), stamped at `borrowBodyContext`, acquired at
+  the gate, released at completion (pooled via `heldPermitPool`).
+- **Gate = three modes** (`gateAcquire`): nested/queued → non-blocking `Acquire` +
+  `Pool.ListenersFor()` postpone; top-level → **block-and-help** on `Pool.Waiters()`
+  (`blockAcquire`); mid-body reclaim (the suspend brackets) → **help-shaped** loop
+  (`reclaim`). **`wv.block` is RETAINED and retargeted onto the Pool's waiters** — the
+  earlier "no help loop / bounded skim-retry" sketch was WRONG (a plain reclaim deadlocks
+  vs a result-poster; a `wv.skim` loop never sees a permit-free wake). Suspend/reclaim is
+  **coarse per drive call**.
+- **Lost-wakeup fix (a cutover regression):** a residual `-race` hang root-caused NOT to
+  permit accounting (forcing unlimited permits → 120/120 `-race` pass) but to a **lost
+  wakeup** the cutover introduced by splitting the Pool's wake into two bare `Notify(nil)`
+  calls, dropping the **renotify conservation** the eager scheduler's single `rdvq.Notifier`
+  had. A stale postpone listener swallows a bare wake without re-delivering it. Fix: keep the
+  Pool's wait/wake as ONE `rdvq.Notifier`; `Release` wakes with `notify.Notify(nil)` (wrapped
+  renotify → a consumer that can't use the wake re-delivers it down the chain to a real
+  waiter). `WakeAll` (NotifyAll) only for multi-permit events (destroy / `SetMaxConcurrency`).
+  Single wake + conservation, no thundering herd. (An earlier `WakeAll`-on-every-release was
+  rejected as a band-aid.) Also fixed a reuse data race: `wavestate` `onDone` now runs BEFORE
+  `close(doneChan)` so cache teardown completes before a re-arm can race it.
+- **Deferred to C4 / not yet done:** the `applicant` sizing (`Processor`/`Value`/`Err`)
+  was removed (re-derive natively when weighted resources land); multi-limiter still panics
+  at construction (`opConfig.singleLimiter`); drain limiting (C3) untouched. **NEXT = B**
+  (dispatch infra) or **C2** (pool split) per the plan.
+
 **►►► PERMIT CORE: HYBRID (LOCK-FREE HOT PATH, LOCKED FOREST) + WAIT/WAKE —
 `internal/permits` (Phase 2a, 2026-06-26).** The concurrent core is a hybrid: the hot
 acquire path is lock-free (atomic128 counter), the forest structure is an intrusive

@@ -205,7 +205,9 @@ func (c *Funnel[T]) SubmitResult(
 	// cross-wave submit redirects into the funnel's wave, recording the source as
 	// parent). No ctx-type restriction — a value may be submitted to a funnel from
 	// anywhere.
-	ctx, meta := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	// Funnel does not yet recycle its minted meta (its body borrows from the
+	// meta-stamped ctx, so freeing it needs the borrow-source fix first); owned ignored.
+	ctx, meta, _ := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -250,7 +252,9 @@ func (c *Funnel[T]) TrySubmitResult(
 	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
 	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
-	ctx, meta := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	// Funnel does not yet recycle its minted meta (its body borrows from the
+	// meta-stamped ctx, so freeing it needs the borrow-source fix first); owned ignored.
+	ctx, meta, _ := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()

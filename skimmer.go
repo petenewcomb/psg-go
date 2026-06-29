@@ -138,7 +138,8 @@ func (g Skimmer[T]) SubmitResult(
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
-	ctx, meta := target.topLevelCtxMeta(ctx, func(contextType) {})
+	// Skimmer submit does not yet recycle its minted meta (follow-on); owned ignored.
+	ctx, meta, _ := target.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 
@@ -188,7 +189,8 @@ func (g Skimmer[T]) TrySubmitResult(
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
-	ctx, meta := target.topLevelCtxMeta(ctx, func(contextType) {})
+	// Skimmer submit does not yet recycle its minted meta (follow-on); owned ignored.
+	ctx, meta, _ := target.topLevelCtxMeta(ctx, func(contextType) {})
 	meta.Lock()
 	defer meta.Unlock()
 

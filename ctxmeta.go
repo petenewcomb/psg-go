@@ -54,6 +54,18 @@ type ctxMeta struct {
 	parentWaves map[*Wave]struct{}
 	ctxType     contextType
 	executionEnvironment
+
+	// Recycling bookkeeping for top-level/skim metas minted by ensureCtxMeta (the body
+	// path uses releaseBodyContext instead and leaves these zero). selfCtx is the
+	// ctxpool child carrying this meta — freed by releaseTopLevelContext. ownsExEnv is
+	// true when THIS meta allocated its topLevelExEnv (a derived skim meta reuses its
+	// parent's, so it must not double-free it). releaseParent is true when this meta's
+	// parent was ALSO minted by the same dispatch (the bare-ctx skim derives a skim meta
+	// over a freshly minted top-level meta) and so belongs to the same owned chain; it is
+	// false at the boundary where an outer scope (a reused ambient meta) owns the parent.
+	selfCtx       context.Context //nolint:containedctx // the ctxpool child this meta rides; freed on release
+	ownsExEnv     bool
+	releaseParent bool
 }
 
 // vetNotNestedInSkim panics if a blocking gather (Skim/SkimAll, hence
@@ -307,6 +319,23 @@ type topLevelExEnv struct {
 	workQueue *workq.Accepted
 }
 
+// topLevelExEnvPool recycles the per-top-level-dispatch execution environments. A
+// fresh one was allocated on every top-level Submit (and never reused); pooling it —
+// together with the meta and ctxpool child freed in [releaseTopLevelContext] —
+// removes that per-dispatch allocation. Get/Put are paired by topLevelCtxMeta
+// (owned) and releaseTopLevelContext.
+var topLevelExEnvPool = omnipool.For[topLevelExEnv]()
+
+// Reset implements omnipool.Resetter. It clears the reusable fields but deliberately
+// does NOT touch mu: omnipool's default (zeroing via *ee = *new(T)) would copy the
+// mutex, so a Reset that leaves the (released-while-unlocked) mutex in place keeps
+// the type pool-safe and preserves the group/queue stack capacity.
+func (ee *topLevelExEnv) Reset() {
+	ee.workQueue = nil
+	ee.groupStack = ee.groupStack[:0]
+	ee.queueFnStack = ee.queueFnStack[:0]
+}
+
 func (ee *topLevelExEnv) Lock() {
 	ee.mu.Lock()
 }
@@ -381,19 +410,24 @@ func (wv *Wave) ensureCtxMeta(
 
 	// wave is the owning/ambient wave for the derived meta; it equals wv on every
 	// transition (same-wave keeps it, a cross-wave redirect re-roots it on wv and
-	// records the source wave in parentWaves above).
-	meta := &ctxMeta{
-		wave:                 wv,
-		parent:               sourceMeta,
-		parentWaves:          parentWaves,
-		ctxType:              ctxType,
-		executionEnvironment: exEnv,
-	}
+	// records the source wave in parentWaves above). Drawn from the shared meta pool
+	// (zeroed on Put, so held is nil here as required); a top-level dispatch returns it
+	// via releaseTopLevelContext, other callers leave it to GC (no worse than before).
+	meta := bodyMetaPool.Get()
+	meta.wave = wv
+	meta.parent = sourceMeta
+	meta.parentWaves = parentWaves
+	meta.ctxType = ctxType
+	meta.executionEnvironment = exEnv
 
 	// Stamp the derived meta onto a ctxpool child of ctx. The child descends from
 	// the submit/drive ctx, so cancellation rides that ancestry — the Wave owns no
 	// ctx (no AfterFunc(j.ctx) linkage; that was the wave-owned-ctx model we drop).
 	ctx = ctxpool.WithValue(ctx, meta)
+	// Record the child so releaseTopLevelContext can free it. The owned-chain flags
+	// (ownsExEnv, releaseParent) default false here and are set by the caller that knows
+	// the derivation shape (topLevelCtxMeta's updateFn / skimCtxMeta).
+	meta.selfCtx = ctx
 
 	if updateFn != nil {
 		ctx = updateFn(ctx, meta)
@@ -404,10 +438,15 @@ func (wv *Wave) ensureCtxMeta(
 	return ctx, meta
 }
 
-// checkCtxType should panic if the type is not allowed
+// checkCtxType should panic if the type is not allowed. The bool return reports
+// whether topLevelCtxMeta MINTED a fresh meta (true) or reused one already on ctx
+// (false). A caller that owns a freshly minted top-level meta — and whose body does
+// not descend from the meta-stamped ctx (the Launcher path roots the body at the
+// original caller ctx) — passes that ctx to [releaseTopLevelContext] once the
+// synchronous dispatch completes, recycling the meta + exEnv + ctxpool child.
 func (wv *Wave) topLevelCtxMeta(
 	ctx context.Context, checkCtxType func(ctxType contextType),
-) (context.Context, *ctxMeta) {
+) (context.Context, *ctxMeta, bool) {
 	traceRegion := "Wave.topLevelCtxMeta"
 
 	// Lazy-init chokepoint: every dispatch (Launcher via vetStart, Skimmer/Funnel
@@ -420,45 +459,93 @@ func (wv *Wave) topLevelCtxMeta(
 	// inside a Skim/Accumulate body), or this wave's top-level/skim meta — rather
 	// than re-deriving a copy. Keeps the parent chain short and skips a needless
 	// borrow. ensureCtxMeta below handles the no-meta (fresh top-level) and
-	// cross-wave cases (where a topLevelExEnv must be stamped).
+	// cross-wave cases (where a topLevelExEnv must be stamped). A reused meta is owned
+	// by its borrower, so the caller must NOT release it.
 	if m, ok := metaFromContext(ctx); ok && m.wave == wv && m.executionEnvironment != nil {
 		checkCtxType(m.ctxType)
-		return ctx, m
+		return ctx, m, false
 	}
 
 	ctx, meta := wv.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			checkCtxType(meta.ctxType) // Avoid stamping if invalid
 			if meta.executionEnvironment == nil {
-				exEnv := &topLevelExEnv{
-					workQueue: &wv.workQueue,
-				}
+				exEnv := topLevelExEnvPool.Get()
+				exEnv.workQueue = &wv.workQueue
 				meta.executionEnvironment = exEnv
+				meta.ownsExEnv = true // this meta allocated it; it frees it on release
 				trace.Logf(ctx, traceRegion, "created new topLevelExEnv=%p, ctxMeta=%v", exEnv, meta)
 			}
 			return ctx
 		},
 	)
 	checkCtxType(meta.ctxType)
-	return ctx, meta
+	return ctx, meta, true
 }
 
-func (wv *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+// releaseTopLevelContext recycles a top-level meta that [Wave.topLevelCtxMeta]
+// minted (reported owned==true): it returns the meta's pooled topLevelExEnv, frees
+// the ctxpool child (recycling it for reuse, so the per-dispatch child allocation +
+// newChildPool/AfterFunc disappear), and returns the meta to its pool. Call ONLY
+// after the synchronous dispatch that used ctx has completed AND only when the body
+// does not descend from ctx — the meta-stamped ctx must not be referenced afterward.
+// Mirrors [releaseBodyContext]. Safe to call with a ctx carrying no meta (no-op).
+//
+//nolint:contextcheck // selfCtx is the stored ctxpool child being freed, not a propagated ctx
+func releaseTopLevelContext(ctx context.Context) {
+	m, ok := metaFromContext(ctx)
+	if !ok {
+		return
+	}
+	// Walk the owned chain: a bare-ctx skim derives a skim meta over a freshly minted
+	// top-level meta, so both belong to this dispatch and are freed together (skim
+	// metaC.releaseParent==true → also free metaB). The walk stops at the boundary —
+	// a meta whose parent is a reused ambient meta (releaseParent==false), owned by an
+	// outer scope (a body, or the dispatch that yield ran under). Each meta frees its
+	// own ctxpool child and its exEnv only if it allocated it (ownsExEnv); a derived
+	// skim meta reuses its parent's exEnv and must not double-free it.
+	for {
+		parent := m.parent
+		releaseParent := m.releaseParent
+		if m.ownsExEnv {
+			if exEnv, ok := m.executionEnvironment.(*topLevelExEnv); ok {
+				topLevelExEnvPool.Put(exEnv)
+			}
+		}
+		ctxpool.Free(m.selfCtx)
+		bodyMetaPool.Put(m) // zeroes m (selfCtx, parent, flags)
+		if !releaseParent || parent == nil {
+			return
+		}
+		m = parent
+	}
+}
+
+// The bool return is the owned signal (see [Wave.topLevelCtxMeta] /
+// [releaseTopLevelContext]): true when this call minted the skim meta — and, for a
+// bare-ctx skim, the underlying top-level meta too (linked via releaseParent) — so
+// the caller releases the whole chain after the skim drive completes; false when an
+// ambient skim meta was reused.
+func (wv *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta, bool) {
 	traceRegion := "Wave.skimCtxMeta"
 
-	ctx, meta := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
+	ctx, meta, ownedTop := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		if ctxType != topLevelContext && ctxType != skimContext {
 			panic(fmt.Sprintf("Skim called from %v context but allowed only by top-level or skim context", ctxType))
 		}
 	})
 	if meta.ctxType == skimContext {
-		return ctx, meta
+		// Reused an ambient skim meta (topLevelCtxMeta never mints skim), so ownedTop is
+		// false here — nothing to release.
+		return ctx, meta, ownedTop
 	}
 
 	// ensureCtxMeta mints a fresh ctxpool child for the skim meta, so it has a
 	// distinct identity from the top-level meta automatically — the old
-	// skimCtxMetaMap identity-fork is no longer needed.
-	ctx, meta = wv.ensureCtxMeta(ctx,
+	// skimCtxMetaMap identity-fork is no longer needed. The skim meta reuses the
+	// top-level meta's exEnv (ownsExEnv stays false). If the top-level meta was minted
+	// by THIS call (ownedTop), it is part of the same owned chain → releaseParent.
+	ctx, skimMeta := wv.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {
 			if meta.ctxType != topLevelContext {
 				panic(fmt.Sprintf("context type %v is not valid for skim, expected top-level context", meta.ctxType))
@@ -471,9 +558,10 @@ func (wv *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 			return ctx
 		},
 	)
+	skimMeta.releaseParent = ownedTop
 
-	if meta.ctxType != skimContext {
-		panic(fmt.Sprintf("context type %v is not valid for skim, expected skim context", meta.ctxType))
+	if skimMeta.ctxType != skimContext {
+		panic(fmt.Sprintf("context type %v is not valid for skim, expected skim context", skimMeta.ctxType))
 	}
-	return ctx, meta
+	return ctx, skimMeta, true
 }

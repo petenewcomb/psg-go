@@ -207,7 +207,13 @@ func (r Launcher[T]) dispatch(
 	// the meta-stamped ctx adds no cancellation, the body meta is self-contained
 	// (parent is a field), and metaFromContext resolves the nearest child either way.
 	srcCtx := ctx
-	ctx, meta := vetStart(ctx, wv)
+	ctx, meta, owned := vetStart(ctx, wv)
+	if owned {
+		// The body is rooted at srcCtx (above), not this meta-stamped ctx, so the meta
+		// is used only for this synchronous dispatch and can be recycled afterward.
+		// Deferred BEFORE meta.Unlock so it runs AFTER it (LIFO).
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -322,12 +328,15 @@ func newTaskErrSink() ErrSkimmer {
 // dispatching a handler. It checks that the calling ctx is one of
 // the allowed types (top-level, skim, or funnel) and that the wave
 // is not yet done. Panics on misuse.
+// The bool return is topLevelCtxMeta's owned signal: true when a fresh top-level meta
+// was minted (and so should be released after dispatch), false when an ambient meta
+// was reused.
 func vetStart(
 	ctx context.Context,
 	wv *Wave,
-) (context.Context, *ctxMeta) {
+) (context.Context, *ctxMeta, bool) {
 	wv.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
-	ctx, meta := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
+	ctx, meta, owned := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
 		case topLevelContext, skimContext, funnelContext:
 			// These are valid for starting a task
@@ -340,7 +349,7 @@ func vetStart(
 
 	wv.panicIfDone()
 
-	return ctx, meta
+	return ctx, meta, owned
 }
 
 // launcherScatterWork wraps the target's inner scatter work with

@@ -118,6 +118,77 @@ design. Key facts the 2-line plan banner missed:
   `internal/worker` + the dead `workq.Queue`/`Worker` scaffold + strip vestigial `deadlineCh` (DONE,
   this cleanup).
 
+**►►► DISPATCH ALLOC REDUCTION — top-level meta pooling (2026-06-29, in progress).** The bench
+comparison showed streampool ~37 allocs/task vs naive-pool's 1; root-caused via `BenchmarkLauncherSkim`
+(the main-module hot-path guard = 38 allocs/op, single-threaded Submit+Skim, no limiter — so it's CORE,
+not the harness). Memprofile (`-memprofilerate=1`) attribution, three clusters:
+1. **top-level/skim ctxMeta machinery (~65%)** — every top-level Submit/Skim from a bare ctx minted a
+   fresh `&ctxMeta` + `&topLevelExEnv` + a ctxpool child (`newChildPool`+`AfterFunc`+`WithValue`+`&child`),
+   none recycled. The body-meta path IS pooled (`bodyMetaPool`/`releaseBodyContext`); the top-level path
+   had no matching free. (launcher.go:202 comment already half-knew: it roots the BODY at the stable
+   caller ctx to dodge the per-dispatch child, but left the meta-stamped ctx itself allocating.)
+2. **rdvq handoff inbox (~30%)** — `rdvq.inbox[func()].Init` + nbcq + omnipool Gets per dispatch (the
+   executor handoff isn't recycling inboxes). C2-introduced. DEFERRED.
+3. exEnv stack slice growth (`PushQueueFunc`/`PushGroup`). minor.
+- **DONE: top-level SUBMIT + SKIM meta pooling — BenchmarkLauncherSkim 38 → 14 allocs/op** (2178 →
+  645 B/op). Submit path validated 25/25 -race; combined (submit+skim) -race batch running. The remaining
+  14 allocs are ~99% the rdvq-inbox cluster (the skim-queue handoff `inbox[func()].Init` + nbcq nodes) —
+  the deferred follow-on; the meta machinery itself now contributes ~0.
+  - SKIM path: `skimCtxMeta` now returns the `owned` signal; the 6 wave.go skim drivers (Skim, yield,
+    block, TrySkim, SkimAll, skimAll) `defer releaseTopLevelContext` when owned. Handles the skim
+    derivation CHAIN (bare-ctx skim mints top-level metaB + skim metaC; yield reuses the dispatch's
+    top-level meta and mints only metaC) and the SHARED exEnv via three ctxMeta fields: `selfCtx` (child
+    to free), `ownsExEnv` (free exEnv only where allocated — metaC reuses metaB's), `releaseParent`
+    (bounded walk: free metaB too iff this call minted it; stop at a reused-ambient boundary so yield
+    never frees the dispatch's meta). Nested skim (SkimAll→skimAll, yield/block on an already-skim ctx)
+    reuses the ambient skim meta → owned=false → no double-release.
+  - ESCAPE-SAFETY (skim ctx is the ambient root for handler-launched async work): SAFE because ctxpool is
+    nearest-child-wins + structural cancellation — a handler-launched body resolves its OWN nearest meta,
+    never the recycled skim meta's value; recycling swaps only the childKey value, not the cancellation
+    chain. The launcher.go:202 comment is about reuse EFFICIENCY, not safety. Proven by the -race/sim
+    batch (exercises skim + nested subwaves + handlers launching work).
+- **(earlier sub-step) top-level SUBMIT meta pooling.** `ensureCtxMeta` draws the meta from `bodyMetaPool`
+  (zeroed on Put → `held` nil as required); `topLevelExEnvPool = omnipool.For[topLevelExEnv]()` with a
+  `Reset()` (clears workQueue+stacks, NOT the mutex — avoids copylock + keeps stack cap);
+  `topLevelCtxMeta` returns an `owned` bool; `releaseTopLevelContext(ctx)` (mirrors releaseBodyContext)
+  returns exEnv+meta to pools and `ctxpool.Free`s the child. Wired ONLY into the Launcher path
+  (`vetStart`→`dispatch`, `defer releaseTopLevelContext` after `meta.Unlock`), which is provably safe: the
+  body is rooted at `srcCtx`, so the meta-stamped ctx is used only for synchronous admission and never
+  escapes (confirmed: postpone re-queues the work item, which carries the body ctx, not the meta ctx).
+- **Result: BenchmarkLauncherSkim 38 → 32 allocs/op** (2178 → 1698 B/op). Suite green; -race batch running.
+- **WHY ONLY 6:** Skim shares the same pools but doesn't release (its nested skimCtxMeta derivation, where
+  the expensive per-call `newChildPool`/`AfterFunc` lives, is DEFERRED) — so skim DRAINS the shared meta+
+  exEnv pools, masking part of the submit win. The two meta paths are coupled through the shared pools;
+  the full payoff needs the skim path pooled too.
+- **NOT safe to extend blindly:** Funnel/Skimmer submit borrow the body FROM the meta-stamped ctx (unlike
+  Launcher), so freeing their meta needs the borrow-source fix (root body at srcCtx) FIRST. Skim's nested
+  derivation needs the parent-chain liveness handled (free the whole owned chain together; don't free a
+  meta still referenced via another meta's `parent`).
+- **NEXT increments:** (a) skim-path meta pooling (biggest payoff: kills per-call newChildPool/AfterFunc +
+  stops draining the shared pools); (b) funnel/skimmer submit (after rooting their bodies at srcCtx);
+  (c) the rdvq inbox cluster. NOT committed (awaiting PN + -race green).
+
+**►►► C2 BENCHMARKS — bench/ comparison submodule created (2026-06-29).** New isolated module
+`github.com/petenewcomb/streampool/bench` (own go.mod, `replace ../`) for head-to-head comparisons vs
+other frameworks — keeps their deps/licenses out of the root module (mirrors otpsg). Rationale (from PN's
+"consider what competitors benchmark"): Go pool libs (ants/pond/tunny) compete on throughput + memory +
+peak-goroutines; NONE benchmark tail-latency-under-blocking, which is exactly the split's moat. So the
+harness reports BOTH turfs through one `dispatcher` interface (start/submit/drain/stop):
+- competitors' turf: tasks/sec, allocs/task, B/task, peak-goroutines.
+- our turf: p50/p99/p99.9 dispatch (enqueue→body-start) + e2e (enqueue→body-done) latency, heavy-tailed
+  lognormal blocking work, swept P:D (underload→heavy-overload).
+- Lineup: unbounded (explosion control), chan-semaphore, naive-pool (the "dispatcher-pinned/no-split"
+  control), streampool. tdigest for streaming quantiles; sharded recorder; fixed warmup+window;
+  `-benchtime=1x`.
+- **First validated result** (heavytail/balanced/P=D=8): streampool matches/beats the bounded baselines'
+  e2e tail (12.2ms p99) while bounding goroutines, at ~37 allocs/task vs naive-pool's 1; unbounded blows
+  to 133k goroutines. Green: gofmt + vet + lint(0) + compiles.
+- **KNOWN LIMITATION (documented in bench/README.md):** the flat independent-blocking-task workload is
+  throughput-bound by D, so all bounded systems converge — it does NOT yet isolate the split's
+  responsiveness edge. NEXT: (1) nested-dispatch workload (naive pool DEADLOCKS, streampool doesn't);
+  (2) funnel+flush (exercises CP-B1b); (3) mixed latency-probe + heavy bodies; (4) ants/pond/conc in the
+  lineup. NOT yet committed (awaiting PN).
+
 **►►► CP-B1b DONE (2026-06-29) — funnel-flush body → executor (the deferred D2). build/vet/suite green;
 -race batch confirming.** A blocking user `Flush` no longer pins a scheduler — the always-live-dispatcher
 invariant now holds for *every* user body (task, funnel-accumulate, funnel-flush). The split, collapsed

@@ -311,7 +311,13 @@ func (wv *Wave) Skim(ctx context.Context) error {
 	traceRegion := "Wave.Skim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, meta := wv.skimCtxMeta(ctx)
+	ctx, meta, owned := wv.skimCtxMeta(ctx)
+	if owned {
+		// Recycle the minted skim meta after the drive (and after reclaim, below, which
+		// is deferred later and so runs first). Safe: the skim ctx is used only to drive
+		// the synchronous skim; handler-launched async work resolves its own nearest meta.
+		defer releaseTopLevelContext(ctx)
+	}
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
@@ -350,7 +356,10 @@ func (wv *Wave) yield(ctx context.Context, deadline time.Time) error {
 	traceRegion := "Wave.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, _ = wv.skimCtxMeta(ctx)
+	ctx, _, owned := wv.skimCtxMeta(ctx)
+	if owned {
+		defer releaseTopLevelContext(ctx)
+	}
 	for {
 		ok, err := wv.trySkim(ctx)
 		if err != nil {
@@ -389,7 +398,10 @@ func (wv *Wave) block(
 	traceRegion := "Wave.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
-	ctx, meta := wv.skimCtxMeta(ctx)
+	ctx, meta, owned := wv.skimCtxMeta(ctx)
+	if owned {
+		defer releaseTopLevelContext(ctx)
+	}
 	// Suspend-class episode: the block-and-help wait both parks and
 	// synchronously runs other framework-gated work. Bracketing here is
 	// correctness-required, not just utilization — without it, a
@@ -720,7 +732,10 @@ func (wv *Wave) TrySkim(ctx context.Context) (bool, error) {
 	traceRegion := "Wave.TrySkim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	ctx, _ = wv.skimCtxMeta(ctx)
+	ctx, _, owned := wv.skimCtxMeta(ctx)
+	if owned {
+		defer releaseTopLevelContext(ctx)
+	}
 	return wv.trySkim(ctx)
 }
 
@@ -752,7 +767,10 @@ func (wv *Wave) SkimAll(ctx context.Context) error {
 	// body driving this drain — e.g. a subwave's CloseAndSkimAll —
 	// parks here while holding its limiter permit; give the slot back
 	// for the whole drain and reclaim (help-shaped) on return.
-	ctx, meta := wv.skimCtxMeta(ctx)
+	ctx, meta, owned := wv.skimCtxMeta(ctx)
+	if owned {
+		defer releaseTopLevelContext(ctx)
+	}
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
@@ -790,7 +808,10 @@ func (wv *Wave) TrySkimAll(ctx context.Context) error {
 }
 
 func (wv *Wave) skimAll(ctx context.Context, skimFn func(context.Context) (bool, error)) error {
-	ctx, _ = wv.skimCtxMeta(ctx)
+	ctx, _, owned := wv.skimCtxMeta(ctx)
+	if owned {
+		defer releaseTopLevelContext(ctx)
+	}
 	for {
 		ok, err := skimFn(ctx)
 		if err != nil {

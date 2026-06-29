@@ -44,7 +44,7 @@ func TestPermitScopingChains(t *testing.T) {
 	// Mint (or fetch) the wave's top-level meta from ctx. A zero-value Wave
 	// self-initializes on this first topLevelCtxMeta call; ctxMeta below then
 	// reads back the meta now stamped on ctx.
-	ctx, _ = wave.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, _, _ = wave.topLevelCtxMeta(ctx, func(contextType) {})
 	_, topMeta := wave.ctxMeta(ctx)
 	require.NotNil(t, topMeta)
 	require.Equal(t, topLevelContext, topMeta.ctxType)
@@ -83,7 +83,7 @@ func TestPermitScopingChains(t *testing.T) {
 		// record the body meta as parent — the body→subwave chaining the
 		// assertions below pin.
 		var subWave Wave
-		subCtx, subTopMeta := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
+		subCtx, subTopMeta, _ := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subTopCtxType = subTopMeta.ctxType
 		subTopParentIsBody = subTopMeta.parent == bodyMeta
 		// The chain a subwave parking point would walk: from the subwave's
@@ -146,7 +146,7 @@ func TestHeldPermitStampedDuringBodies(t *testing.T) {
 		// derived meta's parent to bodyCtx's (cross-wave) body meta, so the
 		// subwave context finds the body's held handle via the parent walk.
 		var subWave Wave
-		subCtx, subTopMeta := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
+		subCtx, subTopMeta, _ := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subwaveSeenHeld = subTopMeta.currentHeldPermit()
 		return subWave.CloseAndSkimAll(subCtx)
 	}, WithLimits(NewSemaphore(1)))

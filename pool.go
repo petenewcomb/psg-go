@@ -7,7 +7,6 @@ import (
 	"context"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
-	"github.com/petenewcomb/streampool/internal/execpool"
 	"github.com/petenewcomb/streampool/internal/worker"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
@@ -25,16 +24,6 @@ import (
 // placeholder context is never exercised.
 var defaultPool = worker.NewPool(newWorkerState)
 
-// bodyExecutorPool is the execution half of the dispatch/execution split (Phase 2b C2):
-// a demand-spawned pool of workers that run user bodies handed to them over an unbuffered
-// rendezvous. A body PushBack'd here (by taskWork/funnelWork.Execute on a scheduler
-// worker) runs to completion on an executor goroutine and Frees itself — so a blocking
-// body no longer pins a scheduler worker, keeping admission always live. Bodies reach an
-// executor with their per-worker environment passed directly (no workerEnvKey ctx walk);
-// the body still runs under its own borrowed body ctx, stamping the executor's env in.
-// (Distinct from executorPool in ctxmeta.go, which pools the workq.Executor drive helper.)
-var bodyExecutorPool = execpool.NewExecutor(func() *workerExEnv { return &workerExEnv{} })
-
 // Wait blocks until every worker goroutine of the default pool has exited. It
 // waits for all in-flight Waves to finish on their own and then reaps the idle
 // workers — it does NOT cancel running work (a Wave that never drains makes Wait
@@ -49,12 +38,7 @@ var bodyExecutorPool = execpool.NewExecutor(func() *workerExEnv { return &worker
 //
 // (Under the planned package rename this becomes streampool.Wait.)
 func Wait() {
-	// Quiesce the scheduler first (it stops admitting and handing bodies off), then the
-	// executor (it drains the bodies already handed off). Bodies are strictly downstream
-	// of scheduler admission, so this order is the safe one: a scheduler worker blocked
-	// handing a body off is still served by the live executor during defaultPool.Wait().
 	defaultPool.Wait()
-	bodyExecutorPool.Wait()
 	ctxpool.Clear()
 }
 

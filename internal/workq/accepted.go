@@ -614,12 +614,7 @@ func (c *controller) execute(ctx context.Context, blockOrListen bool) error {
 	}
 
 	if c.ex.Started() {
-		// A handed-off item (PushBack'd to the executor pool) is owned by that runner,
-		// which Frees it after the body completes — Freeing here would race its use and
-		// double-free. Every other Started item is the controller's to Free.
-		if !c.executor.WasHandedOff() {
-			bw.work.Free()
-		}
+		bw.work.Free()
 	} else {
 		c.workWasPostponed = true
 	}

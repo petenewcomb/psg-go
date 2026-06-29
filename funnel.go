@@ -684,40 +684,32 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 	hbc.accumulate(ctx, wk.input, wk.inputErr)
 }
 
-// Execute runs on a scheduler worker. The permit gate runs HERE, on the scheduler — NOT
-// the executor (Wrinkle 1: schedulers own permits, executors only run bodies) — so a
-// permit miss postpones on the scheduler's controller and is retried there. On a grant the
-// permit is held across the handoff and released when the body completes (in Free, on the
-// executor). The body itself is handed to the executor pool over the unbuffered rendezvous
-// (block-as-demand), freeing the scheduler worker the instant an executor takes it.
 func (wk *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	traceRegion := "funnelWork.Execute"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", wk, wk)
 
-	if wk.h != nil {
-		held, err := gateAcquire(ctx, ex, wk.fn.wave, wk.h)
-		if err != nil || !held {
-			return err
-		}
+	if wk.h == nil {
+		return wk.executeInner(ctx, ex)
 	}
 
-	ex.Starting()
-	if err := bodyExecutorPool.PushBack(ctx, wk); err != nil {
-		// Not handed off: the controller Frees it (Free releases the held permit).
+	held, err := gateAcquire(ctx, ex, wk.fn.wave, wk.h)
+	if err != nil || !held {
 		return err
 	}
-	ex.HandedOff() // executor owns wk now; it runs the body and Frees it (releasing the permit)
-	return nil
+	// The funnel permit scopes exactly the body run: executeInner always
+	// starts, so the postpone-after-grant case doesn't arise here.
+	// Released on return (panic-inclusive); Free's release is then an
+	// idempotent no-op before the recycle.
+	defer wk.h.release()
+	return wk.executeInner(ctx, ex)
 }
 
-// Run is the executor pool's entry (execpool.Task[*workerExEnv]): it runs the funnel body
-// against the executor's environment and Frees the work — releasing any held permit — since
-// the executor is its sole owner after the handoff. run takes ee directly (no workerEnvKey
-// ctx walk); the body executes under its borrowed body ctx.
-func (wk *funnelWork[T]) Run(ee *workerExEnv) {
-	wk.run(ee)
-	wk.Free()
+func (wk *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
+	ex.Starting()
+	//nolint:contextcheck // run uses ctx only to fetch the worker E; the body runs under bodyCtx
+	wk.run(workerEnvFromContext(ctx))
+	return nil
 }
 
 // run executes the funnel body against the per-worker environment ee. The body context was
@@ -740,11 +732,9 @@ func (wk *funnelWork[T]) Free() {
 	trace.Logf(context.Background(), traceRegion, "funnelWork(%p), %v", wk, wk)
 
 	if wk.h != nil {
-		// Release the permit the gate (funnelWork.Execute) acquired. Free is the release
-		// point now that the body runs on the executor: Run calls Free after the body, so
-		// this releases at body completion; on the abandon paths (handoff failed, or work
-		// freed without executing) it gives back a held-but-unused permit, and a
-		// never-acquired handle no-ops. Idempotent. Then recycle.
+		// Normal completion already released at body end; this is the idempotent
+		// backstop for work freed without executing (cancellation drain) — a held
+		// permit is given back, a never-acquired handle no-ops. Then recycle.
 		wk.h.release()
 		heldPermitPool.Put(wk.h)
 		wk.h = nil

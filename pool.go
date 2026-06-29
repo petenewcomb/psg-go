@@ -21,10 +21,12 @@ import (
 //     workers by COUNTER (bounded, not per-call), while top-level admission runs inline on
 //     the per-wave workQueue. (On execpool — "worker.Pool is obsolete", now retired here.)
 //   - bodyExecutor — the EXECUTOR: a demand-spawned pool of workers that run the blocking
-//     user bodies (task, funnel-accumulate) handed to them over an unbuffered rendezvous. It
-//     MAY block — that is its job — so a blocking body never pins a scheduler. Each
-//     *PostWork.Execute PushBacks its body here; the body runs Run(ee) against the worker's
-//     environment and frees itself. (Funnel-flush still runs on the scheduler for now — D2.)
+//     user bodies (task, funnel-accumulate, funnel-flush) handed to them over an unbuffered
+//     rendezvous. It MAY block — that is its job — so a blocking body never pins a scheduler.
+//     Each *PostWork.Execute PushBacks its body here; the body runs Run(ee) against the
+//     worker's environment and frees itself. Funnel-flush is the same shape: the scheduler
+//     surfaces a due flush (funnelInstance.Execute) and hands the flush body to the executor
+//     (funnelInstance.Run), so a blocking user Flush never pins a scheduler either (CP-B1b).
 var defaultPool = workq.NewScheduler()
 
 // bodyExecutor runs user bodies off the scheduler. Per-worker environments are fresh

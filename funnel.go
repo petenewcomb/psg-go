@@ -372,34 +372,67 @@ type funnelInstance[T any] struct {
 	accumulator Accumulator[T]
 
 	// detached marks an instance the end-of-work sweep popped out of the cache queue
-	// and enqueued as flush work: its Execute must recycle it (it is no longer cached,
-	// so the owner lineage won't). A deadline-driven Execute leaves detached false and
+	// and enqueued as flush work: its Run must recycle it (it is no longer cached,
+	// so the owner lineage won't). A deadline-driven flush leaves detached false and
 	// leaves the spent shell cached for the owner/sweep to recycle. Set under mu by the
-	// sweep before ForceFresh; read under mu by Execute.
+	// sweep before ForceFresh; read under mu by Run.
 	detached bool
+
+	// borrowSrcCtx is the ctx the scheduler-side Execute stashes for Run to borrow the
+	// flush body ctx from (the instance carries no ctx of its own). It is written in
+	// Execute before the handoff that publishes the instance to an executor — the
+	// handoff's rendezvous supplies the happens-before — and read exactly once at the top
+	// of Run, before c.mu is taken. That ordering is what keeps it race-free against an
+	// owner reuse-pop, which may recycle a non-detached spent shell the instant Run
+	// releases c.mu (see Run).
+	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the flush body ctx
 }
 
-// Execute implements [workq.Work]: it runs the scheduled flush once the
-// instance's deadline has come due and the shared queue has surfaced it as fresh
-// work — either a deadline drained by a worker, or the end-of-work sweep's
-// ForceFresh. Any pool worker may run it. It flushes (dropping the per-instance
-// barrier in flush) and then, only if the sweep detached it from the cache,
-// recycles the spent shell — never touching the instance after releasing c.mu
-// otherwise (rule R2), so an owner reuse-pop is free to recycle a non-detached
-// shell the instant Execute releases c.mu.
+// Execute implements [workq.Work] as the scheduler-side admission for a due flush
+// (CP-B1b — the deferred D2). The instance becomes fresh work either when a worker
+// drains its deadline or when the end-of-work sweep ForceFreshes it; Execute then hands
+// the flush BODY to the EXECUTOR (mirrors taskPostWork / funnelPostWork) so a blocking
+// user Flush never pins a scheduler. There is no permit gate — flush is not limited — so
+// admission is just the handoff: a non-blocking direct handoff first, and if no executor
+// waits the work postpones and is retried-and-blocked when the scheduler worker parks
+// (shouldStillWait), exactly as a task body's handoff is.
 //
-//nolint:contextcheck // ctx is the borrow source for the flush body ctx, not a propagated arg
+// ex.Starting fires only on a successful handoff, which transfers the instance to the
+// executor (Run owns the flush, the barrier drop, and any recycle). The controller's
+// subsequent Free is a no-op, and after Starting the controller drops its buffer slot, so
+// nothing on the scheduler side touches the instance once it is handed off.
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
-	ex.Starting()
-	// The flush runs on a scheduler worker (D2: moving the flush body to the executor is a
-	// deferred follow-up). Scheduler workers carry no per-worker execution environment on
-	// their ctx (unlike the obsolete worker.Pool), so give the flush body its own fresh
-	// workerExEnv: it runs single-threaded on this goroutine, and a downstream Submit from
-	// Flush routes through it (workerExEnv.ExecuteNowOrQueue → scheduler intake). Borrow a
-	// funnel-body ctx (wave ambient for downstream resolution, funnel ctxType); cancellation
-	// rides ctx by ancestry, the wave owns none.
-	ee := &workerExEnv{}
-	bodyCtx, _ := borrowBodyContext(ctx, c.wave, funnelContext, nil, ee)
+	// Stash the borrow source for Run; see the field and Run for why writing it here
+	// (before the publishing handoff) and reading it once at the top of Run is race-free.
+	c.borrowSrcCtx = ctx
+	if bodyExecutor.TryPushBack(c) {
+		ex.Starting()
+		return nil
+	}
+	if !ex.ShouldBlockOrPostpone() {
+		return nil // postpone; retried (and blocked) when the scheduler worker parks
+	}
+	err := bodyExecutor.PushBack(ctx, c)
+	if err == nil {
+		ex.Starting()
+	}
+	return err
+}
+
+// Run is the [execpool.Task] entry: an executor goroutine runs the flush against its
+// worker environment ee. It borrows a fresh funnel-body ctx from the stashed source (wave
+// ambient for downstream Submit resolution, funnel ctxType; cancellation rides the source
+// by ancestry, the wave owns none), flushes under c.mu — dropping the per-instance wave
+// barrier inside flush, ordered after the user Flush body so a downstream Submit takes its
+// reference first — and then, only if the sweep detached it from the cache, recycles the
+// spent shell. Rule R2: it never touches the instance after releasing c.mu otherwise, so
+// an owner reuse-pop may recycle a non-detached shell the instant c.mu is released.
+//
+//nolint:contextcheck // src is the borrow source for the flush body ctx, not a propagated arg
+func (c *funnelInstance[T]) Run(ee *workerExEnv) {
+	src := c.borrowSrcCtx
+	c.borrowSrcCtx = nil
+	bodyCtx, _ := borrowBodyContext(src, c.wave, funnelContext, nil, ee)
 	defer releaseBodyContext(bodyCtx)
 	c.mu.Lock()
 	c.flush(bodyCtx)
@@ -410,15 +443,13 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 		// R2 guarantees we hold it exclusively now. Recycle the spent shell.
 		omnipool.For[funnelInstance[T]]().Put(c)
 	}
-	return nil
 }
 
-// Free implements [workq.Work] as a no-op. A flush completes everything it needs —
-// the user flush, the wave barrier, and (if detached) recycling — inside
-// [funnelInstance.Execute] before releasing c.mu and never touches the instance
-// again. Because an owner reuse-pop may recycle a non-detached spent shell the
-// instant c.mu is released (before the controller gets here to call Free), Free must
-// not read any instance field.
+// Free implements [workq.Work] as a no-op. The flush completes everything it needs — the
+// user flush, the wave barrier, and (if detached) recycling — inside [funnelInstance.Run]
+// on the executor, not here. The controller calls Free on the scheduler side right after
+// Execute's successful handoff, possibly concurrently with Run; Free must therefore not
+// read any instance field (it would race Run and any owner reuse-pop).
 func (c *funnelInstance[T]) Free() {}
 
 func (c *funnelInstance[T]) allocate(

@@ -118,6 +118,38 @@ design. Key facts the 2-line plan banner missed:
   `internal/worker` + the dead `workq.Queue`/`Worker` scaffold + strip vestigial `deadlineCh` (DONE,
   this cleanup).
 
+**►►► CP-B1b DONE (2026-06-29) — funnel-flush body → executor (the deferred D2). build/vet/suite green;
+-race batch confirming.** A blocking user `Flush` no longer pins a scheduler — the always-live-dispatcher
+invariant now holds for *every* user body (task, funnel-accumulate, funnel-flush). The split, collapsed
+onto `funnelInstance` itself (no new object — the instance is already the scheduled `Work` *and* now the
+`execpool.Task`):
+- `funnelInstance.Execute` (scheduler side, driven by a drained deadline or the sweep's ForceFresh) is now
+  pure admission: it hands the flush body to `bodyExecutor` — `TryPushBack` first, then (only when the
+  scheduler worker parks, via `shouldStillWait` with `ShouldBlockOrPostpone`) a blocking `PushBack`.
+  No permit gate (flush is unlimited). `ex.Starting()` fires only on a successful handoff.
+- `funnelInstance.Run(ee *workerExEnv)` (NEW, the executor Task body) holds the moved flush: borrow body
+  ctx → `c.mu` → `flush` → read `detached` → unlock → recycle if detached. This is verbatim the old
+  `Execute` body, now on an executor goroutine with the worker's `ee` (was a fresh `&workerExEnv{}`).
+- **Why collapsing onto the instance is safe (not a separate post-work like funnelPostWork):** the
+  controller calls `instance.Free()` right after `Execute`'s handoff, possibly *concurrently* with the
+  executor's `Run`. That is fine because `Free()` is already a pure no-op (R2 design) and the instance
+  already self-recycles — nothing on the scheduler side touches the instance after Starting (the buffer
+  slot is dropped in `releaseOthers`).
+- **Barrier ordering preserved for free:** `flush()` (user Flush body + the deferred
+  `state.DecrementReference()`) moves atomically to the executor, so the barrier still drops *after* the
+  Flush body regardless of which goroutine runs it; the per-instance barrier (held from allocate) keeps
+  the wave out of Done across the scheduler→executor handoff window.
+- **bodyCtx-reuse race avoided:** added `borrowSrcCtx` field, written in `Execute` before the publishing
+  handoff (rendezvous = happens-before) and read *once* at the top of `Run` before `c.mu` — so the owner
+  reuse-pop that may recycle a non-detached shell the instant `Run` releases `c.mu` never races it. The
+  borrowed bodyCtx is a `Run` local (not an instance field), as it was in the old `Execute`.
+- **Widened accumulate/flush window:** the deadline-drain→flush window is now longer (drain → handoff →
+  executor `Run` acquires `c.mu`) but it was already an interleavable window handled by `c.mu` + R1
+  (accumulate on a drained instance sees `Reschedule`==false and leaves it to the pending flush) +
+  spent-shell recycle. Widening changes nothing structurally.
+- **Remaining for full C2:** the C2 latency/alloc benchmarks (real methodology: P99/max, heavy-tailed
+  blocking-I/O, swept P:D ratios). CP-B1b was the last code-structure piece of the split.
+
 **►►► CP-B2 CLEANUP DONE (2026-06-29) — build/vet/lint/suite green; -race confirming.** Deleted the
 obsolete worker-pool lineage now that `defaultPool` is `workq.Scheduler`:
 - Removed `internal/worker/` (pool.go + test) — unreferenced.

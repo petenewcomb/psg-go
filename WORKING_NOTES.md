@@ -25,10 +25,39 @@ Decide revert-to-green vs. fix-forward before relying on it.
   it); needs a different tactic — e.g. add invalid-state panics / targeted `trace.Logf` at the
   scheduler spawn-on-demand and the wave Done/skim-wake, or an "op started-vs-completed" diff to
   prove whether work is pending-unadmitted (lost spawn) vs. done-but-unwoken (lost Done-wake).
-- **Next:** confirm pending-work-vs-lost-wake (started/completed diff on a fresh dump), then fix the
-  missed scheduler spawn or the missed Done/skim wake. Fix likely lands with/near the scheduler
-  cutover (the execpool demand-counter model is more robust against lost spawns than worker.Pool's
-  TrySpawn). See `internal/cmd/fmttrace` + the `sim-trace-debugging` skill.
+- **REFINED DIAGNOSIS (2026-06-28d, deeper dig — supersedes the lost-spawn guess above):**
+  - **It is a LEAKED WORK/REFERENCE, not scale-to-zero.** Discriminator run: scheduler idle set
+    to 1h (never scales to zero mid-run) STILL hangs (1/80) → scheduler scale-to-zero is NOT the
+    trigger. The 1h-idle hang dump is the clean tell: ~80 *idle* scheduler workers (kept alive by
+    1h idle), nothing running, and **ONE lone top-level `SkimAll` parked** — its wave never reached
+    Done despite no in-flight work. `skimSelect` (wave.go:577) includes `case <-state.Done()` (a
+    closed channel — reliable), so it is NOT a lost-Done-wake: the wave's in-flight/ref count is
+    stuck > 0, so a body (`taskWork`/`funnelWork`) was `IncrementWork`'d at dispatch but its
+    `Free`→`DecrementWork` NEVER ran (or a funnel-instance barrier leaked).
+  - **The executor Handoff orphan/abandon machinery is CORRECT** (verified by reading
+    `rdvq/inboxonly.go` PopFrontFunc + `handoff.go`): sender-before-abandon → orphan drained &
+    run (ok=true); sender-after-abandon → abandonment marker makes TryPushBack skip the dead inbox
+    → block-as-demand spawns fresh. So the leak is NOT a lost handoff there.
+  - **Controller HandedOff path looks correct** (single-item-per-drive: a handed-off item Starts →
+    tryAccepted returns → drive ends → executor.Reset clears wasHandedOff; releaseOthers nils the
+    item's buffer slot so it isn't requeued; executor owns+Frees). No cross-item leak found by
+    inspection.
+  - **HEISENBUG resists ALL observation:** reproduces ONLY at DEFAULT config under `-race` (~1/25).
+    SUPPRESSED/masked by: zero or small `SelfTime`, 2ms idle, amplified nesting, `-trace` (0/60),
+    AND even lightweight atomic counters + a 2s ticker goroutine (0/60). Also: small samples are
+    statistically meaningless here — P(0 hangs in 40 at 1/25) ≈ 20%, so earlier "suppressed"
+    reads were underpowered. Any added goroutine/sync shifts the window.
+  - **NEXT TACTICS (untried / promising):** (1) a NON-perturbing leak witness readable only from the
+    `-timeout` goroutine dump — e.g. park a sentinel goroutine whose stack/select encodes the live
+    body count, or have the executor-pool scale-to-zero point assert "no handed-off-but-unrun
+    bodies"; (2) op-type bisect (funnel-only vs launcher-only) and limiter on/off — but ONLY with
+    large samples (≥150 -race) or after finding a high-rate amplifier; (3) deep code review of the
+    **funnel-instance barrier** lifecycle (the dumps prominently feature funnels) vs the new
+    `funnelWork.Run`+`Free`/permit-release-moved-to-Free change; (4) since the leak is a missed
+    `DecrementWork`, add a per-wave `IncrementWork`/`DecrementWork` pair-tally that PANICS on a
+    detectable imbalance at a sync point (gut: the hang has no sync point, so this needs a teardown
+    hook). The captured hang dumps are in the scratchpad (`noidle_72.log` = the clean 1-stuck-wave
+    case).
 
 
 **►►► C2 IN PROGRESS — `execpool.Pool[W]` FOUNDATION LANDED; SCHEDULER (workq.Scheduler)

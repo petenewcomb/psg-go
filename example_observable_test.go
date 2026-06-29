@@ -98,12 +98,12 @@ func Example_observable() {
 	//   0ms: launched task "A"
 	//   0ms: launched task "B"
 	//  10ms:   task "B" complete
-	//  20ms:   skimmed result "result for task B"
-	//  20ms: launched task "C"
-	//  30ms: skimming remaining tasks
-	//  50ms:   task "C" complete
+	//  10ms: launched task "C"
+	//  20ms: skimming remaining tasks
+	//  30ms:   skimmed result "result for task B"
+	//  40ms:   task "C" complete
+	//  50ms:   skimmed result "result for task C"
 	//  60ms:   task "A" complete
-	//  60ms:   skimmed result "result for task C"
 	//  70ms:   skimmed result "result for task A"
 	//  70ms: skimming complete
 	// results[0]="result for task B"

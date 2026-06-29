@@ -71,6 +71,16 @@ func (x *Executor[E]) PushBack(ctx context.Context, task Task[E]) error {
 	return err
 }
 
+// TryPushBack attempts a non-blocking direct handoff: it delivers task to an executor only
+// if one is already waiting, returning true on success. It never buffers, blocks, or fires
+// demand — the caller decides what to do on a false (block via PushBack, postpone, or give
+// up). It is the "try once" handoff a synchronous-dispatch caller uses when it must not block
+// (e.g. a body on an executor goroutine, where a blocking PushBack waiting for another
+// executor could deadlock).
+func (x *Executor[E]) TryPushBack(task Task[E]) bool {
+	return x.handoff.TryPushBack(task)
+}
+
 // Acquire, Release, and Wait are the executor's lifecycle, delegated to the underlying pool.
 func (x *Executor[E]) Acquire() { x.pool.Acquire() }
 func (x *Executor[E]) Release() { x.pool.Release() }

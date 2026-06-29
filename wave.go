@@ -139,18 +139,14 @@ func (wk *taskWork) Reset() {
 	wk.bodyMeta = nil
 }
 
-// Execute is the workq.Work entry run by a global-pool worker (the scheduler-side
-// controller path). It confirms execution (ex.Starting) and delegates to run, the
-// Execution-free body. When dispatch moves to the executor pool (C2c), the executor calls
-// run directly with the worker E and Execute is dropped — the body never needs Execution.
-func (wk *taskWork) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "taskWork.Execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	ex.Starting()
-	//nolint:contextcheck // run uses ctx only to fetch the worker E; the body runs under bodyCtx
-	wk.run(workerEnvFromContext(ctx))
-	return nil
+// Run is the [execpool.Task] entry: the executor hands it the worker environment ee and
+// Run owns ALL of its own cleanup. It runs the body against ee and frees the work. The
+// executor never touches a body through the priority controller — Run is the whole
+// contract (no Execution, no confirm-execute; admission already happened on the scheduler
+// side, and the post-work called ex.Starting before PushBack).
+func (wk *taskWork) Run(ee *workerExEnv) {
+	wk.run(ee)
+	wk.Free()
 }
 
 // run executes the task body against the per-worker environment ee. The body context
@@ -821,21 +817,25 @@ func (wk *taskPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 		trace.Logf(ctx, traceRegion, "%v", wk)
 	}
 
-	// Handoff to the GLOBAL pool's shared work queue: the unified Queue.Post
-	// replaces the legacy taskQueue try/listen/block loop, and the pool's
-	// unmet-demand signal (trySpawnWorker) replaces registerDemand/
-	// trySpawnTaskWorker. Spawn/governor are handled elsewhere (governor at
-	// launcherScatterWork, spawn at defaultPool). onWait is nil for task (no
-	// downstream governor registration here).
-	// shouldBlock is read directly from the ctx (not via wv.ctxMeta, which panics on
-	// a missing meta): a producer only postpones onto the global queue in LISTEN
-	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta —
-	// so "no matching meta → shouldBlock=false" matches the original dispatch.
-	meta, _ := metaFromContext(ctx)
-	shouldBlock := meta != nil && meta.wave == wk.wave && meta.ShouldBlock()
-	posted, err := defaultPool.Post(ctx, ex, shouldBlock, wk.task, nil)
-	if posted {
-		// Ownership transferred to the queue; the worker will run + Free it.
+	// Hand the admitted body to the EXECUTOR (dispatch/execution split): the body runs
+	// off the scheduler so it never pins one. Try a non-blocking direct handoff first; if
+	// no executor is waiting, block-as-demand spawns one — but only block when the caller
+	// can wait (ex.ShouldBlockOrPostpone): a TryExecuteNow probe (AddToListeners nil) gives
+	// up instead, and a controller drive postpones to retry under its wait protocol. This
+	// runs only on a scheduler worker or a top-level/skim producer goroutine — never on an
+	// executor body goroutine (nested submits are dropped to the scheduler, not run inline)
+	// — so a blocking PushBack here can never wedge waiting for an executor.
+	if bodyExecutor.TryPushBack(wk.task) {
+		ex.Starting()
+		wk.task = nil // ownership transferred to the executor, which runs + Frees it
+		return nil
+	}
+	if !ex.ShouldBlockOrPostpone() {
+		return nil // try-once probe: didn't start, caller (TryExecuteNow / drive) retries
+	}
+	err := bodyExecutor.PushBack(ctx, wk.task)
+	if err == nil {
+		ex.Starting()
 		wk.task = nil
 	}
 	return err

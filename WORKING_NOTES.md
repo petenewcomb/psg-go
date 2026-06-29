@@ -2,6 +2,150 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► CUTOVER FULLY SCOPED — FORK A (`combiner`, 2026-06-28e).** Deep read of the whole
+dispatch surface (pool.go, ctxmeta.go, wave.go, launcher.go, limiter.go, funnel.go) settled the
+design. Key facts the 2-line plan banner missed:
+- **The existing design ALREADY splits admission from bodies.** Per-wave `workQueue` (`workq.Accepted`,
+  `Init(nil)`) + `skimQueue` (`Pending`) run *admission* (the scatter-works) INLINE on the user /
+  skim goroutines (`topLevelExEnv.ExecuteNowOrQueue` → `wave.workQueue`; skim drives `workQueue.
+  ExecuteOne`). Only the BODY goes to the global `defaultPool` (`*PostWork.Execute → defaultPool.
+  Post`). So C2 is NOT "rebuild dispatch" — it is "move the body off `defaultPool` onto an executor,
+  and move NESTED admission off the body goroutine onto a scheduler."
+- **THREE blocking body types** (each runs user code; each must run on the executor, never pin a
+  scheduler): (1) task — `taskWork`; (2) funnel-accumulate — `funnelWork[T]`; (3) funnel-flush —
+  `funnelInstance.Execute` (the user `Flush` handler), `ForceFresh`'d into the pool by `sweepFlush`/
+  deadline-drain.
+- **Admission chains differ (must unify).** Task: `launcherScatterWork`(governor) → `limiterScatterWork`
+  (permit) → `taskPostWork`(post) → body. The body (`taskWork`) is already a pure body (no gate).
+  Funnel: `funnelPostWork`(governor via onWait/`Waiting`) → post; **the permit gate is INSIDE
+  `funnelWork.Execute`** (`gateAcquire`) — Wrinkle 1. Funnel-flush: bare `funnelInstance` (no
+  decorator). Unify by reusing `limiterScatterWork`/`launcherScatterWork` around the funnel post-works,
+  matching the task order **governor OUTSIDE permit** (a prior gate-hoist hit governor-ordering — the
+  inversion is the trap).
+
+**FORK A (chosen, see DECISIONS) — minimal, semantics-preserving:**
+- **Bodies → `bodyExecutor` (`execpool.Executor[*workerExEnv]`).** Each body type gets `Run(ee)` (=
+  `run(ee)` + self-`Free`, already 90% there) and a scheduler-side post-work whose `.Execute` does
+  `bodyExecutor.PushBack(body)` + `ex.Starting()` + null-out (the EXISTING `wk.task=nil` ownership
+  transfer; the controller `Free`s the post-work, the executor owns+frees the body). NO `HandedOff`.
+- **Top-level admission stays inline** on `wave.workQueue` (user/skim goroutine) — preserves producer
+  backpressure; the `PushBack` blocks the producer (safe: never an executor goroutine).
+- **Nested admission (from a body on an executor) must NOT run inline** (its `PushBack` would block the
+  executor waiting for an executor ⇒ deadlock). `workerExEnv.ExecuteNowOrQueue` drops the scatter-work
+  to the scheduler non-blocking (push fresh + `Nudge`); a scheduler worker runs admission + the
+  blocking `PushBack`. This is the deadlock-avoidance the split exists for.
+- **`defaultPool` → `workq.Scheduler`** (drives nested admission + postponed + scheduled-flush);
+  `streampool.Wait` reaps BOTH pools. The scaffold's `incoming` Handoff + `Scheduler.Post` are UNUSED
+  in Fork A (top-level is inline, not Handoff-posted) — leave vestigial, remove later.
+- Funnel-gate hoist: wrap `funnelPostWork` with `limiterScatterWork`(permit) [+ governor wrapper to
+  keep governor-outside-permit]; remove `gateAcquire` from `funnelWork.Execute`; permit released at
+  body end / `Free` (already idempotent). Funnel-flush: `funnelInstance.Run(ee)` + a flush post-work
+  that `PushBack`s it; `sweepFlush`/deadline `ForceFresh` the post-work.
+
+**DECISIONS (asked PN 2026-06-28e):**
+- **D1 topology:** Fork A (top-level inline, `incoming` unused) vs Fork B (route top-level through the
+  scheduler `incoming` Handoff — the earlier written plan; relaxes producer backpressure). → recommend A.
+- **D2 funnel-flush:** flush body → executor too (honors always-live-scheduler) vs run on scheduler for
+  the first cut (simpler, but a blocking `Flush` pins a scheduler). → recommend executor. **PN chose
+  executor; DEFERRED to a follow-up CP after closer reading.** Reason: `funnelInstance.Execute`'s flush
+  is synchronous under `c.mu`, and the per-instance wave barrier (`DecrementReference`) MUST drop
+  *after* the user `Flush` (so a downstream `Submit` in `Flush` takes its ref before this one drops —
+  else `totalReferences` transiently hits zero ⇒ premature wave Done = the leak class of the prior
+  hang). Splitting that across the scheduler→executor handoff opens a new R1/R2 concurrency window in
+  the delicate instance lifecycle and is too risky to bundle into the first cut. For CP-B1 the
+  deadline/sweep flush stays on the scheduler (its nested submits drop to the scheduler non-blocking →
+  no deadlock; it only *pins* a scheduler worker during a blocking `Flush`, which is bounded — flushes
+  are rare vs accumulates). The already-past-deadline INLINE flush in `accumulate` already runs on the
+  executor. Move `funnelInstance.Execute`→executor in a dedicated follow-up (CP-B1b).
+
+**CP SEQUENCING (revised this session):**
+- **CP-B1 (in progress):** bodies (task + funnel-accumulate) → `bodyExecutor`; nested admission →
+  scheduler via `ForceFresh`; `defaultPool` STAYS `worker.Pool` (proven scheduler); funnel-flush stays
+  on scheduler (D2 deferred). Isolates the body/executor split + deadlock-avoidance from the
+  scheduler-swap. Validate large `-race` batch before commit.
+- **CP-B1b:** `funnelInstance.Execute` flush → executor (the deferred D2), with the instance-split
+  designed carefully.
+- **CP-B2:** swap `defaultPool` `worker.Pool` → `workq.Scheduler`; then delete `internal/worker`.
+
+**CP-B1 IMPLEMENTED (2026-06-28e) — build/vet/sim green; -race batch pending.** Edits:
+- `execpool.Executor.TryPushBack` (non-blocking direct handoff).
+- `pool.go`: `bodyExecutor = execpool.NewExecutor(&workerExEnv{})`; `Wait()` reaps executor then
+  scheduler; `defaultPool` STILL `worker.Pool`.
+- `taskWork.Run(ee)` (= run+Free), `Execute` removed; `taskPostWork.Execute` → TryPushBack-then-(if
+  ShouldBlockOrPostpone)PushBack to `bodyExecutor`, `ex.Starting()` + `task=nil` on handoff.
+- `funnelWork.Run(ee)`, `gate`/`releasePermit` (permit hoisted out of `Execute`); `funnelPostWork.
+  Execute` → permit gate + TryPushBack/Waiting-then-PushBack. `boundFunnelWork` no longer a workq.Work.
+- `workerExEnv.ExecuteNowOrQueue` (nested, on an executor body) → `defaultPool.ForceFresh(work)`
+  (non-blocking drop to scheduler) — the deadlock-avoidance (no inline blocking PushBack on an
+  executor goroutine).
+- `funnelInstance.Execute` UNCHANGED (flush stays on scheduler — D2 deferred to CP-B1b).
+- The handoff is blocking ONLY on scheduler workers / top-level/skim producers, never an executor
+  body goroutine (nested drops to the scheduler), so it can't wedge waiting for an executor.
+- **BEHAVIORAL CHANGE (expected, deterministic): `Example_observable`** golden shifts — task C now
+  dispatches promptly when a permit frees (10ms) instead of the top-level backpressure-help first
+  skimming B (20ms); B is skimmed during SkimAll (30ms) instead. Correct results, order, and the
+  concurrency-2 limit all hold. Direct consequence of the split: the top-level help-drain (the
+  deadlock-avoidance, `wv.block`/`gateAcquire`, UNCHANGED) now only races the executor's independent
+  body completion rather than driving the body itself. NOT a deadlock regression (help-drain still
+  skims a blocked permit-holder's result). Golden needs updating — flagged for PN.
+
+**►►► CP-B1 -race RESULT: HANG (spawn storm) — worker.Pool shortcut REJECTED (2026-06-28e).** The
+40× `-race TestBySimulation` batch HUNG (10m timeout, iteration 1). Dump (`/tmp/race_batch.log`,
+copied to scratchpad `cpb1-hang-dump.log`): **3981 `worker.Pool` worker goroutines** vs 93 idle
+executors; 214 workers blocked on the single `delayq` mutex in `controller.drainScheduled`. =
+**spawn storm**, NOT the prior leaked-ref class.
+- **Root cause:** nested routing via `defaultPool.ForceFresh(work)` (workerExEnv.ExecuteNowOrQueue)
+  spawns a `worker.Pool` worker per nested submit — its `Notify`-or-spawn spawns whenever no worker is
+  PARKED, and under load none are parked (all contending on `delayq`), so every nested submit spawns.
+  Positive feedback (more workers -> more `delayq` contention -> fewer parked -> more spawns) -> ~4000
+  workers -> livelock -> timeout. The 93 idle executors prove it's NOT an executor shortage; the
+  scheduler side melted down.
+- **This is precisely the line 94-103 prediction:** the producer-side redirect is wrong for nested;
+  "the blocking handoff MUST be the scheduler's Work," reached via a **demand-BOUNDED** drop, not a
+  per-call spawn. `worker.Pool`'s per-call `TrySpawn` demand model cannot bound this.
+- **VERDICT: the "keep worker.Pool for CP-B1, swap to Scheduler in CP-B2" sequencing FAILS — the two
+  are coupled.** The handoff needs `workq.Scheduler` (on `execpool`, whose `RegisterUnmetDemand`
+  COUNTER model bounds workers to actual unmet demand) AND the admit/handoff split.
+- **SALVAGEABLE (correct, reusable):** the body-side cutover — `bodyExecutor`, `Executor.TryPushBack`,
+  `taskWork.Run`/`funnelWork.Run`, `taskPostWork`/`funnelPostWork` -> PushBack, the funnel gate hoist.
+  ONLY the nested-routing (`ForceFresh`) + the `worker.Pool` scheduler are wrong. Uncommitted (tree
+  hangs under -race; do NOT commit).
+- **NEXT:** wire `defaultPool` = `workq.Scheduler` and route nested admission to its bounded intake,
+  Wait=admit / Work=PushBack. Then re-run the -race batch. The genuinely-hard C2 core; do it
+  deliberately.
+
+**►►► SCHEDULER INTEGRATION DONE (2026-06-28e) — build/vet/sim×3 green; -race batch RUNNING.**
+Replaced the worker.Pool shortcut with `workq.Scheduler` (execpool, counter-demand):
+- `pool.go`: `defaultPool = workq.NewScheduler()`. Removed the dead worker.Pool plumbing
+  (`newWorkerState`, `workerEnvKey`, `workerEnvFromContext`) and the `internal/worker` import — the
+  package is now unreferenced (delete in CP-B2 cleanup).
+- `workerExEnv.ExecuteNowOrQueue` (nested) → `defaultPool.Post(ctx, work)` (the intake Handoff,
+  block-as-demand COUNTER) instead of `ForceFresh`. Blocks the executor body only until a scheduler
+  worker ACCEPTS (bounded by outstanding blocked Posts — execpool `maybeSpawn` ramps one spin-up at a
+  time toward the `demand` counter and no further; verified in execpool/pool.go), deadlock-free
+  (separate pool, unblocks at handoff before admission).
+- `funnelInstance.Execute` (flush, still on scheduler per D2): now uses a fresh `&workerExEnv{}` for
+  the flush body instead of `workerEnvFromContext` — scheduler workers carry no ctx exEnv, so the
+  flush is self-contained (the LAST consumer of the worker-ctx exEnv; that's why the plumbing could
+  go). Flush logic otherwise UNCHANGED (synchronous under c.mu — avoids the D2 R1/R2 split risk).
+- Why this fixes the storm: worker.Pool's `TrySpawn`/`ForceFresh` spawn per-call (capped burst, but
+  unbounded total under sustained demand). execpool spawns toward a balanced COUNTER, converging on
+  outstanding demand. Hot nested path = Post (counter); only rare flushes use `Nudge`.
+- Gate: 40× `-race TestBySimulation` (`/tmp/race_batch2.log`). If green → update `Example_observable`
+  golden (the benign interleaving change persists; no nested there, so it's the body-executor split).
+
+**►►► GREEN CHECKPOINT (2026-06-28e) — dispatch/execution split WORKS.** Validation:
+- build + vet + full non-`-race` suite (all packages incl. psgwf): GREEN.
+- `-race TestBySimulation`: **56 iterations clean** (6× then 50×, 701.9s; zero hangs/races/fails). The
+  deterministic worker.Pool storm is GONE; no leaked-ref hang or data race surfaced. (Above the ≥25
+  floor; a ≥300 soak still advisable before fully trusting the rare class — feedback_race_confirm.)
+- `Example_observable` golden updated (the benign body-executor-split interleaving).
+- UNCOMMITTED pending PN's go-ahead to commit (harness rule: commit only when asked).
+- **Remaining for full C2:** CP-B1b (move funnel-flush `funnelInstance.Execute` → executor, the
+  deferred D2 — needs the instance-split designed around the c.mu/barrier ordering); CP-B2 (delete
+  `internal/worker`, now dead); audit the scheduler scaffold for vestigial bits (e.g. confirm
+  `incoming`/Post/`Nudge` are all live now); then the C2 latency/alloc benchmarks (real methodology).
+
 **►►► EXECUTOR WIRING REVERTED — BACK TO GREEN (`bfa4005`, 2026-06-28d).** The `HandedOff`
 executor-wiring (`71d8699`) was REVERTED: it both (a) introduced an intermittent `-race`
 `TestBySimulation` hang (~1/25, a leaked work-ref) and (b) was a **complexity smell** — it kept the

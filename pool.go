@@ -7,22 +7,30 @@ import (
 	"context"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
-	"github.com/petenewcomb/streampool/internal/worker"
+	"github.com/petenewcomb/streampool/internal/execpool"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
 
-// defaultPool is the single, package-level worker substrate that all Waves
-// dispatch into. It owns the shared task/funnel work Queue (embedded) and a
-// demand-driven pool of goroutines that drive it. There is deliberately no
-// exported pool type and no settings — the only public lifecycle surface is Wait.
+// The dispatch/execution split (Phase 2b C2). Two package-level pools all Waves share:
 //
-// SEAM (Wave wiring, not yet landed): Wave dispatch will defaultPool.Acquire on
-// first use, defaultPool.Release when its drain completes, and defaultPool.Post
-// work; the per-execution worker context stamps the unified exEnv into the
-// work's borrowed body context. Until a Wave Acquires it the pool is
-// dormant (nothing Posts → no demand → no workers), so newWorkerState's
-// placeholder context is never exercised.
-var defaultPool = worker.NewPool(newWorkerState)
+//   - defaultPool — the SCHEDULER (workq.Scheduler): admits work (governor + limiter
+//     permits) and hands the admitted BODY to the executor. It never runs a user body, so
+//     it is always promptly available (the always-live-dispatcher invariant). It drives the
+//     fresh/postponed priority engine plus scheduled flushes; NESTED admission is dropped to
+//     its intake Handoff (see [workerExEnv.ExecuteNowOrQueue]) whose block-as-demand spawns
+//     workers by COUNTER (bounded, not per-call), while top-level admission runs inline on
+//     the per-wave workQueue. (On execpool — "worker.Pool is obsolete", now retired here.)
+//   - bodyExecutor — the EXECUTOR: a demand-spawned pool of workers that run the blocking
+//     user bodies (task, funnel-accumulate) handed to them over an unbuffered rendezvous. It
+//     MAY block — that is its job — so a blocking body never pins a scheduler. Each
+//     *PostWork.Execute PushBacks its body here; the body runs Run(ee) against the worker's
+//     environment and frees itself. (Funnel-flush still runs on the scheduler for now — D2.)
+var defaultPool = workq.NewScheduler()
+
+// bodyExecutor runs user bodies off the scheduler. Per-worker environments are fresh
+// workerExEnv values (the body's wave/cancellation ride its borrowed body context, not the
+// worker — so the executor needs no per-worker context).
+var bodyExecutor = execpool.NewExecutor(func() *workerExEnv { return &workerExEnv{} })
 
 // Wait blocks until every worker goroutine of the default pool has exited. It
 // waits for all in-flight Waves to finish on their own and then reaps the idle
@@ -38,6 +46,10 @@ var defaultPool = worker.NewPool(newWorkerState)
 //
 // (Under the planned package rename this becomes streampool.Wait.)
 func Wait() {
+	// Reap the executor first (it runs bodies, which the scheduler feeds), then the
+	// scheduler. Both join only their idle workers — neither cancels in-flight work — so
+	// this is safe only at quiescence (every Wave drained on its own, as SkimAll enforces).
+	bodyExecutor.Wait()
 	defaultPool.Wait()
 	ctxpool.Clear()
 }
@@ -59,36 +71,15 @@ var _ executionEnvironment = (*workerExEnv)(nil)
 func (ee *workerExEnv) Lock()   {}
 func (ee *workerExEnv) Unlock() {}
 
-// ExecuteNowOrQueue runs work synchronously on this goroutine, or queues it on
-// the shared engine if it postpones — the synchronous-dispatch entry a body uses
-// to run sub-work inline. Routed to the shared Queue the default pool owns.
-func (ee *workerExEnv) ExecuteNowOrQueue(ctx context.Context, ex workq.Execution, work workq.Work) error {
-	return defaultPool.ExecuteNowOrQueue(ctx, ex, work)
-}
-
-// workerEnvKey carries the worker's execution environment E on its worker context
-// so a body executing on this worker can retrieve E (to stamp into the borrowed
-// body context's meta) without it living in a ctxMeta. The worker ctx itself holds
-// NO ctxMeta — bodies run under a borrowed body ctx, never the worker ctx.
-type workerEnvKey struct{}
-
-// newWorkerState builds a fresh worker environment plus the worker context it runs
-// idle/cancel selects under. The context derives from the global pool's poolCtx
-// (so definitive teardown cancels idle workers by ancestry) and carries E under
-// workerEnvKey. Bodies do NOT run under this context — they run under a body
-// context borrowed at dispatch (borrowBodyContext); this context is only the
-// worker's own idle/cancel signal.
-func newWorkerState(poolCtx context.Context) (*workerExEnv, context.Context, context.CancelFunc) {
-	ee := &workerExEnv{}
-	ctx, cancel := context.WithCancel(poolCtx)
-	ctx = context.WithValue(ctx, workerEnvKey{}, ee)
-	return ee, ctx, cancel
-}
-
-// workerEnvFromContext returns the worker's execution environment carried on a
-// worker context, or nil if ctx is not a worker context (e.g. a top-level or
-// legacy worker context). A body uses it to obtain the E to run against.
-func workerEnvFromContext(ctx context.Context) *workerExEnv {
-	ee, _ := ctx.Value(workerEnvKey{}).(*workerExEnv)
-	return ee
+// ExecuteNowOrQueue is the synchronous-dispatch entry a body uses to run sub-work — but on
+// an EXECUTOR goroutine it must NOT run admission inline. Inline admission would, on success,
+// PushBack the sub-body to the executor and block THIS executor goroutine waiting for another
+// executor: a self-deadlock once the executor pool is saturated. So drop the scatter-work to
+// the scheduler's intake: Post blocks only until a scheduler worker ACCEPTS it (the intake
+// Handoff's block-as-demand spawns one by COUNTER if none waits — bounded, NOT a per-call
+// spawn), then the scheduler runs admission and the blocking handoff off this goroutine.
+// Brief, deadlock-free (the scheduler is a separate pool), and demand-bounded. (ex is unused:
+// the scatter-work re-runs under the scheduler controller's own Execution.)
+func (ee *workerExEnv) ExecuteNowOrQueue(ctx context.Context, _ workq.Execution, work workq.Work) error {
+	return defaultPool.Post(ctx, work)
 }

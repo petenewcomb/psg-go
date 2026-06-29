@@ -391,11 +391,14 @@ type funnelInstance[T any] struct {
 //nolint:contextcheck // ctx is the borrow source for the flush body ctx, not a propagated arg
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
-	// The flush runs on a fungible pool worker whose ctx carries no ctxMeta, so borrow
-	// a funnel-body ctx for it (mirroring accumulate-body dispatch): stamp the wave as
-	// ambient (so a Flush body's downstream Submit resolves it), the worker's E, and the
-	// funnel ctxType. Cancellation rides the worker ctx by ancestry; the wave owns none.
-	ee := workerEnvFromContext(ctx)
+	// The flush runs on a scheduler worker (D2: moving the flush body to the executor is a
+	// deferred follow-up). Scheduler workers carry no per-worker execution environment on
+	// their ctx (unlike the obsolete worker.Pool), so give the flush body its own fresh
+	// workerExEnv: it runs single-threaded on this goroutine, and a downstream Submit from
+	// Flush routes through it (workerExEnv.ExecuteNowOrQueue → scheduler intake). Borrow a
+	// funnel-body ctx (wave ambient for downstream resolution, funnel ctxType); cancellation
+	// rides ctx by ancestry, the wave owns none.
+	ee := &workerExEnv{}
 	bodyCtx, _ := borrowBodyContext(ctx, c.wave, funnelContext, nil, ee)
 	defer releaseBodyContext(bodyCtx)
 	c.mu.Lock()
@@ -551,9 +554,17 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	return true
 }
 
-// boundFunnelWork interface allows type erasure for funnelWork instances
+// boundFunnelWork is the type-erased funnel body as seen by funnelPostWork (the
+// scheduler-side admission decorator) and the executor. It is NOT a workq.Work: the body is
+// PushBack'd to the executor (Run), not Executed through the priority controller. gate /
+// releasePermit are the hoisted limiter permit (was inside funnelWork.Execute); Waiting is
+// the governor downstream-pressure registration (from the embedded DownstreamWork); Free is
+// the post-work's cleanup of an un-handed-off body.
 type boundFunnelWork interface {
-	workq.Work
+	Run(ee *workerExEnv)
+	gate(ctx context.Context, ex workq.Execution) (bool, error)
+	releasePermit()
+	Free()
 	Funnel(ctx context.Context)
 	Waiting(*workq.Governor)
 }
@@ -684,32 +695,34 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 	hbc.accumulate(ctx, wk.input, wk.inputErr)
 }
 
-func (wk *funnelWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
-	traceRegion := "funnelWork.Execute"
-	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "funnelWork(%p), %v", wk, wk)
-
+// gate acquires the funnel's limiter permit, mirroring limiterScatterWork for tasks. It is
+// the permit gate HOISTED out of the old funnelWork.Execute onto the scheduler side
+// (funnelPostWork.Execute), so the body that crosses to the executor is permit-free. Returns
+// (true, nil) for an unlimited funnel. The held permit scopes the body run and is released
+// at body end (Free) or, if the body never starts, by releasePermit (retry re-acquires).
+func (wk *funnelWork[T]) gate(ctx context.Context, ex workq.Execution) (bool, error) {
 	if wk.h == nil {
-		return wk.executeInner(ctx, ex)
+		return true, nil
 	}
-
-	held, err := gateAcquire(ctx, ex, wk.fn.wave, wk.h)
-	if err != nil || !held {
-		return err
-	}
-	// The funnel permit scopes exactly the body run: executeInner always
-	// starts, so the postpone-after-grant case doesn't arise here.
-	// Released on return (panic-inclusive); Free's release is then an
-	// idempotent no-op before the recycle.
-	defer wk.h.release()
-	return wk.executeInner(ctx, ex)
+	return gateAcquire(ctx, ex, wk.fn.wave, wk.h)
 }
 
-func (wk *funnelWork[T]) executeInner(ctx context.Context, ex workq.Execution) error {
-	ex.Starting()
-	//nolint:contextcheck // run uses ctx only to fetch the worker E; the body runs under bodyCtx
-	wk.run(workerEnvFromContext(ctx))
-	return nil
+// releasePermit gives back a permit acquired by gate when the body could not start (the
+// handoff postponed); the gate re-acquires on retry (Acquire is state-free). No-op when
+// unlimited or already released. The handle's recycle stays in Free.
+func (wk *funnelWork[T]) releasePermit() {
+	if wk.h != nil {
+		wk.h.release()
+	}
+}
+
+// Run is the [execpool.Task] entry: the executor hands it the worker environment ee and Run
+// owns ALL cleanup. The permit was acquired on the scheduler side (gate); Run runs the body
+// and frees the work (Free releases the permit and recycles). No Execution, no permit gate —
+// admission already happened.
+func (wk *funnelWork[T]) Run(ee *workerExEnv) {
+	wk.run(ee)
+	wk.Free()
 }
 
 // run executes the funnel body against the per-worker environment ee. The body context was
@@ -779,16 +792,36 @@ func (wk *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", wk)
 
-	// Handoff to the GLOBAL pool's shared work queue (mirrors taskPostWork).
-	// shouldBlock is read directly from the ctx (not via wave.ctxMeta, which panics on
-	// a missing meta): a producer only postpones onto the global queue in LISTEN
-	// mode (shouldBlock=false), and a global worker re-running it has no ctxMeta.
-	meta, _ := metaFromContext(ctx)
-	shouldBlock := meta != nil && meta.wave == wk.wave && meta.ShouldBlock()
-	onWait := func() { wk.work.Waiting(&wk.wave.governor) }
-	posted, err := defaultPool.Post(ctx, ex, shouldBlock, wk.work, onWait)
-	if posted {
-		wk.work = nil // ownership transferred to the queue
+	// Permit gate, HOISTED from the old funnelWork.Execute (Wrinkle 1) so the body crosses
+	// to the executor permit-free — mirrors limiterScatterWork for tasks. Miss → postpone.
+	held, err := wk.work.gate(ctx, ex)
+	if err != nil || !held {
+		return err
+	}
+
+	// Hand the admitted body to the EXECUTOR (mirrors taskPostWork). Try a non-blocking
+	// direct handoff first; if no executor waits, register the funnel's downstream governor
+	// pressure (the old Post onWait) before blocking so upstream sources back off, then
+	// block-as-demand brings an executor up. The blocking PushBack runs only on a scheduler
+	// worker or a top-level/skim producer — never an executor body goroutine — so it cannot
+	// wedge waiting for an executor. On any non-start, give the permit back (retry
+	// re-acquires); the downstream pressure, if registered, is released by the body's Free.
+	if bodyExecutor.TryPushBack(wk.work) {
+		ex.Starting()
+		wk.work = nil // ownership transferred to the executor, which runs + Frees it
+		return nil
+	}
+	if !ex.ShouldBlockOrPostpone() {
+		wk.work.releasePermit()
+		return nil
+	}
+	wk.work.Waiting(&wk.wave.governor)
+	err = bodyExecutor.PushBack(ctx, wk.work)
+	if err == nil {
+		ex.Starting()
+		wk.work = nil
+	} else {
+		wk.work.releasePermit()
 	}
 	return err
 }

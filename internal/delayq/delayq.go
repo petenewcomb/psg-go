@@ -380,6 +380,16 @@ func (q *Queue[T]) republishNext(pre int64) time.Time {
 	return timeFromNanos(newNext)
 }
 
+// NextDeadline reports the earliest currently-known deadline (the zero Time when the queue
+// is empty), read lock-free from the next-deadline atomic. It is the authoritative single
+// source of truth for "when must the queue next be serviced" — a caller arming a timer for
+// the earliest deadline should read it here (under the caller's own arm lock) rather than
+// trust a value passed from a possibly-stale snapshot, so a concurrent [Queue.Schedule] that
+// lowered the deadline is always observed.
+func (q *Queue[T]) NextDeadline() time.Time {
+	return timeFromNanos(q.nextDeadline.Load())
+}
+
 // Yield fires the wake hook and forces the next [Queue.Drain] to
 // observe an already-expired deadline regardless of the heap's actual
 // state. A worker that has been driving the timer calls Yield as it

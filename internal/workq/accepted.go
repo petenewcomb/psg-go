@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/petenewcomb/streampool/internal/trace"
@@ -16,7 +17,6 @@ import (
 	"github.com/petenewcomb/streampool/internal/nbcq"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/rdvq"
-	"github.com/petenewcomb/streampool/internal/timerp"
 )
 
 // Queue manages work items with single-item processing logic using a two-queue
@@ -46,6 +46,16 @@ type Accepted struct {
 	// for queues whose pool does not spawn on demand (e.g. the task
 	// pool, which drives its own spawning).
 	unmetDemandFn RenotifyFunc
+
+	// schedTimer is the single, queue-owned timer that honors scheduled-work deadlines
+	// (Design B). It replaces per-worker deadline timers + idle-exit suppression: workers
+	// now scale fully to zero, and this timer — re-armed from [Accepted.armScheduledTimer]
+	// whenever the earliest deadline changes — fires at the earliest deadline to wake a
+	// parked worker (or spawn one via unmetDemandFn) so the now-due item is drained. nil
+	// until first armed; only the scheduler ever schedules work, so per-wave workQueues
+	// never create it. schedTimerMu serializes Reset against the authoritative-atomic read.
+	schedTimerMu sync.Mutex
+	schedTimer   *time.Timer
 }
 
 // Init initializes the work queue. unmetDemandFn is the demand-spawn
@@ -68,11 +78,51 @@ func (q *Accepted) Init(unmetDemandFn RenotifyFunc) {
 	q.unmetDemandFn = unmetDemandFn
 }
 
-// wakeScheduled is the delayq wake hook: it nudges one parked worker so a
-// newly scheduled earlier deadline is noticed and the worker re-arms
-// its wait for it.
+// wakeScheduled is the delayq wake hook, fired when a newly scheduled deadline beats the
+// current earliest. Under Design B it (re)arms the queue-owned timer for the new earliest
+// rather than waking a worker now: a future deadline needs no worker until it comes due, and
+// the timer fires then. (A deadline that is already due arms for ~now → fires immediately.)
 func (q *Accepted) wakeScheduled() {
-	q.waiters.Notify(nil)
+	q.armScheduledTimer()
+}
+
+// armScheduledTimer (re)arms the queue-owned scheduled-work timer to fire at the earliest
+// currently-known deadline, or stops it when nothing is scheduled. It reads the AUTHORITATIVE
+// earliest from delayq under schedTimerMu (never a passed, possibly-stale value), so
+// concurrent callers — the delayq wake-on-lowering and a worker re-arming after a drain —
+// serialize and the last one always reflects the true earliest; a Schedule that lowered the
+// deadline can never be lost to a racing later re-arm. Lazily creates the timer on first use
+// (only a queue that schedules work — the scheduler — ever does).
+func (q *Accepted) armScheduledTimer() {
+	q.schedTimerMu.Lock()
+	defer q.schedTimerMu.Unlock()
+	next := q.scheduled.NextDeadline()
+	if next.IsZero() {
+		if q.schedTimer != nil {
+			q.schedTimer.Stop()
+		}
+		return
+	}
+	d := time.Until(next)
+	if d < 0 {
+		d = 0
+	}
+	if q.schedTimer == nil {
+		q.schedTimer = time.AfterFunc(d, q.scheduledDeadlineFired)
+	} else {
+		q.schedTimer.Reset(d)
+	}
+}
+
+// scheduledDeadlineFired runs when the scheduled-work timer expires: a deadline has come due.
+// It wakes a parked worker to re-drive — whose drainScheduled promotes the now-due item to
+// fresh and runs it — or, if the pool scaled to zero, spawns one via unmetDemandFn. Mirrors
+// [Accepted.ForceFresh]'s wake-or-spawn. A spurious early fire (the item was already drained
+// by a worker woken another way) is harmless: the re-drive finds nothing due and re-arms.
+func (q *Accepted) scheduledDeadlineFired() {
+	if !q.waiters.Notify(q.unmetDemandFn) && q.unmetDemandFn != nil {
+		q.unmetDemandFn()
+	}
 }
 
 // Schedule hands w to the queue to become fresh work at the given time.
@@ -174,6 +224,11 @@ const drainAllSkew = 24 * time.Hour
 // (delayq.Drain serializes internally).
 func (q *Accepted) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
 	due, _ := q.scheduled.Drain(time.Now().Add(drainAllSkew), dst)
+	// The scheduled queue is now empty; stop the queue-owned timer explicitly rather than
+	// leave it armed for a just-drained deadline (a benign spurious fire otherwise — the
+	// next drainScheduled would stop it — but the end-of-work sweep is the last drive, so
+	// make it definitive). Re-arms cleanly if anything is scheduled afterward.
+	q.armScheduledTimer()
 	return due
 }
 
@@ -350,8 +405,6 @@ type controller struct {
 	endOfWorkErr             error
 
 	scheduledScratch []ScheduledWork // reusable Drain buffer
-	nextDeadline     time.Time       // earliest not-yet-due deadline, set by drainScheduled
-	armedDeadline    time.Time       // deadline WaitForNew armed its wake timer for
 
 	ex Execution // avoid closure reallocations
 
@@ -438,8 +491,8 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 
 // drainScheduled moves any scheduled work whose deadline has arrived into
 // the fresh queue, where it will be picked up and executed like any
-// other work, and records the earliest remaining deadline so
-// [controller.WaitForNew] can arm a wake timer for it.
+// other work, then re-arms the queue-owned scheduled timer (Design B) for
+// the new earliest deadline (the drain may have advanced or emptied it).
 //
 // Due items are promoted through queueFresh (not a bare fresh PushBack)
 // so they carry the same excess-work bookkeeping as any other accepted
@@ -447,12 +500,14 @@ func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
 // additional workers, letting the sweep run in parallel rather than
 // serializing on whichever worker happened to drain it.
 func (c *controller) drainScheduled() {
-	var due []ScheduledWork
-	due, c.nextDeadline = c.q.scheduled.Drain(time.Now(), c.scheduledScratch[:0])
+	// armScheduledTimer reads the authoritative earliest deadline itself, so the next
+	// value Drain returns is intentionally discarded here.
+	due, _ := c.q.scheduled.Drain(time.Now(), c.scheduledScratch[:0])
 	c.scheduledScratch = due
 	for _, w := range due {
 		c.queueFresh(w)
 	}
+	c.q.armScheduledTimer()
 }
 
 // TryAccepted attempts to execute work from both accepted queues.
@@ -529,28 +584,11 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 		c.shouldStillWaitErr = nil
 	}()
 
-	// When a scheduled-work deadline is pending, arm a pooled timer and hand
-	// its channel to addWorkFn so the worker's own select wakes when the
-	// deadline arrives, re-entering ExecuteOne to drain the now-due item. No
-	// goroutine is spawned; nil deadlineCh means no pending deadline.
-	var deadlineCh <-chan time.Time
-	c.armedDeadline = c.nextDeadline
-	if !c.nextDeadline.IsZero() {
-		d := time.Until(c.nextDeadline)
-		if d < 0 {
-			d = 0
-		}
-		timer := timerp.Get()
-		timerp.Reset(timer, d)
-		deadlineCh = timer.C
-		defer func() {
-			timerp.Stop(timer)
-			timerp.Put(timer)
-		}()
-	}
-
+	// Scheduled-work deadlines are honored by the queue-owned timer (Design B,
+	// [Accepted.armScheduledTimer]): it wakes a parked worker or spawns one when a deadline
+	// comes due, so the park no longer arms a per-worker timer. deadlineCh stays nil.
 	var err error
-	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn, deadlineCh)
+	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn, nil)
 	if err == nil {
 		err = c.shouldStillWaitErr
 	} else if c.shouldStillWaitErr != nil {
@@ -697,23 +735,15 @@ func (c *controller) shouldStillWait() bool {
 
 	// Re-drain scheduled work: a Schedule that landed after the ExecuteOne
 	// drainScheduled but before we registered as a waiter may have produced
-	// now-due work or lowered the next deadline below the one WaitForNew
-	// armed its wake timer for. Draining promotes due items into fresh
-	// (caught by the TryAccepted below); the deadline check afterward
-	// aborts the wait so the loop re-arms for the sooner deadline rather
-	// than oversleeping it.
+	// now-due work. Draining promotes due items into fresh (caught by the
+	// TryAccepted below) and re-arms the queue-owned scheduled timer (Design B)
+	// for any future deadline — so a sooner deadline that appeared is honored by
+	// the timer firing, not by aborting this wait.
 	c.drainScheduled()
 
 	// Check to make sure nothing else accumulated before we registered as a
 	// waiter.
 	if c.shouldStillWaitErr = c.TryAccepted(c.shouldStillWaitCtx, true); c.ex.Started() || c.shouldStillWaitErr != nil {
-		return false
-	}
-
-	// Abort the wait if a sooner deadline appeared than the armed timer
-	// covers; WaitForNew will re-arm on the next loop iteration.
-	if !c.nextDeadline.IsZero() &&
-		(c.armedDeadline.IsZero() || c.nextDeadline.Before(c.armedDeadline)) {
 		return false
 	}
 

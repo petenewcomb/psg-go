@@ -190,13 +190,12 @@ func (w *schedulerWorker) pull(
 
 	w.renotify, w.selErr, w.exit = nil, nil, false
 
-	// DECISION B (funnel-engine-removal): do not idle-exit while a scheduled-flush
-	// deadline is pending — keep one worker warm to run the flush. deadlineCh is
-	// non-nil exactly when the queue has a pending scheduled item.
+	// Design B: workers idle-exit (scale to zero) freely; scheduled-flush deadlines are
+	// honored by the queue-owned timer ([Accepted.armScheduledTimer]), which spawns a worker
+	// when a deadline comes due. No per-worker idle-exit suppression. (deadlineCh is now
+	// always nil — WaitForNew no longer arms a per-worker timer; the param is vestigial,
+	// stripped in a follow-up.)
 	idleCh := w.idleCh
-	if deadlineCh != nil {
-		idleCh = nil
-	}
 
 	var newWork Work
 	waiters.WaitFunc(confirmWaitFn,

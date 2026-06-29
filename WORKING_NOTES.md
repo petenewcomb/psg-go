@@ -2,6 +2,55 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► DESIGN B chosen for the scheduled-flush deadline timer (PN, 2026-06-29). Replaces the
+per-worker idle-suppression (DECISION B in scheduler.pull).** Goal: workers scale fully to zero; a
+SINGLE scheduler-owned timer honors pending flush deadlines by waking/spawning a worker. Concrete plan
+(designed against delayq.go + accepted.go):
+- **delayq:** add `func (q *Queue[T]) NextDeadline() time.Time { return timeFromNanos(q.nextDeadline.Load()) }`
+  (authoritative earliest, lock-free atomic read).
+- **Accepted owns the timer** (`schedTimer *time.Timer` + `schedTimerMu` + `schedArmed time.Time`):
+  - `armScheduledTimer(d)`: **only LOWERS** (mirrors delayq.lowerDeadline) — `if !schedArmed.IsZero()
+    && !d.Before(schedArmed) { return }`; else Reset to `time.Until(d)` (clamp ≥0), set schedArmed=d.
+    Zero d ⇒ Stop + clear. THE SUBTLE POINT: arm-only-lowers is REQUIRED — a naive "arm to exact each
+    time" races a concurrent Schedule (a drain computing next=T2 can overwrite a concurrent
+    Schedule's sooner T0 → missed wake). Sooner always wins; later re-arms only after the timer fires
+    (schedArmed cleared on fire) or post-drain.
+  - fired callback: clear schedArmed, then `if !waiters.Notify(nil) && unmetDemandFn != nil {
+    unmetDemandFn() }` (wake a parked worker to re-drive→drainScheduled, else Nudge-spawn one).
+  - Arm sites: `wakeScheduled` (delayq wake on lowering — read NextDeadline, arm) AND end of
+    `drainScheduled` (re-arm for the returned next, advancing/clearing after a drain). Both inert for
+    the per-wave workQueue (waves never Schedule → NextDeadline always zero; unmetDemandFn nil).
+- **scheduler.pull:** delete the DECISION B block (`if deadlineCh != nil { idleCh = nil }`) so workers
+  idle-exit freely.
+- **WaitForNew:** stop arming the per-worker timer (the `timerp` block) — pass deadlineCh=nil; the
+  Accepted timer handles wakes now. Strip the now-vestigial `deadlineCh` from the AddWorkFunc
+  signature / scheduler.pull / wave addWorkFn / controller armedDeadline logic as a follow-up
+  (gut-first: pass nil, leave the dead nil-channel select case, strip later).
+- Validate: large -race TestBySimulation batch (the failure mode is a MISSED/DELAYED wake — subtle,
+  may not trip -race; add targeted assertions or a flush-latency check). Do BEFORE C2 benchmarks
+  (worker count / scale-to-zero is what the methodology measures).
+
+**►►► DESIGN B IMPLEMENTED (2026-06-29) — build/vet/sim green; -race batch RUNNING.** Landed a
+CLEANER formulation than the plan above: `armScheduledTimer` reads the AUTHORITATIVE earliest from
+`delayq.NextDeadline()` (new lock-free atomic accessor) *under its own `schedTimerMu`* and Resets to
+it — so the last of any racing arms always reflects the true earliest. No "arm-only-lowers"
+bookkeeping, no `schedArmed` field. The concurrent-Schedule-vs-drain race that "arm-only-lowers" was
+meant to fix is handled structurally: an arm triggered by a stale event still reads the *current*
+atomic inside the lock. Edits:
+- `delayq.NextDeadline()` — lock-free read of the next-deadline atomic (the single source of truth).
+- `Accepted`: `schedTimerMu`/`schedTimer` fields; `armScheduledTimer()` (read-atomic-under-lock →
+  Reset/Stop, lazy `time.AfterFunc`); `scheduledDeadlineFired()` (`Notify(unmetDemandFn)`-or-Nudge,
+  mirrors `ForceFresh`). Armed from `wakeScheduled` (delayq lowering hook) + end of `drainScheduled`.
+- Removed: per-worker timer in `WaitForNew` (passes nil deadlineCh); the `shouldStillWait`
+  armed-deadline abort; controller `nextDeadline`/`armedDeadline` fields; `timerp` import; the
+  DECISION B idle-exit suppression in `scheduler.pull`. Workers now scale fully to zero.
+- Robustness: the first schedule always arms (any real deadline < `noDeadline`), so no missed flush.
+  Out-of-band removals (ClaimForFlush/Reschedule-later don't fire the lowering wake) leave the timer
+  on a stale-early deadline → a spurious early fire → drain finds nothing due → re-arms. Self-
+  correcting, never a missed/late flush. A *missed* flush would hang TestBySimulation (caught).
+- `deadlineCh` is now vestigial (always nil) through AddWorkFunc/scheduler.pull/wave addWorkFn — strip
+  in a follow-up (gut-first).
+
 **►►► CUTOVER FULLY SCOPED — FORK A (`combiner`, 2026-06-28e).** Deep read of the whole
 dispatch surface (pool.go, ctxmeta.go, wave.go, launcher.go, limiter.go, funnel.go) settled the
 design. Key facts the 2-line plan banner missed:

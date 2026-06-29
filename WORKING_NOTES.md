@@ -2,10 +2,25 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**‼️ KNOWN REGRESSION — executor wiring (`71d8699`) introduced an intermittent `TestBySimulation`
-`-race` HANG (~1/25); NOT yet fixed (2026-06-28c).** Committed prematurely on a `-race ×3` pass; a
-`-race ×25` batch then deadlocked once. The branch tip is therefore RED under `-race` stress.
-Decide revert-to-green vs. fix-forward before relying on it.
+**►►► EXECUTOR WIRING REVERTED — BACK TO GREEN (`bfa4005`, 2026-06-28d).** The `HandedOff`
+executor-wiring (`71d8699`) was REVERTED: it both (a) introduced an intermittent `-race`
+`TestBySimulation` hang (~1/25, a leaked work-ref) and (b) was a **complexity smell** — it kept the
+body flowing through the priority controller and bolted on a `HandedOff` flag to suppress the
+controller's `Free`, creating two-owner contention + an unstated invariant. PN's call: the split
+should *simplify*, so redo it the principled way. Branch is GREEN again (single pool; build + vet
++ `-race ×6` sim pass). The `workq.Scheduler` scaffold (`6cb1164`) + `execpool.Executor` remain,
+unwired.
+- **PRINCIPLED CUTOVER (next) — the body NEVER touches the priority controller.** The controller
+  admits *scatter-works* only; on admission success `taskPostWork`/`funnelPostWork.Execute`
+  `PushBack`s the body to the executor's Handoff via the EXISTING `wk.task = nil` ownership
+  transfer (the controller `Free`s the scatter-work normally; the executor owns+frees the body).
+  **No `HandedOff`, no `Execution` change, no controller `Free`-skip.** Topology (PN): `incoming`
+  becomes the scheduler's admission-intake Handoff (`AddWork` pulls scatter-works); a SEPARATE
+  Handoff is the executor's body intake. Nested admission runs on the scheduler (off the body's
+  goroutine), so the blocking body-`PushBack` is on a scheduler worker, not the nested body —
+  preserving nested non-blocking without a `HandedOff` flag. Funnel-gate hoist (Wrinkle 1) IS
+  needed here (gate in `funnelPostWork` before the body crosses, since `funnelWork` now runs on the
+  executor). This likely dissolves the leak (it lived in the `HandedOff` contention).
 - **Dump signature (decisive):** at deadlock only **6 goroutines** — the timeout alarm, the test
   goroutine, and **4 parked in `skimSelect`** (1 top-level `CloseAndSkimAll` + **3 executor bodies
   driving nested `SkimAll`s**). **ZERO scheduler (`worker.Pool`) workers, ZERO `PushBack`-blocked,

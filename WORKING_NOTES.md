@@ -114,7 +114,23 @@ design. Key facts the 2-line plan banner missed:
   scheduler-swap. Validate large `-race` batch before commit.
 - **CP-B1b:** `funnelInstance.Execute` flush → executor (the deferred D2), with the instance-split
   designed carefully.
-- **CP-B2:** swap `defaultPool` `worker.Pool` → `workq.Scheduler`; then delete `internal/worker`.
+- **CP-B2:** swap `defaultPool` `worker.Pool` → `workq.Scheduler` (DONE, commit 92b5f48); then delete
+  `internal/worker` + the dead `workq.Queue`/`Worker` scaffold + strip vestigial `deadlineCh` (DONE,
+  this cleanup).
+
+**►►► CP-B2 CLEANUP DONE (2026-06-29) — build/vet/lint/suite green; -race confirming.** Deleted the
+obsolete worker-pool lineage now that `defaultPool` is `workq.Scheduler`:
+- Removed `internal/worker/` (pool.go + test) — unreferenced.
+- Removed `internal/workq/queue.go` + `worker.go` + `queue_test.go` — the `workq.Queue`/`Worker`/
+  `ExecEnv`/`NewWorker` scaffold was used only by `internal/worker` + itself (dead cluster). `Accepted`,
+  `Pending`, `Scheduler` are untouched and live.
+- Stripped the vestigial `deadlineCh` (always nil since Design B) from `AddWorkFunc` and every
+  implementor: `scheduler.pull`/`selectWork`, `wave.addWork` (×2), and the test addWorkFns. The
+  deadline-wake path is now entirely the queue-owned timer.
+- `timed_test.go`'s `TestAccepted_FutureDeadline_WakesParkedWorker` now validates Design B directly
+  (the queue timer fires a waiters notification that wakes the parked worker at ~deadline).
+- **Remaining for full C2:** CP-B1b (funnel-flush body → executor, the deferred D2 — delicate R1/R2);
+  the C2 latency/alloc benchmarks (real methodology).
 
 **CP-B1 IMPLEMENTED (2026-06-28e) — build/vet/sim green; -race batch pending.** Edits:
 - `execpool.Executor.TryPushBack` (non-blocking direct handoff).

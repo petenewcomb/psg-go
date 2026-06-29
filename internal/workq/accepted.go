@@ -235,19 +235,17 @@ func (q *Accepted) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
 // AddWorkFunc provides new work to the queue processor. It is called with a
 // waitCh that signals when there is postponed work ready to process. If waiters
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be
-// called for each work item accepted.
+// called for each work item accepted. Returns the RenotifyFunc the wait
+// observed, or nil.
 //
-// deadlineCh, when non-nil, fires when the queue's next scheduled-work deadline
-// arrives; a blocking AddWorkFunc must include it in its select and return
-// (without work) when it fires, so the queue re-drains the now-due scheduled work.
-// It is nil whenever there is no pending deadline. Returns the RenotifyFunc the
-// wait observed, or nil.
+// Scheduled-work deadlines are no longer threaded through here: the queue-owned
+// timer (Design B, [Accepted.armScheduledTimer]) wakes a parked worker or spawns
+// one when a deadline comes due, so a blocking AddWorkFunc need not watch one.
 type AddWorkFunc func(
 	ctx context.Context,
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-	deadlineCh <-chan time.Time,
 ) (RenotifyFunc, error)
 
 type RenotifyFunc = rdvq.RenotifyFunc
@@ -562,7 +560,7 @@ func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
 	if c.tryAddWorkFn != nil {
 		err = c.tryAddWorkFn(ctx, c.queueFreshFn)
 	} else {
-		_, err = c.addWorkFn(ctx, c.queueFreshFn, nil, nil, nil)
+		_, err = c.addWorkFn(ctx, c.queueFreshFn, nil, nil)
 	}
 	workWasAdded := c.workAddedCount > 0
 	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", workWasAdded, err)
@@ -588,7 +586,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 	// [Accepted.armScheduledTimer]): it wakes a parked worker or spawns one when a deadline
 	// comes due, so the park no longer arms a per-worker timer. deadlineCh stays nil.
 	var err error
-	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn, nil)
+	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)
 	if err == nil {
 		err = c.shouldStillWaitErr
 	} else if c.shouldStillWaitErr != nil {

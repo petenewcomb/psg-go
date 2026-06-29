@@ -174,14 +174,14 @@ func (w *schedulerWorker) Close(context.Context) {}
 // pull is the AddWorkFunc ExecuteOne invokes when fresh+postponed are empty. The
 // non-blocking probe (waiters == nil) is a no-op: incoming is an unbuffered Handoff
 // with no TryPopFront. The blocking path registers on the Accepted waiters, then parks
-// on incoming.PopFrontFunc composing the workWaitCh (fresh/postponed became ready), the
-// scheduled deadline, execpool's idle, and pool-teardown/ctx.
+// on incoming.PopFrontFunc composing the workWaitCh (fresh/postponed became ready),
+// execpool's idle, and pool-teardown/ctx. Scheduled-flush deadlines are NOT watched here
+// — the queue-owned timer (Design B) wakes a worker via workWaitCh when one comes due.
 func (w *schedulerWorker) pull(
 	ctx context.Context,
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-	deadlineCh <-chan time.Time,
 ) (RenotifyFunc, error) {
 	if waiters == nil {
 		// Unbuffered Handoff: nothing to probe without blocking.
@@ -192,9 +192,7 @@ func (w *schedulerWorker) pull(
 
 	// Design B: workers idle-exit (scale to zero) freely; scheduled-flush deadlines are
 	// honored by the queue-owned timer ([Accepted.armScheduledTimer]), which spawns a worker
-	// when a deadline comes due. No per-worker idle-exit suppression. (deadlineCh is now
-	// always nil — WaitForNew no longer arms a per-worker timer; the param is vestigial,
-	// stripped in a follow-up.)
+	// when a deadline comes due. No per-worker idle-exit suppression.
 	idleCh := w.idleCh
 
 	var newWork Work
@@ -202,7 +200,7 @@ func (w *schedulerWorker) pull(
 		func(workWaitCh <-chan RenotifyFunc) RenotifyFunc {
 			work, ok := w.sched.incoming.PopFrontFunc(
 				func(inboxCh <-chan Work) (Work, bool) {
-					return w.selectWork(ctx, inboxCh, workWaitCh, deadlineCh, idleCh)
+					return w.selectWork(ctx, inboxCh, workWaitCh, idleCh)
 				},
 			)
 			if ok {
@@ -221,14 +219,13 @@ func (w *schedulerWorker) pull(
 	return w.renotify, w.selErr
 }
 
-// selectWork is the scheduler's canonical park select. Cases that don't apply are nil
-// channels (idleCh is nil while a deadline is pending). It mirrors the obsolete
-// workq.Worker.selectWork minus the outbox case (incoming is an outbox-free Handoff).
+// selectWork is the scheduler's canonical park select. It mirrors the obsolete
+// workq.Worker.selectWork minus the outbox case (incoming is an outbox-free Handoff) and the
+// deadline case (Design B's queue-owned timer wakes via workWaitCh instead).
 func (w *schedulerWorker) selectWork(
 	ctx context.Context,
 	inboxCh <-chan Work,
 	workWaitCh <-chan RenotifyFunc,
-	deadlineCh <-chan time.Time,
 	idleCh <-chan time.Time,
 ) (Work, bool) {
 	select {
@@ -236,9 +233,6 @@ func (w *schedulerWorker) selectWork(
 		return work, true
 	case w.renotify = <-workWaitCh:
 		// notified that fresh/postponed work may be ready; return to re-probe
-		return nil, false
-	case <-deadlineCh:
-		// a scheduled flush came due; return so ExecuteOne re-drains it
 		return nil, false
 	case <-idleCh:
 		w.exit = true // idle scale-to-zero

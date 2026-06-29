@@ -33,15 +33,14 @@ func (wi *scheduledWorkItem) Execute(_ context.Context, ex Execution) error {
 
 // blockingAddWork is a minimal [AddWorkFunc] for tests: it adds no work
 // of its own and, on the blocking path, parks on the queue's waiters
-// until notified, the queue's deadline timer (timedCh) fires, or the
-// context is cancelled. Watching timedCh is what lets a pending
-// scheduled-work deadline wake the parked worker.
+// until notified or the context is cancelled. Under Design B a pending
+// scheduled-work deadline wakes the parked worker through the queue-owned
+// timer firing a waiters notification (no per-worker deadline channel).
 func blockingAddWork(
 	ctx context.Context,
 	_ QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-	timedCh <-chan time.Time,
 ) (RenotifyFunc, error) {
 	if waiters == nil {
 		// Non-blocking probe: no work to contribute.
@@ -53,8 +52,6 @@ func blockingAddWork(
 			select {
 			case rf := <-waitCh:
 				return rf
-			case <-timedCh:
-				return nil
 			case <-ctx.Done():
 				err = ctx.Err()
 				return nil
@@ -66,7 +63,7 @@ func blockingAddWork(
 // endOfWorkAddWork is an [AddWorkFunc] that never has work, signalling
 // end-of-work so ExecuteOne returns promptly instead of blocking.
 func endOfWorkAddWork(
-	context.Context, QueueWorkFunc, *rdvq.Waiters, func() bool, <-chan time.Time,
+	context.Context, QueueWorkFunc, *rdvq.Waiters, func() bool,
 ) (RenotifyFunc, error) {
 	return nil, ErrEndOfWork
 }

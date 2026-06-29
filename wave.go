@@ -443,7 +443,6 @@ func (a *blockingWorkAdder) addWork(
 	queueFn workq.QueueWorkFunc,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
-	_ <-chan time.Time, // skim queue has no scheduled work
 ) (workq.RenotifyFunc, error) {
 	var workReadyRenotifyFn workq.RenotifyFunc
 	var err error
@@ -457,7 +456,6 @@ func (wv *Wave) addWork(
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-	_ <-chan time.Time, // skim queue has no scheduled work
 ) (workq.RenotifyFunc, error) {
 	traceRegion := "Wave.addWork"
 	defer trace.StartRegion(ctx, traceRegion).End()

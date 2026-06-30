@@ -118,6 +118,37 @@ design. Key facts the 2-line plan banner missed:
   `internal/worker` + the dead `workq.Queue`/`Worker` scaffold + strip vestigial `deadlineCh` (DONE,
   this cleanup).
 
+**►►► RDVQ INBOX CLUSTER — remaining ~10/14 allocs/op (2026-06-29, pursuing option 3).** After the
+meta pooling, BenchmarkLauncherSkim's remaining 14 allocs/op are ~99% waiter inboxes. Root cause:
+`Waiters.WaitFunc` (rdvq/waiters.go:85) borrows a fresh inbox from `inboxPool` per call and reclaims it
+ONLY when `clean` (PopFrontFunc received a value on the waiter channel). In the steady-state skim the
+work arrives via the skimQueue's OWN inbox (a different channel), so the registered waiter is never
+satisfied → PopFrontFunc marks it ABANDONED (pushes a zero-value marker, leaves ib in the emptyInboxes
+collection) → clean=false → NOT reclaimed. The abandoned inbox is later popped by a sender (TryPushBack),
+which drains the marker and DISCARDS it (→ GC). So one inbox struct + make(chan,1) leaks per skim.
+Path: Wave.Skim → addWork → skimQueue.PopFrontFunc → workWaiters.WaitFunc (workWaiters = the Accepted's
+q.waiters). Profile: rdvq.inbox[func()].Init 42% + inbox-pool struct Get + nbcq nodes.
+- **ATTEMPTED option 3 (naive sender-reclaim) — FAILED, REVERTED.** Made `inboxOnlyQueue.TryPushBack`'s
+  marker-drain branch reclaim the inbox. WRONG: an abandoned inbox is STILL OWNED by its receiver.
+  `Queue.PopFrontFunc` (queue.go:369-371) explicitly HOLDS its inbox across retry iterations and RE-PASSES
+  it, "preserving the reuse-without-requeue path for its own abandonment marker"; `Handoff.PopFrontFunc`
+  borrows-per-call and DROPS the abandoned inbox to GC by design ("a later sender's TryPushBack drains
+  [the marker]"). So the sender draining the marker does NOT have exclusive ownership — reclaiming steals
+  an inbox the receiver will re-pass (or that must stay GC-owned), giving two receivers one inbox →
+  lost-wakeup/double-receive. `saturation_test` (Queue, 8 prod × 8 drain × 40k) HUNG (125s). The
+  "drop-and-let-GC" of abandoned inboxes is load-bearing, not an oversight.
+- **CORRECT option 3 requires a GENERATION-STAMPED inbox** (the protocol the OUTBOX already has —
+  queue.go:29/189: a stale reclaimed-and-reused outbox fails its CAS and is dropped). The inbox has none,
+  so reclaim-and-reuse can't be disambiguated from a concurrent re-pass. Adding gen-stamping to the inbox
+  is a change to the hairiest lock-free code in rdvq → needs the model-check + large -race treatment, a
+  dedicated effort.
+  - Rejected option 1 (thread a caller-held inbox through Waiters→workq→wave): leaks rdvq complexity into
+    the callers + needs a holder that outlives a single drive (nothing does on the consumer side).
+  - Rejected option 2 (check work before registering): reintroduces the missed-notification race that the
+    register-then-confirm order exists to close.
+- STATUS: 38→14 alloc reduction (meta pooling) stands, committed (50bf217). The rdvq inbox cluster (~10/op)
+  is DEFERRED pending the gen-stamped-inbox design decision.
+
 **►►► DISPATCH ALLOC REDUCTION — top-level meta pooling (2026-06-29, in progress).** The bench
 comparison showed streampool ~37 allocs/task vs naive-pool's 1; root-caused via `BenchmarkLauncherSkim`
 (the main-module hot-path guard = 38 allocs/op, single-threaded Submit+Skim, no limiter — so it's CORE,

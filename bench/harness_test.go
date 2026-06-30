@@ -17,6 +17,31 @@ import (
 	"github.com/influxdata/tdigest"
 )
 
+// benchTask carries one task's per-dispatch state (enqueue stamp, blocking duration,
+// recorder). It is pooled and its run method value is bound once, so the harness submits
+// a reused callback instead of allocating a fresh closure per task — that per-task closure
+// is a constant cost every SUT pays, and it would otherwise floor allocs/task at ~1,
+// masking a framework's true (near-zero) per-dispatch allocation. do() self-returns the
+// task to the pool after running.
+type benchTask struct {
+	enqueue time.Time
+	sleep   time.Duration
+	rec     *recorder
+	run     func()
+}
+
+var benchTaskPool = sync.Pool{New: func() any { return new(benchTask) }}
+
+func (t *benchTask) do() {
+	start := time.Now()
+	time.Sleep(t.sleep)
+	done := time.Now()
+	if t.rec != nil {
+		t.rec.add(start.Sub(t.enqueue), done.Sub(t.enqueue))
+	}
+	benchTaskPool.Put(t)
+}
+
 // workload describes the per-task blocking-I/O cost. Durations are drawn from a
 // lognormal distribution (median * exp(sigma*N(0,1))), the standard model for a
 // heavy right tail: most tasks are quick, a few are very slow. cap clamps the
@@ -144,16 +169,14 @@ func runComparison(b *testing.B, makeDisp func() dispatcher, wl workload, p pd) 
 						return
 					default:
 					}
-					enqueue := time.Now()
-					sleep := wl.sample(rng)
-					disp.submit(ctx, func() {
-						start := time.Now()
-						time.Sleep(sleep)
-						done := time.Now()
-						if rec != nil {
-							rec.add(start.Sub(enqueue), done.Sub(enqueue))
-						}
-					})
+					t := benchTaskPool.Get().(*benchTask)
+					if t.run == nil { // bind once per pooled object (preserved across Put/Get)
+						t.run = t.do
+					}
+					t.enqueue = time.Now()
+					t.sleep = wl.sample(rng)
+					t.rec = rec
+					disp.submit(ctx, t.run)
 				}
 			}(int64(i) + 1)
 		}

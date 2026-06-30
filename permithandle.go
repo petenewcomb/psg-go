@@ -37,6 +37,15 @@ type heldPermit struct {
 	// allocating a fresh method-value closure every time. Bound to the stable pooled
 	// pointer, it always acts on the handle's current permit.
 	releaseFn func()
+
+	// confirmFn is the handle's bound confirm method value, reused as blockAcquire's
+	// block-confirm callback (cached/preserved like releaseFn, so a blocking dispatch
+	// does not allocate a fresh closure per call). It reads the per-call confirm state
+	// below; blockAcquire is single-flighted per handle (one handle per dispatch), so
+	// that state needs no synchronization.
+	confirmFn      func() bool
+	blockingFn     func() // ex.Blocking for the in-flight blockAcquire (nil if none)
+	blockingCalled bool   // whether blockingFn has fired this blockAcquire
 }
 
 // acquire performs the non-blocking admission acquire through ownCache: own cache, then
@@ -163,19 +172,13 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermi
 // block-and-help loop retargeted from the per-request notifier onto the permit Pool's
 // waiters, with h.acquire (idempotent) as both the loop guard and the block confirm.
 func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermit) error {
-	blockingCalled := false
-	confirmFn := func() bool {
-		if h.acquire() {
-			return false // acquired — abort the wait
-		}
-		if !blockingCalled {
-			blockingCalled = true
-			if ex.Blocking != nil {
-				ex.Blocking()
-			}
-		}
-		return true // proceed to block
+	// Per-call confirm state, read by h.confirm (the cached, allocation-free callback).
+	h.blockingCalled = false
+	h.blockingFn = ex.Blocking
+	if h.confirmFn == nil {
+		h.confirmFn = h.confirm
 	}
+	defer func() { h.blockingFn = nil }() // don't pin the Execution past the call
 	var renotifyFn workq.RenotifyFunc
 	for !h.acquire() {
 		if renotifyFn != nil {
@@ -183,7 +186,7 @@ func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPerm
 			renotifyFn()
 		}
 		var err error
-		renotifyFn, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), confirmFn)
+		renotifyFn, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), h.confirmFn)
 		if err != nil {
 			return err
 		}
@@ -206,7 +209,23 @@ func (h *heldPermit) release() {
 // it captures only the (stable) pooled pointer, so it stays valid across reuse and need
 // not be re-bound (re-allocated) each cycle.
 func (h *heldPermit) Reset() {
-	*h = heldPermit{releaseFn: h.releaseFn}
+	*h = heldPermit{releaseFn: h.releaseFn, confirmFn: h.confirmFn}
+}
+
+// confirm is blockAcquire's block-confirm: abort the wait if the permit is now held,
+// otherwise fire ex.Blocking once (on the first real park) and proceed to block. Reads
+// the per-call state set by blockAcquire. Cached as confirmFn so it costs no allocation.
+func (h *heldPermit) confirm() bool {
+	if h.acquire() {
+		return false // acquired — abort the wait
+	}
+	if !h.blockingCalled {
+		h.blockingCalled = true
+		if h.blockingFn != nil {
+			h.blockingFn()
+		}
+	}
+	return true // proceed to block
 }
 
 var heldPermitPool = omnipool.For[heldPermit]()

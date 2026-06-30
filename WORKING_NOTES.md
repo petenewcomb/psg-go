@@ -152,16 +152,31 @@ q.waiters). Profile: rdvq.inbox[func()].Init 42% + inbox-pool struct Get + nbcq 
   claimDeliver-or-skip, never reclaim) + a SINGLE gen bump on abandon (the only transition that disowns a
   registration a sender may have observed). Reference counting rejected (still needs a gen for ABA across
   pool reuse; doesn't evict the lingering hint; no multi-party reclaim to coordinate).
-  - **Step 1 DONE:** `internal/rdvq/inboxpool_proto_test.go` — standalone prototype of the protocol +
-    `TestInboxReclaim_Race` (8 senders × 8 churning receivers: commit-block / churn-abandon / Queue-style
-    re-pass w/ stale duplicate hints). 8/8 -race iterations green: 160k values each delivered exactly once,
-    reclamation real (discarded≫0, circulating=0), no race/livelock. Mirrors outboxpool_reclaim_proto_test.
-  - **Step 2 (IN PROGRESS): productionize** into live `inbox.go`/`inboxonly.go` — gen-stamped state word
-    on `inbox`, `TryPushBack` deliver = claimDeliver-or-skip (drop the zero-value marker), `PopFrontFunc`
-    register/abandon(+gen)/re-pass, receiver-side reclaim on clean AND abandon. Keep Waiters/Handoff/Queue
-    callers working; the reclaim seam moves so abandoned inboxes recycle.
-  - **Step 3 gate:** rdvq unit + saturation_test (the case the naive fix hung) + full suite + large -race
-    TestBySimulation + BenchmarkLauncherSkim (target 14 → low single digits).
+  - **DONE + VALIDATED (2026-06-29).** Live `inbox.go` (gen-stamped 3-state machine) + `inboxonly.go`
+    (`TryPushBack` = claimDeliver-or-skip, no marker; `PopFrontFunc` register/abandon(+gen)/orphan-drain,
+    always leaves the inbox free → callers Waiters/Handoff/Queue reclaim on EVERY PopFrontFunc, recycling
+    abandoned inboxes). **CRUCIAL: captured-gen hints.** emptyInboxes holds `inboxHint{ib,gen}` (not a bare
+    *inbox); a sender claims at the hint's CAPTURED gen. This is what makes the SHARED omnipool.For[inbox[T]]
+    pool cross-queue-safe: an inbox abandoned in queue A (gen bumped) and reused in queue B via the shared
+    pool leaves A's stale hint claiming at the old gen → fails, so A doesn't misdeliver into B's receiver.
+    - **The bug this fixed:** my first cut claimed at the CURRENT gen → cross-queue misdelivery (a skimWork
+      from a wave's skimQueue ran on a scheduler worker with a bare ctx → "Context not associated with a
+      wave" panic). Diagnosed via stash-baseline (confirmed my change), then root-caused to the shared
+      inbox[Work] pool + reclaim-of-abandoned + stale hint. Per-queue pool also fixes it but loses
+      cross-queue reuse; PN directed the shared-pool fix → captured-gen hints (mirrors outboxHint).
+    - **Prototype** (`inboxpool_proto_test.go`): TestInboxReclaim_Race (2 queues sharing 1 pool, churning
+      receivers, per-queue value-range ownership) + TestInboxCapturedGenStaleHintInert (DETERMINISTIC
+      cross-queue guard — orchestrates abandon-in-A/reuse-in-B/A-stale-hint; FAILS if trySend claims at
+      current gen). Note: the stress test alone can't reproduce cross-queue (sync.Pool P-affinity), hence
+      the deterministic guard.
+    - **Gate MET:** full suite green; rdvq -race incl saturation_test; 25/25 TestBySimulation -race;
+      **BenchmarkLauncherSkim 38 → 5 allocs/op** (meta pooling 38→14, gen-stamped inbox 14→5). NOT committed.
+  - **Benchmarks (PN asks):** rdvq Queue benchmarks performance-NEUTRAL (EmitVsChan direct-handoff within
+    noise; OutboxHintCycle/ChanCycle controls flat). NEW `BenchmarkHandoffVsChan` (handoff_bench_test.go):
+    Handoff vs unbuffered chan, conc sweep — chan is ~2-4x faster for pure rendezvous (0 allocs both; the
+    gap is Handoff's multi-step lock-free protocol vs the runtime's direct chan handoff). Handoff's cost
+    buys its composable park (block-as-demand spawn, idle/ctx selectFn seam, LIFO scale-to-zero); ~1µs/
+    handoff is negligible for the executor's blocking bodies.
 
 **►►► DISPATCH ALLOC REDUCTION — top-level meta pooling (2026-06-29, in progress).** The bench
 comparison showed streampool ~37 allocs/task vs naive-pool's 1; root-caused via `BenchmarkLauncherSkim`

@@ -22,7 +22,7 @@ type testInboxOnlyQueue[T any] interface {
 	Init()
 	TryPushBack(value T) bool
 	PopFront(ctx context.Context, inbox *inbox[T], processFn ProcessValueFunc[T]) error
-	PopFrontFunc(inbox *inbox[T], processOrphanFn ProcessValueFunc[T], selectFn inboxOnlyPopSelectFunc[T]) bool
+	PopFrontFunc(inbox *inbox[T], processOrphanFn ProcessValueFunc[T], selectFn inboxOnlyPopSelectFunc[T])
 }
 
 // inboxOnlyQueueTestCases returns test cases for both queue implementations

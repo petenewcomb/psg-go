@@ -83,14 +83,12 @@ func (w *Waiters) WaitFunc(confirmFn func() bool, selectFn WaitSelectFunc) Renot
 	}
 
 	waitInbox := w.q.borrowInbox()
-	clean := true
-	defer func() {
-		if clean {
-			w.q.reclaimInbox(waitInbox)
-		}
-	}()
+	// PopFrontFunc always leaves the inbox free (received, abandoned, or orphan-drained),
+	// so the owning receiver always reclaims it — recycling abandoned inboxes too (the
+	// generation-stamped protocol makes the lingering hint inert).
+	defer w.q.reclaimInbox(waitInbox)
 	var rf RenotifyFunc
-	clean = w.q.PopFrontFunc(
+	w.q.PopFrontFunc(
 		waitInbox,
 		func(renotifyFn RenotifyFunc) {
 			// Stranded renotifyFn from an abandoned inbox: re-queue it for

@@ -158,7 +158,7 @@ func (h *Handoff[T]) PopFrontFunc(selectFn HandoffPopSelectFunc[T]) (value T, ok
 	trace.Logf(context.Background(), traceRegion, "Handoff=%p", h)
 
 	ib := h.inboxes.borrowInbox()
-	clean := h.inboxes.PopFrontFunc(
+	h.inboxes.PopFrontFunc(
 		ib,
 		func(v T) { value, ok = v, true }, // orphan drain: a racing sender delivered late
 		func(ib *inbox[T]) {
@@ -170,9 +170,8 @@ func (h *Handoff[T]) PopFrontFunc(selectFn HandoffPopSelectFunc[T]) (value T, ok
 			}
 		},
 	)
-	if clean {
-		h.inboxes.reclaimInbox(ib)
-	}
+	// PopFrontFunc always leaves ib free; the receiver always reclaims it.
+	h.inboxes.reclaimInbox(ib)
 	return value, ok
 }
 

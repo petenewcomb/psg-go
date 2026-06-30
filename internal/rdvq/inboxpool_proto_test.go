@@ -12,18 +12,22 @@ package rdvq
 // saturation_test).
 //
 // The fix (see docs/rdvq-inbox-reclamation.md): a generation-stamped 3-state inbox
-// (free / waiting / delivering) in one atomic word. The receiver is the SOLE
-// reclaimer — on the clean AND the abandon path; senders only deliver-or-skip. The
-// ONE generation bump is on abandon, the single transition that disowns a waiting
-// registration a sender may already have observed: a sender that loaded the inbox
-// as waiting@g then does claimDeliver(g), which fails the instant abandon advanced
-// it to free@(g+1), so the sender can never deliver into a period the receiver
-// disowned. Every other transition leaves the generation alone.
+// (free / waiting / delivering) in one atomic word, the receiver the SOLE reclaimer
+// (on the clean AND abandon path; senders only deliver-or-skip), and ONE generation
+// bump on abandon. CRUCIALLY, the hint a receiver publishes carries the generation it
+// was minted at, and a sender claims at THAT captured generation — not the inbox's
+// current one. That is what makes a SHARED inbox pool safe: an inbox abandoned in one
+// queue (generation bumped) and reused in ANOTHER via the shared pool leaves a stale
+// hint in the first queue whose captured generation no longer matches, so its claim
+// fails. Claiming at the current generation instead delivers into the reused inbox now
+// owned by a different queue's receiver — cross-queue misdelivery.
 //
-// This file is a STANDALONE prototype of that protocol (its own simplified types),
-// stress-tested so "every value received exactly once" under -race catches any
-// lost/double delivery or use-after-reclaim — exactly as the outbox reclaim
-// prototype (outboxpool_reclaim_proto_test.go) does for the other direction.
+// This is a STANDALONE prototype. It runs TWO queues sharing ONE inbox pool so the
+// cross-queue hazard is actually exercised, and tags each value with its queue: "every
+// value received exactly once, by a receiver of its OWN queue" under -race catches lost
+// / double / cross-queue delivery and use-after-reclaim. (Switching trySend to claim at
+// the current generation instead of the captured one makes this test fail — that is the
+// regression it guards.) Mirrors outboxpool_reclaim_proto_test.go for the other direction.
 
 import (
 	"runtime"
@@ -42,7 +46,6 @@ const (
 	protoFree       protoInboxStateT = iota // pooled / not registered / disowned-by-abandon
 	protoWaiting                            // registered as a hint; receiver may take a value on ch
 	protoDelivering                         // a sender won the claim and is sending into ch (transient)
-	protoStateCount
 )
 
 const (
@@ -62,196 +65,240 @@ func (ib *protoInbox) load() (gen uint64, st protoInboxStateT) {
 	return w >> protoGenShift, w & protoStateMsk
 }
 
-// register: free@g → waiting@g (receiver, no gen bump).
 func (ib *protoInbox) register(g uint64) bool {
 	return ib.state.CompareAndSwap(protoPack(g, protoFree), protoPack(g, protoWaiting))
 }
-
-// claimDeliver: waiting@g → delivering@g (sender, no gen bump). Wins exclusive
-// rights to send into ch; loses if the receiver abandoned (gen advanced) or
-// another sender claimed.
 func (ib *protoInbox) claimDeliver(g uint64) bool {
 	return ib.state.CompareAndSwap(protoPack(g, protoWaiting), protoPack(g, protoDelivering))
 }
-
-// finishReceive: delivering@g → free@g (receiver, no gen bump). The value has been
-// drained; the inbox is now reclaimable or re-registerable.
 func (ib *protoInbox) finishReceive(g uint64) bool {
 	return ib.state.CompareAndSwap(protoPack(g, protoDelivering), protoPack(g, protoFree))
 }
 
-// abandon: waiting@g → free@(g+1) (receiver, the SOLE gen bump). Wins iff no sender
-// has claimed; the bump inerts any sender that observed waiting@g.
+// abandon: waiting@g → free@(g+1) (the SOLE gen bump).
 func (ib *protoInbox) abandon(g uint64) bool {
 	return ib.state.CompareAndSwap(protoPack(g, protoWaiting), protoPack(g+1, protoFree))
 }
 
-type protoInboxPool struct {
-	hints nbcq.Queue[*protoInbox] // stale-tolerant hint collection (receiver-registered)
-	free  sync.Pool
-
-	allocated   atomic.Int64 // inboxes ever newly made
-	discarded   atomic.Int64 // reclaim() calls
-	circulating atomic.Int64 // currently out of sync.Pool (the live set)
+// protoHint is the generation-stamped reference a receiver publishes (the captured-gen
+// hint that makes the shared pool cross-queue-safe).
+type protoHint struct {
+	ib  *protoInbox
+	gen uint64
 }
 
-func newProtoInboxPool() *protoInboxPool {
-	p := &protoInboxPool{}
-	p.hints.Init()
-	return p
+// protoQueue is one inboxOnlyQueue-like rendezvous: its own hint collection, but a
+// SHARED inbox free pool (the cross-queue hazard surface).
+type protoQueue struct {
+	hints nbcq.Queue[protoHint]
+	pool  *sync.Pool // SHARED across queues
+
+	allocated   *atomic.Int64
+	discarded   *atomic.Int64
+	circulating *atomic.Int64
 }
 
-func (p *protoInboxPool) obtain() *protoInbox {
-	p.circulating.Add(1)
-	if v := p.free.Get(); v != nil {
+func (q *protoQueue) obtain() *protoInbox {
+	q.circulating.Add(1)
+	if v := q.pool.Get(); v != nil {
 		return v.(*protoInbox)
 	}
-	p.allocated.Add(1)
+	q.allocated.Add(1)
 	return &protoInbox{ch: make(chan int, 1)}
 }
 
-func (p *protoInboxPool) reclaim(ib *protoInbox) {
-	p.discarded.Add(1)
-	p.circulating.Add(-1)
-	p.free.Put(ib)
+func (q *protoQueue) reclaim(ib *protoInbox) {
+	q.discarded.Add(1)
+	q.circulating.Add(-1)
+	q.pool.Put(ib)
 }
 
-// trySend is the sender side (the TryPushBack analogue): pop hints and deliver to
-// the first genuinely-waiting inbox, skipping stale/in-flight ones. Senders NEVER
-// reclaim. Returns false when no waiting receiver was found.
-func (p *protoInboxPool) trySend(v int) bool {
+// trySend delivers to the first genuinely-waiting inbox, claiming at the hint's CAPTURED
+// generation. Senders never reclaim.
+func (q *protoQueue) trySend(v int) bool {
 	for {
-		ib, ok := p.hints.TryPopFront()
+		h, ok := q.hints.TryPopFront()
 		if !ok {
 			return false
 		}
-		g, st := ib.load()
-		if st == protoWaiting && ib.claimDeliver(g) {
-			ib.ch <- v // cap-1, uncontended: the claim made us the exclusive sender
+		if h.ib.claimDeliver(h.gen) {
+			h.ib.ch <- v
 			return true
 		}
-		// free / delivering / claim lost (abandoned, gen-advanced, or another sender):
-		// a stale or in-flight hint — skip and try the next.
+		// stale (abandoned/reused → gen advanced) or in-flight: skip
 	}
 }
 
-// TestInboxReclaim_Race stresses concurrent senders and churning receivers
-// (registering, mostly abandoning to exercise the hazard, some re-passing like
-// Queue) with reclamation active. "Every value received exactly once" under -race
-// catches any lost/double delivery, use-after-reclaim, or stale-view delivery.
+// TestInboxReclaim_Race stresses two queues sharing one inbox pool, each with concurrent
+// senders and churning receivers (commit-block / churn-abandon / re-pass leaving stale
+// duplicate hints). Each value is tagged with its queue; a receiver must only ever
+// receive a value of its own queue. "Exactly once, own queue" under -race catches
+// lost/double/cross-queue delivery and use-after-reclaim.
 func TestInboxReclaim_Race(t *testing.T) {
 	chk := require.New(t)
 	const (
-		nSenders   = 8
-		nReceivers = 8
+		nQueues    = 2
+		nSenders   = 6
+		nReceivers = 6
 		perSender  = 20000
-		total      = nSenders * perSender
+		perQueue   = nSenders * perSender
+		total      = nQueues * perQueue
 	)
-	p := newProtoInboxPool()
+	var pool sync.Pool
+	var allocated, discarded, circulating atomic.Int64
+
 	received := make([]atomic.Int32, total)
 	var count atomic.Int64
-	done := make(chan struct{}) // closed once when the last value is recorded
+	done := make(chan struct{})
 
-	recordAndFinish := func(ib *protoInbox, v int, claimGen uint64) {
-		if received[v].Add(1) != 1 {
-			t.Errorf("value %d received more than once", v)
+	queues := make([]*protoQueue, nQueues)
+	for k := range queues {
+		q := &protoQueue{pool: &pool, allocated: &allocated, discarded: &discarded, circulating: &circulating}
+		q.hints.Init()
+		queues[k] = q
+	}
+
+	var all sync.WaitGroup
+
+	for k := 0; k < nQueues; k++ {
+		q := queues[k]
+		base := k * perQueue // this queue owns value range [base, base+perQueue)
+
+		// Receivers.
+		for r := 0; r < nReceivers; r++ {
+			all.Add(1)
+			go func(seed int) {
+				defer all.Done()
+				var held *protoInbox
+				iter := seed
+				for count.Load() < total {
+					iter++
+					ib := held
+					held = nil
+					if ib == nil {
+						ib = q.obtain()
+					}
+					g, _ := ib.load()
+					if !ib.register(g) {
+						q.reclaim(ib)
+						continue
+					}
+					q.hints.PushBack(protoHint{ib: ib, gen: g})
+
+					record := func(v int) {
+						if v < base || v >= base+perQueue {
+							t.Errorf("queue %d received value %d outside its range [%d,%d) — cross-queue misdelivery",
+								k, v, base, base+perQueue)
+							return
+						}
+						if received[v].Add(1) != 1 {
+							t.Errorf("value %d received more than once", v)
+						}
+						ib.finishReceive(g)
+						if count.Add(1) == int64(total) {
+							close(done)
+						}
+					}
+
+					commit := iter%4 != 0
+					if commit {
+						select {
+						case v := <-ib.ch:
+							record(v)
+						case <-done:
+							if !ib.abandon(g) {
+								record(<-ib.ch)
+							}
+						}
+					} else {
+						select {
+						case v := <-ib.ch:
+							record(v)
+						default:
+							if !ib.abandon(g) {
+								record(<-ib.ch)
+							}
+						}
+					}
+
+					if iter%3 == 0 {
+						held = ib
+					} else {
+						q.reclaim(ib)
+					}
+				}
+				if held != nil {
+					q.reclaim(held)
+				}
+			}(r)
 		}
-		ib.finishReceive(claimGen) // delivering@claimGen → free@claimGen
-		if count.Add(1) == int64(total) {
-			close(done) // wake committed receivers blocked on <-ib.ch
+
+		// Senders.
+		for s := 0; s < nSenders; s++ {
+			all.Add(1)
+			go func(sbase int) {
+				defer all.Done()
+				for j := 0; j < perSender; j++ {
+					for !q.trySend(sbase + j) {
+						runtime.Gosched()
+					}
+				}
+			}(base + s*perSender)
 		}
 	}
 
-	// Receivers: register an inbox, then take a delivered value or abandon. Most
-	// iterations COMMIT — block on the inbox channel (or shutdown) so senders have
-	// a real rendezvous window. A fraction CHURN — non-blocking probe then abandon
-	// — to stress the hazard (abandon racing a sender's claim, reclaim/reuse). The
-	// abandon's CAS failure means a sender claimed mid-register, so the receiver
-	// drains the orphan. Some receivers re-pass (hold the inbox across iterations,
-	// leaving a stale duplicate hint) — the stale-view stress.
-	var receivers sync.WaitGroup
-	for r := 0; r < nReceivers; r++ {
-		receivers.Add(1)
-		go func(seed int) {
-			defer receivers.Done()
-			var held *protoInbox // re-passed inbox (free at its current gen)
-			iter := seed
-			for count.Load() < total {
-				iter++
-				ib := held
-				held = nil
-				if ib == nil {
-					ib = p.obtain()
-				}
-				g, _ := ib.load() // free@g
-				if !ib.register(g) {
-					p.reclaim(ib) // we own ib free@g, so this cannot fail; guard anyway
-					continue
-				}
-				p.hints.PushBack(ib)
-
-				// abandonOrDrain: give up the registration. abandon wins iff no sender
-				// claimed (clean); a lost CAS means a value is inbound — drain the orphan.
-				abandonOrDrain := func() {
-					if ib.abandon(g) {
-						return
-					}
-					v := <-ib.ch
-					recordAndFinish(ib, v, g)
-				}
-
-				if iter%4 != 0 {
-					// COMMIT: block until a sender delivers, or shutdown.
-					select {
-					case v := <-ib.ch:
-						recordAndFinish(ib, v, g)
-					case <-done:
-						abandonOrDrain()
-					}
-				} else {
-					// CHURN: probe non-blocking, else abandon (races senders).
-					select {
-					case v := <-ib.ch:
-						recordAndFinish(ib, v, g)
-					default:
-						abandonOrDrain()
-					}
-				}
-
-				if iter%3 == 0 {
-					held = ib // re-pass: reuse next iteration (free@g or g+1)
-				} else {
-					p.reclaim(ib)
-				}
-			}
-			if held != nil {
-				p.reclaim(held)
-			}
-		}(r)
-	}
-
-	// Senders: deliver each value exactly once, retrying until a waiting receiver
-	// takes it (mirrors saturation_test's refuse→re-drive producers).
-	var senders sync.WaitGroup
-	for s := 0; s < nSenders; s++ {
-		senders.Add(1)
-		go func(base int) {
-			defer senders.Done()
-			for j := 0; j < perSender; j++ {
-				for !p.trySend(base*perSender + j) {
-					runtime.Gosched()
-				}
-			}
-		}(s)
-	}
-	senders.Wait()
-	receivers.Wait()
+	all.Wait()
 
 	chk.Equal(int64(total), count.Load(), "every value received exactly once")
 	for i := range received {
 		chk.Equalf(int32(1), received[i].Load(), "value %d once", i)
 	}
-	chk.Positive(p.discarded.Load(), "reclamation must actually have happened")
-	t.Logf("allocated=%d discarded=%d circulating(final)=%d (%d values, %d senders, %d receivers)",
-		p.allocated.Load(), p.discarded.Load(), p.circulating.Load(), total, nSenders, nReceivers)
+	chk.Positive(discarded.Load(), "reclamation must actually have happened")
+	t.Logf("allocated=%d discarded=%d circulating(final)=%d (%d values, %d queues sharing one pool)",
+		allocated.Load(), discarded.Load(), circulating.Load(), total, nQueues)
+}
+
+// TestInboxCapturedGenStaleHintInert is the DETERMINISTIC cross-queue regression guard.
+// The stress test above cannot reliably reproduce cross-queue reuse — sync.Pool's
+// P-affinity usually returns a reclaimed inbox to the same goroutine that freed it — so
+// this orchestrates the exact hazard by hand: an inbox abandoned in queue A and reused in
+// queue B, with A's stale hint still pending. Captured-gen claiming makes A's stale hint
+// inert; current-gen claiming would deliver A's value into B's inbox (cross-queue
+// misdelivery). Flipping trySend to claim at the current generation fails this test.
+func TestInboxCapturedGenStaleHintInert(t *testing.T) {
+	chk := require.New(t)
+	var pool sync.Pool
+	var a64 atomic.Int64
+	mk := func() *protoQueue {
+		q := &protoQueue{pool: &pool, allocated: &a64, discarded: &a64, circulating: &a64}
+		q.hints.Init()
+		return q
+	}
+	qA, qB := mk(), mk()
+
+	x := &protoInbox{ch: make(chan int, 1)}
+
+	// Queue A registers X and publishes a hint at generation 0.
+	gA, _ := x.load()
+	chk.True(x.register(gA), "A registers X (free@0 → waiting@0)")
+	qA.hints.PushBack(protoHint{ib: x, gen: gA})
+
+	// A's receiver abandons X (waiting@0 → free@1, the sole gen bump); A's hint lingers.
+	chk.True(x.abandon(gA), "A abandons X (waiting@0 → free@1)")
+
+	// X is reclaimed to the shared pool and reused by queue B, which registers it at the
+	// new generation (1) and publishes its own hint.
+	gB, _ := x.load()
+	chk.Equal(uint64(1), gB, "abandon bumped the generation")
+	chk.True(x.register(gB), "B reuses X (free@1 → waiting@1)")
+	qB.hints.PushBack(protoHint{ib: x, gen: gB})
+
+	// A's sender drives its queue: it pops A's stale hint (captured gen 0). Claiming at
+	// the captured generation FAILS (X is now waiting@1), so A delivers nothing into X —
+	// no cross-queue misdelivery. (Current-gen claiming would succeed here and send 99.)
+	chk.False(qA.trySend(99), "A's stale hint must NOT deliver into X (reused by B at gen 1)")
+
+	// B's sender delivers correctly via its current-gen hint.
+	chk.True(qB.trySend(42), "B's valid hint delivers")
+	chk.Equal(42, <-x.ch, "X holds B's value (42), never A's (99)")
 }

@@ -82,20 +82,36 @@ inboxState (low bits of state word; generation in the rest)
   inboxDelivering // a sender won the claim and is sending the value into ch (transient)
 ```
 
-As with the outbox, the `emptyInboxes` collection holds **stale-tolerant hints**,
-not authoritative membership: an inbox may sit on it while `free`/`waiting`/
-`delivering`; a popping sender loads the current `(gen,state)` and CAS-validates,
-so a duplicate hint or a hint to a since-abandoned incarnation is inert.
+As with the outbox, `emptyInboxes` holds **stale-tolerant, generation-stamped
+hints** — `inboxHint{ib, gen}` (NOT a bare `*inbox`), the gen captured at
+registration — not authoritative membership. A popping sender claims at the
+**hint's captured generation**, so a duplicate hint or a hint to a since-abandoned
+incarnation is inert.
+
+> **Why captured-gen, and why it's load-bearing for the SHARED pool.** The inbox
+> pool is the process-global `omnipool.For[inbox[T]]`, shared across every
+> `inboxOnlyQueue` of the same `T` (the wave's skim `Queue[Work]`, the scheduler's
+> `incoming Handoff[Work]`, …). Only an **abandon** leaves a lingering hint (a clean
+> delivery pops it), and abandon **bumps the gen**. So an inbox abandoned in queue A
+> (gen `g`→`g+1`) and then reused — *in another queue B via the shared pool* — leaves
+> A holding a hint at gen `g`; A's sender claiming at the captured `g` fails (the inbox
+> is now `g+1`, B's), instead of delivering A's value into B's receiver
+> (cross-queue misdelivery). Claiming at the *current* gen would not distinguish
+> incarnations across the shared pool — this was a real bug caught only by the live
+> simulation, since `sync.Pool`'s P-affinity makes cross-queue reuse rare in a stress
+> test (see `TestInboxCapturedGenStaleHintInert`, the deterministic guard). A
+> per-queue pool would also fix it but sacrifices cross-queue inbox reuse; captured-gen
+> keeps the shared pool.
 
 ### Transitions (each a generation-guarded CAS unless noted)
 
 1. **register** (receiver, `PopFrontFunc`): obtain ib (`free` @ g); `CAS(g,free)→
-   (g,waiting)`; push ib as a hint; block on `ch` (select `ch` | ctx | …).
-2. **deliver** (sender, `TryPushBack`): pop a hint; `load(g,st)`:
-   - `st==waiting`: `CAS(g,waiting)→(g,delivering)`. Win → `ch <- value` (cap-1,
-     uncontended; the claim made us exclusive) → delivered. Lose → stale/contended,
-     try next hint. **Senders never reclaim.**
-   - `st∈{free,delivering}`: stale or in-flight hint; skip.
+   (g,waiting)`; push `inboxHint{ib, g}`; block on `ch` (select `ch` | ctx | …).
+2. **deliver** (sender, `TryPushBack`): pop a hint `{ib, hg}`; `CAS(hg,waiting)→
+   (hg,delivering)` — claim at the **captured** `hg`. Win → `ch <- value` (cap-1,
+   uncontended; the claim made us exclusive) → delivered. Lose → stale (abandoned/
+   reused → gen advanced past `hg`), in-flight, or contended; try next hint.
+   **Senders never reclaim.**
 3. **receive** (receiver): `<-ch` got the value; `CAS(g,delivering)→(g,free)` (no
    gen bump), then reclaim (Put) or — for a held/re-passing receiver — keep at
    `free` for the next register. Drained channel preserved (no realloc).
@@ -145,5 +161,21 @@ channel).
 
 ## Status
 
-DESIGN ONLY (2026-06-29). Not implemented. Next step: the standalone prototype +
-proto-tests (step 1) before any change to live rdvq code.
+PRODUCTIONIZED & VALIDATED (2026-06-29).
+
+- Step 1 (prototype, `inboxpool_proto_test.go`): `TestInboxReclaim_Race` (two queues
+  sharing one pool, churning receivers) + `TestInboxCapturedGenStaleHintInert` (the
+  deterministic cross-queue guard — fails if `trySend` claims at the current gen
+  instead of the captured one).
+- Step 2 (live: `inbox.go`, `inboxonly.go`, with `Waiters`/`Handoff`/`Queue` callers
+  reclaiming on every PopFrontFunc since it now always leaves the inbox free).
+- Step 3 gate: full streampool suite green; rdvq `-race` incl. `saturation_test`;
+  25/25 `TestBySimulation -race`; **`BenchmarkLauncherSkim` 38 → 5 allocs/op** (meta
+  pooling 38→14, gen-stamped inbox 14→5). rdvq Queue benchmarks unchanged
+  (performance-neutral). New `BenchmarkHandoffVsChan` quantifies Handoff vs an
+  unbuffered channel.
+
+Note: the design originally described the sender claiming at the inbox's *current*
+generation; productionization corrected this to the **captured-gen hint** (see the
+shared-pool note above) — the only way to keep the shared pool cross-queue-safe while
+bumping the generation solely on abandon.

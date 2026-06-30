@@ -366,13 +366,12 @@ func (q *Queue[T]) PopFrontFunc(
 
 	// Borrow a data inbox lazily — only when we are actually about to wait — so
 	// the fast path (an outbox value is immediately available) touches no inbox
-	// at all. The same inbox is reused across retry iterations (preserving the
-	// reuse-without-requeue path for its own abandonment marker); reclaim it only
-	// when PopFrontFunc last reported it clean (drained and out of the stack).
+	// at all. The same inbox is reused across retry iterations (each iteration
+	// re-registers it free@g → waiting@g; the generation-stamped protocol leaves it
+	// free after every PopFrontFunc, so it is always safe to reclaim at the end).
 	var ib *inbox[T]
-	ibClean := true
 	defer func() {
-		if ib != nil && ibClean {
+		if ib != nil {
 			q.reclaimInbox(ib)
 		}
 	}()
@@ -402,7 +401,7 @@ func (q *Queue[T]) PopFrontFunc(
 					ib = q.borrowInbox()
 				}
 				var rf RenotifyFunc
-				ibClean = q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
+				q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
 					result := selectFn(ib.channel(), waitCh)
 					if result.inboxEmptied {
 						ib.emptied()

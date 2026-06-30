@@ -179,3 +179,28 @@ Note: the design originally described the sender claiming at the inbox's *curren
 generation; productionization corrected this to the **captured-gen hint** (see the
 shared-pool note above) — the only way to keep the shared pool cross-queue-safe while
 bumping the generation solely on abandon.
+
+## Follow-up: reaping accumulated abandoned hints (2026-06-30)
+
+The gen-stamped inbox recycles abandoned *inboxes*, but each registration still publishes
+an `inboxHint` (an nbcq **node + value cell**) into `emptyInboxes`, and an abandoned
+registration leaves its hint behind — inert (stale gen), but holding that node+value live
+in the queue until some sender's `TryPushBack` front-pops past it. Under abort-heavy
+contention (notably `blockAcquire`'s register-then-recheck loop, which aborts the instant
+a permit frees during registration), abandons outrun notifies and these hints accumulate,
+forcing every registration to allocate fresh node+value storage. This was GC- and
+P-independent (`GOGC=off` and `GOMAXPROCS=1` both left it unchanged) — a
+push-without-matching-pop accumulation, not `sync.Pool` churn.
+
+Fix: `inboxOnlyQueue.reapStale`, called from the abandon branch of `PopFrontFunc` —
+front-pop a bounded run of leading hints, drop the stale ones (`TryPopFront` recycles
+their node+value) and re-push the first live one. Re-pushing a live hint is safe (at most
+a redirected/deferred wake, never lost — see
+`docs/decisions/waiter-set-notification.md`). Took streampool from ~7.3 → ~2.6
+allocs/task; with `confirmFn`/`h.release` method-value caching, → ~1.1 (the per-task
+closure floor). `TestWaitersReapPreservesLiveWaiter` + `BenchmarkWaitersAbandon` guard it.
+
+The broader question this raised — whether the FIFO waiter ordering is even desirable, and
+whether a caller-held or affinity-bucketed waiter set would be better — is recorded in
+`docs/decisions/waiter-set-notification.md` (answer: keep the shared substrate + reap;
+affinity bucketing deferred, measurement-gated).

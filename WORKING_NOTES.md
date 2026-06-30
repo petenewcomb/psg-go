@@ -1097,6 +1097,21 @@ that journal now resolve in the history doc.)
 
 ### Next session pickup
 
+**Recent — allocation reduction on the comparison bench (2026-06-30).** Drove streampool
+per-dispatch allocations **~37 → ~1.1 allocs/task** (the per-task-closure floor every
+bounded pool pays), now flat across underload→heavy-overload: meta pooling (37→19),
+gen-stamped inbox + `h.release` method-value cache (→7.3), abandon-path hint **reap**
+(→2.6), `confirmFn` method-value cache (→1.1). Commits: `d1d6484` (bench fix), `ba65991`
+(`h.release`), `21c74f7` (reap), + `confirmFn`. Harness = the `bench/` comparison submodule
+(unbounded / chan-semaphore / naive-pool / streampool). The waiter-set design exploration
+this prompted — is FIFO desirable, caller-held `Receiver`/`Waiter` params, permit-forest
+affinity bucketing — is recorded durably in `docs/decisions/waiter-set-notification.md`
+(net: keep the shared reclamation substrate + reap + per-use ordering; affinity bucketing
+deferred, measurement-gated on a deep-forest workload that doesn't exist yet). Remaining
+gap to naive-pool is the unavoidable shared per-task closure. Possible next bench work: the
+**nested-dispatch** workload (where a naive pool deadlocks and the split should pay off) —
+the comparison so far exercises streampool's overhead, not its differentiator.
+
 **►►► NEXT = C2 — the pool-split cutover.** Phase 2b migration steps 0/C1/B are landed
 (commits `ae6339f`, `551f4e6`, `cfdb039`); the example fix is `565b3b6`. C2 is the big one
 and reshapes the live dispatch path. Full design in

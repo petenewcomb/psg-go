@@ -31,6 +31,12 @@ import (
 type heldPermit struct {
 	ownCache *permits.Cache
 	permit   permits.Permit
+	// releaseFn is the handle's own release method value, bound once and reused as a
+	// task's per-completion callback (see Wave.newTaskWork). Storing the bound method
+	// value lazily here — and preserving it across Reset — keeps a limited dispatch from
+	// allocating a fresh method-value closure every time. Bound to the stable pooled
+	// pointer, it always acts on the handle's current permit.
+	releaseFn func()
 }
 
 // acquire performs the non-blocking admission acquire through ownCache: own cache, then
@@ -196,9 +202,11 @@ func (h *heldPermit) release() {
 }
 
 // Reset implements omnipool.Resetter for the handle pool. A recycled handle must hold
-// no permit (release ran) and no cache reference.
+// no permit (release ran) and no cache reference. The bound releaseFn is preserved —
+// it captures only the (stable) pooled pointer, so it stays valid across reuse and need
+// not be re-bound (re-allocated) each cycle.
 func (h *heldPermit) Reset() {
-	*h = heldPermit{}
+	*h = heldPermit{releaseFn: h.releaseFn}
 }
 
 var heldPermitPool = omnipool.For[heldPermit]()

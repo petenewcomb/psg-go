@@ -94,9 +94,13 @@ func (wv *Wave) newTaskWork(
 	wk.task = task
 	wk.h = h
 	if h != nil {
-		// Stored once so the per-execution completion callback doesn't
-		// allocate a fresh method value.
-		wk.completedFn = h.release
+		// Reuse the handle's bound release method value (lazily bound once per pooled
+		// handle, preserved across Reset) so a limited dispatch does not allocate a fresh
+		// method-value closure here every time.
+		if h.releaseFn == nil {
+			h.releaseFn = h.release
+		}
+		wk.completedFn = h.releaseFn
 	}
 	wk.wave = wv
 	// Borrow the body context at dispatch (descended from the submit ctx, so

@@ -68,6 +68,35 @@ func (q *inboxOnlyQueue[T, C, CT]) reclaimInbox(ib *inbox[T]) {
 	q.inboxPool.Put(ib)
 }
 
+// reapBudget bounds how many leading hints reapStale inspects per call — enough to
+// outpace the one stale hint each abandon produces (so steady-state abort churn drains)
+// without adding unbounded work to the abandon path.
+const reapBudget = 8
+
+// reapStale front-pops up to reapBudget leading hints, dropping STALE ones (whose inbox
+// is no longer waiting at the hint's captured generation — abandoned and/or reused).
+// TryPop already returns each dropped hint's node + value cell to the pool, so this
+// recycles the storage that accumulated abandoned-but-never-notified registrations
+// would otherwise pin live in the queue. The first LIVE hint (its inbox still
+// waiting@gen, belonging to another receiver) is re-pushed and the scan stops — never
+// dropping a live waiter (no lost wakeup); its re-push reuses a node+value the scan just
+// recycled. Called from the abandon path, where new stale hints are produced.
+func (q *inboxOnlyQueue[T, C, CT]) reapStale() {
+	var ct CT
+	for range reapBudget {
+		h, ok := ct.TryPop(&q.emptyInboxes)
+		if !ok {
+			return
+		}
+		if gen, st := h.ib.loadState(); st == inboxWaiting && gen == h.gen {
+			// Live registration of another receiver: restore it and stop.
+			ct.Push(&q.emptyInboxes, h)
+			return
+		}
+		// Stale: TryPop already recycled its node + value cell; drop it.
+	}
+}
+
 // emptyInboxesTrait is the internal interface for managing collections of
 // waiting consumer inboxes. It provides a unified abstraction over FIFO and LIFO
 // consumer selection - the queue itself always delivers items in FIFO order, but
@@ -205,7 +234,12 @@ func (q *inboxOnlyQueue[T, C, CT]) PopFrontFunc(
 	// The caller did not receive — try to abandon this registration.
 	if ib.abandon(g) {
 		// Won: no sender was delivering. The generation bump (→ g+1) inerts the lingering
-		// hint, so the inbox is now free and safe to reclaim or reuse.
+		// hint, so the inbox is now free and safe to reclaim or reuse. This abandon just
+		// orphaned our own hint in emptyInboxes; reap a bounded run of leading stale hints
+		// to recycle the node+value storage that accumulated abandons would otherwise pin
+		// out of the pool (the senders' TryPushBack reaps too, but only when a Notify
+		// arrives — abort-heavy contention outruns Notifies). See reapStale.
+		q.reapStale()
 		trace.Logf(context.Background(), traceRegion, "abandoned inbox=%p", ib)
 		return
 	}

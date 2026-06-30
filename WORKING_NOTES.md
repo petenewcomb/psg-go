@@ -146,8 +146,22 @@ q.waiters). Profile: rdvq.inbox[func()].Init 42% + inbox-pool struct Get + nbcq 
     the callers + needs a holder that outlives a single drive (nothing does on the consumer side).
   - Rejected option 2 (check work before registering): reintroduces the missed-notification race that the
     register-then-confirm order exists to close.
-- STATUS: 38→14 alloc reduction (meta pooling) stands, committed (50bf217). The rdvq inbox cluster (~10/op)
-  is DEFERRED pending the gen-stamped-inbox design decision.
+- STATUS: 38→14 alloc reduction (meta pooling) stands, committed (50bf217).
+- **GEN-STAMPED INBOX — design committed (4cb85b6, docs/rdvq-inbox-reclamation.md); prototype VALIDATED.**
+  Design: 3-state gen-stamped inbox (free/waiting/delivering) with sole-receiver reclaim (senders only
+  claimDeliver-or-skip, never reclaim) + a SINGLE gen bump on abandon (the only transition that disowns a
+  registration a sender may have observed). Reference counting rejected (still needs a gen for ABA across
+  pool reuse; doesn't evict the lingering hint; no multi-party reclaim to coordinate).
+  - **Step 1 DONE:** `internal/rdvq/inboxpool_proto_test.go` — standalone prototype of the protocol +
+    `TestInboxReclaim_Race` (8 senders × 8 churning receivers: commit-block / churn-abandon / Queue-style
+    re-pass w/ stale duplicate hints). 8/8 -race iterations green: 160k values each delivered exactly once,
+    reclamation real (discarded≫0, circulating=0), no race/livelock. Mirrors outboxpool_reclaim_proto_test.
+  - **Step 2 (IN PROGRESS): productionize** into live `inbox.go`/`inboxonly.go` — gen-stamped state word
+    on `inbox`, `TryPushBack` deliver = claimDeliver-or-skip (drop the zero-value marker), `PopFrontFunc`
+    register/abandon(+gen)/re-pass, receiver-side reclaim on clean AND abandon. Keep Waiters/Handoff/Queue
+    callers working; the reclaim seam moves so abandoned inboxes recycle.
+  - **Step 3 gate:** rdvq unit + saturation_test (the case the naive fix hung) + full suite + large -race
+    TestBySimulation + BenchmarkLauncherSkim (target 14 → low single digits).
 
 **►►► DISPATCH ALLOC REDUCTION — top-level meta pooling (2026-06-29, in progress).** The bench
 comparison showed streampool ~37 allocs/task vs naive-pool's 1; root-caused via `BenchmarkLauncherSkim`

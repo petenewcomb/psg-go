@@ -129,10 +129,66 @@ It is the only one of the three that is a genuine improvement rather than a late
 but it should be driven by a deep-, contended-, heterogeneous-forest workload that
 actually shows the renotify-walk/steal churn in the tail — which does not exist yet.
 
+## Planned: `RenotifyFunc` → `Notification` (conservation-discharge refactor)
+
+Separate from the alloc work, this hardens the renotify conservation soft spot (the
+`wrappedRenotify` leak-on-discard, TODO.md). It is **not** an allocation win — `wrappedRenotify`
+is already pooled and not in the residual — its value is making conservation *total and
+explicit*. Design is fully settled (below); it is a ~20-file, concurrency-critical cascade,
+so it should land as its own focused pass with the full `-race`/sim gate, not bolted onto
+other work. The core (`Notification` type, `Notifier.Notify`, `Listeners`/`Waiters`) was
+prototyped and compiled cleanly; reverted to keep the tree green pending the focused pass.
+
+**The type — a value struct, not an interface (deliberate):**
+
+```go
+type Notification struct {
+    n        *Notifier // set ⇒ listener-style Forward re-circulates; nil ⇒ waiter-style terminal
+    fallback func()    // never nil once delivered (defaults to noop); the terminal action
+}
+func (m Notification) Empty() bool  // zero value ⇒ no wake delivered (woken by ctx/timer)
+func (m Notification) Consume()     // wake USED — suppress fallback (no-op body; intent marker)
+func (m Notification) Forward()     // could NOT use — listener re-offers via n.Notify; waiter runs fallback
+```
+
+A value struct because the bug we fix *is* a pooled-wrapper-not-returned leak: a value type
+removes it **by construction** (nothing to forget to return). It references only long-lived
+things (the `*Notifier`; pre-existing fallbacks — `noop` or `unmetDemandFn`) and rides in
+storage pooled regardless (the parked inbox's channel for waiters, the callback stack for
+listeners), so it needs **no pool of its own** and *removes* the `wrappedRenotify` pool. An
+interface would force a pooled pointer impl (to avoid per-wake boxing through `chan
+Notification`), re-introducing the very pooling/Put-discipline we're deleting. Trade-off
+accepted: no double-settle detection (settling twice is a caller bug the value can't catch).
+
+**`Notify` becomes total:** `Notifier.Notify(fallback func())` (and `Waiters.Notify`) run the
+fallback exactly when no consumer takes the wake — so call sites drop the `if !Notify(fn) {
+fn() }` guard (`accepted.go` ×3, the orphan handler). Internal delivery is `Listeners.deliver`
+/ `Waiters.deliver` (return whether taken). `NoopRenotify` → unexported `noop` (default
+fallback), preserving its no-nil-check role.
+
+**The asymmetry, commented at `Notification.Forward`:** listener `Forward` re-circulates
+(`n.Notify(fallback)`) because a listener may hold a still-live reserved resource that must
+reach another consumer or it strands a starving waiter — and it's cheap (callbacks). Waiter
+`Forward` is terminal (`fallback()`) because a woken waiter that can't use the wake means the
+resource is already gone; re-offering would cascade wasteful goroutine wakeups. A *stranded*
+(delivered-then-abandoned, never used) waiter wake is salvaged separately by the orphan path
+(`WaitFunc`'s `processOrphanFn` re-offers via `w.Notify(stranded.fallback)`).
+
+**Migration is mechanical once the types change** — `renotifyFn()` → `Forward()`,
+drop-without-calling → `Consume()`, `rf != nil` → `!n.Empty()`. **Surface (~20 files):**
+rdvq `types/notifier/listeners/waiters/listener/queue/handoff/outbox` (incl.
+`PopSelectResult`'s outbox-ready renotify and the `chan RenotifyFunc` → `chan Notification`
+plumbing); workq `accepted/scheduler/wait`; `wave.go` (the `block`/`skimSelect` return
+threading); `permithandle.go` (`blockAcquire`/`reclaim` consumer loops); `execpool/executor.go`;
+and the rdvq + workq tests. **Gate:** full suite + rdvq `-race` (incl. `saturation_test`) +
+large `TestBySimulation -race` + a conservation-discharge note.
+
 ## Status
 
 - **Landed:** the abandon-path reap; `confirmFn`/`h.release` method-value caching.
 - **Not pursued:** LIFO-everywhere; wholesale `Receiver`/`Waiter` parameters.
+- **Planned (focused pass):** `RenotifyFunc` → `Notification` (spec above) — design settled
+  + core-compiled, reverted to keep the tree green; execute as its own gated change.
 - **Deferred, measurement-gated:** permit-forest affinity bucketing — revisit only if a
   deep-forest workload demonstrates HOL in the tail; the fix is affinity *bucketing of the
   existing queues*, not a waiter-set replacement.

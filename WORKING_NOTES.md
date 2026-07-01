@@ -1112,6 +1112,26 @@ gap to naive-pool is the unavoidable shared per-task closure. Possible next benc
 **nested-dispatch** workload (where a naive pool deadlocks and the split should pay off) —
 the comparison so far exercises streampool's overhead, not its differentiator.
 
+**►► NEXT SESSION PICKUP (2026-06-30 → , order of readiness):**
+1. **`RenotifyFunc` → `Notification` refactor** — design fully settled + spec committed in
+   `docs/decisions/waiter-set-notification.md` ("Planned" section). Discharges the renotify
+   conservation soft spot (not an alloc win). Value-struct `Notification{n, fallback}` with
+   `Consume`/`Forward`/`Empty`; total-conservation `Notify` (drops `if !Notify{fn()}`);
+   listener-recirculate / waiter-terminal asymmetry (commented). It's a ~20-file
+   concurrency-critical cascade (rdvq incl. `Queue`/`Handoff` outbox path + `PopSelectResult`,
+   workq, wave, permithandle, execpool, + tests) — do it as its own focused, fully-`-race`/
+   sim-gated pass. Migration is mechanical from the spec: `renotifyFn()`→`Forward()`,
+   drop→`Consume()`, `rf != nil`→`!Empty()`. Core was prototyped + compiled, then reverted
+   to keep the tree green.
+2. **`select` scase-escape dig** (self-contained) — the residual ~0.06 alloc/task on the
+   park path is the `select`'s scase array escaping behind `PopFrontFunc`'s callback
+   indirection (`executorWorker.Wait`/`Wave.skimSelect`), NOT a closure (confirmed: caching
+   the callback didn't move it). Investigate whether the scase escapes due to the indirect
+   call and/or generic instantiation, and whether restructuring the callback seam avoids it.
+3. **nbcq interface→value-struct audit** — nbcq can carry value structs now (historically
+   pointer-only); sweep `Queue`/`Handoff` value types for interface/pointer values that
+   could be value structs (leaner). Low priority.
+
 **►►► NEXT = C2 — the pool-split cutover.** Phase 2b migration steps 0/C1/B are landed
 (commits `ae6339f`, `551f4e6`, `cfdb039`); the example fix is `565b3b6`. C2 is the big one
 and reshapes the live dispatch path. Full design in

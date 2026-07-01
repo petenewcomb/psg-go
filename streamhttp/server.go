@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lxzan/gws"
@@ -60,8 +59,11 @@ type Server struct {
 	up      *gws.Upgrader
 	msgs    streampool.Wave
 	process streampool.Launcher[wsInbound]
-	conns   sync.Map // *gws.Conn -> *wsConnState (ordered mode only)
 }
+
+// wsStateKey names the per-connection ordered-reply state stored in the gws
+// session (which is per-connection, so no shared map is needed).
+const wsStateKey = "streamhttp.ws.resequencer"
 
 type wsReply struct {
 	op      gws.Opcode
@@ -71,7 +73,6 @@ type wsReply struct {
 // wsConnState is per-connection ordered-reply state.
 type wsConnState struct {
 	seq   uint64 // next sequence number; assigned in OnMessage (serial per conn)
-	rw    *streampool.Wave
 	reseq streampool.Resequencer[wsReply]
 }
 
@@ -147,8 +148,8 @@ func (s *Server) openWS(conn *gws.Conn) {
 	if s.orderedFn == nil {
 		return
 	}
-	rw := new(streampool.Wave)
-	cs := &wsConnState{rw: rw}
+	rw := new(streampool.Wave) // kept alive by the resequencer's internal reference
+	cs := &wsConnState{}
 	cs.reseq = streampool.NewFnResequencer[wsReply](rw, 0,
 		func(_ context.Context, r wsReply, _ error) error {
 			if r.payload != nil {
@@ -156,7 +157,7 @@ func (s *Server) openWS(conn *gws.Conn) {
 			}
 			return nil
 		})
-	s.conns.Store(conn, cs)
+	conn.Session().Store(wsStateKey, cs)
 }
 
 // Serve runs the unified server on ln with TLS. tlsCfg's Certificates must be
@@ -172,10 +173,8 @@ func (s *Server) Serve(ln net.Listener, tlsCfg *tls.Config) error {
 
 type wsEvents struct{ s *Server }
 
-func (e *wsEvents) OnOpen(*gws.Conn) {}
-func (e *wsEvents) OnClose(conn *gws.Conn, _ error) {
-	e.s.conns.Delete(conn)
-}
+func (e *wsEvents) OnOpen(*gws.Conn)         {}
+func (e *wsEvents) OnClose(*gws.Conn, error) {} // session (and its resequencer) is GC'd with the conn
 func (e *wsEvents) OnPing(c *gws.Conn, payload []byte) {
 	_ = c.WriteMessage(gws.OpcodePong, payload)
 }
@@ -189,7 +188,7 @@ func (e *wsEvents) OnMessage(conn *gws.Conn, msg *gws.Message) {
 	// Classify on arrival (serial per conn): only ordered messages take a
 	// sequence number, so the resequencer sees a gap-free run.
 	if e.s.orderedFn != nil && e.s.orderedFn(msg.Opcode, msg.Bytes()) {
-		if v, ok := e.s.conns.Load(conn); ok {
+		if v, ok := conn.Session().Load(wsStateKey); ok {
 			cs := v.(*wsConnState)
 			in.cs = cs
 			in.seq = cs.seq

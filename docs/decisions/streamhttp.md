@@ -67,9 +67,10 @@ backpressure pacing top-level submission when a downstream stage is saturated.
 A `Limiter` models a *real external constraint* — "this backend allows ≤64
 concurrent calls," "≤100 req/s" — not request admission. Putting a semaphore on
 the request gate is an arbitrary number that second-guesses the framework's own
-pacing. `streamhttp/fanout.go` and `streamgrpc` demonstrate the legitimate use: a
-shared `Limiter` bound to the downstream fan-out, capping one dependency
-collectively across every caller regardless of transport.
+pacing. `streamgrpc` demonstrates the legitimate use: its `Aggregate` method fans
+out under a shared `Limiter`, capping one dependency collectively across every
+caller regardless of transport — a handler in `streamhttp` would bind the same
+`Limiter` type identically.
 
 The one structural exception to "limiters model external constraints" is a
 concurrency-1 limiter used to *serialize a reducer* — see the Resequencer below.

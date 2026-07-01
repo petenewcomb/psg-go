@@ -109,7 +109,7 @@ func New(httpApp HTTPApp, wsApp WSApp, grpcSrv *grpc.Server, opts ...Option) *Se
 			return nil
 		}),
 	)
-	s.up = gws.NewUpgrader(&wsEvents{s}, &gws.ServerOption{})
+	s.up = gws.NewUpgrader(&wsEvents{s: s}, &gws.ServerOption{})
 	return s
 }
 
@@ -171,14 +171,13 @@ func (s *Server) Serve(ln net.Listener, tlsCfg *tls.Config) error {
 	return srv.ServeTLS(ln, "", "")
 }
 
-type wsEvents struct{ s *Server }
-
-func (e *wsEvents) OnOpen(*gws.Conn)         {}
-func (e *wsEvents) OnClose(*gws.Conn, error) {} // session (and its resequencer) is GC'd with the conn
-func (e *wsEvents) OnPing(c *gws.Conn, payload []byte) {
-	_ = c.WriteMessage(gws.OpcodePong, payload)
+// wsEvents implements only OnMessage; the embedded BuiltinEventHandler supplies
+// the rest — no-op OnOpen/OnClose/OnPong (the session and its resequencer are
+// GC'd with the conn, so there's nothing to clean up) and an auto-pong OnPing.
+type wsEvents struct {
+	gws.BuiltinEventHandler
+	s *Server
 }
-func (e *wsEvents) OnPong(*gws.Conn, []byte) {}
 
 // OnMessage transfers gws's pooled message to streampool without copying; the
 // worker Closes it after processing. In ordered mode it tags the message with a

@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-// Package edgegrpc shows how gRPC pairs with streampool. The lesson is the same
+// Package streamgrpc shows how gRPC pairs with streampool. The lesson is the same
 // one HTTP/2 taught: a mature stack owns the transport (grpc-go does its own
 // HTTP/2 framing, HPACK, and flow control — never hand-roll it), and streampool
 // owns the *work* inside each method.
@@ -23,7 +23,7 @@
 // registered manually with a JSON codec instead of protoc-generated stubs. In
 // production you would use generated stubs and the proto codec; none of that
 // changes the streampool integration below.
-package edgegrpc
+package streamgrpc
 
 import (
 	"context"
@@ -102,7 +102,7 @@ func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*Aggrega
 // ── Manual service registration (stand-in for generated code) ────────────────
 
 // AggregateFullMethod is the wire method name.
-const AggregateFullMethod = "/edgegrpc.Aggregator/Aggregate"
+const AggregateFullMethod = "/streamgrpc.Aggregator/Aggregate"
 
 func aggregateHandler(
 	srv any,
@@ -125,11 +125,11 @@ func aggregateHandler(
 }
 
 var aggregatorServiceDesc = grpc.ServiceDesc{
-	ServiceName: "edgegrpc.Aggregator",
+	ServiceName: "streamgrpc.Aggregator",
 	HandlerType: (*AggregatorServer)(nil),
 	Methods:     []grpc.MethodDesc{{MethodName: "Aggregate", Handler: aggregateHandler}},
 	Streams:     []grpc.StreamDesc{},
-	Metadata:    "edgegrpc/manual",
+	Metadata:    "streamgrpc/manual",
 }
 
 // RegisterAggregatorServer registers impl on a grpc.Server (or any registrar).

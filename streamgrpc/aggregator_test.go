@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package edgegrpc_test
+package streamgrpc_test
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/streampool"
-	"github.com/petenewcomb/streampool/edgegrpc"
+	"github.com/petenewcomb/streampool/streamgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -52,7 +52,7 @@ func TestSharedGateAcrossRPCs(t *testing.T) {
 		t.Fatal(err)
 	}
 	gs := grpc.NewServer()
-	edgegrpc.RegisterAggregatorServer(gs, &edgegrpc.Service{Gate: shared, Fetch: fetch})
+	streamgrpc.RegisterAggregatorServer(gs, &streamgrpc.Service{Gate: shared, Fetch: fetch})
 	go func() { _ = gs.Serve(lis) }()
 	defer gs.Stop()
 
@@ -83,13 +83,13 @@ func TestSharedGateAcrossRPCs(t *testing.T) {
 		go func(r int) {
 			defer wg.Done()
 			<-start
-			var resp edgegrpc.AggregateResponse
+			var resp streamgrpc.AggregateResponse
 			err := conn.Invoke(
 				context.Background(),
-				edgegrpc.AggregateFullMethod,
-				&edgegrpc.AggregateRequest{Keys: keysFor(r)},
+				streamgrpc.AggregateFullMethod,
+				&streamgrpc.AggregateRequest{Keys: keysFor(r)},
 				&resp,
-				grpc.CallContentSubtype(edgegrpc.CodecName),
+				grpc.CallContentSubtype(streamgrpc.CodecName),
 			)
 			errs[r], got[r] = err, resp.Values
 		}(r)

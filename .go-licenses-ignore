@@ -11,9 +11,11 @@
 
 otpsg:.
 
-edge:.
+streamgrpc:.
 
-edgegrpc:.
+streamhttp:
+	.
+	github.com/petenewcomb/streampool/streamgrpc
 
 internal/cmd/chartgen:
 	golang.org/x/image/vector          # BSD-3-Clause

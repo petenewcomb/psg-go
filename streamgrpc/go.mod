@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-module github.com/petenewcomb/streampool/edgegrpc
+module github.com/petenewcomb/streampool/streamgrpc
 
 go 1.25.0
 

@@ -28,7 +28,6 @@ package streamgrpc
 import (
 	"context"
 	"encoding/json"
-	"sync"
 
 	"github.com/petenewcomb/streampool"
 	"google.golang.org/grpc"
@@ -65,7 +64,10 @@ type Service struct {
 func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*AggregateResponse, error) {
 	var sub streampool.Wave
 
-	var mu sync.Mutex
+	// The skimmer body runs only on the draining goroutine — this one, via the
+	// Submit loop's help-skim and CloseAndSkimAll below — never on the pool
+	// workers that Fetch runs on. So vals needs no lock (cf. the streampool
+	// examples, which append in a skimmer the same way).
 	vals := make([]string, 0, len(in.Keys))
 
 	collect := streampool.NewFnSkimmer(
@@ -73,9 +75,7 @@ func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*Aggrega
 			if err != nil {
 				return err
 			}
-			mu.Lock()
 			vals = append(vals, v)
-			mu.Unlock()
 			return nil
 		},
 	)

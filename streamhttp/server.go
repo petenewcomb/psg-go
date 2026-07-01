@@ -128,7 +128,7 @@ func (s *Server) Handler() http.Handler {
 			if err != nil {
 				return
 			}
-			s.openWS(conn) // set up ordered state before ReadLoop dispatches
+			s.initWS(conn) // set up ordered state before ReadLoop dispatches
 			go conn.ReadLoop()
 			return
 		}
@@ -142,9 +142,9 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// openWS installs the per-connection resequencer for ordered mode. Done here (not
+// initWS installs the per-connection resequencer for ordered mode. Done here (not
 // in OnOpen) so the state exists before ReadLoop can dispatch a message.
-func (s *Server) openWS(conn *gws.Conn) {
+func (s *Server) initWS(conn *gws.Conn) {
 	if s.orderedFn == nil {
 		return
 	}
@@ -172,8 +172,7 @@ func (s *Server) Serve(ln net.Listener, tlsCfg *tls.Config) error {
 }
 
 // wsEvents implements only OnMessage; the embedded BuiltinEventHandler supplies
-// the rest — no-op OnOpen/OnClose/OnPong (the session and its resequencer are
-// GC'd with the conn, so there's nothing to clean up) and an auto-pong OnPing.
+// the rest.
 type wsEvents struct {
 	gws.BuiltinEventHandler
 	s *Server

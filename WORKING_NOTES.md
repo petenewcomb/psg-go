@@ -2,9 +2,9 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► `RenotifyFunc` → `Notification` LANDED (2026-07-01) — the conservation-discharge refactor
-(pickup #1). build/vet/`-short` suite green; `-race` gate RUNNING (rdvq saturation + large
-`TestBySimulation -race` batch) — DO NOT COMMIT until that batch is green.** The bare
+**►►► `RenotifyFunc` → `Notification` LANDED + COMMITTED (`eee5322`, 2026-07-01) — the
+conservation-discharge refactor (pickup #1). Gate green: full `-short` suite; rdvq `-race`
+(saturation, 230s); 25×80-check `TestBySimulation -race` batch 25/25.** The bare
 `RenotifyFunc func()` threaded through the block/wait paths is now a value struct
 `rdvq.Notification{n *Notifier, fallback func()}` with `Empty`/`Consume`/`Forward`. Spec +
 rationale: `docs/decisions/waiter-set-notification.md` (Status → "Landed"). Key points:
@@ -1142,16 +1142,10 @@ gap to naive-pool is the unavoidable shared per-task closure. Possible next benc
 the comparison so far exercises streampool's overhead, not its differentiator.
 
 **►► NEXT SESSION PICKUP (2026-06-30 → , order of readiness):**
-1. **`RenotifyFunc` → `Notification` refactor** — design fully settled + spec committed in
-   `docs/decisions/waiter-set-notification.md` ("Planned" section). Discharges the renotify
-   conservation soft spot (not an alloc win). Value-struct `Notification{n, fallback}` with
-   `Consume`/`Forward`/`Empty`; total-conservation `Notify` (drops `if !Notify{fn()}`);
-   listener-recirculate / waiter-terminal asymmetry (commented). It's a ~20-file
-   concurrency-critical cascade (rdvq incl. `Queue`/`Handoff` outbox path + `PopSelectResult`,
-   workq, wave, permithandle, execpool, + tests) — do it as its own focused, fully-`-race`/
-   sim-gated pass. Migration is mechanical from the spec: `renotifyFn()`→`Forward()`,
-   drop→`Consume()`, `rf != nil`→`!Empty()`. Core was prototyped + compiled, then reverted
-   to keep the tree green.
+1. ~~**`RenotifyFunc` → `Notification` refactor**~~ — DONE (`eee5322`, 2026-07-01). See the
+   top banner + `docs/decisions/waiter-set-notification.md` (Status → Landed). The value
+   struct settles as `Received()`/`Forward()` (no `Consume` — a no-op on a value receiver;
+   productive use just drops the wake); `Empty()` became `Received()` (positive predicate).
 2. **`select` scase-escape dig** (self-contained) — the residual ~0.06 alloc/task on the
    park path is the `select`'s scase array escaping behind `PopFrontFunc`'s callback
    indirection (`executorWorker.Wait`/`Wave.skimSelect`), NOT a closure (confirmed: caching

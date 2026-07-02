@@ -245,21 +245,21 @@ func (q *Queue[T]) ListenersFor() *Listeners {
 // Idiomatic usage is to declare a named return variable of this type and
 // call its methods from the matching select case, then bare-return:
 //
-//	func selectFn(inboxCh <-chan T, outboxWaitCh <-chan RenotifyFunc) (result PopSelectResult[T]) {
+//	func selectFn(inboxCh <-chan T, outboxWaitCh <-chan Notification) (result PopSelectResult[T]) {
 //	    select {
 //	    case v := <-inboxCh:
 //	        result.InboxEmptied(v)
-//	    case rf := <-outboxWaitCh:
-//	        result.OutboxReady(rf)
+//	    case m := <-outboxWaitCh:
+//	        result.OutboxReady(m)
 //	    case <-ctx.Done():
 //	        // result stays zero
 //	    }
 //	    return
 //	}
 type PopSelectResult[T any] struct {
-	inboxValue       T
-	inboxEmptied     bool
-	outboxRenotifyFn RenotifyFunc
+	inboxValue         T
+	inboxEmptied       bool
+	outboxNotification Notification
 }
 
 // InboxEmptied records that the selectFn received the given value from the
@@ -271,7 +271,7 @@ func (r *PopSelectResult[T]) InboxEmptied(value T) {
 	if r.inboxEmptied {
 		panic("rdvq.PopSelectResult.InboxEmptied: already called")
 	}
-	if r.outboxRenotifyFn != nil {
+	if r.outboxNotification.Received() {
 		panic("rdvq.PopSelectResult.InboxEmptied: OutboxReady already called")
 	}
 	r.inboxValue = value
@@ -283,19 +283,19 @@ func (r *PopSelectResult[T]) InboxEmptied(value T) {
 // outbox-wait inbox as emptied on the caller's behalf and chain the
 // notification.
 //
-// Panics if renotifyFn is nil, or if InboxEmptied or OutboxReady was
+// Panics if the notification is empty, or if InboxEmptied or OutboxReady was
 // already called on this result.
-func (r *PopSelectResult[T]) OutboxReady(renotifyFn RenotifyFunc) {
-	if renotifyFn == nil {
-		panic("rdvq.PopSelectResult.OutboxReady: nil renotifyFn")
+func (r *PopSelectResult[T]) OutboxReady(m Notification) {
+	if !m.Received() {
+		panic("rdvq.PopSelectResult.OutboxReady: notification not received")
 	}
 	if r.inboxEmptied {
 		panic("rdvq.PopSelectResult.OutboxReady: InboxEmptied already called")
 	}
-	if r.outboxRenotifyFn != nil {
+	if r.outboxNotification.Received() {
 		panic("rdvq.PopSelectResult.OutboxReady: already called")
 	}
-	r.outboxRenotifyFn = renotifyFn
+	r.outboxNotification = m
 }
 
 // PopSelectFunc handles the select operation for PopFrontFunc when no outbox
@@ -303,7 +303,7 @@ func (r *PopSelectResult[T]) OutboxReady(renotifyFn RenotifyFunc) {
 // and returns a [PopSelectResult] describing what was received.
 type PopSelectFunc[T any] = func(
 	inboxCh <-chan T,
-	outboxWaitCh <-chan RenotifyFunc,
+	outboxWaitCh <-chan Notification,
 ) PopSelectResult[T]
 
 // BasicPopSelect provides a standard implementation of [PopSelectFunc] that
@@ -312,7 +312,7 @@ type PopSelectFunc[T any] = func(
 func BasicPopSelect[T any](
 	ctx context.Context,
 	inboxCh <-chan T,
-	outboxWaitCh <-chan RenotifyFunc,
+	outboxWaitCh <-chan Notification,
 ) (result PopSelectResult[T], err error) {
 	traceRegion := "rdvq.BasicPopSelect"
 	trace.Logf(ctx, traceRegion, "entering select: inboxCh=%p, outboxWaitCh=%p", inboxCh, outboxWaitCh)
@@ -320,9 +320,9 @@ func BasicPopSelect[T any](
 	case value := <-inboxCh:
 		trace.Logf(ctx, traceRegion, "received value from inboxCh=%p", inboxCh)
 		result.InboxEmptied(value)
-	case renotifyFn := <-outboxWaitCh:
+	case m := <-outboxWaitCh:
 		trace.Logf(ctx, traceRegion, "received signal from outboxWaitCh=%p", outboxWaitCh)
-		result.OutboxReady(renotifyFn)
+		result.OutboxReady(m)
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
 		err = context.Cause(ctx)
@@ -376,14 +376,14 @@ func (q *Queue[T]) PopFrontFunc(
 		}
 	}()
 
-	var renotifyFn RenotifyFunc
+	var m Notification
 	for {
 		if value, ok = q.TryPopFront(); ok {
 			return value, true
 		}
 
-		if renotifyFn != nil {
-			renotifyFn()
+		if m.Received() {
+			m.Forward()
 		}
 
 		// Register as outbox waiter first; only register ib in the inbox stack
@@ -394,13 +394,13 @@ func (q *Queue[T]) PopFrontFunc(
 		// orphan value via post-cleanup that the (T, bool) return cannot
 		// carry). The inbox is borrowed inside the selectFn (only reached once
 		// confirmFn confirms we will wait), so a confirmFn-grab borrows nothing.
-		renotifyFn = q.outboxWaiters.WaitFunc(
+		m = q.outboxWaiters.WaitFunc(
 			confirmFn,
-			func(waitCh <-chan RenotifyFunc) RenotifyFunc {
+			func(waitCh <-chan Notification) Notification {
 				if ib == nil {
 					ib = q.borrowInbox()
 				}
-				var rf RenotifyFunc
+				var outboxN Notification
 				q.inboxStackQueue.PopFrontFunc(ib, processOrphanFn, func(ib *inbox[T]) {
 					result := selectFn(ib.channel(), waitCh)
 					if result.inboxEmptied {
@@ -408,9 +408,9 @@ func (q *Queue[T]) PopFrontFunc(
 						value = result.inboxValue
 						ok = true
 					}
-					rf = result.outboxRenotifyFn
+					outboxN = result.outboxNotification
 				})
-				return rf
+				return outboxN
 			},
 		)
 		if ok {
@@ -420,13 +420,13 @@ func (q *Queue[T]) PopFrontFunc(
 			// notification, forward it so the next waiter isn't stalled — the
 			// inbox-drain and direct-inbox paths did NOT consume an outbox, so
 			// the notification is still unfulfilled. (For the confirmFn path,
-			// renotifyFn is always nil since selectFn never ran.)
-			if renotifyFn != nil {
-				renotifyFn()
+			// m is never received since selectFn never ran.)
+			if m.Received() {
+				m.Forward()
 			}
 			return value, true
 		}
-		if renotifyFn == nil {
+		if !m.Received() {
 			return value, false
 		}
 	}
@@ -444,7 +444,7 @@ func (q *Queue[T]) PopFront(
 	ctx context.Context,
 ) (T, error) {
 	var err error
-	value, ok := q.PopFrontFunc(func(inboxCh <-chan T, outboxWaitCh <-chan RenotifyFunc) PopSelectResult[T] {
+	value, ok := q.PopFrontFunc(func(inboxCh <-chan T, outboxWaitCh <-chan Notification) PopSelectResult[T] {
 		var result PopSelectResult[T]
 		result, err = BasicPopSelect(ctx, inboxCh, outboxWaitCh)
 		return result

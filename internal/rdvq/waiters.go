@@ -10,25 +10,25 @@ import (
 )
 
 // WaitSelectFunc handles the select operation for a Waiters wait. It receives
-// the wait channel and returns the RenotifyFunc that came across, or nil if
-// it received from some other case (e.g., ctx.Done). The Waiters caller
+// the wait channel and returns the Notification that came across, or the zero
+// value if it received from some other case (e.g., ctx.Done). The Waiters caller
 // handles Emptied() bookkeeping; the user does not need to call it.
-type WaitSelectFunc func(waitCh <-chan RenotifyFunc) RenotifyFunc
+type WaitSelectFunc func(waitCh <-chan Notification) Notification
 
 // BasicWaitSelect provides a standard implementation of [WaitSelectFunc] that
-// selects on the wait channel and ctx.Done(). Returns the RenotifyFunc and a
-// nil error on success; returns nil RenotifyFunc and a non-nil error if the
+// selects on the wait channel and ctx.Done(). Returns the Notification and a
+// nil error on success; returns the zero Notification and a non-nil error if the
 // context was cancelled.
-func BasicWaitSelect(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyFunc, error) {
+func BasicWaitSelect(ctx context.Context, waitCh <-chan Notification) (Notification, error) {
 	traceRegion := "rdvq.BasicWaitSelect"
 	trace.Logf(ctx, traceRegion, "entering select: waitCh=%p", waitCh)
 	select {
-	case renotifyFn := <-waitCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from waitCh=%p", waitCh)
-		return renotifyFn, nil
+	case m := <-waitCh:
+		trace.Logf(ctx, traceRegion, "received notification from waitCh=%p", waitCh)
+		return m, nil
 	case <-ctx.Done():
 		trace.Logf(ctx, traceRegion, "received context done signal")
-		return nil, ctx.Err()
+		return Notification{}, ctx.Err()
 	}
 }
 
@@ -43,7 +43,7 @@ func BasicWaitSelect(ctx context.Context, waitCh <-chan RenotifyFunc) (RenotifyF
 // re-checks conditions after registration but before blocking, preventing
 // missed notifications due to race conditions.
 type Waiters struct {
-	q inboxQueueQueue[RenotifyFunc]
+	q inboxQueueQueue[Notification]
 }
 
 // Init initializes the Waiters for use. Must be called before any other operations.
@@ -65,12 +65,12 @@ func (w *Waiters) Init() {
 //     false, the wait is aborted (selectFn is not called).
 //   - selectFn: Custom select function for handling the wait operation
 //
-// Returns the RenotifyFunc that selectFn received, or nil if no notification
-// arrived (e.g., the wait was aborted by confirmFn or selectFn picked some
-// other case such as ctx.Done).
+// Returns the Notification that selectFn received, or the zero value if no
+// notification arrived (e.g., the wait was aborted by confirmFn or selectFn
+// picked some other case such as ctx.Done).
 //
 //nolint:contextcheck // background context used only for tracing
-func (w *Waiters) WaitFunc(confirmFn func() bool, selectFn WaitSelectFunc) RenotifyFunc {
+func (w *Waiters) WaitFunc(confirmFn func() bool, selectFn WaitSelectFunc) Notification {
 	traceRegion := "rdvq.Waiters.WaitFunc"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
@@ -87,53 +87,70 @@ func (w *Waiters) WaitFunc(confirmFn func() bool, selectFn WaitSelectFunc) Renot
 	// so the owning receiver always reclaims it — recycling abandoned inboxes too (the
 	// generation-stamped protocol makes the lingering hint inert).
 	defer w.q.reclaimInbox(waitInbox)
-	var rf RenotifyFunc
+	var m Notification
 	w.q.PopFrontFunc(
 		waitInbox,
-		func(renotifyFn RenotifyFunc) {
-			// Stranded renotifyFn from an abandoned inbox: re-queue it for
-			// another waiter, or invoke directly if no waiters are available.
-			if !w.Notify(renotifyFn) {
-				renotifyFn()
-			}
+		func(orphan Notification) {
+			// Stranded notification from an abandoned inbox: re-offer it to another
+			// waiter, or run its fallback directly if none are available. Notify is
+			// total, so a single call both re-offers and, failing that, conserves.
+			w.Notify(orphan.fallback)
 		},
-		func(ib *inbox[RenotifyFunc]) {
+		func(ib *inbox[Notification]) {
 			if confirmFn() {
-				rf = selectFn(ib.channel())
-				if rf != nil {
+				m = selectFn(ib.channel())
+				if m.Received() {
 					ib.emptied()
 				}
 			}
 		},
 	)
-	return rf
+	return m
 }
 
 // Wait registers a waiter and blocks until notified or context cancelled.
-func (w *Waiters) Wait(ctx context.Context, confirmFn func() bool) (RenotifyFunc, error) {
+func (w *Waiters) Wait(ctx context.Context, confirmFn func() bool) (Notification, error) {
 	var err error
-	rf := w.WaitFunc(confirmFn, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
-		var got RenotifyFunc
+	m := w.WaitFunc(confirmFn, func(waitCh <-chan Notification) Notification {
+		var got Notification
 		got, err = BasicWaitSelect(ctx, waitCh)
 		return got
 	})
-	return rf, err
+	return m, err
 }
 
-// Notify signals one waiting goroutine to re-check for work.
-// Returns true if a waiter was successfully notified, false if no waiters
-// were available to notify.
+// Notify delivers a wake to one waiting goroutine, running fallback if no waiter takes it
+// (total conservation). A nil fallback defaults to noop. The waiter receives a
+// waiter-style (terminal) Notification: a Forward it cannot use runs fallback.
+func (w *Waiters) Notify(fallback func()) {
+	if fallback == nil {
+		fallback = noop
+	}
+	if !w.deliver(Notification{fallback: fallback}) {
+		fallback()
+	}
+}
+
+// Deliver hands an already-formed Notification to one waiting goroutine, returning
+// whether a waiter took it. Unlike [Waiters.Notify] it neither defaults nil nor runs a
+// fallback on a miss — the caller decides what a miss means. It is the re-injection
+// primitive a [Listener] uses to route a notification from a Listeners set into this
+// waiter set ([Listener.Notify] = someWaiters.Deliver), preserving the incoming
+// notification's re-circulation identity (a listener-style m keeps re-circulating
+// through its origin Notifier on a later Forward).
+func (w *Waiters) Deliver(m Notification) bool {
+	return w.deliver(m)
+}
+
+// deliver pushes m to a parked waiter, returning whether one took it.
 //
 //nolint:contextcheck // background context used only for tracing
-func (w *Waiters) Notify(renotifyFn RenotifyFunc) bool {
-	traceRegion := "rdvq.Waiters.Notify"
+func (w *Waiters) deliver(m Notification) bool {
+	traceRegion := "rdvq.Waiters.deliver"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
-	if renotifyFn == nil {
-		renotifyFn = NoopRenotify
-	}
-	return w.q.TryPushBack(renotifyFn)
+	return w.q.TryPushBack(m)
 }
 
 // NotifyAll signals all waiting goroutines to re-check for work.
@@ -145,7 +162,7 @@ func (w *Waiters) NotifyAll() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Waiters=%p", w)
 
-	for w.q.TryPushBack(NoopRenotify) {
+	for w.q.TryPushBack(Notification{fallback: noop}) {
 		// Keep notifying until we can't anymore
 	}
 }

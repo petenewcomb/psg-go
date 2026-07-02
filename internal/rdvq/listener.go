@@ -46,8 +46,8 @@ func (w *listenerNotifyWrapper) Reset() {
 	}
 }
 
-func (w *listenerNotifyWrapper) notify(renotifyFn RenotifyFunc) bool {
-	result := w.listener.notify(w.listeners, renotifyFn)
+func (w *listenerNotifyWrapper) notify(m Notification) bool {
+	result := w.listener.notify(w.listeners, m)
 	listenerNotifyWrapperPool.Put(w)
 	return result
 }
@@ -83,7 +83,7 @@ func (m *Listener) AddTo(listeners *Listeners) {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (m *Listener) notify(listeners *Listeners, renotifyFn RenotifyFunc) bool {
+func (m *Listener) notify(listeners *Listeners, notification Notification) bool {
 	traceRegion := "rdvq.Listener.notify"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Listener=%p, listeners=%p", m, listeners)
@@ -93,5 +93,5 @@ func (m *Listener) notify(listeners *Listeners, renotifyFn RenotifyFunc) bool {
 	notifyFn := m.Notify
 	m.mu.Unlock()
 
-	return notifyFn(renotifyFn)
+	return notifyFn(notification)
 }

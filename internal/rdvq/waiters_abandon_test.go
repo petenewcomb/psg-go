@@ -18,7 +18,7 @@ func BenchmarkWaitersAbandon(b *testing.B) {
 	var w Waiters
 	w.Init()
 	abort := func() bool { return false } // confirmFn: a permit is available; abort the wait
-	sel := func(<-chan RenotifyFunc) RenotifyFunc { return nil }
+	sel := func(<-chan Notification) Notification { return Notification{} }
 	b.ReportAllocs()
 	for b.Loop() {
 		w.WaitFunc(abort, sel)
@@ -31,12 +31,12 @@ func BenchmarkWaitersNotified(b *testing.B) {
 	var w Waiters
 	w.Init()
 	confirm := func() bool { return true } // proceed to block
-	sel := func(ch <-chan RenotifyFunc) RenotifyFunc { return <-ch }
+	sel := func(ch <-chan Notification) Notification { return <-ch }
 	b.ReportAllocs()
 	for b.Loop() {
 		done := make(chan struct{})
 		go func() { w.WaitFunc(confirm, sel); close(done) }()
-		for !w.Notify(nil) { // pop the registered waiter
+		for !w.Deliver(Notification{fallback: noop}) { // pop the registered waiter
 		}
 		<-done
 	}
@@ -56,7 +56,7 @@ func TestWaitersReapPreservesLiveWaiter(t *testing.T) {
 	go func() {
 		w.WaitFunc(
 			func() bool { close(aRegistered); return true }, // register, signal, then park
-			func(ch <-chan RenotifyFunc) RenotifyFunc { rf := <-ch; close(gotA); return rf },
+			func(ch <-chan Notification) Notification { m := <-ch; close(gotA); return m },
 		)
 	}()
 	<-aRegistered // A's hint is now published in emptyInboxes
@@ -65,11 +65,11 @@ func TestWaitersReapPreservesLiveWaiter(t *testing.T) {
 	for range reapBudget + 2 {
 		w.WaitFunc(
 			func() bool { return false }, // abort → abandon → reapStale
-			func(<-chan RenotifyFunc) RenotifyFunc { return nil },
+			func(<-chan Notification) Notification { return Notification{} },
 		)
 	}
 
-	if !w.Notify(nil) {
+	if !w.Deliver(Notification{fallback: noop}) {
 		t.Fatal("Notify found no waiter: reap dropped the live waiter (lost wakeup)")
 	}
 	select {

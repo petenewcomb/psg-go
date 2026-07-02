@@ -11,9 +11,10 @@ import (
 	"github.com/petenewcomb/streampool/internal/nbcq"
 )
 
-// NoopRenotify is a no-op RenotifyFunc that can be used when no re-notification
-// action is needed. It serves as a placeholder in notification systems.
-func NoopRenotify() {}
+// noop is the default fallback for a Notification with no explicit conservation action.
+// It preserves the old NoopRenotify's role: a never-nil terminal so Forward/Empty need
+// no nil check on the fallback.
+func noop() {}
 
 // Listeners manages a queue of notification functions waiting to be signaled.
 // It provides a subscription mechanism for goroutines to register for notifications
@@ -43,13 +44,27 @@ func (c *Listeners) add(notifyFn NotifyFunc) {
 	c.q.PushBack(notifyFn)
 }
 
-// Notify attempts to signal one waiting listener.
-// Returns true if a listener was successfully notified, false if no listeners were available.
-// The renotifyFn will be passed to the listener's NotifyFunc.
+// Notify delivers a wake to one waiting listener, running fallback if no listener takes
+// it (total conservation). A nil fallback defaults to noop. The listener receives a
+// waiter-style (terminal) Notification: a standalone Listeners has no enclosing Notifier
+// to re-circulate through, matching the old bare Listeners.Notify that passed the raw
+// renotify. See [Notifier.Notify] for the re-circulating listener-style delivery.
+func (c *Listeners) Notify(fallback func()) {
+	if fallback == nil {
+		fallback = noop
+	}
+	if !c.deliver(Notification{fallback: fallback}) {
+		fallback()
+	}
+}
+
+// deliver offers m to waiting listeners in FIFO order, returning true once one takes it
+// (its NotifyFunc returned true) and false if none did. Listeners that decline
+// synchronously (return false) are dropped and the next is tried.
 //
 //nolint:contextcheck // background context used only for tracing
-func (c *Listeners) Notify(renotifyFn RenotifyFunc) bool {
-	traceRegion := "rdvq.Listeners.notify"
+func (c *Listeners) deliver(m Notification) bool {
+	traceRegion := "rdvq.Listeners.deliver"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Listeners=%p", c)
 
@@ -59,7 +74,7 @@ func (c *Listeners) Notify(renotifyFn RenotifyFunc) bool {
 			return false
 		}
 
-		if notifyFn(renotifyFn) {
+		if notifyFn(m) {
 			return true
 		}
 	}
@@ -79,7 +94,7 @@ func (c *Listeners) NotifyAll() {
 		if !ok {
 			break
 		}
-		notifyFn(NoopRenotify)
+		notifyFn(Notification{fallback: noop})
 	}
 }
 

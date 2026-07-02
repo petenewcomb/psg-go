@@ -67,8 +67,9 @@ func (h *Handoff[T]) TryPushBack(value T) bool {
 //
 // Returns true once value is delivered; false when selectFn returned without a wake (e.g.
 // the caller's ctx was cancelled). A woken sender that loses the rendezvous to a peer
-// simply re-parks for the next receiver — senders are never stale, so the wake's
-// RenotifyFunc is discarded (no renotify conservation, unlike a permit pool's listeners).
+// simply re-parks for the next receiver — senders are never stale, so the wake
+// Notification is discarded (no renotify conservation, unlike a permit pool's listeners;
+// its fallback is always noop, so discarding it drops nothing).
 //
 //nolint:contextcheck // background context used only for tracing
 func (h *Handoff[T]) PushBackFunc(value T, selectFn WaitSelectFunc) (delivered bool) {
@@ -82,7 +83,7 @@ func (h *Handoff[T]) PushBackFunc(value T, selectFn WaitSelectFunc) (delivered b
 		}
 		// No waiting receiver: park. WaitFunc registers this sender, runs the confirm
 		// (the recheck that closes the miss→register race), then calls selectFn to block.
-		rf := h.inboxWaiters.WaitFunc(
+		m := h.inboxWaiters.WaitFunc(
 			func() bool {
 				delivered = h.inboxes.TryPushBack(value)
 				return !delivered // park only if the recheck still found no receiver
@@ -92,10 +93,10 @@ func (h *Handoff[T]) PushBackFunc(value T, selectFn WaitSelectFunc) (delivered b
 		if delivered {
 			return true
 		}
-		if rf == nil {
+		if !m.Received() {
 			return false // selectFn exited without a wake (e.g. ctx cancelled)
 		}
-		// Woken by a registering receiver; loop and retry the handoff. rf discarded —
+		// Woken by a registering receiver; loop and retry the handoff. m discarded —
 		// senders are never stale, so the wake needs no conservation.
 	}
 }
@@ -106,10 +107,10 @@ func (h *Handoff[T]) PushBackFunc(value T, selectFn WaitSelectFunc) (delivered b
 // (the block-as-demand hook), which is exactly why the seam exists.
 func (h *Handoff[T]) PushBack(ctx context.Context, value T) error {
 	var err error
-	if h.PushBackFunc(value, func(waitCh <-chan RenotifyFunc) RenotifyFunc {
-		var rf RenotifyFunc
-		rf, err = BasicWaitSelect(ctx, waitCh)
-		return rf
+	if h.PushBackFunc(value, func(waitCh <-chan Notification) Notification {
+		var m Notification
+		m, err = BasicWaitSelect(ctx, waitCh)
+		return m
 	}) {
 		return nil
 	}

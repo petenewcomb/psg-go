@@ -2,6 +2,35 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► `RenotifyFunc` → `Notification` LANDED (2026-07-01) — the conservation-discharge refactor
+(pickup #1). build/vet/`-short` suite green; `-race` gate RUNNING (rdvq saturation + large
+`TestBySimulation -race` batch) — DO NOT COMMIT until that batch is green.** The bare
+`RenotifyFunc func()` threaded through the block/wait paths is now a value struct
+`rdvq.Notification{n *Notifier, fallback func()}` with `Empty`/`Consume`/`Forward`. Spec +
+rationale: `docs/decisions/waiter-set-notification.md` (Status → "Landed"). Key points:
+- **`wrappedRenotify` + its pool deleted.** The wrapper existed only to give listeners a
+  renotify that re-circulates through the origin `Notifier`; that identity is now the zero-alloc
+  `n *Notifier` field, carried by value. Leak-on-discard gone *by construction*.
+- **`Notify` is total.** `Notifier`/`Waiters`/`Listeners` `.Notify(fallback)` run the fallback
+  when no consumer takes the wake. Consumer loops: `renotifyFn != nil {renotifyFn()}` →
+  `!m.Empty() {m.Forward()}`; productive use → `m.Consume()` (no-op intent marker). Forward is
+  listener-recirculate (`n` set) vs waiter-terminal (`n` nil).
+- **DECISION (PN):** the two *unguarded* `Waiters.Notify(unmetDemandFn)` sites (`queueFresh`,
+  `Expedite`) go total too — they now `Nudge`-spawn on a no-parked-worker miss instead of
+  dropping the signal. Safe: `Nudge` is `spawnConcurrencyLimit`-capped + self-correcting; the
+  extra goroutines are warranted unmet-demand parallelism (the buffered-1→unbuffered shift). The
+  spec's "accepted.go ×3" was a miscount (2 guarded sites); corrected in the spec.
+- **`unmetDemandFn` split** from the threaded value: it is a `func()` fallback (role a), not a
+  `Notification` (role b). `q.listener.Notify = q.waiters.Deliver` (new exported re-injection
+  primitive) replaces the old `= q.waiters.Notify`.
+- **"Pool the fallback" is out of scope** (PN confirmed): every fallback is `noop` or a
+  once-cached method value (`unmetDemandFn` = `ensureWorker`), never a per-call closure. A
+  fallback that ever needs per-call state binds as a method value on a lifecycle-pooled object
+  (cf. `heldPermit.release`/`confirmFn`), NOT a self-returning pooled closure. `rdvq.NewNotification`
+  is the seam for a producer that mints a terminal wake outside a `Notifier` (today: one workq test).
+- **Design nit noted for later:** cached-bound-method may be over-used vs. an interface where the
+  receiver is already a pooled pointer (alloc-free conversion). Own pass, not blocking.
+
 **►►► DESIGN B chosen for the scheduled-flush deadline timer (PN, 2026-06-29). Replaces the
 per-worker idle-suppression (DECISION B in scheduler.pull).** Goal: workers scale fully to zero; a
 SINGLE scheduler-owned timer honors pending flush deadlines by waking/spawning a worker. Concrete plan

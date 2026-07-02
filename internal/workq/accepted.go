@@ -39,13 +39,15 @@ type Accepted struct {
 	// hook nudges a parked worker when a sooner deadline is scheduled.
 	scheduled delayq.Queue[ScheduledWork]
 
-	// unmetDemandFn is the pool's worker-spawn signal, fired (via
-	// waiters) when excess fresh work accumulates and no idle worker is
-	// available — both when a batch of work is promoted to fresh
-	// (queueFresh) and when a scheduled item is forced (Expedite). Nil
-	// for queues whose pool does not spawn on demand (e.g. the task
-	// pool, which drives its own spawning).
-	unmetDemandFn RenotifyFunc
+	// unmetDemandFn is the pool's worker-spawn signal, passed as the
+	// fallback to waiters.Notify: a parked worker takes the wake, or —
+	// with none parked — Notify's total conservation runs unmetDemandFn to
+	// spawn one. Fired when excess fresh work accumulates (queueFresh),
+	// when a scheduled item is forced (Expedite), and when a flush deadline
+	// comes due. Nil for queues whose pool does not spawn on demand (e.g.
+	// the per-wave workQueue, which never schedules and drives its own
+	// work); a nil fallback defaults to noop.
+	unmetDemandFn func()
 
 	// schedTimer is the single, queue-owned timer that honors scheduled-work deadlines
 	// (Design B). It replaces per-worker deadline timers + idle-exit suppression: workers
@@ -63,7 +65,7 @@ type Accepted struct {
 // demand.
 //
 //nolint:contextcheck // background context used only for tracing
-func (q *Accepted) Init(unmetDemandFn RenotifyFunc) {
+func (q *Accepted) Init(unmetDemandFn func()) {
 	traceRegion := "workq.Accepted.Init"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion,
@@ -73,7 +75,7 @@ func (q *Accepted) Init(unmetDemandFn RenotifyFunc) {
 	q.fresh.Init()
 	q.postponed.Init()
 	q.waiters.Init()
-	q.listener.Notify = q.waiters.Notify
+	q.listener.Notify = q.waiters.Deliver
 	q.scheduled.Init(q.wakeScheduled)
 	q.unmetDemandFn = unmetDemandFn
 }
@@ -120,9 +122,8 @@ func (q *Accepted) armScheduledTimer() {
 // [Accepted.ForceFresh]'s wake-or-spawn. A spurious early fire (the item was already drained
 // by a worker woken another way) is harmless: the re-drive finds nothing due and re-arms.
 func (q *Accepted) scheduledDeadlineFired() {
-	if !q.waiters.Notify(q.unmetDemandFn) && q.unmetDemandFn != nil {
-		q.unmetDemandFn()
-	}
+	// Total Notify: a parked worker takes the wake, or unmetDemandFn spawns one.
+	q.waiters.Notify(q.unmetDemandFn)
 }
 
 // Schedule hands w to the queue to become fresh work at the given time.
@@ -198,17 +199,12 @@ func (q *Accepted) Expedite(w ScheduledWork) {
 // ClaimForFlush); this is purely the promote-and-signal step.
 func (q *Accepted) ForceFresh(w Work) {
 	q.fresh.PushBack(w)
-	// Wake a parked worker if one is waiting; otherwise spawn one directly. Notify
-	// only *delivers* the demand signal to a parked waiter — TryPushBack returns false
-	// (and does NOT invoke the fn) when no worker inbox is waiting — so a Notify alone
-	// strands w in fresh whenever every worker is busy inside a body and none is parked
-	// (the funnel-sweep wedge). The direct unmetDemandFn call guarantees a driver,
-	// mirroring Queue.Post's fireDemand. (queueFresh can rely on Notify-only because it
-	// runs inside a live drive whose own worker handles the base case; ForceFresh is
-	// fired from outside any drive — the end-of-work sweep — so it must spawn itself.)
-	if !q.waiters.Notify(q.unmetDemandFn) && q.unmetDemandFn != nil {
-		q.unmetDemandFn()
-	}
+	// Wake a parked worker if one is waiting; otherwise spawn one. Notify is total: it
+	// hands the wake to a parked waiter, and — TryPushBack finding no worker inbox — runs
+	// unmetDemandFn to spawn a driver rather than strand w in fresh (the funnel-sweep
+	// wedge, when every worker is busy inside a body and none is parked). Mirrors
+	// Queue.Post's fireDemand.
+	q.waiters.Notify(q.unmetDemandFn)
 }
 
 // drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllScheduled]
@@ -235,8 +231,8 @@ func (q *Accepted) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
 // AddWorkFunc provides new work to the queue processor. It is called with a
 // waitCh that signals when there is postponed work ready to process. If waiters
 // is nil, AddWorkFunc should not block. A queueFn is provided that should be
-// called for each work item accepted. Returns the RenotifyFunc the wait
-// observed, or nil.
+// called for each work item accepted. Returns the Notification the wait
+// observed, or the zero value.
 //
 // Scheduled-work deadlines are no longer threaded through here: the queue-owned
 // timer (Design B, [Accepted.armScheduledTimer]) wakes a parked worker or spawns
@@ -246,9 +242,12 @@ type AddWorkFunc func(
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-) (RenotifyFunc, error)
+) (Notification, error)
 
-type RenotifyFunc = rdvq.RenotifyFunc
+// Notification is the value-struct wake threaded up through the block/wait paths;
+// see [rdvq.Notification]. A consumer that cannot use a returned Notification forwards
+// it ([Notification.Forward]) to conserve the wake.
+type Notification = rdvq.Notification
 
 // QueueWorkFunc is called by AddWorkFunc to add new work items to processing.
 type QueueWorkFunc func(Work)
@@ -396,7 +395,7 @@ type controller struct {
 	tryAddWorkFn             TryAddWorkFunc
 	onSecure                 func() // released the driver's spawn token before the first body; see ExecuteOne
 	securedFired             bool   // onSecure already fired for this drive
-	renotifyFn               RenotifyFunc
+	notification             Notification
 	workAddedCount           int
 	postponedWorkWasExecuted bool
 	workWasPostponed         bool
@@ -586,7 +585,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 	// [Accepted.armScheduledTimer]): it wakes a parked worker or spawns one when a deadline
 	// comes due, so the park no longer arms a per-worker timer. deadlineCh stays nil.
 	var err error
-	c.renotifyFn, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)
+	c.notification, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)
 	if err == nil {
 		err = c.shouldStillWaitErr
 	} else if c.shouldStillWaitErr != nil {
@@ -690,10 +689,10 @@ func (c *controller) blocking() {
 func (c *controller) starting() {
 	traceRegion := "workq.controller.starting"
 	if c.currentWasPostponed {
-		// Invalidate any saved renotifyFn because we have productively used it.
-		// This must be done before the call to releaseOthers, as it will
-		// ultimately call renotifyFn if set.
-		c.renotifyFn = nil
+		// We have productively used the saved notification: clear it so releaseOthers →
+		// requeueBuffer does not Forward it. This must be done before the call to
+		// releaseOthers.
+		c.notification = Notification{}
 		trace.Logf(context.Background(), traceRegion, "postponed work at index %d started", c.currentIndex)
 	} else {
 		trace.Logf(context.Background(), traceRegion, "fresh work at index %d started", c.currentIndex)
@@ -796,12 +795,14 @@ func (c *controller) requeueBuffer() {
 	c.buffer = c.buffer[:0]
 	c.currentIndex = 0
 
-	// Renotify after requeueing to avoid race in which newly ready items are
-	// not yet available in the postponed queue
-	renotifyFn := c.renotifyFn
-	if renotifyFn != nil && !c.postponedWorkWasExecuted {
-		c.renotifyFn = nil
-		renotifyFn()
+	// Forward the saved notification after requeueing to avoid the race in which newly
+	// ready items are not yet available in the postponed queue. Forward (not a bare
+	// call) so a listener-style wake re-circulates and a waiter-style one runs its
+	// fallback — total conservation.
+	notification := c.notification
+	if notification.Received() && !c.postponedWorkWasExecuted {
+		c.notification = Notification{}
+		notification.Forward()
 	}
 }
 

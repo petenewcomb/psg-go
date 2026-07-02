@@ -17,7 +17,7 @@ type Waiters = rdvq.Waiters
 type Notifier = rdvq.Notifier
 
 type BlockFunc func(ctx context.Context, deadline time.Time, waiters *Waiters,
-	confirmWaitFn func() bool) (RenotifyFunc, error)
+	confirmWaitFn func() bool) (Notification, error)
 
 type WaitBehavior struct {
 	BlockBehavior
@@ -29,7 +29,7 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 	traceRegion := "workq.ExecuteOrWait"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	var renotifyFn RenotifyFunc
+	var m Notification
 	var blockFn BlockFunc
 
 	blockConfirmer := blockConfirmerPool.Get()
@@ -39,9 +39,9 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 
 	for behavior.ShouldWait() {
 
-		if renotifyFn != nil {
-			// Can't productively use notification receieved, so pass it along
-			renotifyFn()
+		if m.Received() {
+			// Can't productively use the notification received, so pass it along.
+			m.Forward()
 		}
 
 		if !ex.ShouldBlockOrPostpone() {
@@ -66,13 +66,15 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 
 		// Blocking path
 		var err error
-		renotifyFn, err = blockFn(ctx, deadline, &notifier.Waiters, blockConfirmer.confirmFn)
+		m, err = blockFn(ctx, deadline, &notifier.Waiters, blockConfirmer.confirmFn)
 		if err != nil {
 			trace.Logf(ctx, traceRegion, "returning error from blockFn: %v", err)
 			return err
 		}
 	}
 
+	// Exiting the loop means ShouldWait is now false — the last wake (if any) let us
+	// find work, so it was productively used: drop it (do not Forward).
 	return workFn(ctx, ex)
 }
 

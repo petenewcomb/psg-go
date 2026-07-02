@@ -6,7 +6,6 @@ package rdvq
 import (
 	"context"
 
-	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/trace"
 )
 
@@ -32,28 +31,31 @@ func (n *Notifier) Init() {
 	n.Waiters.Init()
 }
 
-// Notify attempts to signal a listener or waiter. It prioritizes listeners
-// over waiters since listeners typically represent in-process work.
-// Returns true if a notification was successfully delivered, false otherwise.
+// Notify delivers a wake to one listener or waiter, prioritizing listeners over waiters
+// since listeners typically represent in-process work. It is total: if no consumer takes
+// the wake, fallback runs synchronously — so callers need no `if !Notify {fallback()}`
+// guard. A nil fallback defaults to noop.
+//
+// Listeners receive a listener-style Notification (a Forward they cannot use
+// re-circulates through this Notifier); waiters receive a waiter-style Notification (a
+// Forward runs fallback terminally). See [Notification].
 //
 //nolint:contextcheck // background context used only for tracing
-func (n *Notifier) Notify(renotifyFn RenotifyFunc) bool {
+func (n *Notifier) Notify(fallback func()) {
 	traceRegion := "rdvq.Notifier.Notify"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Notifier=%p", n)
 
-	if renotifyFn == nil {
-		renotifyFn = NoopRenotify
+	if fallback == nil {
+		fallback = noop
 	}
-
-	r := wrappedRenotifyPool.Get()
-	r.n = n
-	r.wrappedFn = renotifyFn
-	if n.Listeners.Notify(r.renotifyFn) {
-		return true
+	if n.Listeners.deliver(Notification{n: n, fallback: fallback}) {
+		return
 	}
-	wrappedRenotifyPool.Put(r)
-	return n.Waiters.Notify(renotifyFn)
+	if n.Waiters.deliver(Notification{fallback: fallback}) {
+		return
+	}
+	fallback()
 }
 
 // NotifyAll signals all listeners and waiters.
@@ -68,29 +70,3 @@ func (n *Notifier) NotifyAll() {
 	n.Listeners.NotifyAll()
 	n.Waiters.NotifyAll()
 }
-
-type wrappedRenotify struct {
-	n         *Notifier
-	wrappedFn RenotifyFunc
-
-	renotifyFn RenotifyFunc // avoid reallocating closure
-}
-
-func (r *wrappedRenotify) Init() {
-	r.renotifyFn = r.renotify
-}
-
-func (r *wrappedRenotify) Reset() {
-	*r = wrappedRenotify{
-		renotifyFn: r.renotifyFn,
-	}
-}
-
-func (r *wrappedRenotify) renotify() {
-	if !r.n.Notify(r.wrappedFn) {
-		r.wrappedFn()
-	}
-	wrappedRenotifyPool.Put(r)
-}
-
-var wrappedRenotifyPool = omnipool.For[wrappedRenotify]()

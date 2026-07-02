@@ -160,11 +160,29 @@ interface would force a pooled pointer impl (to avoid per-wake boxing through `c
 Notification`), re-introducing the very pooling/Put-discipline we're deleting. Trade-off
 accepted: no double-settle detection (settling twice is a caller bug the value can't catch).
 
-**`Notify` becomes total:** `Notifier.Notify(fallback func())` (and `Waiters.Notify`) run the
-fallback exactly when no consumer takes the wake — so call sites drop the `if !Notify(fn) {
-fn() }` guard (`accepted.go` ×3, the orphan handler). Internal delivery is `Listeners.deliver`
-/ `Waiters.deliver` (return whether taken). `NoopRenotify` → unexported `noop` (default
-fallback), preserving its no-nil-check role.
+**`Notify` becomes total:** `Notifier.Notify(fallback func())` (and `Waiters.Notify`,
+`Listeners.Notify`) run the fallback exactly when no consumer takes the wake — so the two
+`if !Notify(fn){fn()}` guards (`accepted.go` `scheduledDeadlineFired`, `ForceFresh`) collapse
+to a bare `Notify`. Internal delivery is `Listeners.deliver` / `Waiters.deliver` (return
+whether taken); `Waiters.Deliver` is the exported re-injection primitive the `Accepted`
+listener wires into its own waiters (`q.listener.Notify = q.waiters.Deliver`), replacing the
+old bool-returning `Waiters.Notify`. `NoopRenotify` → unexported `noop` (default fallback).
+
+**Total also changes the two *unguarded* `Waiters.Notify(unmetDemandFn)` sites — deliberately
+(PN, 2026-07-01).** `queueFresh` and `Expedite` previously delivered the demand signal to a
+parked worker and *dropped* it when none was parked (buffered-1-style absorption). Under total
+conservation they now run `unmetDemandFn` on a miss, i.e. `Nudge`-spawn a worker. This was the
+one non-mechanical decision (the code had 2 guarded sites, not the "×3" this spec first
+claimed). It is **safe and correct**: `unmetDemandFn` → `Scheduler.ensureWorker` → `Pool.Nudge`,
+which is **capped by `spawnConcurrencyLimit`** and self-correcting (an over-nudge spins up, drains
+whatever is ready, and idles back out), so it cannot storm; and `Nudge`'s own contract names this
+case as canonical ("a batch promoted to fresh… needs a worker even though no Post registered
+demand"). The extra goroutines are genuine unmet-demand parallelism, not over-spawn — the same
+buffered→unbuffered shift the value struct embodies (a signal is never silently swallowed).
+
+A producer that must hand a wake into the block/wait return path without going through a
+`Notifier` (a custom `AddWorkFunc`; today only a workq test) mints one with
+`rdvq.NewNotification(fallback)` — a terminal (waiter-style) `Notification`.
 
 **The asymmetry, commented at `Notification.Forward`:** listener `Forward` re-circulates
 (`n.Notify(fallback)`) because a listener may hold a still-live reserved resource that must
@@ -187,8 +205,18 @@ large `TestBySimulation -race` + a conservation-discharge note.
 
 - **Landed:** the abandon-path reap; `confirmFn`/`h.release` method-value caching.
 - **Not pursued:** LIFO-everywhere; wholesale `Receiver`/`Waiter` parameters.
-- **Planned (focused pass):** `RenotifyFunc` → `Notification` (spec above) — design settled
-  + core-compiled, reverted to keep the tree green; execute as its own gated change.
+- **Landed (2026-07-01):** `RenotifyFunc` → `Notification` (spec above), the full ~18-file
+  cascade. `wrappedRenotify` + its pool deleted; recirculation identity is now the zero-alloc
+  `n *Notifier` field carried by value. Conservation is total. Confirmed: the "pooled fallback"
+  worry is out of scope — every fallback is a singleton (`noop`) or a once-cached method value
+  (`unmetDemandFn`), never a per-call closure; a fallback that ever needs per-call state is
+  bound as a method value on a lifecycle-pooled object (cf. `heldPermit.release`/`confirmFn`),
+  so consume-vs-discard never strands it. Gate: full `-short` suite + rdvq `-race` (saturation)
+  + large `TestBySimulation -race` batch.
+- **Open (design, not blocking):** the cached-bound-method pattern may be over-used where the
+  receiver is already a pooled pointer — an interface (alloc-free pointer conversion) would drop
+  the per-callback cached field and the Init/Reset binding discipline. Revisit as its own pass;
+  it earns its keep for `func`-typed seams with no natural named-method surface.
 - **Deferred, measurement-gated:** permit-forest affinity bucketing — revisit only if a
   deep-forest workload demonstrates HOL in the tail; the fix is affinity *bucketing of the
   existing queues*, not a waiter-set replacement.

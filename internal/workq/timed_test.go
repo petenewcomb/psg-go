@@ -41,31 +41,31 @@ func blockingAddWork(
 	_ QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-) (RenotifyFunc, error) {
+) (Notification, error) {
 	if waiters == nil {
 		// Non-blocking probe: no work to contribute.
-		return nil, nil
+		return Notification{}, nil
 	}
 	var err error
-	rf := waiters.WaitFunc(confirmWaitFn,
-		func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+	m := waiters.WaitFunc(confirmWaitFn,
+		func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 			select {
-			case rf := <-waitCh:
-				return rf
+			case m := <-waitCh:
+				return m
 			case <-ctx.Done():
 				err = ctx.Err()
-				return nil
+				return rdvq.Notification{}
 			}
 		})
-	return rf, err
+	return m, err
 }
 
 // endOfWorkAddWork is an [AddWorkFunc] that never has work, signalling
 // end-of-work so ExecuteOne returns promptly instead of blocking.
 func endOfWorkAddWork(
 	context.Context, QueueWorkFunc, *rdvq.Waiters, func() bool,
-) (RenotifyFunc, error) {
-	return nil, ErrEndOfWork
+) (Notification, error) {
+	return Notification{}, ErrEndOfWork
 }
 
 func TestAccepted_Schedule_ImmediateDue(t *testing.T) {

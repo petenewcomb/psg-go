@@ -89,15 +89,15 @@ func (h *heldPermit) suspend() bool {
 func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 	confirmFn := func() bool { return !h.acquire() } // block only while still un-acquired
 	helping := true
-	var renotifyFn workq.RenotifyFunc
+	var m workq.Notification
 	for !h.acquire() {
-		if renotifyFn != nil {
+		if m.Received() {
 			// Couldn't use the wake productively; pass it along (renotify conservation).
-			renotifyFn()
+			m.Forward()
 		}
 		var err error
 		if helping {
-			renotifyFn, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), confirmFn)
+			m, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), confirmFn)
 			switch {
 			case err == nil:
 			case ctx.Err() != nil:
@@ -109,12 +109,13 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 				// the reclaim must not abandon the permit; keep helping.
 			}
 		} else {
-			renotifyFn, err = h.pool().Waiters().Wait(ctx, confirmFn)
+			m, err = h.pool().Waiters().Wait(ctx, confirmFn)
 			if err != nil {
 				return // canceled: leave un-acquired, as above
 			}
 		}
 	}
+	// Acquired: the last wake (if any) was used productively — drop it (do not Forward).
 }
 
 // pool returns the Pool this handle draws from — the manager-listener target for the
@@ -179,18 +180,19 @@ func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPerm
 		h.confirmFn = h.confirm
 	}
 	defer func() { h.blockingFn = nil }() // don't pin the Execution past the call
-	var renotifyFn workq.RenotifyFunc
+	var m workq.Notification
 	for !h.acquire() {
-		if renotifyFn != nil {
+		if m.Received() {
 			// Couldn't use the wake productively; pass it along (renotify conservation).
-			renotifyFn()
+			m.Forward()
 		}
 		var err error
-		renotifyFn, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), h.confirmFn)
+		m, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), h.confirmFn)
 		if err != nil {
 			return err
 		}
 	}
+	// Acquired: the last wake (if any) was used productively — drop it (do not Forward).
 	return nil
 }
 

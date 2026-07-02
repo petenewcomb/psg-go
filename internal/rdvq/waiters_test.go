@@ -27,11 +27,11 @@ func TestWaiters_BasicNotification(t *testing.T) {
 
 		rf := waiters.WaitFunc(
 			func() bool { return true },
-			func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 				return <-waitCh
 			},
 		)
-		notified <- rf != nil
+		notified <- rf.Received()
 	}()
 
 	// Wait for waiter to be created and start waiting
@@ -57,9 +57,9 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 	selectCalled := false
 	waiters.WaitFunc(
 		func() bool { return false },
-		func(<-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+		func(<-chan rdvq.Notification) rdvq.Notification {
 			selectCalled = true
-			return nil
+			return rdvq.Notification{}
 		},
 	)
 
@@ -87,12 +87,12 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 				defer mu.Unlock()
 				return !workReady // Continue waiting only if no work ready
 			},
-			func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 				// When verification succeeds, this should be called and block
 				return <-waitCh
 			},
 		)
-		waitResult <- rf != nil
+		waitResult <- rf.Received()
 	}()
 
 	// Wait for waiter to start
@@ -122,9 +122,9 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 		func() bool {
 			return !workReady // Should return false (don't wait)
 		},
-		func(<-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+		func(<-chan rdvq.Notification) rdvq.Notification {
 			selectCalled = true
-			return nil
+			return rdvq.Notification{}
 		},
 	)
 
@@ -146,16 +146,16 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 		go func(id int) {
 			rf := waiters.WaitFunc(
 				func() bool { return true },
-				func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 					select {
 					case rf := <-waitCh:
 						return rf
 					case <-time.After(200 * time.Millisecond):
-						return nil
+						return rdvq.Notification{}
 					}
 				},
 			)
-			if rf != nil {
+			if rf.Received() {
 				notifications <- id
 			} else {
 				notifications <- -1 // Indicate timeout/abort
@@ -200,16 +200,16 @@ func TestWaiters_NotifyAll(t *testing.T) {
 		go func() {
 			rf := waiters.WaitFunc(
 				func() bool { return true },
-				func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+				func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 					select {
 					case rf := <-waitCh:
 						return rf
 					case <-time.After(200 * time.Millisecond):
-						return nil
+						return rdvq.Notification{}
 					}
 				},
 			)
-			notifications <- rf != nil
+			notifications <- rf.Received()
 		}()
 	}
 
@@ -238,9 +238,9 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	go func() {
 		waiters.WaitFunc(
 			func() bool { return true },
-			func(<-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			func(<-chan rdvq.Notification) rdvq.Notification {
 				// Abandon immediately - don't wait on channel
-				return nil
+				return rdvq.Notification{}
 			},
 		)
 	}()
@@ -255,16 +255,16 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	go func() {
 		rf := waiters.WaitFunc(
 			func() bool { return true },
-			func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+			func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 				select {
 				case rf := <-waitCh:
 					return rf
 				case <-time.After(50 * time.Millisecond):
-					return nil
+					return rdvq.Notification{}
 				}
 			},
 		)
-		notified <- rf != nil
+		notified <- rf.Received()
 	}()
 
 	// Give new waiter time to process orphaned notification

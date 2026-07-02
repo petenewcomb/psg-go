@@ -395,8 +395,8 @@ func (pm Permit) Release() {
 
 // wake routes one freed permit to a single waiting consumer — a postponed manager
 // (listeners) first, since it represents in-process admission, else a parked executor
-// (waiters). It hands the consumer a renotify (Notifier.Notify's wrapped conservation)
-// so that a consumer which cannot use the wake RE-DELIVERS it to the next rather than
+// (waiters). The consumer receives a [rdvq.Notification] whose Forward re-delivers the
+// wake to the next consumer (Notifier.Notify's total conservation) rather than
 // swallowing it: without that, a stale postpone listener (one whose work already
 // re-checked and ran, leaving its idempotent shared controller listener registered)
 // would consume the wake and report it delivered, and a genuinely-waiting executor

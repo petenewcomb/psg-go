@@ -117,9 +117,9 @@ func TestAccepted_ExecuteOne_NewWork_Deferred(t *testing.T) {
 		queueFn QueueWorkFunc,
 		waiters *rdvq.Waiters,
 		confirmWaitFn func() bool,
-	) (RenotifyFunc, error) {
+	) (Notification, error) {
 		queueFn(work)
-		return nil, nil
+		return Notification{}, nil
 	}
 
 	_ = q.ExecuteOne(context.Background(), addWorkFn, nil) // blocking to retry deferred work
@@ -291,15 +291,15 @@ func TestAccepted_ExecuteOne_Blocking_RetriesWithNotification(t *testing.T) {
 		queueFn QueueWorkFunc,
 		waiters *rdvq.Waiters,
 		confirmWaitFn func() bool,
-	) (RenotifyFunc, error) {
+	) (Notification, error) {
 		if tryCount == 0 {
 			queueFn(work)
-			return func() {}, nil
+			return rdvq.NewNotification(func() {}), nil
 		}
 		if confirmWaitFn != nil {
 			confirmWaitFn()
 		}
-		return nil, nil // No new work on subsequent calls
+		return Notification{}, nil // No new work on subsequent calls
 	}
 
 	_ = q.ExecuteOne(context.Background(), addWorkFn, nil) // blocking

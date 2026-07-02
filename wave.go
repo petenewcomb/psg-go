@@ -398,7 +398,7 @@ func (wv *Wave) block(
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
-) (workq.RenotifyFunc, error) {
+) (workq.Notification, error) {
 	traceRegion := "Wave.block"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
@@ -439,7 +439,7 @@ type blockingWorkAdder struct {
 	blockDeadline       time.Time
 	blockWaiters        *workq.Waiters
 	confirmBlockWaitFn  func() bool
-	blockWaitRenotifyFn workq.RenotifyFunc
+	blockWaitRenotifyFn workq.Notification
 
 	addWorkFn workq.AddWorkFunc
 }
@@ -459,8 +459,8 @@ func (a *blockingWorkAdder) addWork(
 	queueFn workq.QueueWorkFunc,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
-) (workq.RenotifyFunc, error) {
-	var workReadyRenotifyFn workq.RenotifyFunc
+) (workq.Notification, error) {
+	var workReadyRenotifyFn workq.Notification
 	var err error
 	workReadyRenotifyFn, a.blockWaitRenotifyFn, err = a.wave.addWorkWhileMaybeBlocking(
 		ctx, a.meta, queueFn, workWaiters, confirmWorkWaitFn, a.blockDeadline, a.blockWaiters, a.confirmBlockWaitFn)
@@ -472,7 +472,7 @@ func (wv *Wave) addWork(
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-) (workq.RenotifyFunc, error) {
+) (workq.Notification, error) {
 	traceRegion := "Wave.addWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
@@ -491,27 +491,27 @@ func (wv *Wave) addWorkWhileMaybeBlocking(
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
-) (workReadyRenotifyFn, blockWaitRenotifyFn workq.RenotifyFunc, err error) {
+) (workReadyRenotifyFn, blockWaitRenotifyFn workq.Notification, err error) {
 	meta.PushQueueFunc(queueFn)
 	defer meta.PopQueueFunc()
 
-	var workRf, blockRf rdvq.RenotifyFunc
+	var workRf, blockRf rdvq.Notification
 	if workWaiters == nil {
 		err = wv.tryAddWork(ctx, queueFn)
 	} else {
 		work, ok := wv.skimQueue.PopFrontFunc(
-			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.RenotifyFunc) rdvq.PopSelectResult[workq.Work] {
+			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.Notification) rdvq.PopSelectResult[workq.Work] {
 				// Declared per invocation: skimSelect (which is the only thing
 				// that populates this) is skipped on any iteration where the
 				// block confirm short-circuits — i.e. once the permit is
 				// acquired/reclaimed. A value hoisted across iterations would
 				// retain a stale outbox-ready result, keeping PopFrontFunc's
-				// loop from ever reaching its empty (renotifyFn==nil) exit.
+				// loop from ever reaching its no-wake (!m.Received()) exit.
 				var psResult rdvq.PopSelectResult[workq.Work]
 				workRf = workWaiters.WaitFunc(
 					confirmWorkWaitFn,
-					func(workWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
-						var innerWorkRf rdvq.RenotifyFunc
+					func(workWaitCh <-chan rdvq.Notification) rdvq.Notification {
+						var innerWorkRf rdvq.Notification
 						if blockWaiters == nil {
 							psResult, innerWorkRf, _, err = wv.skimSelect(
 								ctx, inboxCh, outboxWaitCh, workWaitCh, nil, nil,
@@ -525,7 +525,7 @@ func (wv *Wave) addWorkWhileMaybeBlocking(
 									}
 									return shouldWait
 								},
-								func(blockWaitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+								func(blockWaitCh <-chan rdvq.Notification) rdvq.Notification {
 									var blockTimerCh <-chan time.Time
 									// Zero or Forever deadline: no timer (block until ctx
 									// cancel or notification). Non-zero, non-Forever: set
@@ -537,7 +537,7 @@ func (wv *Wave) addWorkWhileMaybeBlocking(
 										timerp.Reset(blockTimer, max(0, time.Until(blockDeadline)))
 										blockTimerCh = blockTimer.C
 									}
-									var innerBlockRf rdvq.RenotifyFunc
+									var innerBlockRf rdvq.Notification
 									psResult, innerWorkRf, innerBlockRf, err = wv.skimSelect(
 										ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh,
 									)
@@ -561,11 +561,11 @@ func (wv *Wave) addWorkWhileMaybeBlocking(
 func (wv *Wave) skimSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
-	outboxWaitCh <-chan rdvq.RenotifyFunc,
-	workWaitCh <-chan rdvq.RenotifyFunc,
+	outboxWaitCh <-chan rdvq.Notification,
+	workWaitCh <-chan rdvq.Notification,
 	blockTimerCh <-chan time.Time,
-	blockWaitCh <-chan rdvq.RenotifyFunc,
-) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.RenotifyFunc, err error) {
+	blockWaitCh <-chan rdvq.Notification,
+) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.Notification, err error) {
 	traceRegion := "Wave.skimSelect"
 	trace.Logf(ctx, traceRegion,
 		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, blockWaitCh=%p",

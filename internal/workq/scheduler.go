@@ -85,7 +85,7 @@ func (s *Scheduler) Post(ctx context.Context, w Work) error {
 	}()
 
 	var err error
-	delivered := s.incoming.PushBackFunc(w, func(waitCh <-chan rdvq.RenotifyFunc) rdvq.RenotifyFunc {
+	delivered := s.incoming.PushBackFunc(w, func(waitCh <-chan rdvq.Notification) rdvq.Notification {
 		// selectFn runs only when no scheduler was waiting — i.e. the producer is
 		// about to park. Register unmet demand once (on the first park) so the pool
 		// spawns toward it.
@@ -93,9 +93,9 @@ func (s *Scheduler) Post(ctx context.Context, w Work) error {
 			registered = true
 			s.pool.RegisterUnmetDemand()
 		}
-		var rf rdvq.RenotifyFunc
-		rf, err = rdvq.BasicWaitSelect(ctx, waitCh)
-		return rf
+		var m rdvq.Notification
+		m, err = rdvq.BasicWaitSelect(ctx, waitCh)
+		return m
 	})
 	if delivered {
 		return nil
@@ -147,7 +147,7 @@ type schedulerWorker struct {
 
 	// per-Wait scratch (set in Wait, read in pull/selectWork):
 	idleCh   <-chan time.Time
-	renotify RenotifyFunc
+	renotify Notification
 	exit     bool  // idle/stop fired: stop this worker
 	selErr   error // ctx cancel surfaced from the select
 }
@@ -182,13 +182,13 @@ func (w *schedulerWorker) pull(
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-) (RenotifyFunc, error) {
+) (Notification, error) {
 	if waiters == nil {
 		// Unbuffered Handoff: nothing to probe without blocking.
-		return nil, nil
+		return Notification{}, nil
 	}
 
-	w.renotify, w.selErr, w.exit = nil, nil, false
+	w.renotify, w.selErr, w.exit = Notification{}, nil, false
 
 	// Design B: workers idle-exit (scale to zero) freely; scheduled-flush deadlines are
 	// honored by the queue-owned timer ([Accepted.armScheduledTimer]), which spawns a worker
@@ -197,7 +197,7 @@ func (w *schedulerWorker) pull(
 
 	var newWork Work
 	waiters.WaitFunc(confirmWaitFn,
-		func(workWaitCh <-chan RenotifyFunc) RenotifyFunc {
+		func(workWaitCh <-chan Notification) Notification {
 			work, ok := w.sched.incoming.PopFrontFunc(
 				func(inboxCh <-chan Work) (Work, bool) {
 					return w.selectWork(ctx, inboxCh, workWaitCh, idleCh)
@@ -225,7 +225,7 @@ func (w *schedulerWorker) pull(
 func (w *schedulerWorker) selectWork(
 	ctx context.Context,
 	inboxCh <-chan Work,
-	workWaitCh <-chan RenotifyFunc,
+	workWaitCh <-chan Notification,
 	idleCh <-chan time.Time,
 ) (Work, bool) {
 	select {

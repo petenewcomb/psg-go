@@ -2,6 +2,25 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► WEIGHTED ACQUISITION — design agreed, recorded (2026-07-02), NOT implemented.**
+`docs/decisions/weighted-acquisition.md` (companion to limiter-resource-classes.md): counts layout
+is weight-ready, ops are weight-1. Core: (1) gather-into-own-`held` + atomic occupy — a partial
+gather is NOT hold-and-wait (hoard stays borrowable ⇒ "parked ⟹ borrowable" proof intact;
+cache-don't-return IS the rollback, no give-back protocol); (2) demand-side head-of-line barrier
+(PN): Pool-level FIFO of caller-held invalidatable demand identities, **sticky head, FIFO
+succession, NO weight-based ordering** (max succession rejected — biases toward large demands);
+gathering is HEAD-ONLY ⇒ gather-vs-gather livelock unrepresentable; barrier must gate steps 1–4
+incl. acquireLocal (one atomic load, mirror of the release-side balance load) else step-1
+recirculation starves the head invisibly; (3) arm only w≥2 — weight-1 never registers, mechanism
+dormant for semaphore/rate pools; (4) identity = conservation token (satisfied-or-invalidated;
+caller-held to dedupe postpone retries; gen-stamp for ABA). Supply-side reservation (x/sync-style)
+rejected — breaks the liveness proof; demand-side barrier reaches the same fairness without it.
+Weighing SURFACE already settled (dispatch-execution-split.md: static per-op panic / data-dependent
+per-item unit error; "applicant" backlog note). Needs: TryAcquireUpTo capability (partial grants),
+capacity visibility (infeasibility BEFORE arming), stealOutUpTo. Sequencing: mechanical w=1-caller
+weighting (no-op, green) → gather+barrier behind model check → resource capabilities → surface
+plumbing (own session).
+
 **►►► LIMITER RESOURCE CLASSES — design agreed, recorded (2026-07-02), NOT implemented.**
 `docs/decisions/limiter-resource-classes.md`: the permit forest's premises (cache-don't-return,
 inheritance, steal) hold only for conserved holdable permits — rate limiters break conservation,

@@ -2,6 +2,33 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► LIMITER RESOURCE CLASSES — design agreed, recorded (2026-07-02), NOT implemented.**
+`docs/decisions/limiter-resource-classes.md`: the permit forest's premises (cache-don't-return,
+inheritance, steal) hold only for conserved holdable permits — rate limiters break conservation,
+external gauges break revalidation. Design: base `Resource{TryAcquire}` + `HoldableResource{+Release}`
+discovered by ONE type assertion at NewPool (nil-field test on hot paths; whole policy bundle —
+caching forest vs pass-through, postpone charge-rides vs release-and-reacquire, park/resume
+alternation vs no-op — keys off it). Consumables = degenerate forest (no caches; every acquire is a
+fresh step-3 TryAcquire). Wake: resource-owned production (timers arm lazily on failed TryAcquire),
+Pool-supplied surface = ONE signed verb `Adjust(delta)` posting to a signed atomic `balance` (PN's
+counter model — the execpool demand-counter pattern applied to wakes; superseded the counted-fan-out
+Notify(n) and fit-matched per-waiter-demand drafts, both now in Rejected). Positive: serialized wake
+chain (≤1 wake in flight; step-3 success decrements by amount + ALWAYS forwards one probe → unknown-
+size events = Adjust(1); failure STOPS the chain but does NOT clamp — balance is the resource's delta
+ledger, pool transacts-never-rewrites [clamp ⇒ phantom debt on +5/raced/−5 netting]; ⇒ wake seeds are
+per-positive-Adjust events, NOT zero-crossing edges, else residue masks fresh posts; register-then-
+check closes the missed-wake race; positive side = lossy hint / negative side = exact, drift bounded,
+reconciliation-read is the seam if measured material). Negative (holdable-only, panics for consumable) =
+reclaim debt subsuming Reclaim(n): immediate idle harvest (steal-with-Resource-as-sink; lazy debt
+would strand vs event-less cached idle) + releases pay debt before caching (targeted suspension of
+cache-don't-return; one atomic load on the release hot path) + repayment = ordinary resource.Release
+calls. **No WakeAll anywhere** — even destroy-drain posts to the balance. Verb name still open
+(Adjust vs Offer/Credit). `Reclaim(n)` = the
+shrink-direction dual for holdables (memory/GC drift): a steal whose beneficiary is the Resource,
+reusing the LRU walk + revalidating CAS; idle-only (recall-of-in-use stays rejected); also sharpens
+SetMaxConcurrency lowering. Joint admission: holdables before consumables in the canonical order.
+Mixed semantics = WithLimits composition, no third class.
+
 **►►► `RenotifyFunc` → `Notification` LANDED + COMMITTED (`eee5322`, 2026-07-01) — the
 conservation-discharge refactor (pickup #1). Gate green: full `-short` suite; rdvq `-race`
 (saturation, 230s); 25×80-check `TestBySimulation -race` batch 25/25.** The bare

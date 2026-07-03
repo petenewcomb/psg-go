@@ -55,9 +55,12 @@
 //
 //   - [Cache.Acquire] is the single locality-ordered primitive (permit-core.md
 //     "Acquisition"): own cache → ancestor chain → free Resource → steal → wait. It
-//     returns a [Permit] (recording the backing cache) or ok=false to wait. Steps
-//     1–2 occupy an existing borrowable permit; steps 3–4 (delegated to the Pool)
-//     check one out of the Resource or steal it into the acquiring cache's held.
+//     takes the caller-held [Demand] identity and a weight, returning a [Permit]
+//     (recording the backing cache and weight) or ok=false to wait. Steps 1–2 occupy
+//     existing borrowable permits; steps 3–4 (delegated to the Pool) check capacity
+//     out of the Resource or steal it into the acquiring cache's held — assembling a
+//     weight no single source covers by a multi-source gather whose partial hoard
+//     stays borrowable throughout (weighted-acquisition.md Decision 1).
 //   - [Permit.Release] ends a run segment (body completed or parked): backing
 //     inUse−−. The permit STAYS cached in held (cache-don't-return), now borrowable.
 //   - Park / resume are Release / Acquire: parking releases the body's permit (now
@@ -75,6 +78,8 @@
 //   - Per-cache: 0 ≤ inUse ≤ held.
 //   - Conservation: Σheld == Pool.checkedOut ≤ capacity.
 //   - Concurrency bound: Σinuse ≤ capacity.
-//   - Liveness: no reachable state has a blocked Acquire while some permit is
-//     borrowable (the steal must find it) — the operational face of deadlock-freedom.
+//   - Liveness: no reachable state has a blocked Acquire of weight w while the
+//     gatherable capacity — borrowable permits anywhere plus free Resource capacity —
+//     covers w (the gather must assemble it) — the operational face of
+//     deadlock-freedom, generalized from the weight-1 "some permit is borrowable".
 package permits

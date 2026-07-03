@@ -16,10 +16,13 @@ const maxCaches = 10
 
 // modelUnit tracks the usage state the real Cache does not: whether the owning unit's
 // own reference is still held (it must be ReleaseRef'd exactly once), and the Permit
-// backing its body while it runs. A unit models one body: it runs (acquire),
-// parks/completes (release), may resume, and finally exits (ReleaseRef).
+// backing its body while it runs. A unit models one body: it runs (acquire, at a
+// weight drawn per attempt), parks/completes (release), may resume, and finally exits
+// (ReleaseRef). demand is the unit's caller-held identity, re-presented across its
+// sequential acquire episodes (Decision 4's postpone-retry shape).
 type modelUnit struct {
 	cache       *Cache
+	demand      Demand
 	unitRefHeld bool
 	pm          Permit
 	running     bool
@@ -27,9 +30,13 @@ type modelUnit struct {
 
 // TestPermitsModel model-checks the permit invariants (permit-core.md "Invariants")
 // sequentially — the algorithm, not the concurrency (that is the -race stress tests):
-// random forests of caches on a shared Pool, random acquire/park/resume/exit. After
-// every operation it asserts the invariants; on every blocked Acquire the liveness
-// property (nothing borrowable, Resource exhausted); and after a full drain, no leak.
+// random forests of caches on a shared Pool, random weighted acquire/park/resume/exit.
+// After every operation it asserts the invariants; on every blocked Acquire the
+// weight-aware liveness property (everything gatherable — borrowable anywhere plus
+// free Resource capacity — is less than w, so a sequential gather had to fail); and
+// after a full drain, no leak. Weights range past capacity so the legitimately
+// infeasible block is exercised too, and a failed gather's retained hoard is part of
+// the modeled state (it stays borrowable for every later operation).
 func TestPermitsModel(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		capacity := rapid.IntRange(1, 4).Draw(t, "capacity")
@@ -78,16 +85,17 @@ func TestPermitsModel(t *testing.T) {
 				if u == nil {
 					return
 				}
-				if pm, got := u.cache.Acquire(1); got {
+				w := rapid.IntRange(1, capacity+1).Draw(t, "weight")
+				if pm, got := u.cache.Acquire(&u.demand, w); got {
 					u.pm = pm
 					u.running = true
 				} else {
-					// Liveness: a block is legitimate ONLY when no permit is borrowable
-					// and the Resource is exhausted.
-					require.False(t, tp.hasBorrowable(),
-						"Acquire blocked while a permit was borrowable")
-					require.Equal(t, int64(tp.sem.capacity), tp.sem.inFlight.Load(),
-						"Acquire blocked while Resource capacity remained")
+					// Liveness: a block is legitimate ONLY when the gather could not
+					// assemble w — borrowable everywhere plus free Resource capacity
+					// falls short. (Weight-1 special case: nothing borrowable and the
+					// Resource exhausted, as before.)
+					require.Less(t, tp.borrowableTotal()+tp.free(), w,
+						"Acquire blocked while gatherable capacity covered w")
 				}
 				check()
 			},

@@ -43,9 +43,10 @@ import (
 //     so conservation holds), and decrements the parent's refs (cascade).
 
 // Resource is the pluggable accounting object permits are drawn from — the open
-// extension point (semaphore, memory, rate, weighted); n carries the weight of the
-// acquire being satisfied (1 from every current caller — weighted callers arrive
-// with the gather/barrier, weighted-acquisition.md step 2).
+// extension point (semaphore, memory, rate, weighted); n carries the amount being
+// checked out: a whole weight on the single-grant fast path, or the gather's current
+// shortfall (all-or-nothing until the TryAcquireUpTo capability lands,
+// weighted-acquisition.md sequencing step 3).
 type Resource interface {
 	TryAcquire(n int) bool
 	Release(n int)
@@ -249,13 +250,41 @@ func (c *Cache) touch() {
 	c.list().moveToBack(c)
 }
 
+// Demand is the caller-held identity of one acquisition demand — the conservation
+// token of weighted-acquisition.md Decision 4: a registered demand is satisfied or
+// explicitly invalidated, never dropped, and the CALLER holds the identity so a
+// postponed manager's retries re-present the SAME demand rather than registering a
+// fresh one per retry. The zero value is ready. Registration itself (the w ≥ 2
+// demand FIFO and head-of-line barrier) lands with the barrier checkpoint of
+// sequencing step 2; until then the identity is carried through Acquire unused.
+type Demand struct {
+	// gen guards pooled/recycled identities against ABA once the FIFO holds demand
+	// references (the captured-generation discipline of rdvq-inbox-reclamation.md):
+	// Invalidate bumps it, retiring every outstanding reference to this identity. It
+	// also gives Demand nonzero size, keeping distinct *Demand pointers distinct.
+	gen atomic.Uint64
+}
+
+// Invalidate withdraws the demand — the caller-side edge for a dropped or cancelled
+// postpone, wave teardown, or a demand deadline. Idempotent, and safe on a demand
+// that was never registered. Invalidating a registered head passes the barrier to
+// the next demand in FIFO order (once the barrier lands); a partial hoard stays
+// borrowable in its cache — conservation needs no give-back (Decision 1).
+func (d *Demand) Invalidate() {
+	d.gen.Add(1)
+}
+
 // Acquire makes w permits available for a body in c to run and returns a Permit
-// recording the backing cache and weight. ok is false if the body must wait. All
-// callers pass w=1 until the weighted gather/barrier lands (weighted-acquisition.md
-// step 1); a w>1 acquire is already correct but gather-less — it needs a single
-// source (one cache, the free Resource, or one steal victim) able to cover the
-// whole weight.
-func (c *Cache) Acquire(w int) (Permit, bool) {
+// recording the backing cache and weight. ok is false if the body must wait. d is
+// the caller-held demand identity (see [Demand]). A weight no single source covers
+// is assembled by a multi-source gather into c's own held (weighted-acquisition.md
+// Decision 1): the partial hoard stays borrowable throughout — a blocked weighted
+// acquire is not hold-and-wait — and a miss leaves it cached, step-1 fodder for the
+// retry (cache-don't-return is the rollback).
+func (c *Cache) Acquire(d *Demand, w int) (Permit, bool) {
+	if d == nil {
+		panic("permits: Acquire with nil Demand")
+	}
 	if w < 1 {
 		panic("permits: Acquire weight < 1")
 	}
@@ -285,74 +314,99 @@ func (c *Cache) Acquire(w int) (Permit, bool) {
 // AcquireWait is the blocking acquire — for an executor reacquiring mid-body. It does
 // the non-blocking Acquire and, on a miss, parks on the Pool's waiters until a permit
 // frees (Release or destroy wakes it), re-searching each time, until it succeeds or
-// ctx is cancelled. The confirm callback re-runs Acquire AFTER registering as a
-// waiter, so a permit freed between the miss and the park is taken immediately rather
-// than lost — and if it succeeds there, that is the one acquisition (no double-take).
-// (The non-blocking Acquire stays the manager's admit path, which postpones on a
-// miss; that postpone hook lands with the manager/executor split.)
-func (c *Cache) AcquireWait(ctx context.Context, w int) (Permit, error) {
+// ctx is cancelled. Cancellation invalidates d (the demand is withdrawn, not
+// dropped). The confirm callback re-runs Acquire AFTER registering as a waiter, so a
+// permit freed between the miss and the park is taken immediately rather than lost —
+// and if it succeeds there, that is the one acquisition (no double-take). (The
+// non-blocking Acquire stays the manager's admit path, which postpones on a miss;
+// that postpone hook lands with the manager/executor split.)
+func (c *Cache) AcquireWait(ctx context.Context, d *Demand, w int) (Permit, error) {
 	for {
-		if pm, ok := c.Acquire(w); ok {
+		if pm, ok := c.Acquire(d, w); ok {
 			return pm, nil
 		}
 		p := c.pool
 		var pm Permit
 		var ok bool
 		_, err := p.notify.Wait(ctx, func() bool {
-			pm, ok = c.Acquire(w)
+			pm, ok = c.Acquire(d, w)
 			return !ok // park only if still no permit
 		})
 		if ok {
 			return pm, nil
 		}
 		if err != nil {
+			d.Invalidate()
 			return Permit{}, err
 		}
 		// Woken by a freed permit; loop and retry.
 	}
 }
 
-// acquireInto runs steps 3–4 for c, landing w permits in c's own held. Returns c on
-// success or nil if both miss (the caller waits). The loop re-checks the Resource each
-// turn (a concurrent destroy may free capacity) and retries the search when a steal
-// candidate's idle permits were consumed before the take. Single-source only: the
-// Resource grant and the steal are each all-or-nothing at weight w (multi-source
-// gathering lands with the demand barrier, weighted-acquisition.md step 2).
+// acquireInto runs steps 3–4 for c, landing w permits in c's own counts. Returns c
+// on success or nil if the pool cannot cover w right now (the caller waits). The
+// whole weight in one Resource grant is the fast path; otherwise a multi-source
+// gather assembles the weight into c's own held from partial steals (coldest victims
+// first) and the Resource's remainder, then occupies atomically once covered
+// (weighted-acquisition.md Decision 1). The hoard stays borrowable the entire time,
+// and a miss returns with it in place — anyone may take it meanwhile, and the retry
+// finds what remains at step 1; cache-don't-return is the rollback. The Resource arm
+// is all-or-nothing at the current shortfall until the TryAcquireUpTo capability
+// lands (sequencing step 3), so free capacity smaller than the shortfall stays
+// unharvested. NOTE: concurrent w ≥ 2 gatherers can contest each other's hoards
+// (freelance gathering) until head-only gathering lands with the demand-FIFO
+// barrier checkpoint; sequential correctness and conservation are complete here.
 func (p *Pool) acquireInto(c *Cache, w int) *Cache {
 	//nolint:gosec // G115: w >= 1, validated by Acquire (the only caller)
 	uw := uint64(w)
+	if p.resource.TryAcquire(w) {
+		c.counts.checkout(uw)
+		return c
+	}
 	for {
-		if p.resource.TryAcquire(w) {
-			c.counts.checkout(uw)
-			return c
+		if c.counts.acquireLocal(uw) {
+			return c // the hoard (plus c's own residue) covers w — occupied
 		}
-		v := searchList(&p.roots, uw) // returns a ref-pinned candidate (or nil)
+		held, inUse := c.counts.load()
+		if held >= inUse+uw {
+			continue // raced coverable between the occupy attempt and the load; retry
+		}
+		need := inUse + uw - held
+		//nolint:gosec // G115: need ≤ uw, which came from the int w
+		if p.resource.TryAcquire(int(need)) {
+			if c.counts.depositOccupy(need, uw) {
+				return c
+			}
+			continue // the hoard shrank since the load; the grant stays as hoard
+		}
+		v := searchList(&p.roots, 1, c) // any borrowable victim but c itself (ref-pinned)
 		if v == nil {
-			return nil // step 5: nothing free, nothing borrowable
+			return nil // step 5: nothing free, nothing borrowable — the hoard stays
 		}
-		ok := v.counts.stealOut(uw)
-		if ok {
-			c.counts.checkout(uw)
-		}
+		n := v.counts.stealOutUpTo(need)
 		v.ReleaseRef() // unpin the candidate (may be the call that destroys it)
-		if ok {
+		if n > 0 && c.counts.depositOccupy(n, uw) {
 			return c
 		}
-		// The candidate's idle permits were consumed (a lock-free acquire, or another
-		// steal) between the search and the take. Loop and re-search.
+		// A zero take means the candidate's idle permits were consumed (a lock-free
+		// acquire, or another steal) between the search and the take; a partial take
+		// stays as hoard. Either way, re-assess and re-search.
 	}
 }
 
 // searchList finds a cache with at least w borrowable to steal from in the forest
-// rooted at l, or nil if none is borrowable anywhere. It is a front-to-back DFS
-// returning the FIRST sufficiently-borrowable cache — coldest-first by touch order,
-// so the common case both picks the least-recently-active victim and terminates
-// early; the victim is left in place, so a still-borrowable one stays at the front
-// and is re-picked (order-based camping). It holds l's lock while scanning and
-// descends into a child's list while still holding l's lock, so the locks nest
-// root→leaf. searchList is the ONLY holder of two list locks at once and always in
-// that one order, so no lock-order cycle can form. The returned candidate is a hint;
-// acquireInto's stealOut CAS is the authority.
+// rooted at l, or nil if none is borrowable anywhere. exclude (may be nil) is never
+// returned as a victim, though its children remain candidates — a gatherer must not
+// steal from itself, since its own borrowable already counts toward its occupy. It
+// is a front-to-back DFS returning the FIRST sufficiently-borrowable cache —
+// coldest-first by touch order, so the common case both picks the
+// least-recently-active victim and terminates early; the victim is left in place, so
+// a still-borrowable one stays at the front and is re-picked (order-based camping).
+// It holds l's lock while scanning and descends into a child's list while still
+// holding l's lock, so the locks nest root→leaf. searchList is the ONLY holder of
+// two list locks at once and always in that one order, so no lock-order cycle can
+// form. The returned candidate is a hint; acquireInto's stealOutUpTo CAS is the
+// authority.
 //
 // A non-nil candidate is returned **ref-pinned** (`refs++`), taken under the list lock
 // where the cache is known linked and alive — so it cannot be destroyed (its memory
@@ -360,7 +414,7 @@ func (p *Pool) acquireInto(c *Cache, w int) *Cache {
 // it. The victim is cross-subtree (off the acquirer's ancestor chain, so not pinned by
 // the acquirer's refs); without this pin only GC keeps it alive across the take, which
 // is fine for a GC'd cache but not for a pooled one.
-func searchList(l *cacheList, w uint64) *Cache {
+func searchList(l *cacheList, w uint64, exclude *Cache) *Cache {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for c := l.head; c != nil; c = c.next {
@@ -370,13 +424,15 @@ func searchList(l *cacheList, w uint64) *Cache {
 			// (its children are already drained).
 			continue
 		}
-		if h, u := c.counts.load(); h >= u+w {
-			if c.tryPin() {
-				return c // borrowable victim, pinned across the steal; caller ReleaseRefs
+		if c != exclude {
+			if h, u := c.counts.load(); h >= u+w {
+				if c.tryPin() {
+					return c // borrowable victim, pinned across the steal; caller ReleaseRefs
+				}
+				continue // raced into destroy after the alive check; skip
 			}
-			continue // raced into destroy after the alive check; skip
 		}
-		if v := searchList(&c.children, w); v != nil {
+		if v := searchList(&c.children, w, exclude); v != nil {
 			return v // already pinned by the recursive hit
 		}
 	}

@@ -75,6 +75,17 @@ func hasBorrowable(caches []*Cache) bool {
 	return false
 }
 
+// borrowableTotal sums held−inUse over the given caches — everything a gather could
+// steal, anywhere in the forest.
+func borrowableTotal(caches []*Cache) int {
+	var sum uint64
+	for _, c := range caches {
+		h, u := c.counts.load()
+		sum += h - u
+	}
+	return int(sum) //nolint:gosec // G115: bounded by the Resource's small test capacity
+}
+
 // totalHeld returns Σheld over the given caches — the permits checked out of the
 // Resource.
 func totalHeld(caches []*Cache) int {
@@ -175,5 +186,11 @@ func (tp *testPool) check(t require.TestingT) {
 	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
 }
 
-func (tp *testPool) totalHeld() int      { return totalHeld(tp.snapshot()) }
-func (tp *testPool) hasBorrowable() bool { return hasBorrowable(tp.snapshot()) }
+func (tp *testPool) totalHeld() int       { return totalHeld(tp.snapshot()) }
+func (tp *testPool) hasBorrowable() bool  { return hasBorrowable(tp.snapshot()) }
+func (tp *testPool) borrowableTotal() int { return borrowableTotal(tp.snapshot()) }
+
+// free returns the Resource capacity not currently checked out.
+func (tp *testPool) free() int {
+	return tp.sem.capacity - int(tp.sem.inFlight.Load())
+}

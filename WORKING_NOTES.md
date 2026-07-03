@@ -2,15 +2,93 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► NEXT (2026-07-03): weighted-acquisition STEP 2 — gather + demand-FIFO barrier + overdraft,
-behind the extended model check.** Read `docs/decisions/weighted-acquisition.md` FIRST (it is the
-complete spec: Decisions 1-4, §Overdraft incl. pool-allowance representation + standing head +
-episode extension, §Multi-limiter liveness, model-check target lists) + `limiter-resource-classes.md`
-(Adjust/balance chain — the wake side step 2 composes with). Step 1 (mechanical w) landed at
-9e03d83. Start with a CP-sequencing design-to-implementation pass (the C2 pattern) BEFORE coding;
-gate per feedback_race_confirm (large TestBySimulation -race batch) + extend the rapid model check
-per the recorded targets. Steps 3 (TryAcquireUpTo/NotifyAt resource capabilities) and 4 (surface:
-WithLimits/WithWeightLimits builders + sets + opoption removal) follow, each separable.
+**►►► NEXT (2026-07-03): weighted-acquisition STEP 2 IN PROGRESS — CP pass SETTLED (PN):
+CP-W2a (multi-source gather, head-less) → CP-W2b (demand FIFO + barrier) → CP-W2c (overdraft),
+each green behind the extended rapid model + permits -race + large sim -race batch.** Spec:
+`docs/decisions/weighted-acquisition.md` + `limiter-resource-classes.md`. Step 1 landed 9e03d83.
+**API-FIRST (PN, in memory too): unreleased code — land end-state APIs first (behavior may lag),
+NO compat layers, update call sites up front; upgrade tests as behaviors come online**
+(permits-level concurrent/-race stress until step 4 gives the sim a weighted surface; sim still
+gates every CP as regression). Design-to-implementation resolutions (2026-07-03, PN-confirmed):
+- **(a) PER-HEAD BODY CACHE C_B^L, created at REGISTRATION** (w≥2 slow-path miss), child of C_W^L
+  via the meta-recorded-cache redirect (ensureCacheChain already resolves sub-wave parents through
+  the recorded cache) — the head's sub-waves parent under C_B^L, so episode end = C_B^L destroy
+  (refs==0: body exited + sub-waves drained — existing lifecycle verbatim); destroy ⇒ inUse==0 ⇒
+  "allowance necessarily home at completion" is STRUCTURAL. Gather hoards in C_B^L (clean own-held
+  accounting, no sibling blur); invalidated hoard returns via the existing destroy/drain path.
+  Ties the episode to the head BODY, not its possibly-long-lived wave (PN's requirement).
+- **(b) ONE exemption rule, both phases**: while armed, an acquire proceeds iff its cache chain
+  passes through the head's C_B^L. Gather phase degenerates to head-only (nothing under C_B^L
+  yet); episode phase exempts exactly the causal subtree; siblings/ancestors/arrivals gated
+  throughout (gated parties hold nothing inUse ⇒ liveness induction intact). Descendants NEVER
+  gather — allowance fungibility (inUse past held) + episode extension substitute, so head-only
+  gathering holds even mid-episode. Cost: unarmed = one nil load at Acquire entry; armed =
+  piggybacks on the up-walk.
+- **(c) DRIVE-TARGET SUSPENSION COUNTERS**: suspend bumps pool.suspended + suspendedDrivers on the
+  drive-target wave's cache (mkdir-p a pass-through node if absent — impl detail vs a nil-bucket);
+  reclaim decrements; same-goroutine bracketing. Stranger ⇔ pool.suspended ≠ Σ suspendedDrivers
+  along the head's chain (exact: ensureCacheChain's mkdir-p guarantees true drivers have on-chain
+  targets; catches parked siblings of on-chain ancestor waves driving L-less sub-waves, invisible
+  to any forest walk). **Stranger present ⇒ NO overdraft — wait for the suspension to END**: cancel
+  (→ full release) or resume (reclaim decrements, parks at the barrier as VISIBLE queued demand —
+  grant may then proceed; requiring full release would wedge, since the barrier gates the
+  stranger's reacquire). Sticky-head+FIFO ⇒ the head doesn't starve meanwhile (PN). Reclaim-side
+  decrement must NUDGE the parked head to re-evaluate. Accepted consequence: a stranger whose drain
+  itself needs this limiter never clears ⇒ head resolves only by invalidation deadline
+  (fairness-over-head-progress, chosen). Model observable: suspended == Σ suspendedDrivers.
+- **Steal of suspended permits STAYS GLOBAL** (PN probed, convinced): scoped lending = hold-and-wait
+  by parked drivers (2-limiter parked-driver cycle deadlocks with no running body) + "whose token"
+  unrepresentable (lent permits are fungible in the shared ancestor cache) + it is supply-side
+  reservation redux (already rejected). (c) is the compensating fairness rule — two halves of one
+  deal. Nice-to-have (NOT step 2): suspend-touches-hot so the coldest-first steal prefers old
+  residue over fresh suspensions.
+- **CP-W2a LANDED (this commit)**: end-state API — `Demand` (caller-held gen-stamped identity;
+  registration behavior lands W2b), `Cache.Acquire(d, w)` / `AcquireWait(ctx, d, w)` (cancel
+  invalidates d), heldPermit gains a demand (Reset went field-wise: the atomic must not be
+  copied); `counts.stealOutUpTo` + `deposit` + `depositOccupy`; multi-source gather in
+  acquireInto (hoard-retaining miss = cache-don't-return rollback; Resource arm all-or-nothing
+  at the shortfall until step 3's TryAcquireUpTo); searchList gains `exclude` (gatherer never
+  steals from itself). Model: weighted units (w ∈ 1..cap+1), per-unit demands, weight-aware
+  blocked-legitimacy oracle (blocked ⟹ Σ borrowable anywhere + resource-free < w), 10k checks;
+  new unit tests (fragment assembly, hoard retention incl. the stranded-free-permit
+  all-or-nothing subtlety, deposit/partial-steal); weighted concurrent -race stress in an
+  always-satisfiable mix ONLY (over-subscribed weighted fairness doesn't exist until the W2b
+  barrier — add that stress WITH the barrier). Gate: vet/lint/pre-commit/full -short/permits
+  -race/rapid 10k/**40×40 TestBySimulation -race clean**.
+  **LIVENESS LESSON (cost one hang, 1/25 in the first batch): a completing transfer must never
+  transit a stealable state.** First cut deposited a steal borrowable-then-occupied (two CASs);
+  the old stealOut→checkout pair kept the permit HIDDEN mid-transfer. Exposed, two w=1 acquirers
+  can bounce one permit between caches forever without parking — under the sim's virtual clock
+  that's a hang, not just unfairness. Fix: `depositOccupy(n, w)` — deposit + occupy-if-covering
+  in ONE CAS; partial (non-completing) takes stay borrowable BY DESIGN (Decision 1
+  contestability, not a window). Generalize the rule to W2b/W2c: any transfer that completes a
+  demand must land occupied atomically.
+- **CP-W2b NEXT (demand FIFO + sticky-head barrier), design notes from the W2a pass**:
+  (1) Pool gains a mutex-guarded FIFO of registered entries {d, captured gen, bodyCache, w} +
+  `barrier atomic.Pointer[Cache]` holding the HEAD'S BODY CACHE — the one-load unarmed check AND
+  the exemption anchor (rule (b): exempt iff acquirer's parent chain passes through it).
+  (2) Registration in the w≥2 Acquire slow path: create the body cache (`c.NewChild()`, settled
+  (a)) at registration; idempotent re-presentation by (d, gen); Permit backs from the body
+  cache. Streampool meta-redirect (sub-waves parenting under C_B^L) has no production caller
+  until step 4 — permits-level only for now.
+  (3) The head's gather runs on ITS CALLER's goroutine: succession wakes the pool's waiters; the
+  promoted caller's retry finds itself head and gathers. Gathering is head-only; non-head
+  registered demands fail fast (postpone/park).
+  (4) **WAKE-FORWARD CONSERVATION (found in the W2a pass — REQUIRED for W2b correctness):**
+  `permits.AcquireWait` currently DISCARDS the rdvq Notification from a completed Wait (`_, err
+  :=`) — today benign (a failed retry means somebody took the permit and will release+wake
+  again), but under an armed barrier the freed permit is taken by NOBODY (gated), so a gated
+  waiter consuming the wake and re-parking without Forward LOSES the wake and wedges the head.
+  AcquireWait must adopt the m.Received→Forward discipline (see streampool blockAcquire /
+  reclaim). The spec's "cheap fail-and-re-park" for non-head wakes is only correct WITH
+  forwarding.
+  (5) Model targets: barrier-pass liveness induction under adversarial nesting, FIFO
+  no-starvation, weight-1 progress across epochs, head invalidation mid-gather (hoard
+  disposition + successor promotion), identity ABA (stale head ref to recycled demand),
+  blocked-legitimacy predicate scoped to unarmed (armed non-head blocking is legitimate);
+  now-possible over-subscribed weighted -race stress.
+  Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
+  meta-redirect wiring) follow, each separable.
 
 **►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,

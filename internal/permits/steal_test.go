@@ -15,8 +15,9 @@ import (
 func makeIdle(tp *testPool, n int) *Cache {
 	c := tp.NewCache()
 	pms := make([]Permit, n)
+	var d Demand
 	for i := range pms {
-		pm, ok := c.Acquire(1)
+		pm, ok := c.Acquire(&d, 1)
 		require.True(tp.tb, ok)
 		pms[i] = pm
 	}
@@ -41,16 +42,16 @@ func TestStealCampsOnFrontVictim(t *testing.T) {
 	_ = makeIdle(tp, 1)
 	require.Equal(t, 5, tp.totalHeld())
 
-	// Each search returns the same front victim; draining it (stealOut, which does not
-	// touch) leaves it at the front while it stays borrowable, so it is re-picked.
+	// Each search returns the same front victim; draining it (stealOutUpTo, which does
+	// not touch) leaves it at the front while it stays borrowable, so it is re-picked.
 	for range 3 {
-		v := searchList(&tp.roots, 1) // ref-pinned; release after
+		v := searchList(&tp.roots, 1, nil) // ref-pinned; release after
 		require.Same(t, fat, v, "the steal camps on the coldest front victim")
-		require.True(t, v.counts.stealOut(1))
+		require.Equal(t, uint64(1), v.counts.stealOutUpTo(1))
 		v.ReleaseRef()
 	}
 	// Exhausted now (held 0): the search abandons it for the next source.
-	v := searchList(&tp.roots, 1)
+	v := searchList(&tp.roots, 1, nil)
 	require.NotSame(t, fat, v, "an exhausted victim is skipped")
 	require.NotNil(t, v)
 	v.ReleaseRef()
@@ -68,14 +69,14 @@ func TestTouchRedirectsSteal(t *testing.T) {
 	x := makeIdle(tp, 1) // roots front-to-back: [x, y]
 	y := makeIdle(tp, 1)
 
-	v := searchList(&tp.roots, 1) // ref-pinned; release after
+	v := searchList(&tp.roots, 1, nil) // ref-pinned; release after
 	require.Same(t, x, v, "x is the coldest (front) victim")
 	v.ReleaseRef()
 
 	x.touch() // x became active → moves to the back
 
 	require.Equal(t, []*Cache{y, x}, listSlice(&tp.roots), "touch moved x to the back")
-	v = searchList(&tp.roots, 1)
+	v = searchList(&tp.roots, 1, nil)
 	require.Same(t, y, v, "the steal now prefers y, the coldest")
 	v.ReleaseRef()
 }
@@ -92,14 +93,15 @@ func TestAcquireUpWalkTouchesUnsatisfiedAncestors(t *testing.T) {
 	require.Equal(t, []*Cache{r0, r1}, listSlice(&tp.roots))
 
 	// r0 runs a body and stays running (held=1, inUse=1 → no idle to lend).
-	p0, ok := r0.Acquire(1)
+	var d0, dc Demand
+	p0, ok := r0.Acquire(&d0, 1)
 	require.True(t, ok)
 
 	// A child of r0 acquires: step-1 (own) misses (held 0), step-2 at r0 misses
 	// (inUse==held), so the up-walk passes r0 unsatisfied → r0.touch() moves it to the
 	// back of roots. (The acquire then checks out the Resource's last permit.)
 	child := r0.NewChild()
-	pc, ok := child.Acquire(1)
+	pc, ok := child.Acquire(&dc, 1)
 	require.True(t, ok)
 
 	require.Equal(t, []*Cache{r1, r0}, listSlice(&tp.roots),

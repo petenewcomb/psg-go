@@ -4,9 +4,11 @@
 package permits
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +25,8 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	root := tp.NewCache()
-	rp, _ := root.Acquire(1) // root runs, then parks → its base (held=1) is borrowable
+	var dr Demand
+	rp, _ := root.Acquire(&dr, 1) // root runs, then parks → its base (held=1) is borrowable
 	rp.Release()
 
 	kids := make([]*Cache, children)
@@ -37,8 +40,9 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 		wg.Add(1)
 		go func(c *Cache) {
 			defer wg.Done()
+			var d Demand
 			for range iters {
-				if pm, ok := c.Acquire(1); ok {
+				if pm, ok := c.Acquire(&d, 1); ok {
 					if h, u := pm.backing.counts.load(); u > h {
 						invViolated.Store(true)
 					}
@@ -72,7 +76,8 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	root := tp.NewCache()
-	rp, _ := root.Acquire(1)
+	var dr Demand
+	rp, _ := root.Acquire(&dr, 1)
 	rp.Release()
 	fixed := make([]*Cache, 4)
 	for i := range fixed {
@@ -86,8 +91,9 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		wg.Add(1)
 		go func(c *Cache) {
 			defer wg.Done()
+			var d Demand
 			for range 10000 {
-				if pm, ok := c.Acquire(1); ok {
+				if pm, ok := c.Acquire(&d, 1); ok {
 					pm.Release()
 				}
 			}
@@ -99,9 +105,10 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var d Demand
 			for range 4000 {
 				sub := tp.newChild(root)
-				if pm, ok := sub.Acquire(1); ok {
+				if pm, ok := sub.Acquire(&d, 1); ok {
 					pm.Release()
 				}
 				sub.ReleaseRef() // drains the ephemeral sub-wave (destroy)
@@ -117,4 +124,45 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 	}
 	require.True(t, root.ReleaseRef())
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked after churn")
+}
+
+// Weighted gathers racing each other and weight-1 traffic, in a configuration where
+// every demand is always satisfiable (Σ peak concurrent weight ≤ capacity), so the
+// pre-barrier fairness gaps cannot starve anyone: this exercises the gather's
+// deposit / stealOutUpTo / occupy CAS interleavings under -race without asserting a
+// fairness the design doesn't have yet. Over-subscribed weighted contention — where
+// freelance gatherers can legitimately starve or contest each other's hoards — gets
+// its liveness stress only once head-only gathering lands with the demand-FIFO
+// barrier (weighted-acquisition.md, step-2 barrier checkpoint).
+func TestConcurrentWeightedGatherSatisfiable(t *testing.T) {
+	const capacity, workers, iters = 8, 4, 3000
+	tp := newTestPool(capacity) // weights 1,2,1,2 → peak demand 6 ≤ 8
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var failed atomic.Int64
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			c := tp.NewCache()
+			defer c.ReleaseRef()
+			var d Demand
+			for range iters {
+				pm, err := c.AcquireWait(ctx, &d, w)
+				if err != nil {
+					failed.Add(1)
+					return
+				}
+				pm.Release()
+			}
+		}(1 + i%2)
+	}
+	wg.Wait()
+
+	require.Equal(t, int64(0), failed.Load(), "an always-satisfiable weighted mix must never wedge")
+	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
+	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 }

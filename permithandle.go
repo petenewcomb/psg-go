@@ -31,6 +31,13 @@ import (
 type heldPermit struct {
 	ownCache *permits.Cache
 	permit   permits.Permit
+
+	// demand is the caller-held demand identity this handle presents to every
+	// Acquire (weighted-acquisition.md Decision 4): the postpone/retry cycle
+	// re-presents the SAME identity, deduping to one FIFO entry once registration
+	// lands. It persists across handle recycling — Reset retires the old episode's
+	// identity by bumping its generation rather than reallocating.
+	demand permits.Demand
 	// releaseFn is the handle's own release method value, bound once and reused as a
 	// task's per-completion callback (see Wave.newTaskWork). Storing the bound method
 	// value lazily here — and preserving it across Reset — keeps a limited dispatch from
@@ -57,7 +64,7 @@ func (h *heldPermit) acquire() bool {
 	if h.permit.Held() {
 		return true
 	}
-	pm, ok := h.ownCache.Acquire(1)
+	pm, ok := h.ownCache.Acquire(&h.demand, 1)
 	if ok {
 		h.permit = pm
 	}
@@ -207,11 +214,18 @@ func (h *heldPermit) release() {
 }
 
 // Reset implements omnipool.Resetter for the handle pool. A recycled handle must hold
-// no permit (release ran) and no cache reference. The bound releaseFn is preserved —
-// it captures only the (stable) pooled pointer, so it stays valid across reuse and need
-// not be re-bound (re-allocated) each cycle.
+// no permit (release ran) and no cache reference. The bound releaseFn/confirmFn are
+// preserved — they capture only the (stable) pooled pointer, so they stay valid across
+// reuse and need not be re-bound (re-allocated) each cycle. The demand persists too:
+// Invalidate retires the episode's identity (any reference a FIFO still holds goes
+// stale by generation), and the same storage serves the next dispatch. Field-wise
+// rather than a struct literal because the demand's atomic must not be copied over.
 func (h *heldPermit) Reset() {
-	*h = heldPermit{releaseFn: h.releaseFn, confirmFn: h.confirmFn}
+	h.demand.Invalidate()
+	h.ownCache = nil
+	h.permit = permits.Permit{}
+	h.blockingFn = nil
+	h.blockingCalled = false
 }
 
 // confirm is blockAcquire's block-confirm: abort the wait if the permit is now held,

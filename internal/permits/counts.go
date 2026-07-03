@@ -9,9 +9,9 @@ import "github.com/petenewcomb/atomic128-go"
 // joint invariant 0 ≤ inUse ≤ held is preserved by every transition as one atomic
 // step — a CAS on inUse alone could not check held. Both halves are uint64 amounts
 // (not 32-bit unit counts), so a weighted Resource (e.g. a memory limiter above
-// 4 GiB) is representable; the transitions take the weight w as a parameter (all
-// callers pass 1 until the weighted gather/barrier lands — see
-// docs/decisions/weighted-acquisition.md, sequencing step 1).
+// 4 GiB) is representable; the transitions take the weight w as a parameter, and the
+// multi-source gather assembles weights the fast path cannot cover through
+// deposit/stealOutUpTo (docs/decisions/weighted-acquisition.md, Decision 1).
 //
 // It reuses atomic128-go — the same primitive nbcq uses — but directly, with no
 // atomic.Pointer GC-shadow: both halves are scalars, not pointers, so nothing here
@@ -77,6 +77,44 @@ func (c *counts) checkout(w uint64) {
 	}
 }
 
+// deposit adds w borrowable permits to held without occupying them (held += w) — the
+// gather's transfer-in. Capacity stolen from a victim (stealOutUpTo) or granted by
+// the Resource lands here as hoard, borrowable by anyone, until the gatherer's
+// occupying acquireLocal covers its full weight (weighted-acquisition.md Decision 1:
+// a partial gather is not hold-and-wait precisely because the hoard stays in held).
+func (c *counts) deposit(w uint64) {
+	for {
+		p := atomic128.LoadUint128(&c.w)
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{p[0] + w, p[1]}) {
+			return
+		}
+	}
+}
+
+// depositOccupy adds n gathered permits to held and, in the SAME atomic step,
+// occupies the full weight w if the deposit makes it coverable (held+n ≥ inUse+w),
+// reporting whether it occupied. The single CAS is load-bearing for liveness, not
+// just economy: a take that completes the weight must never sit borrowable in a
+// window between deposit and occupy, or a racing acquirer can lift it and two
+// weight-1 acquirers can bounce one permit between their caches forever (the old
+// stealOut→checkout pair kept the permit hidden mid-transfer; this preserves that
+// no-exposure property exactly when the gather is completing). A take that does NOT
+// complete the weight deposits borrowable-only — the partial hoard's contestability
+// is Decision 1's design, not a window.
+func (c *counts) depositOccupy(n, w uint64) bool {
+	for {
+		p := atomic128.LoadUint128(&c.w)
+		held, inUse := p[0]+n, p[1]
+		if held >= inUse+w {
+			if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + w}) {
+				return true
+			}
+		} else if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse}) {
+			return false
+		}
+	}
+}
+
 // release lowers inUse by w — a body completed or parked. The permits stay in held
 // (cache-don't-return), now borrowable. Reports whether the release raised borrowable
 // from zero (held > inUse crossing), i.e. whether a waiter should be woken.
@@ -95,20 +133,23 @@ func (c *counts) release(w uint64) (wokeBorrowable bool) {
 	}
 }
 
-// stealOut removes w borrowable permits from this cache (held -= w, gated
-// inUse+w ≤ held) for transfer into another. It reports false when too little is
-// borrowable now — a concurrent lock-free acquire may have consumed the idle permits
-// since the steal walk observed them, so the caller must revalidate by this CAS and,
-// on false, look elsewhere.
-func (c *counts) stealOut(w uint64) bool {
+// stealOutUpTo removes up to w borrowable permits from this cache (held -= n,
+// n = min(borrowable, w)) for transfer into another, returning n — still a single
+// CAS. The partial take is what lets a weighted gather harvest fragmented capacity
+// victim by victim instead of demanding one source that covers the whole weight. A
+// zero return means nothing was borrowable at the take — a concurrent lock-free
+// acquire may have consumed the idle permits since the steal walk observed them, so
+// the caller must treat the walk's candidate as a hint and, on zero, look elsewhere.
+func (c *counts) stealOutUpTo(w uint64) uint64 {
 	for {
 		p := atomic128.LoadUint128(&c.w)
 		held, inUse := p[0], p[1]
-		if inUse+w > held {
-			return false
+		n := min(held-inUse, w) // held ≥ inUse is the standing invariant
+		if n == 0 {
+			return 0
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held - w, inUse}) {
-			return true
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held - n, inUse}) {
+			return n
 		}
 	}
 }

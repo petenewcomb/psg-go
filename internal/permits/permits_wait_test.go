@@ -34,8 +34,9 @@ func TestAcquireWaitLiveness(t *testing.T) {
 			defer wg.Done()
 			c := tp.NewCache()
 			defer c.ReleaseRef()
+			var d Demand
 			for range iters {
-				pm, err := c.AcquireWait(ctx, 1)
+				pm, err := c.AcquireWait(ctx, &d, 1)
 				if err != nil {
 					failed.Add(1)
 					return
@@ -57,7 +58,8 @@ func TestAcquireWaitLiveness(t *testing.T) {
 func TestAcquireWaitCancel(t *testing.T) {
 	tp := newTestPool(1)
 	hog := tp.NewCache()
-	hp, _ := hog.Acquire(1) // saturate the one permit and keep it in use
+	var dh, dw Demand
+	hp, _ := hog.Acquire(&dh, 1) // saturate the one permit and keep it in use
 	defer hp.Release()
 
 	waiter := tp.NewCache()
@@ -65,7 +67,7 @@ func TestAcquireWaitCancel(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := waiter.AcquireWait(ctx, 1)
+		_, err := waiter.AcquireWait(ctx, &dw, 1)
 		errCh <- err
 	}()
 

@@ -26,7 +26,7 @@ func TestCountsTransitions(t *testing.T) {
 	require.Equal(t, [2]uint64{1, 1}, [2]uint64{h, u})
 
 	require.False(t, c.acquireLocal(1), "no borrowable while inUse == held")
-	require.False(t, c.stealOut(1), "no borrowable to steal while inUse == held")
+	require.Equal(t, uint64(0), c.stealOutUpTo(1), "no borrowable to steal while inUse == held")
 
 	require.True(t, c.release(1), "release of the last in-use permit raises borrowable 0→1")
 	h, u = c.load()
@@ -49,6 +49,22 @@ func TestCountsReleaseWakeSignal(t *testing.T) {
 	c.checkout(1) // 2,2
 	require.True(t, c.release(1), "2,2 → 2,1 crosses borrowable 0→1")
 	require.False(t, c.release(1), "2,1 → 2,0 was already borrowable, no new crossing")
+}
+
+// deposit adds borrowable without occupying; stealOutUpTo takes min(borrowable, w) —
+// the partial-take pair the multi-source gather is built from.
+func TestCountsDepositAndPartialSteal(t *testing.T) {
+	var c counts
+	c.deposit(4) // held=4, inUse=0: 4 borrowable, none occupied
+	h, u := c.load()
+	require.Equal(t, [2]uint64{4, 0}, [2]uint64{h, u})
+
+	c.checkout(1) // an occupier arrives: held=5, inUse=1 — borrowable 4
+	require.Equal(t, uint64(3), c.stealOutUpTo(3), "full take while enough is borrowable")
+	require.Equal(t, uint64(1), c.stealOutUpTo(3), "partial take: only the remainder")
+	require.Equal(t, uint64(0), c.stealOutUpTo(3), "nothing borrowable → zero, not a spin")
+	h, u = c.load()
+	require.Equal(t, [2]uint64{1, 1}, [2]uint64{h, u}, "the occupied permit was never stealable")
 }
 
 // Concurrent acquireLocal/release on shared borrowable capacity stays invariant
@@ -86,8 +102,29 @@ func TestCountsConcurrentAcquireRelease(t *testing.T) {
 	assert.Equal(t, uint64(0), u, "every acquire was released")
 }
 
-// Concurrent stealOut hands out each borrowable permit at most once: with more
-// stealers than permits, exactly `held` succeed and the cache drains to held=0.
+// depositOccupy is atomic take-and-occupy when the deposit completes the weight —
+// the no-exposure guarantee the gather's completing tranche needs (a completing
+// permit must never transit through a stealable state) — and a plain borrowable
+// deposit otherwise.
+func TestCountsDepositOccupy(t *testing.T) {
+	var c counts
+	require.False(t, c.depositOccupy(1, 2), "1 toward 2: deposits borrowable only")
+	h, u := c.load()
+	require.Equal(t, [2]uint64{1, 0}, [2]uint64{h, u})
+
+	require.True(t, c.depositOccupy(1, 2), "the completing tranche occupies in the same atomic step")
+	h, u = c.load()
+	require.Equal(t, [2]uint64{2, 2}, [2]uint64{h, u})
+
+	c.release(2)
+	require.True(t, c.depositOccupy(1, 3), "own borrowable residue counts toward coverage")
+	h, u = c.load()
+	require.Equal(t, [2]uint64{3, 3}, [2]uint64{h, u})
+}
+
+// Concurrent stealOutUpTo hands out each borrowable permit at most once: with more
+// stealers than permits, exactly `held` single-permit takes succeed and the cache
+// drains to held=0.
 func TestCountsConcurrentStealOnce(t *testing.T) {
 	var c counts
 	const capacity = 8
@@ -106,9 +143,7 @@ func TestCountsConcurrentStealOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if c.stealOut(1) {
-				won.Add(1)
-			}
+			won.Add(int64(c.stealOutUpTo(1))) //nolint:gosec // G115: 0 or 1
 		}()
 	}
 	wg.Wait()

@@ -6,7 +6,24 @@ This document contains working notes and context for development on the `combine
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,
 searchList(l,w) [borrowable≥w — no w>1 spin], acquireInto single-source all-or-nothing at w; all
 callers pass 1. Gate: build/vet/-short suite/permits -race incl rapid/25×25 TestBySimulation -race.
-Steps 2-4 (gather+barrier, resource capabilities, surface) NOT implemented.**
+Steps 2-4 (gather+barrier, resource capabilities, surface) NOT implemented.
+**OVERDRAFT designed + recorded (PN, 2026-07-03, weighted-acquisition.md §Overdraft):** armed +
+zero-inUse = free exact infeasibility proof (retires capacity-visibility); ancestor-exempt trigger
+(strangers block; ancestors resume causally after head); OverdraftResource{Overdraft(n) (granted,
+err)} — policy only, resource-authored refuse errors, default-GRANT for non-implementing holdables,
+consumables must implement (no pool-side proof); representation = POOL-LEVEL ALLOWANCE, d never in
+held/checkedOut (conservation untouched; inUse>held cache-locally while granted; occupy claims /
+release returns excess via CAS-local delta of max(inUse−held,0)); HEAD STANDS until completion
+(seriality across park gaps + arrival blocking; allowance necessarily home at completion);
+descendant shortfall ⇒ EPISODE EXTENSION (same call, added to aggregate, clears at ORIGINAL head
+completion; refuse ⇒ unit error, no wedge); consumable counterpart = negative bucket (resource-
+internal) + single replaceable notify-target (exact-timer wake at n, kills O(w) per-token chatter).
+KNOWN FLAKE (pre-existing by construction, surfaced during step-1 commit): psgwf
+Example_clientTimeout — real-clock golden (10-20ms time.Sleep margins) where a worker's "task
+completed" print races main's "skimming results" under machine load; ~1/15 under parallel
+full-suite runs, 0/200 standalone. Not a step-1 regression (w=1 arithmetic identical; the flip is
+pure goroutine scheduling). Fix candidates when picked up: wider margins, deterministic
+ordering, or sim-clock drive.**
 `docs/decisions/weighted-acquisition.md` (companion to limiter-resource-classes.md): counts layout
 is weight-ready, ops are weight-1. Core: (1) gather-into-own-`held` + atomic occupy — a partial
 gather is NOT hold-and-wait (hoard stays borrowable ⇒ "parked ⟹ borrowable" proof intact;

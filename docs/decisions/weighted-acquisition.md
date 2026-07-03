@@ -173,11 +173,117 @@ idempotent).
   of the needed 3 — untenable at byte granularity. Add a capability interface
   (`TryAcquireUpTo(n int) int`), discovered by type assertion like
   `HoldableResource`; resources without it fall back to the retry loop.
-- **Infeasibility is enforced *before* arming** (an infeasible head is a permanent
-  world-stop): the runtime rule — distinct per-unit error for a weight that can
-  never fit — applies at demand registration, which requires capacity visibility
-  from the resource — a small capability question to resolve with
-  `TryAcquireUpTo`.
+- **Infeasibility handling**: superseded by the overdraft design (see "Overdraft"
+  below) — detection is the armed + zero-in-use proof, needing no capacity
+  visibility from the resource; the outcome is overdraft, wait-on-promise, or the
+  distinct per-unit error.
+
+## Overdraft: infeasible demand under the armed barrier (PN, 2026-07-03)
+
+**Detection is free and exact.** Barrier armed + zero `inUse` anywhere + head's
+gather exhausted + `TryAcquire(remaining)` refused = nothing inside the system can
+ever change the answer — dynamically-proven infeasibility at current capacity. No
+pool-level `inUse` aggregate and no resource capacity-visibility capability needed
+(this retires the registration-time check sketched in the struct mapping): while
+armed, occupies are blocked and only releases move the world, so the head performs a
+cold forest walk (searchList-shaped, any `inUse > 0`?) after a failed gather.
+
+**Ancestor-exempt trigger (PN).** Overdraft is evaluated only when every suspended
+holder is on the head's own driver chain — their resume is causally *after* the
+head's wave drains, so they can never observe the over-commitment. A *stranger* (a
+suspended holder off that chain) blocks overdraft: its resume races the
+over-commitment and would stack reacquisition pressure on it. (Strict total
+quiescence was rejected: the head's ancestors are suspended *by construction* under
+nesting, so nested demands could never overdraft.)
+
+**The capability** — policy only, no accounting duties:
+
+```go
+type OverdraftResource interface {
+	Resource
+	// Called when the pool has exhausted its own means for the head demand.
+	//   granted=true           — overdraft granted
+	//   granted=false, err=nil — a promise: normal operation can eventually satisfy n
+	//   err != nil             — refuse: the unit fails with err (the resource's own
+	//                            reason — no sentinel required; PN)
+	Overdraft(n int) (granted bool, err error)
+}
+```
+
+Type-asserted at `NewPool`. Panic inside the call is the resource's prerogative for
+must-never-happen cases. Refusal errors propagate on existing channels (blocking
+top-level → `Submit`'s error; postponed manager → error sink → `SkimAll`; mid-body →
+`AcquireWait`'s error) and invalidate the demand, passing the barrier. "Never" as
+the third state's name was rejected: the assertion is present-tense policy ("not at
+any capacity I'm currently willing to reach"), not prophecy — a resubmission after a
+capacity raise may succeed. **Non-implementing holdables default to GRANT** (PN): at
+the proven-infeasible point the unit is satisfiable only by overdraft, and a briefly
+exceeded concurrency cap beats a killed unit; resources whose limits are hard safety
+walls (memory) implement the capability to refuse. Weighted-usable *consumables*
+effectively must implement it — the pool has no proof for them (time is the helper;
+only the resource knows whether w exceeds what it can ever accrue), so a
+non-implementer facing w > burst would stall the armed pool. A constraint on
+framework-authored resources, not a user trap.
+
+**Representation (PN): a pool-level allowance; overdraft never enters `held`.** The
+conservation law `Σ held == checkedOut` survives untouched — the granted amount `d`
+enters neither `held` nor `checkedOut`. It is a parallel allowance for
+`inUse`-excess: `inUse > held` is permitted cache-locally only while a grant stands,
+governed by `Σ max(inUse − held, 0) + allowance-remaining = d`. An occupy that
+cannot fit under `held` claims excess from the allowance and pushes `inUse` past
+`held`; a release returns excess to the allowance — the returned amount is the delta
+of `max(inUse − held, 0)` across the decrement, computable inside the existing CAS
+loop, so no per-occupy tagging. Park/lend needs zero special cases: the parking
+head's excess flows back to the allowance; descendants occupying in place claim from
+it ("available to add to Caches' `inUse`" — PN). Unstealable and uncacheable by
+*structure*: steals move `held`, and `d` is never in `held`.
+
+**The head stands until completion (PN).** The head remains in place — enqueued,
+barrier armed — until it fully releases at completion. This is the seriality
+guarantee across park gaps (while the head is parked its subtree can transiently hit
+zero-in-use; without the standing head the next FIFO demand could pass the proof and
+stack an independent overdraft) and it keeps new arrivals from accreting demand into
+the over-committed window. At completion the subtree's `inUse` has drained, so the
+allowance is necessarily fully home: zero the counter, dequeue, pass the barrier.
+
+**Episode extension (PN).** A descendant demand that exceeds lent capacity plus
+remaining allowance may request an *additional* overdraft — the same capability
+call, for the shortfall, evaluations serialized within the episode. Granted: the
+amount is added to the outstanding aggregate and remains until the *original* head
+completes — one episode, one owner, monotone growth, a single clear point. Refused:
+that unit takes the distinct error path (its sub-wave drains with the error, the
+head resumes and completes — no wedge). Wait: it parks on the promise.
+
+**Consumable counterpart.** Holdable overdraft is pool-side as above; consumable
+overdraft is resource-internal — the bucket goes *negative* (the literal meaning of
+the word: borrowing against future refill), repayment is automatic via the refill
+stream, and the negative bucket refuses all comers until repaid, providing the
+scoping with no pool machinery. Weighted consumable waiting composes with the
+barrier (resource-agnostic, demand-side) with the *gather replaced by the resource's
+internal accrual*; and to kill the O(w) per-token wake chatter of a large head
+against a filling bucket, the pool sets a **single replaceable notify-target** on
+the resource — "wake when n is satisfiable" — set at head-arrival, replaced on head
+change, cleared on disarm (replacement subsumes cancellation). The resource arms one
+exact timer (`(n − level) / rate`) or folds the threshold into its gauge poll, and
+may suppress sub-target notifies while a target stands — they are waste by
+construction, since the barrier blocks everyone they could serve. This makes `Wait`
+operational: the promise arrives with the machinery that fires when it comes true.
+
+Rejected along the way: **force-accounting the overdraft into `held`** (stealable
+the moment the head parks; cache-don't-return makes it reusable after completion —
+never repaid until cache destroy); **an unconditional `Acquire(n)` force-accounting
+primitive on `HoldableResource`** (the resource needn't know — the standing barrier
+does the everyone-else-refused scoping); **per-cache `inUse > held` with a
+`Permit`-carried overdraft and repay-on-any-drop** (park/resume churn: repay +
+re-grant brackets around every drive); **"Never" as the refuse state's name**;
+**strict-quiescence suspend rule**; **error-only descendant rule** (superseded by
+episode extension); **a pool-side give-up timeout** (an arbitrary clock deciding a
+semantic question the resource can answer exactly).
+
+Model-check additions: the episode invariant (`Σ excess + allowance = d`);
+conservation untouched by grants; standing-head seriality across park gaps;
+extension serialization; descendant-refusal unwedging; ancestor-exempt detection
+(stranger present ⇒ no grant).
 
 ## User-facing surface (settled 2026-07-02; sequencing step 4)
 

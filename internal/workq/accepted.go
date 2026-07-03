@@ -385,21 +385,20 @@ func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) 
 }
 
 type controller struct {
-	q                        *Accepted
-	executor                 Executor
-	buffer                   []bufferedWork
-	currentIndex             int
-	currentWasPostponed      bool
-	othersReleased           bool
-	addWorkFn                AddWorkFunc
-	tryAddWorkFn             TryAddWorkFunc
-	onSecure                 func() // released the driver's spawn token before the first body; see ExecuteOne
-	securedFired             bool   // onSecure already fired for this drive
-	notification             Notification
-	workAddedCount           int
-	postponedWorkWasExecuted bool
-	workWasPostponed         bool
-	endOfWorkErr             error
+	q                   *Accepted
+	executor            Executor
+	buffer              []bufferedWork
+	currentIndex        int
+	currentWasPostponed bool
+	othersReleased      bool
+	addWorkFn           AddWorkFunc
+	tryAddWorkFn        TryAddWorkFunc
+	onSecure            func() // released the driver's spawn token before the first body; see ExecuteOne
+	securedFired        bool   // onSecure already fired for this drive
+	notification        Notification
+	workAddedCount      int
+	workWasPostponed    bool
+	endOfWorkErr        error
 
 	scheduledScratch []ScheduledWork // reusable Drain buffer
 
@@ -691,7 +690,11 @@ func (c *controller) starting() {
 	if c.currentWasPostponed {
 		// We have productively used the saved notification: clear it so releaseOthers →
 		// requeueBuffer does not Forward it. This must be done before the call to
-		// releaseOthers.
+		// releaseOthers. A CHAINED wake (announcing multi-consumer capacity, e.g. a
+		// weighted permit release) additionally owes its origin one fresh probe (wake
+		// chain rule 2), so the next satisfiable consumer admits too; ProbeOrigin is a
+		// no-op for ordinary wakes.
+		c.notification.ProbeOrigin()
 		c.notification = Notification{}
 		trace.Logf(context.Background(), traceRegion, "postponed work at index %d started", c.currentIndex)
 	} else {
@@ -800,7 +803,7 @@ func (c *controller) requeueBuffer() {
 	// call) so a listener-style wake re-circulates and a waiter-style one runs its
 	// fallback — total conservation.
 	notification := c.notification
-	if notification.Received() && !c.postponedWorkWasExecuted {
+	if notification.Received() {
 		c.notification = Notification{}
 		notification.Forward()
 	}

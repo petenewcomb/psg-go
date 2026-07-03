@@ -317,29 +317,43 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, bool) {
 // ctx is cancelled. Cancellation invalidates d (the demand is withdrawn, not
 // dropped). The confirm callback re-runs Acquire AFTER registering as a waiter, so a
 // permit freed between the miss and the park is taken immediately rather than lost —
-// and if it succeeds there, that is the one acquisition (no double-take). (The
-// non-blocking Acquire stays the manager's admit path, which postpones on a miss;
-// that postpone hook lands with the manager/executor split.)
+// and if it succeeds there, that is the one acquisition (no double-take).
+//
+// Chain discipline: a success on a CHAINED wake (weighted release / multi-permit
+// drain — capacity that may satisfy more waiters) owes the chain one fresh probe
+// (rule 2); a failed re-acquire after any wake is the chain's terminal probe — the
+// capacity is genuinely gone, so the wake simply drops (rule 3; this is the
+// pre-existing discard, now load-bearing by design). (The non-blocking Acquire stays
+// the manager's admit path, which postpones on a miss; that postpone hook lands with
+// the manager/executor split.)
 func (c *Cache) AcquireWait(ctx context.Context, d *Demand, w int) (Permit, error) {
+	p := c.pool
+	var m rdvq.Notification
 	for {
 		if pm, ok := c.Acquire(d, w); ok {
+			if m.Chained() {
+				p.ChainProbe() // rule 2: pay the chain forward
+			}
 			return pm, nil
 		}
-		p := c.pool
 		var pm Permit
 		var ok bool
-		_, err := p.notify.Wait(ctx, func() bool {
+		var err error
+		m, err = p.notify.Wait(ctx, func() bool {
 			pm, ok = c.Acquire(d, w)
 			return !ok // park only if still no permit
 		})
 		if ok {
+			if m.Chained() {
+				p.ChainProbe() // rule 2, confirm-path success
+			}
 			return pm, nil
 		}
 		if err != nil {
 			d.Invalidate()
 			return Permit{}, err
 		}
-		// Woken by a freed permit; loop and retry.
+		// Woken by a freed permit; loop and retry (a top-of-loop miss is rule 3).
 	}
 }
 
@@ -457,13 +471,15 @@ func (pm Permit) Held() bool {
 // (cache-don't-return), now borrowable — and may satisfy a parked AcquireWait or a
 // postponed manager, so it wakes one consumer. Every release wakes (not just a
 // borrowable 0→ crossing): a multi-held cache freeing its second idle permit is no
-// crossing, yet a second waiter could take it.
+// crossing, yet a second waiter could take it. A WEIGHTED release seeds a chained
+// wake — its w freed permits may satisfy several waiters, and plain wake-one would
+// strand all but the first over borrowable capacity.
 func (pm Permit) Release() {
 	if pm.backing == nil {
 		panic("permits: Release of a zero Permit")
 	}
 	pm.backing.counts.release(pm.weight)
-	pm.backing.pool.wake()
+	pm.backing.pool.wake(pm.weight > 1)
 }
 
 // wake routes one freed permit to a single waiting consumer — a postponed manager
@@ -476,15 +492,28 @@ func (pm Permit) Release() {
 // would never be notified — a borrowable permit idle forever (the residual ~1/120
 // -race TestBySimulation hang). Notify is cheap when both sets are empty, so the
 // uncontended release is unaffected.
-func (p *Pool) wake() {
+//
+// chained marks a wake for capacity that may satisfy MORE than one consumer (a
+// weighted release, a multi-permit drain): each productive consumer then owes the
+// chain one fresh probe (ChainProbe / Notification.ProbeOrigin), so consumers admit
+// one by one until the first miss — the serialized wake chain
+// (limiter-resource-classes.md Decision 3) in place of the broadcast WakeAll this
+// package used to carry, which herded N consumers to satisfy k.
+func (p *Pool) wake(chained bool) {
+	if chained {
+		p.notify.NotifyChained(nil)
+		return
+	}
 	p.notify.Notify(nil)
 }
 
-// WakeAll wakes EVERY waiting consumer so each re-runs its acquire. It is for events
-// that free MULTIPLE permits at once — a destroy returning held to the Resource, or an
-// out-of-band capacity raise (SetMaxConcurrency) — where one wake would under-notify.
-func (p *Pool) WakeAll() {
-	p.notify.NotifyAll()
+// ChainProbe emits one fresh chained wake. It is both the SEED for a pool-external
+// multi-permit capacity event (a SetMaxConcurrency raise announcing unknown headroom)
+// and the LINK a productive consumer of a chained wake owes when its wake was
+// waiter-style (no origin recorded — the streampool gate loops call this on the Pool
+// they already hold; listener-style consumers use Notification.ProbeOrigin instead).
+func (p *Pool) ChainProbe() {
+	p.notify.NotifyChained(nil)
 }
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting
@@ -531,8 +560,10 @@ func (c *Cache) destroy() {
 		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
 		c.pool.resource.Release(int(held))
 		// Returning held permits to the Resource frees that much capacity, which can
-		// satisfy several postponed managers / parked waiters at step 3 — wake them all.
-		c.pool.WakeAll()
+		// satisfy several postponed managers / parked waiters at step 3 — seed the
+		// wake chain (chained iff more than one permit returned; rule 2 walks the
+		// satisfiable consumers from there).
+		c.pool.wake(held > 1)
 	}
 	// Recycle c. Safe now and only now: refs==0 (destroy's precondition) with tryPin
 	// refusing to resurrect, c is unlinked, inUse==0, and no Permit backs it — so no

@@ -58,6 +58,32 @@ func (n *Notifier) Notify(fallback func()) {
 	fallback()
 }
 
+// NotifyChained is [Notifier.Notify] for a wake announcing capacity that may satisfy
+// more than one consumer — a weighted release, a multi-permit drain, a capacity
+// raise. The delivered Notification is chain-marked: a consumer that uses it
+// productively owes exactly one fresh chained probe (the serialized wake chain of
+// limiter-resource-classes.md Decision 3 — success forwards one, the first miss
+// terminates), which walks the satisfiable consumers one by one without either the
+// under-notify of wake-one or the thundering herd of a broadcast.
+//
+//nolint:contextcheck // background context used only for tracing
+func (n *Notifier) NotifyChained(fallback func()) {
+	traceRegion := "rdvq.Notifier.NotifyChained"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion, "Notifier=%p", n)
+
+	if fallback == nil {
+		fallback = noop
+	}
+	if n.Listeners.deliver(Notification{n: n, fallback: fallback, chained: true}) {
+		return
+	}
+	if n.Waiters.deliver(Notification{fallback: fallback, chained: true}) {
+		return
+	}
+	fallback()
+}
+
 // NotifyAll signals all listeners and waiters.
 // This is typically used during shutdown or when conditions change globally.
 //

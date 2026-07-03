@@ -2,9 +2,89 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► NEXT (2026-07-03): weighted-acquisition STEP 2 IN PROGRESS — CP pass SETTLED (PN):
-CP-W2a (multi-source gather, head-less) → CP-W2b (demand FIFO + barrier) → CP-W2c (overdraft),
-each green behind the extended rapid model + permits -race + large sim -race batch.** Spec:
+**►►► NEXT (2026-07-03g): CP-W2b-ii — rebuild the barrier from the stash ON the landed chain.
+CP-W2b-i (pool-internal wake chain) LANDED this commit — gate: vet/lint/-short 11/11,
+permits+workq+rdvq -race, rapid 10k, 40/40 TestBySimulation -race; the weighted-release and
+capacity-raise chain tests are NEGATIVE-CONTROLLED (unchained ⇒ deterministic "only 1 of 3
+admitted"). The W2b barrier work (FIFO+barrier+NotifyAll, 40/40 green pre-chain) is STASHED
+("w2b-barrier-pre-chain", belt copy scratchpad/w2b_barrier_wip.diff). W2b-ii deltas vs the
+stash: permits.go needs a REDESIGN-MERGE (chain edits landed under it); satisfy/deregister
+promotion WakeAlls → the promoted demand's OWN MAILBOX (each registered Demand carries a
+lazily-Init'd rdvq.Notifier; registered demands park there, never on the general set); armed
+release/drain/raise → head's mailbox (barrier becomes atomic.Pointer[Demand]; d.cache read is
+safe via the barrier-publish ordering); DISARM → pool chain seed (NotifyChained — unknown
+multi); AcquireWait picks its park target by registration state; test files + barrier_test.go
+apply from the stash nearly clean; re-add the stashed notes item (6) (W2b implementation
+decisions) which lives only in the diff.**
+
+**WAKE DESIGN SETTLED (PN, 2026-07-03f, after two pushes on my WakeAll band-aids):**
+- **Finding 1 (cost one wedged stress test): waiter-style rdvq Forward is TERMINAL** on the
+  premise "failed retry ⇒ capacity already taken" — TRUE unarmed, FALSE under an armed barrier
+  (capacity sits borrowable but gated; only the head can act). A gated waiter consuming a
+  release wake drops it ⇒ head starves ⇒ wedge (TestConcurrentWeightedOverSubscribed, 6/6
+  workers timed out). My fix #1 (armed release ⇒ NotifyAll) REJECTED: herd per armed release
+  (armed TRANSITIONS are cold; armed RELEASES are not), and broadcast-to-find-a-known-recipient
+  is the band-aid shape.
+- **Finding 2: promotion broadcast unnecessary** — the promoted head is a KNOWN single party.
+  Endpoint: **per-demand mailboxes** (each REGISTERED demand parks on its own notifier; armed
+  release → head's mailbox; promotion → successor's mailbox; registered demands never park on
+  the general pool set). Single-consumer + register-then-confirm ⇒ no lost wakes, no Forward
+  duty, terminal-Forward premise never violated. Missed-wake closure: Release decrements counts
+  BEFORE waking, so an undelivered head wake means the head's in-flight/confirm gather already
+  sees the capacity in counts. [CP-W2b-ii]
+- **Finding 3: disarm = destroy-drain = SetMaxConcurrency-raise = the SAME multi-permit
+  under-notify class** (k waiters satisfiable, wake-one strands k−1 on borrowable capacity),
+  which limiter-resource-classes.md ALREADY sentences to the chain ("No WakeAll anywhere").
+  **NEW BUG (W2a-vintage, latent until step 4): WEIGHTED RELEASE under-notifies** — release(w=3)
+  frees 3, wakes one, two waiters sleep over borrowable permits. So chain rule 2 is WEIGHTED
+  CORRECTNESS, not the deferred "cleanliness" unification.
+- **CP-W2b-i scope — the pool-internal chain, WakeAll deleted from permits**: seed = ONE wake
+  per multi-permit event (destroy-drain held>0, capacity raise; disarm arrives with W2b-ii);
+  consumer discipline becomes THREE-WAY: probe-SUCCEEDED while holding a received wake → emit
+  exactly one fresh probe (rule 2; only wake-triggered successes — a never-parked acquirer is
+  not a chain member); probe-FAILED → stop, no forward (rule 3 — safe unarmed: capacity truly
+  gone); NO-PROBE (stale postpone listener whose work already ran) → Forward as today (renotify
+  conservation — the stale-listener hang fix is PRESERVED, distinct from probe-failure).
+  Pool-internal chain needs NO balance ledger (capacity is counts-visible; register-then-confirm
+  covers undelivered seeds — the ledger is for resource-side invisible accrual, step 3). Probe
+  emission needs no rdvq surgery: waiters (AcquireWait) know their Pool; listener-side works
+  (limiterScatterWork/gateAcquire) know h.pool() — emit via a Pool chain-probe method. Chain
+  must hold across BOTH consumer classes sharing pool.notify (a listener that consumes a chain
+  wake productively and doesn't forward breaks it) ⇒ touches the eee5322 Notification consumer
+  sites (workq controller / streampool) — sequenced FIRST per foundation-first, own sim gate.
+- **W2b-i SITE MAP (code-read findings, 2026-07-03f):** the wake carries a CHAINED BIT
+  ("announces possibly more than one consumer's worth" — release(w>1), destroy-drain(held>1),
+  capacity raise, later disarm; plain release(1) unflagged so the w=1 hot path gains zero probe
+  churn; a bare bit suffices — probes re-propagate it and the chain dies at the first failed
+  probe, ≤1 dead wake per chain). RULE-2 HOOKS: (a) workq controller.starting() — the exact
+  existing "productively used the saved notification" seam (it clears c.notification there);
+  probe BEFORE clearing when chained. (b) permits.AcquireWait / streampool blockAcquire /
+  heldPermit.reclaim — loop-exit success with m.Received() && chained → probe at the pool the
+  site already knows. RULE 3: accepted.go:803's Forward-on-unused STAYS (the controller cannot
+  tell a permit-probe failure from a governor/queue-space postpone — forwarding is conservative,
+  never loses a wake, terminates at a waiter-style terminal); the strict stop applies only at
+  permits-side loops where the probe is unambiguously the pool acquire — and W2a's AcquireWait
+  (discard-on-failure) is ALREADY rule-3-compliant. postponedWorkWasExecuted (accepted.go:400)
+  appears write-never — vestigial, check+strip in passing. PLUMBING CONFIRMED (rdvq read):
+  Waiters.Deliver passes the Notification VALUE through ("preserving re-circulation identity")
+  ⇒ the chained bit rides the listener→queue re-injection for free, and the controller's
+  notification keeps n = the PERMITS notifier (Notifier.Notify builds {n: n} for listeners) ⇒
+  ProbeOrigin at the controller emits at the right pool. IMPLEMENTATION SHAPE: rdvq —
+  Notification gains `chained bool` + `Chained()` + `ProbeOrigin()` (n.NotifyChained(nil) when
+  n set; no-op waiter-style — waiter sites probe via the pool they know) + `Notifier.
+  NotifyChained(fallback)` (sets the bit in both delivery styles; Notify unchanged). permits —
+  wake(chained bool); Release passes weight>1; destroy drain seeds chained iff held>1;
+  Pool.WakeAll DELETED, replaced by exported chain-seed for SetMaxConcurrency's
+  capacityChangedFn (always chained — cold) + exported Pool probe for streampool sites.
+  Consumers — AcquireWait/blockAcquire/reclaim: on success-with-m.Chained() → pool probe;
+  controller.starting() postponed case: if c.notification.Chained() → ProbeOrigin() BEFORE the
+  clear. Tests — weighted-release under-notify regression (release(w=3) must admit 3 parked
+  w=1 AcquireWaiters), destroy-drain multi-wake, chain termination; model untouched
+  (sequential).
+- Gate discipline per CP unchanged (vet/lint/-short/permits -race/rapid 10k/40× sim -race).
+
+**Step-2 CP sequence (revised): CP-W2a LANDED 698bac4 → CP-W2b-i (wake chain) LANDED this
+commit → CP-W2b-ii (FIFO+barrier+mailboxes, from stash) → CP-W2c (overdraft).** Spec:
 `docs/decisions/weighted-acquisition.md` + `limiter-resource-classes.md`. Step 1 landed 9e03d83.
 **API-FIRST (PN, in memory too): unreleased code — land end-state APIs first (behavior may lag),
 NO compat layers, update call sites up front; upgrade tests as behaviors come online**

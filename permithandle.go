@@ -122,7 +122,12 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 			}
 		}
 	}
-	// Acquired: the last wake (if any) was used productively — drop it (do not Forward).
+	// Acquired: the last wake (if any) was used productively — drop it (do not
+	// Forward). A CHAINED wake additionally owes the chain one probe (rule 2): its
+	// multi-permit capacity may satisfy more waiters behind us.
+	if m.Chained() {
+		h.pool().ChainProbe()
+	}
 }
 
 // pool returns the Pool this handle draws from — the manager-listener target for the
@@ -199,7 +204,12 @@ func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPerm
 			return err
 		}
 	}
-	// Acquired: the last wake (if any) was used productively — drop it (do not Forward).
+	// Acquired: the last wake (if any) was used productively — drop it (do not
+	// Forward). A CHAINED wake (weighted release / multi-permit drain) additionally
+	// owes the chain one probe: its capacity may satisfy more waiters behind us.
+	if m.Chained() {
+		h.pool().ChainProbe()
+	}
 	return nil
 }
 

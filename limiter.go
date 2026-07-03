@@ -75,9 +75,11 @@ func NewSemaphore(n int) Limiter {
 	r.maxConcurrency.Store(int32(n))
 	p := permits.NewPool(r)
 	// A capacity raise (SetMaxConcurrency) frees slots at the Resource without any
-	// cache returning a permit, so wake the Pool's parked managers/executors to
-	// re-check against the new ceiling.
-	r.capacityChangedFn = p.WakeAll
+	// cache returning a permit — a multi-permit event of unknown usable size, so it
+	// seeds the Pool's wake chain: one chained wake, each productive consumer
+	// forwarding one probe, the first miss terminating (no broadcast herd, no
+	// wake-one under-notify).
+	r.capacityChangedFn = p.ChainProbe
 	return Limiter{pool: p}
 }
 
@@ -88,7 +90,7 @@ func NewSemaphore(n int) Limiter {
 type semaphoreResource struct {
 	maxConcurrency    atomic.Int32
 	inFlight          wavestate.InFlightCounter
-	capacityChangedFn func() // Pool.WakeAll, called when the ceiling is raised
+	capacityChangedFn func() // Pool.ChainProbe, called when the ceiling is raised
 }
 
 // TryAcquire and Release implement [permits.Resource]. n is the weight (always 1 in this

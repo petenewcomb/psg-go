@@ -106,3 +106,54 @@ func TestSetMaxConcurrency_PanicsOnUnlimitedLimiter(t *testing.T) {
 	require.Panics(t, func() { SetMaxConcurrency(Limiter{}, 1) },
 		"SetMaxConcurrency on the zero (unlimited) Limiter must panic")
 }
+
+// A capacity raise frees MULTIPLE slots at once with nothing stealable anywhere —
+// the multi-permit event class. The raise seeds the wake chain (one chained wake;
+// each admitted waiter probes the next), so every newly satisfiable parked waiter
+// admits; the replaced broadcast is gone and wake-one alone would strand all but
+// the first. Waiters hold their permits until everyone is in, so the raise is the
+// only wake source.
+func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
+	chk := require.New(t)
+	const raised = 3
+	l := NewSemaphore(0) // start fully blocked; nothing checked out, nothing stealable
+	c := l.pool.NewCache()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	admitted := make(chan permits.Permit, raised)
+	errs := make(chan error, raised)
+	for range raised {
+		go func() {
+			var d permits.Demand
+			defer d.Invalidate()
+			p, err := c.AcquireWait(ctx, &d, 1)
+			if err != nil {
+				errs <- err
+				return
+			}
+			admitted <- p
+		}()
+	}
+
+	// Let the waiters park, then open all three slots in one raise.
+	time.Sleep(50 * time.Millisecond)
+	SetMaxConcurrency(l, raised)
+
+	held := make([]permits.Permit, 0, raised)
+	for i := range raised {
+		select {
+		case p := <-admitted:
+			held = append(held, p)
+		case err := <-errs:
+			chk.NoError(err, "waiter %d failed instead of admitting", i)
+		case <-time.After(20 * time.Second):
+			chk.FailNowf("chain under-notified", "only %d of %d waiters admitted after the raise", i, raised)
+		}
+	}
+	for _, p := range held {
+		p.Release()
+	}
+	c.ReleaseRef()
+}

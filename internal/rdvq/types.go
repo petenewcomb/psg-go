@@ -33,6 +33,14 @@ type Notification struct {
 	// fallback is the terminal conservation action — never nil once delivered (noop by
 	// default). It is what a Forward ultimately runs when re-circulation finds no taker.
 	fallback func()
+	// chained marks a wake announcing capacity that may satisfy MORE consumers than
+	// the one it wakes (a weighted release, a multi-permit drain, a capacity raise —
+	// see [Notifier.NotifyChained]): a consumer that uses it productively owes the
+	// chain exactly one fresh chained probe ([Notification.ProbeOrigin], or the
+	// consumer's own probe at the pool-level notifier it knows), so consumers admit
+	// one by one until the first miss ends the chain. Wake-one would otherwise
+	// under-notify — k satisfiable waiters, one wake, k−1 stranded.
+	chained bool
 }
 
 // NewNotification returns a terminal (waiter-style) Notification carrying fallback: a
@@ -64,6 +72,22 @@ func (m Notification) Forward() {
 		m.n.Notify(m.fallback)
 	} else {
 		m.fallback()
+	}
+}
+
+// Chained reports whether this wake announces capacity that may satisfy more than
+// its one recipient — see [Notifier.NotifyChained]. A consumer that uses a chained
+// wake productively owes the chain one fresh probe.
+func (m Notification) Chained() bool { return m.chained }
+
+// ProbeOrigin pays a productive consumer's chain debt at the wake's origin Notifier:
+// one fresh chained wake, so the next satisfiable consumer admits and the first miss
+// ends the chain. A no-op for an unchained wake (no debt) or a waiter-style one (no
+// origin recorded — those consumers emit their probe at the pool-level notifier they
+// already know). Safe to call unconditionally after productive use.
+func (m Notification) ProbeOrigin() {
+	if m.chained && m.n != nil {
+		m.n.NotifyChained(nil)
 	}
 }
 

@@ -19,7 +19,52 @@ Weighing SURFACE already settled (dispatch-execution-split.md: static per-op pan
 per-item unit error; "applicant" backlog note). Needs: TryAcquireUpTo capability (partial grants),
 capacity visibility (infeasibility BEFORE arming), stealOutUpTo. Sequencing: mechanical w=1-caller
 weighting (no-op, green) → gather+barrier behind model check → resource capabilities → surface
-plumbing (own session).
+plumbing (own session). **SURFACE SETTLED (PN, 2026-07-02, recorded in the doc):** variadic builder
+methods on the op type — `Launcher[T].WithLimits(...Limiter)` / `.WithWeightLimits(...WeightLimiter[T])`
++ `NewWeightLimiter[T](l, weigh)` constructor (New* consistency; Limiter→Limit general rename
+REJECTED — "limit" = numeric ceiling throughout the package, type would collide; compile-time T via
+receiver's param; `With` prefix = http.Request.WithContext copy-semantics convention;
+WeightLimiter[T] = reusable same-T binding;
+variadic slices stack-allocate IFF methods copy-out-never-retain — verified 0 allocs incl. multi-arg;
+Funnel adds WithFlushLimits). Both methods compose + repeated calls ACCUMULATE (variadic = pure
+sugar; enables base-op layering); one binding per limiter TOTAL across both methods (dup panics);
+replace/last-wins + removal affordances REJECTED (silent constraint-dropping). Multi-limiter
+representation (PN, final): every With* call COPIES into op-owned storage (1 construction alloc per
+call) — adopt-the-variadic REJECTED (spread caller `WithLimits(mySlice...)` aliases; later element
+mutation = silent constraint modification, same class as replace/last-wins; doc-only adoption too
+weak for a limiting API); fixed inline array REJECTED (caps count, bloats every op-value copy).
+Mitigations: single-limiter cut = plain fields, still 0 allocs; multi-limiter needs owned storage
+ANYWAY (canonical-order sort + dup scan at bind time = the copy is canonicalization, not defense).
+Accumulation copy-merges, never appends (backing shared among op value copies). **SETS (PN, 2026-07-02):**
+ONE limiter type — AmountLimiter kind-split REJECTED (PN: no reason TO do it; the rationale offered
+for it — type-guarding weight-blind amount binding — was invalid: unit coherence isn't
+type-checkable). T/U weigher-op pairing stays unrepresentable via WeightLimiter[T]→same-T methods
+only, no boxing, sets carry no weighers. PN sweep-ratifications (2026-07-02): every op gets the
+FULL complement of the 4 binding methods; FLUSH LIMITERS DROPPED ENTIRELY (PN, supersedes his
+earlier incl-flush answer — a flush needing limits attaches them to a launcher invoked FROM the
+flush; kills the WithFlush* surface, the flush-weigher-arg question, C3's WithFlushLimits, and
+permit-core's limited-flush model-check case; SKIMMER drain limiting STAYS — PN: a skim handler has
+something to weigh [typed result], isn't pre-committed by an upstream limited op [flush only drains
+what limited accumulates admitted], and runs in the user's context [a launched body wouldn't] —
+permit-core's limited-drain model-check case remains, skim-scoped); weigher <0 panics
+but ==0 VALID = nothing acquired, binding skipped that dispatch; weigh-once-per-dispatch confirmed;
+opoption deletion confirmed; Limit-rename rejection confirmed. Construction-time static-infeasibility panic
+DROPPED entirely (PN never wanted it — I had misread his sweep answer as keep-it; strike the static
+branch from dispatch-execution-split.md "Infeasible demand" at implementation); ALL weighted
+infeasibility = runtime distinct per-unit error, enforced at demand registration (before barrier
+arming). Reusable canonicalized
+sets: untyped `LimiterSet` (universal) +
+`WeightLimiterSet[T]` (same-T, T inferred from members) — one-shot homogeneous variadic ctors;
+single MIXED set REJECTED (no T witness / heterogeneous variadic untypable / boxing = T/U). Set
+binding methods are SINGULAR (`WithLimiterSet(s)` — a set IS the bunch; multi-set = repeated calls
+per accumulation law). Pure-set op = zero per-op alloc (shares frozen state); customizing op = one
+bind-time merge. Dup panic spans all four methods + sets. NO static-weight form — always a function (constant closure covers the rare
+case); deliberately retires the construction-time static-infeasibility panic (was advisory anyway —
+capacity is dynamic) → all weighted infeasibility = per-unit distinct error at dispatch. opoption.go
+DISSOLVES (WithLimits was the only OpOption; constructors drop opts). Gotchas: COW the bindings
+slice (diverging-chains aliasing; needs dedicated test); weigh runs ONCE per dispatch on the
+dispatching goroutine, stamped int, stable across postpone retries + demand identity; weigh<1 panics
+(weigher bug), oversize-vs-capacity errors (data).
 
 **►►► LIMITER RESOURCE CLASSES — design agreed, recorded (2026-07-02), NOT implemented.**
 `docs/decisions/limiter-resource-classes.md`: the permit forest's premises (cache-don't-return,

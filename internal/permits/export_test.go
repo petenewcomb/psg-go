@@ -5,7 +5,6 @@ package permits
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 
 	"github.com/stretchr/testify/require"
@@ -13,9 +12,9 @@ import (
 
 // This file holds test-only fixtures and oracles, compiled only under `go test`.
 //
-// The forest's nbcq queues can't be walked non-destructively, so the oracles take an
-// explicit slice of every cache the test created (the tests track that anyway). They
-// read each cache's atomic counter, so they are meant to run at a quiescent point.
+// The oracles take an explicit slice of caches (usually the allCaches forest walk,
+// which also sees the body caches registration creates internally). They read each
+// cache's atomic counter, so they are only consistent at a quiescent point.
 
 // semaphore is the weight-1 test Resource: a fixed capacity and an atomic in-flight
 // count (atomic so the concurrency harness can share it).
@@ -132,15 +131,11 @@ func (c *Cache) childrenContains(target *Cache) bool {
 	return false
 }
 
-// testPool wraps a Pool, tracking every cache created through it so the oracles have
-// the full set to sum over. The tracking slice is guarded for the concurrency tests.
+// testPool wraps a Pool for the oracles.
 type testPool struct {
 	*Pool
 	sem *semaphore
 	tb  require.TestingT // set by tests that use makeIdle
-
-	mu     sync.Mutex
-	caches []*Cache
 }
 
 func newTestPool(capacity int) *testPool {
@@ -148,39 +143,30 @@ func newTestPool(capacity int) *testPool {
 	return &testPool{Pool: NewPool(sem), sem: sem}
 }
 
-func (tp *testPool) track(c *Cache) *Cache {
-	tp.mu.Lock()
-	tp.caches = append(tp.caches, c)
-	tp.mu.Unlock()
-	return c
-}
+func (tp *testPool) NewCache() *Cache { return tp.Pool.NewCache() }
 
-func (tp *testPool) NewCache() *Cache { return tp.track(tp.Pool.NewCache()) }
+func (tp *testPool) newChild(parent *Cache) *Cache { return parent.NewChild() }
 
-func (tp *testPool) newChild(parent *Cache) *Cache { return tp.track(parent.NewChild()) }
-
-// snapshot returns the DISTINCT tracked caches for the oracles to read. Caches are
-// pooled (recycled on destroy), so a destroyed cache's *Cache can be handed back out by
-// a later NewCache/NewChild and tracked again — the same pointer then appears twice in
-// the tracking slice. The oracles sum held/inUse per cache, so a duplicated pointer
-// would double-count its current incarnation; dedup by pointer here. A pointer sitting
-// idle in the pool contributes 0 (drained on destroy), and a reused one contributes its
-// current incarnation's counts exactly once — so the deduped sum equals Σ over live
-// caches = the Resource's in-flight count.
-func (tp *testPool) snapshot() []*Cache {
-	tp.mu.Lock()
-	defer tp.mu.Unlock()
-	seen := make(map[*Cache]struct{}, len(tp.caches))
-	out := make([]*Cache, 0, len(tp.caches))
-	for _, c := range tp.caches {
-		if _, dup := seen[c]; dup {
-			continue
+// allCaches walks the live forest — roots and every descendant, INCLUDING the body
+// caches registration creates internally (a caller-side tracking list cannot see
+// those). It takes each list's lock level by level, so it is safe concurrently but
+// only a consistent oracle at a quiescent point (which is when the tests read it).
+// Destroyed caches are unlinked and so absent — no dedup against pooled reuse needed.
+func (p *Pool) allCaches() []*Cache {
+	var out []*Cache
+	var walk func(l *cacheList)
+	walk = func(l *cacheList) {
+		for _, c := range listSlice(l) {
+			out = append(out, c)
+			walk(&c.children)
 		}
-		seen[c] = struct{}{}
-		out = append(out, c)
 	}
+	walk(&p.roots)
 	return out
 }
+
+// snapshot returns the live forest for the oracles to sum over.
+func (tp *testPool) snapshot() []*Cache { return tp.allCaches() }
 
 func (tp *testPool) check(t require.TestingT) {
 	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))

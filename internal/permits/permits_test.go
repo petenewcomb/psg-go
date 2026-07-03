@@ -158,10 +158,11 @@ func TestNestedDriveSinglePermitChain(t *testing.T) {
 }
 
 // A weighted acquire assembles its weight from fragmented sources — partial steals
-// from several victims plus the Resource's remainder — into the acquirer's own held,
-// then occupies atomically (weighted-acquisition.md Decision 1: gather into your own
-// held). No single source covers w=5, so the pre-gather single-source path would
-// have blocked here.
+// from several victims plus the Resource's remainder — into the demand's body cache
+// (registration creates it; the gather hoards and occupies there,
+// weighted-acquisition.md Decisions 1–2). No single source covers w=5, so the fast
+// path misses, the demand registers, becomes the instant head, gathers, and the
+// barrier disarms — all within one Acquire call.
 func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 	tp := newTestPool(5)
 	tp.tb = t
@@ -172,13 +173,17 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 	var d Demand
 	pm, ok := g.Acquire(&d, 5)
 	require.True(t, ok, "w=5 must assemble from 2+2 stolen plus 1 free")
-	require.Same(t, g, pm.backing, "the gather lands the whole weight in the acquirer's own cache")
+	require.Same(t, d.cache, pm.backing, "a registered demand backs from its body cache")
+	require.Same(t, g, pm.backing.parent, "the body cache is homed under the registering cache")
+	assert.Equal(t, uint64(5), pm.backing.held(), "the whole weight landed in the body cache")
 	assert.Equal(t, uint64(0), v1.held(), "victim 1 fully harvested")
 	assert.Equal(t, uint64(0), v2.held(), "victim 2 fully harvested")
+	assert.Nil(t, tp.barrier.Load(), "satisfaction dequeued the head and disarmed")
 	assert.Equal(t, 5, tp.totalHeld(), "steals transfer and the delta checks out — no double-count")
 	tp.check(t)
 
 	pm.Release()
+	d.Invalidate() // releases the demand's persistent home
 	require.True(t, g.ReleaseRef())
 	require.True(t, v1.ReleaseRef())
 	require.True(t, v2.ReleaseRef())
@@ -186,10 +191,11 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 	tp.check(t)
 }
 
-// A gather that comes up short keeps its partial hoard cached and borrowable —
-// cache-don't-return IS the rollback (no give-back protocol) — and the hoard is
-// ordinary steal fodder for anyone else meanwhile.
-func TestWeightedGatherMissRetainsBorrowableHoard(t *testing.T) {
+// A gather that comes up short keeps its partial hoard in the demand's body cache —
+// cache-don't-return IS the rollback (no give-back protocol). The demand stays
+// registered as the armed head, gating other acquirers off the hoard; invalidating
+// it drains the hoard back to the Resource and disarms.
+func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	tp := newTestPool(3)
 	tp.tb = t
 	v := makeIdle(tp, 2) // 2 cached idle + 1 free = 3 total < 4
@@ -198,23 +204,35 @@ func TestWeightedGatherMissRetainsBorrowableHoard(t *testing.T) {
 	var dg Demand
 	_, ok := g.Acquire(&dg, 4)
 	require.False(t, ok, "w=4 cannot be covered by capacity 3")
-	// The hoard holds the stolen 2. The 1 free permit stays in the Resource: the
-	// Resource arm is all-or-nothing at the shortfall until TryAcquireUpTo lands
-	// (weighted-acquisition.md sequencing step 3).
-	assert.Equal(t, uint64(2), g.held(), "the failed gather keeps its partial hoard")
+	// The hoard holds the stolen 2 in the body cache. The 1 free permit stays in the
+	// Resource: the Resource arm is all-or-nothing at the shortfall until
+	// TryAcquireUpTo lands (weighted-acquisition.md sequencing step 3).
+	require.NotNil(t, dg.cache, "the miss left the demand registered with its body cache")
+	assert.Equal(t, uint64(2), dg.cache.held(), "the failed gather keeps its partial hoard")
 	assert.Equal(t, uint64(0), v.held(), "the victim was harvested before the miss")
+	require.Same(t, &dg, tp.barrier.Load(), "the unsatisfied head keeps the barrier armed")
 	tp.check(t)
 
-	// The hoard is ordinary borrowable capacity: an unrelated wave assembles its own
-	// weight from it (plus the free permit) — the abandoned gather blocks no one.
+	// While armed, everyone else is gated — even off capacity the head cannot use.
 	b := tp.NewCache()
+	var db1 Demand
+	_, ok = b.Acquire(&db1, 1)
+	require.False(t, ok, "a weight-1 acquire is gated while the barrier is armed")
+
+	// Invalidation retires the head: the hoard drains to the Resource (conservation
+	// via the ordinary destroy path) and the barrier disarms.
+	dg.Invalidate()
+	require.Nil(t, tp.barrier.Load(), "invalidating the sole head disarms the barrier")
+	assert.Equal(t, 0, tp.totalHeld(), "the drained hoard returned everything to the Resource")
+	tp.check(t)
+
 	var db Demand
 	bp, ok := b.Acquire(&db, 3)
-	require.True(t, ok, "the abandoned hoard is steal-recoverable by others")
-	assert.Equal(t, 3, tp.totalHeld())
+	require.True(t, ok, "the drained capacity is available again (whole-grant fast path)")
 	tp.check(t)
 
 	bp.Release()
+	db.Invalidate()
 	require.True(t, b.ReleaseRef())
 	require.True(t, g.ReleaseRef())
 	require.True(t, v.ReleaseRef())

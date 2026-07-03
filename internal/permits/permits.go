@@ -133,6 +133,26 @@ type Pool struct {
 	// destroy only because the steal ref-pins its victim, so a Cache is never reclaimed
 	// while another goroutine still references it (see tryPin / searchList).
 	cachePool *omnipool.Pool[Cache]
+
+	// The demand-side head-of-line barrier (weighted-acquisition.md Decision 2): fifo
+	// holds the registered w ≥ 2 demands in arrival order — sticky head, FIFO
+	// succession, no weight-based ordering — under fifoMu (cold by construction: only
+	// w ≥ 2 misses register). barrier mirrors fifo[0], nil iff the FIFO is empty;
+	// stored under fifoMu, loaded lock-free as the one-load armed check on every
+	// acquire, the exemption anchor (proceed while armed iff the acquiring chain
+	// passes through the head's body cache), and the wake router (armed capacity
+	// events go to the head's own mailbox — the single consumer that can act).
+	// Publish ordering makes the lock-free reads safe: the head's cache and mailbox
+	// are written before the barrier Store that publishes it. Transient read races
+	// are benign: a stale nil during arming leaks one ordinary acquire (not the
+	// systematic step-1 recirculation bypass the barrier exists to close); a stale
+	// head in wake() drops the wake into an empty mailbox, which is compensated —
+	// the release decremented counts BEFORE the stale load, the successor is
+	// promoted AFTER that, and its park-time confirm re-reads counts fresh, so the
+	// freed capacity is seen without the wake.
+	fifoMu  sync.Mutex
+	fifo    []*Demand
+	barrier atomic.Pointer[Demand]
 }
 
 // NewPool returns a Pool drawing permits from r.
@@ -254,33 +274,91 @@ func (c *Cache) touch() {
 // token of weighted-acquisition.md Decision 4: a registered demand is satisfied or
 // explicitly invalidated, never dropped, and the CALLER holds the identity so a
 // postponed manager's retries re-present the SAME demand rather than registering a
-// fresh one per retry. The zero value is ready. Registration itself (the w ≥ 2
-// demand FIFO and head-of-line barrier) lands with the barrier checkpoint of
-// sequencing step 2; until then the identity is carried through Acquire unused.
+// fresh one per retry (re-presentation is idempotent: one FIFO entry). The zero
+// value is ready. A Demand's operations (Acquire retries, Invalidate) are externally
+// serialized — one goroutine at a time, like the handle that carries it; the Pool's
+// fifoMu covers everything other goroutines observe.
 type Demand struct {
-	// gen guards pooled/recycled identities against ABA once the FIFO holds demand
-	// references (the captured-generation discipline of rdvq-inbox-reclamation.md):
-	// Invalidate bumps it, retiring every outstanding reference to this identity. It
-	// also gives Demand nonzero size, keeping distinct *Demand pointers distinct.
+	// gen guards pooled/recycled identities against ABA once external references to
+	// the identity exist (the captured-generation discipline of
+	// rdvq-inbox-reclamation.md): Invalidate bumps it, retiring every outstanding
+	// reference. It also gives Demand nonzero size, keeping distinct *Demand
+	// pointers distinct.
 	gen atomic.Uint64
+
+	// pool is non-nil exactly while the demand is registered in that Pool's FIFO —
+	// published atomically so Invalidate can find the registration. The fields
+	// below are guarded by that Pool's fifoMu while registered and caller-serialized
+	// otherwise.
+	pool atomic.Pointer[Pool]
+
+	// cache is the demand's body cache (C_B^L): created lazily at first
+	// registration as a child of the registering cache, it is where the head's
+	// gather hoards and where every registered acquisition lands (the Permit backs
+	// from it). It PERSISTS across satisfied episodes — a resume reacquire hits its
+	// hoard as a step-0 own-home occupy — and is destroyed by Invalidate.
+	cache *Cache
+
+	// mailbox is the registered demand's own wake target: while registered, the
+	// demand parks HERE, never on the Pool's general set — an armed capacity event
+	// (release/drain/raise) is deliverable only to the head, and promotion only to
+	// the successor, so both are single-consumer wakes with a known address. That
+	// addressing is what dissolves both the broadcast (herd) and the wake-one
+	// conservation hole (a waiter-style Forward is terminal, so a bystander taking
+	// the one wake would drop it and strand the head). Lazily initialized at first
+	// registration; initialized before the barrier publish, so wake()'s lock-free
+	// barrier read always sees a ready mailbox.
+	mailbox rdvq.Notifier
+
+	// mailboxReady records the lazy one-time mailbox.Init (guarded by fifoMu).
+	mailboxReady bool
+
+	// w is the registered weight (0 when not registered) — stamped at
+	// registration; retries must re-present it unchanged (weigh-once).
+	w uint64
+
+	// registered marks live FIFO membership (guarded by pool's fifoMu).
+	registered bool
 }
 
 // Invalidate withdraws the demand — the caller-side edge for a dropped or cancelled
 // postpone, wave teardown, or a demand deadline. Idempotent, and safe on a demand
-// that was never registered. Invalidating a registered head passes the barrier to
-// the next demand in FIFO order (once the barrier lands); a partial hoard stays
-// borrowable in its cache — conservation needs no give-back (Decision 1).
+// that was never registered. Invalidating the registered HEAD passes the barrier to
+// the next demand in FIFO order. The demand's body cache is released: its partial
+// hoard needs no give-back protocol (Decision 1) — the destroy path drains it to the
+// Resource like any cached permits, seeding the wake chain on the freed capacity.
+// Must not be called while a Permit backed by the demand's body cache is still held
+// (release first — the handle lifecycle already sequences this; destroy's inUse
+// panic is the tripwire).
 func (d *Demand) Invalidate() {
 	d.gen.Add(1)
+	if p := d.pool.Load(); p != nil {
+		p.deregister(d)
+		return
+	}
+	if d.cache != nil {
+		d.cache.ReleaseRef()
+		d.cache = nil
+	}
 }
 
 // Acquire makes w permits available for a body in c to run and returns a Permit
 // recording the backing cache and weight. ok is false if the body must wait. d is
-// the caller-held demand identity (see [Demand]). A weight no single source covers
-// is assembled by a multi-source gather into c's own held (weighted-acquisition.md
-// Decision 1): the partial hoard stays borrowable throughout — a blocked weighted
-// acquire is not hold-and-wait — and a miss leaves it cached, step-1 fodder for the
-// retry (cache-don't-return is the rollback).
+// the caller-held demand identity (see [Demand]).
+//
+// The demand-side barrier (weighted-acquisition.md Decision 2) shapes the flow:
+// while armed, every acquisition arm — including the step-1/2 up-walk, so local
+// recirculation cannot bypass the head invisibly — is gated unless the acquiring
+// chain passes through the head's body cache. A gated weight-1 acquire simply
+// misses (Decision 3: weight-1 never registers); a gated w ≥ 2 acquire registers
+// its demand and waits its FIFO turn. A registered demand acquires only through
+// its own body cache: as head it gathers into it — multi-source assembly whose
+// partial hoard stays borrowable throughout (Decision 1; a blocked weighted
+// acquire is not hold-and-wait) — and as a non-head it waits. Unarmed w ≥ 2 gets
+// the fast path (single-node up-walk occupy, then a whole-weight Resource grant);
+// any miss registers — gathering is head-only, so gather-vs-gather livelock is
+// unrepresentable. An uncontended w ≥ 2 still satisfies within one call:
+// register → instant head → gather → dequeue → disarm.
 func (c *Cache) Acquire(d *Demand, w int) (Permit, bool) {
 	if d == nil {
 		panic("permits: Acquire with nil Demand")
@@ -291,7 +369,31 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, bool) {
 	if !c.alive.Load() {
 		panic("permits: Acquire on a destroyed cache")
 	}
+	if d.cache != nil && d.cache.parent != c {
+		panic("permits: demand homed under a different cache (Invalidate between homes)")
+	}
 	uw := uint64(w)
+	p := c.pool
+
+	// A registered demand waits its turn; only the head acquires (through its own
+	// body cache).
+	if d.pool.Load() != nil {
+		return p.registeredAcquire(d, uw)
+	}
+
+	if hd := p.barrier.Load(); hd != nil && !chainPassesThrough(c, hd.cache) {
+		if w == 1 {
+			return Permit{}, false // gated; weight-1 never registers
+		}
+		return p.registerAndAcquire(c, d, uw) // join the FIFO behind the head
+	}
+
+	// Step 0: the demand's persistent body-cache home from a prior satisfied
+	// episode — the resume-reacquire hit, and where any leftover hoard lives.
+	if d.cache != nil && d.cache.counts.acquireLocal(uw) {
+		return Permit{backing: d.cache, weight: uw}, true
+	}
+
 	// Steps 1–2: lock-free up-walk; ancestors pinned by refcounts.
 	for a := c; a != nil; a = a.parent {
 		if a.counts.acquireLocal(uw) {
@@ -303,12 +405,172 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, bool) {
 		// fair victim.
 		a.touch()
 	}
-	// Steps 3–4: free Resource, then steal.
-	if backing := c.pool.acquireInto(c, w); backing != nil {
-		return Permit{backing: backing, weight: uw}, true
+	if w == 1 {
+		// Steps 3–4: free Resource, then steal (the w=1 "gather" degenerates to a
+		// single atomic take-and-occupy).
+		if backing := p.acquireInto(c, w); backing != nil {
+			return Permit{backing: backing, weight: uw}, true
+		}
+		return Permit{}, false // step 5: wait
 	}
-	// Step 5: wait.
-	return Permit{}, false
+	// w ≥ 2: the whole weight in one Resource grant is the last non-registering
+	// arm — it is atomic, so it is not freelance gathering. No single-victim steal
+	// here: a partial take would strand loose permits or freelance-deposit them;
+	// the head's gather harvests victims instead.
+	if p.resource.TryAcquire(w) {
+		c.counts.checkout(uw)
+		return Permit{backing: c, weight: uw}, true
+	}
+	return p.registerAndAcquire(c, d, uw)
+}
+
+// chainPassesThrough reports whether b is on c's ancestor chain (c itself
+// included) — the barrier exemption test: an acquire may proceed while armed iff
+// its chain passes through the head's body cache. Lock-free: parents are immutable
+// and pinned by refcounts. Cost is armed-only.
+func chainPassesThrough(c, b *Cache) bool {
+	for a := c; a != nil; a = a.parent {
+		if a == b {
+			return true
+		}
+	}
+	return false
+}
+
+// registerAndAcquire registers d (weight uw, homed under c) at the back of the
+// demand FIFO and, if that made it the head, gathers immediately — so an
+// uncontended w ≥ 2 acquire completes in one call. The body cache is created
+// lazily on first registration and reused across the demand's episodes; the
+// mailbox is initialized (once) BEFORE the barrier publish that makes this demand
+// reachable from wake()'s lock-free barrier read.
+func (p *Pool) registerAndAcquire(c *Cache, d *Demand, uw uint64) (Permit, bool) {
+	p.fifoMu.Lock()
+	if d.cache == nil {
+		d.cache = c.NewChild()
+	}
+	if !d.mailboxReady {
+		d.mailbox.Init()
+		d.mailboxReady = true
+	}
+	d.w = uw
+	d.registered = true
+	d.pool.Store(p)
+	p.fifo = append(p.fifo, d)
+	isHead := len(p.fifo) == 1
+	if isHead {
+		p.barrier.Store(d)
+	}
+	p.fifoMu.Unlock()
+	if !isHead {
+		return Permit{}, false
+	}
+	return p.headGather(d, uw)
+}
+
+// registeredAcquire is a re-presentation of an already-registered demand (a
+// postpone retry, a mailbox wake, or a succession wake): the head gathers,
+// everyone else keeps waiting.
+func (p *Pool) registeredAcquire(d *Demand, uw uint64) (Permit, bool) {
+	p.fifoMu.Lock()
+	if d.w != uw {
+		p.fifoMu.Unlock()
+		panic("permits: re-presented demand with a different weight (registered weight is stamped)")
+	}
+	isHead := len(p.fifo) > 0 && p.fifo[0] == d
+	p.fifoMu.Unlock()
+	if !isHead {
+		return Permit{}, false
+	}
+	return p.headGather(d, uw)
+}
+
+// headGather drives the head demand's assembly into its body cache and, on
+// success, retires the demand: dequeue, then promote the successor (one wake to
+// its mailbox — the known single party that can now act) or disarm (a chained
+// seed to the general set: capacity the barrier held uncontested may now satisfy
+// several ordinary waiters, and the chain walks them).
+func (p *Pool) headGather(d *Demand, uw uint64) (Permit, bool) {
+	//nolint:gosec // G115: uw came from Acquire's int w, validated >= 1
+	if p.acquireInto(d.cache, int(uw)) == nil {
+		return Permit{}, false // gather exhausted; the hoard stays; wakes re-drive
+	}
+	p.fifoMu.Lock()
+	if len(p.fifo) == 0 || p.fifo[0] != d {
+		p.fifoMu.Unlock()
+		panic("permits: satisfied head is not the FIFO front")
+	}
+	next := p.dequeueFrontLocked()
+	d.registered = false
+	d.w = 0
+	d.pool.Store(nil) // d.cache persists — the demand's home until Invalidate
+	p.fifoMu.Unlock()
+	p.barrierPassed(next)
+	return Permit{backing: d.cache, weight: uw}, true
+}
+
+// deregister removes an invalidated demand from the FIFO (promoting the successor
+// if it was the head) and releases its body cache; the destroy path drains any
+// hoard back to the Resource, itself seeding the chain on the freed capacity.
+// No-op if a racing satisfaction already dequeued it.
+func (p *Pool) deregister(d *Demand) {
+	p.fifoMu.Lock()
+	if !d.registered {
+		p.fifoMu.Unlock()
+		return
+	}
+	wasHead := p.fifo[0] == d
+	var next *Demand
+	if wasHead {
+		next = p.dequeueFrontLocked()
+	} else {
+		for i, e := range p.fifo {
+			if e == d {
+				copy(p.fifo[i:], p.fifo[i+1:])
+				p.fifo[len(p.fifo)-1] = nil
+				p.fifo = p.fifo[:len(p.fifo)-1]
+				break
+			}
+		}
+	}
+	d.registered = false
+	d.w = 0
+	d.pool.Store(nil)
+	cache := d.cache
+	d.cache = nil
+	p.fifoMu.Unlock()
+	cache.ReleaseRef() // outside fifoMu: destroy takes list locks
+	if wasHead {
+		p.barrierPassed(next)
+	}
+}
+
+// dequeueFrontLocked removes fifo[0], re-points the barrier at the successor (nil
+// when the FIFO empties — disarm), and returns the successor for the caller to
+// wake AFTER releasing fifoMu. fifoMu must be held.
+func (p *Pool) dequeueFrontLocked() *Demand {
+	copy(p.fifo, p.fifo[1:])
+	p.fifo[len(p.fifo)-1] = nil
+	p.fifo = p.fifo[:len(p.fifo)-1]
+	if len(p.fifo) > 0 {
+		next := p.fifo[0]
+		p.barrier.Store(next)
+		return next
+	}
+	p.barrier.Store(nil)
+	return nil
+}
+
+// barrierPassed delivers the head-change wake, outside fifoMu: promotion is one
+// wake to the successor's own mailbox (the known single consumer); disarm is a
+// chained seed to the general set — whatever capacity the barrier held
+// uncontested is a multi-permit event of unknown usable size for the ordinary
+// waiters the barrier was gating.
+func (p *Pool) barrierPassed(next *Demand) {
+	if next != nil {
+		next.mailbox.Notify(nil)
+		return
+	}
+	p.notify.NotifyChained(nil)
 }
 
 // AcquireWait is the blocking acquire — for an executor reacquiring mid-body. It does
@@ -339,10 +601,20 @@ func (c *Cache) AcquireWait(ctx context.Context, d *Demand, w int) (Permit, erro
 		var pm Permit
 		var ok bool
 		var err error
-		m, err = p.notify.Wait(ctx, func() bool {
+		confirm := func() bool {
 			pm, ok = c.Acquire(d, w)
 			return !ok // park only if still no permit
-		})
+		}
+		// Park target follows registration state: a registered demand parks on its
+		// OWN mailbox (armed capacity events and its promotion are addressed there;
+		// it must not compete for — or worse, consume — general-set wakes it cannot
+		// use), an unregistered one on the Pool's general set. The registration
+		// happens inside Acquire, so re-evaluate every iteration.
+		if d.pool.Load() != nil {
+			m, err = d.mailbox.Wait(ctx, confirm)
+		} else {
+			m, err = p.notify.Wait(ctx, confirm)
+		}
 		if ok {
 			if m.Chained() {
 				p.ChainProbe() // rule 2, confirm-path success
@@ -499,7 +771,18 @@ func (pm Permit) Release() {
 // one by one until the first miss — the serialized wake chain
 // (limiter-resource-classes.md Decision 3) in place of the broadcast WakeAll this
 // package used to carry, which herded N consumers to satisfy k.
+//
+// While the barrier is armed, EVERY capacity event routes to the head's own mailbox
+// instead — the one consumer that can act (everyone else is gated), so wake-one is
+// exact there and the chained bit is moot (the head always re-gathers against
+// counts). A wake dropped into a stale head's empty mailbox during a barrier
+// transition is compensated by the successor's park-time confirm re-reading counts
+// (see the barrier field's comment).
 func (p *Pool) wake(chained bool) {
+	if hd := p.barrier.Load(); hd != nil {
+		hd.mailbox.Notify(nil)
+		return
+	}
 	if chained {
 		p.notify.NotifyChained(nil)
 		return
@@ -512,8 +795,9 @@ func (p *Pool) wake(chained bool) {
 // and the LINK a productive consumer of a chained wake owes when its wake was
 // waiter-style (no origin recorded — the streampool gate loops call this on the Pool
 // they already hold; listener-style consumers use Notification.ProbeOrigin instead).
+// While the barrier is armed it routes to the head like every capacity event.
 func (p *Pool) ChainProbe() {
-	p.notify.NotifyChained(nil)
+	p.wake(true)
 }
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting

@@ -2,20 +2,38 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► NEXT (2026-07-03g): CP-W2b-ii — rebuild the barrier from the stash ON the landed chain.
-CP-W2b-i (pool-internal wake chain) LANDED this commit — gate: vet/lint/-short 11/11,
-permits+workq+rdvq -race, rapid 10k, 40/40 TestBySimulation -race; the weighted-release and
-capacity-raise chain tests are NEGATIVE-CONTROLLED (unchained ⇒ deterministic "only 1 of 3
-admitted"). The W2b barrier work (FIFO+barrier+NotifyAll, 40/40 green pre-chain) is STASHED
-("w2b-barrier-pre-chain", belt copy scratchpad/w2b_barrier_wip.diff). W2b-ii deltas vs the
-stash: permits.go needs a REDESIGN-MERGE (chain edits landed under it); satisfy/deregister
-promotion WakeAlls → the promoted demand's OWN MAILBOX (each registered Demand carries a
-lazily-Init'd rdvq.Notifier; registered demands park there, never on the general set); armed
-release/drain/raise → head's mailbox (barrier becomes atomic.Pointer[Demand]; d.cache read is
-safe via the barrier-publish ordering); DISARM → pool chain seed (NotifyChained — unknown
-multi); AcquireWait picks its park target by registration state; test files + barrier_test.go
-apply from the stash nearly clean; re-add the stashed notes item (6) (W2b implementation
-decisions) which lives only in the diff.**
+**►►► CP-W2b-ii LANDED (2026-07-03g, this commit) — NEXT: CP-W2c (overdraft; design settled —
+see resolutions (a)/(b)/(c) + episode/allowance/standing-head spec in weighted-acquisition.md
+§Overdraft; suspension counters per (c); wrinkles 4/5 resolved as body-cache episode end +
+subtree exemption).** Gate: vet, lint, -short 11/11, permits -race incl the over-subscribed
+canary ON the mailbox routing, rapid 10k, **40/40 TestBySimulation -race** (run in foreground
+chunks — background batch shells were being externally reaped mid-run this session; 15
+additional clean iterations from the two reaped partials). CP-W2b-i (wake chain) landed
+1f27117 (negative-controlled chain tests). W2b-ii as landed:
+- ZERO BROADCASTS: armed release/drain/raise/probe → the HEAD'S OWN MAILBOX via wake()'s
+  barrier load (barrier is now atomic.Pointer[Demand], == fifo[0], nil iff empty; head's
+  cache+mailbox are written before the publishing Store; a wake dropped into a stale head's
+  empty mailbox during a transition is compensated — release decrements counts BEFORE the
+  stale load, promotion happens-after, and the successor's park-time confirm re-reads counts);
+  PROMOTION → one wake to the successor's mailbox (barrierPassed, outside fifoMu); DISARM →
+  one chained seed to the general set (the freed uncontested capacity is a multi-permit event
+  for the gated crowd). ChainProbe routes through wake(true), so armed probes reach the head.
+- Each registered Demand carries a lazily-Init'd rdvq.Notifier mailbox (mailboxReady under
+  fifoMu; Init BEFORE barrier publish). Registered demands park on their OWN mailbox —
+  AcquireWait picks its park target by d.pool.Load() each iteration (registration happens
+  inside Acquire; register-then-confirm covers the promotion-before-park race).
+- W2b decisions carried over from the stash: registered ⇒ backing = body cache; d.cache
+  persists across satisfied episodes (step-0 own-home occupy on resume; panic on re-home
+  without Invalidate); satisfaction keeps the body-cache ref with the demand (destroy at
+  dequeue would panic on inUse=w; W2c standing head builds on this); unregistered w≥2 =
+  steps 1-2 + whole-grant TryAcquire(w) ONLY (atomic, not gathering; no single-victim steal —
+  partials would strand or freelance-deposit), miss ⇒ register (uncontended w≥2 satisfies in
+  one call: register→instant head→gather→dequeue→disarm); w=1 armed non-exempt fails WITHOUT
+  registering; re-presented weight must equal the stamp (panic); stranger-free stash bits
+  (barrier_test.go, export_test forest-walk oracles, weighted rapid model with per-unit
+  demands + armed-legitimacy predicate now comparing &u.demand) applied nearly clean.
+  Stash "w2b-barrier-pre-chain" can be DROPPED once W2b-ii commits (belt copy:
+  scratchpad/w2b_barrier_wip.diff).
 
 **WAKE DESIGN SETTLED (PN, 2026-07-03f, after two pushes on my WakeAll band-aids):**
 - **Finding 1 (cost one wedged stress test): waiter-style rdvq Forward is TERMINAL** on the

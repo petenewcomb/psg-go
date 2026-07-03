@@ -85,18 +85,41 @@ func TestPermitsModel(t *testing.T) {
 				if u == nil {
 					return
 				}
-				w := rapid.IntRange(1, capacity+1).Draw(t, "weight")
+				// A registered demand re-presents its STAMPED weight (weigh-once:
+				// the registered weight is stable across retries — a mismatch
+				// panics); a fresh attempt draws one.
+				var w int
+				if u.demand.pool.Load() != nil {
+					w = int(u.demand.w) //nolint:gosec // G115: stamped from a small drawn int
+				} else {
+					w = rapid.IntRange(1, capacity+1).Draw(t, "weight")
+				}
 				if pm, got := u.cache.Acquire(&u.demand, w); got {
 					u.pm = pm
 					u.running = true
-				} else {
-					// Liveness: a block is legitimate ONLY when the gather could not
-					// assemble w — borrowable everywhere plus free Resource capacity
-					// falls short. (Weight-1 special case: nothing borrowable and the
-					// Resource exhausted, as before.)
+				} else if b := tp.barrier.Load(); b == nil || b == &u.demand {
+					// Unarmed miss, or the head's own gather exhausted: legitimate
+					// ONLY when the gather could not assemble w — borrowable
+					// everywhere plus free Resource capacity falls short.
 					require.Less(t, tp.borrowableTotal()+tp.free(), w,
 						"Acquire blocked while gatherable capacity covered w")
 				}
+				// else: gated by another head's armed barrier — legitimate
+				// unconditionally (fairness over utilization, Decision 2).
+				check()
+			},
+			"invalidate": func(t *rapid.T) {
+				// Withdraw a demand (postpone dropped / deadline): deregisters a
+				// waiting registration (promoting a successor head) and releases the
+				// demand's persistent home; the unit may acquire again afterward
+				// with a fresh registration.
+				u := pick(t, "invalidate-unit", func(u *modelUnit) bool {
+					return !u.running && (u.demand.pool.Load() != nil || u.demand.cache != nil)
+				})
+				if u == nil {
+					return
+				}
+				u.demand.Invalidate()
 				check()
 			},
 			"release": func(t *rapid.T) {
@@ -116,14 +139,17 @@ func TestPermitsModel(t *testing.T) {
 				if u == nil {
 					return
 				}
+				u.demand.Invalidate() // unit exit withdraws its demand and home first
 				u.unitRefHeld = false
 				u.cache.ReleaseRef()
 				check()
 			},
 		})
 
-		// Teardown: stop every running body, then drop every remaining unit reference;
-		// the destroy cascade returns all held to the Resource.
+		// Teardown: stop every running body, withdraw every demand (registration and
+		// persistent home — conservation: satisfied or invalidated, never dropped),
+		// then drop every remaining unit reference; the destroy cascade returns all
+		// held to the Resource.
 		for _, u := range units {
 			if u.running {
 				u.pm.Release()
@@ -131,6 +157,10 @@ func TestPermitsModel(t *testing.T) {
 				u.running = false
 			}
 		}
+		for _, u := range units {
+			u.demand.Invalidate()
+		}
+		require.Nil(t, tp.barrier.Load(), "an emptied FIFO must disarm the barrier")
 		for _, u := range units {
 			if u.unitRefHeld {
 				u.unitRefHeld = false

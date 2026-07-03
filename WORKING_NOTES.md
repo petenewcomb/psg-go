@@ -2,7 +2,11 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► WEIGHTED ACQUISITION — design agreed, recorded (2026-07-02), NOT implemented.**
+**►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
+(2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,
+searchList(l,w) [borrowable≥w — no w>1 spin], acquireInto single-source all-or-nothing at w; all
+callers pass 1. Gate: build/vet/-short suite/permits -race incl rapid/25×25 TestBySimulation -race.
+Steps 2-4 (gather+barrier, resource capabilities, surface) NOT implemented.**
 `docs/decisions/weighted-acquisition.md` (companion to limiter-resource-classes.md): counts layout
 is weight-ready, ops are weight-1. Core: (1) gather-into-own-`held` + atomic occupy — a partial
 gather is NOT hold-and-wait (hoard stays borrowable ⇒ "parked ⟹ borrowable" proof intact;

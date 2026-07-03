@@ -78,7 +78,7 @@ func TestPermitsModel(t *testing.T) {
 				if u == nil {
 					return
 				}
-				if pm, got := u.cache.Acquire(); got {
+				if pm, got := u.cache.Acquire(1); got {
 					u.pm = pm
 					u.running = true
 				} else {

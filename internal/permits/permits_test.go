@@ -16,7 +16,7 @@ func TestRootUnitLifecycle(t *testing.T) {
 	tp := newTestPool(1)
 	c := tp.NewCache()
 
-	pm, got := c.Acquire()
+	pm, got := c.Acquire(1)
 	require.True(t, got)
 	require.Same(t, c, pm.backing, "a top-level acquire backs from the unit's own cache")
 	assert.Equal(t, 1, tp.totalHeld())
@@ -39,13 +39,13 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	tp := newTestPool(1)
 	parent := tp.NewCache()
 
-	pp, _ := parent.Acquire() // parent runs: held=1, inUse=1
+	pp, _ := parent.Acquire(1) // parent runs: held=1, inUse=1
 	tp.check(t)
 
 	pp.Release() // parent parks to drive a sub-wave: inUse=0, borrowable=1
 	sub := tp.newChild(parent)
 
-	cp, got := sub.Acquire() // the old livelock — now a step-2 ancestor inherit
+	cp, got := sub.Acquire(1) // the old livelock — now a step-2 ancestor inherit
 	require.True(t, got, "child must inherit the parked parent's idle permit, not deadlock")
 	require.Same(t, parent, cp.backing, "the child is backed by the parent's permit, unmoved")
 	assert.Equal(t, 1, tp.totalHeld(), "no second permit is checked out")
@@ -56,7 +56,7 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	assert.Equal(t, 1, tp.totalHeld()) // parent still holds its cached permit
 	tp.check(t)
 
-	pp2, got := parent.Acquire() // parent resumes (reacquire): step-1 own-cache hit
+	pp2, got := parent.Acquire(1) // parent resumes (reacquire): step-1 own-cache hit
 	require.True(t, got)
 	require.Same(t, parent, pp2.backing)
 	pp2.Release()
@@ -72,21 +72,21 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 	tp := newTestPool(2)
 	parent := tp.NewCache()
-	pp, _ := parent.Acquire()
+	pp, _ := parent.Acquire(1)
 	pp.Release() // parent parks: borrowable=1
 	sub := tp.newChild(parent)
 
-	c1, ok1 := sub.Acquire() // step 2: inherit parent's permit
+	c1, ok1 := sub.Acquire(1) // step 2: inherit parent's permit
 	require.True(t, ok1)
 	require.Same(t, parent, c1.backing)
 
-	c2, ok2 := sub.Acquire() // ancestors exhausted → step 3: delta from the Resource
+	c2, ok2 := sub.Acquire(1) // ancestors exhausted → step 3: delta from the Resource
 	require.True(t, ok2)
 	require.Same(t, sub, c2.backing, "the second concurrent child takes a delta into its own cache")
 	assert.Equal(t, 2, tp.totalHeld())
 	tp.check(t)
 
-	_, ok3 := sub.Acquire() // capacity exhausted, both in use
+	_, ok3 := sub.Acquire(1) // capacity exhausted, both in use
 	require.False(t, ok3, "a third concurrent child must block")
 	assert.False(t, tp.hasBorrowable(), "blocking is legitimate: nothing is borrowable")
 
@@ -104,12 +104,12 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 func TestCrossWaveSteal(t *testing.T) {
 	tp := newTestPool(1)
 	a := tp.NewCache()
-	ap, _ := a.Acquire()
+	ap, _ := a.Acquire(1)
 	ap.Release() // wave A parked-idle: a.held=1, borrowable=1
 	tp.check(t)
 
 	b := tp.NewCache()
-	bp, got := b.Acquire() // own/ancestor miss, Resource full → step 4 steals from A
+	bp, got := b.Acquire(1) // own/ancestor miss, Resource full → step 4 steals from A
 	require.True(t, got, "B steals A's idle permit rather than deadlocking")
 	require.Same(t, b, bp.backing)
 	assert.Equal(t, 1, tp.totalHeld(), "a steal is a transfer, not a new checkout")
@@ -129,16 +129,16 @@ func TestCrossWaveSteal(t *testing.T) {
 func TestNestedDriveSinglePermitChain(t *testing.T) {
 	tp := newTestPool(1)
 	parent := tp.NewCache()
-	pp, _ := parent.Acquire()
+	pp, _ := parent.Acquire(1)
 	pp.Release() // parent parks
 	child := tp.newChild(parent)
 
-	cp, ok1 := child.Acquire() // inherit parent's permit
+	cp, ok1 := child.Acquire(1) // inherit parent's permit
 	require.True(t, ok1)
 	cp.Release() // child parks to drive its own sub-wave
 	grand := tp.newChild(child)
 
-	gp, ok2 := grand.Acquire() // walk grand → child(held=0) → parent(borrowable=1): inherit
+	gp, ok2 := grand.Acquire(1) // walk grand → child(held=0) → parent(borrowable=1): inherit
 	require.True(t, ok2)
 	require.Same(t, parent, gp.backing, "the grandchild reaches the parent's permit up the chain")
 	assert.Equal(t, 1, tp.totalHeld())

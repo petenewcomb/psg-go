@@ -9,8 +9,9 @@ import "github.com/petenewcomb/atomic128-go"
 // joint invariant 0 ≤ inUse ≤ held is preserved by every transition as one atomic
 // step — a CAS on inUse alone could not check held. Both halves are uint64 amounts
 // (not 32-bit unit counts), so a weighted Resource (e.g. a memory limiter above
-// 4 GiB) is representable; the operations below are weight-1 for now, and weights
-// slot in later by parameterizing the deltas, not the layout.
+// 4 GiB) is representable; the transitions take the weight w as a parameter (all
+// callers pass 1 until the weighted gather/barrier lands — see
+// docs/decisions/weighted-acquisition.md, sequencing step 1).
 //
 // It reuses atomic128-go — the same primitive nbcq uses — but directly, with no
 // atomic.Pointer GC-shadow: both halves are scalars, not pointers, so nothing here
@@ -49,64 +50,64 @@ func (c *counts) drain() uint64 {
 	}
 }
 
-// acquireLocal occupies one borrowable permit (inUse++ when inUse < held) and
-// reports success; false means this cache has nothing idle to lend right now. The
+// acquireLocal occupies w borrowable permits (inUse += w when inUse+w ≤ held) and
+// reports success; false means this cache has too little idle to lend right now. The
 // lock-free step-1 (own cache) / step-2 (ancestor) hit.
-func (c *counts) acquireLocal() bool {
+func (c *counts) acquireLocal(w uint64) bool {
 	for {
 		p := atomic128.LoadUint128(&c.w)
 		held, inUse := p[0], p[1]
-		if inUse >= held {
+		if inUse+w > held {
 			return false
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + 1}) {
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + w}) {
 			return true
 		}
 	}
 }
 
-// checkout adds one freshly-obtained permit (from the Resource at step 3, or stolen
-// in at step 4) to held and immediately occupies it (held++, inUse++).
-func (c *counts) checkout() {
+// checkout adds w freshly-obtained permits (from the Resource at step 3, or stolen
+// in at step 4) to held and immediately occupies them (held += w, inUse += w).
+func (c *counts) checkout(w uint64) {
 	for {
 		p := atomic128.LoadUint128(&c.w)
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{p[0] + 1, p[1] + 1}) {
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{p[0] + w, p[1] + w}) {
 			return
 		}
 	}
 }
 
-// release lowers inUse by one — a body completed or parked. The permit stays in held
+// release lowers inUse by w — a body completed or parked. The permits stay in held
 // (cache-don't-return), now borrowable. Reports whether the release raised borrowable
 // from zero (held > inUse crossing), i.e. whether a waiter should be woken.
-func (c *counts) release() (wokeBorrowable bool) {
+func (c *counts) release(w uint64) (wokeBorrowable bool) {
 	for {
 		p := atomic128.LoadUint128(&c.w)
 		held, inUse := p[0], p[1]
-		if inUse == 0 {
+		if inUse < w {
 			panic("permits: release underflow (no running body backed by this cache)")
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse - 1}) {
-			// borrowable went from (held-inUse) to (held-inUse+1); it crossed 0→1
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse - w}) {
+			// borrowable went from (held-inUse) to (held-inUse+w); it crossed 0→
 			// exactly when it was 0 before, i.e. inUse == held.
 			return inUse == held
 		}
 	}
 }
 
-// stealOut removes one borrowable permit from this cache (held--, gated inUse < held)
-// for transfer into another. It reports false when nothing is borrowable now — a
-// concurrent lock-free acquire may have consumed the idle permit since the steal walk
-// observed it, so the caller must revalidate by this CAS and, on false, look
-// elsewhere.
-func (c *counts) stealOut() bool {
+// stealOut removes w borrowable permits from this cache (held -= w, gated
+// inUse+w ≤ held) for transfer into another. It reports false when too little is
+// borrowable now — a concurrent lock-free acquire may have consumed the idle permits
+// since the steal walk observed them, so the caller must revalidate by this CAS and,
+// on false, look elsewhere.
+func (c *counts) stealOut(w uint64) bool {
 	for {
 		p := atomic128.LoadUint128(&c.w)
 		held, inUse := p[0], p[1]
-		if inUse >= held {
+		if inUse+w > held {
 			return false
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held - 1, inUse}) {
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held - w, inUse}) {
 			return true
 		}
 	}

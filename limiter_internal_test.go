@@ -22,15 +22,15 @@ func TestSemaphoreResource_Accounting(t *testing.T) {
 	l := NewSemaphore(2)
 	c := l.pool.NewCache()
 
-	p1, ok := c.Acquire()
+	p1, ok := c.Acquire(1)
 	chk.True(ok)
-	p2, ok := c.Acquire()
+	p2, ok := c.Acquire(1)
 	chk.True(ok, "second permit fits under limit 2")
-	_, ok = c.Acquire()
+	_, ok = c.Acquire(1)
 	chk.False(ok, "third must miss at limit 2")
 
 	p1.Release()
-	p3, ok := c.Acquire()
+	p3, ok := c.Acquire(1)
 	chk.True(ok, "a freed permit is reusable")
 
 	p2.Release()
@@ -42,7 +42,7 @@ func TestSemaphoreResource_ZeroBlocksAll(t *testing.T) {
 	chk := require.New(t)
 	l := NewSemaphore(0)
 	c := l.pool.NewCache()
-	_, ok := c.Acquire()
+	_, ok := c.Acquire(1)
 	chk.False(ok, "limit 0 blocks every acquire")
 	c.ReleaseRef()
 }
@@ -53,7 +53,7 @@ func TestSemaphoreResource_Unlimited(t *testing.T) {
 	c := l.pool.NewCache()
 	perms := make([]permits.Permit, 0, 100)
 	for range 100 {
-		p, ok := c.Acquire()
+		p, ok := c.Acquire(1)
 		chk.True(ok, "unlimited never misses")
 		perms = append(perms, p)
 	}
@@ -72,7 +72,7 @@ func TestSetMaxConcurrency_RaiseWakesParkedWaiter(t *testing.T) {
 	var acqErr error
 	go func() {
 		// Parks on the Pool until SetMaxConcurrency raises the ceiling and wakes it.
-		p, err := c.AcquireWait(context.Background())
+		p, err := c.AcquireWait(context.Background(), 1)
 		acqErr = err
 		if err == nil {
 			p.Release()

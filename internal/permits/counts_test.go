@@ -19,24 +19,24 @@ func TestCountsTransitions(t *testing.T) {
 	h, u := c.load()
 	require.Equal(t, [2]uint64{0, 0}, [2]uint64{h, u})
 
-	require.False(t, c.acquireLocal(), "nothing borrowable on an empty cache")
+	require.False(t, c.acquireLocal(1), "nothing borrowable on an empty cache")
 
-	c.checkout() // held=1, inUse=1
+	c.checkout(1) // held=1, inUse=1
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 1}, [2]uint64{h, u})
 
-	require.False(t, c.acquireLocal(), "no borrowable while inUse == held")
-	require.False(t, c.stealOut(), "no borrowable to steal while inUse == held")
+	require.False(t, c.acquireLocal(1), "no borrowable while inUse == held")
+	require.False(t, c.stealOut(1), "no borrowable to steal while inUse == held")
 
-	require.True(t, c.release(), "release of the last in-use permit raises borrowable 0→1")
+	require.True(t, c.release(1), "release of the last in-use permit raises borrowable 0→1")
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 0}, [2]uint64{h, u}, "cache-don't-return: held stays")
 
-	require.True(t, c.acquireLocal(), "the cached permit is now borrowable")
+	require.True(t, c.acquireLocal(1), "the cached permit is now borrowable")
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 1}, [2]uint64{h, u})
 
-	require.True(t, c.release(), "1,1 → 1,0 crosses borrowable 0→1 again")
+	require.True(t, c.release(1), "1,1 → 1,0 crosses borrowable 0→1 again")
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 0}, [2]uint64{h, u})
 }
@@ -45,10 +45,10 @@ func TestCountsTransitions(t *testing.T) {
 // held > inUse already, a release does not newly free capacity for a waiter.
 func TestCountsReleaseWakeSignal(t *testing.T) {
 	var c counts
-	c.checkout() // 1,1
-	c.checkout() // 2,2
-	require.True(t, c.release(), "2,2 → 2,1 crosses borrowable 0→1")
-	require.False(t, c.release(), "2,1 → 2,0 was already borrowable, no new crossing")
+	c.checkout(1) // 1,1
+	c.checkout(1) // 2,2
+	require.True(t, c.release(1), "2,2 → 2,1 crosses borrowable 0→1")
+	require.False(t, c.release(1), "2,1 → 2,0 was already borrowable, no new crossing")
 }
 
 // Concurrent acquireLocal/release on shared borrowable capacity stays invariant
@@ -57,10 +57,10 @@ func TestCountsConcurrentAcquireRelease(t *testing.T) {
 	var c counts
 	const capacity = 8
 	for range capacity {
-		c.checkout()
+		c.checkout(1)
 	}
 	for range capacity {
-		c.release()
+		c.release(1)
 	}
 	// held=cap, inUse=0 — cap permits borrowable.
 
@@ -71,10 +71,10 @@ func TestCountsConcurrentAcquireRelease(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range iters {
-				if c.acquireLocal() {
+				if c.acquireLocal(1) {
 					h, u := c.load()
 					assert.LessOrEqual(t, u, h, "inUse ≤ held must hold")
-					c.release()
+					c.release(1)
 				}
 			}
 		}()
@@ -92,10 +92,10 @@ func TestCountsConcurrentStealOnce(t *testing.T) {
 	var c counts
 	const capacity = 8
 	for range capacity {
-		c.checkout()
+		c.checkout(1)
 	}
 	for range capacity {
-		c.release()
+		c.release(1)
 	}
 	// held=cap, inUse=0.
 
@@ -106,7 +106,7 @@ func TestCountsConcurrentStealOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if c.stealOut() {
+			if c.stealOut(1) {
 				won.Add(1)
 			}
 		}()

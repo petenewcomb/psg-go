@@ -57,7 +57,7 @@ func (h *heldPermit) acquire() bool {
 	if h.permit.Held() {
 		return true
 	}
-	pm, ok := h.ownCache.Acquire()
+	pm, ok := h.ownCache.Acquire(1)
 	if ok {
 		h.permit = pm
 	}

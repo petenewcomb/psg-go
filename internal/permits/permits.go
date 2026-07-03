@@ -43,8 +43,9 @@ import (
 //     so conservation holds), and decrements the parent's refs (cascade).
 
 // Resource is the pluggable accounting object permits are drawn from — the open
-// extension point (semaphore, memory, rate, weighted); n carries the weight (always
-// 1 in this weight-1 cut).
+// extension point (semaphore, memory, rate, weighted); n carries the weight of the
+// acquire being satisfied (1 from every current caller — weighted callers arrive
+// with the gather/barrier, weighted-acquisition.md step 2).
 type Resource interface {
 	TryAcquire(n int) bool
 	Release(n int)
@@ -248,25 +249,34 @@ func (c *Cache) touch() {
 	c.list().moveToBack(c)
 }
 
-// Acquire makes one permit available for a body in c to run and returns a Permit
-// recording the backing cache. ok is false if the body must wait.
-func (c *Cache) Acquire() (Permit, bool) {
+// Acquire makes w permits available for a body in c to run and returns a Permit
+// recording the backing cache and weight. ok is false if the body must wait. All
+// callers pass w=1 until the weighted gather/barrier lands (weighted-acquisition.md
+// step 1); a w>1 acquire is already correct but gather-less — it needs a single
+// source (one cache, the free Resource, or one steal victim) able to cover the
+// whole weight.
+func (c *Cache) Acquire(w int) (Permit, bool) {
+	if w < 1 {
+		panic("permits: Acquire weight < 1")
+	}
 	if !c.alive.Load() {
 		panic("permits: Acquire on a destroyed cache")
 	}
+	uw := uint64(w)
 	// Steps 1–2: lock-free up-walk; ancestors pinned by refcounts.
 	for a := c; a != nil; a = a.parent {
-		if a.counts.acquireLocal() {
-			return Permit{a}, true
+		if a.counts.acquireLocal(uw) {
+			return Permit{backing: a, weight: uw}, true
 		}
-		// Walked past a without being satisfied: a had nothing to lend, so it is hot —
-		// move it to the back of its sibling list so the steal prefers quiescent caches.
-		// A satisfied hit (above) pays nothing: its remaining idle stays a fair victim.
+		// Walked past a without being satisfied: a had too little to lend, so it is
+		// hot — move it to the back of its sibling list so the steal prefers quiescent
+		// caches. A satisfied hit (above) pays nothing: its remaining idle stays a
+		// fair victim.
 		a.touch()
 	}
 	// Steps 3–4: free Resource, then steal.
-	if backing := c.pool.acquireInto(c); backing != nil {
-		return Permit{backing}, true
+	if backing := c.pool.acquireInto(c, w); backing != nil {
+		return Permit{backing: backing, weight: uw}, true
 	}
 	// Step 5: wait.
 	return Permit{}, false
@@ -280,16 +290,16 @@ func (c *Cache) Acquire() (Permit, bool) {
 // than lost — and if it succeeds there, that is the one acquisition (no double-take).
 // (The non-blocking Acquire stays the manager's admit path, which postpones on a
 // miss; that postpone hook lands with the manager/executor split.)
-func (c *Cache) AcquireWait(ctx context.Context) (Permit, error) {
+func (c *Cache) AcquireWait(ctx context.Context, w int) (Permit, error) {
 	for {
-		if pm, ok := c.Acquire(); ok {
+		if pm, ok := c.Acquire(w); ok {
 			return pm, nil
 		}
 		p := c.pool
 		var pm Permit
 		var ok bool
 		_, err := p.notify.Wait(ctx, func() bool {
-			pm, ok = c.Acquire()
+			pm, ok = c.Acquire(w)
 			return !ok // park only if still no permit
 		})
 		if ok {
@@ -302,42 +312,47 @@ func (c *Cache) AcquireWait(ctx context.Context) (Permit, error) {
 	}
 }
 
-// acquireInto runs steps 3–4 for c, landing the permit in c's own held. Returns c on
+// acquireInto runs steps 3–4 for c, landing w permits in c's own held. Returns c on
 // success or nil if both miss (the caller waits). The loop re-checks the Resource each
 // turn (a concurrent destroy may free capacity) and retries the search when a steal
-// candidate's idle permit was consumed before the take.
-func (p *Pool) acquireInto(c *Cache) *Cache {
+// candidate's idle permits were consumed before the take. Single-source only: the
+// Resource grant and the steal are each all-or-nothing at weight w (multi-source
+// gathering lands with the demand barrier, weighted-acquisition.md step 2).
+func (p *Pool) acquireInto(c *Cache, w int) *Cache {
+	//nolint:gosec // G115: w >= 1, validated by Acquire (the only caller)
+	uw := uint64(w)
 	for {
-		if p.resource.TryAcquire(1) {
-			c.counts.checkout()
+		if p.resource.TryAcquire(w) {
+			c.counts.checkout(uw)
 			return c
 		}
-		v := searchList(&p.roots) // returns a ref-pinned candidate (or nil)
+		v := searchList(&p.roots, uw) // returns a ref-pinned candidate (or nil)
 		if v == nil {
 			return nil // step 5: nothing free, nothing borrowable
 		}
-		ok := v.counts.stealOut()
+		ok := v.counts.stealOut(uw)
 		if ok {
-			c.counts.checkout()
+			c.counts.checkout(uw)
 		}
 		v.ReleaseRef() // unpin the candidate (may be the call that destroys it)
 		if ok {
 			return c
 		}
-		// The candidate's idle permit was consumed (a lock-free acquire, or another
+		// The candidate's idle permits were consumed (a lock-free acquire, or another
 		// steal) between the search and the take. Loop and re-search.
 	}
 }
 
-// searchList finds a borrowable cache to steal from in the forest rooted at l, or nil
-// if none is borrowable anywhere. It is a front-to-back DFS returning the FIRST
-// borrowable cache — coldest-first by touch order, so the common case both picks the
-// least-recently-active victim and terminates early; the victim is left in place, so a
-// still-borrowable one stays at the front and is re-picked (order-based camping). It
-// holds l's lock while scanning and descends into a child's list while still holding
-// l's lock, so the locks nest root→leaf. searchList is the ONLY holder of two list
-// locks at once and always in that one order, so no lock-order cycle can form. The
-// returned candidate is a hint; acquireInto's stealOut CAS is the authority.
+// searchList finds a cache with at least w borrowable to steal from in the forest
+// rooted at l, or nil if none is borrowable anywhere. It is a front-to-back DFS
+// returning the FIRST sufficiently-borrowable cache — coldest-first by touch order,
+// so the common case both picks the least-recently-active victim and terminates
+// early; the victim is left in place, so a still-borrowable one stays at the front
+// and is re-picked (order-based camping). It holds l's lock while scanning and
+// descends into a child's list while still holding l's lock, so the locks nest
+// root→leaf. searchList is the ONLY holder of two list locks at once and always in
+// that one order, so no lock-order cycle can form. The returned candidate is a hint;
+// acquireInto's stealOut CAS is the authority.
 //
 // A non-nil candidate is returned **ref-pinned** (`refs++`), taken under the list lock
 // where the cache is known linked and alive — so it cannot be destroyed (its memory
@@ -345,7 +360,7 @@ func (p *Pool) acquireInto(c *Cache) *Cache {
 // it. The victim is cross-subtree (off the acquirer's ancestor chain, so not pinned by
 // the acquirer's refs); without this pin only GC keeps it alive across the take, which
 // is fine for a GC'd cache but not for a pooled one.
-func searchList(l *cacheList) *Cache {
+func searchList(l *cacheList, w uint64) *Cache {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for c := l.head; c != nil; c = c.next {
@@ -355,22 +370,24 @@ func searchList(l *cacheList) *Cache {
 			// (its children are already drained).
 			continue
 		}
-		if h, u := c.counts.load(); h > u {
+		if h, u := c.counts.load(); h >= u+w {
 			if c.tryPin() {
 				return c // borrowable victim, pinned across the steal; caller ReleaseRefs
 			}
 			continue // raced into destroy after the alive check; skip
 		}
-		if v := searchList(&c.children); v != nil {
+		if v := searchList(&c.children, w); v != nil {
 			return v // already pinned by the recursive hit
 		}
 	}
 	return nil
 }
 
-// Permit is the transient handle for a body occupying one permit.
+// Permit is the transient handle for a body occupying w permits from one backing
+// cache.
 type Permit struct {
 	backing *Cache
+	weight  uint64
 }
 
 // Held reports whether this Permit currently occupies a slot (a non-zero Permit). A
@@ -380,16 +397,16 @@ func (pm Permit) Held() bool {
 	return pm.backing != nil
 }
 
-// Release ends the run segment the Permit backed; the permit stays cached in held
+// Release ends the run segment the Permit backed; the permits stay cached in held
 // (cache-don't-return), now borrowable — and may satisfy a parked AcquireWait or a
 // postponed manager, so it wakes one consumer. Every release wakes (not just a
-// borrowable 0→1 crossing): a multi-held cache freeing its second idle permit is no
+// borrowable 0→ crossing): a multi-held cache freeing its second idle permit is no
 // crossing, yet a second waiter could take it.
 func (pm Permit) Release() {
 	if pm.backing == nil {
 		panic("permits: Release of a zero Permit")
 	}
-	pm.backing.counts.release()
+	pm.backing.counts.release(pm.weight)
 	pm.backing.pool.wake()
 }
 

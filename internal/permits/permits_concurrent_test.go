@@ -23,7 +23,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	root := tp.NewCache()
-	rp, _ := root.Acquire() // root runs, then parks → its base (held=1) is borrowable
+	rp, _ := root.Acquire(1) // root runs, then parks → its base (held=1) is borrowable
 	rp.Release()
 
 	kids := make([]*Cache, children)
@@ -38,7 +38,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 		go func(c *Cache) {
 			defer wg.Done()
 			for range iters {
-				if pm, ok := c.Acquire(); ok {
+				if pm, ok := c.Acquire(1); ok {
 					if h, u := pm.backing.counts.load(); u > h {
 						invViolated.Store(true)
 					}
@@ -72,7 +72,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	root := tp.NewCache()
-	rp, _ := root.Acquire()
+	rp, _ := root.Acquire(1)
 	rp.Release()
 	fixed := make([]*Cache, 4)
 	for i := range fixed {
@@ -87,7 +87,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		go func(c *Cache) {
 			defer wg.Done()
 			for range 10000 {
-				if pm, ok := c.Acquire(); ok {
+				if pm, ok := c.Acquire(1); ok {
 					pm.Release()
 				}
 			}
@@ -101,7 +101,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 			defer wg.Done()
 			for range 4000 {
 				sub := tp.newChild(root)
-				if pm, ok := sub.Acquire(); ok {
+				if pm, ok := sub.Acquire(1); ok {
 					pm.Release()
 				}
 				sub.ReleaseRef() // drains the ephemeral sub-wave (destroy)

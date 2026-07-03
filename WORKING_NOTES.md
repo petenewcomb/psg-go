@@ -188,12 +188,49 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
   meta-redirect wiring) follow, each separable.
 
-**►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN) — NOT implemented, no code
-touched; parallel thread to the weighted-acquisition work above. SUPERSEDES the Flow-object
-surface everywhere it appears (API_DESIGN.md Flow section, programming-model.md Wave+Flow
-framing, surface-lineage Flow bullet): there is NO Flow type anymore.** Rationale chain
-recorded below so it isn't relitigated; `docs/decisions/flow-design.md` is now the
-permanent record (docs pass done 2026-07-03 — see open queue item 5).
+**►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN); IMPLEMENTATION IN
+PROGRESS on branch `flow-impl` (worktree). Parallel thread to the weighted-acquisition
+work. SUPERSEDES the Flow-object surface everywhere it appears (API_DESIGN.md Flow
+section, programming-model.md Wave+Flow framing, surface-lineage Flow bullet): there is
+NO Flow type anymore.** Rationale chain recorded below so it isn't relitigated;
+`docs/decisions/flow-design.md` is now the permanent record (docs pass done 2026-07-03 —
+see open queue item 5).
+- **CP-F1 LANDED (2026-07-03, this commit): keys/tags + path-scoped values end-to-end.**
+  `flow.go`: FlowKey[V]/FlowTag/NewFlowKey/NewFlowTag (identity = *flowIdentity pointer,
+  NONZERO size on purpose — zero-size allocs share an address), key.Value / key.From /
+  tag.InFlow live; FollowUp/Suppress/NewFlow() declared per API-first but panic
+  ("not yet implemented", CP-F2/F4). WithFlow = plain inline call; zero-opt degenerates
+  to body(ctx); scope meta CLONES the ambient meta (wave/parent/parentWaves/ctxType/
+  exEnv) so it is transparent to wave resolution, permit-chain walks (held stays nil,
+  parent link preserved), and reentrancy typing; rider set = immutable snapshot
+  `*flowRiders` (small slice, linear scan, replace-or-append shadowing).
+  - **Propagation seams (one pointer copy each)**: borrowBodyContext captures riders
+    from the submit-time ctx (body borrows happen synchronously AT DISPATCH — verified
+    launcher newTaskWork + funnel newFunnelWork; the riders ride the DISPATCH chain,
+    unlike meta.parent = the severed permit chain); ensureCtxMeta inherits riders
+    verbatim on every derivation (+ gained a sourceMeta.wave==nil branch so a top-level
+    scope meta doesn't pollute parentWaves with a nil key).
+  - **Fan-in sever is STRUCTURAL**: funnelInstance.flush severs at entry via
+    severFlowRiders (bodyMetaPool clone with riders=nil, released at flush return —
+    synchronous extent). Covers BOTH drive paths: the executor Run path (naturally
+    rider-free src) and the INLINE already-past-deadline flush, which arrives on the
+    triggering accumulate item's ctx and was the leak path. Tested both.
+  - **Scope meta/child NOT pooled** (plain alloc, GC-owned): the scope has no
+    completion event until CP-F2 refcounts provide one, and a freed-then-recycled meta
+    read through a retained scope ctx would misdeliver. One alloc per REGISTERING
+    scope, never per dispatch; BenchmarkLauncherSkim floor CONFIRMED unchanged at
+    1 alloc/op. Revisit pooling with CP-F2 (refcount zero = safe recycle point).
+  - Gate: vet, lint 0 (after cache clean — a stale main-tree golangci cache leaked 5
+    permits-WIP gosec findings into worktree runs; `golangci-lint cache clean` fixed),
+    full -short suite, flow tests (propagation chain incl. sub-wave + skim, absence,
+    degenerate, shadowing, in-body scope, sever ×2 paths, zero-identity panics),
+    40× TestBySimulation -race batch (regression — sim has no flow surface yet).
+  - **NEXT: CP-F2** — follow-up instances (pooled gen-stamped state), per-work-item
+    refcounting on the dispatch path (ref at admission under the scope's cover, unref
+    at item completion), nominal-end firing + extension semantics (fn's dispatches
+    inherit the firing instance ambiently via a provisional ref), scope-exit release.
+    Then CP-F3 funnel transfer/union multiset; CP-F4 Suppress/NewFlow + opt-alloc
+    verification + sim model extension (flow-rider conservation oracle).
 - **Ontology: "flow" = the causal DAG itself** (nodes = work items; edges = submits + the
   funnel accumulate→flush fan-in). Two rider kinds propagate along it, split by ONE property
   — whether a merge operator exists at fan-in:

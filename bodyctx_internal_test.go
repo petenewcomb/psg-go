@@ -66,7 +66,8 @@ func TestParentJobsForSource(t *testing.T) {
 	has := func(m map[*Wave]struct{}, w *Wave) bool { _, ok := m[w]; return ok }
 
 	t.Run("top-level source (no meta) carries none", func(t *testing.T) {
-		assert.Nil(t, parentWavesForSource(context.Background(), &Wave{}))
+		srcMeta, ok := metaFromContext(context.Background())
+		assert.Nil(t, parentWavesForSource(srcMeta, ok, &Wave{}))
 	})
 
 	t.Run("same-wave source passes parentWaves through", func(t *testing.T) {
@@ -77,7 +78,7 @@ func TestParentJobsForSource(t *testing.T) {
 		m, _ := metaFromContext(srcCtx)
 		m.parentWaves = map[*Wave]struct{}{ancestor: {}}
 
-		got := parentWavesForSource(srcCtx, srcWave)
+		got := parentWavesForSource(m, true, srcWave)
 		assert.True(t, has(got, ancestor))
 		assert.False(t, has(got, srcWave), "same-wave must not add the source wave")
 		releaseBodyContext(srcCtx)
@@ -91,7 +92,7 @@ func TestParentJobsForSource(t *testing.T) {
 		m, _ := metaFromContext(srcCtx)
 		m.parentWaves = map[*Wave]struct{}{ancestor: {}}
 
-		got := parentWavesForSource(srcCtx, target)
+		got := parentWavesForSource(m, true, target)
 		assert.True(t, has(got, ancestor), "the source's own ancestry carries over")
 		assert.True(t, has(got, srcWave), "the source wave joins the ancestry")
 		assert.False(t, has(m.parentWaves, srcWave), "the source meta's map must not be mutated")

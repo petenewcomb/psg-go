@@ -53,6 +53,13 @@ type ctxMeta struct {
 	held        *heldPermit
 	parentWaves map[*Wave]struct{}
 	ctxType     contextType
+	// riders is the flow rider set in scope (docs/decisions/flow-design.md): an
+	// immutable snapshot shared by pointer along the causal dispatch chain. nil when
+	// no enclosing WithFlow registered anything. Inherited verbatim by derived metas
+	// (ensureCtxMeta) and by body borrows from the dispatch-time ctx
+	// (borrowBodyContext); severed at the funnel accumulate→flush fan-in
+	// (funnelInstance.flush via severFlowRiders).
+	riders *flowRiders
 	executionEnvironment
 
 	// Recycling bookkeeping for top-level/skim metas minted by ensureCtxMeta (the body
@@ -394,11 +401,16 @@ func (wv *Wave) ensureCtxMeta(
 	var parentWaves map[*Wave]struct{}
 	var exEnv executionEnvironment
 	if sourceMeta != nil {
-		if sourceMeta.wave == wv {
+		switch sourceMeta.wave {
+		case wv:
 			parentWaves = sourceMeta.parentWaves
 			ctxType = sourceMeta.ctxType
 			exEnv = sourceMeta.executionEnvironment
-		} else {
+		case nil:
+			// A wave-less meta (a top-level WithFlow scope): nothing to join
+			// wave-wise — inherit its (nil) ancestry and derive as top-level.
+			parentWaves = sourceMeta.parentWaves
+		default:
 			if _, isParentWave := sourceMeta.parentWaves[wv]; isParentWave {
 				panic("Context belongs to a child wave")
 			}
@@ -419,6 +431,9 @@ func (wv *Wave) ensureCtxMeta(
 	meta.parentWaves = parentWaves
 	meta.ctxType = ctxType
 	meta.executionEnvironment = exEnv
+	if sourceMeta != nil {
+		meta.riders = sourceMeta.riders // flow riders inherit verbatim along derivations
+	}
 
 	// Stamp the derived meta onto a ctxpool child of ctx. The child descends from
 	// the submit/drive ctx, so cancellation rides that ancestry — the Wave owns no

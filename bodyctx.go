@@ -55,7 +55,15 @@ func borrowBodyContext(
 	m.ctxType = ctxType
 	m.held = h
 	m.executionEnvironment = exEnv
-	m.parentWaves = parentWavesForSource(srcCtx, wv)
+	srcMeta, srcOk := metaFromContext(srcCtx)
+	m.parentWaves = parentWavesForSource(srcMeta, srcOk, wv)
+	if srcOk {
+		// Flow riders ride the DISPATCH chain: captured from the submit-time ctx
+		// here at borrow (which body-creating call sites perform synchronously at
+		// dispatch), unlike parent — the permit chain — which stays severed for a
+		// body that runs on a fungible worker.
+		m.riders = srcMeta.riders
+	}
 	return ctxpool.WithValue(srcCtx, m), m
 }
 
@@ -71,13 +79,13 @@ func releaseBodyContext(ctx context.Context) {
 }
 
 // parentWavesForSource computes the cross-wave ancestry a body bound to wv should
-// carry, derived from srcCtx's own meta (mirrors ensureCtxMeta): a top-level source
-// (no meta) carries none; a same-wave source passes its parentWaves through unchanged;
-// a cross-wave source joins its own wave into its parentWaves (the body reaches across a
-// wave boundary). The cross-wave branch allocates a fresh map per call — see
-// docs/decisions/body-context-pool.md on caching this for a hot redirect.
-func parentWavesForSource(srcCtx context.Context, wv *Wave) map[*Wave]struct{} {
-	srcMeta, ok := metaFromContext(srcCtx)
+// carry, derived from the source ctx's meta (mirrors ensureCtxMeta): a top-level
+// source (no meta) carries none; a same-wave source passes its parentWaves through
+// unchanged; a cross-wave source joins its own wave into its parentWaves (the body
+// reaches across a wave boundary). The cross-wave branch allocates a fresh map per
+// call — see docs/decisions/body-context-pool.md on caching this for a hot redirect.
+// The meta is passed in (rather than looked up) so borrowBodyContext resolves it once.
+func parentWavesForSource(srcMeta *ctxMeta, ok bool, wv *Wave) map[*Wave]struct{} {
 	if !ok || srcMeta.wave == nil || srcMeta.wave == wv {
 		if ok {
 			return srcMeta.parentWaves

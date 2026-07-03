@@ -562,6 +562,19 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	}
 	c.accumulator = nil
 
+	// Fan-in sever: path-scoped flow riders do not cross the accumulate→flush edge
+	// (docs/decisions/flow-design.md). The inline already-past-deadline flush arrives
+	// here on the TRIGGERING accumulate body's ctx, whose meta carries that one item's
+	// riders — one of many folded into this flush, so letting them through would
+	// misattribute the whole aggregate. The executor-driven path (Run) borrows from
+	// the scheduler ctx and is naturally rider-free; severing here makes the rule
+	// structural for both. The severed extent is synchronous (the user Flush and its
+	// dispatches complete within this call), so the clone releases at return.
+	if sctx, severed := severFlowRiders(ctx); severed {
+		defer releaseBodyContext(sctx)
+		ctx = sctx
+	}
+
 	// Release the per-instance flush barrier reference acquired at
 	// allocation. Deferred so a panicking Flush still releases it, and
 	// ordered after the accumulator.Flush body below so that any

@@ -188,6 +188,152 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
   meta-redirect wiring) follow, each separable.
 
+**►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN) — NOT implemented, no code
+touched; parallel thread to the weighted-acquisition work above. SUPERSEDES the Flow-object
+surface everywhere it appears (API_DESIGN.md Flow section, programming-model.md Wave+Flow
+framing, surface-lineage Flow bullet): there is NO Flow type anymore.** Rationale chain
+recorded below so it isn't relitigated; `docs/decisions/flow-design.md` pass still pending.
+- **Ontology: "flow" = the causal DAG itself** (nodes = work items; edges = submits + the
+  funnel accumulate→flush fan-in). Two rider kinds propagate along it, split by ONE property
+  — whether a merge operator exists at fan-in:
+  - **Values (no canonical merge) = PATH-scoped**: verbatim inheritance along chains
+    (including nil/empty — NO top-level default; initiation is always explicit), SEVERED at
+    fan-in (a flush body reads nil — the truthful signal), re-asserted only by the fan-in
+    owner (funnel-owns-aggregation: collect per-item in accumulate, pick/union/start-fresh
+    in user code). Framework-collected value sets REJECTED (unbounded ctx pinning,
+    per-window alloc, unanswerable dedupe).
+  - **Lifetime / after-funcs (counting monoid) = DAG-scoped**: refs union through EVERYTHING
+    by default, incl. funnels — an accumulate item's refs TRANSFER to the funnel instance at
+    completion, the flush item takes over the instance set (never-transit-unreferenced, the
+    W2a depositOccupy lesson), downstream submits inherit before the flush item releases.
+    Shrink only at explicit suppression.
+- **Surface: ONE function — `streampool.WithFlow(ctx, body, opts...)`** (evolution: Exec →
+  Flow → WithFlow; no non-flow use case can exist — everything scope-expressible is a DAG
+  rider, incl. the deferred priority feature). Runs body inline on the CALLER's goroutine
+  with a flow-stamped pooled ctx; the lexical scope IS the flow root. **FINAL NAMING
+  SCHEME (PN, 2026-07-03 — supersedes the same-day With*-option family):**
+  - **Constructors (scoping declared by NAME, not sizeof)**: `NewFlowKey[V]()` =
+    PATH-scoped key (any V incl. struct{} — a path-scoped marker severs);
+    `NewFlowTag()` = DAG-scoped, STRUCTURALLY valueless (no type param, no value slot ⇒
+    data-bearing DAG keys stay UNREPRESENTABLE — the guard survives without the sizeof
+    rule). The sizeof(V)==0 scheme was agreed then REJECTED same-day (PN worry, valid):
+    struct{}→bool refactor silently flips scoping; rule invisible at use sites; generic-V
+    spooky. Explicit constructors keep the type-level guarantee, kill the cliff.
+  - **Options are METHODS ON THE KEY/TAG** (kills the With/Flow prefix stutter; maximal
+    static typing): `FlowKey[V].Value(v V)` (compile-time key→value binding),
+    `.FollowUp(fn)` (both kinds; name chosen over After [context.AfterFunc fires on
+    CANCEL — harmful echo], Close/Commit/Cleanup/Done/End — FollowUp teaches the
+    extension semantics: the handler IS potentially more flow), `.Suppress()` (per-key
+    targeted suppression; the free-function WithoutFlow is REDUNDANT and DROPPED).
+    FlowTag has NO Value method — type system enforces valuelessness.
+  - **`streampool.NewFlow()`** = the one package-level option: suppress-all reframed as
+    fresh-flow-root (positive intent-naming; clears the INHERITED set only,
+    order-independent vs sibling adds; "New" here is semantic — a new flow — accepted
+    over the New*-constructor-convention nit).
+  - **Read family settled: `key.From(ctx) (V, bool)`** (comma-ok; XFromContext idiom in
+    method form; `Value` was taken by registration — good, reads shouldn't look like
+    writes) + **`tag.InFlow(ctx) bool`** (presence, ORs through fan-ins). InFlow names
+    the TWO-HOP structure (PN: the tag is on the FLOW; the ctx merely contains/reaches
+    the flow — bare prepositions collapse the hops and land the tag on the wrong
+    object); both parses converge true ("is checkout in the flow of ctx" / "is ctx's
+    work in the checkout flow"); rhymes with the WithFlow/NewFlow* family. Accepted
+    demerit: "inflow" noun homograph (visually broken by camelCase). Rejected en route:
+    Tags [plural-noun misparse — PN], Tagged/Marked/Labeled [participial dodge, passed
+    over], In/On [wrong object per two-hop], IsTagOf [correct, awkward],
+    Contains/Covers/Reaches [math/CS-y — PN], Describes [tags are informationless],
+    Active/Underway [claim untracked state]. Reads consult the nearest meta's rider
+    set; (zero, false) on never-stamped ctxs — no panic.
+  - **Declaration naming CONVENTION (PN, docs-borne, taught by examples): NO Key/Tag
+    suffixes** — a KEY is named for the VALUE it carries (`requestCtx`, `tenant`, `txn`:
+    every use site reads as a sentence about the value — txn.Value(t), txn.From(ctx),
+    txn.FollowUp(commit)); a TAG is named for the FLOW it identifies (`checkout`,
+    `ingestion`: checkout.In(ctx), checkout.FollowUp(fn)). Enabled BY the method-shaped
+    API (receiver position gives the noun its grammatical role — free functions would
+    have needed the suffix back). Accepted caveat: noun keys can collide with the
+    natural local for a read result (`txn, ok := txn.From(ctx)` is legal-but-ugly
+    shadowing; users pick a short local) — traded for call-site readability where it
+    counts.
+  - Call shape: `streampool.WithFlow(ctx, body, requestCtx.Value(r.Context()),
+    checkout.FollowUp(commitFn), audit.Suppress())`.
+  **UNIFIED KEYSPACE + SCOPING-AS-KEY-PROPERTY (PN, 2026-07-03)**: one identity
+  namespace; a key's bundle {value?, followups...} propagates AS A UNIT under the key's
+  scoping — a follow-up scoped to a value's lifetime = register both under one path key
+  ("fires when all work CARRYING the value completes" — release-the-carried-ctx case);
+  commit-through-the-funnel uses a FlowTag (refs union through fan-ins; presence
+  readable through fan-ins — the "tag" semantics). Genuinely different lifetimes = two
+  keys, deliberately. Earlier same-day "type/instance orthogonality" bullet: instances
+  stay internal as recorded; "types" therein = these keys/tags. Docs-pass details:
+  follow-up fn optionally receiving the bundle value (typed handoff is free under the
+  bundle). Ops keep bare `Submit(ctx, v)` — NO submit options, NO handles, NO
+  lifecycle objects. Zero-opt WithFlow degenerates to `body(ctx)`. The mid-session
+  singular WithFlow(ctx)-submit-option/`FlowFromContext` idea = sugar over one built-in
+  key (or dropped — doc pass decides; NB the name WithFlow now belongs to the scope
+  function). **`WithFlow` is OPTIONAL (PN): flows aren't created, they're always already
+  there** — every bare Submit roots/extends the DAG with the ambient (possibly empty) rider
+  set; the function only opens a lexical extent with a MODIFIED rider set; wrapping a
+  single Submit = per-dispatch registration. Docs framing: "most programs never call it"
+  (and are still fully in flows when they don't). Interop: a flow value is any user value incl. a live request ctx; otel
+  spans propagate through foreign wrappers untouched (nearest-meta Value walk, same as
+  ambient-wave resolution).
+- **Type/instance orthogonality**: minted TYPE identifiers (cold-path; shared across many
+  flows or unique per flow — the user's granularity dial) are the SHAPING identity
+  (suppress / read / mix-and-match). INSTANCES (pooled gen-stamped state, one per
+  registration) are the LIFETIME identity and are FULLY INTERNAL — no user handle.
+  Same-type instances NEVER auto-merge (would weld concurrent requests sharing a
+  package-level type).
+- **Lifetime semantics**: the scope's own ref covers entry→return, so the attach window is
+  race-free LEXICALLY (parent-covers-children; the early-fire multi-root race is
+  unwritable). Multi-root = several submits in one scope — never special. Empty scope fires
+  at return. Count-zero after scope exit = NOMINAL end → afterFn fires; the afterFn's own
+  dispatches inherit the firing instance ambiently (framework provisional ref bridges
+  fire→admission) → extension = a later nominal end fires again; TRUE end = a firing that
+  extends nothing. Rejected en route (do not relitigate): NewFlow-returns-ctx object w/
+  Dup/Close + gen-stamped user handle; op builder `.As(flow)` + use-site stacking;
+  initiator-held ref + Close for multi-root (superseded by lexical root closure);
+  per-registration suppression HANDLES (couple the suppression site to the registration
+  site — replaced by types); framework auto-merge by type.
+- **Cancellation stance**: riders are pure values — NO framework cancellation derives from
+  a flow value; bodies consult a carried ctx's `Err()` explicitly. AfterFunc-on-cancel
+  stays user-space on the user's own ctx; nominal-end events are the framework's. The
+  completion hook is REQUIRED (PN): "commit upstream txn at flow end" and "cancel a carried
+  ctx once unreferenced" are both just things fn does at nominal end — one mechanism.
+  TODO.md:79 (joined-context adapter) RESOLVED: nothing merges cancellation scopes — not
+  needed.
+- **Cost model**: one rider-set pointer in the pooled ctxMeta; inherit by pointer (zero
+  cost); pooled COW node only at registration/suppression edges; per-funnel-instance small
+  multiset (dedupe by identity + count, the bindings-slice alloc pattern); types minted
+  cold; reads = small linear scan; opts copy-out-never-retain (the verified WithLimits
+  0-alloc discipline).
+- **PANIC STANCE SETTLED (PN, 2026-07-03): the framework NEVER recovers.** The
+  "recovered and surfaced as an error" claims (doc.go, programming-model.md ×2) were
+  unimplemented fiction from the original design-doc drop (5160c50) — zero recover() in
+  production code; funnel.go's panicked-sentinel defers are cleanup-on-unwind, not
+  recovery; TODO.md:202 already presumed propagation. Claims STRUCK this session
+  (doc.go + programming-model.md now state propagate + accounting-sound unwind +
+  recover-in-your-own-body). Flow's body fn is therefore UNIFORM, not exceptional:
+  plain function call on the caller's goroutine, panics propagate, error returned
+  verbatim, NOT a dispatched work item (no wave membership / permits / backpressure);
+  scope refs release via defer so a panicking scope stays conservation-sound; body ctx
+  valid for the duration of the call (existing body-ctx escape contract).
+- **CTX ROLES SETTLED (PN, 2026-07-03): Flow's ctx param = EXECUTION ancestry** (ambient
+  rider inheritance + cancellation for dispatched work: a body ctx when nested, a stable
+  app/base ctx at top level); **a request ctx enters as a flow VALUE** (`WithValue(reqKey,
+  reqCtx)`) — data, consultative only (.Err()/deadline/span read by bodies), NEVER a parent
+  of framework ctx derivation. Consequence: the fresh-parent pooled-ctx seam is NOT
+  APPLICABLE to Flow (parents are pooled body ctxs / stable base ctxs — populations ctxpool
+  already amortizes); the delegating-parent custom ctx idea is shelved alongside TODO.md:79
+  (same reason: nothing derives from a fresh ctx). Residual, pre-existing + orthogonal:
+  fresh reqCtx passed directly to a top-level Submit pays ctxpool's one-time
+  childPool+AfterFunc on first touch. Cancellation model unchanged: request cancellation
+  stops bodies only if the request ctx is in the execution ancestry (user's explicit
+  choice + cost).
+- **Open queue**: (3) verify opt alloc discipline (variadic +
+  boxed payloads stay on stack); (4) naming REMAINDER — shaping-identity constructors
+  only (NewFlowKey[V] / follow-up type mint, possibly unified); the option/function names
+  are SETTLED (see surface bullet); (5) docs pass — new
+  `docs/decisions/flow-design.md`; reconcile API_DESIGN.md / programming-model.md ("two
+  user-facing types" framing) / surface-lineage.md / TODO.md:79.
+
 **►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,
 searchList(l,w) [borrowable≥w — no w>1 spin], acquireInto single-source all-or-nothing at w; all

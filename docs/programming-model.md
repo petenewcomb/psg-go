@@ -34,8 +34,7 @@ hierarchical lifetime, like structured control flow. The properties that follow:
   sequential and ordered.
 - **Resource accountability** — all submitted work is tracked and must complete
   before a wave's drain returns; no goroutine leaks.
-- **Failure isolation** — errors propagate through well-defined boundaries, and a
-  body panic is recovered and surfaced as an error.
+- **Failure isolation** — errors propagate through well-defined boundaries.
 
 ## The model: Wave, Flow, and the internal Pool
 
@@ -220,7 +219,9 @@ drain from ever waiting on a permit. Worker-pool sizing is automatic — limiter
 - **Context cancellation** propagates through all in-flight work by context
   ancestry; cancel the ctx you dispatched the work with (usually the same ctx you
   drive the wave with) to abort. The Wave owns no context of its own.
-- **Panics** in a body are recovered and converted to errors.
+- **Panics** in a body are not recovered — they unwind normally (framework
+  cleanup along the unwind keeps accounting sound). A body that wants per-task
+  isolation recovers for itself; the framework never masks a bug as an error.
 - **Cleanup is guaranteed**: a wave's drain does not return until its work (and its
   child waves) complete, even under cancellation — no leaked goroutines.
 

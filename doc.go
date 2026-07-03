@@ -56,8 +56,9 @@
 //     with a descriptive message.
 //   - Skim queuing: skim work is queued rather than run recursively, so a body
 //     that submits more work cannot overflow the stack.
-//   - Panic-safe: a panic in user code is recovered and surfaced as an error
-//     rather than crashing the process.
+//   - Panics propagate: a panic in user code unwinds normally (internal cleanup
+//     keeps accounting sound along the way) — the framework never recovers on
+//     your behalf. Recover inside your own body if you want per-task isolation.
 package streampool
 
 //go:generate go build -C internal/cmd/benchnorm -o ../../bin/benchnorm

@@ -53,32 +53,58 @@ type heldPermit struct {
 	confirmFn      func() bool
 	blockingFn     func() // ex.Blocking for the in-flight blockAcquire (nil if none)
 	blockingCalled bool   // whether blockingFn has fired this blockAcquire
+
+	// acquireErr latches an overdraft-refusal error surfaced by Acquire — terminal
+	// for this dispatch (the unit fails with the resource's own reason; retrying a
+	// refused demand would just re-register it). Sticky so every acquire loop
+	// observes it and stops parking; cleared with the demand's episode at Reset.
+	// Unreachable while streampool dispatches weight-1 only (a w=1 acquire can be
+	// refused only through an overdraft-episode extension, which needs a weighted
+	// head first — sequencing step 4), but the plumbing is the end-state API.
+	acquireErr error
+
+	// suspendTarget is the drive-target wave's cache for the in-flight suspend
+	// bracket (§Overdraft resolution (c)): suspend counts this handle's lend on it,
+	// and reclaim ends the suspension there before reacquiring.
+	suspendTarget *permits.Cache
 }
 
 // acquire performs the non-blocking admission acquire through ownCache: own cache, then
 // the ancestor up-walk (inherit in place), then the free Resource, then a forest steal.
 // Reports whether a permit is now held. Idempotent (latched on Held): a handle already
 // occupying a permit returns true without taking a second — so the block loop can call
-// it as both its guard and its confirm without double-acquiring.
+// it as both its guard and its confirm without double-acquiring. A refusal error
+// latches in acquireErr (terminal — see the field), and the loops surface it.
 func (h *heldPermit) acquire() bool {
 	if h.permit.Held() {
 		return true
 	}
-	pm, ok := h.ownCache.Acquire(&h.demand, 1)
-	if ok {
+	if h.acquireErr != nil {
+		return false
+	}
+	pm, err := h.ownCache.Acquire(&h.demand, 1)
+	if err != nil {
+		h.acquireErr = err
+		return false
+	}
+	if pm.Held() {
 		h.permit = pm
 	}
-	return ok
+	return pm.Held()
 }
 
 // suspend lends the held permit back to its backing cache for the duration of a park
 // episode (a drive call), reporting whether there was one to lend. False is the
 // re-entrancy no-op: an enclosing episode already suspended this handle, so the reclaim
-// belongs to that episode.
-func (h *heldPermit) suspend() bool {
+// belongs to that episode. target is the drive-target wave's cache for this handle's
+// limiter: the suspension counts there BEFORE the permit frees, so no overdraft
+// evaluation can observe the lent capacity without the suspension that produced it.
+func (h *heldPermit) suspend(target *permits.Cache) bool {
 	if !h.permit.Held() {
 		return false
 	}
+	target.SuspendDriver()
+	h.suspendTarget = target
 	h.permit.Release()
 	h.permit = permits.Permit{}
 	return true
@@ -94,10 +120,25 @@ func (h *heldPermit) suspend() bool {
 // slot. On cancellation it leaves the handle un-acquired (the completion release no-ops).
 // Void so it defers cleanly. Mirrors the eager reclaimRequest.
 func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
-	confirmFn := func() bool { return !h.acquire() } // block only while still un-acquired
+	// End the suspend bracket BEFORE reacquiring: the resumed holder becomes a
+	// visible parked demand instead of a suspension, which is what lets a standing
+	// overdraft evaluation waiting on this suspension proceed (resolution (c)).
+	if t := h.suspendTarget; t != nil {
+		h.suspendTarget = nil
+		t.ResumeDriver()
+	}
+	confirmFn := func() bool { return h.acquireErr == nil && !h.acquire() } // block only while still un-acquired
 	helping := true
 	var m workq.Notification
 	for !h.acquire() {
+		if h.acquireErr != nil {
+			// Overdraft refusal mid-reclaim: terminal — no wake follows a refusal,
+			// so parking would wedge. Leave the handle un-acquired (the completion
+			// release no-ops), like the cancellation path. Unreachable at weight-1
+			// (see acquireErr); revisit error surfacing with the step-4 weighted
+			// surface.
+			return
+		}
 		if m.Received() {
 			// Couldn't use the wake productively; pass it along (renotify conservation).
 			m.Forward()
@@ -137,11 +178,15 @@ func (h *heldPermit) pool() *permits.Pool {
 }
 
 // suspendHeldPermit lends the enclosing body's held permit for the duration of a drive
-// episode, returning the handle to reclaim at episode end, or nil: no enclosing body
-// holds a permit, or it is already suspended by an enclosing episode (re-entrancy — the
-// reclaim belongs to that episode). The native replacement for suspendForEpisode.
-func suspendHeldPermit(meta *ctxMeta) *heldPermit {
-	if h := meta.currentHeldPermit(); h != nil && h.suspend() {
+// episode targeting wave wv, returning the handle to reclaim at episode end, or nil:
+// no enclosing body holds a permit, or it is already suspended by an enclosing episode
+// (re-entrancy — the reclaim belongs to that episode). The suspension is counted on
+// wv's cache for the handle's limiter (mkdir-p'd through ensureCache when absent), the
+// drive-target attribution the overdraft stranger check reads (resolution (c)). The
+// native replacement for suspendForEpisode.
+func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
+	if h := meta.currentHeldPermit(); h != nil && h.permit.Held() &&
+		h.suspend(wv.ensureCache(meta, h.pool())) {
 		return h
 	}
 	return nil
@@ -164,13 +209,16 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermi
 	if h.acquire() {
 		return true, nil
 	}
+	if h.acquireErr != nil {
+		return false, h.acquireErr // overdraft refusal: the unit fails, no retry
+	}
 	if !ex.ShouldBlockOrPostpone() {
 		return false, nil
 	}
 	if wv.shouldBlock(ctx) == nil {
 		// Non-top-level: postpone. Register for a freed permit, then recheck.
 		ex.AddToListeners(h.pool().ListenersFor())
-		return h.acquire(), nil
+		return h.acquire(), h.acquireErr
 	}
 	// Top-level: block-and-help.
 	if err := blockAcquire(ctx, ex, wv, h); err != nil {
@@ -194,6 +242,9 @@ func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPerm
 	defer func() { h.blockingFn = nil }() // don't pin the Execution past the call
 	var m workq.Notification
 	for !h.acquire() {
+		if h.acquireErr != nil {
+			return h.acquireErr // overdraft refusal: terminal, don't park
+		}
 		if m.Received() {
 			// Couldn't use the wake productively; pass it along (renotify conservation).
 			m.Forward()
@@ -236,6 +287,8 @@ func (h *heldPermit) Reset() {
 	h.permit = permits.Permit{}
 	h.blockingFn = nil
 	h.blockingCalled = false
+	h.acquireErr = nil
+	h.suspendTarget = nil // reclaim always brackets; nil'd here as recycling hygiene
 }
 
 // confirm is blockAcquire's block-confirm: abort the wait if the permit is now held,
@@ -244,6 +297,9 @@ func (h *heldPermit) Reset() {
 func (h *heldPermit) confirm() bool {
 	if h.acquire() {
 		return false // acquired — abort the wait
+	}
+	if h.acquireErr != nil {
+		return false // refusal is terminal — abort the wait; the loop surfaces it
 	}
 	if !h.blockingCalled {
 		h.blockingCalled = true

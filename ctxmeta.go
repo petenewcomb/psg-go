@@ -220,7 +220,7 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 			// op shares the holder's limiter), reclaiming any earlier
 			// waits on a task that hasn't been queued yet. Interior
 			// brackets (Wave.block) no-op via re-entrancy.
-			if h := suspendHeldPermit(cm); h != nil {
+			if h := suspendHeldPermit(cm, cm.wave); h != nil {
 				defer h.reclaim(ctx, cm.wave)
 			}
 

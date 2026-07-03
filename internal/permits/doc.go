@@ -56,16 +56,22 @@
 //   - [Cache.Acquire] is the single locality-ordered primitive (permit-core.md
 //     "Acquisition"): own cache → ancestor chain → free Resource → steal → wait. It
 //     takes the caller-held [Demand] identity and a weight, returning a [Permit]
-//     (recording the backing cache and weight) or ok=false to wait. Steps 1–2 occupy
-//     existing borrowable permits; steps 3–4 (delegated to the Pool) check capacity
-//     out of the Resource or steal it into the acquiring cache's held — assembling a
-//     weight no single source covers by a multi-source gather whose partial hoard
-//     stays borrowable throughout (weighted-acquisition.md Decision 1).
+//     (recording the backing cache and weight), a zero Permit to wait, or an
+//     [OverdraftResource] refusal error (the unit's distinct failure). Steps 1–2
+//     occupy existing borrowable permits; steps 3–4 (delegated to the Pool) check
+//     capacity out of the Resource or steal it into the acquiring cache's held —
+//     assembling a weight no single source covers by a multi-source gather whose
+//     partial hoard stays borrowable throughout (weighted-acquisition.md
+//     Decision 1); a registered head whose gather exhausts a provably infeasible
+//     forest runs the overdraft evaluation (weighted-acquisition.md §Overdraft).
 //   - [Permit.Release] ends a run segment (body completed or parked): backing
 //     inUse−−. The permit STAYS cached in held (cache-don't-return), now borrowable.
 //   - Park / resume are Release / Acquire: parking releases the body's permit (now
 //     lendable to the sub-wave's bodies); resuming reacquires it (normally a step-1
 //     own-cache hit). (permit-core.md "Driving is an alternation".)
+//   - [Cache.SuspendDriver] / [Cache.ResumeDriver] bracket a holder's park-for-drive
+//     episode on the drive-target wave's cache — the attribution the overdraft
+//     stranger check reads (§Overdraft resolution (c)).
 //
 // # Lifetime
 //
@@ -75,9 +81,15 @@
 //
 // # Invariants the model-check targets (permit-core.md "Invariants")
 //
-//   - Per-cache: 0 ≤ inUse ≤ held.
-//   - Conservation: Σheld == Pool.checkedOut ≤ capacity.
-//   - Concurrency bound: Σinuse ≤ capacity.
+//   - Per-cache: 0 ≤ inUse ≤ held — except inside a standing overdraft episode's
+//     exempt subtree, where inUse may exceed held by exactly what was claimed from
+//     the episode allowance.
+//   - Conservation: Σheld == Pool.checkedOut ≤ capacity — untouched by overdraft
+//     (the grant enters neither held nor checkedOut).
+//   - Concurrency bound: Σinuse ≤ capacity + episodeTotal (== capacity outside an
+//     episode).
+//   - Episode: Σ max(inUse−held, 0) + allowance == episodeTotal, zero outside an
+//     episode; the allowance is necessarily fully home at episode end.
 //   - Liveness: no reachable state has a blocked Acquire of weight w while the
 //     gatherable capacity — borrowable permits anywhere plus free Resource capacity —
 //     covers w (the gather must assemble it) — the operational face of

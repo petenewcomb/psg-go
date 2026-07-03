@@ -9,9 +9,13 @@
 > sticky head, no weight-based ordering — provides x/sync/semaphore-grade fairness
 > *without* supply-side reservation, preserving the "parked ⟹ borrowable"
 > deadlock-freedom proof and making gather-vs-gather livelock unrepresentable.
-> **Status: agreed design; not implemented.** The weighing *surface* (how ops weigh
-> tasks) was already settled in `dispatch-execution-split.md` and is not revisited
-> here.
+> **Status: steps 1–2 implemented** — step 1 (mechanical weighting) landed 9e03d83;
+> step 2a (multi-source gather + Demand identity) 698bac4; step 2b (FIFO + sticky-head
+> barrier + per-demand mailboxes, wake chain) 1f27117 + cd09e5a; step 2c (§Overdraft:
+> episode sentinel, allowance, extensions, suspension counters) this commit. Steps 3–4
+> (TryAcquireUpTo/NotifyAt capabilities; user-facing surface) remain design-only. The
+> weighing *surface* (how ops weigh tasks) was already settled in
+> `dispatch-execution-split.md` and is not revisited here.
 
 ## Context
 

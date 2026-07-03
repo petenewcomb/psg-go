@@ -24,8 +24,9 @@ func TestDestroyRemovesChildExactly(t *testing.T) {
 
 	for range iters {
 		sub := root.NewChild() // ephemeral
-		pm, ok := sub.Acquire(&ds, 1)
-		require.True(t, ok)
+		pm, err := sub.Acquire(&ds, 1)
+		require.NoError(t, err)
+		require.True(t, pm.Held())
 		pm.Release()
 		require.True(t, sub.ReleaseRef()) // destroy → unlinked from root.children
 	}
@@ -41,8 +42,9 @@ func TestDestroyRemovesRootExactly(t *testing.T) {
 	var d Demand
 	for range iters {
 		c := tp.Pool.NewCache()
-		pm, ok := c.Acquire(&d, 1)
-		require.True(t, ok)
+		pm, err := c.Acquire(&d, 1)
+		require.NoError(t, err)
+		require.True(t, pm.Held())
 		pm.Release()
 		require.True(t, c.ReleaseRef())
 	}

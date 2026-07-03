@@ -27,43 +27,50 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	tp := newTestPool(2)
 	hog := tp.NewCache()
 	var dh Demand
-	hp, ok := hog.Acquire(&dh, 2)
-	require.True(t, ok, "w=2 whole-grant on a free Resource, no registration")
+	hp, err := hog.Acquire(&dh, 2)
+	require.NoError(t, err)
+	require.True(t, hp.Held(), "w=2 whole-grant on a free Resource, no registration")
 	require.Equal(t, 0, tp.fifoLen(), "a satisfied fast path never registers")
 
 	a := tp.NewCache()
 	b := tp.NewCache()
 	var da, db Demand
-	_, ok = a.Acquire(&da, 2)
-	require.False(t, ok, "everything is in use; a registers and arms")
+	pa0, err := a.Acquire(&da, 2)
+	require.NoError(t, err)
+	require.False(t, pa0.Held(), "everything is in use; a registers and arms")
 	require.Same(t, &da, tp.barrier.Load(), "a is the head")
-	_, ok = b.Acquire(&db, 2)
-	require.False(t, ok, "b queues behind a")
+	pb0, err := b.Acquire(&db, 2)
+	require.NoError(t, err)
+	require.False(t, pb0.Held(), "b queues behind a")
 	require.Equal(t, 2, tp.fifoLen())
 
 	w1 := tp.NewCache()
 	var d1 Demand
-	_, ok = w1.Acquire(&d1, 1)
-	require.False(t, ok, "weight-1 is gated while armed")
+	pw0, err := w1.Acquire(&d1, 1)
+	require.NoError(t, err)
+	require.False(t, pw0.Held(), "weight-1 is gated while armed")
 	require.Equal(t, 2, tp.fifoLen(), "weight-1 never registers")
 
 	hp.Release() // 2 permits go borrowable in hog's cache
 
-	_, ok = b.Acquire(&db, 2)
-	require.False(t, ok, "freed capacity must NOT satisfy the non-head, even on its retry")
-	pa, ok := a.Acquire(&da, 2)
-	require.True(t, ok, "the sticky head takes the freed capacity")
-	require.Same(t, da.cache, pa.backing)
+	pb1, err := b.Acquire(&db, 2)
+	require.NoError(t, err)
+	require.False(t, pb1.Held(), "freed capacity must NOT satisfy the non-head, even on its retry")
+	pa, err := a.Acquire(&da, 2)
+	require.NoError(t, err)
+	require.True(t, pa.Held(), "the sticky head takes the freed capacity")
+	require.Same(t, da.cache.Load(), pa.backing)
 	require.Same(t, &db, tp.barrier.Load(), "FIFO succession promoted b")
 
 	pa.Release() // a parks: its 2 go borrowable in a's home
-	pb, ok := b.Acquire(&db, 2)
-	require.True(t, ok, "the promoted head gathers from the parked predecessor's hoard")
+	pb, err := b.Acquire(&db, 2)
+	require.NoError(t, err)
+	require.True(t, pb.Held(), "the promoted head gathers from the parked predecessor's hoard")
 	require.Nil(t, tp.barrier.Load(), "the emptied FIFO disarms")
 
-	p1, ok := w1.Acquire(&d1, 1)
-	require.False(t, ok, "capacity is genuinely exhausted for weight-1 now")
-	_ = p1
+	p1, err := w1.Acquire(&d1, 1)
+	require.NoError(t, err)
+	require.False(t, p1.Held(), "capacity is genuinely exhausted for weight-1 now")
 
 	pb.Release()
 	for _, d := range []*Demand{&dh, &da, &db, &d1} {
@@ -85,21 +92,24 @@ func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 
 	a := tp.NewCache()
 	var da Demand
-	_, ok := a.Acquire(&da, 4)
-	require.False(t, ok, "w=4 on capacity 3 is infeasible; a hoards 2 and stays head")
-	require.Equal(t, uint64(2), da.cache.held())
+	pa0, err := a.Acquire(&da, 4)
+	require.NoError(t, err, "the promise-mode Overdraft waits rather than granting or refusing")
+	require.False(t, pa0.Held(), "w=4 on capacity 3 is infeasible; a hoards 2 and stays head")
+	require.Equal(t, uint64(2), da.cache.Load().held())
 
 	b := tp.NewCache()
 	var db Demand
-	_, ok = b.Acquire(&db, 3)
-	require.False(t, ok, "b queues behind the armed head")
+	pb0, err := b.Acquire(&db, 3)
+	require.NoError(t, err)
+	require.False(t, pb0.Held(), "b queues behind the armed head")
 
 	da.Invalidate()
 	require.Same(t, &db, tp.barrier.Load(), "b promoted")
 
-	pb, ok := b.Acquire(&db, 3)
-	require.True(t, ok, "the promoted head assembles from the drained hoard + free capacity")
-	require.Same(t, db.cache, pb.backing)
+	pb, err := b.Acquire(&db, 3)
+	require.NoError(t, err)
+	require.True(t, pb.Held(), "the promoted head assembles from the drained hoard + free capacity")
+	require.Same(t, db.cache.Load(), pb.backing)
 
 	pb.Release()
 	db.Invalidate()
@@ -117,20 +127,23 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 	tp := newTestPool(3)
 	v := tp.NewCache()
 	var dv Demand
-	pv, ok := v.Acquire(&dv, 1)
-	require.True(t, ok)
+	pv, err := v.Acquire(&dv, 1)
+	require.NoError(t, err)
+	require.True(t, pv.Held())
 	pv.Release() // 1 idle in v; 2 free
 
 	g := tp.NewCache()
 	var d Demand
-	pm, ok := g.Acquire(&d, 3)
-	require.True(t, ok, "3 = steal 1 + grant 2")
+	pm, err := g.Acquire(&d, 3)
+	require.NoError(t, err)
+	require.True(t, pm.Held(), "3 = steal 1 + grant 2")
 	home := pm.backing
-	require.Same(t, d.cache, home)
+	require.Same(t, d.cache.Load(), home)
 
 	pm.Release() // park: the home keeps 3 borrowable
-	pm2, ok := g.Acquire(&d, 3)
-	require.True(t, ok, "resume reacquire")
+	pm2, err := g.Acquire(&d, 3)
+	require.NoError(t, err)
+	require.True(t, pm2.Held(), "resume reacquire")
 	require.Same(t, home, pm2.backing, "step-0 own-home hit — stable backing, no re-registration")
 	require.Equal(t, 0, tp.fifoLen(), "no registration on the home hit")
 

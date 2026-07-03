@@ -28,7 +28,7 @@ func TestCountsTransitions(t *testing.T) {
 	require.False(t, c.acquireLocal(1), "no borrowable while inUse == held")
 	require.Equal(t, uint64(0), c.stealOutUpTo(1), "no borrowable to steal while inUse == held")
 
-	require.True(t, c.release(1), "release of the last in-use permit raises borrowable 0→1")
+	require.Equal(t, uint64(0), c.release(1), "no excess to return while inUse ≤ held")
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 0}, [2]uint64{h, u}, "cache-don't-return: held stays")
 
@@ -36,19 +36,36 @@ func TestCountsTransitions(t *testing.T) {
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 1}, [2]uint64{h, u})
 
-	require.True(t, c.release(1), "1,1 → 1,0 crosses borrowable 0→1 again")
+	require.Equal(t, uint64(0), c.release(1))
 	h, u = c.load()
 	require.Equal(t, [2]uint64{1, 0}, [2]uint64{h, u})
 }
 
-// A release raises borrowable only when it crosses 0→1 (inUse was == held). With
-// held > inUse already, a release does not newly free capacity for a waiter.
-func TestCountsReleaseWakeSignal(t *testing.T) {
+// A release returns exactly the overdraft excess the decrement retired — the delta of
+// max(inUse−held, 0) across the transition — and zero when inUse never exceeded held.
+func TestCountsReleaseExcessReturn(t *testing.T) {
 	var c counts
 	c.checkout(1) // 1,1
 	c.checkout(1) // 2,2
-	require.True(t, c.release(1), "2,2 → 2,1 crosses borrowable 0→1")
-	require.False(t, c.release(1), "2,1 → 2,0 was already borrowable, no new crossing")
+	require.Equal(t, uint64(0), c.release(1), "2,2 → 2,1: no excess")
+	require.Equal(t, uint64(0), c.release(1), "2,1 → 2,0: no excess")
+
+	// Overdraft shape: an exempt occupy pushed inUse past held (held=2, inUse=5 —
+	// 3 excess, claimed from a pool allowance by occupyTaking).
+	c.acquireLocal(2)
+	var allowance atomic.Uint64
+	allowance.Store(3)
+	require.True(t, c.occupyTaking(3, &allowance), "the allowance covers the shortfall exactly")
+	require.Equal(t, uint64(0), allowance.Load(), "the claim debited the allowance")
+	h, u := c.load()
+	require.Equal(t, [2]uint64{2, 5}, [2]uint64{h, u})
+	require.Equal(t, uint64(0), c.stealOutUpTo(1), "a cache in excess has nothing borrowable")
+
+	require.Equal(t, uint64(1), c.release(1), "5→4 over held=2 retires 1 excess")
+	require.Equal(t, uint64(2), c.release(2), "4→2 retires the remaining 2 excess")
+	require.Equal(t, uint64(0), c.release(2), "2→0 is all under held — no excess")
+	h, u = c.load()
+	require.Equal(t, [2]uint64{2, 0}, [2]uint64{h, u})
 }
 
 // deposit adds borrowable without occupying; stealOutUpTo takes min(borrowable, w) —

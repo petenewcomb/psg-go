@@ -66,8 +66,9 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 
 	g := tp.NewCache()
 	var dg Demand
-	pm, ok := g.Acquire(&dg, capacity) // whole-grant fast path holds ALL capacity
-	require.True(t, ok)
+	pm, err := g.Acquire(&dg, capacity) // whole-grant fast path holds ALL capacity
+	require.NoError(t, err)
+	require.True(t, pm.Held())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

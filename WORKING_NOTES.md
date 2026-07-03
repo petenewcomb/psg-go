@@ -2,7 +2,78 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► CP-W2b-ii LANDED (2026-07-03g, this commit) — NEXT: CP-W2c (overdraft; design settled —
+**►►► CP-W2c LANDED (2026-07-03h, this commit) — overdraft per weighted-acquisition.md
+§Overdraft + resolutions (a)/(b)/(c). NEXT: weighted-acquisition step 3 (TryAcquireUpTo /
+NotifyAt resource capabilities), then step 4 (surface builders + sets + opoption removal +
+meta-redirect wiring).** Gate: vet, lint 0 issues, full -short, permits -race ×5 (incl the
+over-subscribed canary + new overdraft suite), rapid 10k, 40/40 TestBySimulation -race in
+foreground chunks. Design-to-implementation resolutions made this session (implementation
+detail, not design changes — flag on review if any smells):
+- **Episode anchor = pool-owned sentinel Demand installed at fifo[0] on grant** (barrier →
+  `&p.episode`): "head stands until completion" without aliasing caller-reused demand
+  storage — the CALLER's demand dequeues normally at grant (its d.cache persists as home
+  AND as `p.episode.cache`/`episodeCache`, the exemption anchor); arrivals queue behind the
+  sentinel so no successor gathers mid-episode; `Invalidate` at completion just drops the
+  home ref, and the anchor cache's destroy (refs==0: body exited + subtree drained + all
+  suspensions resumed) runs `endEpisode` — allowance-home assert, sentinel dequeue,
+  promotion/disarm. Episodes are STRICTLY serial by construction.
+- **Third park set `episodeNotify`**: while the episode STANDS, armed capacity events route
+  there (the satisfied owner consumes no mailbox wakes; the actionable consumers are exempt
+  claimants); exempt claimants park there in AcquireWait (three-way park-target switch:
+  registered → own mailbox, standing-episode-exempt → episodeNotify, else general set).
+  The chained bit rides through. Liveness is structural: a parked claimant's cache
+  ref-pins the anchor, so episodeNotify can never strand a waiter across an episode end
+  (episode end IS the anchor's destroy).
+- **Exemption = chain-through-anchor OR home==anchor** (the resuming owner acquires from
+  the anchor's PARENT, so the chain test alone misses it). Exempt claimants under a
+  standing episode NEVER register (queueing behind the episode would deadlock its own
+  drain) — they claim from the allowance (`counts.occupyTaking`) and extend.
+- **Claim lands on `bestClaimCache`** — the chain cache (claimant → anchor, inclusive)
+  needing the least allowance: the design's "lent capacity plus remaining allowance"
+  honored as inherit-in-place, allowance-topped (first cut claimed on the claimant's own
+  cache and over-asked the extension by the parked hoard it could have borrowed — caught
+  by the counting-resource test). Per-cache all-or-nothing granularity stays (one Permit,
+  one backing).
+- **Stranger check anchored at the EVALUATOR's chain** (its claim cache → root), not just
+  the head's: in-subtree suspended drivers on the claimant's own chain are causally inside
+  it — chain-only-from-head would wedge an extension needed by the very drive a suspended
+  ancestor is parked in. Off-chain-but-in-subtree (sibling branch) suspensions read as
+  strangers — conservative, resolves at their resume (causally before episode end).
+- **`Cache.Acquire` → `(Permit, error)`** (miss = zero Permit + nil error): the refusal
+  channel the spec requires; AcquireWait invalidates on refusal; heldPermit latches
+  `acquireErr` (sticky-terminal, stops all parking; gateAcquire/blockAcquire surface it;
+  reclaim's refusal path leaves un-acquired like cancellation — REVISIT error surfacing
+  with step 4; unreachable at w=1 until then).
+- **`Demand.cache` → atomic.Pointer[Cache]** — the canary CAUGHT (first -race run) a
+  latent W2b-era race: exemption readers reach hd.cache lock-free through a stale barrier
+  pointer while the owner's post-satisfaction Invalidate writes it. Values stay
+  benign-stale by doctrine; the ACCESS is now coherent. (Also cleanly covers the
+  sentinel's anchor set/clear.)
+- **Suspension counters (c) wired end-to-end**: `Cache.SuspendDriver/ResumeDriver`
+  (ref-pinned target; counters bumped BEFORE the permit frees; resume decrements BEFORE
+  reacquire + nudges via wake(true) when armed; destroy panics on a nonzero counter =
+  bracket tripwire). streampool: heldPermit.suspend(target) with target =
+  `wv.ensureCache(meta, h.pool())` at all four suspend sites (Skim / block / SkimAll /
+  ExecuteNowOrQueue) — ensureCacheChain IS the mkdir-p of resolution (c).
+- **Known over-ask (accepted until step 3)**: the head's gather can't harvest Resource
+  free-capacity smaller than the shortfall (all-or-nothing TryAcquire), so the overdraft
+  ask can exceed the true net need when free permits sit stranded — TryAcquireUpTo
+  (step 3) shrinks it. Same class: borrowable fragmented across several chain caches is
+  unharvestable by one claimant (descendants never gather; per-backing all-or-nothing).
+- **Test posture**: the shared test `semaphore` is now wrapped by `promiseResource`
+  (Overdraft = standing promise) so every W2b-era test keeps its blocking semantics and
+  oracles; the bare semaphore (default-GRANT) + counting/refusing resources live in
+  overdraft_test.go (grant arc incl. extension + owner park/resume round-trip; refusal
+  through Acquire and AcquireWait; proof gating on inUse; stranger block/resume;
+  episodeNotify wake delivery; serialized concurrent episodes under -race). The rapid
+  model stays promise-mode (blocked-legitimacy oracle unchanged) — a grant-mode model
+  with allowance accounting is a possible follow-up, not blocking. Sim: production
+  limiters are w=1-only until step 4 ⇒ no registration ⇒ no episodes ⇒ pure regression.
+- streampool `semaphoreResource` does NOT implement Overdraft ⇒ default-grant — inert
+  until step 4 dispatches w≥2; decide per-limiter policy (grant vs refuse vs promise via
+  NotifyAt) when the surface lands.
+
+**►►► CP-W2b-ii LANDED (2026-07-03g) — its design pickup was: CP-W2c (overdraft; design settled —
 see resolutions (a)/(b)/(c) + episode/allowance/standing-head spec in weighted-acquisition.md
 §Overdraft; suspension counters per (c); wrinkles 4/5 resolved as body-cache episode end +
 subtree exemption).** Gate: vet, lint, -short 11/11, permits -race incl the over-subscribed

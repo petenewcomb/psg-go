@@ -3,7 +3,11 @@
 
 package permits
 
-import "github.com/petenewcomb/atomic128-go"
+import (
+	"sync/atomic"
+
+	"github.com/petenewcomb/atomic128-go"
+)
 
 // counts packs a cache's (held, inUse) into a single 128-bit atomic word so the
 // joint invariant 0 ≤ inUse ≤ held is preserved by every transition as one atomic
@@ -116,9 +120,12 @@ func (c *counts) depositOccupy(n, w uint64) bool {
 }
 
 // release lowers inUse by w — a body completed or parked. The permits stay in held
-// (cache-don't-return), now borrowable. Reports whether the release raised borrowable
-// from zero (held > inUse crossing), i.e. whether a waiter should be woken.
-func (c *counts) release(w uint64) (wokeBorrowable bool) {
+// (cache-don't-return), now borrowable. Returns the amount of overdraft excess this
+// decrement returned to the pool allowance: the delta of max(inUse−held, 0) across
+// the transition, computed inside the same CAS so no per-occupy tagging is needed
+// (weighted-acquisition.md §Overdraft). Zero whenever inUse ≤ held — i.e. always,
+// outside an overdraft episode.
+func (c *counts) release(w uint64) (excessReturned uint64) {
 	for {
 		p := atomic128.LoadUint128(&c.w)
 		held, inUse := p[0], p[1]
@@ -126,9 +133,56 @@ func (c *counts) release(w uint64) (wokeBorrowable bool) {
 			panic("permits: release underflow (no running body backed by this cache)")
 		}
 		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse - w}) {
-			// borrowable went from (held-inUse) to (held-inUse+w); it crossed 0→
-			// exactly when it was 0 before, i.e. inUse == held.
-			return inUse == held
+			before := excessOver(held, inUse)
+			after := excessOver(held, inUse-w)
+			return before - after
+		}
+	}
+}
+
+// excessOver returns max(inUse−held, 0) — the overdraft excess a cache is running at.
+func excessOver(held, inUse uint64) uint64 {
+	if inUse > held {
+		return inUse - held
+	}
+	return 0
+}
+
+// occupyTaking occupies w, drawing any shortfall past this cache's own borrowable
+// from the pool allowance (weighted-acquisition.md §Overdraft: an occupy that cannot
+// fit under held claims excess from the allowance and pushes inUse past held). The
+// claim — min(w, inUse+w−held) — is debited from the allowance before the counts CAS
+// and refunded if the CAS loses, so the joint (counts, allowance) state never
+// double-spends; the transient debit is invisible to the episode invariant, which is
+// only read at quiescent points. Reports false, leaving both untouched, when the
+// remaining allowance cannot cover the shortfall. With inUse+w ≤ held it degenerates
+// to acquireLocal (no allowance touched).
+func (c *counts) occupyTaking(w uint64, allowance *atomic.Uint64) bool {
+	for {
+		p := atomic128.LoadUint128(&c.w)
+		held, inUse := p[0], p[1]
+		need := excessOver(held, inUse+w) - excessOver(held, inUse)
+		if need > 0 && !takeAllowance(allowance, need) {
+			return false
+		}
+		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + w}) {
+			return true
+		}
+		if need > 0 {
+			allowance.Add(need) // counts moved underneath us — refund and retry
+		}
+	}
+}
+
+// takeAllowance debits n from the pool allowance if it covers n, reporting success.
+func takeAllowance(a *atomic.Uint64, n uint64) bool {
+	for {
+		cur := a.Load()
+		if cur < n {
+			return false
+		}
+		if a.CompareAndSwap(cur, cur-n) {
+			return true
 		}
 	}
 }
@@ -140,11 +194,16 @@ func (c *counts) release(w uint64) (wokeBorrowable bool) {
 // zero return means nothing was borrowable at the take — a concurrent lock-free
 // acquire may have consumed the idle permits since the steal walk observed them, so
 // the caller must treat the walk's candidate as a hint and, on zero, look elsewhere.
+// A cache running at overdraft excess (inUse > held, possible only inside an
+// episode's exempt subtree) has nothing borrowable.
 func (c *counts) stealOutUpTo(w uint64) uint64 {
 	for {
 		p := atomic128.LoadUint128(&c.w)
 		held, inUse := p[0], p[1]
-		n := min(held-inUse, w) // held ≥ inUse is the standing invariant
+		if inUse >= held {
+			return 0 // nothing borrowable (inUse > held is overdraft excess, not idle)
+		}
+		n := min(held-inUse, w)
 		if n == 0 {
 			return 0
 		}

@@ -42,7 +42,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 			defer wg.Done()
 			var d Demand
 			for range iters {
-				if pm, ok := c.Acquire(&d, 1); ok {
+				if pm, _ := c.Acquire(&d, 1); pm.Held() {
 					if h, u := pm.backing.counts.load(); u > h {
 						invViolated.Store(true)
 					}
@@ -93,7 +93,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 			defer wg.Done()
 			var d Demand
 			for range 10000 {
-				if pm, ok := c.Acquire(&d, 1); ok {
+				if pm, _ := c.Acquire(&d, 1); pm.Held() {
 					pm.Release()
 				}
 			}
@@ -108,7 +108,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 			var d Demand
 			for range 4000 {
 				sub := tp.newChild(root)
-				if pm, ok := sub.Acquire(&d, 1); ok {
+				if pm, _ := sub.Acquire(&d, 1); pm.Held() {
 					pm.Release()
 				}
 				sub.ReleaseRef() // drains the ephemeral sub-wave (destroy)

@@ -94,7 +94,9 @@ func TestPermitsModel(t *testing.T) {
 				} else {
 					w = rapid.IntRange(1, capacity+1).Draw(t, "weight")
 				}
-				if pm, got := u.cache.Acquire(&u.demand, w); got {
+				pm, err := u.cache.Acquire(&u.demand, w)
+				require.NoError(t, err, "the promise-mode Overdraft never grants or refuses")
+				if pm.Held() {
 					u.pm = pm
 					u.running = true
 				} else if b := tp.barrier.Load(); b == nil || b == &u.demand {
@@ -114,7 +116,7 @@ func TestPermitsModel(t *testing.T) {
 				// demand's persistent home; the unit may acquire again afterward
 				// with a fresh registration.
 				u := pick(t, "invalidate-unit", func(u *modelUnit) bool {
-					return !u.running && (u.demand.pool.Load() != nil || u.demand.cache != nil)
+					return !u.running && (u.demand.pool.Load() != nil || u.demand.cache.Load() != nil)
 				})
 				if u == nil {
 					return

@@ -327,7 +327,7 @@ func (wv *Wave) Skim(ctx context.Context) error {
 	meta.vetNotNestedInSkim()
 	// Suspend-class episode: a body driving this skim lends its limiter permit for the
 	// duration (a sub-wave inherits it; deadlock-free) and reacquires on return.
-	if h := suspendHeldPermit(meta); h != nil {
+	if h := suspendHeldPermit(meta, wv); h != nil {
 		defer h.reclaim(ctx, wv)
 	}
 	_, err := wv.skim(ctx)
@@ -413,7 +413,7 @@ func (wv *Wave) block(
 	// goroutine's enclosing body self-deadlocks (see "Where suspend
 	// fires" in docs/limiter-suspend-resume.md). Re-entrant: the
 	// reclaim's own suspend finds the handle already suspended and no-ops.
-	if h := suspendHeldPermit(meta); h != nil {
+	if h := suspendHeldPermit(meta, wv); h != nil {
 		defer h.reclaim(ctx, wv)
 	}
 	adder := blockingWorkAdderPool.Get()
@@ -778,7 +778,7 @@ func (wv *Wave) SkimAll(ctx context.Context) error {
 	// A blocking gather from inside a skim handler would monopolize the
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
-	if h := suspendHeldPermit(meta); h != nil {
+	if h := suspendHeldPermit(meta, wv); h != nil {
 		defer h.reclaim(ctx, wv)
 	}
 

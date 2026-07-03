@@ -23,16 +23,20 @@ func TestSemaphoreResource_Accounting(t *testing.T) {
 	c := l.pool.NewCache()
 
 	var d permits.Demand
-	p1, ok := c.Acquire(&d, 1)
-	chk.True(ok)
-	p2, ok := c.Acquire(&d, 1)
-	chk.True(ok, "second permit fits under limit 2")
-	_, ok = c.Acquire(&d, 1)
-	chk.False(ok, "third must miss at limit 2")
+	p1, err := c.Acquire(&d, 1)
+	chk.NoError(err)
+	chk.True(p1.Held())
+	p2, err := c.Acquire(&d, 1)
+	chk.NoError(err)
+	chk.True(p2.Held(), "second permit fits under limit 2")
+	px, err := c.Acquire(&d, 1)
+	chk.NoError(err)
+	chk.False(px.Held(), "third must miss at limit 2")
 
 	p1.Release()
-	p3, ok := c.Acquire(&d, 1)
-	chk.True(ok, "a freed permit is reusable")
+	p3, err := c.Acquire(&d, 1)
+	chk.NoError(err)
+	chk.True(p3.Held(), "a freed permit is reusable")
 
 	p2.Release()
 	p3.Release()
@@ -44,8 +48,9 @@ func TestSemaphoreResource_ZeroBlocksAll(t *testing.T) {
 	l := NewSemaphore(0)
 	c := l.pool.NewCache()
 	var d permits.Demand
-	_, ok := c.Acquire(&d, 1)
-	chk.False(ok, "limit 0 blocks every acquire")
+	p, err := c.Acquire(&d, 1)
+	chk.NoError(err)
+	chk.False(p.Held(), "limit 0 blocks every acquire")
 	c.ReleaseRef()
 }
 
@@ -56,8 +61,9 @@ func TestSemaphoreResource_Unlimited(t *testing.T) {
 	perms := make([]permits.Permit, 0, 100)
 	var d permits.Demand
 	for range 100 {
-		p, ok := c.Acquire(&d, 1)
-		chk.True(ok, "unlimited never misses")
+		p, err := c.Acquire(&d, 1)
+		chk.NoError(err)
+		chk.True(p.Held(), "unlimited never misses")
 		perms = append(perms, p)
 	}
 	for _, p := range perms {

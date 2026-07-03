@@ -17,8 +17,9 @@ func TestRootUnitLifecycle(t *testing.T) {
 	c := tp.NewCache()
 
 	var d Demand
-	pm, got := c.Acquire(&d, 1)
-	require.True(t, got)
+	pm, err := c.Acquire(&d, 1)
+	require.NoError(t, err)
+	require.True(t, pm.Held())
 	require.Same(t, c, pm.backing, "a top-level acquire backs from the unit's own cache")
 	assert.Equal(t, 1, tp.totalHeld())
 	tp.check(t)
@@ -47,8 +48,9 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	pp.Release() // parent parks to drive a sub-wave: inUse=0, borrowable=1
 	sub := tp.newChild(parent)
 
-	cp, got := sub.Acquire(&dc, 1) // the old livelock — now a step-2 ancestor inherit
-	require.True(t, got, "child must inherit the parked parent's idle permit, not deadlock")
+	cp, err := sub.Acquire(&dc, 1) // the old livelock — now a step-2 ancestor inherit
+	require.NoError(t, err)
+	require.True(t, cp.Held(), "child must inherit the parked parent's idle permit, not deadlock")
 	require.Same(t, parent, cp.backing, "the child is backed by the parent's permit, unmoved")
 	assert.Equal(t, 1, tp.totalHeld(), "no second permit is checked out")
 	tp.check(t)
@@ -58,8 +60,9 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	assert.Equal(t, 1, tp.totalHeld()) // parent still holds its cached permit
 	tp.check(t)
 
-	pp2, got := parent.Acquire(&dp, 1) // parent resumes (reacquire): step-1 own-cache hit
-	require.True(t, got)
+	pp2, err := parent.Acquire(&dp, 1) // parent resumes (reacquire): step-1 own-cache hit
+	require.NoError(t, err)
+	require.True(t, pp2.Held())
 	require.Same(t, parent, pp2.backing)
 	pp2.Release()
 	require.True(t, parent.ReleaseRef())
@@ -79,18 +82,21 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 	pp.Release() // parent parks: borrowable=1
 	sub := tp.newChild(parent)
 
-	c1, ok1 := sub.Acquire(&d1, 1) // step 2: inherit parent's permit
-	require.True(t, ok1)
+	c1, err1 := sub.Acquire(&d1, 1) // step 2: inherit parent's permit
+	require.NoError(t, err1)
+	require.True(t, c1.Held())
 	require.Same(t, parent, c1.backing)
 
-	c2, ok2 := sub.Acquire(&d2, 1) // ancestors exhausted → step 3: delta from the Resource
-	require.True(t, ok2)
+	c2, err2 := sub.Acquire(&d2, 1) // ancestors exhausted → step 3: delta from the Resource
+	require.NoError(t, err2)
+	require.True(t, c2.Held())
 	require.Same(t, sub, c2.backing, "the second concurrent child takes a delta into its own cache")
 	assert.Equal(t, 2, tp.totalHeld())
 	tp.check(t)
 
-	_, ok3 := sub.Acquire(&d3, 1) // capacity exhausted, both in use
-	require.False(t, ok3, "a third concurrent child must block")
+	c3, err3 := sub.Acquire(&d3, 1) // capacity exhausted, both in use
+	require.NoError(t, err3)
+	require.False(t, c3.Held(), "a third concurrent child must block")
 	assert.False(t, tp.hasBorrowable(), "blocking is legitimate: nothing is borrowable")
 
 	c1.Release()
@@ -113,8 +119,9 @@ func TestCrossWaveSteal(t *testing.T) {
 	tp.check(t)
 
 	b := tp.NewCache()
-	bp, got := b.Acquire(&db, 1) // own/ancestor miss, Resource full → step 4 steals from A
-	require.True(t, got, "B steals A's idle permit rather than deadlocking")
+	bp, err := b.Acquire(&db, 1) // own/ancestor miss, Resource full → step 4 steals from A
+	require.NoError(t, err)
+	require.True(t, bp.Held(), "B steals A's idle permit rather than deadlocking")
 	require.Same(t, b, bp.backing)
 	assert.Equal(t, 1, tp.totalHeld(), "a steal is a transfer, not a new checkout")
 	assert.Equal(t, uint64(0), a.held(), "the victim simply loses the cached permit")
@@ -138,13 +145,15 @@ func TestNestedDriveSinglePermitChain(t *testing.T) {
 	pp.Release() // parent parks
 	child := tp.newChild(parent)
 
-	cp, ok1 := child.Acquire(&dc, 1) // inherit parent's permit
-	require.True(t, ok1)
+	cp, err1 := child.Acquire(&dc, 1) // inherit parent's permit
+	require.NoError(t, err1)
+	require.True(t, cp.Held())
 	cp.Release() // child parks to drive its own sub-wave
 	grand := tp.newChild(child)
 
-	gp, ok2 := grand.Acquire(&dg, 1) // walk grand → child(held=0) → parent(borrowable=1): inherit
-	require.True(t, ok2)
+	gp, err2 := grand.Acquire(&dg, 1) // walk grand → child(held=0) → parent(borrowable=1): inherit
+	require.NoError(t, err2)
+	require.True(t, gp.Held())
 	require.Same(t, parent, gp.backing, "the grandchild reaches the parent's permit up the chain")
 	assert.Equal(t, 1, tp.totalHeld())
 	tp.check(t)
@@ -171,9 +180,10 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
-	pm, ok := g.Acquire(&d, 5)
-	require.True(t, ok, "w=5 must assemble from 2+2 stolen plus 1 free")
-	require.Same(t, d.cache, pm.backing, "a registered demand backs from its body cache")
+	pm, err := g.Acquire(&d, 5)
+	require.NoError(t, err)
+	require.True(t, pm.Held(), "w=5 must assemble from 2+2 stolen plus 1 free")
+	require.Same(t, d.cache.Load(), pm.backing, "a registered demand backs from its body cache")
 	require.Same(t, g, pm.backing.parent, "the body cache is homed under the registering cache")
 	assert.Equal(t, uint64(5), pm.backing.held(), "the whole weight landed in the body cache")
 	assert.Equal(t, uint64(0), v1.held(), "victim 1 fully harvested")
@@ -202,13 +212,14 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 
 	g := tp.NewCache()
 	var dg Demand
-	_, ok := g.Acquire(&dg, 4)
-	require.False(t, ok, "w=4 cannot be covered by capacity 3")
+	gm, err := g.Acquire(&dg, 4)
+	require.NoError(t, err, "the promise-mode Overdraft waits rather than granting or refusing")
+	require.False(t, gm.Held(), "w=4 cannot be covered by capacity 3")
 	// The hoard holds the stolen 2 in the body cache. The 1 free permit stays in the
 	// Resource: the Resource arm is all-or-nothing at the shortfall until
 	// TryAcquireUpTo lands (weighted-acquisition.md sequencing step 3).
-	require.NotNil(t, dg.cache, "the miss left the demand registered with its body cache")
-	assert.Equal(t, uint64(2), dg.cache.held(), "the failed gather keeps its partial hoard")
+	require.NotNil(t, dg.cache.Load(), "the miss left the demand registered with its body cache")
+	assert.Equal(t, uint64(2), dg.cache.Load().held(), "the failed gather keeps its partial hoard")
 	assert.Equal(t, uint64(0), v.held(), "the victim was harvested before the miss")
 	require.Same(t, &dg, tp.barrier.Load(), "the unsatisfied head keeps the barrier armed")
 	tp.check(t)
@@ -216,8 +227,9 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	// While armed, everyone else is gated — even off capacity the head cannot use.
 	b := tp.NewCache()
 	var db1 Demand
-	_, ok = b.Acquire(&db1, 1)
-	require.False(t, ok, "a weight-1 acquire is gated while the barrier is armed")
+	b1, err1 := b.Acquire(&db1, 1)
+	require.NoError(t, err1)
+	require.False(t, b1.Held(), "a weight-1 acquire is gated while the barrier is armed")
 
 	// Invalidation retires the head: the hoard drains to the Resource (conservation
 	// via the ordinary destroy path) and the barrier disarms.
@@ -227,8 +239,9 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	tp.check(t)
 
 	var db Demand
-	bp, ok := b.Acquire(&db, 3)
-	require.True(t, ok, "the drained capacity is available again (whole-grant fast path)")
+	bp, err2 := b.Acquire(&db, 3)
+	require.NoError(t, err2)
+	require.True(t, bp.Held(), "the drained capacity is available again (whole-grant fast path)")
 	tp.check(t)
 
 	bp.Release()

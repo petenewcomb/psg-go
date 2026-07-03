@@ -17,8 +17,9 @@ func makeIdle(tp *testPool, n int) *Cache {
 	pms := make([]Permit, n)
 	var d Demand
 	for i := range pms {
-		pm, ok := c.Acquire(&d, 1)
-		require.True(tp.tb, ok)
+		pm, err := c.Acquire(&d, 1)
+		require.NoError(tp.tb, err)
+		require.True(tp.tb, pm.Held())
 		pms[i] = pm
 	}
 	for _, pm := range pms {
@@ -94,15 +95,17 @@ func TestAcquireUpWalkTouchesUnsatisfiedAncestors(t *testing.T) {
 
 	// r0 runs a body and stays running (held=1, inUse=1 → no idle to lend).
 	var d0, dc Demand
-	p0, ok := r0.Acquire(&d0, 1)
-	require.True(t, ok)
+	p0, err := r0.Acquire(&d0, 1)
+	require.NoError(t, err)
+	require.True(t, p0.Held())
 
 	// A child of r0 acquires: step-1 (own) misses (held 0), step-2 at r0 misses
 	// (inUse==held), so the up-walk passes r0 unsatisfied → r0.touch() moves it to the
 	// back of roots. (The acquire then checks out the Resource's last permit.)
 	child := r0.NewChild()
-	pc, ok := child.Acquire(&dc, 1)
-	require.True(t, ok)
+	pc, err := child.Acquire(&dc, 1)
+	require.NoError(t, err)
+	require.True(t, pc.Held())
 
 	require.Equal(t, []*Cache{r1, r0}, listSlice(&tp.roots),
 		"the unsatisfied up-walk through r0 moved it to the back")

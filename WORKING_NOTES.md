@@ -2,6 +2,16 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► NEXT (2026-07-03): weighted-acquisition STEP 2 — gather + demand-FIFO barrier + overdraft,
+behind the extended model check.** Read `docs/decisions/weighted-acquisition.md` FIRST (it is the
+complete spec: Decisions 1-4, §Overdraft incl. pool-allowance representation + standing head +
+episode extension, §Multi-limiter liveness, model-check target lists) + `limiter-resource-classes.md`
+(Adjust/balance chain — the wake side step 2 composes with). Step 1 (mechanical w) landed at
+9e03d83. Start with a CP-sequencing design-to-implementation pass (the C2 pattern) BEFORE coding;
+gate per feedback_race_confirm (large TestBySimulation -race batch) + extend the rapid model check
+per the recorded targets. Steps 3 (TryAcquireUpTo/NotifyAt resource capabilities) and 4 (surface:
+WithLimits/WithWeightLimits builders + sets + opoption removal) follow, each separable.
+
 **►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,
 searchList(l,w) [borrowable≥w — no w>1 spin], acquireInto single-source all-or-nothing at w; all

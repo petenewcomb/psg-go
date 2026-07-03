@@ -126,6 +126,44 @@ Induction over barrier passes:
 3. A blocked acquirer waits at most the finite FIFO ahead of it (registered demands)
    or one barrier epoch (weight-1 acquirers, who never register).
 
+### Multi-limiter: the FIFO under joint admission (PN, 2026-07-03)
+
+The induction above is **invalid as stated** once joint admission exists: a joint
+acquirer that satisfied limiter A and is registered/waiting at B's barrier holds
+A-permits **un-lent while neither running nor parked** — a *mid-sequence hold*, a
+blocked-holding state with no single-limiter analogue. A's head may need exactly
+those permits, and they flow only when B resolves.
+
+**The canonical global acquisition order keeps this acyclic.** A demand blocked at
+limiter L holds permits only at limiters ordered before L, so every wait-for edge
+points strictly *up* the order — no cycle can close. Liveness restates as
+descending induction: the highest limiter's capacity is held only by
+fully-admitted running bodies (anyone blocked there holds only lower limiters), so
+it drains by ordinary complete-or-park; its waiters admit, run, and release their
+lower holds; repeat downward.
+
+- **Mid-sequence holds are NOT lent** (policy, load-bearing): letting the blocked
+  joint acquirer's A-permits be borrowable would unblock A's head sooner, but on
+  B-success the acquirer must re-take A — possibly gone, re-registering at A while
+  holding B: a *down-order* wait, exactly the edge that reopens the cycle, and a
+  breach of atomic joint admission. The cost of holding is latency coupling (A's
+  head waits on B's resolution), not deadlock.
+- **The overdraft proof already handles this correctly — do not "fix" it**:
+  mid-sequence holds are `inUse` in `counts`, so the zero-in-use proof cannot pass
+  while a joint acquirer is mid-flight. Correct: that capacity *will* return.
+- **Consumable barriers cannot participate in mutual contention at all (PN)**: a
+  consumable head's satisfaction depends only on *time* (accrual), never on
+  anyone's release, and the head dequeues **at admission** — the barrier never
+  stands through work execution. With consumables sorted last in the canonical
+  order (already decided for the refund-free abort), the induction's base case is
+  therefore trivially live: it resolves autonomously (exact-timer wake) or ends in
+  `NotifyAt`'s refusal error. Spent tokens create no wait-for edges either —
+  nobody waits for tokens to come back.
+
+Model-check additions: the ordered-wait DAG (blocked-at-L ⟹ holds only < L);
+no-lending-mid-sequence; descending-order drain with consumables-last; interleaved
+armed barriers across pools under joint admission; consumable-base autonomy.
+
 ## Decision 3: arm only for w ≥ 2
 
 A weight-1 waiter never needs assembly — any single freed permit satisfies it — so
@@ -210,20 +248,21 @@ type OverdraftResource interface {
 }
 ```
 
-Type-asserted at `NewPool`. Panic inside the call is the resource's prerogative for
-must-never-happen cases. Refusal errors propagate on existing channels (blocking
-top-level → `Submit`'s error; postponed manager → error sink → `SkimAll`; mid-body →
-`AcquireWait`'s error) and invalidate the demand, passing the barrier. "Never" as
-the third state's name was rejected: the assertion is present-tense policy ("not at
-any capacity I'm currently willing to reach"), not prophecy — a resubmission after a
-capacity raise may succeed. **Non-implementing holdables default to GRANT** (PN): at
-the proven-infeasible point the unit is satisfiable only by overdraft, and a briefly
-exceeded concurrency cap beats a killed unit; resources whose limits are hard safety
-walls (memory) implement the capability to refuse. Weighted-usable *consumables*
-effectively must implement it — the pool has no proof for them (time is the helper;
-only the resource knows whether w exceeds what it can ever accrue), so a
-non-implementer facing w > burst would stall the armed pool. A constraint on
-framework-authored resources, not a user trap.
+Type-asserted at `NewPool`. **Holdable-only** (PN, 2026-07-03): a consumable
+"overdraft" is mechanically indistinguishable from regular acquisition — the
+resource is the sole accountant, and grant-by-going-negative is just `TryAcquire`
+returning true past zero, internal policy the pool never sees (see the consumable
+section below for what consumables actually need). Panic inside the call is the
+resource's prerogative for must-never-happen cases. Refusal errors propagate on
+existing channels (blocking top-level → `Submit`'s error; postponed manager → error
+sink → `SkimAll`; mid-body → `AcquireWait`'s error) and invalidate the demand,
+passing the barrier. "Never" as the third state's name was rejected: the assertion
+is present-tense policy ("not at any capacity I'm currently willing to reach"), not
+prophecy — a resubmission after a capacity raise may succeed. **Non-implementing
+holdables default to GRANT** (PN): at the proven-infeasible point the unit is
+satisfiable only by overdraft, and a briefly exceeded concurrency cap beats a killed
+unit; resources whose limits are hard safety walls (memory) implement the capability
+to refuse.
 
 **Representation (PN): a pool-level allowance; overdraft never enters `held`.** The
 conservation law `Σ held == checkedOut` survives untouched — the granted amount `d`
@@ -254,22 +293,46 @@ completes — one episode, one owner, monotone growth, a single clear point. Ref
 that unit takes the distinct error path (its sub-wave drains with the error, the
 head resumes and completes — no wedge). Wait: it parks on the promise.
 
-**Consumable counterpart.** Holdable overdraft is pool-side as above; consumable
-overdraft is resource-internal — the bucket goes *negative* (the literal meaning of
-the word: borrowing against future refill), repayment is automatic via the refill
-stream, and the negative bucket refuses all comers until repaid, providing the
-scoping with no pool machinery. Weighted consumable waiting composes with the
-barrier (resource-agnostic, demand-side) with the *gather replaced by the resource's
-internal accrual*; and to kill the O(w) per-token wake chatter of a large head
-against a filling bucket, the pool sets a **single replaceable notify-target** on
-the resource — "wake when n is satisfiable" — set at head-arrival, replaced on head
-change, cleared on disarm (replacement subsumes cancellation). The resource arms one
-exact timer (`(n − level) / rate`) or folds the threshold into its gauge poll, and
-may suppress sub-target notifies while a target stands — they are waste by
-construction, since the barrier blocks everyone they could serve. This makes `Wait`
-operational: the promise arrives with the machinery that fires when it comes true.
+**Consumables: the sticky-head+FIFO is the mechanism; there is no consumable
+overdraft (PN, 2026-07-03).** What actually protects a large consumable demand is
+the barrier — without it, weight-1 racers drain every refill before a w=5 demand
+ever sees 5; the notify-target alone cannot help, because nothing would guard the
+accrual it is timing. So the same Pool-level FIFO/sticky-head object serves both
+classes, with the pass-through mechanics pinned as:
 
-Rejected along the way: **force-accounting the overdraft into `held`** (stealable
+- a w ≥ 2 demand whose `TryAcquire(w)` misses **registers in the FIFO** (same
+  w ≥ 2 arming rule; weight-1 contention keeps the ordinary wake path);
+- while armed, the **barrier check in the pass-through gate blocks all
+  acquisition** (one atomic load, the analogue of the `acquireLocal` check);
+- the head is satisfied by the resource's internal accrual under barrier
+  protection, woken by the **single replaceable notify-target**: `NotifyAt(n) error`
+  — set at head-arrival, replaced on head change, cleared on disarm (replacement
+  subsumes cancellation). A *reachable* n arms one exact timer
+  (`(n − level) / rate`, or folds into the gauge poll), and sub-target notifies are
+  suppressible while a target stands — waste by construction, since the barrier
+  blocks everyone they could serve. An *unreachable* n (w > anything the resource
+  can ever accrue) **returns the resource-authored refusal error** — the
+  feasibility answer and the wake mechanism are one call, making `Wait`
+  operational and `Refuse` explicit with no Overdraft involvement;
+- the head **dequeues at admission** — charge-once semantics has no completion
+  event, and the standing head is the holdable overdraft-episode mechanism, not a
+  barrier feature.
+
+Per-class asymmetry, in one view: the FIFO/head is shared; what differs is how the
+head is satisfied (gather vs. accrual + notify-target), what stands after
+satisfaction (the holdable overdraft episode vs. nothing), and where infeasibility
+is known (the pool's zero-in-use proof vs. the resource's `NotifyAt` error).
+Weighted-usable consumables must implement the notify-target — which they need for
+the wake-chatter fix regardless — a constraint on framework-authored resources, not
+a user trap. A resource that *wants* oversized-admission semantics (negative
+bucket, repaid by refill) implements it as internal `TryAcquire` policy, invisible
+to the pool.
+
+Rejected along the way: **consumable overdraft as a pool-visible event** (PN: the
+grant is mechanically indistinguishable from regular acquisition — decrement the
+counter, just past zero; the pool holds no state either way, so it was internal
+`TryAcquire` policy dressed in the holdable concept's clothes);
+**force-accounting the overdraft into `held`** (stealable
 the moment the head parks; cache-don't-return makes it reusable after completion —
 never repaid until cache destroy); **an unconditional `Acquire(n)` force-accounting
 primitive on `HoldableResource`** (the resource needn't know — the standing barrier

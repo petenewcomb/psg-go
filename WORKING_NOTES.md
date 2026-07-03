@@ -16,8 +16,22 @@ held/checkedOut (conservation untouched; inUse>held cache-locally while granted;
 release returns excess via CAS-local delta of max(inUse−held,0)); HEAD STANDS until completion
 (seriality across park gaps + arrival blocking; allowance necessarily home at completion);
 descendant shortfall ⇒ EPISODE EXTENSION (same call, added to aggregate, clears at ORIGINAL head
-completion; refuse ⇒ unit error, no wedge); consumable counterpart = negative bucket (resource-
-internal) + single replaceable notify-target (exact-timer wake at n, kills O(w) per-token chatter).
+completion; refuse ⇒ unit error, no wedge); CONSUMABLES (PN, 2026-07-03 refinement): NO
+consumable overdraft — grant-by-negative ≡ TryAcquire past zero, internal policy invisible to the
+pool (OverdraftResource is HOLDABLE-ONLY); the consumable mechanism IS the shared sticky-head+FIFO:
+w≥2 TryAcquire miss registers, barrier check in the pass-through gate blocks all acquisition while
+armed (protects the accrual from w=1 racers), head woken by `NotifyAt(n) error` (reachable n = one
+exact timer + sub-target suppression; unreachable n = resource-authored refusal error — feasibility
++ wake in ONE call), head dequeues AT ADMISSION (standing head is the holdable episode mechanism).
+Weighted consumables must implement NotifyAt (needed for chatter fix anyway).
+**MULTI-LIMITER × FIFO (PN, 2026-07-03):** single-limiter liveness induction INVALID under joint
+admission — the mid-sequence hold (joint acquirer holds A un-lent while blocked at B's barrier) is
+a new blocked-holding state; canonical order rescues (blocked-at-L ⟹ holds only <L, edges point
+up-order, acyclic; descending induction). Policy pinned: mid-sequence holds NOT lent (lending ⇒
+re-take A after B = down-order wait, reopens cycle + breaks atomic joint admission). Overdraft
+proof already correct (mid-sequence holds ARE inUse — don't "fix"). Consumable barriers can't join
+cycles AT ALL (PN): head satisfaction is time-driven not release-driven + dequeue-at-admission ⇒
+barrier never stands through work; consumables-last ⇒ induction base trivially live.
 KNOWN FLAKE (pre-existing by construction, surfaced during step-1 commit): psgwf
 Example_clientTimeout — real-clock golden (10-20ms time.Sleep margins) where a worker's "task
 completed" print races main's "skimming results" under machine load; ~1/15 under parallel

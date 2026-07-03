@@ -76,11 +76,13 @@ The next major piece is **Pool/workq consolidation** (merge TaskPool + FunnelPoo
   pool of idle shells after peak-concurrency bursts; permit-core's per-pool
   permit caches have the same shape. Worth a shared trim/cap mechanism over the
   nbcq reuse-cache pattern rather than bespoke ones.
-- **Revisit the joined-context adapter when tackling Flows.** A framework-native
-  alloc-free / mutex-free `AfterFunc`-equivalent hook (modeled on how `ctxMeta`
-  is a preallocated reused value) is only needed if Flows must merge two
-  *genuinely independent* (non-ancestor) cancellation scopes; the wave case
-  doesn't (ancestry suffices). Deferred until Flows decides.
+- **Revisit the joined-context adapter when tackling Flows.** RESOLVED (2026-07-03):
+  the converged flow design (`docs/decisions/flow-design.md`) derives no cancellation
+  from flow values and never merges cancellation scopes — a request ctx enters as a
+  consultative flow *value*, never a parent of framework ctx derivation — so no
+  adapter is needed. (Original question: a framework-native alloc-free / mutex-free
+  `AfterFunc`-equivalent hook would only have been needed if Flows had to merge two
+  *genuinely independent* (non-ancestor) cancellation scopes.)
 
 The sections below are the original pre-refactor TODO. Many items are now stale or superseded; treat them as historical reference and consult WORKING_NOTES + CHANGELOG for current scope.
 

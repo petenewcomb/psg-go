@@ -127,6 +127,22 @@ Three successive shapes, all now superseded:
   `NewFunnel(factory)`). In-body `op.Submit(ctx, v)` routes to the body's **ambient**
   (framework-stamped) wave; `op.In(&w)` returns a cheap wave-bound handle for top-level
   dispatch, redirect, or bind-once reuse. Routing is handle-level, so it never perturbs
-  the ctx — Flow/trace propagation crosses redirects untouched.
+  the ctx — flow-rider/trace propagation crosses redirects untouched.
 - **why:** separates routing from propagation (the same split that killed 3a); lets one
   op spec be reused across many waves; keeps the ctx clean for genuine propagation.
+
+## 9. Flow: refcounted ctx-borne value handle → the flow facility (`WithFlow` + keys/tags)
+
+- **was:** `Flow`, the one ctx-borne, refcounted user type: `NewFlow(parent)` returned a
+  carrying ctx plus a handle with `Dup`/`Close`, configured via `WithAfterFunc` — a value
+  handle users *created* to span waves (API_DESIGN.md's Flow section, kept there as the
+  historical record).
+- **now:** **no Flow type.** A flow is the causal DAG of work the framework already
+  maintains — flows always exist and are never created. Riders on it are shaped by the
+  lexical scope `streampool.WithFlow(ctx, body, opts...)` with user-minted
+  `NewFlowKey[V]` (path-scoped values) / `NewFlowTag()` (DAG-scoped lifetimes)
+  identities; the scope's own reference replaces the user-held refcount. Design converged
+  2026-07-03, not yet implemented: `docs/decisions/flow-design.md`.
+- **why:** the handle put the `Dup`/`Close` refcount discipline in user hands where the
+  lexical root closure makes the attach window race-free structurally, and it modeled
+  flows as created objects when the causal structure is already there for every dispatch.

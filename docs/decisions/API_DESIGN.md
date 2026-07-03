@@ -22,7 +22,8 @@ often unravels several.
 >   describes in places gave way to a zero-value `var w streampool.Wave` (`*Wave`),
 >   lazy `ensureInit`, drain-only lifecycle (no Cancel), bound via `op.In(&w)`. Full
 >   evolution + rationale: `surface-lineage.md`. Flow stays a refcounted, ctx-borne
->   value handle (keeps `Dup`/`Close`) — the lone ctx-borne type.
+>   value handle (keeps `Dup`/`Close`) — the lone ctx-borne type. (That last sentence
+>   is itself superseded — see the Flow bullet below.)
 > - **Funnel is wave-scoped** — `Flush` / `FlushTo`, no `Close` / `Dup`;
 >   finalization is wave-driven.
 > - **Limiters are standalone values** — `WithLimits` jointly admits in a global
@@ -30,6 +31,11 @@ often unravels several.
 >   deferred, internal-arbiter feature; no API named yet).
 > - **Reentrancy: the only rule is "you cannot skim a wave you are part of."**
 >   Principle 7's task-to-task prohibition / skim-queued-not-recursive are retired.
+> - **The Flow type is GONE (2026-07-03).** The refcounted, ctx-borne `Flow` value
+>   handle this doc still describes (`NewFlow` / `FlowFromContext` / `Dup` / `Close`
+>   / `WithAfterFunc`) is superseded *entirely* by the flow facility —
+>   `WithFlow(ctx, body, opts...)` plus user-minted flow keys/tags; there is NO Flow
+>   type anymore. See `docs/decisions/flow-design.md`.
 
 Companion docs:
 - `docs/permit-core.md` — the permit allocation model (the hierarchical cache).
@@ -117,8 +123,10 @@ design exists to remove.
    keeps the parent drain waiting, transitively) and run concurrently. The lifecycle
    is the drain — no `Cancel`, no `Dup`; cancellation rides the driving context.
 
-2. **Flow** *(optional)* — one logical thread of related work: a refcounted,
-   ctx-borne **value handle** that can span multiple Waves. Use a Flow to attach
+2. **Flow** *(optional)* — **SUPERSEDED (2026-07-03): there is no Flow type; see
+   `flow-design.md`.** As originally designed: one logical thread of related work:
+   a refcounted, ctx-borne **value handle** that can span multiple Waves. Use a
+   Flow to attach
    metadata (trace context, audit data) or a cleanup hook to work that crosses
    batch boundaries. It is the one type that **rides the ctx** (propagation) and
    the one that keeps **`Dup`/`Close`** (a cross-wave lifetime no single wave
@@ -172,6 +180,10 @@ func (*Wave) Close()                                    // seal: no more top-lev
 // ctx's error, and in-flight bodies stop via their own submit ctxs.
 
 // ===== Flow: one logical thread of work (optional) =====
+//
+// SUPERSEDED (2026-07-03): this entire Flow surface is dead. There is no Flow type;
+// the flow facility (streampool.WithFlow + NewFlowKey[V]/NewFlowTag riders) replaces
+// it. Kept here as the historical record; see docs/decisions/flow-design.md.
 
 // Flow is a refcounted, ctx-borne value handle for a single workflow instance —
 // the ONE type that rides the ctx (propagation) and the ONE that keeps Dup/Close
@@ -661,6 +673,10 @@ wave.CloseAndSkimAll(ctx) // seal + drain to completion
 ```
 
 ## With a Flow
+
+> **SUPERSEDED (2026-07-03).** The Flow object below no longer exists; the equivalent
+> under the flow facility is a `WithFlow` scope with a key/tag `FollowUp` option. See
+> `docs/decisions/flow-design.md`.
 
 Flow is optional — add one to attach logical-thread metadata (trace, audit) or a
 cleanup hook to work that may cross Wave boundaries:

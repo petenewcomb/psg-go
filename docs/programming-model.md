@@ -2,7 +2,7 @@
 
 streampool is a Go library for running large batches of related work concurrently
 and processing the results as they arrive. The model is small: **a pool of workers
-serves waves of work, and each wave hosts flows of related processing.** You
+serves waves of work, and flows of related processing run through them.** You
 describe work as a few composable *ops*, submit inputs, and drain results — the
 library handles worker scaling, backpressure, concurrency limits, cancellation, and
 cleanup.
@@ -36,10 +36,10 @@ hierarchical lifetime, like structured control flow. The properties that follow:
   before a wave's drain returns; no goroutine leaks.
 - **Failure isolation** — errors propagate through well-defined boundaries.
 
-## The model: Wave, Flow, and the internal Pool
+## The model: Wave, flows, and the internal Pool
 
-Two user-facing types — **Wave** and **Flow** — plus the ops (the verbs); the worker
-**Pool** is internal.
+One user-facing type — **Wave** — plus the ops (the verbs); the worker **Pool** is
+internal. Cross-cutting concerns ride **flows**, a facility rather than a type.
 
 - **Wave** — *the primary user-facing type*: a batch of work to complete together.
   A zero-value `var w streampool.Wave` is ready to use — there is no constructor, and
@@ -49,11 +49,13 @@ Two user-facing types — **Wave** and **Flow** — plus the ops (the verbs); th
   first used inside a body; the body's drain of it keeps the parent drain waiting,
   transitively) and run concurrently. The lifecycle is the drain — there is no
   `Cancel` and no `Dup`; cancellation rides the driving context (below).
-- **Flow** *(optional)* — one logical thread of related work: a refcounted, ctx-borne
-  value handle that can span multiple waves. Reach for a Flow to attach metadata
-  (trace, audit) or a cleanup hook to work that may cross wave boundaries. It is the
-  one type that rides the ctx and the one that keeps `Dup`/`Close`. Most programs
-  never construct one.
+- **Flows** — the causal DAG of related work the framework already maintains as
+  dispatches submit further work. Flows always exist and are never constructed; most
+  programs never call the API. To attach a cross-cutting rider — a value such as a
+  request context, or a completion hook that fires once all related work is done —
+  open a lexical scope with `streampool.WithFlow(ctx, body, opts...)` and user-minted
+  flow keys/tags. (Designed, not yet implemented; the full design is
+  `docs/decisions/flow-design.md`.)
 - **Pool** *(internal)* — the worker goroutines. A process-wide default Pool serves
   all work, sized automatically (spin up on demand, retire when idle). Not
   constructed or tuned; per-op concurrency is expressed with **Limiters**, not pool

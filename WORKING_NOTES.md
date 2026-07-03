@@ -192,7 +192,8 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
 touched; parallel thread to the weighted-acquisition work above. SUPERSEDES the Flow-object
 surface everywhere it appears (API_DESIGN.md Flow section, programming-model.md Wave+Flow
 framing, surface-lineage Flow bullet): there is NO Flow type anymore.** Rationale chain
-recorded below so it isn't relitigated; `docs/decisions/flow-design.md` pass still pending.
+recorded below so it isn't relitigated; `docs/decisions/flow-design.md` is now the
+permanent record (docs pass done 2026-07-03 — see open queue item 5).
 - **Ontology: "flow" = the causal DAG itself** (nodes = work items; edges = submits + the
   funnel accumulate→flush fan-in). Two rider kinds propagate along it, split by ONE property
   — whether a merge operator exists at fan-in:
@@ -247,7 +248,7 @@ recorded below so it isn't relitigated; `docs/decisions/flow-design.md` pass sti
     suffixes** — a KEY is named for the VALUE it carries (`requestCtx`, `tenant`, `txn`:
     every use site reads as a sentence about the value — txn.Value(t), txn.From(ctx),
     txn.FollowUp(commit)); a TAG is named for the FLOW it identifies (`checkout`,
-    `ingestion`: checkout.In(ctx), checkout.FollowUp(fn)). Enabled BY the method-shaped
+    `ingestion`: checkout.InFlow(ctx), checkout.FollowUp(fn)). Enabled BY the method-shaped
     API (receiver position gives the noun its grammatical role — free functions would
     have needed the suffix back). Accepted caveat: noun keys can collide with the
     natural local for a read result (`txn, ok := txn.From(ctx)` is legal-but-ugly
@@ -330,9 +331,13 @@ recorded below so it isn't relitigated; `docs/decisions/flow-design.md` pass sti
 - **Open queue**: (3) verify opt alloc discipline (variadic +
   boxed payloads stay on stack); (4) naming REMAINDER — shaping-identity constructors
   only (NewFlowKey[V] / follow-up type mint, possibly unified); the option/function names
-  are SETTLED (see surface bullet); (5) docs pass — new
-  `docs/decisions/flow-design.md`; reconcile API_DESIGN.md / programming-model.md ("two
-  user-facing types" framing) / surface-lineage.md / TODO.md:79.
+  are SETTLED (see surface bullet); (5) docs pass DONE (2026-07-03): new
+  `docs/decisions/flow-design.md` (definitive record incl. the full rejection trail; its
+  "Open details" section carries the follow-up-fn-receives-value sugar decision as OPEN,
+  plus items (3)/(4) here); reconciled API_DESIGN.md (banner bullet + superseded notes on
+  the Flow model item / API block / example), programming-model.md (Wave is THE
+  user-facing type; flow facility framed designed-not-implemented), surface-lineage.md
+  (new facet 9: Flow handle → flow facility), TODO.md:79 (RESOLVED — no adapter needed).
 
 **►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,

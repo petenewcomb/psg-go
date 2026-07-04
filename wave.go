@@ -641,7 +641,7 @@ func (wk *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 
 			if !wk.shouldBlock {
 				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(wk.wave.skimQueue.ListenersFor())
+				ex.AddToListeners(wk.wave.skimQueue.Listeners())
 
 				// Check again after registering for notification, but return
 				// and expect to be called again if needed

@@ -149,7 +149,7 @@ type Pool struct {
 
 	// notify routes a freed permit to one waiting consumer with renotify conservation.
 	// Its embedded Listeners are non-blocking manager postpones (register a callback via
-	// ListenersFor, re-run admission when fired); its embedded Waiters are blocked
+	// Listeners, re-run admission when fired); its embedded Waiters are blocked
 	// executors — AcquireWait and the top-level block-and-help gate (which waits on
 	// Waiters() while help-draining). On a freed permit, Notify(nil) wakes ONE consumer
 	// (listeners before waiters) but hands it a renotify so a consumer that cannot use
@@ -366,7 +366,7 @@ func newCache(p *Pool, parent *Cache) *Cache {
 }
 
 // Pool returns the Pool c draws permits from — the boundary that owns the manager
-// listener set (ListenersFor) and the executor waiters a body parks on.
+// listener set (Listeners) and the executor waiters a body parks on.
 func (c *Cache) Pool() *Pool {
 	return c.pool
 }

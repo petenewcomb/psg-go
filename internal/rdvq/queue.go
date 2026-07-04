@@ -173,7 +173,7 @@ func (q *Queue[T]) PushBack(ctx context.Context, value T, bufferedFn BufferedFun
 // value was delivered — to a waiting receiver, or into an outbox that could
 // accept it immediately — and false if neither was possible right now. A false
 // return is the backpressure signal callers use to postpone; the value is
-// re-driven when the queue-level "outbox freed" wakeup fires (see ListenersFor).
+// re-driven when the queue-level "outbox freed" wakeup fires (see Listeners).
 //
 //nolint:contextcheck // background context used only for tracing
 func (q *Queue[T]) TryPushBack(value T, bufferedFn BufferedFunc) bool {
@@ -228,12 +228,14 @@ func (q *Queue[T]) TryPushBack(value T, bufferedFn BufferedFunc) bool {
 	return true
 }
 
-// ListenersFor returns the queue-level "an outbox freed" listener set. A
+// Listeners returns the queue-level "an outbox freed" listener set. A
 // producer that could not push (TryPushBack refused) subscribes here and is
 // re-driven when a receiver drains an outbox, freeing a buffered slot. This
 // replaces the former per-outbox listeners: with destination-owned outboxes
-// there is no per-sender outbox to wait on, only the pool as a whole.
-func (q *Queue[T]) ListenersFor() *Listeners {
+// there is no per-sender outbox to wait on, only the pool as a whole. (The
+// name was ListenersFor(s *Sender) when listeners were per-sender-outbox; the
+// destination-owned pool removed the parameter.)
+func (q *Queue[T]) Listeners() *Listeners {
 	return &q.outboxFreed
 }
 

@@ -2,7 +2,35 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► W2c REVIEW RESPONSE LANDED (2026-07-04, this commit) — PN's data-structure review
+**►►► QUEUE UNIFICATION DESIGN RECORDED (2026-07-04, this commit) — NEXT: implement as
+CP-W2d (weighted-acquisition.md "Queue unification"; supersedes Decision 2's
+representation + ALL of Decision 3).** Converged in the PN review thread, docs-first
+by agreement. Core: ONE always-on lock-free demand FIFO (nbcq) for EVERY weight + a
+CAS-managed head SLOT (the field formerly named barrier); fast path = a BARE LOAD of
+the slot (PN — no CAS on the hot path), nil ⇒ ordinary lock-free acquire, success never
+touches the queue (pure-w=1 pools keep today's machinery verbatim — Decision 3's
+dormancy WITHOUT the exclusion rule); miss/occupied ⇒ enqueue + promote-if-slot-nil;
+head retirement = pop-next (gen-stale entries skipped — lazy interior removal, nbcq
+can't unlink; Decision 4's gen discipline now load-bearing) + ONE CAS self→successor
+(no empty-slot window while waiters exist ⇒ ~zero sniping against queued demands) +
+mailbox wake. Wake delivery serves parks AND postpones (mailbox = full notifier;
+listeners half for the manager-postpone path — PN's "can't assume mailbox parking").
+COLLAPSES: arming/disarm as concepts (armed ⇔ slot non-nil; no flush), fifoMu (episode
+extension serialization moves to a small mutex inside the pooled od), the pool general
+waiter/listener set on the permits path (Release wakes the head slot or NOBODY; the
+promotion cascade IS the chain — W2b-i probe rules stay for workq consumers only).
+LAYERS UNCHANGED: episodes (sentinel in the slot), suspension counters, exemption
+anchor, head-only gathering, Decision 1. Trade recorded: while a head stands, each
+contended admission pays one wake handoff instead of a snipe — expect BETTER P99/max,
+possible peak-throughput cost; MEASURE per bench methodology (heavy-tailed blocking
+I/O, tail metrics primary, P:D sweeps) before/after. Impl notes: w=1 head's body cache
+optional (uniform acceptable); blockAcquire/reclaim park targets move to the demand
+mailbox. Gate for W2d when implemented: the usual + the full 40× sim batch (this is a
+wake-path rewrite) + before/after benchmarks.
+
+**Previous banner:**
+
+**►►► W2c REVIEW RESPONSE LANDED (2026-07-04) — PN's data-structure review
 comments applied; overdraft state now DEMAND-ALLOCATED (PN follow-up during the session).**
 - Pool.notify → **notifier**; cachePool → package-level var (heldPermitPool precedent);
   ListenersFor → **Listeners** (+ recorded WHY Listeners/Waiters stay separate and the

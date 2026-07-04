@@ -79,6 +79,12 @@ borrowable hoard) between gathering steps.
 
 ## Decision 2: a demand-side head-of-line barrier — FIFO, sticky head, no max
 
+> **Representation superseded (2026-07-04)** by "Queue unification" below: the
+> mutex-guarded slice becomes an always-on lock-free (nbcq) FIFO + a CAS-managed
+> head slot, and EVERY weight queues. The principles here — demand-side not
+> supply-side, sticky head, arrival order with no weight-based ordering, gate
+> every arm while a head stands, head-only gathering — all carry forward.
+
 The fairness/livelock mechanism is a **barrier on other acquirers**, not a
 reservation of capacity. The distinction is what keeps the proof intact:
 
@@ -170,12 +176,21 @@ armed barriers across pools under joint admission; consumable-base autonomy.
 
 ## Decision 3: arm only for w ≥ 2
 
-A weight-1 waiter never needs assembly — any single freed permit satisfies it — so
-weight-1 demands neither register nor arm. Weight-1 contention keeps today's fully
-concurrent machinery (wake-one + renotify conservation + steal). Without this guard,
-ordinary weight-1 saturation would serialize the entire pool through the barrier — a
-regression on the common case. With it, the whole mechanism is dormant for semaphore
-and rate pools: one always-false branch.
+> **SUPERSEDED (2026-07-04)** by "Queue unification" below. Excluding weight-1 from
+> the queue was itself weight-based ordering — the exact bias Decision 2 rejects —
+> and let weight-1 starve for as long as the FIFO stayed non-empty. The property
+> this decision actually protected (the mechanism is dormant for pure weight-1
+> pools; no serialization of the common case) is preserved by the empty-slot fast
+> path instead of by an exclusion rule: no waiter ⇒ no head ⇒ the ordinary
+> lock-free machinery, verbatim.
+
+As originally recorded: a weight-1 waiter never needs assembly — any single freed
+permit satisfies it — so weight-1 demands neither register nor arm. Weight-1
+contention keeps today's fully concurrent machinery (wake-one + renotify
+conservation + steal). Without this guard, ordinary weight-1 saturation would
+serialize the entire pool through the barrier — a regression on the common case.
+With it, the whole mechanism is dormant for semaphore and rate pools: one
+always-false branch.
 
 ## Decision 4: the demand identity is a conservation token, caller-held
 
@@ -197,6 +212,109 @@ idempotent).
   machine — a stale head-field reference to an invalidated-and-reused identity is
   the same bug shape as the rdvq inbox reuse (captured-gen hints,
   `rdvq-inbox-reclamation.md`).
+
+## Queue unification (PN, 2026-07-04): one always-on lock-free demand FIFO
+
+> Supersedes Decision 2's representation and all of Decision 3. Converged in the
+> W2c data-structure review thread: (a) gated weight-1 starving behind a non-empty
+> FIFO is weight-based ordering by class; (b) registered demands cannot assume
+> mailbox *parking* — w ≥ 2 arrives through the manager-postpone path too, so wake
+> delivery must serve listeners and waiters uniformly; (c) the wake chain already
+> serializes admission, so the mutex-guarded slice duplicates queue structure the
+> notifier machinery (nbcq) already provides. **Status: agreed design; not
+> implemented (sequencing step 2d).**
+
+### Structure
+
+- **One demand FIFO, always on, for every weight** — an nbcq of `*Demand` (the
+  queue needs concurrent producers but only a logically-single consumer: promotion
+  is the sole consumption point and the head slot serializes it). Every acquire
+  that cannot be satisfied immediately enqueues; a satisfied acquire never touches
+  the queue.
+- **The head slot** — `head atomic.Pointer[Demand]` (the field formerly named
+  `barrier`): the current head demand, held OUTSIDE the queue (nbcq cannot peek
+  without popping; the slot is the sticky head). Non-nil ⇔ someone is waiting ⇔
+  every acquisition arm is gated (Decision 2's gate-all-arms rule, unchanged)
+  unless exempt (chain through the head's cache / episode owner at its anchor).
+- **Interior removal is lazy** (nbcq cannot unlink interior nodes): Invalidate
+  retires the entry by generation — Decision 4's ABA discipline becomes
+  load-bearing — and promotion skips gen-stale entries when popping.
+
+### Protocol (CAS only at transitions; the hot path only loads)
+
+- **Fast path (PN): a bare load, nothing stronger.** Load the head slot; nil ⇒
+  attempt the ordinary lock-free acquire (steps 0–4 / whole-grant) and, on
+  success, return — the queue and slot are never touched, no CAS, no barrier
+  beyond today's one-load check. This is the pre-unification unarmed path
+  verbatim, so pure weight-1 pools keep their fully concurrent machinery.
+  Staleness is the existing benign doctrine: a stale nil leaks one snipe
+  (compensated by the promoted head's park-time confirm re-reading counts); a
+  stale head over-gates one attempt (retried).
+- **Enqueue**: slot non-nil (and not exempt), or the fast-path attempt missed ⇒
+  push the demand, then, if the slot is nil, promote (pop-front-into-slot CAS —
+  possibly popping an earlier arrival, preserving order; popping *yourself* is the
+  instant-head case, and the uncontended w ≥ 2 single-call satisfaction survives:
+  enqueue → instant head → gather inline → hand off).
+- **Head retirement** (satisfaction or invalidation): pop the next non-stale
+  entry and CAS the slot **directly from self to successor** — one CAS, so no
+  empty-slot window exists while waiters remain, which is what bounds sniping to
+  ~zero against queued demands. Wake the successor's mailbox. Empty queue ⇒ CAS
+  the slot to nil; the enqueue-side promote check closes the race with a
+  concurrent arrival.
+- **Wake delivery serves parks AND postpones**: the demand mailbox is a full
+  notifier — `AcquireWait` parks on its waiter half; a postponed manager registers
+  its retry on its listener half (Notify already prefers listeners). No separate
+  wait-target classes remain.
+
+### What collapses
+
+- **Arming/disarm**: gone as concepts — "armed" degenerates to "the slot is
+  non-nil"; there is no mode to enter or leave, no disarm condition, no flush.
+- **The pool's general waiter/listener set retires from the permits path**: every
+  waiter is a queue entry with a mailbox. `Release` wakes the head slot's mailbox
+  if a head stands, else nobody (nobody is waiting). Multi-permit events need no
+  chained walk: **the promotion cascade is the chain** — each satisfied head
+  promotes a successor whose confirm re-reads counts. W2b-i's probe rules remain
+  for the workq/queue-space consumers they also serve; the permits pool no longer
+  needs them.
+- **fifoMu**: the queue is lock-free and the slot is CAS-managed. What fifoMu
+  also guarded — episode-extension serialization and `od.total` — moves to a
+  small mutex inside the pooled `overdraft` object (episode-cold by definition).
+
+### What layers on unchanged
+
+Episodes (the sentinel occupies the head slot; claimants; the structural pin;
+endEpisode retires slot → successor), suspension counters and the stranger check,
+the exemption anchor (the slot demand's cache), head-only gathering, and Decision
+1's hoard discipline.
+
+### Fairness and the stated trade
+
+Strict arrival order among ALL waiters, uniformly — the liveness induction's step
+3 loses its two-class split (every waiter's wait is bounded by the finite queue
+ahead of it, period). While a head stands there is no capacity sniping (the slot
+gates), and the single-CAS handoff leaves no inter-head window; the only leak is
+the empty-queue transition race — one benign, compensated acquire. And that leak
+is not a fairness violation at all (PN): it can only occur between demands that
+arrived within the same race window, and arrival order is undefined at that
+resolution — whichever serialization the race produces IS a valid arrival order
+for those two demands. The compensation discipline covers liveness; this covers
+fairness. The cost:
+while a head stands, each contended admission pays one wake handoff instead of a
+snipe — expected to *improve* P99/max (no starvation tail) at some peak-throughput
+cost on saturated pools. Measure before/after per the benchmark methodology
+(heavy-tailed blocking-I/O work, tail metrics primary, P:D sweeps); the fast path
+means an uncontended pool pays nothing.
+
+### Implementation notes
+
+- Weight-1 registrants carry demands with mailboxes like everyone else; whether a
+  w = 1 head needs a body cache (its "gather" is a single take that could back
+  from the registering cache) is an implementation detail — uniform-with-w ≥ 2 is
+  acceptable, it is the cold path.
+- streampool's block-and-help loops (`blockAcquire`, `reclaim`) currently park on
+  the pool's general waiters; they move to the demand mailbox (the wave.block
+  plumbing takes the park target as a parameter already).
 
 ## Struct / API mapping (internal/permits)
 
@@ -566,6 +684,10 @@ generic `OpOption[T]` (infects every option's call site).
   head-only).
 
 ## Sequencing (gut-first discipline)
+
+> Step 2d added 2026-07-04: the queue unification above — after step 2c
+> (overdraft), before step 3 (resource capabilities). It is a representation
+> swap of just-landed machinery; reset-over-patch applies.
 
 1. **Mechanical weighting** — parameterize `counts` deltas, `Acquire(w)`,
    `Permit.weight` — with every caller passing w=1: a provable no-op, landed green.

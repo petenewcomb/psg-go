@@ -111,6 +111,7 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 
 	c1.Release()
 	c2.Release()
+	d3.Invalidate() // the miss queued d3, homing it under sub — withdraw before drain
 	require.True(t, sub.ReleaseRef())
 	require.True(t, parent.ReleaseRef())
 	assert.Equal(t, 0, tp.totalHeld())
@@ -183,10 +184,10 @@ func TestNestedDriveSinglePermitChain(t *testing.T) {
 
 // A weighted acquire assembles its weight from fragmented sources — partial steals
 // from several victims plus the Resource's remainder — into the demand's body cache
-// (registration creates it; the gather hoards and occupies there,
+// (enqueueing creates it; the gather hoards and occupies there,
 // weighted-acquisition.md Decisions 1–2). No single source covers w=5, so the fast
-// path misses, the demand registers, becomes the instant head, gathers, and the
-// barrier disarms — all within one Acquire call.
+// path misses, the demand queues, becomes the instant head, gathers, and the head
+// slot reopens — all within one Acquire call.
 func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 	tp := newTestPool(5)
 	tp.tb = t
@@ -204,7 +205,7 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 	assert.Equal(t, uint64(5), pm.backing.held(), "the whole weight landed in the body cache")
 	assert.Equal(t, uint64(0), v1.held(), "victim 1 fully harvested")
 	assert.Equal(t, uint64(0), v2.held(), "victim 2 fully harvested")
-	assert.Nil(t, tp.barrier.Load(), "satisfaction dequeued the head and disarmed")
+	assert.Nil(t, tp.head.Load(), "satisfaction retired the head and opened the slot")
 	assert.Equal(t, 5, tp.totalHeld(), "steals transfer and the delta checks out — no double-count")
 	tp.check(t)
 
@@ -218,9 +219,10 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 }
 
 // A gather that comes up short keeps its partial hoard in the demand's body cache —
-// cache-don't-return IS the rollback (no give-back protocol). The demand stays
-// registered as the armed head, gating other acquirers off the hoard; invalidating
-// it drains the hoard back to the Resource and disarms.
+// cache-don't-return IS the rollback (no give-back protocol). The demand stands as
+// the head, gating other acquirers off the hoard; invalidating it drains the hoard
+// back to the Resource, and the promotion scan skips the lazily-retired entries of
+// demands invalidated while queued.
 func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	tp := newTestPool(3)
 	tp.tb = t
@@ -235,24 +237,28 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	// The hoard holds the stolen 2 in the body cache. The 1 free permit stays in the
 	// Resource: the Resource arm is all-or-nothing at the shortfall until
 	// TryAcquireUpTo lands (weighted-acquisition.md sequencing step 3).
-	require.NotNil(t, dg.cache.Load(), "the miss left the demand registered with its body cache")
+	require.NotNil(t, dg.cache.Load(), "the miss left the demand queued with its body cache")
 	assert.Equal(t, uint64(2), dg.cache.Load().held(), "the failed gather keeps its partial hoard")
 	assert.Equal(t, uint64(0), v.held(), "the victim was harvested before the miss")
-	require.Same(t, &dg, tp.barrier.Load(), "the unsatisfied head keeps the barrier armed")
+	require.Same(t, &dg, tp.head.Load(), "the unsatisfied head stands in the slot")
 	tp.check(t)
 
-	// While armed, everyone else is gated — even off capacity the head cannot use.
+	// While a head stands, everyone else is gated — even off capacity the head
+	// cannot use — and joins the queue in arrival order, weight-1 included.
 	b := tp.NewCache()
 	var db1 Demand
 	db1.Init()
 	b1, err1 := b.Acquire(&db1, 1)
 	require.NoError(t, err1)
-	require.False(t, b1.Held(), "a weight-1 acquire is gated while the barrier is armed")
+	require.False(t, b1.Held(), "a weight-1 acquire is gated while a head stands")
+	require.True(t, db1.queued(), "and queues behind it")
 
-	// Invalidation retires the head: the hoard drains to the Resource (conservation
-	// via the ordinary destroy path) and the barrier disarms.
+	// Invalidate the queued weight-1 demand FIRST — lazy removal: its entry stays
+	// in the queue, retired by the generation bump — then the head. The promotion
+	// scan must skip the stale entry and open the slot.
+	db1.Invalidate()
 	dg.Invalidate()
-	require.Nil(t, tp.barrier.Load(), "invalidating the sole head disarms the barrier")
+	require.Nil(t, tp.head.Load(), "the scan skipped the lazily-retired entry and opened the slot")
 	assert.Equal(t, 0, tp.totalHeld(), "the drained hoard returned everything to the Resource")
 	tp.check(t)
 
@@ -287,13 +293,13 @@ func TestDemandPoolRoundTrip(t *testing.T) {
 		require.True(t, hog.Held())
 
 		d := NewDemand()
-		p2, err := c.Acquire(d, 2) // over capacity: registers as the armed head
+		p2, err := c.Acquire(d, 2) // over capacity: queues and takes the head slot
 		require.NoError(t, err)
 		require.False(t, p2.Held())
-		require.Same(t, d, tp.barrier.Load(), "the pooled demand registered as head")
+		require.Same(t, d, tp.head.Load(), "the pooled demand stands as head")
 
-		d.Free() // Reset → Invalidate: dequeued, disarmed, identity retired
-		require.Nil(t, tp.barrier.Load())
+		d.Free() // Reset → Invalidate: retired from the slot, identity bumped
+		require.Nil(t, tp.head.Load())
 
 		hog.Release()
 		hogD.Free()

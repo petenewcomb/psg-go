@@ -43,6 +43,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 			defer wg.Done()
 			var d Demand
 			d.Init()
+			defer d.Invalidate() // a final miss leaves the demand queued (unified queue)
 			for range iters {
 				if pm, _ := c.Acquire(&d, 1); pm.Held() {
 					if h, u := pm.backing.counts.load(); u > h {
@@ -50,7 +51,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 					}
 					pm.Release()
 				}
-				// On a miss every permit was in use elsewhere; just retry next loop.
+				// On a miss the demand queued; the next attempt re-presents it.
 			}
 		}(kid)
 	}
@@ -96,6 +97,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 			defer wg.Done()
 			var d Demand
 			d.Init()
+			defer d.Invalidate() // a final miss leaves the demand queued
 			for range 10000 {
 				if pm, _ := c.Acquire(&d, 1); pm.Held() {
 					pm.Release()
@@ -116,6 +118,9 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 				if pm, _ := sub.Acquire(&d, 1); pm.Held() {
 					pm.Release()
 				}
+				// A miss homed the demand under this ephemeral sub-cache;
+				// withdraw it before the next iteration re-homes elsewhere.
+				d.Invalidate()
 				sub.ReleaseRef() // drains the ephemeral sub-wave (destroy)
 			}
 		}()

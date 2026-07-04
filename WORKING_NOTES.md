@@ -2,7 +2,51 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► QUEUE UNIFICATION DESIGN RECORDED (2026-07-04, this commit) — NEXT: implement as
+**►►► CP-W2d LANDED (2026-07-04, this commit) — queue unification implemented per
+weighted-acquisition.md "Queue unification". NEXT: weighted-acquisition step 3
+(TryAcquireUpTo / NotifyAt), then step 4 (surface).** As landed:
+- Pool: `queue nbcq.Queue[demandEntry]` (entry = {d, gen} — gen-stale entries are the
+  lazy interior removal) + `head atomic.Pointer[Demand]` slot + `promoting` marker
+  demand (exclusive pop right; readers see armed-non-exempt; wake() drops marker-window
+  events — compensated). fifoMu/fifo/barrier DELETED; pool general notifier DELETED
+  from permits (Release wakes the head slot or NOBODY; promotion cascade = the chain);
+  episode extension serialization + od.total moved to od.mu inside the pooled object;
+  initial-grant evaluation needs no lock (slot ownership = sole evaluator; od
+  initialized unpublished).
+- Protocol: fast path = bare head load (nil ⇒ today's lock-free machinery verbatim);
+  miss/gated ⇒ enqueue (EVERY weight; body cache uniform) + promote-if-slot-nil
+  (CAS nil→marker → scan); retirement (satisfy/refuse/invalidate/endEpisode) = CAS
+  self→marker → scan (pop, skip gen-stale, Store head, post-install gen re-check with
+  marker-swap reclaim vs racing Invalidate — exactly one party continues the scan; empty
+  ⇒ Store nil + Empty re-check + re-close). Invalidate of a queued non-head is lazy
+  (gen bump only). Parks AND postpones ride the demand mailbox: Cache.WaitersFor/
+  ListenersFor(d) resolve mailbox-vs-episode-claimants; heldPermit gateAcquire/
+  blockAcquire/reclaim re-plumbed; AcquireWait's transient no-target case loops (next
+  Acquire enqueues).
+- **REFINEMENT (caught by TestSemaphoreResource_ZeroBlocksAll): initial overdraft
+  evaluation stays w≥2** — a w=1 head reaching default-GRANT let Semaphore(0) admit
+  past a zero limit; w=1 exhaustion is always "capacity is zero right now" (raisable ⇒
+  wait; ChainProbe reaches the head), never structural infeasibility. Episode
+  extensions still cover w=1 claimants (wedge argument). Recorded in the doc's
+  Implementation notes.
+- Sequencing note: satisfied w=1 permits now back from the demand's BODY CACHE, so
+  Invalidate-before-Release trips destroy's inUse tripwire (caught one test doing it);
+  callers already sequenced correctly via heldPermit.
+- Tests: barrier_test → head-slot semantics (w=1 queues in arrival order; promotion
+  order assertions updated incl. lazy-stale-skip coverage); model oracle → "a miss
+  always leaves a head standing; legitimacy checked when we ARE the head"; concurrent
+  tests gained Invalidate hygiene (a final miss leaves the demand queued; the churn
+  test re-homes per iteration).
+- **Gate: vet, lint 0, full -short, permits -race ×10, rapid 10k, 41/41
+  TestBySimulation -race (chunks of 10, full capture), full root -race ×1.
+  BENCHMARKS (bench/BenchmarkDispatch heavytail, medians of 5, before=W2c):
+  underload/balanced noise; overload p99-e2e −34%; heavy-overload p99-e2e −63%,
+  p99.9-e2e −51%, tasks/sec +6.6%; p50-e2e +5–8% under overload (fairness
+  redistribution — accepted). Tail-first priorities: clear win.**
+
+**Previous banner:**
+
+**►►► QUEUE UNIFICATION DESIGN RECORDED (2026-07-04) — implement as
 CP-W2d (weighted-acquisition.md "Queue unification"; supersedes Decision 2's
 representation + ALL of Decision 3).** Converged in the PN review thread, docs-first
 by agreement. Core: ONE always-on lock-free demand FIFO (nbcq) for EVERY weight + a

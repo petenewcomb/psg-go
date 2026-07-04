@@ -103,15 +103,20 @@ func TestPermitsModel(t *testing.T) {
 				if pm.Held() {
 					u.pm = pm
 					u.running = true
-				} else if b := tp.barrier.Load(); b == nil || b == &u.demand {
-					// Unarmed miss, or the head's own gather exhausted: legitimate
-					// ONLY when the gather could not assemble w — borrowable
-					// everywhere plus free Resource capacity falls short.
+				} else if hd := tp.head.Load(); hd == &u.demand {
+					// The head's own gather exhausted: legitimate ONLY when the
+					// gather could not assemble w — borrowable everywhere plus
+					// free Resource capacity falls short. (A miss always leaves
+					// SOME head standing under the unified queue: the missing
+					// demand enqueued and the promote scan installed one.)
 					require.Less(t, tp.borrowableTotal()+tp.free(), w,
 						"Acquire blocked while gatherable capacity covered w")
+				} else {
+					require.NotNil(t, hd,
+						"a miss must leave a head standing (the demand queued)")
+					// Gated behind another head — legitimate unconditionally
+					// (fairness over utilization, Decision 2).
 				}
-				// else: gated by another head's armed barrier — legitimate
-				// unconditionally (fairness over utilization, Decision 2).
 				check()
 			},
 			"invalidate": func(t *rapid.T) {
@@ -152,7 +157,7 @@ func TestPermitsModel(t *testing.T) {
 			},
 		})
 
-		// Teardown: stop every running body, withdraw every demand (registration and
+		// Teardown: stop every running body, withdraw every demand (queue entry and
 		// persistent home — conservation: satisfied or invalidated, never dropped),
 		// then drop every remaining unit reference; the destroy cascade returns all
 		// held to the Resource.
@@ -166,7 +171,7 @@ func TestPermitsModel(t *testing.T) {
 		for _, u := range units {
 			u.demand.Invalidate()
 		}
-		require.Nil(t, tp.barrier.Load(), "an emptied FIFO must disarm the barrier")
+		require.Nil(t, tp.head.Load(), "an emptied queue must open the head slot")
 		for _, u := range units {
 			if u.unitRefHeld {
 				u.unitRefHeld = false

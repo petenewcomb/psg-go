@@ -89,9 +89,9 @@ func (tp *testPool) checkEpisode(t require.TestingT) {
 	require.LessOrEqual(t, inFlight, capacity)
 	var total, allowance uint64
 	if od := tp.od.Load(); od != nil {
-		tp.fifoMu.Lock()
+		od.mu.Lock()
 		total = od.total
-		tp.fifoMu.Unlock()
+		od.mu.Unlock()
 		allowance = od.allowance.Load()
 	}
 	require.Equal(t, total, excess+allowance,
@@ -117,7 +117,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	require.True(t, pm.Held(), "w=5 on capacity 3: gather 3, overdraft 2")
 	require.Same(t, d.cache.Load(), pm.backing)
 	require.Equal(t, []int{2}, res.asks, "the ask is the post-gather shortfall")
-	require.Same(t, tp.standingSentinel(), tp.barrier.Load(), "the sentinel stands: barrier armed")
+	require.Same(t, tp.standingSentinel(), tp.head.Load(), "the sentinel stands: gate closed")
 	require.Same(t, d.cache.Load(), tp.episodeAnchor())
 	require.Equal(t, uint64(0), tp.allowanceRemaining(), "the head's occupy claimed the whole grant")
 	require.Equal(t, uint64(2), excessOverCache(d.cache.Load()), "inUse runs past held by the grant")
@@ -131,13 +131,14 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	p1, err := w1.Acquire(&d1, 1)
 	require.NoError(t, err)
 	require.False(t, p1.Held(), "weight-1 is gated while the episode stands")
+	require.True(t, d1.queued(), "and queues in arrival order like every weight")
 	b := tp.NewCache()
 	var db Demand
 	db.Init()
 	pb, err := b.Acquire(&db, 2)
 	require.NoError(t, err)
-	require.False(t, pb.Held(), "a w≥2 arrival registers behind the sentinel")
-	require.Equal(t, 2, tp.fifoLen(), "sentinel + the queued arrival")
+	require.False(t, pb.Held(), "a w≥2 arrival queues behind the sentinel")
+	require.True(t, db.queued())
 
 	// The owner parks: its excess flows home to the allowance.
 	pm.Release()
@@ -176,25 +177,32 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	pm2.Release()
 
 	// Completion: the demand's ref drops and the drained subtree destroys the body
-	// cache — the episode ends with the allowance necessarily home, and the queued
-	// successor is promoted to a live (gathering) head.
+	// cache — the episode ends with the allowance necessarily home, and the FIRST
+	// arrival (the weight-1 demand, which queued before b under the unified queue)
+	// is promoted to a live head.
 	require.True(t, ch.ReleaseRef())
 	d.Invalidate()
 	require.Nil(t, tp.od.Load(), "episode end retired the pooled episode state")
-	require.Same(t, &db, tp.barrier.Load(), "the queued arrival was promoted to head")
+	require.Same(t, &d1, tp.head.Load(), "arrival order: the weight-1 demand promoted first")
 	tp.checkEpisode(t)
+
+	p1b, err := w1.Acquire(&d1, 1)
+	require.NoError(t, err)
+	require.True(t, p1b.Held(), "the weight-1 head gathers from the drained capacity")
+	require.Same(t, &db, tp.head.Load(), "then b is promoted in turn")
 
 	pb2, err := b.Acquire(&db, 2)
 	require.NoError(t, err)
-	require.True(t, pb2.Held(), "the promoted head gathers the drained capacity")
+	require.True(t, pb2.Held(), "the next head gathers the remaining capacity")
 	pb2.Release()
+	p1b.Release()
 	db.Invalidate()
 	d1.Invalidate()
 	for _, c := range []*Cache{v, g, w1, b} {
 		require.True(t, c.ReleaseRef())
 	}
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
-	require.Nil(t, tp.barrier.Load())
+	require.Nil(t, tp.head.Load())
 	tp.checkEpisode(t)
 }
 
@@ -212,7 +220,7 @@ func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
 	d.Init()
 	_, err := g.Acquire(&d, 4)
 	require.ErrorIs(t, err, refuseErr, "the refusal error is the resource's own")
-	require.Nil(t, tp.barrier.Load(), "the refused sole head disarmed the barrier")
+	require.Nil(t, tp.head.Load(), "the refused sole head opened the slot")
 	require.Nil(t, d.pool.Load(), "the refused demand was dequeued")
 	d.Invalidate() // the caller's error path releases the home (and its hoard)
 	require.Equal(t, 0, tp.totalHeld(), "the drained hoard returned to the Resource")
@@ -243,7 +251,7 @@ func TestOverdraftRefusalThroughAcquireWait(t *testing.T) {
 	require.ErrorIs(t, err, refuseErr)
 	require.Nil(t, d.pool.Load())
 	require.Nil(t, d.cache.Load(), "AcquireWait's error path invalidated the demand")
-	require.Nil(t, tp.barrier.Load())
+	require.Nil(t, tp.head.Load())
 	require.True(t, g.ReleaseRef())
 	require.Equal(t, 0, tp.totalHeld())
 }
@@ -266,7 +274,7 @@ func TestOverdraftWaitsWhileAnythingRuns(t *testing.T) {
 	pg, err := g.Acquire(&d, 4)
 	require.NoError(t, err)
 	require.False(t, pg.Held(), "no grant while a release could still change the answer")
-	require.Same(t, &d, tp.barrier.Load(), "the head stays armed, waiting")
+	require.Same(t, &d, tp.head.Load(), "the head stands, waiting")
 
 	ph.Release() // the last runner parks; now the proof can pass
 	pg, err = g.Acquire(&d, 4)
@@ -326,7 +334,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 		require.True(t, c.ReleaseRef())
 	}
 	require.Equal(t, 0, tp.totalHeld())
-	require.Nil(t, tp.barrier.Load())
+	require.Nil(t, tp.head.Load())
 }
 
 // A parked exempt claimant is woken by a release routed through episodeNotify: while
@@ -340,7 +348,7 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 	pm, err := g.Acquire(&d, 2) // infeasible on capacity 1 → grant → episode
 	require.NoError(t, err)
 	require.True(t, pm.Held())
-	require.Same(t, tp.standingSentinel(), tp.barrier.Load())
+	require.Same(t, tp.standingSentinel(), tp.head.Load())
 
 	// A descendant needs weight the busy episode cannot spare: it parks on
 	// episodeNotify (exempt, unregistered).
@@ -371,7 +379,7 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 
 	require.True(t, ch.ReleaseRef())
 	d.Invalidate()
-	require.Nil(t, tp.barrier.Load())
+	require.Nil(t, tp.head.Load())
 	require.True(t, g.ReleaseRef())
 	require.Equal(t, 0, tp.totalHeld())
 	tp.checkEpisode(t)
@@ -413,7 +421,7 @@ func TestConcurrentOverdraftEpisodes(t *testing.T) {
 	wg.Wait()
 
 	require.Equal(t, int64(0), failed.Load(), "every over-capacity demand must complete via its episode")
-	require.Nil(t, tp.barrier.Load(), "quiescence disarms")
+	require.Nil(t, tp.head.Load(), "quiescence opens the slot")
 	require.Nil(t, tp.od.Load(), "quiescence retires the episode state")
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	tp.checkEpisode(t)

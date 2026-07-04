@@ -5,6 +5,7 @@ package streampool
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,19 +134,25 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	admitted := make(chan permits.Permit, raised)
+	admitted := make(chan struct{}, raised)
+	holdRelease := make(chan struct{})
 	errs := make(chan error, raised)
+	var wg sync.WaitGroup
 	for range raised {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			var d permits.Demand
 			d.Init()
-			defer d.Invalidate()
+			defer d.Invalidate() // after the release below — a held permit may back from the demand's home
 			p, err := c.AcquireWait(ctx, &d, 1)
 			if err != nil {
 				errs <- err
 				return
 			}
-			admitted <- p
+			admitted <- struct{}{}
+			<-holdRelease
+			p.Release()
 		}()
 	}
 
@@ -153,19 +160,16 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	SetMaxConcurrency(l, raised)
 
-	held := make([]permits.Permit, 0, raised)
 	for i := range raised {
 		select {
-		case p := <-admitted:
-			held = append(held, p)
+		case <-admitted:
 		case err := <-errs:
 			chk.NoError(err, "waiter %d failed instead of admitting", i)
 		case <-time.After(20 * time.Second):
 			chk.FailNowf("chain under-notified", "only %d of %d waiters admitted after the raise", i, raised)
 		}
 	}
-	for _, p := range held {
-		p.Release()
-	}
+	close(holdRelease)
+	wg.Wait()
 	c.ReleaseRef()
 }

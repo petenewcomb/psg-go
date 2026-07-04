@@ -36,6 +36,7 @@ func TestAcquireWaitLiveness(t *testing.T) {
 			defer c.ReleaseRef()
 			var d Demand
 			d.Init()
+			defer d.Invalidate() // release the home a mid-loop miss created
 			for range iters {
 				pm, err := c.AcquireWait(ctx, &d, 1)
 				if err != nil {

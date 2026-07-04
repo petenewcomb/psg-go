@@ -221,8 +221,9 @@ idempotent).
 > mailbox *parking* — w ≥ 2 arrives through the manager-postpone path too, so wake
 > delivery must serve listeners and waiters uniformly; (c) the wake chain already
 > serializes admission, so the mutex-guarded slice duplicates queue structure the
-> notifier machinery (nbcq) already provides. **Status: agreed design; not
-> implemented (sequencing step 2d).**
+> notifier machinery (nbcq) already provides. **Status: implemented (step 2d,
+> this commit)**; one refinement surfaced by the tests, recorded under
+> "Implementation notes".
 
 ### Structure
 
@@ -315,6 +316,21 @@ means an uncontended pool pays nothing.
 - streampool's block-and-help loops (`blockAcquire`, `reclaim`) currently park on
   the pool's general waiters; they move to the demand mailbox (the wave.block
   plumbing takes the park target as a parameter already).
+- **The initial overdraft evaluation stays w ≥ 2 (refinement found at
+  implementation, 2026-07-04).** With every miss now able to become a head, a
+  weight-1 head on a zero-capacity pool would reach the overdraft evaluation and
+  a non-implementing resource would default-GRANT past the limit — `Semaphore(0)`
+  stopped blocking. §Overdraft's trigger class is demands that cannot fit the
+  current capacity structurally; a weight-1 demand fits any capacity ≥ 1, so its
+  exhaustion is always "capacity is zero right now" — a raisable condition to
+  WAIT on, never one to overdraft past. Episode EXTENSIONS still cover weight-1
+  exempt claimants (the intra-episode wedge argument stands).
+- **Measured (2026-07-04, bench/BenchmarkDispatch, heavytail, medians of 5)**:
+  underload/balanced within noise (the fast path is untouched); overload
+  p99-e2e −34%; heavy-overload p99-e2e −63%, p99.9-e2e −51%, throughput +6.6% —
+  the starvation tail the strict arrival order was predicted to remove. p50-e2e
+  +5–8% under overload: the fairness redistribution (the median no longer snipes
+  past the unlucky), the accepted side of the trade.
 
 ## Struct / API mapping (internal/permits)
 

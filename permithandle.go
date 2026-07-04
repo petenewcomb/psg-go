@@ -145,7 +145,7 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 		}
 		var err error
 		if helping {
-			m, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), confirmFn)
+			m, err = wv.block(ctx, time.Time{}, h.ownCache.WaitersFor(&h.demand), confirmFn)
 			switch {
 			case err == nil:
 			case ctx.Err() != nil:
@@ -157,7 +157,7 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 				// the reclaim must not abandon the permit; keep helping.
 			}
 		} else {
-			m, err = h.pool().Waiters().Wait(ctx, confirmFn)
+			m, err = h.ownCache.WaitersFor(&h.demand).Wait(ctx, confirmFn)
 			if err != nil {
 				return // canceled: leave un-acquired, as above
 			}
@@ -216,8 +216,11 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermi
 		return false, nil
 	}
 	if wv.shouldBlock(ctx) == nil {
-		// Non-top-level: postpone. Register for a freed permit, then recheck.
-		ex.AddToListeners(h.pool().Listeners())
+		// Non-top-level: postpone. Register for the demand's own wake — its
+		// promotion, or the head-addressed capacity events once it is the head
+		// (there is no general set under the unified queue) — then recheck, which
+		// also covers a registration racing the wake.
+		ex.AddToListeners(h.ownCache.ListenersFor(&h.demand))
 		return h.acquire(), h.acquireErr
 	}
 	// Top-level: block-and-help.
@@ -250,7 +253,7 @@ func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPerm
 			m.Forward()
 		}
 		var err error
-		m, err = wv.block(ctx, time.Time{}, h.pool().Waiters(), h.confirmFn)
+		m, err = wv.block(ctx, time.Time{}, h.ownCache.WaitersFor(&h.demand), h.confirmFn)
 		if err != nil {
 			return err
 		}

@@ -439,7 +439,19 @@ see open queue item 5).
     ≥1 and reaches true end after its subtree quiesces; no fire while carriers
     outstanding). Own model-design pass. Then the psgwf/otpsg disposition pass
     (below).
-  - **AFTER CP-F4 (PN, 2026-07-03): psgwf/otpsg DISPOSITION PASS.** psgwf's own doc.go
+  - **psgwf/otpsg DISPOSITION SETTLED (PN, 2026-07-04; supersedes the audit-only
+    framing below): psgwf = FULL DELETE after CP-F6–F8 land**, gated on a
+    per-symbol audit (anything lacking a flow equivalent gets SURFACED, not
+    silently dropped — pin.go semantics unread), examples ported as flow examples
+    (kills the Example_clientTimeout flake). **otpsg = REBUILD AS V2 ON FLOWS, not
+    shrink**: an otel span's lifecycle maps exactly onto a flow — span starts at
+    scope entry, rides as a flow VALUE (child spans/log correlation in every
+    body, fan-in semantics per tags), and span.End() is a FOLLOW-UP firing at the
+    flow's TRUE END (covers async work outliving the handler; extension = honest
+    span extension — previously inexpressible). V2 ≈ one helper returning
+    []FlowOption (span value + end follow-up). propagation.go/tracing.go deleted
+    as subsumed; metrics.go/logging.go/instrumented.go audited (keep iff they
+    instrument ops in ways flows don't touch). Original recon notes:** psgwf's own doc.go
     is the flow facility's job description ("workflow context propagation…
     cancellation domains and context values that flow through PSG task chains") on the
     dead vocabulary — HIGH-confidence delete once follow-ups land; audit each exported

@@ -58,9 +58,10 @@ func TestBySimulation(t *testing.T) {
 		// planConfig.FunnelPool.ConcurrencyLimit = sim.BiasedIntConfig{Min: 1, Med: 1, Max: 1}
 
 		//nolint:gocritic // ignore commented-out code
-		// planConfig.streampool.Task.Func.SelfTime = sim.BiasedDurationConfig{}
-		// planConfig.Funnel.Func.SelfTime = sim.BiasedDurationConfig{}
-		// planConfig.Skim.Func.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Launcher.Body.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Funnel.Accumulate.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Funnel.Flush.SelfTime = sim.BiasedDurationConfig{}
+		// planConfig.Skimmer.Handle.SelfTime = sim.BiasedDurationConfig{}
 
 		plan := sim.NewPlan(t, &planConfig)
 		t.Logf("Test plan:\n%#v", plan)

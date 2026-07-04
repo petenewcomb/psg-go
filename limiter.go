@@ -93,8 +93,9 @@ type semaphoreResource struct {
 	capacityChangedFn func() // Pool.ChainProbe, called when the ceiling is raised
 }
 
-// TryAcquire and Release implement [permits.Resource]. n is the weight (always 1 in this
-// weight-1 cut — the semaphore caps a unit count).
+// TryAcquire and Release implement [permits.Resource]. n is the weight: the whole
+// amount is admitted atomically or not at all (a partial admit would strand the
+// remainder — the same all-or-nothing contract the gather's shortfall arm assumes).
 func (s *semaphoreResource) TryAcquire(n int) bool {
 	limit := s.maxConcurrency.Load()
 	switch {
@@ -106,8 +107,7 @@ func (s *semaphoreResource) TryAcquire(n int) bool {
 	case limit == 0:
 		return false
 	default:
-		// n is always 1 for a semaphore.
-		return s.inFlight.IncrementIfUnder(int(limit))
+		return s.inFlight.AddIfUnder(n, int(limit))
 	}
 }
 
@@ -115,6 +115,21 @@ func (s *semaphoreResource) Release(n int) {
 	for range n {
 		s.inFlight.Decrement()
 	}
+}
+
+// Overdraft implements permits.OverdraftResource: the pool has PROVEN the head
+// demand infeasible at current capacity with zero permits in use anywhere. The
+// answer is a standing PROMISE — for every weight, for now: an overdraft episode
+// exempts the grantee's causal subtree from its own barrier, but the subtree is
+// not representable until weighted-acquisition step 4 wires the body-cache
+// meta-redirect, so pre-step-4 an episode owner's own downstream dispatches would
+// be GATED behind its episode and wedge whenever the owner blocks on them. At
+// step 4 this becomes the ratified two-sided policy (PN, 2026-07-04): promise
+// while PAUSED (limit 0 keeps blocking every weight until a raise), GRANT for a
+// demand heavier than a nonzero ceiling (nothing is running at grant time; the
+// episode's allowance accounting bounds the over-commitment).
+func (s *semaphoreResource) Overdraft(int) (bool, error) {
+	return false, nil
 }
 
 func (s *semaphoreResource) setMaxConcurrency(limit int) {

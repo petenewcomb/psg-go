@@ -842,26 +842,56 @@ func (p *Pool) queuedAcquire(d *Demand, uw uint64) (Permit, error) {
 // gather runs the overdraft evaluation instead of returning a bare miss.
 func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 	home := d.cache.Load() // queued ⇒ non-nil, stable until this call retires it
-	//nolint:gosec // G115: uw came from Acquire's int w, validated >= 1
-	if p.acquireInto(home, int(uw)) == nil {
-		// Gather exhausted: the forest has no borrowable and the Resource refused
-		// the shortfall. The hoard stays; a wait outcome re-drives via wakes.
-		if uw == 1 {
-			// The overdraft evaluation is for demands that cannot fit the
-			// CURRENT capacity structurally (w ≥ 2 under fragmentation or a
-			// small ceiling). A weight-1 demand fits any capacity ≥ 1: its
-			// exhaustion always means "capacity is zero right now" — a raisable
-			// condition to WAIT on (SetMaxConcurrency's chain probe reaches the
-			// head), never one to overdraft past (a limit-0 semaphore must
-			// block). Episode EXTENSIONS still cover weight-1 exempt claimants
-			// (claimOrExtend): inside an already-over-committed episode, waiting
-			// on a zero-inUse subtree would wedge the drain.
+	for {
+		//nolint:gosec // G115: uw came from Acquire's int w, validated >= 1
+		if p.acquireInto(home, int(uw)) != nil {
+			p.retireHead(d)
+			return Permit{backing: home, weight: uw}, nil
+		}
+		// Gather exhausted THIS pass: the steal walk found nothing and the
+		// Resource refused the shortfall. The hoard stays; a wait outcome
+		// re-drives via wakes. Before consulting overdraft policy, re-establish
+		// the §Overdraft proof premises AT ONE POINT IN TIME: the gather and the
+		// walk below are separate snapshots, and a release landing between them
+		// leaves takable capacity the gather never saw — granting then would
+		// over-commit past capacity that is right there (and, until step 4 wires
+		// the exempt-subtree redirect, strand the pool in an episode whose
+		// claimants cannot exist). anyInUse ⇒ wait (those releases re-drive the
+		// head); borrowable anywhere else ⇒ the exhaustion premise broke —
+		// re-gather, which takes it (everyone else is gated, so nothing bounces).
+		// Only a truly dry forest reaches the policy, which is what makes the
+		// evaluation uniform across weights (PN): a weight-1 head gets here only
+		// at literally zero capacity, and whether that means "paused, wait for
+		// the raise" or "grant past it" is the RESOURCE's policy call, not a
+		// weight rule (streampool's semaphore promises while paused, preserving
+		// limit-0-blocks; a non-implementing resource grants).
+		anyInUse, anyBorrowable := p.walkCounts(home)
+		if anyInUse || p.strangerSuspended(home) {
 			return Permit{}, nil
+		}
+		if anyBorrowable {
+			continue
+		}
+		// The Resource's FREE pool is invisible to the walk: a destroy draining
+		// capacity back between the gather and the walk leaves the forest dry
+		// while TryAcquire would succeed (common under cache churn, not a rare
+		// race). Re-establish the refusal premise LAST — take the shortfall if it
+		// is there and finish the gather instead of consulting policy.
+		held, inUse := home.counts.load()
+		need := excessOver(held, inUse+uw) - excessOver(held, inUse)
+		if need == 0 {
+			continue // raced coverable — the next acquireInto pass occupies
+		}
+		//nolint:gosec // G115: need ≤ uw, which came from the int w
+		if p.resource.TryAcquire(int(need)) {
+			if home.counts.depositOccupy(need, uw) {
+				p.retireHead(d)
+				return Permit{backing: home, weight: uw}, nil
+			}
+			continue // hoard shrank underneath; the grant stays as hoard — re-gather
 		}
 		return p.headOverdraft(d, uw)
 	}
-	p.retireHead(d)
-	return Permit{backing: home, weight: uw}, nil
 }
 
 // retireHead ends d's headship — satisfaction, refusal, or invalidation-by-owner —
@@ -1014,26 +1044,45 @@ func (p *Pool) evaluateOverdraft(anchor *Cache, ask uint64) (bool, error) {
 	return p.overdraftPolicy.Overdraft(int(ask))
 }
 
-// anyInUse reports whether any cache in the forest has a running occupier. The
-// locking mirrors searchList: each list's lock is held while scanning it, and the
-// walk descends holding the parent's lock — root→leaf only, so it composes with
-// the steal's ordering discipline.
+// anyInUse reports whether any cache in the forest has a running occupier.
 func (p *Pool) anyInUse() bool {
-	return anyInUseList(&p.roots)
+	anyInUse, _ := p.walkCounts(nil)
+	return anyInUse
 }
 
-func anyInUseList(l *cacheList) bool {
+// walkCounts sweeps the forest in one pass for the head-proof premises: whether
+// any cache has a running occupier (inUse > 0), and whether any cache OTHER THAN
+// exclude holds borrowable idle a steal could take (exclude is the head's own
+// home, whose borrowable is already counted against its shortfall). The locking
+// mirrors searchList: each list's lock is held while scanning it, and the walk
+// descends holding the parent's lock — root→leaf only, so it composes with the
+// steal's ordering discipline.
+func (p *Pool) walkCounts(exclude *Cache) (anyInUse, anyBorrowable bool) {
+	return walkCountsList(&p.roots, exclude)
+}
+
+func walkCountsList(l *cacheList, exclude *Cache) (anyInUse, anyBorrowable bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for c := l.head; c != nil; c = c.next {
-		if _, u := c.counts.load(); u > 0 {
-			return true
+		h, u := c.counts.load()
+		if u > 0 {
+			anyInUse = true
 		}
-		if anyInUseList(&c.children) {
-			return true
+		if c != exclude && h > u {
+			anyBorrowable = true
+		}
+		if anyInUse && anyBorrowable {
+			return
+		}
+		cu, cb := walkCountsList(&c.children, exclude)
+		anyInUse = anyInUse || cu
+		anyBorrowable = anyBorrowable || cb
+		if anyInUse && anyBorrowable {
+			return
 		}
 	}
-	return false
+	return
 }
 
 // strangerSuspended reports whether any suspended permit-holder is off the

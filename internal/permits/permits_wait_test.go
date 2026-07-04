@@ -34,11 +34,10 @@ func TestAcquireWaitLiveness(t *testing.T) {
 			defer wg.Done()
 			c := tp.NewCache()
 			defer c.ReleaseRef()
-			var d Demand
-			d.Init()
+			d := NewDemand()
 			defer d.Invalidate() // release the home a mid-loop miss created
 			for range iters {
-				pm, err := c.AcquireWait(ctx, &d, 1)
+				pm, err := c.AcquireWait(ctx, d, 1)
 				if err != nil {
 					failed.Add(1)
 					return
@@ -67,9 +66,8 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	g := tp.NewCache()
-	var dg Demand
-	dg.Init()
-	pm, err := g.Acquire(&dg, capacity) // whole-grant fast path holds ALL capacity
+	dg := NewDemand()
+	pm, err := g.Acquire(dg, capacity) // whole-grant fast path holds ALL capacity
 	require.NoError(t, err)
 	require.True(t, pm.Held())
 
@@ -86,10 +84,9 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 			defer wg.Done()
 			c := tp.NewCache()
 			defer c.ReleaseRef()
-			var d Demand
-			d.Init()
+			d := NewDemand()
 			defer d.Invalidate()
-			pmw, err := c.AcquireWait(ctx, &d, 1)
+			pmw, err := c.AcquireWait(ctx, d, 1)
 			if err != nil {
 				failed.Add(1)
 				return
@@ -126,10 +123,9 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 func TestAcquireWaitCancel(t *testing.T) {
 	tp := newTestPool(1)
 	hog := tp.NewCache()
-	var dh, dw Demand
-	dh.Init()
-	dw.Init()
-	hp, _ := hog.Acquire(&dh, 1) // saturate the one permit and keep it in use
+	dh := NewDemand()
+	dw := NewDemand()
+	hp, _ := hog.Acquire(dh, 1) // saturate the one permit and keep it in use
 	defer hp.Release()
 
 	waiter := tp.NewCache()
@@ -137,7 +133,7 @@ func TestAcquireWaitCancel(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := waiter.AcquireWait(ctx, &dw, 1)
+		_, err := waiter.AcquireWait(ctx, dw, 1)
 		errCh <- err
 	}()
 

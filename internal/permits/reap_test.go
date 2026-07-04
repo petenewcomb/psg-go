@@ -18,15 +18,14 @@ func TestDestroyRemovesChildExactly(t *testing.T) {
 	tp := newTestPool(8)
 
 	root := tp.NewCache()
-	var dr, ds Demand
-	dr.Init()
-	ds.Init()
-	rp, _ := root.Acquire(&dr, 1)
+	dr := NewDemand()
+	ds := NewDemand()
+	rp, _ := root.Acquire(dr, 1)
 	rp.Release()
 
 	for range iters {
 		sub := root.NewChild() // ephemeral
-		pm, err := sub.Acquire(&ds, 1)
+		pm, err := sub.Acquire(ds, 1)
 		require.NoError(t, err)
 		require.True(t, pm.Held())
 		pm.Release()
@@ -41,12 +40,10 @@ func TestDestroyRemovesRootExactly(t *testing.T) {
 	const iters = 1000
 	tp := newTestPool(8)
 
-	var d Demand
-
-	d.Init()
+	d := NewDemand()
 	for range iters {
 		c := tp.Pool.NewCache()
-		pm, err := c.Acquire(&d, 1)
+		pm, err := c.Acquire(d, 1)
 		require.NoError(t, err)
 		require.True(t, pm.Held())
 		pm.Release()
@@ -62,9 +59,8 @@ func TestDestroyKeepsLiveSibling(t *testing.T) {
 	tp := newTestPool(8)
 
 	root := tp.NewCache()
-	var dr Demand
-	dr.Init()
-	rp, _ := root.Acquire(&dr, 1)
+	dr := NewDemand()
+	rp, _ := root.Acquire(dr, 1)
 	rp.Release()
 
 	live := tp.newChild(root) // persists across the churn

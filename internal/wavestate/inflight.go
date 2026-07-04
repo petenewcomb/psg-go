@@ -44,6 +44,23 @@ func (c *InFlightCounter) IsUnder(limit int) bool {
 	return ok
 }
 
+// AddIfUnder atomically adds n while the result stays within limit, reporting
+// success — the weighted form of IncrementIfUnder (a weighted semaphore's
+// TryAcquire(n) must admit all of n or none of it; n sequential increments would
+// admit partially and strand the remainder).
+func (c *InFlightCounter) AddIfUnder(n, limit int) bool {
+	for {
+		cur := c.v.Load()
+		next := cur + int64(n)
+		if next > int64(limit) {
+			return false
+		}
+		if c.v.CompareAndSwap(cur, next) {
+			return true
+		}
+	}
+}
+
 //nolint:contextcheck // background context used only for tracing
 func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	traceRegion := "InFlightCounter.IncrementIfUnder"

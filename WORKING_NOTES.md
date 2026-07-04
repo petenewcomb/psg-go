@@ -2,7 +2,52 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► CP-W2d LANDED (2026-07-04, this commit) — queue unification implemented per
+**►►► W2d REVIEW FOLLOW-UPS LANDED (2026-07-04, this commit) — PN's 7-point response
+applied. NEXT: step 3 (TryAcquireUpTo / NotifyAt), then step 4 (surface + FLIP THE
+SEMAPHORE OVERDRAFT POLICY, see below).**
+- **(1)+(5) Overdraft evaluation now UNIFORM across weights** (w≥2 gate removed —
+  PN: not wrong, just inefficient; and the proof means w=1 reaches policy only at
+  zero capacity). Made sound by TWO hardenings found via a biased-sim hang hunt
+  (zero-SelfTime bias per the sim-trace-debugging skill; pre-fix ~5%/check, post-fix
+  0/300):
+  (a) **Proof-premise re-establishment in headGather**: gather-exhaustion / zero-inUse
+  walk / Resource refusal were separate snapshots — capacity moving between them (a
+  steal mid-transfer; commonly a destroy draining held back to the Resource's
+  walk-INVISIBLE free pool) let policy be consulted while capacity was right there.
+  Now a loop: gather → walkCounts (anyInUse ⇒ wait; borrowable-elsewhere ⇒ re-gather)
+  → re-TryAcquire(shortfall) LAST (finish gather on success) → only a truly dry
+  forest reaches policy.
+  (b) **semaphoreResource.Overdraft = PROMISE for every weight UNTIL STEP 4**: an
+  episode owner's downstream dispatches are its causal subtree — exempt by design,
+  but UNREPRESENTABLE until step 4's meta-redirect, so pre-step-4 they gate behind
+  the owner's own episode = structural self-wedge (the actual sim hang: grants were
+  COMMON, 72/120 biased iterations, mostly benign until the owner blocked on gated
+  downstream work). Step 4 flips to the PN-ratified two-sided policy (promise while
+  paused / grant past a nonzero ceiling) — recorded in the doc + the policy test.
+  ALSO FOUND: latent W2a-era weight bug — semaphoreResource.TryAcquire(n) ignored n
+  for bounded limits ("n is always 1" shortcut); fixed with InFlightCounter.
+  AddIfUnder(n, limit) (atomic all-or-nothing).
+- **(4) The 2026-07-04 lost-output sim FAIL**: PN attributes to a concurrent session
+  killing tests indiscriminately; plausible and consistent (pre-W2d code lacked the
+  uniform evaluation, so today's hang class was unreachable there). Closed.
+- **(6) Reclaim-refusal direction (PN)**: panic to abort the driving body we can no
+  longer resume, treated as a special case — the framework catches ONLY that typed
+  sentinel at the dispatch boundary and returns the error as though the body returned
+  it. Not general recovery (the never-recover stance covers USER panics; this is
+  framework non-local exit, encoding/json-style). Alternative (return-and-continue
+  unpermitted) rejected: silently violates the limiter contract. Implement at step 4
+  with the weighted surface.
+- **(7) Tests converted to NewDemand()** (~63 sites); Invalidate calls kept where they
+  exercise the public API; modelUnit keeps the embedded-demand host pattern (mirrors
+  heldPermit, documented in Demand.Init).
+- (2) p50-for-tail trade ratified; (3) PN to review promoteScan by eye
+  (permits.go: enqueue/promoteScan/retireHead/Invalidate + the headGather proof loop).
+- Gate: vet, lint 0, full -short, permits -race, rapid 10k, biased-sim 0/300,
+  stock sim -race batch, root -race.
+
+**Previous banner:**
+
+**►►► CP-W2d LANDED (2026-07-04) — queue unification implemented per
 weighted-acquisition.md "Queue unification". NEXT: weighted-acquisition step 3
 (TryAcquireUpTo / NotifyAt), then step 4 (surface).** As landed:
 - Pool: `queue nbcq.Queue[demandEntry]` (entry = {d, gen} — gen-stale entries are the

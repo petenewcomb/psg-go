@@ -23,21 +23,19 @@ func TestSemaphoreResource_Accounting(t *testing.T) {
 	l := NewSemaphore(2)
 	c := l.pool.NewCache()
 
-	var d permits.Demand
-
-	d.Init()
-	p1, err := c.Acquire(&d, 1)
+	d := permits.NewDemand()
+	p1, err := c.Acquire(d, 1)
 	chk.NoError(err)
 	chk.True(p1.Held())
-	p2, err := c.Acquire(&d, 1)
+	p2, err := c.Acquire(d, 1)
 	chk.NoError(err)
 	chk.True(p2.Held(), "second permit fits under limit 2")
-	px, err := c.Acquire(&d, 1)
+	px, err := c.Acquire(d, 1)
 	chk.NoError(err)
 	chk.False(px.Held(), "third must miss at limit 2")
 
 	p1.Release()
-	p3, err := c.Acquire(&d, 1)
+	p3, err := c.Acquire(d, 1)
 	chk.NoError(err)
 	chk.True(p3.Held(), "a freed permit is reusable")
 
@@ -50,9 +48,8 @@ func TestSemaphoreResource_ZeroBlocksAll(t *testing.T) {
 	chk := require.New(t)
 	l := NewSemaphore(0)
 	c := l.pool.NewCache()
-	var d permits.Demand
-	d.Init()
-	p, err := c.Acquire(&d, 1)
+	d := permits.NewDemand()
+	p, err := c.Acquire(d, 1)
 	chk.NoError(err)
 	chk.False(p.Held(), "limit 0 blocks every acquire")
 	c.ReleaseRef()
@@ -63,10 +60,9 @@ func TestSemaphoreResource_Unlimited(t *testing.T) {
 	l := NewSemaphore(-1)
 	c := l.pool.NewCache()
 	perms := make([]permits.Permit, 0, 100)
-	var d permits.Demand
-	d.Init()
+	d := permits.NewDemand()
 	for range 100 {
-		p, err := c.Acquire(&d, 1)
+		p, err := c.Acquire(d, 1)
 		chk.NoError(err)
 		chk.True(p.Held(), "unlimited never misses")
 		perms = append(perms, p)
@@ -86,9 +82,8 @@ func TestSetMaxConcurrency_RaiseWakesParkedWaiter(t *testing.T) {
 	var acqErr error
 	go func() {
 		// Parks on the Pool until SetMaxConcurrency raises the ceiling and wakes it.
-		var d permits.Demand
-		d.Init()
-		p, err := c.AcquireWait(context.Background(), &d, 1)
+		d := permits.NewDemand()
+		p, err := c.AcquireWait(context.Background(), d, 1)
 		acqErr = err
 		if err == nil {
 			p.Release()
@@ -142,10 +137,9 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var d permits.Demand
-			d.Init()
+			d := permits.NewDemand()
 			defer d.Invalidate() // after the release below — a held permit may back from the demand's home
-			p, err := c.AcquireWait(ctx, &d, 1)
+			p, err := c.AcquireWait(ctx, d, 1)
 			if err != nil {
 				errs <- err
 				return
@@ -172,4 +166,33 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 	close(holdRelease)
 	wg.Wait()
 	c.ReleaseRef()
+}
+
+// The semaphore's overdraft answer is a standing PROMISE for every weight — the
+// OverdraftResource middle outcome (granted=false, err=nil: "normal operation can
+// eventually satisfy this") — until weighted-acquisition step 4 wires the
+// exempt-subtree meta-redirect: pre-step-4 an episode owner's own downstream
+// dispatches would be gated behind its episode and wedge. At step 4 this flips to
+// the ratified two-sided policy (promise while paused, grant past a nonzero
+// ceiling); update this test with it.
+func TestSemaphoreOverdraftPolicy(t *testing.T) {
+	chk := require.New(t)
+
+	paused := NewSemaphore(0)
+	pc := paused.pool.NewCache()
+	dp := permits.NewDemand()
+	pm, err := pc.Acquire(dp, 3)
+	chk.NoError(err, "paused: a promise, not a refusal")
+	chk.False(pm.Held(), "limit 0 blocks every weight until raised")
+	dp.Free()
+	pc.ReleaseRef()
+
+	sem := NewSemaphore(2)
+	c := sem.pool.NewCache()
+	d := permits.NewDemand()
+	pm, err = c.Acquire(d, 3)
+	chk.NoError(err, "over the ceiling: a promise too, until step 4 makes episodes safe")
+	chk.False(pm.Held(), "no grant before the exempt subtree is representable")
+	d.Free()
+	chk.True(c.ReleaseRef())
 }

@@ -316,15 +316,34 @@ means an uncontended pool pays nothing.
 - streampool's block-and-help loops (`blockAcquire`, `reclaim`) currently park on
   the pool's general waiters; they move to the demand mailbox (the wave.block
   plumbing takes the park target as a parameter already).
-- **The initial overdraft evaluation stays w ≥ 2 (refinement found at
-  implementation, 2026-07-04).** With every miss now able to become a head, a
-  weight-1 head on a zero-capacity pool would reach the overdraft evaluation and
-  a non-implementing resource would default-GRANT past the limit — `Semaphore(0)`
-  stopped blocking. §Overdraft's trigger class is demands that cannot fit the
-  current capacity structurally; a weight-1 demand fits any capacity ≥ 1, so its
-  exhaustion is always "capacity is zero right now" — a raisable condition to
-  WAIT on, never one to overdraft past. Episode EXTENSIONS still cover weight-1
-  exempt claimants (the intra-episode wedge argument stands).
+- **The overdraft evaluation is uniform across weights (PN, 2026-07-04 —
+  superseding the short-lived w ≥ 2 gate from the first cut)**, made sound by
+  **proof-premise re-establishment in headGather** (found by a biased-sim hang
+  hunt, ~5%/check before, 0/300 after): the gather's exhaustion, the zero-inUse
+  walk, and the Resource's refusal are separate snapshots, and capacity moving
+  between them — a steal mid-transfer, or (the common case) a cache destroy
+  draining held back to the Resource's walk-invisible FREE pool — let the policy
+  be consulted while capacity was right there. The head's evaluation now loops:
+  gather; walk (anyInUse ⇒ wait; borrowable-elsewhere ⇒ re-gather); re-attempt
+  TryAcquire(shortfall) LAST and finish the gather on success; only a truly dry
+  forest with a fresh refusal reaches the policy. Consequently a weight-1 head
+  reaches the policy only at literally zero capacity.
+- **streampool's `semaphoreResource` answers PROMISE for every weight until
+  step 4.** An episode exempts the grantee's CAUSAL SUBTREE from its own
+  barrier, but the subtree is not representable until step 4 wires the
+  body-cache meta-redirect — pre-step-4 an episode owner's own downstream
+  dispatches are gated behind its own episode, a structural self-wedge (this,
+  not the over-grant itself, is what the sim hang hunt surfaced). At step 4 the
+  policy flips to the ratified two-sided form (PN, 2026-07-04): PROMISE while
+  paused (limit 0 keeps blocking every weight; the raise probe reaches the
+  head), GRANT for a demand heavier than a nonzero ceiling (nothing runs at
+  grant time; the episode's allowance bounds the over-commitment,
+  Σ inUse ≤ capacity + D). A non-implementing resource default-grants at any
+  weight.
+- **Latent weight bug found by the policy test**: `semaphoreResource.TryAcquire(n)`
+  ignored n for bounded limits (a W2a-era "n is always 1" shortcut) — admitting 1
+  while the pool checked out n. Fixed with `InFlightCounter.AddIfUnder(n, limit)`
+  (atomic all-or-nothing, the contract the gather's shortfall arm assumes).
 - **Measured (2026-07-04, bench/BenchmarkDispatch, heavytail, medians of 5)**:
   underload/balanced within noise (the fast path is untouched); overload
   p99-e2e −34%; heavy-overload p99-e2e −63%, p99.9-e2e −51%, throughput +6.6% —

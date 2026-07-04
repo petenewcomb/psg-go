@@ -25,9 +25,8 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	root := tp.NewCache()
-	var dr Demand
-	dr.Init()
-	rp, _ := root.Acquire(&dr, 1) // root runs, then parks → its base (held=1) is borrowable
+	dr := NewDemand()
+	rp, _ := root.Acquire(dr, 1) // root runs, then parks → its base (held=1) is borrowable
 	rp.Release()
 
 	kids := make([]*Cache, children)
@@ -41,11 +40,10 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 		wg.Add(1)
 		go func(c *Cache) {
 			defer wg.Done()
-			var d Demand
-			d.Init()
+			d := NewDemand()
 			defer d.Invalidate() // a final miss leaves the demand queued (unified queue)
 			for range iters {
-				if pm, _ := c.Acquire(&d, 1); pm.Held() {
+				if pm, _ := c.Acquire(d, 1); pm.Held() {
 					if h, u := pm.backing.counts.load(); u > h {
 						invViolated.Store(true)
 					}
@@ -79,9 +77,8 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 	tp := newTestPool(capacity)
 
 	root := tp.NewCache()
-	var dr Demand
-	dr.Init()
-	rp, _ := root.Acquire(&dr, 1)
+	dr := NewDemand()
+	rp, _ := root.Acquire(dr, 1)
 	rp.Release()
 	fixed := make([]*Cache, 4)
 	for i := range fixed {
@@ -95,11 +92,10 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		wg.Add(1)
 		go func(c *Cache) {
 			defer wg.Done()
-			var d Demand
-			d.Init()
+			d := NewDemand()
 			defer d.Invalidate() // a final miss leaves the demand queued
 			for range 10000 {
-				if pm, _ := c.Acquire(&d, 1); pm.Held() {
+				if pm, _ := c.Acquire(d, 1); pm.Held() {
 					pm.Release()
 				}
 			}
@@ -111,11 +107,10 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var d Demand
-			d.Init()
+			d := NewDemand()
 			for range 4000 {
 				sub := tp.newChild(root)
-				if pm, _ := sub.Acquire(&d, 1); pm.Held() {
+				if pm, _ := sub.Acquire(d, 1); pm.Held() {
 					pm.Release()
 				}
 				// A miss homed the demand under this ephemeral sub-cache;
@@ -159,10 +154,9 @@ func TestConcurrentWeightedGatherSatisfiable(t *testing.T) {
 			defer wg.Done()
 			c := tp.NewCache()
 			defer c.ReleaseRef()
-			var d Demand
-			d.Init()
+			d := NewDemand()
 			for range iters {
-				pm, err := c.AcquireWait(ctx, &d, w)
+				pm, err := c.AcquireWait(ctx, d, w)
 				if err != nil {
 					failed.Add(1)
 					return

@@ -408,6 +408,18 @@ see open queue item 5).
     riders=nil). Decide by alloc floors. Sim oracle: whole-run scopes coincide on
     both chains (CP-F5a assertions survive); add a divergent-chain oracle with
     CP-F7.
+  - **THEN CP-F8 — FLUSH SEES THE ENCLOSING CHAIN (PN, 2026-07-04): the fan-in
+    sever applies ONLY to per-item riders.** A flow-A body driving a subwave
+    containing flow-B's funnel: Flush must still see A's values AND tags — A is
+    invariant structural context ABOVE the fan-in (not part of the per-item
+    ambiguity). Semantics: flush riders = enclosing-chain riders (ordinary
+    inheritance) + item-tag union; item VALUES still sever. Current impl anchors
+    the flush borrow at the scheduler ctx (rider-free) / triggering item — WRONG
+    anchor. OPEN: where to capture the enclosing chain — wave ensureInit ctx? the
+    drive ctx? (funnel-instance allocation ctx is an ITEM chain — likely wrong);
+    think through wave reuse + multiple drivers. Sim oracle: ancestor expects in
+    flush bodies flip from severed to PRESENT for values once this lands (adjust
+    assertFlowInFlush).
   - **THEN CP-F5b** — sim model extension: flow scopes/followups in
     internal/sim scenarios + conservation oracle (every registered follow-up fires
     ≥1 and reaches true end after its subtree quiesces; no fire while carriers

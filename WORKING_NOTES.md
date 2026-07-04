@@ -347,7 +347,32 @@ see open queue item 5).
       thread, not flow-impl — hand this dossier + recipe over (or trace here:
       capture the biased repro with PSGTRACEINTERNALS + -trace per the
       sim-trace-debugging skill; the recipe makes the trace small enough to read).
-  - **NEXT: CP-F5** — sim model extension: flow scopes/followups in
+  - **CP-F5a LANDED (2026-07-04, this commit): sim flow oracle, whole-run scopes.**
+    internal/sim/flow.go + Config.Flow{ScopeProb:0.25} + Plan.Flow: a scoped
+    (sub)plan's ENTIRE run (steps + drain) wraps in WithFlow with a per-plan
+    NewFlowKey[int] (val=plan ID) + NewFlowTag FollowUp. Oracles: (1) propagation —
+    every launcher/accumulate/skim body asserts each enclosing scope's value
+    present+correct and tag present (drain inside scope ⇒ skim handlers covered);
+    flush bodies assert value SEVERED + tag PRESENT (union); (2) inheritance probes
+    DYNAMICALLY at subjob entry (flush-descended subjobs legitimately see severed
+    ancestor values — only the ctx knows the path; present ⇒ value must match =
+    misdelivery check); (3) nominal end — follow-up fires EXACTLY once, only after
+    drained flag, within Eventually(10s) (not inline-deterministic: the flush ctx's
+    adopted refs release just after the wave barrier drops). Covers cancellation
+    plans too (fn fires under teardown — refcount soundness under cancel).
+    **SIM PAID OFF IMMEDIATELY: found a real CP-F1 gap** — limiter-bound dispatch
+    from a top-level scope panicked in ensureCache/ensureCacheChain (nil wave on the
+    scope meta; unit tests never combined limiter+scope). Fix: wave-less metas are
+    TRANSPARENT to permit ancestry (walk to nearest wave-bearing meta; skip in the
+    ancestor-chain walk) — wavepermits.go, + TestFlowScopeWithLimiter regression.
+    Gate: vet, lint 0, full -short suite (ExampleFunnel flaked once under parallel
+    load, 3/3 standalone — the documented real-clock-example class, not a
+    regression), sim -short ×5 with oracle active, 40× -race batch (counting
+    failures; expected ambient hit rate of the KNOWN pre-existing hang ≈1-2/40 —
+    verdict recorded with signature check against the OPEN item above).
+    CP-F5b (steps-only scopes + carrier-counter async-fire oracle) deferred — own
+    checkpoint.
+  - **NEXT: CP-F5b** — sim model extension: flow scopes/followups in
     internal/sim scenarios + conservation oracle (every registered follow-up fires
     ≥1 and reaches true end after its subtree quiesces; no fire while carriers
     outstanding). Own model-design pass. Then the psgwf/otpsg disposition pass

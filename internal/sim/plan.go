@@ -53,6 +53,11 @@ type Plan struct {
 	// non-unit probabilities.
 	MinSkimmerInvocations []int
 	MaxSkimmerInvocations []int
+	// Flow marks a plan whose whole run (steps and drain) is wrapped in a
+	// streampool.WithFlow scope with a value key and a tag follow-up; the
+	// controller asserts the propagation and nominal-end contracts
+	// (internal/sim/flow.go).
+	Flow bool
 	// CancelTriggerRunnerID, when >= 0, names the Launcher whose body
 	// cancels this (sub)plan's wave when it runs — a plan-baked,
 	// structural mid-flight cancellation. -1 means no cancellation. Only
@@ -87,6 +92,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 	nextIDs.Plan++
 	planName := fmt.Sprintf("Plan#%d", planID)
 	plan := &Plan{ID: planID, CancelTriggerRunnerID: -1}
+	plan.Flow = (BiasedBoolConfig{Probability: config.Flow.ScopeProb}).Draw(t, planName+".Flow")
 
 	nextIDsOrigin := *nextIDs
 

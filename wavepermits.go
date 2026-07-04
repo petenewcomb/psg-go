@@ -32,6 +32,12 @@ import "github.com/petenewcomb/streampool/internal/permits"
 // wave), creating the forest chain as needed. The returned cache is wv's own node for
 // Pool p; the body acquires its permit from it.
 func (wv *Wave) ensureCache(m *ctxMeta, p *permits.Pool) *permits.Cache {
+	// A wave-less meta (a top-level WithFlow scope) is transparent for permit
+	// ancestry — resolve through its parent chain to the nearest wave-bearing
+	// meta (nil when the scope is truly top-level).
+	for m != nil && m.wave == nil {
+		m = m.parent
+	}
 	// Same-wave dispatch (ambient submit, or wv is the dispatching wave): wv's own
 	// position in the forest is whatever m's chain gives — resolve it directly.
 	if m != nil && m.wave == wv {
@@ -61,9 +67,10 @@ func ensureCacheChain(m *ctxMeta, p *permits.Pool) *permits.Cache {
 	if c, ok := wv.cacheFor(p); ok {
 		return c
 	}
-	// Find the nearest distinct ancestor wave in the synchronous chain.
+	// Find the nearest distinct ancestor wave in the synchronous chain,
+	// skipping wave-less flow-scope metas (transparent, as above).
 	am := m.parent
-	for am != nil && am.wave == wv {
+	for am != nil && (am.wave == wv || am.wave == nil) {
 		am = am.parent
 	}
 	var parent *permits.Cache

@@ -130,9 +130,33 @@ type controller struct {
 	funnelLimiterTrackers []*limiterTracker
 	skimmerInvocations    []atomic.Int64
 	StartTime             time.Time
+
+	// flow is the flow-scope oracle state (internal/sim/flow.go); nil when
+	// this plan is unscoped and no ancestor expectation survives at entry.
+	flow *flowState
 }
 
 func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
+	// Flow-scope oracle setup: probe inherited expectations from the entry
+	// ctx (a flush-descended subjob sees severed values), then mint this
+	// plan's own scope identities when the plan is flow-scoped.
+	expects := flowExpectsForCtx(ctx, t, c.parent)
+	if c.Plan.Flow {
+		expects = append(expects, flowExpect{
+			key: streampool.NewFlowKey[int](),
+			val: c.Plan.ID,
+			tag: streampool.NewFlowTag(),
+		})
+	}
+	if len(expects) > 0 {
+		c.flow = &flowState{expects: expects, own: c.Plan.Flow}
+	}
+	return c.runWithFlowScope(ctx, t, func(ctx context.Context) error {
+		return c.runInner(ctx, t)
+	})
+}
+
+func (c *controller) runInner(ctx context.Context, t assert.TestingT) error {
 	traceRegion := "sim.controller.Run"
 	c.StartTime = time.Now()
 
@@ -195,6 +219,9 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 			chk.NoError(err)
 		}
 		break
+	}
+	if c.flow != nil {
+		c.flow.drained.Store(true)
 	}
 
 	// Per-Skimmer sink-invocation bounds.
@@ -351,6 +378,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 		if c.cancel != nil && runner.ID == c.Plan.CancelTriggerRunnerID {
 			c.cancel()
 		}
+		c.assertFlowInBody(ctx, t, "launcher body")
 		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
 		if err := c.executeFuncInTask(ctx, t, runner.Body, v, tracker); err != nil {
 			return err
@@ -472,6 +500,7 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) s
 		_ = valErr
 		_ = v
 		c.skimmerInvocations[idx].Add(1)
+		c.assertFlowInBody(ctx, t, "skim handler")
 		// Skimmers are deliberately limiter-free (drain must stay
 		// permit-free — see docs/limiter-suspend-resume.md), so no
 		// tracker rides this walk.
@@ -508,6 +537,7 @@ func (c *controller) newFunnelFactory(
 					tracker.enter()
 					defer tracker.exit()
 				}
+				c.assertFlowInBody(ctx, t, "accumulate body")
 				err := c.executeFunc(ctx, t, cmb.Accumulate, v, tracker)
 				if err == nil && c.shouldReturnError(cmb.Accumulate) {
 					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
@@ -526,6 +556,7 @@ func (c *controller) newFunnelFactory(
 				// subjob op's Accumulate on the shared tracker. Pass nil
 				// so Subjob steps in a Flush body don't drop a
 				// contribution that was never added.
+				c.assertFlowInFlush(ctx, t)
 				v := &simValue{DispatchTime: time.Now()}
 				err := c.executeFunc(ctx, t, cmb.Flush, v, nil)
 				if err == nil && c.shouldReturnError(cmb.Flush) {

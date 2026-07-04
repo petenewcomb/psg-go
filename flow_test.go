@@ -667,3 +667,30 @@ func TestFlowAllocFloors(t *testing.T) {
 		t.Errorf("key.From allocates %v/op; must be 0", reads)
 	}
 }
+
+// TestFlowScopeWithLimiter: a limiter-bound dispatch from inside a top-level
+// WithFlow scope — the wave-less scope meta must be transparent to the permit
+// cache-ancestry walk (regression: ensureCache/ensureCacheChain panicked on a
+// nil wave; found by the sim's flow oracle on its first run).
+func TestFlowScopeWithLimiter(t *testing.T) {
+	chk := require.New(t)
+	key := streampool.NewFlowKey[int]()
+	sem := streampool.NewSemaphore(2)
+
+	var wave streampool.Wave
+	var saw atomic.Value
+	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		v, ok := key.From(ctx)
+		saw.Store([2]any{v, ok})
+		return nil
+	}, streampool.WithLimits(sem))
+
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		if err := task.In(&wave).Start(ctx); err != nil {
+			return err
+		}
+		return wave.CloseAndSkimAll(ctx)
+	}, key.Value(3))
+	chk.NoError(err)
+	chk.Equal([2]any{3, true}, saw.Load())
+}

@@ -415,9 +415,14 @@ see open queue item 5).
     ambiguity). Semantics: flush riders = enclosing-chain riders (ordinary
     inheritance) + item-tag union; item VALUES still sever. Current impl anchors
     the flush borrow at the scheduler ctx (rider-free) / triggering item — WRONG
-    anchor. OPEN: where to capture the enclosing chain — wave ensureInit ctx? the
-    drive ctx? (funnel-instance allocation ctx is an ITEM chain — likely wrong);
-    think through wave reuse + multiple drivers. Sim oracle: ancestor expects in
+    anchor. ANCHOR SETTLED (PN): NO capture — walk the meta parent chain up to the
+    first meta ABOVE the funnel's wave; its flat snapshot IS the enclosing chain
+    (merged-at-construction makes it one pointer read; sever-per-item and
+    inherit-enclosing are the same act: take the boundary meta's riders, not the
+    item's). Residual: the executor-driven flush borrows from the scheduler ctx,
+    which doesn't reach the chain — needs an enclosing-reaching source (wave
+    first-use meta natural; square with "Wave owns no ctx": retain the riders
+    pointer, never cancellation); think through wave reuse + multiple drivers. Sim oracle: ancestor expects in
     flush bodies flip from severed to PRESENT for values once this lands (adjust
     assertFlowInFlush).
   - **THEN CP-F5b** — sim model extension: flow scopes/followups in

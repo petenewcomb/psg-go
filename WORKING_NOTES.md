@@ -419,10 +419,15 @@ see open queue item 5).
     first meta ABOVE the funnel's wave; its flat snapshot IS the enclosing chain
     (merged-at-construction makes it one pointer read; sever-per-item and
     inherit-enclosing are the same act: take the boundary meta's riders, not the
-    item's). Residual: the executor-driven flush borrows from the scheduler ctx,
-    which doesn't reach the chain — needs an enclosing-reaching source (wave
-    first-use meta natural; square with "Wave owns no ctx": retain the riders
-    pointer, never cancellation); think through wave reuse + multiple drivers. Sim oracle: ancestor expects in
+    item's). CAVEAT (from CP-F1's own design): body metas have parent=nil — the meta
+    chain is SYNCHRONOUS-ONLY (permit severing, load-bearing). FIX: resolve the
+    boundary AT DISPATCH (submit ctx's chain is intact there): walk above the
+    target wave, stamp the enclosing snapshot as ONE extra riders-only pointer on
+    the body meta (currentHeldPermit walks meta.parent, a different field —
+    permits untouched). Flush reaches the enclosing chain in one hop from any
+    item; the executor-path borrowSrcCtx problem dissolves (boundary snapshot is
+    invariant across a funnel's items by construction — take it from any).
+    Think through wave reuse + multiple drivers. Sim oracle: ancestor expects in
     flush bodies flip from severed to PRESENT for values once this lands (adjust
     assertFlowInFlush).
   - **THEN CP-F5b** — sim model extension: flow scopes/followups in

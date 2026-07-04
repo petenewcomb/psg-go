@@ -303,13 +303,17 @@ see open queue item 5).
     value-registering scope ≤ 6 (meta + snapshot + entries + ctxpool child
     bookkeeping — per REGISTERING SCOPE, never per dispatch), key.From = 0;
     BenchmarkLauncherSkim floor unchanged at 1 alloc/op.
-    **INSTANCE POOLING/GEN-STAMPING DROPPED (decision, this CP; reconcile
-    flow-design.md "pooled, generation-stamped" at the next docs pass):**
-    registration is cold by design — the whole registering-scope allocation class is
-    deliberately GC-owned (scope meta, rider snapshot, instances), never per
-    dispatch; pooling would buy ~1 alloc per registration at the price of the full
-    captured-gen ABA machinery (stale-rider-snapshot reuse hazards). Machinery
-    without a hot path = the band-aid shape inverted.
+    **INSTANCE POOLING: CP-F4 dropped it claiming captured-gen ABA machinery was
+    needed — WRONG (PN challenge, 2026-07-04; REVERSED).** ref==0 at terminal
+    resolution (firingPass true-end branch) IS the no-readers guarantee: the scope
+    exited, all items under any containing snapshot completed, fn ctx released; a
+    ref-from-zero needs a ctx carrying the instance and all are dead by the same
+    escape contract as body ctxs (violation = the EXISTING body-meta hazard class,
+    not new). Pooling is sound with NO gen: recycle at the true-end branch (sole
+    terminal point, serialized by the active flag), omnipool zero-on-Put. Land in
+    a later CP; registration stays cold either way. Reconcile flow-design.md
+    "pooled, generation-stamped" → "pooled, no generation needed" at the docs
+    pass.
     Gate: vet, lint 0, full -short suite, new tests (suppress key+tag incl.
     no-refs-taken liveness, NewFlow fresh root w/ trailing-position
     order-independence, alloc floors) + all flow tests -race ×2; sim -race batch

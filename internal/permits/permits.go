@@ -157,24 +157,35 @@ type Pool struct {
 	// postpone listener from swallowing a wake a real waiter needed.
 	notifier rdvq.Notifier
 
-	// The demand-side head-of-line barrier (weighted-acquisition.md Decision 2): fifo
-	// holds the registered w ≥ 2 demands in arrival order — sticky head, FIFO
-	// succession, no weight-based ordering — under fifoMu (cold by construction: only
-	// w ≥ 2 misses register). barrier mirrors fifo[0], nil iff the FIFO is empty;
-	// stored under fifoMu, loaded lock-free as the one-load armed check on every
-	// acquire, the exemption anchor (proceed while armed iff the acquiring chain
-	// passes through the head's body cache), and the wake router (armed capacity
-	// events go to the head's own mailbox — the single consumer that can act).
-	// Publish ordering makes the lock-free reads safe: the head's cache and mailbox
-	// are written before the barrier Store that publishes it. Transient read races
-	// are benign: a stale nil during arming leaks one ordinary acquire (not the
-	// systematic step-1 recirculation bypass the barrier exists to close); a stale
-	// head in wake() drops the wake into an empty mailbox, which is compensated —
-	// the release decremented counts BEFORE the stale load, the successor is
-	// promoted AFTER that, and its park-time confirm re-reads counts fresh, so the
-	// freed capacity is seen without the wake.
-	// PN: I get that this is unnecessary for w = 1 in the general case, but
-	// shouldn't w = 1 still be queued if barrier is non-nil?
+	// The demand-side head-of-line barrier (weighted-acquisition.md Decision 2).
+	// While ARMED (barrier non-nil), EVERY acquire is gated — weight-1 included,
+	// and including the step-1/2 up-walk, else weight-1 recirculation would
+	// starve the head invisibly — unless the acquirer is exempt (its chain passes
+	// through the head's body cache, or it is the episode owner resuming into its
+	// own home). The weights differ only in HOW they wait, never in whether they
+	// are gated: a gated w ≥ 2 acquire REGISTERS, joining fifo in arrival order
+	// (sticky head, FIFO succession, no weight-based ordering; cold by
+	// construction) and parking on its own mailbox for its promotion; a gated
+	// weight-1 acquire never registers (Decision 3 — no FIFO entry, body cache,
+	// or mailbox on the hot class) and instead misses and parks on the general
+	// set, re-admitted when the FIFO empties (the disarm's chained seed walks the
+	// satisfiable waiters). The accepted asymmetry: weight-1 has no arrival-order
+	// claim relative to the queued w ≥ 2 demands — it progresses in the gaps
+	// between epochs, not through them.
+	//
+	// barrier mirrors fifo[0], nil iff the FIFO is empty; stored under fifoMu,
+	// loaded lock-free as the one-load armed check on every acquire, the
+	// exemption anchor, and the wake router (armed capacity events go to the
+	// head's own mailbox — the single consumer that can act — or to a standing
+	// episode's claimants when the sentinel holds the slot). Publish ordering
+	// makes the lock-free reads safe: the head's cache and mailbox are written
+	// before the barrier Store that publishes it. Transient read races are
+	// benign: a stale nil during arming leaks one ordinary acquire (not the
+	// systematic step-1 recirculation bypass the barrier exists to close); a
+	// stale head in wake() drops the wake into an empty mailbox, which is
+	// compensated — the release decremented counts BEFORE the stale load, the
+	// successor is promoted AFTER that, and its park-time confirm re-reads counts
+	// fresh, so the freed capacity is seen without the wake.
 	fifoMu  sync.Mutex
 	fifo    []*Demand
 	barrier atomic.Pointer[Demand]
@@ -306,7 +317,12 @@ func (p *Pool) Waiters() *rdvq.Waiters {
 // Resource returns the Pool's backing Resource — the accounting object permits are drawn
 // from. Callers that constructed the Resource use it to reach Resource-specific controls
 // (e.g. a semaphore's dynamic capacity), type-asserting back to the concrete type.
-// PN: the need for such type-assertion is a smell we should dig into.
+//
+// The round-trip-and-assert is a known smell (PN review, 2026-07-04): the sole caller
+// (SetMaxConcurrency) had the concrete pointer at construction. The fix is a typed
+// handle kept by the constructor — naturally a distinct Semaphore surface carrying the
+// method — folded into weighted-acquisition step 4's surface work, which retires this
+// accessor.
 func (p *Pool) Resource() Resource {
 	return p.resource
 }

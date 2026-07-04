@@ -372,7 +372,24 @@ see open queue item 5).
     verdict recorded with signature check against the OPEN item above).
     CP-F5b (steps-only scopes + carrier-counter async-fire oracle) deferred — own
     checkpoint.
-  - **NEXT: CP-F5b** — sim model extension: flow scopes/followups in
+  - **NEXT: CP-F6 — FollowUp ERROR PROPAGATION (PN, 2026-07-04; REVERSES the CP-F2
+    no-error signature decision — my "no wave exists" rationale was FALSE).**
+    `FollowUp(fn func(context.Context) error)`. Propagation: INLINE (scope-exit)
+    firing's error joins WithFlow's return via errors.Join, body error FIRST
+    (first-error-primary; multiple followups join in REGISTRATION order — they fire
+    in created order at exit); innermost-scope-first is COMPOSITIONAL (inner
+    WithFlow's join is the outer body's error — no mechanism). ASYNC (post-return)
+    firing's error routes to the TRIGGERING work item's wave via the errSink →
+    surfaces through its drain like a body error; errSink submission keeps the wave
+    alive like any skim work (PN). Arm-time wave ref is sound: item unref precedes
+    its wave-ref drop — EXCEPT the flush-adopted-union release, which currently runs
+    AFTER the barrier drop (LIFO defers in flush()); FIX: register the
+    releaseBodyContext defer AFTER the barrier defer so it runs BEFORE it (safe: the
+    flush body has returned; dispatches captured riders at admission). Tests:
+    inline-error-joins-return (body+followup, multi-followup order), async-error via
+    drain, extension-firing error routing, flush-triggered firing under live
+    barrier. Reconcile flow-design.md (fn signature + this model) at the docs pass.
+  - **THEN CP-F5b** — sim model extension: flow scopes/followups in
     internal/sim scenarios + conservation oracle (every registered follow-up fires
     ≥1 and reaches true end after its subtree quiesces; no fire while carriers
     outstanding). Own model-design pass. Then the psgwf/otpsg disposition pass

@@ -585,15 +585,23 @@ see open queue item 5).
   stops bodies only if the request ctx is in the execution ancestry (user's explicit
   choice + cost).
 - **Open queue**: (3) verify opt alloc discipline (variadic +
-  boxed payloads stay on stack); (4) naming REMAINDER — shaping-identity constructors
-  only (NewFlowKey[V] / follow-up type mint, possibly unified); the option/function names
-  are SETTLED (see surface bullet); (5) docs pass DONE (2026-07-03): new
+  boxed payloads stay on stack); (4) naming SETTLED IN FULL (PN, 2026-07-04): NewFlowKey[V]/NewFlowTag stay a
+  pair — no further unification; all option/function/read names settled (see surface
+  bullet); (5) docs pass DONE (2026-07-03): new
   `docs/decisions/flow-design.md` (definitive record incl. the full rejection trail; its
   "Open details" section carries the follow-up-fn-receives-value sugar decision as OPEN,
   plus items (3)/(4) here); reconciled API_DESIGN.md (banner bullet + superseded notes on
   the Flow model item / API block / example), programming-model.md (Wave is THE
   user-facing type; flow facility framed designed-not-implemented), surface-lineage.md
   (new facet 9: Flow handle → flow facility), TODO.md:79 (RESOLVED — no adapter needed).
+
+**►► OPEN FOR A FUTURE SESSION (PN, 2026-07-04): the RARE PRE-EXISTING SIM HANG.**
+Missed-wake wedge, ~1/2600 ambient -race checks, reproduced on pre-flow base 300576b
+(NOT flow); full dossier + dumps + VALIDATED repro recipe (~1/300 checks: -race,
+default SelfTimes, Subjob.Add probs 0.3-0.5) in the flow block's "OPEN: RARE SIM
+HANG" item below. Leading suspect: the W2b-i/ii wake-chain rewiring. Nobody is
+actively on it; whoever picks it up starts from the recipe + the
+sim-trace-debugging skill.
 
 **►► CHALLENGE FOR THE PERMITS THREAD (from the flow session, 2026-07-04): does
 Demand really need its gen-stamp?** Principle established while reversing the flow

@@ -564,3 +564,106 @@ func TestFlowTagFunnelUnion(t *testing.T) {
 	chk.True(flushSawA.Load(), "union must carry scope A's tag")
 	chk.True(flushSawB.Load(), "union must carry scope B's tag")
 }
+
+// ─── CP-F4: suppression, fresh roots, allocation guards ─────────────────────
+
+// TestFlowSuppress: a suppressed key reads absent inside the scope (and in
+// work dispatched there) while the outer scope is unaffected; a suppressed
+// tag's follow-up reaches its nominal end without waiting for work in the
+// suppressed subtree.
+func TestFlowSuppress(t *testing.T) {
+	chk := require.New(t)
+	key := streampool.NewFlowKey[string]()
+	tag := streampool.NewFlowTag()
+
+	release := make(chan struct{})
+	fired := make(chan struct{})
+	var suppressedBodySaw atomic.Value
+
+	blocked := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		_, keyOK := key.From(ctx)
+		suppressedBodySaw.Store([2]bool{keyOK, tag.InFlow(ctx)})
+		<-release
+		return nil
+	})
+
+	var wave streampool.Wave
+	err := streampool.WithFlow(context.Background(), func(outerCtx context.Context) error {
+		return streampool.WithFlow(outerCtx, func(inCtx context.Context) error {
+			_, ok := key.From(inCtx)
+			chk.False(ok, "suppressed key reads absent in the scope")
+			chk.False(tag.InFlow(inCtx), "suppressed tag reads absent in the scope")
+			// Long-running work under the suppressed scope takes no refs.
+			return blocked.In(&wave).Start(inCtx)
+		}, key.Suppress(), tag.Suppress())
+	}, key.Value("outer"), tag.FollowUp(func(context.Context) { close(fired) }))
+	chk.NoError(err)
+
+	// The tag's only carriers were the scope and unsuppressed items (none):
+	// it must fire even though the suppressed-subtree body still runs (or has
+	// not even started — its refs were never taken, which is the point).
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("suppressed subtree delayed the follow-up's nominal end")
+	}
+	close(release)
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+	chk.Equal([2]bool{false, false}, suppressedBodySaw.Load(),
+		"suppressed identities read absent in the subtree body")
+}
+
+// TestFlowNewFlowRoot: NewFlow() clears the whole inherited set; sibling
+// options add to the fresh root, in any order.
+func TestFlowNewFlowRoot(t *testing.T) {
+	chk := require.New(t)
+	inherited := streampool.NewFlowKey[string]()
+	freshKey := streampool.NewFlowKey[int]()
+
+	err := streampool.WithFlow(context.Background(), func(outerCtx context.Context) error {
+		return streampool.WithFlow(outerCtx, func(inCtx context.Context) error {
+			_, ok := inherited.From(inCtx)
+			chk.False(ok, "fresh root inherits nothing")
+			v, ok := freshKey.From(inCtx)
+			chk.True(ok)
+			chk.Equal(9, v)
+			return nil
+		}, freshKey.Value(9), streampool.NewFlow()) // NewFlow listed last: order-independent
+	}, inherited.Value("outer"))
+	chk.NoError(err)
+}
+
+// TestFlowAllocFloors guards the flow cost model: the degenerate WithFlow is
+// free; a value-registering scope pays a small constant (scope meta + rider
+// snapshot + ctxpool child on first use — never per dispatch); reads are
+// free. Floors use the allocsPerOp minimum like the other alloc guards.
+func TestFlowAllocFloors(t *testing.T) {
+	key := streampool.NewFlowKey[int]()
+	body := func(context.Context) error { return nil }
+	ctx := context.Background()
+
+	degenerate := allocsPerOp(t, 100, 1000, func() {
+		_ = streampool.WithFlow(ctx, body)
+	})
+	if degenerate != 0 {
+		t.Errorf("zero-opt WithFlow allocates %v/op; must be 0", degenerate)
+	}
+
+	opt := key.Value(7) // reused option value: measures the scope, not boxing
+	scope := allocsPerOp(t, 100, 1000, func() {
+		_ = streampool.WithFlow(ctx, body, opt)
+	})
+	const scopeCeiling = 6 // meta + riders + entries + ctxpool child bookkeeping
+	if scope > scopeCeiling {
+		t.Errorf("value-registering WithFlow allocates %v/op; ceiling %d", scope, scopeCeiling)
+	}
+
+	var inScope context.Context
+	_ = streampool.WithFlow(ctx, func(c context.Context) error { inScope = c; return nil }, key.Value(7))
+	reads := allocsPerOp(t, 100, 1000, func() {
+		_, _ = key.From(inScope)
+	})
+	if reads != 0 {
+		t.Errorf("key.From allocates %v/op; must be 0", reads)
+	}
+}

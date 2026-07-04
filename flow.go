@@ -93,6 +93,8 @@ type flowOptionKind int8
 const (
 	flowOptValue flowOptionKind = iota + 1
 	flowOptFollowUp
+	flowOptSuppress
+	flowOptNewFlow
 )
 
 // FlowOption configures a [WithFlow] scope. Obtain options from the methods
@@ -199,35 +201,35 @@ func (t FlowTag) FollowUp(fn func(context.Context)) FlowOption {
 	return FlowOption{kind: flowOptFollowUp, id: t.id, fn: fn}
 }
 
-// Suppress returns a [FlowOption] that stops k's inherited bundle at the
-// scope boundary: work dispatched inside the scope reads the key as absent.
-// Not yet implemented; currently panics. (Suppression lands in a later
-// checkpoint; see docs/decisions/flow-design.md.)
+// Suppress returns a [FlowOption] that stops k's INHERITED bundle at the
+// scope boundary: inside the scope the key reads absent, and work dispatched
+// there takes no refs on the bundle's follow-ups — so a suppressed subtree
+// cannot delay their nominal end. Suppression applies to the inherited set
+// only; a Value or FollowUp for the same key in the same call registers
+// fresh, regardless of option order.
 func (k FlowKey[V]) Suppress() FlowOption {
 	if k.id == nil {
 		panic("streampool: Suppress called on a zero FlowKey; mint with NewFlowKey")
 	}
-	panic("streampool: flow suppression is not yet implemented")
+	return FlowOption{kind: flowOptSuppress, id: k.id}
 }
 
-// Suppress returns a [FlowOption] that stops t's inherited presence (and
-// follow-up refs) at the scope boundary. Not yet implemented; currently
-// panics. (Suppression lands in a later checkpoint; see
-// docs/decisions/flow-design.md.)
+// Suppress returns a [FlowOption] that stops t's inherited presence and
+// follow-up refs at the scope boundary. Semantics as in [FlowKey.Suppress].
 func (t FlowTag) Suppress() FlowOption {
 	if t.id == nil {
 		panic("streampool: Suppress called on a zero FlowTag; mint with NewFlowTag")
 	}
-	panic("streampool: flow suppression is not yet implemented")
+	return FlowOption{kind: flowOptSuppress, id: t.id}
 }
 
 // NewFlow returns a [FlowOption] that roots a fresh flow: the scope starts
-// from an empty rider set instead of inheriting the ambient one. Sibling
-// options add to the fresh set, in any order. Not yet implemented; currently
-// panics. (Lands with suppression in a later checkpoint; see
-// docs/decisions/flow-design.md.)
+// from an EMPTY rider set instead of inheriting the ambient one — the
+// explicit form of what a funnel fan-in does implicitly for path-scoped
+// riders. Sibling options add to the fresh set, in any order; per-identity
+// [FlowKey.Suppress]/[FlowTag.Suppress] are its targeted counterparts.
 func NewFlow() FlowOption {
-	panic("streampool: NewFlow is not yet implemented")
+	return FlowOption{kind: flowOptNewFlow}
 }
 
 // WithFlow runs body inline on the calling goroutine with a context whose
@@ -327,8 +329,21 @@ type flowRiderEntry struct {
 // holds one scope ref on each, released at scope exit; inherited instances
 // take no scope ref (the enclosing carrier's ref covers this scope's extent).
 func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*flowInstance) {
+	// Pass 0: validation, and the fresh-root / suppression shape of the base.
+	// Applying suppressions against the inherited set BEFORE any adds is what
+	// makes same-call Suppress+Value/FollowUp order-independent.
+	fresh := false
+	for i := range opts {
+		switch opts[i].kind {
+		case flowOptValue, flowOptFollowUp, flowOptSuppress:
+		case flowOptNewFlow:
+			fresh = true
+		default:
+			panic("streampool: invalid (zero) FlowOption passed to WithFlow")
+		}
+	}
 	var base []flowRiderEntry
-	if ambient != nil {
+	if ambient != nil && !fresh {
 		base = ambient.entries
 	}
 	entries := make([]flowRiderEntry, len(base), len(base)+len(opts))
@@ -343,20 +358,25 @@ func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*fl
 		return -1
 	}
 
-	// Pass 1: values (and option validation).
+	for i := range opts {
+		if opts[i].kind != flowOptSuppress {
+			continue
+		}
+		if j := entryIdx(opts[i].id); j >= 0 {
+			entries = append(entries[:j], entries[j+1:]...)
+		}
+	}
+
+	// Pass 1: values.
 	for i := range opts {
 		o := &opts[i]
-		switch o.kind {
-		case flowOptValue:
-			if j := entryIdx(o.id); j >= 0 {
-				entries[j].val = o.val
-			} else {
-				entries = append(entries, flowRiderEntry{id: o.id, val: o.val})
-			}
-		case flowOptFollowUp:
-			// pass 2
-		default:
-			panic("streampool: invalid (zero) FlowOption passed to WithFlow")
+		if o.kind != flowOptValue {
+			continue
+		}
+		if j := entryIdx(o.id); j >= 0 {
+			entries[j].val = o.val
+		} else {
+			entries = append(entries, flowRiderEntry{id: o.id, val: o.val})
 		}
 	}
 

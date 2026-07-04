@@ -291,10 +291,67 @@ see open queue item 5).
       paths incl. not-before-flush + downstream-keeps-alive + value-still-severed;
       two-scope union) -race ×2 + all flow tests, alloc floor 1/op, 40×
       TestBySimulation -race.
-  - **NEXT: CP-F4** — Suppress()/NewFlow() options + instance pooling/gen-stamping +
-    opt-alloc verification (variadic + boxed payloads stack-stay) + sim model
-    extension (flow-rider conservation oracle). Then the psgwf/otpsg disposition
-    pass (below).
+  - **CP-F4 LANDED (2026-07-04, this commit): shaping complete — Suppress()/NewFlow()
+    live + alloc guards.** buildFlowRiders is now phased for order-independence:
+    pass 0 validates + detects NewFlow (fresh root = skip inheriting the base) +
+    applies suppressions against the INHERITED set only; pass 1 values; pass 2
+    follow-up instances. Same-call Suppress+Value/FollowUp on one id = suppress
+    inherited, register fresh — documented in godoc. A suppressed subtree takes NO
+    refs on the suppressed bundle's follow-ups (cannot delay their nominal end —
+    tested with a still-running suppressed body). TestFlowAllocFloors guards the
+    cost model in the suite (allocsPerOp floors): degenerate WithFlow = 0,
+    value-registering scope ≤ 6 (meta + snapshot + entries + ctxpool child
+    bookkeeping — per REGISTERING SCOPE, never per dispatch), key.From = 0;
+    BenchmarkLauncherSkim floor unchanged at 1 alloc/op.
+    **INSTANCE POOLING/GEN-STAMPING DROPPED (decision, this CP; reconcile
+    flow-design.md "pooled, generation-stamped" at the next docs pass):**
+    registration is cold by design — the whole registering-scope allocation class is
+    deliberately GC-owned (scope meta, rider snapshot, instances), never per
+    dispatch; pooling would buy ~1 alloc per registration at the price of the full
+    captured-gen ABA machinery (stale-rider-snapshot reuse hazards). Machinery
+    without a hot path = the band-aid shape inverted.
+    Gate: vet, lint 0, full -short suite, new tests (suppress key+tag incl.
+    no-refs-taken liveness, NewFlow fresh root w/ trailing-position
+    order-independence, alloc floors) + all flow tests -race ×2; sim -race batch
+    26/40 clean then ONE HANG at iteration 27 — see the OPEN hang item below.
+  - **►► OPEN: RARE SIM HANG (1× observed, 2026-07-04, CP-F4 batch iter 27; dump
+    preserved at scratchpad sim4_race_27.log — do NOT delete until fixed).**
+    Signature: 10m -race timeout; 6 goroutines; NO mutex/semacquire waiters; 4 skim
+    drivers parked 9m in Wave.skimSelect via addWorkWhileMaybeBlocking/rdvq
+    (top-level Run + two subjobs + a funnel-flush-driven subjob:
+    funnelInstance.Run→flush→sim runSubjob→CloseAndSkimAll→WaitForNew); all executor
+    workers idle-exited ⇒ missed-wake / stuck-reference class (some wave never
+    Done-signaled its skimmer).
+    - **ATTRIBUTION RESOLVED: PRE-EXISTING, NOT FLOW (2026-07-04).** The A/B landed:
+      the pre-flow base 300576b — ZERO flow code — hung 1/30 under the
+      subjob/flush-heavy bias with the IDENTICAL signature (6 goroutines, 4 parked
+      selects in skimSelect/WaitForNew, no lock waiters; dump preserved at
+      scratchpad bias3_base_hang_1.log). Corroborating: flow seams audited
+      line-by-line as nil-rider no-ops on sim paths (sim never calls WithFlow); 146
+      clean 10m -race iterations across the CP-F1..F3 batches with flow code
+      present.
+    - **VALIDATED REPRO RECIPE (~9× the ambient rate — use this to hunt it):**
+      -race, -rapid.checks=10, default SelfTimes (zero-delay KILLS the repro — it
+      needs real delays/parked-worker windows), planConfig Subjob.Add probabilities
+      raised: Launcher.Body 0.5, Funnel.Accumulate 0.3, Funnel.Flush 0.5,
+      Skimmer.Handle 0.3 → ≈1/300 checks (vs ~1/2600 ambient: 1 hit in ~26
+      100-check 10m iterations). Other configs tried and DEAD: zero-SelfTime
+      no-race ×300 checks and zero-SelfTime -race ×2500 checks, 0 hits both trees.
+    - **Leading hypothesis (unproven):** latent wake-loss in the W2b-i/ii
+      rdvq/workq wake-chain rewiring (1f27117 chained-bit consumer discipline /
+      cd09e5a per-demand mailboxes) — the only recent commits touching the
+      implicated machinery; failure class (missed wake) matches change class (wake
+      conservation). Surfaced now simply by exposure (~150 additional 10m -race
+      iterations against this base across the flow batches).
+    - **Next step (decision for PN):** this belongs to the permits/wake-chain
+      thread, not flow-impl — hand this dossier + recipe over (or trace here:
+      capture the biased repro with PSGTRACEINTERNALS + -trace per the
+      sim-trace-debugging skill; the recipe makes the trace small enough to read).
+  - **NEXT: CP-F5** — sim model extension: flow scopes/followups in
+    internal/sim scenarios + conservation oracle (every registered follow-up fires
+    ≥1 and reaches true end after its subtree quiesces; no fire while carriers
+    outstanding). Own model-design pass. Then the psgwf/otpsg disposition pass
+    (below).
   - **AFTER CP-F4 (PN, 2026-07-03): psgwf/otpsg DISPOSITION PASS.** psgwf's own doc.go
     is the flow facility's job description ("workflow context propagation…
     cancellation domains and context values that flow through PSG task chains") on the

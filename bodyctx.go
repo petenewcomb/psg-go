@@ -61,8 +61,13 @@ func borrowBodyContext(
 		// Flow riders ride the DISPATCH chain: captured from the submit-time ctx
 		// here at borrow (which body-creating call sites perform synchronously at
 		// dispatch), unlike parent — the permit chain — which stays severed for a
-		// body that runs on a fungible worker.
+		// body that runs on a fungible worker. The borrow takes one carrier ref
+		// per follow-up instance in the set — synchronously at dispatch, under
+		// the registering scope's own ref (parent-covers-children), so an
+		// instance live at the submit call provably cannot reach zero first.
+		// releaseBodyContext releases them.
 		m.riders = srcMeta.riders
+		flowRefRiders(m.riders)
 	}
 	return ctxpool.WithValue(srcCtx, m), m
 }
@@ -70,11 +75,16 @@ func borrowBodyContext(
 // releaseBodyContext returns a borrowed body context's child ctx to ctxpool and its
 // *ctxMeta to bodyMetaPool. The meta is read out before ctxpool.Free clears the child's
 // value, then returned (and zeroed) — so neither pool retains a cross-borrow reference.
+// It also releases the flow carrier refs the borrow took; a release that ends an
+// instance's flow hands the firing pass to the executor (never inline — this path runs
+// inside completion/Free machinery, before the item's wave reference drops).
 func releaseBodyContext(ctx context.Context) {
 	m, _ := ctxpool.GetValue[*ctxMeta](ctx)
 	ctxpool.Free(ctx)
 	if m != nil {
+		riders := m.riders
 		bodyMetaPool.Put(m)
+		flowUnrefRiders(riders)
 	}
 }
 

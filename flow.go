@@ -92,6 +92,7 @@ type flowOptionKind int8
 
 const (
 	flowOptValue flowOptionKind = iota + 1
+	flowOptFollowUp
 )
 
 // FlowOption configures a [WithFlow] scope. Obtain options from the methods
@@ -101,6 +102,7 @@ type FlowOption struct {
 	kind flowOptionKind
 	id   *flowIdentity
 	val  any
+	fn   func(context.Context)
 }
 
 // Value returns a [FlowOption] that attaches v under k for the extent of a
@@ -156,33 +158,45 @@ func (t FlowTag) InFlow(ctx context.Context) bool {
 	return false
 }
 
-// FollowUp returns a [FlowOption] that registers fn to run at the key's
-// nominal end — when all work carrying k's bundle has completed. Not yet
-// implemented; the registration currently panics. (Flow follow-ups land in a
-// later checkpoint; see docs/decisions/flow-design.md.)
-func (k FlowKey[V]) FollowUp(fn func(context.Context) error) FlowOption {
+// FollowUp returns a [FlowOption] that registers fn to run at the
+// registration's nominal end — when the registering scope has exited and all
+// work carrying k's bundle has completed. fn runs with a fresh framework ctx
+// (rooted at context.Background, not the ended work's cancellation) that
+// carries the bundle ambiently: work fn dispatches extends the flow, and a
+// later nominal end runs fn again; a firing that extends nothing is the true
+// end. fn returns nothing by design — a follow-up has no wave to surface an
+// error through, so error handling belongs inside fn (typically by
+// dispatching into a wave fn drains). See docs/decisions/flow-design.md.
+//
+// NOTE (current checkpoint): the key's bundle severs at a funnel fan-in, so a
+// path-scoped follow-up's refs release as each accumulate item completes —
+// which is its defined semantics ("all work CARRYING the value").
+func (k FlowKey[V]) FollowUp(fn func(context.Context)) FlowOption {
 	if k.id == nil {
 		panic("streampool: FollowUp called on a zero FlowKey; mint with NewFlowKey")
 	}
 	if fn == nil {
 		panic("streampool: FollowUp called with a nil function")
 	}
-	panic("streampool: flow follow-ups are not yet implemented")
+	return FlowOption{kind: flowOptFollowUp, id: k.id, fn: fn}
 }
 
-// FollowUp returns a [FlowOption] that registers fn to run at the tag's
-// nominal end — when all work in the tagged flow, including work downstream
-// of fan-ins, has completed. Not yet implemented; the registration currently
-// panics. (Flow follow-ups land in a later checkpoint; see
-// docs/decisions/flow-design.md.)
-func (t FlowTag) FollowUp(fn func(context.Context) error) FlowOption {
+// FollowUp returns a [FlowOption] that registers fn to run at the
+// registration's nominal end — when the registering scope has exited and all
+// work in the tagged flow has completed. Semantics as in [FlowKey.FollowUp].
+//
+// NOTE (current checkpoint): the DAG-scoped union across funnel fan-ins lands
+// in a later checkpoint — until then a tag's refs release as each accumulate
+// item completes, so a nominal end can precede the flush of an aggregate that
+// folded tagged items.
+func (t FlowTag) FollowUp(fn func(context.Context)) FlowOption {
 	if t.id == nil {
 		panic("streampool: FollowUp called on a zero FlowTag; mint with NewFlowTag")
 	}
 	if fn == nil {
 		panic("streampool: FollowUp called with a nil function")
 	}
-	panic("streampool: flow follow-ups are not yet implemented")
+	return FlowOption{kind: flowOptFollowUp, id: t.id, fn: fn}
 }
 
 // Suppress returns a [FlowOption] that stops k's inherited bundle at the
@@ -248,6 +262,20 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	if src != nil {
 		ambient = src.riders
 	}
+	riders, created := buildFlowRiders(ambient, opts)
+	if len(created) > 0 {
+		// Release the scope's ref on each instance this scope registered —
+		// deferred so a panicking body stays conservation-sound. The release
+		// that reaches zero fires the follow-up INLINE here at scope exit
+		// (semantically the user's own call site; also what makes "an empty
+		// scope fires at return" hold deterministically). Inherited instances
+		// hold no scope ref: the enclosing carrier's ref covers this extent.
+		defer func() {
+			for _, in := range created {
+				in.unref(true)
+			}
+		}()
+	}
 
 	// The scope meta clones the ambient meta (when there is one) so it is
 	// transparent to everything but the rider set: wave resolution, the
@@ -258,11 +286,10 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	// op.In), ctxType top-level, exEnv nil (minted by the dispatch path).
 	//
 	// The meta and its ctxpool child are deliberately NOT pooled or freed at
-	// return: the scope has no completion event until follow-up refcounts
-	// (a later checkpoint) provide one, and a retained scope ctx read after
-	// a free would resolve a recycled meta. GC owns both; the cost is one
-	// small allocation per registering scope, never per dispatch.
-	m := &ctxMeta{riders: buildFlowRiders(ambient, opts)}
+	// return: a retained scope ctx read after a free would resolve a recycled
+	// meta, and no event marks the last such read. GC owns both; the cost is
+	// one small allocation per registering scope, never per dispatch.
+	m := &ctxMeta{riders: riders}
 	if src != nil {
 		m.wave = src.wave
 		m.parent = src
@@ -281,41 +308,84 @@ type flowRiders struct {
 	entries []flowRiderEntry
 }
 
+// flowRiderEntry is one identity's bundle: its value (path keys; nil for
+// tags) and the follow-up instances registered under it. The insts slice is
+// as immutable as the entry — appending in a nested scope copy-appends, never
+// mutating a backing array shared with the ambient snapshot.
 type flowRiderEntry struct {
-	id  *flowIdentity
-	val any
+	id    *flowIdentity
+	val   any
+	insts []*flowInstance
 }
 
 // buildFlowRiders derives a fresh immutable snapshot: the ambient entries,
 // with each option applied replace-or-append (a nested scope re-registering a
-// key shadows the outer value — nearest scope wins).
-func buildFlowRiders(ambient *flowRiders, opts []FlowOption) *flowRiders {
+// key shadows the outer value — nearest scope wins). Values apply in a first
+// pass and follow-up instances are created in a second, so a follow-up's fn
+// ctx captures the bundle's final value regardless of option order
+// (order-independence). Returns the instances THIS scope created — the caller
+// holds one scope ref on each, released at scope exit; inherited instances
+// take no scope ref (the enclosing carrier's ref covers this scope's extent).
+func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*flowInstance) {
 	var base []flowRiderEntry
 	if ambient != nil {
 		base = ambient.entries
 	}
 	entries := make([]flowRiderEntry, len(base), len(base)+len(opts))
 	copy(entries, base)
+
+	entryIdx := func(id *flowIdentity) int {
+		for j := range entries {
+			if entries[j].id == id {
+				return j
+			}
+		}
+		return -1
+	}
+
+	// Pass 1: values (and option validation).
 	for i := range opts {
 		o := &opts[i]
 		switch o.kind {
 		case flowOptValue:
-			replaced := false
-			for j := range entries {
-				if entries[j].id == o.id {
-					entries[j].val = o.val
-					replaced = true
-					break
-				}
-			}
-			if !replaced {
+			if j := entryIdx(o.id); j >= 0 {
+				entries[j].val = o.val
+			} else {
 				entries = append(entries, flowRiderEntry{id: o.id, val: o.val})
 			}
+		case flowOptFollowUp:
+			// pass 2
 		default:
 			panic("streampool: invalid (zero) FlowOption passed to WithFlow")
 		}
 	}
-	return &flowRiders{entries: entries}
+
+	// Pass 2: follow-up instances, wired against the settled bundle values.
+	var created []*flowInstance
+	for i := range opts {
+		o := &opts[i]
+		if o.kind != flowOptFollowUp {
+			continue
+		}
+		in := &flowInstance{fn: o.fn}
+		in.count.Store(1) // the registering scope's ref, released at scope exit
+		j := entryIdx(o.id)
+		if j < 0 {
+			entries = append(entries, flowRiderEntry{id: o.id})
+			j = len(entries) - 1
+		}
+		// Copy-append: the copied entry's insts may share its backing array
+		// with the ambient snapshot, which other goroutines read.
+		entries[j].insts = append(append([]*flowInstance(nil), entries[j].insts...), in)
+		in.fnRiders = &flowRiders{entries: []flowRiderEntry{{
+			id:    o.id,
+			val:   entries[j].val,
+			insts: []*flowInstance{in},
+		}}}
+		created = append(created, in)
+	}
+
+	return &flowRiders{entries: entries}, created
 }
 
 // severFlowRiders returns a ctx whose nearest meta clones ctx's but carries

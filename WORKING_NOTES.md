@@ -225,12 +225,62 @@ see open queue item 5).
     full -short suite, flow tests (propagation chain incl. sub-wave + skim, absence,
     degenerate, shadowing, in-body scope, sever ×2 paths, zero-identity panics),
     40× TestBySimulation -race batch (regression — sim has no flow surface yet).
-  - **NEXT: CP-F2** — follow-up instances (pooled gen-stamped state), per-work-item
-    refcounting on the dispatch path (ref at admission under the scope's cover, unref
-    at item completion), nominal-end firing + extension semantics (fn's dispatches
-    inherit the firing instance ambiently via a provisional ref), scope-exit release.
-    Then CP-F3 funnel transfer/union multiset; CP-F4 Suppress/NewFlow + opt-alloc
-    verification + sim model extension (flow-rider conservation oracle).
+  - **CP-F2 LANDED (2026-07-03, this commit): follow-ups end-to-end.** `flowinst.go`:
+    flowInstance {fn, fnRiders, count atomic, active atomic} — one per FollowUp option
+    per scope. Carriers: +1 scope (entry→exit, the lexical cover), +1 per work item
+    (ref in borrowBodyContext at dispatch / unref in releaseBodyContext — SYMMETRIC BY
+    CONSTRUCTION with the existing borrow/release pairing), +1 while fn runs (fire()
+    borrows its ctx through the same ref/unref path ⇒ the design's "provisional ref"
+    falls out of the symmetry for free). Derived metas (ensureCtxMeta) and the flush
+    sever clone inherit WITHOUT refs — synchronous extents covered by their enclosing
+    carrier; their release paths don't unref. Conservation is pairing-structural.
+    - **Firing = {count, active} state machine**: 1→0 arms via CAS(active); the pass
+      fires fn iff count==0, then resolves: count==0 after fn = TRUE END (quiescent
+      forever — no carrier remains to re-ref; extensions that completed within the
+      pass count as observed — kills the inline-drain refire livelock); count>0 =
+      disarm + closed missed-wake window (recheck-and-reCAS after Store(false)).
+      Each real extension's last release arms a fresh pass = "fires at each nominal
+      end".
+    - **Two firing paths**: scope-exit unref fires INLINE (user's own call site;
+      makes "empty scope fires at return" deterministic); work-item completion unrefs
+      fire via scheduler→executor (flowFireWork: bare workq.WorkItem embed — NO wave
+      ref; funnelInstance.Execute handoff pattern verbatim; Free no-op, Run recycles)
+      because release sites run inside Free machinery BEFORE the item's wave ref
+      drops — an inline fn draining that wave would deadlock.
+    - **fn ctx**: rooted at context.Background (a flow's end-reaction must not
+      inherit the ended work's cancellation — nolint:contextcheck by design), meta
+      carries fnRiders = single-entry bundle {id, settled val, [this instance only —
+      NOT siblings]}; fn's dispatches work via the CP-F1 nil-wave ensureCtxMeta
+      branch. **fn SIGNATURE DECISION (flag for PN): func(context.Context), NO error
+      return** — a follow-up has no wave to surface an error through; an error return
+      would be silent-discard dressed as API. Errors belong inside fn (dispatch into a
+      wave fn drains).
+    - buildFlowRiders two-pass (values settle, then instances wire against final
+      bundle values ⇒ option order-independence); copy-append on entry.insts
+      (ambient snapshot sharing); instances GC-owned this CP (pool + gen = CP-F4;
+      firing is cold).
+    - KNOWN CP-F3 GAP (documented in FollowUp godoc): tag refs release at accumulate
+      completion — DAG union across funnels needs the transfer multiset.
+    - Gate: vet, lint 0, full -short suite, follow-up tests (scope-exit inline,
+      empty scope, async completion via executor path, extension-refire-then-true-end,
+      bundle value + order-independence, concurrent stress ×5 -race), all flow tests
+      -race ×2, alloc floor 1/op, 40× TestBySimulation -race batch.
+  - **NEXT: CP-F3** — funnel transfer/union multiset (accumulate item's DAG-scoped
+    refs TRANSFER to funnel instance at completion — never-transit-unreferenced;
+    flush item takes over the set; sever keeps killing path-scoped only). Then CP-F4
+    Suppress/NewFlow + instance pooling/gen + opt-alloc verification + sim model
+    extension (flow-rider conservation oracle).
+  - **AFTER CP-F4 (PN, 2026-07-03): psgwf/otpsg DISPOSITION PASS.** psgwf's own doc.go
+    is the flow facility's job description ("workflow context propagation…
+    cancellation domains and context values that flow through PSG task chains") on the
+    dead vocabulary — HIGH-confidence delete once follow-ups land; audit each exported
+    symbol for a flow-native equivalent, port examples worth keeping as flow docs
+    (kills the Example_clientTimeout real-clock flake with it). otpsg is PARTIALLY
+    subsumed: propagation.go/tracing.go = what flow values do natively; but
+    metrics.go/logging.go/instrumented.go = op instrumentation flows don't replace —
+    decide shrink-to-instrumentation-core vs delete-and-compose. Check
+    internal/benchapp/funnel.go's reference. Isolated module (own go.mod), so removal
+    is clean either way.
 - **Ontology: "flow" = the causal DAG itself** (nodes = work items; edges = submits + the
   funnel accumulate→flush fan-in). Two rider kinds propagate along it, split by ONE property
   — whether a merge operator exists at fan-in:

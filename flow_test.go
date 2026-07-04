@@ -254,3 +254,189 @@ func TestWithFlowNilBodyPanics(t *testing.T) {
 		_ = streampool.WithFlow(context.Background(), nil)
 	})
 }
+
+// ─── CP-F2: follow-ups ───────────────────────────────────────────────────────
+
+// TestFollowUpFiresAtScopeExit: work drained inside the scope means the scope
+// ref is the last carrier — the follow-up fires inline at WithFlow return,
+// after the drain, exactly once.
+func TestFollowUpFiresAtScopeExit(t *testing.T) {
+	chk := require.New(t)
+	checkout := streampool.NewFlowTag()
+
+	var fires atomic.Int32
+	var bodyRan atomic.Bool
+	var firedBeforeReturn bool
+
+	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		bodyRan.Store(true)
+		return nil
+	})
+
+	var wave streampool.Wave
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		if err := task.In(&wave).Start(ctx); err != nil {
+			return err
+		}
+		if err := wave.CloseAndSkimAll(ctx); err != nil {
+			return err
+		}
+		chk.EqualValues(0, fires.Load(), "must not fire while the scope holds its ref")
+		return nil
+	}, checkout.FollowUp(func(context.Context) { fires.Add(1) }))
+	firedBeforeReturn = fires.Load() == 1
+	chk.NoError(err)
+	chk.True(bodyRan.Load())
+	chk.True(firedBeforeReturn, "scope exit is the last release — fires inline at return")
+	chk.EqualValues(1, fires.Load())
+}
+
+// TestFollowUpEmptyScope: a scope that dispatches nothing fires at return.
+func TestFollowUpEmptyScope(t *testing.T) {
+	chk := require.New(t)
+	tag := streampool.NewFlowTag()
+	var fires atomic.Int32
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		chk.True(tag.InFlow(ctx), "registration marks presence")
+		return nil
+	}, tag.FollowUp(func(context.Context) { fires.Add(1) }))
+	chk.NoError(err)
+	chk.EqualValues(1, fires.Load())
+}
+
+// TestFollowUpFiresAfterAsyncCompletion: work still in flight at scope exit
+// keeps the instance alive; the last item's completion fires the follow-up on
+// an executor worker (the scheduler-routed path).
+func TestFollowUpFiresAfterAsyncCompletion(t *testing.T) {
+	chk := require.New(t)
+	tag := streampool.NewFlowTag()
+
+	release := make(chan struct{})
+	fired := make(chan struct{})
+
+	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		<-release
+		return nil
+	})
+
+	var wave streampool.Wave
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return task.In(&wave).Start(ctx)
+	}, tag.FollowUp(func(context.Context) { close(fired) }))
+	chk.NoError(err)
+
+	select {
+	case <-fired:
+		t.Fatal("fired while the dispatched body still held its ref")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("follow-up did not fire after the last carrier completed")
+	}
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+}
+
+// TestFollowUpExtension: a follow-up that dispatches async work extends the
+// flow — a later nominal end fires it again; a firing that extends nothing is
+// the true end (no third fire).
+func TestFollowUpExtension(t *testing.T) {
+	chk := require.New(t)
+	tag := streampool.NewFlowTag()
+
+	var fires atomic.Int32
+	release := make(chan struct{})
+	secondFire := make(chan struct{})
+	var extWave streampool.Wave
+
+	extTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		<-release
+		return nil
+	})
+
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return nil // empty scope: first fire happens at return
+	}, tag.FollowUp(func(ctx context.Context) {
+		switch fires.Add(1) {
+		case 1:
+			// Extend: async work under the firing instance (ambient bundle).
+			chk.True(tag.InFlow(ctx), "fn ctx carries the firing bundle")
+			chk.NoError(extTask.In(&extWave).Start(ctx))
+		case 2:
+			close(secondFire) // extend nothing: true end
+		}
+	}))
+	chk.NoError(err)
+	chk.EqualValues(1, fires.Load(), "first fire is inline at scope exit")
+
+	close(release)
+	select {
+	case <-secondFire:
+	case <-time.After(5 * time.Second):
+		t.Fatal("extension's nominal end did not refire the follow-up")
+	}
+	chk.NoError(extWave.CloseAndSkimAll(context.Background()))
+	time.Sleep(50 * time.Millisecond) // settle: no third fire may arrive
+	chk.EqualValues(2, fires.Load(), "a firing that extends nothing is the true end")
+}
+
+// TestFollowUpBundleValue: a follow-up under a value-bearing key receives the
+// bundle ambiently — the fn ctx reads the key's value — regardless of option
+// order within the call.
+func TestFollowUpBundleValue(t *testing.T) {
+	chk := require.New(t)
+	txn := streampool.NewFlowKey[string]()
+
+	var got atomic.Value
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return nil
+	},
+		// FollowUp deliberately listed BEFORE Value: order-independent.
+		txn.FollowUp(func(ctx context.Context) {
+			v, ok := txn.From(ctx)
+			got.Store([2]any{v, ok})
+		}),
+		txn.Value("tx-7"),
+	)
+	chk.NoError(err)
+	chk.Equal([2]any{"tx-7", true}, got.Load())
+}
+
+// TestFollowUpConcurrentStress: many concurrent scopes, each with a follow-up
+// and a burst of work items, hammering ref/unref and the firing state machine.
+// Every follow-up must fire at least once, and the per-scope firing loop must
+// resolve (run under -race in the suite).
+func TestFollowUpConcurrentStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("stress test; skipped in -short")
+	}
+	chk := require.New(t)
+	const scopes = 32
+	const items = 16
+
+	var fired atomic.Int32
+	errs := make(chan error, scopes)
+	for s := 0; s < scopes; s++ {
+		go func() {
+			tag := streampool.NewFlowTag()
+			var wave streampool.Wave
+			task := streampool.NewTaskLauncher(func(ctx context.Context) error { return nil })
+			errs <- streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+				for i := 0; i < items; i++ {
+					if err := task.In(&wave).Start(ctx); err != nil {
+						return err
+					}
+				}
+				return wave.CloseAndSkimAll(ctx)
+			}, tag.FollowUp(func(context.Context) { fired.Add(1) }))
+		}()
+	}
+	for s := 0; s < scopes; s++ {
+		chk.NoError(<-errs)
+	}
+	chk.Eventually(func() bool { return fired.Load() == scopes },
+		5*time.Second, 5*time.Millisecond)
+}

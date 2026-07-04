@@ -265,11 +265,36 @@ see open queue item 5).
       empty scope, async completion via executor path, extension-refire-then-true-end,
       bundle value + order-independence, concurrent stress ×5 -race), all flow tests
       -race ×2, alloc floor 1/op, 40× TestBySimulation -race batch.
-  - **NEXT: CP-F3** — funnel transfer/union multiset (accumulate item's DAG-scoped
-    refs TRANSFER to funnel instance at completion — never-transit-unreferenced;
-    flush item takes over the set; sever keeps killing path-scoped only). Then CP-F4
-    Suppress/NewFlow + instance pooling/gen + opt-alloc verification + sim model
-    extension (flow-rider conservation oracle).
+  - **CP-F3 LANDED (2026-07-04, this commit): fan-in transfer/union.** Two design
+    simplifications found at implementation (both RECORD for the doc pass —
+    flow-design.md says "multiset ... count per entry"; reality is simpler):
+    (1) **SET, not multiset**: refs are fungible covers, not per-item tokens — the
+    funnel holds ONE ref per DISTINCT instance (first accumulate refs it; later ones
+    see it present). collectFlowTags at accumulate entry (under c.mu, the only
+    accumulate path), ref-before-item-release ⇒ never-transit-unreferenced without
+    any skip-marking. (2) **ADOPTION, not ref-churn**: the flush takeover hands the
+    union — refs included — to the flush body ctx (flowFanInContext replaces
+    severFlowRiders: path riders sever, tag union takes over as the flush meta's
+    rider set); releaseBodyContext at flush end releases exactly one ref per
+    distinct instance = the one collect took. Pure handoff, zero churn. Downstream
+    dispatches from the flush body ref the union insts themselves ⇒ the lifetime
+    survives through arbitrary post-flush chains; InFlow(ctx) true in the flush body
+    (presence ORs through fan-ins, as designed). funnelInstance gains `flowTags
+    []flowRiderEntry` (mu-guarded; nil'd at takeover; flush ALWAYS runs — the
+    per-instance wave barrier — so the refs always release).
+    - NOTED for docs pass: SKIM is not a fan-in edge — results are data pulled by
+      the driver, not a submit edge; per-item riders don't reach skim handlers (the
+      driver's chain applies) and tag refs release at item completion, not skim.
+      Matches the ontology (edges = submits + funnel accumulate→flush); flag if PN
+      wants it reconsidered.
+    - Gate: vet, lint 0, full -short suite, new tests (tag-crosses-funnel ×2 drive
+      paths incl. not-before-flush + downstream-keeps-alive + value-still-severed;
+      two-scope union) -race ×2 + all flow tests, alloc floor 1/op, 40×
+      TestBySimulation -race.
+  - **NEXT: CP-F4** — Suppress()/NewFlow() options + instance pooling/gen-stamping +
+    opt-alloc verification (variadic + boxed payloads stack-stay) + sim model
+    extension (flow-rider conservation oracle). Then the psgwf/otpsg disposition
+    pass (below).
   - **AFTER CP-F4 (PN, 2026-07-03): psgwf/otpsg DISPOSITION PASS.** psgwf's own doc.go
     is the flow facility's job description ("workflow context propagation…
     cancellation domains and context values that flow through PSG task chains") on the

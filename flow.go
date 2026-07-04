@@ -388,23 +388,78 @@ func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*fl
 	return &flowRiders{entries: entries}, created
 }
 
-// severFlowRiders returns a ctx whose nearest meta clones ctx's but carries
-// no flow riders — the fan-in sever (path-scoped riders do not cross the
-// funnel accumulate→flush edge). Reports false (ctx unchanged) when there is
-// nothing to sever. The clone is a bodyMetaPool borrow stamped on a ctxpool
-// child; the caller must releaseBodyContext the returned ctx when the severed
-// extent — which must be synchronous — completes.
-func severFlowRiders(ctx context.Context) (context.Context, bool) {
+// collectFlowTags folds the DAG-scoped (tag) riders of ctx's meta into union,
+// taking one carrier ref on each instance newly added — the fan-in transfer.
+// The funnel instance's ref covers the tag from this accumulate until the
+// flush takeover adopts it, overlapping the accumulate item's own ref
+// (ref-before-release: the instance never transits an unreferenced state).
+// One ref per DISTINCT instance suffices — refs are fungible covers, not
+// per-item tokens — so union is a set, not a multiset. Called under the
+// funnel instance's mu; union's backing is owned by the funnel instance.
+func collectFlowTags(union []flowRiderEntry, ctx context.Context) []flowRiderEntry {
+	m, ok := metaFromContext(ctx)
+	if !ok || m.riders == nil {
+		return union
+	}
+	for i := range m.riders.entries {
+		e := &m.riders.entries[i]
+		if e.id.kind != flowTagIdent || len(e.insts) == 0 {
+			continue
+		}
+		ui := -1
+		for j := range union {
+			if union[j].id == e.id {
+				ui = j
+				break
+			}
+		}
+		if ui < 0 {
+			union = append(union, flowRiderEntry{id: e.id})
+			ui = len(union) - 1
+		}
+		for _, in := range e.insts {
+			present := false
+			for _, have := range union[ui].insts {
+				if have == in {
+					present = true
+					break
+				}
+			}
+			if !present {
+				in.ref()
+				union[ui].insts = append(union[ui].insts, in)
+			}
+		}
+	}
+	return union
+}
+
+// flowFanInContext is the funnel accumulate→flush fan-in applied to the flush
+// ctx: path-scoped riders sever (whatever the drive ctx carried — notably the
+// triggering item's riders on the inline past-deadline path — is dropped),
+// while the DAG-scoped tags collected from ALL accumulated items take over as
+// the flush body's rider set. The clone ADOPTS the funnel's collected refs
+// outright: releaseBodyContext at the flush's end releases exactly one ref
+// per distinct instance — the one collectFlowTags took — so the handoff never
+// transits an unreferenced state and never churns the counts. Reports false
+// (ctx unchanged, nothing to release) when there is nothing to sever or
+// adopt. The severed/adopted extent must be synchronous, like any body ctx.
+func flowFanInContext(ctx context.Context, tags []flowRiderEntry) (context.Context, bool) {
 	src, ok := metaFromContext(ctx)
-	if !ok || src.riders == nil {
+	hasSrcRiders := ok && src.riders != nil
+	if !hasSrcRiders && len(tags) == 0 {
 		return ctx, false
 	}
 	m := bodyMetaPool.Get()
-	m.wave = src.wave
-	m.parent = src // preserve the permit chain; held stays nil on the clone
-	m.parentWaves = src.parentWaves
-	m.ctxType = src.ctxType
-	m.executionEnvironment = src.executionEnvironment
-	// riders stays nil — the sever.
+	if ok {
+		m.wave = src.wave
+		m.parent = src // preserve the permit chain; held stays nil on the clone
+		m.parentWaves = src.parentWaves
+		m.ctxType = src.ctxType
+		m.executionEnvironment = src.executionEnvironment
+	}
+	if len(tags) > 0 {
+		m.riders = &flowRiders{entries: tags}
+	}
 	return ctxpool.WithValue(ctx, m), true
 }

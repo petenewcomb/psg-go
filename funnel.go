@@ -390,6 +390,15 @@ type funnelInstance[T any] struct {
 	// owner reuse-pop, which may recycle a non-detached spent shell the instant Run
 	// releases c.mu (see Run).
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the flush body ctx
+
+	// flowTags is the union of DAG-scoped flow riders (tags) carried by this
+	// instance's accumulated items — one carrier ref held per distinct
+	// instance (collectFlowTags, called from accumulate under mu). The flush
+	// takeover hands the whole set, refs included, to the flush body ctx
+	// (flowFanInContext), which is what carries a tag's presence and its
+	// follow-up lifetimes across the accumulate→flush fan-in. Nil'd at
+	// takeover; mutated only under mu.
+	flowTags []flowRiderEntry
 }
 
 // Execute implements [workq.Work] as the scheduler-side admission for a due flush
@@ -509,6 +518,12 @@ func (c *funnelInstance[T]) accumulate(
 	traceRegion := "funnelInstance.funnel"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
+	// Fan-in transfer, collect side: fold this item's DAG-scoped riders into
+	// the instance's union (one ref per distinct flow instance), so tag
+	// presence and follow-up lifetimes survive to the flush regardless of when
+	// the item itself completes. Runs under c.mu (the only accumulate path).
+	c.flowTags = collectFlowTags(c.flowTags, ctx)
+
 	didNotPanic := false
 	defer func() {
 		if !didNotPanic {
@@ -562,17 +577,20 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	}
 	c.accumulator = nil
 
-	// Fan-in sever: path-scoped flow riders do not cross the accumulate→flush edge
-	// (docs/decisions/flow-design.md). The inline already-past-deadline flush arrives
-	// here on the TRIGGERING accumulate body's ctx, whose meta carries that one item's
-	// riders — one of many folded into this flush, so letting them through would
-	// misattribute the whole aggregate. The executor-driven path (Run) borrows from
-	// the scheduler ctx and is naturally rider-free; severing here makes the rule
-	// structural for both. The severed extent is synchronous (the user Flush and its
-	// dispatches complete within this call), so the clone releases at return.
-	if sctx, severed := severFlowRiders(ctx); severed {
-		defer releaseBodyContext(sctx)
-		ctx = sctx
+	// Flow fan-in (docs/decisions/flow-design.md): path-scoped riders SEVER —
+	// the inline already-past-deadline flush arrives here on the TRIGGERING
+	// accumulate body's ctx, whose meta carries that one item's riders, one of
+	// many folded into this flush — while the DAG-scoped tags collected from
+	// ALL accumulated items TAKE OVER as the flush body's rider set, their
+	// funnel-held refs adopted by the flush ctx and released with it. The
+	// executor-driven path (Run) borrows from the scheduler ctx and is
+	// naturally rider-free on the sever side; doing both here makes the rule
+	// structural for every drive. The extent is synchronous (the user Flush
+	// and its dispatches complete within this call).
+	if fctx, adopted := flowFanInContext(ctx, c.flowTags); adopted {
+		c.flowTags = nil
+		defer releaseBodyContext(fctx)
+		ctx = fctx
 	}
 
 	// Release the per-instance flush barrier reference acquired at

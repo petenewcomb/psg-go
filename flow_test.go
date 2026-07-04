@@ -440,3 +440,127 @@ func TestFollowUpConcurrentStress(t *testing.T) {
 	chk.Eventually(func() bool { return fired.Load() == scopes },
 		5*time.Second, 5*time.Millisecond)
 }
+
+// ─── CP-F3: fan-in transfer/union ────────────────────────────────────────────
+
+// TestFlowTagCrossesFunnel: a tag's presence and follow-up lifetime union
+// through the accumulate→flush fan-in, on both flush drives. The follow-up
+// must not fire while the aggregate is pending (the funnel's collected ref
+// covers the gap after the accumulate items complete), the flush body must
+// read the tag as present while the key's value stays severed, and work the
+// flush dispatches downstream keeps the flow alive until IT completes.
+func TestFlowTagCrossesFunnel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline func() time.Time
+	}{
+		{"drain sweep flush", func() time.Time { return time.Time{} }},
+		{"inline past-deadline flush", func() time.Time { return time.Now().Add(-time.Millisecond) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chk := require.New(t)
+			checkout := streampool.NewFlowTag()
+			reqCtx := streampool.NewFlowKey[string]()
+
+			var fires atomic.Int32
+			var flushSawTag, flushSawVal, downSawTag atomic.Bool
+			var firedBeforeFlush atomic.Bool
+			downRelease := make(chan struct{})
+			fired := make(chan struct{})
+
+			downstream := streampool.NewTaskLauncher(func(ctx context.Context) error {
+				downSawTag.Store(checkout.InFlow(ctx))
+				<-downRelease
+				return nil
+			})
+
+			var wave streampool.Wave
+			aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+				return streampool.NewAccumulator(
+					func(ctx context.Context, _ int, err error) (time.Time, error) {
+						if err != nil {
+							return time.Time{}, err
+						}
+						return tc.deadline(), nil
+					},
+					func(ctx context.Context) error {
+						firedBeforeFlush.Store(fires.Load() > 0)
+						flushSawTag.Store(checkout.InFlow(ctx))
+						_, ok := reqCtx.From(ctx)
+						flushSawVal.Store(ok)
+						return downstream.Submit(ctx, struct{}{}) // ambient: same wave, tagged
+					},
+				)
+			})
+
+			err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+				for i := 0; i < 3; i++ {
+					if err := aggregator.Submit(ctx, i); err != nil {
+						return err
+					}
+				}
+				return nil
+			}, checkout.FollowUp(func(context.Context) { fires.Add(1); close(fired) }),
+				reqCtx.Value("req-77"))
+			chk.NoError(err)
+
+			// Scope exited; accumulate items complete as they run; the funnel's
+			// collected ref must keep the tag alive while the aggregate pends.
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				close(downRelease)
+			}()
+			chk.NoError(wave.CloseAndSkimAll(context.Background()))
+
+			select {
+			case <-fired:
+			case <-time.After(5 * time.Second):
+				t.Fatal("follow-up never fired after flush + downstream completion")
+			}
+			chk.False(firedBeforeFlush.Load(), "fired before the flush ran — the fan-in transfer leaked the lifetime")
+			chk.True(flushSawTag.Load(), "tag presence must cross the fan-in")
+			chk.False(flushSawVal.Load(), "key value must sever at the fan-in")
+			chk.True(downSawTag.Load(), "flush-dispatched work inherits the tag")
+			chk.EqualValues(1, fires.Load())
+		})
+	}
+}
+
+// TestFlowTagFunnelUnion: items from two independent scopes (two tags) fold
+// into one funnel instance; both follow-ups survive to the flush and fire
+// after it — the union, not last-writer-wins.
+func TestFlowTagFunnelUnion(t *testing.T) {
+	chk := require.New(t)
+	tagA := streampool.NewFlowTag()
+	tagB := streampool.NewFlowTag()
+
+	var firedA, firedB atomic.Int32
+	var flushSawA, flushSawB atomic.Bool
+
+	var wave streampool.Wave
+	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+		return streampool.NewAccumulator(
+			func(ctx context.Context, _ int, err error) (time.Time, error) {
+				return time.Time{}, err
+			},
+			func(ctx context.Context) error {
+				flushSawA.Store(tagA.InFlow(ctx))
+				flushSawB.Store(tagB.InFlow(ctx))
+				return nil
+			},
+		)
+	})
+
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return aggregator.Submit(ctx, 1)
+	}, tagA.FollowUp(func(context.Context) { firedA.Add(1) })))
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return aggregator.Submit(ctx, 2)
+	}, tagB.FollowUp(func(context.Context) { firedB.Add(1) })))
+
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+	chk.Eventually(func() bool { return firedA.Load() == 1 && firedB.Load() == 1 },
+		5*time.Second, 2*time.Millisecond)
+	chk.True(flushSawA.Load(), "union must carry scope A's tag")
+	chk.True(flushSawB.Load(), "union must carry scope B's tag")
+}

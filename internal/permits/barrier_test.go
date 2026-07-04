@@ -27,6 +27,7 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	tp := newTestPool(2)
 	hog := tp.NewCache()
 	var dh Demand
+	dh.Init()
 	hp, err := hog.Acquire(&dh, 2)
 	require.NoError(t, err)
 	require.True(t, hp.Held(), "w=2 whole-grant on a free Resource, no registration")
@@ -35,6 +36,8 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	a := tp.NewCache()
 	b := tp.NewCache()
 	var da, db Demand
+	da.Init()
+	db.Init()
 	pa0, err := a.Acquire(&da, 2)
 	require.NoError(t, err)
 	require.False(t, pa0.Held(), "everything is in use; a registers and arms")
@@ -46,6 +49,7 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 
 	w1 := tp.NewCache()
 	var d1 Demand
+	d1.Init()
 	pw0, err := w1.Acquire(&d1, 1)
 	require.NoError(t, err)
 	require.False(t, pw0.Held(), "weight-1 is gated while armed")
@@ -92,6 +96,7 @@ func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 
 	a := tp.NewCache()
 	var da Demand
+	da.Init()
 	pa0, err := a.Acquire(&da, 4)
 	require.NoError(t, err, "the promise-mode Overdraft waits rather than granting or refusing")
 	require.False(t, pa0.Held(), "w=4 on capacity 3 is infeasible; a hoards 2 and stays head")
@@ -99,6 +104,7 @@ func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 
 	b := tp.NewCache()
 	var db Demand
+	db.Init()
 	pb0, err := b.Acquire(&db, 3)
 	require.NoError(t, err)
 	require.False(t, pb0.Held(), "b queues behind the armed head")
@@ -127,6 +133,7 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 	tp := newTestPool(3)
 	v := tp.NewCache()
 	var dv Demand
+	dv.Init()
 	pv, err := v.Acquire(&dv, 1)
 	require.NoError(t, err)
 	require.True(t, pv.Held())
@@ -134,6 +141,7 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	pm, err := g.Acquire(&d, 3)
 	require.NoError(t, err)
 	require.True(t, pm.Held(), "3 = steal 1 + grant 2")
@@ -178,6 +186,7 @@ func TestConcurrentWeightedOverSubscribed(t *testing.T) {
 			c := tp.NewCache()
 			defer c.ReleaseRef()
 			var d Demand
+			d.Init()
 			defer d.Invalidate()
 			for range iters {
 				pm, err := c.AcquireWait(ctx, &d, w)

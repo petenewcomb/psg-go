@@ -26,6 +26,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 
 	root := tp.NewCache()
 	var dr Demand
+	dr.Init()
 	rp, _ := root.Acquire(&dr, 1) // root runs, then parks → its base (held=1) is borrowable
 	rp.Release()
 
@@ -41,6 +42,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 		go func(c *Cache) {
 			defer wg.Done()
 			var d Demand
+			d.Init()
 			for range iters {
 				if pm, _ := c.Acquire(&d, 1); pm.Held() {
 					if h, u := pm.backing.counts.load(); u > h {
@@ -77,6 +79,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 
 	root := tp.NewCache()
 	var dr Demand
+	dr.Init()
 	rp, _ := root.Acquire(&dr, 1)
 	rp.Release()
 	fixed := make([]*Cache, 4)
@@ -92,6 +95,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		go func(c *Cache) {
 			defer wg.Done()
 			var d Demand
+			d.Init()
 			for range 10000 {
 				if pm, _ := c.Acquire(&d, 1); pm.Held() {
 					pm.Release()
@@ -106,6 +110,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			var d Demand
+			d.Init()
 			for range 4000 {
 				sub := tp.newChild(root)
 				if pm, _ := sub.Acquire(&d, 1); pm.Held() {
@@ -150,6 +155,7 @@ func TestConcurrentWeightedGatherSatisfiable(t *testing.T) {
 			c := tp.NewCache()
 			defer c.ReleaseRef()
 			var d Demand
+			d.Init()
 			for range iters {
 				pm, err := c.AcquireWait(ctx, &d, w)
 				if err != nil {

@@ -217,7 +217,7 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermi
 	}
 	if wv.shouldBlock(ctx) == nil {
 		// Non-top-level: postpone. Register for a freed permit, then recheck.
-		ex.AddToListeners(h.pool().ListenersFor())
+		ex.AddToListeners(h.pool().Listeners())
 		return h.acquire(), h.acquireErr
 	}
 	// Top-level: block-and-help.
@@ -308,6 +308,13 @@ func (h *heldPermit) confirm() bool {
 		}
 	}
 	return true // proceed to block
+}
+
+// Init implements omnipool.Initer: one-time setup when the handle pool creates a
+// fresh object — the embedded demand's mailbox outlives every recycle (Reset retires
+// identities by generation, never by reallocation).
+func (h *heldPermit) Init() {
+	h.demand.Init()
 }
 
 var heldPermitPool = omnipool.For[heldPermit]()

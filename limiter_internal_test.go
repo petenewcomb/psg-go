@@ -23,6 +23,8 @@ func TestSemaphoreResource_Accounting(t *testing.T) {
 	c := l.pool.NewCache()
 
 	var d permits.Demand
+
+	d.Init()
 	p1, err := c.Acquire(&d, 1)
 	chk.NoError(err)
 	chk.True(p1.Held())
@@ -48,6 +50,7 @@ func TestSemaphoreResource_ZeroBlocksAll(t *testing.T) {
 	l := NewSemaphore(0)
 	c := l.pool.NewCache()
 	var d permits.Demand
+	d.Init()
 	p, err := c.Acquire(&d, 1)
 	chk.NoError(err)
 	chk.False(p.Held(), "limit 0 blocks every acquire")
@@ -60,6 +63,7 @@ func TestSemaphoreResource_Unlimited(t *testing.T) {
 	c := l.pool.NewCache()
 	perms := make([]permits.Permit, 0, 100)
 	var d permits.Demand
+	d.Init()
 	for range 100 {
 		p, err := c.Acquire(&d, 1)
 		chk.NoError(err)
@@ -82,6 +86,7 @@ func TestSetMaxConcurrency_RaiseWakesParkedWaiter(t *testing.T) {
 	go func() {
 		// Parks on the Pool until SetMaxConcurrency raises the ceiling and wakes it.
 		var d permits.Demand
+		d.Init()
 		p, err := c.AcquireWait(context.Background(), &d, 1)
 		acqErr = err
 		if err == nil {
@@ -133,6 +138,7 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 	for range raised {
 		go func() {
 			var d permits.Demand
+			d.Init()
 			defer d.Invalidate()
 			p, err := c.AcquireWait(ctx, &d, 1)
 			if err != nil {

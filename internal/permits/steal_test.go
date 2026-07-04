@@ -16,6 +16,7 @@ func makeIdle(tp *testPool, n int) *Cache {
 	c := tp.NewCache()
 	pms := make([]Permit, n)
 	var d Demand
+	d.Init()
 	for i := range pms {
 		pm, err := c.Acquire(&d, 1)
 		require.NoError(tp.tb, err)
@@ -95,6 +96,8 @@ func TestAcquireUpWalkTouchesUnsatisfiedAncestors(t *testing.T) {
 
 	// r0 runs a body and stays running (held=1, inUse=1 → no idle to lend).
 	var d0, dc Demand
+	d0.Init()
+	dc.Init()
 	p0, err := r0.Acquire(&d0, 1)
 	require.NoError(t, err)
 	require.True(t, p0.Held())

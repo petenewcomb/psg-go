@@ -47,9 +47,35 @@ func (r *countingGrantResource) Overdraft(n int) (bool, error) {
 	return true, nil
 }
 
+// standingSentinel returns the standing episode's sentinel demand, or nil.
+func (p *Pool) standingSentinel() *Demand {
+	if od := p.od.Load(); od != nil {
+		return &od.sentinel
+	}
+	return nil
+}
+
+// episodeAnchor returns the standing episode's anchor cache, or nil.
+func (p *Pool) episodeAnchor() *Cache {
+	if od := p.od.Load(); od != nil {
+		return od.sentinel.cache.Load()
+	}
+	return nil
+}
+
+// allowanceRemaining returns the standing episode's un-claimed allowance (0 when
+// no episode stands).
+func (p *Pool) allowanceRemaining() uint64 {
+	if od := p.od.Load(); od != nil {
+		return od.allowance.Load()
+	}
+	return 0
+}
+
 // checkEpisode asserts the overdraft invariants at a quiescent point: conservation
 // untouched by grants (Σheld == inFlight ≤ capacity) and the episode equation
-// Σ max(inUse−held, 0) + allowance == episodeTotal (all zero outside an episode).
+// Σ max(inUse−held, 0) + allowance == the episode's grant total (all zero outside
+// an episode).
 func (tp *testPool) checkEpisode(t require.TestingT) {
 	var sumHeld, excess uint64
 	for _, c := range tp.snapshot() {
@@ -61,11 +87,15 @@ func (tp *testPool) checkEpisode(t require.TestingT) {
 	inFlight, capacity := uint64(tp.sem.inFlight.Load()), uint64(tp.sem.capacity)
 	require.Equal(t, inFlight, sumHeld, "conservation: Σheld == checkedOut, untouched by grants")
 	require.LessOrEqual(t, inFlight, capacity)
-	tp.episodeMu.Lock()
-	total := tp.episodeTotal
-	tp.episodeMu.Unlock()
-	require.Equal(t, total, excess+tp.allowance.Load(),
-		"episode invariant: Σ excess + allowance == episodeTotal")
+	var total, allowance uint64
+	if od := tp.od.Load(); od != nil {
+		tp.fifoMu.Lock()
+		total = od.total
+		tp.fifoMu.Unlock()
+		allowance = od.allowance.Load()
+	}
+	require.Equal(t, total, excess+allowance,
+		"episode invariant: Σ excess + allowance == the episode's grant total")
 }
 
 // The full arc of a granted overdraft: proven-infeasible head → grant → standing
@@ -81,14 +111,15 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	pm, err := g.Acquire(&d, 5)
 	require.NoError(t, err)
 	require.True(t, pm.Held(), "w=5 on capacity 3: gather 3, overdraft 2")
 	require.Same(t, d.cache.Load(), pm.backing)
 	require.Equal(t, []int{2}, res.asks, "the ask is the post-gather shortfall")
-	require.Same(t, &tp.episode, tp.barrier.Load(), "the sentinel stands: barrier armed")
-	require.Same(t, d.cache.Load(), tp.episodeCache.Load())
-	require.Equal(t, uint64(0), tp.allowance.Load(), "the head's occupy claimed the whole grant")
+	require.Same(t, tp.standingSentinel(), tp.barrier.Load(), "the sentinel stands: barrier armed")
+	require.Same(t, d.cache.Load(), tp.episodeAnchor())
+	require.Equal(t, uint64(0), tp.allowanceRemaining(), "the head's occupy claimed the whole grant")
 	require.Equal(t, uint64(2), excessOverCache(d.cache.Load()), "inUse runs past held by the grant")
 	tp.checkEpisode(t)
 
@@ -96,11 +127,13 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	// gathers into the over-committed window.
 	w1 := tp.NewCache()
 	var d1 Demand
+	d1.Init()
 	p1, err := w1.Acquire(&d1, 1)
 	require.NoError(t, err)
 	require.False(t, p1.Held(), "weight-1 is gated while the episode stands")
 	b := tp.NewCache()
 	var db Demand
+	db.Init()
 	pb, err := b.Acquire(&db, 2)
 	require.NoError(t, err)
 	require.False(t, pb.Held(), "a w≥2 arrival registers behind the sentinel")
@@ -108,7 +141,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 
 	// The owner parks: its excess flows home to the allowance.
 	pm.Release()
-	require.Equal(t, uint64(2), tp.allowance.Load(), "park returned the excess")
+	require.Equal(t, uint64(2), tp.allowanceRemaining(), "park returned the excess")
 	tp.checkEpisode(t)
 
 	// An exempt descendant borrows the parked hoard, then a bigger one extends the
@@ -116,6 +149,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	// aggregate.
 	ch := d.cache.Load().NewChild()
 	var dch Demand
+	dch.Init()
 	pch, err := ch.Acquire(&dch, 1)
 	require.NoError(t, err)
 	require.True(t, pch.Held(), "the exempt descendant inherits the parked hoard")
@@ -123,6 +157,8 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	pch.Release()
 
 	var dbig Demand
+
+	dbig.Init()
 	pbig, err := ch.Acquire(&dbig, 6)
 	require.NoError(t, err)
 	require.True(t, pbig.Held(), "the descendant extends: 3 borrowable + 2 allowance + 1 fresh grant")
@@ -144,7 +180,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	// successor is promoted to a live (gathering) head.
 	require.True(t, ch.ReleaseRef())
 	d.Invalidate()
-	require.Equal(t, uint64(0), tp.allowance.Load(), "episode end cleared the allowance")
+	require.Nil(t, tp.od.Load(), "episode end retired the pooled episode state")
 	require.Same(t, &db, tp.barrier.Load(), "the queued arrival was promoted to head")
 	tp.checkEpisode(t)
 
@@ -173,6 +209,7 @@ func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	_, err := g.Acquire(&d, 4)
 	require.ErrorIs(t, err, refuseErr, "the refusal error is the resource's own")
 	require.Nil(t, tp.barrier.Load(), "the refused sole head disarmed the barrier")
@@ -182,6 +219,7 @@ func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
 
 	// The pool is unharmed: a feasible acquire proceeds.
 	var d2 Demand
+	d2.Init()
 	pm, err := g.Acquire(&d2, 3)
 	require.NoError(t, err)
 	require.True(t, pm.Held())
@@ -200,6 +238,7 @@ func TestOverdraftRefusalThroughAcquireWait(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	_, err := g.AcquireWait(context.Background(), &d, 3)
 	require.ErrorIs(t, err, refuseErr)
 	require.Nil(t, d.pool.Load())
@@ -216,12 +255,14 @@ func TestOverdraftWaitsWhileAnythingRuns(t *testing.T) {
 	tp := newGrantTestPool(3)
 	hog := tp.NewCache()
 	var dh Demand
+	dh.Init()
 	ph, err := hog.Acquire(&dh, 1)
 	require.NoError(t, err)
 	require.True(t, ph.Held()) // a running body: inUse=1 somewhere
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	pg, err := g.Acquire(&d, 4)
 	require.NoError(t, err)
 	require.False(t, pg.Held(), "no grant while a release could still change the answer")
@@ -255,6 +296,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	pg, err := g.Acquire(&d, 3)
 	require.NoError(t, err)
 	require.False(t, pg.Held(), "a stranger's suspension blocks the grant")
@@ -271,6 +313,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 	g2 := tp.NewCache()
 	g2.SuspendDriver() // the demand registers under g2 → g2 is on the head's chain
 	var d2 Demand
+	d2.Init()
 	pg2, err := g2.Acquire(&d2, 3)
 	require.NoError(t, err)
 	require.True(t, pg2.Held(), "an on-chain suspension is causally inside the head — no stranger")
@@ -293,10 +336,11 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 	tp := newGrantTestPool(1)
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	pm, err := g.Acquire(&d, 2) // infeasible on capacity 1 → grant → episode
 	require.NoError(t, err)
 	require.True(t, pm.Held())
-	require.Same(t, &tp.episode, tp.barrier.Load())
+	require.Same(t, tp.standingSentinel(), tp.barrier.Load())
 
 	// A descendant needs weight the busy episode cannot spare: it parks on
 	// episodeNotify (exempt, unregistered).
@@ -306,6 +350,7 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 	got := make(chan error, 1)
 	go func() {
 		var dch Demand
+		dch.Init()
 		defer dch.Invalidate()
 		pch, err := ch.AcquireWait(ctx, &dch, 1)
 		if err == nil {
@@ -354,6 +399,7 @@ func TestConcurrentOverdraftEpisodes(t *testing.T) {
 			defer c.ReleaseRef()
 			for range iters {
 				var d Demand
+				d.Init()
 				pm, err := c.AcquireWait(ctx, &d, capacity+1)
 				if err != nil {
 					failed.Add(1)
@@ -368,7 +414,7 @@ func TestConcurrentOverdraftEpisodes(t *testing.T) {
 
 	require.Equal(t, int64(0), failed.Load(), "every over-capacity demand must complete via its episode")
 	require.Nil(t, tp.barrier.Load(), "quiescence disarms")
-	require.Equal(t, uint64(0), tp.allowance.Load())
+	require.Nil(t, tp.od.Load(), "quiescence retires the episode state")
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	tp.checkEpisode(t)
 }

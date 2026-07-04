@@ -35,6 +35,7 @@ func TestAcquireWaitLiveness(t *testing.T) {
 			c := tp.NewCache()
 			defer c.ReleaseRef()
 			var d Demand
+			d.Init()
 			for range iters {
 				pm, err := c.AcquireWait(ctx, &d, 1)
 				if err != nil {
@@ -66,6 +67,7 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 
 	g := tp.NewCache()
 	var dg Demand
+	dg.Init()
 	pm, err := g.Acquire(&dg, capacity) // whole-grant fast path holds ALL capacity
 	require.NoError(t, err)
 	require.True(t, pm.Held())
@@ -84,6 +86,7 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 			c := tp.NewCache()
 			defer c.ReleaseRef()
 			var d Demand
+			d.Init()
 			defer d.Invalidate()
 			pmw, err := c.AcquireWait(ctx, &d, 1)
 			if err != nil {
@@ -123,6 +126,8 @@ func TestAcquireWaitCancel(t *testing.T) {
 	tp := newTestPool(1)
 	hog := tp.NewCache()
 	var dh, dw Demand
+	dh.Init()
+	dw.Init()
 	hp, _ := hog.Acquire(&dh, 1) // saturate the one permit and keep it in use
 	defer hp.Release()
 

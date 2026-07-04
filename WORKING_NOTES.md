@@ -2,7 +2,55 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► CP-W2c LANDED (2026-07-03h, this commit) — overdraft per weighted-acquisition.md
+**►►► W2c REVIEW RESPONSE LANDED (2026-07-04, this commit) — PN's data-structure review
+comments applied; overdraft state now DEMAND-ALLOCATED (PN follow-up during the session).**
+- Pool.notify → **notifier**; cachePool → package-level var (heldPermitPool precedent);
+  ListenersFor → **Listeners** (+ recorded WHY Listeners/Waiters stay separate and the
+  Notifier is NOT exposed: they are the register/park side; every notify entry must route
+  through the Pool — wake/ChainProbe — or it would bypass barrier/episode routing).
+- **Overdraft state = pooled `overdraft` object behind `Pool.od atomic.Pointer[overdraft]`**
+  (PN: demand-allocated, fifoMu-protected, reached through an atomic.Pointer): a Pool
+  carries no episode state (and pays no claimants-notifier Init) until a grant installs
+  one; retired to the omnipool at endEpisode. Write side under fifoMu (the install swaps
+  the sentinel into fifo[0], so the FIFO lock is the natural guard — episodeMu DELETED;
+  evaluations now serialize under fifoMu, whole grant = ONE lock section, lock order
+  fifoMu → list locks, policy call under fifoMu documented no-callback). Lock-free readers
+  (wake routing, excess return, claimant parks) are safe by the STRUCTURAL PIN: every such
+  reader lives inside the episode subtree whose cache refs pin the anchor, and episode end
+  IS the anchor's destroy — a live reader ⇒ un-recycled episode. Stale barrier readers
+  (wake across an end) classify sentinels by an immutable `Demand.sentinel` flag and
+  re-load p.od instead of dereferencing the stale pointer; nil ⇒ drop (same compensated
+  class as the stale-head empty-mailbox drop). overdraftPolicy stays a Pool field
+  (nil-field test per limiter-resource-classes.md — replaces the method-value closure,
+  PN comment); pool.suspended stays a Pool field (suspension is drive attribution, not
+  episode state; maintained unarmed too).
+- **Demand: gen-only-size note struck (stale); mailboxReady lazy flag DELETED — omnipool
+  Initer convention instead** (PN): Demand.Init (mailbox, once per object) / Reset
+  (Invalidate) / NewDemand / Free + package demandPool; heldPermit keeps its BY-VALUE
+  embedded demand and gains Init(){demand.Init()} (omnipool calls it on fresh handles) —
+  no per-dispatch pool traffic added. Zero-value Demand is NO LONGER READY. Tests kept
+  stack demands + explicit d.Init() (minimal churn); TestDemandPoolRoundTrip covers the
+  pooled path.
+- ANSWER-ONLY (PN to decide, not implemented): (a) w=1 queuing under an armed barrier —
+  current miss-don't-register is recorded Decision 3; queuing w=1 would give strict
+  cross-class arrival FIFO but puts registration (body-cache alloc + FIFO + mailbox) on
+  the hot class and serializes multi-permit admission through head succession; today's
+  cost is w=1 can be starved while a w≥2 FIFO stays non-empty. (b) Resource()
+  type-assertion smell — only caller is SetMaxConcurrency; root fix is a typed handle
+  kept by the constructor (or a distinct Semaphore type with the method), natural to fold
+  into step 4's surface work; Pool.Resource() then dies.
+- Gate: vet, lint 0, full -short (one hit of the KNOWN psgwf Example_clientTimeout
+  real-clock flake under parallel load, 20/20 standalone), permits -race ×10+, rapid 10k,
+  root -race, sim -race: **one UNEXPLAINED TestBySimulation -race chunk failure whose
+  output was lost (only the FAIL line captured), then 40/40 consecutive green on
+  identical reruns + no rapid failfile written ⇒ NOT a property failure (panic, race
+  report, or binary timeout; another session was running concurrent -race sim batches on
+  this machine — timeout under load is the benign candidate). Flagged, unresolved; if a
+  sim FAIL recurs, capture full output first.**
+
+**Previous banner:**
+
+**►►► CP-W2c LANDED (2026-07-03h) — overdraft per weighted-acquisition.md
 §Overdraft + resolutions (a)/(b)/(c). NEXT: weighted-acquisition step 3 (TryAcquireUpTo /
 NotifyAt resource capabilities), then step 4 (surface builders + sets + opoption removal +
 meta-redirect wiring).** Gate: vet, lint 0 issues, full -short, permits -race ×5 (incl the

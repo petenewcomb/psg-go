@@ -19,6 +19,8 @@ func TestDestroyRemovesChildExactly(t *testing.T) {
 
 	root := tp.NewCache()
 	var dr, ds Demand
+	dr.Init()
+	ds.Init()
 	rp, _ := root.Acquire(&dr, 1)
 	rp.Release()
 
@@ -40,6 +42,8 @@ func TestDestroyRemovesRootExactly(t *testing.T) {
 	tp := newTestPool(8)
 
 	var d Demand
+
+	d.Init()
 	for range iters {
 		c := tp.Pool.NewCache()
 		pm, err := c.Acquire(&d, 1)
@@ -59,6 +63,7 @@ func TestDestroyKeepsLiveSibling(t *testing.T) {
 
 	root := tp.NewCache()
 	var dr Demand
+	dr.Init()
 	rp, _ := root.Acquire(&dr, 1)
 	rp.Release()
 

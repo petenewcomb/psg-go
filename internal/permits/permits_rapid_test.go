@@ -64,7 +64,9 @@ func TestPermitsModel(t *testing.T) {
 				if len(units) >= maxCaches {
 					return
 				}
-				units = append(units, &modelUnit{cache: tp.NewCache(), unitRefHeld: true})
+				u := &modelUnit{cache: tp.NewCache(), unitRefHeld: true}
+				u.demand.Init()
+				units = append(units, u)
 				check()
 			},
 			"newChild": func(t *rapid.T) {
@@ -75,7 +77,9 @@ func TestPermitsModel(t *testing.T) {
 				if parent == nil {
 					return
 				}
-				units = append(units, &modelUnit{cache: tp.newChild(parent.cache), unitRefHeld: true})
+				u := &modelUnit{cache: tp.newChild(parent.cache), unitRefHeld: true}
+				u.demand.Init()
+				units = append(units, u)
 				check()
 			},
 			"acquire": func(t *rapid.T) {

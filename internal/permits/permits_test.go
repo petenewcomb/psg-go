@@ -17,6 +17,8 @@ func TestRootUnitLifecycle(t *testing.T) {
 	c := tp.NewCache()
 
 	var d Demand
+
+	d.Init()
 	pm, err := c.Acquire(&d, 1)
 	require.NoError(t, err)
 	require.True(t, pm.Held())
@@ -42,6 +44,10 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	parent := tp.NewCache()
 
 	var dp, dc Demand
+
+	dp.Init()
+
+	dc.Init()
 	pp, _ := parent.Acquire(&dp, 1) // parent runs: held=1, inUse=1
 	tp.check(t)
 
@@ -78,6 +84,10 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 	tp := newTestPool(2)
 	parent := tp.NewCache()
 	var dp, d1, d2, d3 Demand
+	dp.Init()
+	d1.Init()
+	d2.Init()
+	d3.Init()
 	pp, _ := parent.Acquire(&dp, 1)
 	pp.Release() // parent parks: borrowable=1
 	sub := tp.newChild(parent)
@@ -114,6 +124,8 @@ func TestCrossWaveSteal(t *testing.T) {
 	tp := newTestPool(1)
 	a := tp.NewCache()
 	var da, db Demand
+	da.Init()
+	db.Init()
 	ap, _ := a.Acquire(&da, 1)
 	ap.Release() // wave A parked-idle: a.held=1, borrowable=1
 	tp.check(t)
@@ -141,6 +153,9 @@ func TestNestedDriveSinglePermitChain(t *testing.T) {
 	tp := newTestPool(1)
 	parent := tp.NewCache()
 	var dp, dc, dg Demand
+	dp.Init()
+	dc.Init()
+	dg.Init()
 	pp, _ := parent.Acquire(&dp, 1)
 	pp.Release() // parent parks
 	child := tp.newChild(parent)
@@ -180,6 +195,7 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 
 	g := tp.NewCache()
 	var d Demand
+	d.Init()
 	pm, err := g.Acquire(&d, 5)
 	require.NoError(t, err)
 	require.True(t, pm.Held(), "w=5 must assemble from 2+2 stolen plus 1 free")
@@ -212,6 +228,7 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 
 	g := tp.NewCache()
 	var dg Demand
+	dg.Init()
 	gm, err := g.Acquire(&dg, 4)
 	require.NoError(t, err, "the promise-mode Overdraft waits rather than granting or refusing")
 	require.False(t, gm.Held(), "w=4 cannot be covered by capacity 3")
@@ -227,6 +244,7 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	// While armed, everyone else is gated — even off capacity the head cannot use.
 	b := tp.NewCache()
 	var db1 Demand
+	db1.Init()
 	b1, err1 := b.Acquire(&db1, 1)
 	require.NoError(t, err1)
 	require.False(t, b1.Held(), "a weight-1 acquire is gated while the barrier is armed")
@@ -239,6 +257,8 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	tp.check(t)
 
 	var db Demand
+
+	db.Init()
 	bp, err2 := b.Acquire(&db, 3)
 	require.NoError(t, err2)
 	require.True(t, bp.Held(), "the drained capacity is available again (whole-grant fast path)")
@@ -250,5 +270,35 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	require.True(t, g.ReleaseRef())
 	require.True(t, v.ReleaseRef())
 	assert.Equal(t, 0, tp.totalHeld(), "hoards drain to the Resource like any cached permits")
+	tp.check(t)
+}
+
+// NewDemand/Free round-trip: pooled demands arrive initialized (a registration
+// publishes a live mailbox), and Free retires the identity through Reset →
+// Invalidate — deregistering, disarming, releasing the home — so recycled objects
+// come back clean with their once-initialized mailbox intact.
+func TestDemandPoolRoundTrip(t *testing.T) {
+	tp := newTestPool(1)
+	c := tp.NewCache()
+	for range 3 { // recycle through the pool across iterations
+		hogD := NewDemand()
+		hog, err := c.Acquire(hogD, 1)
+		require.NoError(t, err)
+		require.True(t, hog.Held())
+
+		d := NewDemand()
+		p2, err := c.Acquire(d, 2) // over capacity: registers as the armed head
+		require.NoError(t, err)
+		require.False(t, p2.Held())
+		require.Same(t, d, tp.barrier.Load(), "the pooled demand registered as head")
+
+		d.Free() // Reset → Invalidate: dequeued, disarmed, identity retired
+		require.Nil(t, tp.barrier.Load())
+
+		hog.Release()
+		hogD.Free()
+	}
+	require.True(t, c.ReleaseRef())
+	require.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }

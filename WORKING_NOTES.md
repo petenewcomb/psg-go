@@ -376,8 +376,11 @@ see open queue item 5).
     no-error signature decision — my "no wave exists" rationale was FALSE).**
     `FollowUp(fn func(context.Context) error)`. Propagation: INLINE (scope-exit)
     firing's error joins WithFlow's return via errors.Join, body error FIRST
-    (first-error-primary; multiple followups join in REGISTRATION order — they fire
-    in created order at exit); innermost-scope-first is COMPOSITIONAL (inner
+    (first-error-primary; multiple followups fire + join in INVERSE registration
+    order — LIFO, defer-like unwind [PN 2026-07-04]; guarantee scoped to SAME-PASS
+    firings — cross-identity async ends have no relative order; name stays FollowUp:
+    Defer REJECTED, run-once echo contradicts extension/refire semantics);
+    innermost-scope-first is COMPOSITIONAL (inner
     WithFlow's join is the outer body's error — no mechanism). ASYNC (post-return)
     firing's error routes to the TRIGGERING work item's wave via the errSink →
     surfaces through its drain like a body error; errSink submission keeps the wave

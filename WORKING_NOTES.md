@@ -595,6 +595,19 @@ see open queue item 5).
   user-facing type; flow facility framed designed-not-implemented), surface-lineage.md
   (new facet 9: Flow handle → flow facility), TODO.md:79 (RESOLVED — no adapter needed).
 
+**►► CHALLENGE FOR THE PERMITS THREAD (from the flow session, 2026-07-04): does
+Demand really need its gen-stamp?** Principle established while reversing the flow
+instance-pooling decision (see the flow block): ABA/gen machinery is warranted only
+where references outlive ownership BY DESIGN (untracked readers — rdvq inbox/outbox
+hints, proven); it is waste where a conservation discipline tracks every reference
+and recycle happens at a proven-quiescent point (body metas, heldPermits, funnel
+shells, flow instances — all correctly gen-free). Demand's justification is the
+deliberately-racy readers (barrier atomic.Pointer[Demand] loads, in-flight mailbox
+wakes) — legitimate; BUT if demand recycle can be deferred to a tracked-quiescence
+point (FIFO/barrier provably dropped it AND the wake-compensation window closed —
+the counts-before-wake ordering may already be most of that proof), the gen could
+go. Re-derive rather than assume.
+
 **►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,
 searchList(l,w) [borrowable≥w — no w>1 spin], acquireInto single-source all-or-nothing at w; all

@@ -392,6 +392,22 @@ see open queue item 5).
     inline-error-joins-return (body+followup, multi-followup order), async-error via
     drain, extension-firing error routing, flush-triggered firing under live
     barrier. Reconcile flow-design.md (fn signature + this model) at the docs pass.
+  - **THEN CP-F7 — SKIM HANDLERS ARE FLOW CONTINUATIONS (PN, 2026-07-04; REVERSES
+    the CP-F3 "skim is not a fan-in edge" note — my gloss was wrong).** A queued
+    result is a CARRIER: skimmer.Submit captures the item's riders (ref at submit),
+    the handler runs under them stamped as a CHILD of the driver's ctx (normal
+    shadowing — per-key nearest-wins, ITEM over driver; no merge mechanism exists
+    or is needed), release at handler end; handler dispatches extend the flow. A
+    tag follow-up must NOT fire while results await skimming (reverses the CP-F2/F3
+    behavior). NOT a fan-in: each invocation continues ONE item's path — values flow
+    through. IMPLEMENTATION WRINKLE (mine): From() reads the nearest FLAT snapshot,
+    sound only because every snapshot is merged at construction; the skim stamp
+    must restore that invariant — either merge item-over-driver at stamp
+    (per-invocation cost) or teach reads to walk meta.parent (then the flush sever
+    clone must be an explicit BARRIER — a walking read must not see through
+    riders=nil). Decide by alloc floors. Sim oracle: whole-run scopes coincide on
+    both chains (CP-F5a assertions survive); add a divergent-chain oracle with
+    CP-F7.
   - **THEN CP-F5b** — sim model extension: flow scopes/followups in
     internal/sim scenarios + conservation oracle (every registered follow-up fires
     ≥1 and reaches true end after its subtree quiesces; no fire while carriers

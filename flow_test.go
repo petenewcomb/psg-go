@@ -500,13 +500,12 @@ func TestFollowUpBundleValue(t *testing.T) {
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
 		return nil
 	},
-		// FollowUp deliberately listed BEFORE Value: order-independent.
-		// The value is delivered as the handler argument (end-state channel).
-		txn.FollowUpFn(func(ctx context.Context, v string) error {
+		// The value is bound and delivered as the handler argument in one call —
+		// no ambient lookup, no order dependence.
+		txn.FollowUpFn("tx-7", func(ctx context.Context, v string) error {
 			got.Store([2]any{v, true})
 			return nil
 		}),
-		txn.Value("tx-7"),
 	)
 	chk.NoError(err)
 	chk.Equal([2]any{"tx-7", true}, got.Load())

@@ -74,7 +74,7 @@ earns: a *name* for presence and targeted suppression).
 |---|---|---|
 | carry data downstream | `key.Value(v)` | **severs** (data has no merge) |
 | run something once at the end | `FlowFollowUp(fn)` | crosses (DAG) |
-| …with that data in hand | `key.Value(v).FollowUp(fn)` | severs (path) |
+| …with that data in hand | `key.FollowUp(v, fn)` | severs (path) |
 | …and suppress/query it by name | `tag.FollowUp(fn)` | crosses (DAG) |
 | infuse work so bodies can ask "am I in it?" | `tag.Infuse()` + `tag.InFlow(ctx)` | crosses (DAG) |
 | keep a concern out of a subtree | `x.Suppress()` | — |
@@ -98,55 +98,50 @@ earns: a *name* for presence and targeted suppression).
 The follow-up interfaces and their `Do` method are unchanged (`flow-design.md`): a keyed
 follow-up is `FlowKeyFollowUp[V]`, a tag/anonymous one is `FlowTagFollowUp`.
 
-## Options: composed interfaces (matching `OpOption`), with a fluent bundle
+## Options: a value struct, with an explicit-value key follow-up
 
-`FlowOption` becomes an **interface** — `applyToFlow(*flowRiderBuilder)` — mirroring
-`OpOption`'s `applyToOpConfig` (`opoption.go`). It is 0-alloc for the same reason: the
-concrete option boxes into the interface but is copy-out-never-retained by
-`buildFlowRiders`, so escape analysis keeps it on the caller's stack (the cost model's
-"boxed payloads stay on the caller's stack"). The single kind-enum struct is replaced by
-**per-kind concrete types** — `valueOption[V]`, `followUpOption`, `suppressOption`,
-`newFlowOption` (all unexported) — each with its own `applyToFlow`; `buildFlowRiders`
-becomes polymorphic (each option applies itself onto the builder) instead of a `switch`.
+> **Superseded during CP-R3 (2026-07-05) by a benchmark.** The design below replaces an
+> earlier "composed interfaces + fluent bundle" sketch (`FlowOption` an interface,
+> `key.Value(v).FollowUp(fn)` fluent). That sketch was **measured and rejected**: it costs
+> **~2 warm allocations per registering `WithFlow`** (value-only scope 0 → 2), because a
+> generic `valueOption[V]` in a heterogeneous variadic can only be dispatched through an
+> interface method (`applyToFlow`), and interface dispatch is **opaque to escape analysis** —
+> `go build -gcflags=-m` confirms both the `...FlowOption` variadic and the builder escape to
+> the heap. `OpOption` gets away with the interface because op construction is cold; `WithFlow`
+> is warm (per request-scope), so the fluent surface would forfeit exactly the zero-warm-alloc
+> win CP-R2 landed. The Go constraint in one line: *typed fluent follow-up ⟹ generic option ⟹
+> interface variadic ⟹ heap.*
 
-Affordances differ by option, so the **return types differ**, narrowing to `FlowOption`
-for the variadic. Only a *value* option can be extended with a follow-up, so only it
-carries the richer interface:
+`FlowOption` is a **value struct** (a small kind-tagged record; no interface boxing), so a
+registering scope allocates nothing warm. All constructors return it:
 
 ```go
-type FlowOption interface { applyToFlow(*flowRiderBuilder) }
-
-// A key's value binding, extensible into a bundle. Embeds FlowOption (usable value-only).
-type FlowKeyOption[V any] interface {
-    FlowOption
-    FollowUp(FlowKeyFollowUp[V]) FlowOption
-    FollowUpFn(func(context.Context, V) error) FlowOption
-}
-
-func (k FlowKey[V]) Value(v V) FlowKeyOption[V]   // rich; every other option returns FlowOption
+func (k FlowKey[V]) Value(v V) FlowOption                                    // bind a value
+func (k FlowKey[V]) FollowUp(v V, h FlowKeyFollowUp[V]) FlowOption           // bind v AND hook it
+func (k FlowKey[V]) FollowUpFn(v V, fn func(context.Context, V) error) FlowOption
+func (t FlowTag)    FollowUp(h FlowTagFollowUp) FlowOption                    // valueless hook
+func (t FlowTag)    FollowUpFn(fn func(context.Context) error) FlowOption
+func (k FlowKey[V]) Suppress() FlowOption
+func (t FlowTag)    Suppress() FlowOption
+func NewFlow() FlowOption
 ```
 
-- `txn.Value(v)` is a value-only option; `txn.Value(v).FollowUpFn(fn)` is the **bundle** —
-  one option, **one node** (val + inst together). The generic `FlowKeyOption[V]` carries
-  the typed value, so `FollowUpFn` stays `func(ctx, V) error`.
-- **The fluent form is the ONLY way to attach a follow-up to a key.** `FlowKey` has *no*
-  standalone `FollowUp`/`FollowUpFn` — a key follow-up exists only as
-  `key.Value(v).FollowUp(...)`, so the value it receives is unambiguously the `v` in the
-  same expression, captured at registration (no ambient lookup, no order dependence). A
-  valueless follow-up is a **tag** — `FlowTag` keeps standalone `FollowUp`/`FollowUpFn`,
-  since a tag has nothing to bind.
-- `.FollowUp`/`.FollowUpFn` are reachable **only** on a value option (a `FlowKeyOption[V]`)
-  — the type system forbids chaining a follow-up onto a `Suppress`, `NewFlow`, or a bare
-  key. That is the point of composed interfaces over one fat `FlowOption`.
-- **Node invariant**: on a key node, `inst != nil ⇒ hasVal` — value and follow-up always
-  arrive together. So the "merge separate `Value` + `FollowUp` by id" case **vanishes for
-  keys** (there is no standalone key follow-up); a key bundle is always exactly one option
-  → one node. Construction-merge only ever reconciles repeated *values* under one id.
-  `.FollowUpFn` returns `FlowOption` (terminal); a second follow-up on the same key is a
-  separate `Value(v).FollowUpFn(...)` (the edge case).
-- The generic `FlowKeyOption[V]`'s 0-alloc boxing is the one thing to confirm by escape
-  analysis + benchmark, as the cost model already prescribes for options — generics
-  usually hold but it isn't free by fiat.
+- **A key follow-up takes its value as an explicit first argument**: `key.FollowUp(v, h)` /
+  `key.FollowUpFn(v, fn)`. This keeps the property the fluent form was reaching for — the value
+  the follow-up receives is unambiguously the `v` written right there, captured at registration
+  (no ambient lookup, no order dependence) — while staying 0-alloc and preserving the typed
+  `func(ctx, V)` signature (the generic lives on the `FlowKey[V]` receiver, not on a boxed
+  option). It is one option → **one node** (`val` + `inst` together), the same bundle node the
+  fluent form would have built. Same `FollowUp` verb as a tag's, with the value added.
+- There is **no standalone key follow-up without a value** and **no fluent chain**: `Suppress`,
+  `NewFlow`, and a bare `FlowKey` simply have no `FollowUp` method, so `Suppress().FollowUp()`
+  is not expressible — the "type system forbids it" property survives without composed
+  interfaces (there is nothing to chain onto).
+- **Node invariant**: on a key node, `inst != nil ⇒ hasVal` — value and follow-up always arrive
+  together (a key follow-up carries its value). A key bundle is exactly one option → one node;
+  construction-merge only ever reconciles repeated *values* under one id. Internally the struct
+  carries a `hasVal` bit (true for `Value` and for a key follow-up; false for a tag follow-up,
+  suppress, new-flow) so `settledVal` reads the bound value off either shape.
 
 ## Reads
 

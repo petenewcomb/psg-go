@@ -104,13 +104,18 @@ const (
 	flowOptNewFlow
 )
 
-// FlowOption configures a [WithFlow] scope. Obtain options from the methods
-// on [FlowKey] and [FlowTag] (Value, FollowUp, Suppress) or from [NewFlow];
-// the zero FlowOption is invalid and panics when passed to WithFlow.
+// FlowOption configures a [WithFlow] scope. Obtain options from the methods on
+// [FlowKey] and [FlowTag] (Value, FollowUp, Suppress) or from [NewFlow]; the zero
+// FlowOption is invalid and panics when passed to WithFlow. It is a value type
+// (no interface boxing), so a registering scope allocates nothing warm.
 type FlowOption struct {
 	kind flowOptionKind
 	id   *flowIdentity
 	val  any
+	// hasVal marks that val is a real binding: true for a Value and for a key
+	// follow-up (which carries its value), false for a tag follow-up, suppress or
+	// new-flow. It distinguishes a bound nil from "no value".
+	hasVal bool
 	// fn is the type-erased follow-up body: the registering FlowKey/FlowTag method
 	// wraps the user's typed handler into this shape (value delivered as `any`, the
 	// key's bundle value or nil for a tag). nil unless kind == flowOptFollowUp.
@@ -120,12 +125,13 @@ type FlowOption struct {
 // Value returns a [FlowOption] that attaches v under k for the extent of a
 // [WithFlow] scope: every dispatch inside the scope inherits it, transitively
 // along the causal chain, until a fan-in severs it or a nested scope shadows
-// it. Read it back inside a body with [FlowKey.From].
+// it. Read it back inside a body with [FlowKey.From]. To also run a hook at the
+// flow's end with v in hand, use [FlowKey.FollowUp]/[FlowKey.FollowUpFn] instead.
 func (k FlowKey[V]) Value(v V) FlowOption {
 	if k.id == nil {
 		panic("streampool: Value called on a zero FlowKey; mint with NewFlowKey")
 	}
-	return FlowOption{kind: flowOptValue, id: k.id, val: v}
+	return FlowOption{kind: flowOptValue, id: k.id, val: v, hasVal: true}
 }
 
 // From returns the value attached under k on ctx's flow, if any. The comma-ok
@@ -203,31 +209,35 @@ type FlowTagFollowUpFunc func(ctx context.Context) error
 // Do calls f.
 func (f FlowTagFollowUpFunc) Do(ctx context.Context) error { return f(ctx) }
 
-// FollowUp returns a [FlowOption] that registers h to run once at the
-// registration's end — when the registering scope has exited and all work
-// carrying k's bundle has completed. h receives k's value and runs under the
-// enclosing rider set (k's own rider peeled, so h's own dispatches do not
-// re-fire it; re-extending the flow under k is an explicit re-stamp inside h).
-// See docs/decisions/flow-design.md.
-func (k FlowKey[V]) FollowUp(h FlowKeyFollowUp[V]) FlowOption {
+// FollowUp returns a [FlowOption] that binds v under k AND registers h to run
+// once at the flow's end — when the registering scope has exited and all work
+// carrying k's bundle has completed. h receives v directly (the value is an
+// explicit argument, captured here at registration, so it is unambiguous — no
+// ambient lookup, no order dependence). The follow-up runs under the enclosing
+// rider set with k's own rider peeled, so [FlowKey.From] reads absent inside h
+// and h's own dispatches do not re-fire it (re-extending the flow under k is an
+// explicit re-stamp inside h). A valueless follow-up is a tag's; see
+// [FlowTag.FollowUp]. See docs/decisions/flow-design.md.
+func (k FlowKey[V]) FollowUp(v V, h FlowKeyFollowUp[V]) FlowOption {
 	if k.id == nil {
 		panic("streampool: FollowUp called on a zero FlowKey; mint with NewFlowKey")
 	}
 	if h == nil {
 		panic("streampool: FollowUp called with a nil handler")
 	}
-	return FlowOption{kind: flowOptFollowUp, id: k.id, fn: func(ctx context.Context, value any) error {
-		v, _ := value.(V) // zero V when the key carries no value
-		return h.Do(ctx, v)
-	}}
+	return FlowOption{kind: flowOptFollowUp, id: k.id, val: v, hasVal: true,
+		fn: func(ctx context.Context, value any) error {
+			vv, _ := value.(V)
+			return h.Do(ctx, vv)
+		}}
 }
 
 // FollowUpFn is [FlowKey.FollowUp] sugar over a plain function.
-func (k FlowKey[V]) FollowUpFn(fn func(ctx context.Context, value V) error) FlowOption {
+func (k FlowKey[V]) FollowUpFn(v V, fn func(ctx context.Context, value V) error) FlowOption {
 	if fn == nil {
 		panic("streampool: FollowUpFn called with a nil function")
 	}
-	return k.FollowUp(FlowKeyFollowUpFunc[V](fn))
+	return k.FollowUp(v, FlowKeyFollowUpFunc[V](fn))
 }
 
 // FollowUp returns a [FlowOption] that registers h to run once at the
@@ -525,14 +535,15 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		}
 	}
 
-	// settledVal returns id's value from the last Value option under it (order-
-	// independence: settled before any node is built). hasFollowUp reports whether
-	// a follow-up under id will bundle its value onto that follow-up's node.
+	// settledVal returns id's value from the last value-bearing option under it —
+	// a Value or a key FollowUp, both of which set hasVal (order-independence:
+	// settled before any node is built). hasFollowUp reports whether a follow-up
+	// under id will bundle its value onto that follow-up's node.
 	settledVal := func(id *flowIdentity) (any, bool) {
 		var v any
 		found := false
 		for i := range opts {
-			if opts[i].kind == flowOptValue && opts[i].id == id {
+			if opts[i].id == id && opts[i].hasVal {
 				v, found = opts[i].val, true
 			}
 		}

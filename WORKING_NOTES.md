@@ -626,11 +626,37 @@ see open queue item 5).
       GATE: vet, golangci-lint 0, -short suite, flow tests + conservation -race (x5),
       alloc floors (0), **80/80 TestBySimulation -race total (40 pre-safety + 40 with the underflow
       panic in place; rapid.checks=60, seeds 1-40 each) — 0 fails/hangs/races/panics**.
-    - **NEXT: CP-R3 — FlowOption becomes an interface (per-kind concrete types, 0-alloc boxing) +
-      fluent `key.Value(v).FollowUp(fn)` bundle; drop standalone FlowKey.FollowUp.** Surface change;
-      verify 0-alloc boxing by escape analysis + bench. The two R1 semantic deltas normalize here
-      (keys bundle value+follow-up on one node; no standalone key follow-up). Then R4 surface
-      reframe, R5 sever+union (F7/F8), R6 coalescing, R7 sim oracle + psgwf/otpsg.
+    - **CP-R3 LANDED (2026-07-05, worktree — NOT committed): typed key follow-up via explicit
+      value arg; FlowOption stays a value STRUCT.** The spec's "FlowOption→interface + fluent
+      `key.Value(v).FollowUp(fn)`" design was BUILT, MEASURED, and REJECTED: it costs ~2 warm
+      allocs per registering WithFlow (value-only 0→2). Root cause: a generic `valueOption[V]` in a
+      heterogeneous variadic can only dispatch through an interface method (`applyToFlow`), and
+      interface dispatch is OPAQUE to escape analysis — `go build -gcflags=-m` confirmed BOTH the
+      `...FlowOption` variadic and the builder escape to heap. OpOption's interface is fine because
+      op construction is COLD; WithFlow is WARM (per request-scope), so the fluent surface would
+      forfeit CP-R2's zero-warm-alloc win. Go constraint: typed-fluent-followup ⟹ generic option ⟹
+      interface variadic ⟹ heap. **Decision (PN, Option 3): keep FlowOption a struct; a key
+      follow-up takes its value as an EXPLICIT first arg** — `key.FollowUp(v, h)` /
+      `key.FollowUpFn(v, fn)` (typed `func(ctx, V)`, the generic on the FlowKey[V] receiver, not a
+      boxed option). Same `FollowUp` verb as tags; value unambiguous (written right there, captured
+      at registration); one option → one bundle node. No standalone valueless key follow-up, no
+      fluent chain; `Suppress`/`NewFlow`/bare-key have no FollowUp method so `Suppress().FollowUp()`
+      is unexpressible (type-safety survives without composed interfaces). PN vetoed "Bundle" (too
+      generic) — FollowUp(v, …) reads right and composes with Fn. Internal: FlowOption gains
+      `hasVal` (true for Value + key follow-up, false for tag follow-up/suppress/new-flow);
+      settledVal reads the bound value off either. buildFlowRiders / refcount / firing UNCHANGED
+      from R2b (surface-only). Spec `flow-rider-chain.md` Options section rewritten to record the
+      rejection + Option 3. ALLOC: value-only scope stays **0**; key bundle 1 (the `created` slice,
+      cold). Floor unchanged (0). GATE: vet, lint 0, -short (modulo the known real-clock
+      Example_clientTimeout/ExampleFunnel flakes — pass 3/3 standalone), flow + conservation -race,
+      alloc floors 0, **40 TestBySimulation -race runs clean (24 distinct seeds; on top of R2b's
+      80/80 identical concurrency)**.
+    - **NEXT: CP-R4 — surface reframe.** `FlowFollowUp(h)`/`FlowFollowUpFn(fn)` = anonymous
+      DAG-scoped follow-up (mints an unnamed tag-kind identity per registration; the default when
+      you want "run once at the true end" with no name/value). `tag.Infuse()` = bare presence
+      (valueless marker, no lifetime — new; CP-6 had no tagging without a follow-up). Decision table
+      + "value severs / lifetime & presence cross" as the teaching frame. Then R5 sever+union
+      (F7/F8), R6 coalescing (union-find), R7 sim oracle + psgwf/otpsg.
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

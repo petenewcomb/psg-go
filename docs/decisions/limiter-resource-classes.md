@@ -12,6 +12,15 @@
 > debt that the forest pays down as work completes. **Status: agreed design; not
 > implemented.** The live `permits.Resource` interface, `NewSemaphore`, and the gate
 > paths in `limiter.go` predate this record.
+>
+> **Sequencing (PN, 2026-07-05):** this consumable class is the framework's first
+> non-semaphore resource, and a **rate limiter is its intended first instance**. It
+> lands as the **one consumable pass** at the end of the weighted-acquisition
+> sequencing — *after* the weighted/plain surface is in place — so the class is built
+> once with weighted-consumable support from the start (`weighted-acquisition.md`
+> §"one consumable pass"). The head's exact-target-or-refuse wake for a weighted
+> consumable is `NotifyAt(n) error` (`weighted-acquisition.md` §Overdraft consumables);
+> reconcile it with the `Adjust`/`balance` general wake here at implementation.
 
 ## Context: what the forest actually assumes
 

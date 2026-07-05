@@ -12,9 +12,16 @@
 > **Status: steps 1–2 implemented** — step 1 (mechanical weighting) landed 9e03d83;
 > step 2a (multi-source gather + Demand identity) 698bac4; step 2b (FIFO + sticky-head
 > barrier + per-demand mailboxes, wake chain) 1f27117 + cd09e5a; step 2c (§Overdraft:
-> episode sentinel, allowance, extensions, suspension counters) this commit. Steps 3–4
-> (TryAcquireUpTo/NotifyAt capabilities; user-facing surface) remain design-only. The
-> weighing *surface* (how ops weigh tasks) was already settled in
+> episode sentinel, allowance, extensions, suspension counters) 081b57c; step 2d
+> (queue unification: nbcq FIFO + head slot) 91844ea. The remaining work and its
+> scope were revised 2026-07-05: **`TryAcquireUpTo` is DROPPED** (unnecessary — the
+> resource self-accounts for its own free capacity in the overdraft decision — and a
+> pessimization; see "Resource partial grants" and Rejected alternatives). What
+> remains: the **user-facing surface** (the weighted/plain limiter split etc.) next,
+> then **one consumable pass** — the consumable resource class
+> (`limiter-resource-classes.md`) + a rate limiter + `NotifyAt`, INCLUDING weighted
+> consumables — after the surface is in place (one implementation of the consumable
+> class, not two). The weighing *surface* (how ops weigh tasks) was already settled in
 > `dispatch-execution-split.md` and is not revisited here.
 
 ## Context
@@ -370,11 +377,33 @@ means an uncontended pool pays nothing.
   mutex-guarded FIFO of registered demands — cold by construction (only w ≥ 2
   waiters), so a locked list is fine.
 - The barrier check lands in `acquireLocal` and `acquireInto` (one atomic load).
-- **Resource partial grants**: gathering wants "give me up to n"; all-or-nothing
-  `TryAcquire(remaining)` forces a retry loop that never learns the resource has 2
-  of the needed 3 — untenable at byte granularity. Add a capability interface
-  (`TryAcquireUpTo(n int) int`), discovered by type assertion like
-  `HoldableResource`; resources without it fall back to the retry loop.
+- **Resource partial grants (`TryAcquireUpTo`) — considered, then DROPPED
+  (2026-07-05).** The idea was that a gather that can't take the whole shortfall from
+  the free pool (`TryAcquire(remaining)` is all-or-nothing) strands the free fragment
+  `F < remaining`, inflating the overdraft ask; `TryAcquireUpTo(n) int` would take
+  `F` and shrink the ask. Two findings retire it:
+  (1) **Not needed for correctness.** A demand only ever reaches the overdraft
+  evaluation when `free < shortfall` (if `free ≥ shortfall`, `TryAcquire` already
+  satisfied it). So the resource, which *is* the accountant for its own
+  `free = capacity − checkedOut`, computes the true deficit `shortfall − free` itself
+  and decides grant/refuse on that. A demand that would fit using the free capacity
+  never reaches the callback, so there is no spurious refusal to prevent.
+  (2) **It is a pessimization.** The demand that reaches overdraft is over capacity
+  and overdrafts regardless, so taking `F` does not help it finish — it only converts
+  easily-reachable free-pool capacity into cached-borrowable buried in the outlier's
+  body cache, which every subsequent small demand must then *steal* (a forest walk)
+  to reach. All-or-nothing is the *good* behavior: it leaves `F` in the pool where
+  locality is best. See Rejected alternatives.
+
+  Concentration is bounded by the cache lifecycle, so no reclamation machinery is
+  needed for it: a cache's held returns to the Resource by two paths — *steal-pull*
+  while it lives, and *destroy-drain* when it dies (`destroy` → `counts.drain` at
+  `inUse == 0` → `resource.Release`). For the overdraft case this is exact: the
+  episode end *is* the body-cache destroy, so the outlier's whole gathered hoard
+  drains back to the Resource at completion. (Proactive shrink of long-lived *idle*
+  cache — a persistent wave that gathered and went quiet — is the separate, narrower
+  `Reclaim(n)` case in `limiter-resource-classes.md`, motivated by shrinking capacity
+  (memory/GC drift), not by concentration.)
 - **Infeasibility handling**: superseded by the overdraft design (see "Overdraft"
   below) — detection is the armed + zero-in-use proof, needing no capacity
   visibility from the resource; the outcome is overdraft, wait ("not now"), or the
@@ -810,21 +839,39 @@ generic `OpOption[T]` (infects every option's call site).
 
 ## Sequencing (gut-first discipline)
 
-> Step 2d added 2026-07-04: the queue unification above — after step 2c
-> (overdraft), before step 3 (resource capabilities). It is a representation
-> swap of just-landed machinery; reset-over-patch applies.
+> Revised 2026-07-05: `TryAcquireUpTo` and the "capacity visibility for
+> infeasibility" of the old step 3 are both gone — infeasibility is the overdraft
+> zero-inUse proof (landed 2c), and partial grants were dropped (above). Steps 1–2
+> (incl. 2c overdraft, 2d queue unification) are landed; the remaining order is the
+> surface, then one consumable pass.
 
 1. **Mechanical weighting** — parameterize `counts` deltas, `Acquire(w)`,
-   `Permit.weight` — with every caller passing w=1: a provable no-op, landed green.
-2. **Gather + barrier + demand FIFO** behind the extended model check.
-3. **Resource capabilities** (`TryAcquireUpTo`, capacity visibility for
-   infeasibility).
-4. **Surface plumbing** per "User-facing surface" above (`WithLimits`/
-   `WithWeightLimits` builder methods + `WeightLimiter[T]`; `opoption.go` removal) —
-   separable, biggest churn, own session.
+   `Permit.weight` — with every caller passing w=1: a provable no-op. LANDED.
+2. **Gather + barrier + demand FIFO** behind the extended model check, then §Overdraft
+   episodes (2c) and the queue unification (2d). LANDED + validated (sequential
+   promise/grant rapid models, concurrent -race episode/suspension/churn stress).
+3. **Surface plumbing** per "User-facing surface" above (`WithLimits`/
+   `WithWeightLimits` builder methods + `WeightLimiter[T]` + the weighted/plain
+   limiter split; `opoption.go` removal) — biggest churn, own session. Lights up the
+   validated holdable weighted/overdraft core end-to-end (the sim can then dispatch
+   w ≥ 2). NEXT.
+4. **One consumable pass** — the consumable resource class
+   (`limiter-resource-classes.md`: pass-through, no caching forest) + a rate limiter +
+   the resource-driven wake (`NotifyAt` for the head's exact-target-or-refuse, plus
+   `Adjust`/`balance` for the general consumer wake), INCLUDING weighted consumables.
+   Done as one pass AFTER the surface (step 3) so the consumable class is implemented
+   once, with weighted support from the start, rather than a w=1 rate limiter now and
+   weighted consumables later (PN, 2026-07-05).
 
 ## Rejected alternatives
 
+- **`TryAcquireUpTo` (resource partial grants)** — PN, 2026-07-05. Not needed for
+  correctness (the resource self-accounts for its own free capacity; a demand that
+  would fit never reaches overdraft), and a pessimization (the overdrafting outlier
+  gains nothing by taking the free fragment — it just buries easily-reachable
+  free-pool capacity as cached-borrowable others must steal back; all-or-nothing
+  correctly leaves it in the pool). Concentration is bounded by destroy-drain, not by
+  a partial-grant primitive. See "Resource partial grants".
 - **Running-max (or any weight-sensitive) succession** — PN: biases toward
   satisfying only large demands; inverse starvation of smaller registered demands
   under sustained large arrivals. FIFO + sticky head instead.

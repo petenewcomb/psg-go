@@ -27,9 +27,39 @@ TestConcurrentOverdraftSuspendChurn (promoteScan churn + suspension counters/Res
 nudge + steal-vs-forest-mutation + blocking-waiter wedge detection). Both -race x20 clean.
 No further bug found (the one real bug was the exempt-gather leak, fixed d2ec3e8). Weighted
 core now validated by: sequential promise + grant rapid models (10-20k), concurrent
--race weighted/episode/suspension/churn stress. NEXT (forward work, foundation de-risked):
-weighted-acquisition step 3 (TryAcquireUpTo/NotifyAt) or step 4 (surface + split) or the
-gather-walk-avoidance impl — user's pick.
+-race weighted/episode/suspension/churn stress.
+
+**ROADMAP REVISED (PN, 2026-07-05, design session):**
+- **`TryAcquireUpTo` DROPPED** — not needed for correctness (a demand only reaches
+  overdraft when free < shortfall, so the resource self-accounts its own free to decide
+  grant/refuse; a fitting demand never reaches the callback) AND a pessimization (the
+  overdrafting outlier gains nothing by taking the free fragment — it just buries
+  easily-reachable free-pool capacity as cached-borrowable others must steal back;
+  all-or-nothing correctly leaves it in the pool). Recorded in weighted-acquisition.md
+  ("Resource partial grants" + Rejected alternatives).
+- **Concentration needs NO reclamation machinery** — destroy-drain is the safety net: a
+  cache's held returns via steal-pull (alive) + destroy-drain (`destroy`→`counts.drain`
+  at inUse==0→`resource.Release`). For overdraft it's exact: episode end IS the
+  body-cache destroy, so the outlier's hoard drains back at completion. (Proactive
+  shrink of long-lived IDLE cache = the separate narrower `Reclaim(n)`, motivated by
+  shrinking capacity, not concentration.)
+- **`NotifyAt` KEPT** — genuinely load-bearing for consumables (rate limiters): capacity
+  accrues over TIME (resource-internal), no release event for the pool to see, so the
+  resource must own the wake. `NotifyAt(n) error` = wake-at-exact-target + refuse-if-
+  unreachable in one call; also the wake-chatter fix. Nothing the pool can query/compute
+  (unlike free capacity), so it can't be dropped like TryAcquireUpTo.
+- **SEQUENCING (PN): surface FIRST (step 3), then ONE consumable pass (step 4).** Step 3
+  = the weighted/plain surface + split (lights up the validated holdable core; sim can
+  dispatch w≥2). Step 4 = one consumable pass — the consumable resource CLASS
+  (limiter-resource-classes.md: pass-through, no caching forest) + a rate limiter +
+  NotifyAt/Adjust wake, INCLUDING weighted consumables — done once AFTER the surface so
+  the consumable class is implemented a single time with weighted support from the start
+  (not a w=1 rate limiter now + weighted later). Note: adding a rate limiter is the
+  framework's FIRST consumable; the consumable class itself is unimplemented today (only
+  the holdable semaphore exists). Open detail for that pass: reconcile Adjust/balance
+  (general consumer wake) with NotifyAt (head exact-target) — does NotifyAt's timer post
+  to the balance or wake the head mailbox directly.
+NEXT: step 3 (weighted surface + split), then walk-avoidance impl is optional/separable.
 
 **►►► GATHER WALK-AVOIDANCE DESIGNED + enqueue w=1 gate LANDED (2026-07-05) —
 docs/decisions/gather-walk-avoidance.md. LANDED (0c0623e): enqueue calls headGather
@@ -289,11 +319,16 @@ detail, not design changes — flag on review if any smells):
   bracket tripwire). streampool: heldPermit.suspend(target) with target =
   `wv.ensureCache(meta, h.pool())` at all four suspend sites (Skim / block / SkimAll /
   ExecuteNowOrQueue) — ensureCacheChain IS the mkdir-p of resolution (c).
-- **Known over-ask (accepted until step 3)**: the head's gather can't harvest Resource
-  free-capacity smaller than the shortfall (all-or-nothing TryAcquire), so the overdraft
-  ask can exceed the true net need when free permits sit stranded — TryAcquireUpTo
-  (step 3) shrinks it. Same class: borrowable fragmented across several chain caches is
-  unharvestable by one claimant (descendants never gather; per-backing all-or-nothing).
+- **Known over-ask — RESOLVED as a non-issue (PN, 2026-07-05), not a step-3 item.** The
+  head's gather can't harvest Resource free-capacity smaller than the shortfall
+  (all-or-nothing TryAcquire), so the overdraft ask can name more than the true net need
+  when free permits sit stranded. But this is HARMLESS: the resource self-accounts its
+  own free in the grant/refuse decision (a demand that would fit never reaches
+  overdraft), so no wrong decision; and the stranded free stays in the pool where
+  locality is BEST (TryAcquireUpTo would bury it — see the roadmap above, DROPPED). The
+  looser `total` self-corrects at episode end. Borrowable fragmented across chain caches
+  is likewise fine (descendants never gather — the exempt path claims from the allowance
+  and the lifecycle drains it).
 - **Test posture**: the shared test `semaphore` is now wrapped by `waitingResource`
   (Overdraft = always "not now") so every W2b-era test keeps its blocking semantics and
   oracles; the bare semaphore (default-GRANT) + counting/refusing resources live in

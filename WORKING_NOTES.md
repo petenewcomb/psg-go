@@ -18,9 +18,18 @@ capacity (checkout, no excess) or claims from the allowance; the head's own gath
 in 1-2 runs), full gate + sim -race 20/20 regression. NOTE: the bug was UNREACHABLE in
 production/sim (w=1-only, no episodes) — only weighted dispatch (step 4) would hit it, so
 finding it now (cheap 3-line permits repro) vindicates validate-before-extend.
-REMAINING validation item 2 (NEXT): adversarial concurrent -race weighted stress
-interleaving episodes + suspensions + nested drives + invalidation/cancellation (exercise
-promoteScan against the episode/suspension machinery together).
+VALIDATION ITEM 2 DONE (09ad848): two adversarial concurrent -race tests —
+TestConcurrentEpisodeClaimants (stands an episode deliberately per round — grants need
+quiescence, which concurrency kills — then races exempt claimants + owner park/resume +
+stranger suspender WITHIN it; oracle = endEpisode's allowance==total assert; measured
+~15.7k concurrent excess-creating claims across 150 episodes) and
+TestConcurrentOverdraftSuspendChurn (promoteScan churn + suspension counters/ResumeDriver
+nudge + steal-vs-forest-mutation + blocking-waiter wedge detection). Both -race x20 clean.
+No further bug found (the one real bug was the exempt-gather leak, fixed d2ec3e8). Weighted
+core now validated by: sequential promise + grant rapid models (10-20k), concurrent
+-race weighted/episode/suspension/churn stress. NEXT (forward work, foundation de-risked):
+weighted-acquisition step 3 (TryAcquireUpTo/NotifyAt) or step 4 (surface + split) or the
+gather-walk-avoidance impl — user's pick.
 
 **►►► GATHER WALK-AVOIDANCE DESIGNED + enqueue w=1 gate LANDED (2026-07-05) —
 docs/decisions/gather-walk-avoidance.md. LANDED (0c0623e): enqueue calls headGather

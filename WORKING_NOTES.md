@@ -378,6 +378,79 @@ see open queue item 5).
     checkpoint.
   - **NEXT: CP-F6 — FollowUp ERROR PROPAGATION (PN, 2026-07-04; REVERSES the CP-F2
     no-error signature decision — my "no wave exists" rationale was FALSE).**
+    ★★★ FINAL API + SEMANTICS (PN 2026-07-04 — this block SUPERSEDES the detailed
+    mechanism prose below wherever they conflict; the below is kept for the reasoning
+    trail). ★★★
+    IMPLEMENTATION PROGRESS (worktree, uncommitted): STEPS 1-3 LANDED GREEN.
+    1 (KeyFollowUp/TagFollowUp interfaces + Func adapters + FollowUpFn sugar, value as
+    arg, type-erased fn on flowInstance), 2 (fnRiders = prefix-minus-self peel +
+    inner-holds-outer via flowInstance.holds released at the single fire's completion;
+    firingPass/active/re-fire DELETED; fires exactly once), 3 (unref/fire return error;
+    WithFlow named-return joins inline fires body-FIRST then LIFO). Tests added:
+    TestFollowUpFiresOnce, TestFollowUpNestedCoupling, TestFollowUpInlineErrors; re-fire
+    test removed. Root suite + 200-check -race sim green. NOTE: TestFlowTagFunnelUnion is
+    a PRE-EXISTING flake (~1/40 broad, verified by stash-A/B vs base — same flushSawB
+    signature; zero-deadline flush racing the 2nd accumulate; CP-F3 code untouched). NOT
+    a CP-F6 regression.
+    STEP 4a LANDED (async flush-model dispatch, WAVE-ROOTED — PN chose option 1 over
+    item-rooted/Background, 2026-07-05): unref(inline,wave); async path takes
+    wave.state.IncrementReference() at the unref site (sound — triggering item's work ref
+    not yet dropped: releaseBodyContext wave.go:189 precedes DecrementWork :193), dispatches
+    flowFireWork carrying the wave; flowFireWork.Execute stashes the scheduler ctx as
+    borrowSrcCtx (funnel precedent), Run builds a skimContext fire meta bound to the wave
+    rooted at borrowSrcCtx (NOT the recycled per-item ctx — that was the ctxpool-lifetime
+    trap), runs fn via runFire, routes fn's error through package-level flowErrSink to the
+    wave (funnelErrSink shape), then DecrementReference. wave threaded
+    releaseBodyContext(capture m.wave before Put) → flowUnrefRiders(r,wave) → unref → fire.
+    Consequence: the wave's drain now WAITS for the fire (keep-alive), so a follow-up on an
+    outstanding-work flow fires as part of the drain — verified by the async unit tests
+    under -race. Gate (40x rapid.checks=60 -race) running.
+    STEP 4b LANDED (funnel flush defer reorder): flush() now computes flushCtx at :590
+    without deferring its release there; registers `defer c.wave.state.DecrementReference()`
+    FIRST (runs LAST) then `defer releaseBodyContext(flushCtx)` AFTER (runs before the
+    barrier), keeping the panicked-emitErr defer registered LAST (runs FIRST — it reads
+    ctx=flushCtx before the release frees it). So a tag follow-up fired from the flush's
+    union-release takes its wave keep-alive while the funnel barrier still holds the wave
+    open — no Done-wave IncrementReference. Test TestFollowUpErrorCrossesFunnel (erroring
+    tag follow-up crosses a funnel, error surfaces via wave.CloseAndSkimAll) green -race 30x.
+    STEP 4 COMPLETE (4a+4b). -race gate 40/40 on 4a; RE-GATE after the 4b funnel change
+    40/40 (rapid.checks=60 each, 0 hangs). golangci-lint clean. CP-F6 COMPLETE — all 5
+    steps green. NOT committed yet (PN commits on request). CP-F5b (sim async-fire
+    oracle) and CP-F7/F8 remain separate future checkpoints; the sim currently fires the
+    scope follow-up INLINE (plan drains inside the scope body), so async firing is covered
+    only by unit tests until CP-F5b.
+      FIRE-ONCE, NO RE-FIRE. A followup's own rider is PEELED before its body runs
+      (fnRiders = prefix-MINUS-self = the enclosing set), so its dispatches don't re-ref
+      it: it fires EXACTLY ONCE on count→0 (a single atomic transition — one winner).
+      DELETES the firingPass loop, the active flag, the true-end-vs-extension recheck,
+      and the missed-wake window (flowinst.go:93–116) ENTIRELY. Re-attachment (extending
+      the flow under the followup's own identity) is an EXPLICIT re-stamp inside the
+      body — opt-IN, so "no extension" is the safe default and users never have to
+      remember Suppress to avoid accidental re-fire (PN). NESTED-LIFETIME COUPLING
+      SURVIVES: the peeled body still carries the ENCLOSING instances, so its extensions
+      ref them and every OUTER followup still waits for the inner's subtree (the peel IS
+      the LIFO unwind, made literal). The inner-holds-outer ref releases when the single
+      fire COMPLETES (inline: body returns; async: fire-task completes) — no true-end
+      loop needed.
+      VALUE DELIVERED AS THE ARG. A key followup gets its key's value directly (From()
+      reads absent inside, since self is peeled — the arg is the honest channel).
+      TWO UNIQUE INTERFACES + Func adapters + Fn sugar (NOT bare func; NOT Handler/Task —
+      both carry a callerErr arg a followup has no analog for; dropped, not repurposed —
+      a coherent "flow failed" value is inline-only, so disqualified). NAMES LOCKED (PN
+      2026-07-05): method Do (not Handle — Handle/Submit take a NOUN to handle; a followup
+      is intrinsically a VERB/action; sync.Once.Do fire-once resonance). Interfaces fully
+      Flow-qualified for consistency with FlowKey/FlowTag (future non-flow keys/tags):
+        key:  FlowKeyFollowUp[T]{Do(ctx,value T)error} + FlowKeyFollowUpFunc[T] +
+              k.FollowUp(iface) / k.FollowUpFn(func(ctx,T)error)
+        tag:  FlowTagFollowUp{Do(ctx)error} + FlowTagFollowUpFunc + t.FollowUp(iface) /
+              t.FollowUpFn(func(ctx)error)
+      (Follower+Follow considered & rejected — -er begs Follow, clashes with Do; kept the
+      noun FollowUp type + Do.) Value delivered as the Do arg, named to MIRROR/EQUAL the
+      key var (txn key → `txn` value, deliberately shadowing; peel makes From absent inside
+      so the shadow removes only what you shouldn't reach for). Op-builder sugar (In/limits)
+      NOT added: the fire-wave is dynamic, no meaning for a followup; own pass if ever.
+      ASYNC DISPATCH unchanged from the flush-model block below (IncrementReference on the
+      finished wave + global-pool dispatch + package errSink), MINUS the re-fire delta.
     `FollowUp(fn func(context.Context) error)`. Propagation: INLINE (scope-exit)
     firing's error joins WithFlow's return via errors.Join, body error FIRST
     (first-error-primary; multiple followups fire + join in INVERSE registration
@@ -396,6 +469,79 @@ see open queue item 5).
     inline-error-joins-return (body+followup, multi-followup order), async-error via
     drain, extension-firing error routing, flush-triggered firing under live
     barrier. Reconcile flow-design.md (fn signature + this model) at the docs pass.
+    MECHANISM SETTLED (2026-07-04, after a full design pass — SUPERSEDES the earlier
+    "capture + IncrementReference + bespoke errSink + misattribution corner" sketch,
+    which was me hand-reimplementing what an ordinary WAVE WORK ITEM already gives).
+    The firing STOPS being wave-less. Two firing sites, keyed by the existing `inline`
+    flag, which now means DIRECT-CALL vs SUBMIT-INTO-FINISHED-WAVE:
+      • inline=true (scope exit): direct `fn(scopeCtx)` on the user's own WithFlow call
+        frame (safe — their goroutine); its error joins WithFlow's return (body err
+        FIRST, created instances LIFO).
+      • inline=false (work-item completion): fire via the FUNNEL-FLUSH MODEL (PN chose
+        flush as the model, 2026-07-04 — SUPERSEDES the "submit as an ordinary task"
+        idea; a direct inline fn is still rejected: that site, releaseBodyContext inside
+        taskWork.Free wave.go:189, runs on a pool worker mid-completion and a direct fn
+        draining its own wave on a saturated pool would wedge). Lift the flush trio:
+          – KEEP-ALIVE BARRIER: at count→0 inside the finished item's completion, its
+            wave W is still live (item DecrementWork wave.go:193 runs AFTER
+            releaseBodyContext wave.go:189), so take W.state.IncrementReference() there —
+            the funnel barrier (funnel.go:733), just taken at true-end on a dynamic W
+            instead of at accumulate on a fixed wave.
+          – DISPATCH: hand the body to the global pool (the existing flowFireWork /
+            ForceFresh path, retained), riding the finished item's ctx, carrying
+            fnRiders (prefix).
+          – ERROR ROUTING: a package-level flow errSink (funnelErrSink shape,
+            funnel.go:75/505) submits the body's error to W → surfaces via W's drain;
+            release the IncrementReference AFTER any downstream Submit so totalReferences
+            never transiently zeroes (flush defer ordering, funnel.go:604).
+        The earlier "capture across an executor hop + misattribution corner" framing is
+        RETIRED — this is the IncrementReference pattern adopted wholesale from flush,
+        not hand-rolled.
+      STRUCTURAL DELTA (the two things a follow-up has that a flush doesn't; both handled
+      by keeping existing machinery): a funnel instance is bound to ONE wave and fires
+      ONCE; a follow-up's wave is DYNAMIC (whichever DAG item finished last) and it can
+      RE-FIRE (extension → re-quiesce). So the IncrementReference is taken/released PER
+      FIRING on that firing's W, and the firingPass/count/active state machine is RETAINED
+      (fire-once-per-quiescence, true-end detection, nested-lifetime holds). Flush supplies
+      dispatch+keepalive+errSink; firingPass supplies the re-fire logic.
+      DROP context.Background rooting (flowinst.go:118): the firing rides the finished
+      item's ctx; if it's cancelled that's the user's call (fn checks ctx.Err()). The
+      follow-up body is a launchable Task internally (Handler[struct{}]) so the errSink
+      path is the ordinary one; user-facing signature stays func(context.Context) error
+      (wrapped) — a bare Handler only earns its keep if follow-ups take op-options, which
+      they don't.
+    NESTED-LIFETIME RIDER MODEL (PN confirmed 2026-07-04; REPLACES the singleton
+    fnRiders — flat siblings were wrong, LIFO held only for same-pass inline firings):
+      • A follow-up fires with the rider set AS OF ITS OWN REGISTRATION POINT (the
+        prefix: all values + follow-up instances registered at or before it), NOT a
+        singleton {self}. VISIBILITY half: fn reads the ENCLOSING values/tags it was
+        registered under (reqKey.From in an audit follow-up), not only its own key.
+        LIFO firing peels the stack one layer per firing (innermost fires first seeing
+        the whole stack; each outer sees one fewer).
+      • ORDERING half — inner-holds-outer: at registration, an inner (later-registered)
+        follow-up takes a persistent ref() on EACH enclosing instance, held for its
+        whole life, RELEASED AT ITS OWN TRUE END (firingPass count-still-zero branch,
+        flowinst.go:99). So an outer's count cannot reach zero — cannot fire — until the
+        inner has fully quiesced. This sequences LIFO even when firings go async (the
+        prefix set alone gives visibility but NOT ordering: shared body carriers drive
+        all instances to zero together otherwise).
+      • EXTENSION COUPLING IS INTENDED: true end = count still zero after firing = fn
+        fired AND nothing it spawned is outstanding, so an extension re-raises the count
+        and defers true end (and thus the peel) until the extension's whole subtree
+        quiesces. Every ENCLOSING follow-up waits, transitively (cascade one layer at a
+        time). This is the defer guarantee made to hold across async extension — plain
+        defer can't express it. Real coupling (a slow inner extension holds every outer
+        follow-up open); the decoupling escape hatch is a SINGLE follow-up that itself
+        submits N concurrent tasks (PN).
+    Return threading: fire()→raw fn err; firingPass()→errors.Join of its fires;
+    inline path returns it up through unref(true) to WithFlow; Submit path routes the
+    firing task's error through the wave's ordinary errSink. WithFlow's scope-exit defer
+    must release created instances in REVERSE registration order (LIFO). Flush defer
+    reorder (releaseBodyContext AFTER the barrier defer so it runs BEFORE it) still
+    applies. Tests: inline-error-joins-return (body+multi-followup LIFO order), async
+    firing surfaces via the finished wave's drain, extension delays every outer
+    follow-up (nested-lifetime coupling), enclosing value readable in fn, flush-
+    triggered firing under live barrier. Reconcile flow-design.md at the docs pass.
   - **THEN CP-F7 — SKIM HANDLERS ARE FLOW CONTINUATIONS (PN, 2026-07-04; REVERSES
     the CP-F3 "skim is not a fan-in edge" note — my gloss was wrong).** A queued
     result is a CARRIER: skimmer.Submit captures the item's riders (ref at submit),

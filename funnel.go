@@ -587,21 +587,34 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	// naturally rider-free on the sever side; doing both here makes the rule
 	// structural for every drive. The extent is synchronous (the user Flush
 	// and its dispatches complete within this call).
-	if fctx, adopted := flowFanInContext(ctx, c.flowTags); adopted {
+	//nolint:contextcheck // flushCtx holds the adopted fan-in ctx to defer its release after the barrier
+	var flushCtx context.Context
+	if fc, adopted := flowFanInContext(ctx, c.flowTags); adopted {
 		c.flowTags = nil
-		defer releaseBodyContext(fctx)
-		ctx = fctx
+		flushCtx = fc
+		ctx = fc
 	}
 
 	// Release the per-instance flush barrier reference acquired at
-	// allocation. Deferred so a panicking Flush still releases it, and
-	// ordered after the accumulator.Flush body below so that any
-	// downstream Submit performed by Flush takes its work reference
-	// before this reference drops — totalReferences cannot transiently
-	// reach zero across an emitting flush. (c.wave is read here, while
-	// c.mu is held, so the deferred call captures the state pointer, not
-	// the instance.)
+	// allocation. Registered FIRST among the trailing defers so it runs
+	// LAST — after the accumulator.Flush body (so any downstream Submit
+	// takes its work reference before this reference drops) AND after the
+	// tag-union release below (so a tag follow-up fired by that release
+	// takes its wave reference while this barrier still holds the wave open;
+	// otherwise the wave-rooted fire could IncrementReference a Done wave).
+	// totalReferences cannot transiently reach zero across an emitting flush.
+	// Deferred so a panicking Flush still releases it. (c.wave is read here,
+	// while c.mu is held, so the deferred call captures the state pointer,
+	// not the instance.)
 	defer c.wave.state.DecrementReference()
+
+	// Tag-union release: registered after the barrier so it runs BEFORE it —
+	// firing the adopted tag follow-ups while the wave is still held. Registered
+	// before the panicked defer below so it runs AFTER it (that defer reads
+	// ctx=flushCtx, which this release frees).
+	if flushCtx != nil {
+		defer releaseBodyContext(flushCtx)
+	}
 
 	panicked := true // Assume the worst
 	defer func() {

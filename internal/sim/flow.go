@@ -121,10 +121,11 @@ func (c *controller) runWithFlowScope(
 	own := &fs.expects[len(fs.expects)-1]
 	err := streampool.WithFlow(ctx, body,
 		own.key.Value(own.val),
-		own.tag.FollowUp(func(context.Context) {
+		own.tag.FollowUpFn(func(context.Context) error {
 			chk.Truef(fs.drained.Load(),
 				"flow follow-up fired before the scoped plan drained (Plan#%d)", c.Plan.ID)
 			fs.fires.Add(1)
+			return nil
 		}))
 	// Generous bound: the executor-path firing normally lands in microseconds;
 	// the wait only bites when the contract is violated.

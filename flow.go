@@ -5,6 +5,7 @@ package streampool
 
 import (
 	"context"
+	"errors"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
 )
@@ -104,7 +105,10 @@ type FlowOption struct {
 	kind flowOptionKind
 	id   *flowIdentity
 	val  any
-	fn   func(context.Context)
+	// fn is the type-erased follow-up body: the registering FlowKey/FlowTag method
+	// wraps the user's typed handler into this shape (value delivered as `any`, the
+	// key's bundle value or nil for a tag). nil unless kind == flowOptFollowUp.
+	fn func(ctx context.Context, value any) error
 }
 
 // Value returns a [FlowOption] that attaches v under k for the extent of a
@@ -160,45 +164,85 @@ func (t FlowTag) InFlow(ctx context.Context) bool {
 	return false
 }
 
-// FollowUp returns a [FlowOption] that registers fn to run at the
-// registration's nominal end — when the registering scope has exited and all
-// work carrying k's bundle has completed. fn runs with a fresh framework ctx
-// (rooted at context.Background, not the ended work's cancellation) that
-// carries the bundle ambiently: work fn dispatches extends the flow, and a
-// later nominal end runs fn again; a firing that extends nothing is the true
-// end. fn returns nothing by design — a follow-up has no wave to surface an
-// error through, so error handling belongs inside fn (typically by
-// dispatching into a wave fn drains). See docs/decisions/flow-design.md.
-//
-// NOTE (current checkpoint): the key's bundle severs at a funnel fan-in, so a
-// path-scoped follow-up's refs release as each accumulate item completes —
-// which is its defined semantics ("all work CARRYING the value").
-func (k FlowKey[V]) FollowUp(fn func(context.Context)) FlowOption {
+// FlowKeyFollowUp is the body registered by [FlowKey.FollowUp]; its Do runs once
+// at the flow's end and receives the key's bundle value directly (the key's own
+// rider is peeled before the call, so [FlowKey.From] would read absent inside —
+// the argument is the value's channel). Its error propagates like a body's:
+// joined into [WithFlow]'s return for an end reached before the scope exits, or
+// through the finishing wave's drain otherwise.
+type FlowKeyFollowUp[T any] interface {
+	Do(ctx context.Context, value T) error
+}
+
+// FlowKeyFollowUpFunc adapts a plain function to [FlowKeyFollowUp];
+// [FlowKey.FollowUpFn] wraps one for you.
+type FlowKeyFollowUpFunc[T any] func(ctx context.Context, value T) error
+
+// Do calls f.
+func (f FlowKeyFollowUpFunc[T]) Do(ctx context.Context, value T) error { return f(ctx, value) }
+
+// FlowTagFollowUp is the body registered by [FlowTag.FollowUp]; its Do runs once
+// at the flow's end. A tag carries no value, so it takes only a ctx. Error
+// propagation as in [FlowKeyFollowUp].
+type FlowTagFollowUp interface {
+	Do(ctx context.Context) error
+}
+
+// FlowTagFollowUpFunc adapts a plain function to [FlowTagFollowUp];
+// [FlowTag.FollowUpFn] wraps one for you.
+type FlowTagFollowUpFunc func(ctx context.Context) error
+
+// Do calls f.
+func (f FlowTagFollowUpFunc) Do(ctx context.Context) error { return f(ctx) }
+
+// FollowUp returns a [FlowOption] that registers h to run once at the
+// registration's end — when the registering scope has exited and all work
+// carrying k's bundle has completed. h receives k's value and runs under the
+// enclosing rider set (k's own rider peeled, so h's own dispatches do not
+// re-fire it; re-extending the flow under k is an explicit re-stamp inside h).
+// See docs/decisions/flow-design.md.
+func (k FlowKey[V]) FollowUp(h FlowKeyFollowUp[V]) FlowOption {
 	if k.id == nil {
 		panic("streampool: FollowUp called on a zero FlowKey; mint with NewFlowKey")
 	}
-	if fn == nil {
-		panic("streampool: FollowUp called with a nil function")
+	if h == nil {
+		panic("streampool: FollowUp called with a nil handler")
 	}
-	return FlowOption{kind: flowOptFollowUp, id: k.id, fn: fn}
+	return FlowOption{kind: flowOptFollowUp, id: k.id, fn: func(ctx context.Context, value any) error {
+		v, _ := value.(V) // zero V when the key carries no value
+		return h.Do(ctx, v)
+	}}
 }
 
-// FollowUp returns a [FlowOption] that registers fn to run at the
-// registration's nominal end — when the registering scope has exited and all
-// work in the tagged flow has completed. Semantics as in [FlowKey.FollowUp].
-//
-// NOTE (current checkpoint): the DAG-scoped union across funnel fan-ins lands
-// in a later checkpoint — until then a tag's refs release as each accumulate
-// item completes, so a nominal end can precede the flush of an aggregate that
-// folded tagged items.
-func (t FlowTag) FollowUp(fn func(context.Context)) FlowOption {
+// FollowUpFn is [FlowKey.FollowUp] sugar over a plain function.
+func (k FlowKey[V]) FollowUpFn(fn func(ctx context.Context, value V) error) FlowOption {
+	if fn == nil {
+		panic("streampool: FollowUpFn called with a nil function")
+	}
+	return k.FollowUp(FlowKeyFollowUpFunc[V](fn))
+}
+
+// FollowUp returns a [FlowOption] that registers h to run once at the
+// registration's end — when the registering scope has exited and all work in
+// the tagged flow has completed. Semantics as in [FlowKey.FollowUp].
+func (t FlowTag) FollowUp(h FlowTagFollowUp) FlowOption {
 	if t.id == nil {
 		panic("streampool: FollowUp called on a zero FlowTag; mint with NewFlowTag")
 	}
-	if fn == nil {
-		panic("streampool: FollowUp called with a nil function")
+	if h == nil {
+		panic("streampool: FollowUp called with a nil handler")
 	}
-	return FlowOption{kind: flowOptFollowUp, id: t.id, fn: fn}
+	return FlowOption{kind: flowOptFollowUp, id: t.id, fn: func(ctx context.Context, _ any) error {
+		return h.Do(ctx)
+	}}
+}
+
+// FollowUpFn is [FlowTag.FollowUp] sugar over a plain function.
+func (t FlowTag) FollowUpFn(fn func(ctx context.Context) error) FlowOption {
+	if fn == nil {
+		panic("streampool: FollowUpFn called with a nil function")
+	}
+	return t.FollowUp(FlowTagFollowUpFunc(fn))
 }
 
 // Suppress returns a [FlowOption] that stops k's INHERITED bundle at the
@@ -251,7 +295,7 @@ func NewFlow() FlowOption {
 // WithFlow is optional: flows always exist, and every bare Submit extends one
 // with the ambient (possibly empty) rider set. Most programs never call it.
 // See docs/decisions/flow-design.md.
-func WithFlow(ctx context.Context, body func(context.Context) error, opts ...FlowOption) error {
+func WithFlow(ctx context.Context, body func(context.Context) error, opts ...FlowOption) (err error) {
 	if body == nil {
 		panic("streampool: WithFlow called with a nil body")
 	}
@@ -266,15 +310,24 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	}
 	riders, created := buildFlowRiders(ambient, opts)
 	if len(created) > 0 {
-		// Release the scope's ref on each instance this scope registered —
-		// deferred so a panicking body stays conservation-sound. The release
-		// that reaches zero fires the follow-up INLINE here at scope exit
-		// (semantically the user's own call site; also what makes "an empty
-		// scope fires at return" hold deterministically). Inherited instances
-		// hold no scope ref: the enclosing carrier's ref covers this extent.
+		// Release the scope's ref on each instance this scope registered, in
+		// REVERSE registration order (LIFO — innermost first, defer-like). The
+		// release that reaches zero fires the follow-up INLINE here at scope exit
+		// (semantically the user's own call site; also what makes "an empty scope
+		// fires at return" hold deterministically). Reverse order gives the LIFO
+		// firing sequence directly when the flow is already quiescent; the
+		// inner-holds-outer refs enforce it when work is still outstanding.
+		// Deferred so a panicking body still releases. Inherited instances hold no
+		// scope ref: the enclosing carrier's ref covers this extent.
+		//
+		// An inline firing's error joins WithFlow's return, body error FIRST (err
+		// already holds it), then follow-ups in this LIFO order (innermost first).
+		//nolint:contextcheck // inline scope-exit fire runs on the caller's own frame
 		defer func() {
-			for _, in := range created {
-				in.unref(true)
+			for i := len(created) - 1; i >= 0; i-- {
+				if fireErr := created[i].unref(true, nil); fireErr != nil {
+					err = errors.Join(err, fireErr)
+				}
 			}
 		}()
 	}
@@ -299,7 +352,8 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
 	}
-	return body(ctxpool.WithValue(ctx, m))
+	err = body(ctxpool.WithValue(ctx, m))
+	return err
 }
 
 // flowRiders is an immutable snapshot of the riders in scope. A registering
@@ -380,7 +434,12 @@ func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*fl
 		}
 	}
 
-	// Pass 2: follow-up instances, wired against the settled bundle values.
+	// Pass 2: follow-up instances. Each fires ONCE at its own end. Its fnRiders is
+	// the ENCLOSING snapshot (entries registered before it, its own identity
+	// peeled — value delivered as the fn arg, instance omitted so it can't
+	// re-fire); its extensions inherit that, holding the outer instances. It also
+	// takes an inner-holds-outer ref on every already-registered instance,
+	// released when it fires — so an outer waits for this whole subtree (LIFO).
 	var created []*flowInstance
 	for i := range opts {
 		o := &opts[i]
@@ -389,19 +448,39 @@ func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*fl
 		}
 		in := &flowInstance{fn: o.fn}
 		in.count.Store(1) // the registering scope's ref, released at scope exit
+
+		// Enclosing snapshot: entries as they stand BEFORE this instance is added
+		// (so it is naturally absent), copied so later appends don't mutate it,
+		// with this identity's value peeled (From reads absent inside — the value
+		// is the fn argument). The insts slices are shared read-only snapshots:
+		// every future add copy-appends a fresh slice, never mutating these.
+		encl := make([]flowRiderEntry, len(entries))
+		copy(encl, entries)
+		for e := range encl {
+			if encl[e].id == o.id {
+				encl[e].val = nil
+			}
+		}
+		in.fnRiders = &flowRiders{entries: encl}
+
+		// Inner-holds-outer: reference every instance registered before this one.
+		for e := range entries {
+			for _, out := range entries[e].insts {
+				out.ref()
+				in.holds = append(in.holds, out)
+			}
+		}
+
+		// Settle this instance's own value and add it to the live entries.
 		j := entryIdx(o.id)
 		if j < 0 {
 			entries = append(entries, flowRiderEntry{id: o.id})
 			j = len(entries) - 1
 		}
+		in.val = entries[j].val // settled bundle value (nil for a tag / valueless key)
 		// Copy-append: the copied entry's insts may share its backing array
 		// with the ambient snapshot, which other goroutines read.
 		entries[j].insts = append(append([]*flowInstance(nil), entries[j].insts...), in)
-		in.fnRiders = &flowRiders{entries: []flowRiderEntry{{
-			id:    o.id,
-			val:   entries[j].val,
-			insts: []*flowInstance{in},
-		}}}
 		created = append(created, in)
 	}
 

@@ -76,15 +76,17 @@ func borrowBodyContext(
 // *ctxMeta to bodyMetaPool. The meta is read out before ctxpool.Free clears the child's
 // value, then returned (and zeroed) — so neither pool retains a cross-borrow reference.
 // It also releases the flow carrier refs the borrow took; a release that ends an
-// instance's flow hands the firing pass to the executor (never inline — this path runs
+// instance's flow hands the firing to the executor (never inline — this path runs
 // inside completion/Free machinery, before the item's wave reference drops).
 func releaseBodyContext(ctx context.Context) {
 	m, _ := ctxpool.GetValue[*ctxMeta](ctx)
 	ctxpool.Free(ctx)
 	if m != nil {
 		riders := m.riders
+		wave := m.wave // captured before Put zeroes the meta; wave a fire routes into
 		bodyMetaPool.Put(m)
-		flowUnrefRiders(riders)
+		//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
+		flowUnrefRiders(riders, wave)
 	}
 }
 

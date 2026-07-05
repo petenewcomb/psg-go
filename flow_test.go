@@ -5,6 +5,8 @@ package streampool_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -283,7 +285,7 @@ func TestFollowUpFiresAtScopeExit(t *testing.T) {
 		}
 		chk.EqualValues(0, fires.Load(), "must not fire while the scope holds its ref")
 		return nil
-	}, checkout.FollowUp(func(context.Context) { fires.Add(1) }))
+	}, checkout.FollowUpFn(func(context.Context) error { fires.Add(1); return nil }))
 	firedBeforeReturn = fires.Load() == 1
 	chk.NoError(err)
 	chk.True(bodyRan.Load())
@@ -299,7 +301,7 @@ func TestFollowUpEmptyScope(t *testing.T) {
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
 		chk.True(tag.InFlow(ctx), "registration marks presence")
 		return nil
-	}, tag.FollowUp(func(context.Context) { fires.Add(1) }))
+	}, tag.FollowUpFn(func(context.Context) error { fires.Add(1); return nil }))
 	chk.NoError(err)
 	chk.EqualValues(1, fires.Load())
 }
@@ -322,7 +324,7 @@ func TestFollowUpFiresAfterAsyncCompletion(t *testing.T) {
 	var wave streampool.Wave
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
 		return task.In(&wave).Start(ctx)
-	}, tag.FollowUp(func(context.Context) { close(fired) }))
+	}, tag.FollowUpFn(func(context.Context) error { close(fired); return nil }))
 	chk.NoError(err)
 
 	select {
@@ -340,16 +342,16 @@ func TestFollowUpFiresAfterAsyncCompletion(t *testing.T) {
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
 }
 
-// TestFollowUpExtension: a follow-up that dispatches async work extends the
-// flow — a later nominal end fires it again; a firing that extends nothing is
-// the true end (no third fire).
-func TestFollowUpExtension(t *testing.T) {
+// TestFollowUpFiresOnce: a follow-up fires exactly once at its end. Its own
+// rider is peeled inside the body (InFlow reads false), so async work it
+// dispatches does NOT re-fire it — re-extending under its identity would be an
+// explicit re-stamp.
+func TestFollowUpFiresOnce(t *testing.T) {
 	chk := require.New(t)
 	tag := streampool.NewFlowTag()
 
 	var fires atomic.Int32
 	release := make(chan struct{})
-	secondFire := make(chan struct{})
 	var extWave streampool.Wave
 
 	extTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
@@ -358,29 +360,133 @@ func TestFollowUpExtension(t *testing.T) {
 	})
 
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		return nil // empty scope: first fire happens at return
-	}, tag.FollowUp(func(ctx context.Context) {
-		switch fires.Add(1) {
-		case 1:
-			// Extend: async work under the firing instance (ambient bundle).
-			chk.True(tag.InFlow(ctx), "fn ctx carries the firing bundle")
-			chk.NoError(extTask.In(&extWave).Start(ctx))
-		case 2:
-			close(secondFire) // extend nothing: true end
-		}
+		return nil // empty scope: fires at return
+	}, tag.FollowUpFn(func(ctx context.Context) error {
+		fires.Add(1)
+		chk.False(tag.InFlow(ctx), "the follow-up's own rider is peeled inside the body")
+		// Dispatch async work — it does not carry the tag, so it cannot re-fire.
+		return extTask.In(&extWave).Start(ctx)
 	}))
 	chk.NoError(err)
-	chk.EqualValues(1, fires.Load(), "first fire is inline at scope exit")
+	chk.EqualValues(1, fires.Load(), "fires once, inline at scope exit")
 
 	close(release)
-	select {
-	case <-secondFire:
-	case <-time.After(5 * time.Second):
-		t.Fatal("extension's nominal end did not refire the follow-up")
-	}
 	chk.NoError(extWave.CloseAndSkimAll(context.Background()))
-	time.Sleep(50 * time.Millisecond) // settle: no third fire may arrive
-	chk.EqualValues(2, fires.Load(), "a firing that extends nothing is the true end")
+	time.Sleep(50 * time.Millisecond) // settle: no second fire may arrive
+	chk.EqualValues(1, fires.Load(), "the extension did not re-fire the follow-up")
+}
+
+// TestFollowUpNestedCoupling: an inner (later-registered) follow-up that extends
+// the flow holds the outer follow-up open until the extension drains — defer-
+// style LIFO nesting. The inner fires first (inline at scope exit); the outer
+// fires only after the inner's async extension completes.
+func TestFollowUpNestedCoupling(t *testing.T) {
+	chk := require.New(t)
+	outer := streampool.NewFlowTag()
+	inner := streampool.NewFlowTag()
+
+	release := make(chan struct{})
+	var extDone atomic.Bool
+	var extWave streampool.Wave
+	extTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		<-release
+		extDone.Store(true)
+		return nil
+	})
+
+	var innerFired, outerAfterExt atomic.Bool
+	outerFired := make(chan struct{})
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return nil
+	},
+		outer.FollowUpFn(func(context.Context) error {
+			outerAfterExt.Store(extDone.Load())
+			close(outerFired)
+			return nil
+		}),
+		inner.FollowUpFn(func(ctx context.Context) error {
+			innerFired.Store(true)
+			chk.True(outer.InFlow(ctx), "inner fn sees the enclosing outer rider")
+			chk.False(inner.InFlow(ctx), "inner's own rider is peeled")
+			// Extend under the enclosing set (outer still present): the extension
+			// references outer, holding it open until it drains.
+			return extTask.In(&extWave).Start(ctx)
+		}),
+	)
+	chk.NoError(err)
+	chk.True(innerFired.Load(), "inner fires inline at scope exit")
+	select {
+	case <-outerFired:
+		t.Fatal("outer fired before the inner's extension drained")
+	default:
+	}
+
+	close(release)
+	chk.NoError(extWave.CloseAndSkimAll(context.Background()))
+	select {
+	case <-outerFired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outer follow-up did not fire after the extension drained")
+	}
+	chk.True(outerAfterExt.Load(), "outer fired only after the extension completed")
+}
+
+// TestFollowUpInlineErrors: follow-ups firing inline at scope exit join their
+// errors into WithFlow's return — body error FIRST, then follow-ups in LIFO
+// (innermost-first) order.
+func TestFollowUpInlineErrors(t *testing.T) {
+	chk := require.New(t)
+	outer := streampool.NewFlowTag()
+	inner := streampool.NewFlowTag()
+
+	errBody := errors.New("body-err")
+	errOuter := errors.New("outer-err")
+	errInner := errors.New("inner-err")
+
+	err := streampool.WithFlow(context.Background(), func(context.Context) error {
+		return errBody
+	},
+		outer.FollowUpFn(func(context.Context) error { return errOuter }),
+		inner.FollowUpFn(func(context.Context) error { return errInner }),
+	)
+	chk.ErrorIs(err, errBody)
+	chk.ErrorIs(err, errOuter)
+	chk.ErrorIs(err, errInner)
+	// Order: body first, then follow-ups LIFO (inner before outer).
+	msg := err.Error()
+	chk.True(
+		strings.Index(msg, "body-err") < strings.Index(msg, "inner-err") &&
+			strings.Index(msg, "inner-err") < strings.Index(msg, "outer-err"),
+		"order must be body, inner, outer: %q", msg)
+}
+
+// TestFollowUpErrorCrossesFunnel: a tag follow-up whose last carrier is a funnel's
+// adopted tag-union ref fires from the flush; if it errors, the error must surface
+// via the funnel wave's drain. Exercises the flush-defer ordering — the fire's
+// wave keep-alive is taken while the funnel barrier still holds the wave open.
+func TestFollowUpErrorCrossesFunnel(t *testing.T) {
+	chk := require.New(t)
+	tag := streampool.NewFlowTag()
+	errFollowUp := errors.New("followup-across-funnel")
+
+	var wave streampool.Wave
+	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+		return streampool.NewAccumulator(
+			func(_ context.Context, _ int, err error) (time.Time, error) { return time.Time{}, err },
+			func(context.Context) error { return nil },
+		)
+	})
+
+	// Scope submits one item then returns; the tag rides the fan-in and the
+	// follow-up's last carrier becomes the funnel's adopted union ref, released
+	// at flush.
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return aggregator.Submit(ctx, 1)
+	}, tag.FollowUpFn(func(context.Context) error { return errFollowUp })))
+
+	err := wave.CloseAndSkimAll(context.Background())
+	chk.ErrorIs(err, errFollowUp,
+		"an erroring tag follow-up fired from the flush must surface via the wave drain")
 }
 
 // TestFollowUpBundleValue: a follow-up under a value-bearing key receives the
@@ -395,9 +501,10 @@ func TestFollowUpBundleValue(t *testing.T) {
 		return nil
 	},
 		// FollowUp deliberately listed BEFORE Value: order-independent.
-		txn.FollowUp(func(ctx context.Context) {
-			v, ok := txn.From(ctx)
-			got.Store([2]any{v, ok})
+		// The value is delivered as the handler argument (end-state channel).
+		txn.FollowUpFn(func(ctx context.Context, v string) error {
+			got.Store([2]any{v, true})
+			return nil
 		}),
 		txn.Value("tx-7"),
 	)
@@ -431,7 +538,7 @@ func TestFollowUpConcurrentStress(t *testing.T) {
 					}
 				}
 				return wave.CloseAndSkimAll(ctx)
-			}, tag.FollowUp(func(context.Context) { fired.Add(1) }))
+			}, tag.FollowUpFn(func(context.Context) error { fired.Add(1); return nil }))
 		}()
 	}
 	for s := 0; s < scopes; s++ {
@@ -500,7 +607,7 @@ func TestFlowTagCrossesFunnel(t *testing.T) {
 					}
 				}
 				return nil
-			}, checkout.FollowUp(func(context.Context) { fires.Add(1); close(fired) }),
+			}, checkout.FollowUpFn(func(context.Context) error { fires.Add(1); close(fired); return nil }),
 				reqCtx.Value("req-77"))
 			chk.NoError(err)
 
@@ -553,10 +660,10 @@ func TestFlowTagFunnelUnion(t *testing.T) {
 
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
 		return aggregator.Submit(ctx, 1)
-	}, tagA.FollowUp(func(context.Context) { firedA.Add(1) })))
+	}, tagA.FollowUpFn(func(context.Context) error { firedA.Add(1); return nil })))
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
 		return aggregator.Submit(ctx, 2)
-	}, tagB.FollowUp(func(context.Context) { firedB.Add(1) })))
+	}, tagB.FollowUpFn(func(context.Context) error { firedB.Add(1); return nil })))
 
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
 	chk.Eventually(func() bool { return firedA.Load() == 1 && firedB.Load() == 1 },
@@ -596,7 +703,7 @@ func TestFlowSuppress(t *testing.T) {
 			// Long-running work under the suppressed scope takes no refs.
 			return blocked.In(&wave).Start(inCtx)
 		}, key.Suppress(), tag.Suppress())
-	}, key.Value("outer"), tag.FollowUp(func(context.Context) { close(fired) }))
+	}, key.Value("outer"), tag.FollowUpFn(func(context.Context) error { close(fired); return nil }))
 	chk.NoError(err)
 
 	// The tag's only carriers were the scope and unsuppressed items (none):

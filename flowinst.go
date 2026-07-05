@@ -5,6 +5,8 @@ package streampool
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
@@ -23,116 +25,112 @@ import (
 //   - +1 per work item whose body ctx was borrowed under a rider set
 //     containing the instance (taken at dispatch inside borrowBodyContext,
 //     released at completion inside releaseBodyContext);
-//   - +1 while the instance's own follow-up runs (fire borrows the fn ctx
-//     with the same symmetric ref — the provisional ref that lets fn's own
-//     dispatches attach before the count can resolve to zero).
+//   - +1 per ENCLOSING instance held by each inner (later-registered) instance
+//     from registration until the inner's single fire completes (holds below) —
+//     the peel that makes an outer follow-up wait for the whole nested subtree.
 //
-// A release that reaches zero arms a firing pass. The pass runs fn once,
-// then resolves: count still zero → true end (nothing extended the flow —
-// quiescent forever, since no carrier remains to take a new ref); count
-// positive → an extension is outstanding, so the pass disarms and the
-// extension's own last release arms the next pass ("fires at each nominal
-// end"). Extensions that complete within the pass count as observed by it.
+// The follow-up fires EXACTLY ONCE, when the count reaches zero (a single
+// atomic transition — one winner). Its own rider is PEELED from fnRiders, so
+// its dispatches cannot re-reference it: nothing re-fires it, and re-extending
+// the flow under its identity is an explicit re-stamp inside the body. The fire
+// carries the ENCLOSING rider set (fnRiders), so its extensions hold the outer
+// instances — which is why an outer cannot reach zero (cannot fire) until this
+// instance's fire and everything it spawned have drained (LIFO nesting).
 //
-// Instances are currently GC-owned; pooling + generation stamps arrive with
-// the CP-F4 allocation pass (a firing is cold — once per flow end — so the
-// alloc is off the hot path).
+// Instances are currently GC-owned; pooling arrives with a later allocation
+// pass (a firing is cold — once per flow end — so the alloc is off the hot path).
 type flowInstance struct {
-	// fn is the user follow-up. It deliberately returns nothing: a follow-up
-	// has no wave to surface an error through, so an error return would be a
-	// silent discard dressed as an API; user error handling belongs inside fn
-	// (typically by dispatching into a wave fn drains).
-	fn func(context.Context)
-	// fnRiders is the single-entry rider set the fn ctx carries: the firing
-	// instance's own bundle (identity, the bundle value if any, and this
-	// instance alone — not sibling registrations, whose lifecycles are their
-	// own). fn's dispatches inherit it ambiently, which is what makes
-	// extension work.
+	// fn is the type-erased user follow-up (FlowKey/FlowTag.FollowUp wrap the
+	// typed handler into this shape). It receives the bundle value (val below)
+	// and returns the follow-up's error.
+	fn func(ctx context.Context, value any) error
+	// val is the bundle value passed to fn — the key's value, or nil for a tag
+	// or a valueless key. Captured at registration (buildFlowRiders).
+	val any
+	// fnRiders is the ENCLOSING rider set the fire ctx carries: the values and
+	// follow-up instances registered before this one (this instance PEELED, its
+	// value delivered as fn's argument instead). fn's dispatches inherit it, so
+	// they hold the outer instances — the nested-lifetime coupling — while never
+	// re-referencing this instance.
 	fnRiders *flowRiders
-	count    atomic.Int64
-	active   atomic.Bool
+	// holds is the enclosing instances this (inner) instance references from
+	// registration until its fire completes, released in fire(). Bridges the gap
+	// before the fire's own fnRiders ref takes over, so an outer never reaches
+	// zero out from under a not-yet-fired inner regardless of unref order.
+	holds []*flowInstance
+	count atomic.Int64
 }
 
 func (in *flowInstance) ref() {
 	in.count.Add(1)
 }
 
-// unref releases one carrier; the release that reaches zero arms a firing
-// pass. inline selects where the pass runs: true only at WithFlow scope exit,
-// where running user code is semantically the user's own call site (and gives
-// "an empty scope fires at return" deterministically); false everywhere else
-// — work-item completion paths run inside Free/release machinery where the
-// item's wave reference has not yet dropped, so user code must not run (an fn
-// draining that wave would deadlock) and the pass is handed to the executor
-// through the scheduler instead.
-func (in *flowInstance) unref(inline bool) {
+// unref releases one carrier; the release that reaches zero fires the follow-up
+// EXACTLY ONCE. inline selects how fn runs:
+//   - true (WithFlow scope exit only): directly on the caller's own frame; fn's
+//     error is RETURNED, up to WithFlow's join. wave is nil.
+//   - false (work-item or fire completion): a wave-rooted fire dispatched to the
+//     executor — those paths run inside Free/release machinery where user code
+//     must not run (an fn draining its wave would deadlock). wave is the finishing
+//     item's wave; it is kept alive across the hop (IncrementReference, sound
+//     because the triggering item's own work reference has not yet dropped) and
+//     the fire's error routes to its errSink. Returns nil (the fire is async).
+func (in *flowInstance) unref(inline bool, wave *Wave) error {
 	if in.count.Add(-1) != 0 {
-		return
-	}
-	in.arm(inline)
-}
-
-func (in *flowInstance) arm(inline bool) {
-	if !in.active.CompareAndSwap(false, true) {
-		// A pass is already armed or running; its post-fire recheck covers
-		// this zero-crossing.
-		return
+		return nil
 	}
 	if inline {
-		in.firingPass()
-		return
+		m := bodyMetaPool.Get()
+		m.ctxType = topLevelContext
+		m.riders = in.fnRiders
+		flowRefRiders(m.riders)
+		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
+		ctx := ctxpool.WithValue(context.Background(), m)
+		return in.runFire(ctx, true, nil, nil)
 	}
+	wave.state.IncrementReference()
 	wk := flowFireWorkPool.Get()
 	wk.Init(workq.NewGroupID())
 	wk.inst = in
+	wk.wave = wave
 	defaultPool.ForceFresh(wk)
+	return nil
 }
 
-// firingPass owns the active flag. It fires fn while the instance is
-// quiescent and resolves the activation per the nominal-end semantics above.
-func (in *flowInstance) firingPass() {
-	for {
-		if in.count.Load() == 0 {
-			in.fire()
-			if in.count.Load() == 0 {
-				// True end: fn extended nothing (or its extensions already
-				// completed and were observed by this pass). No carrier
-				// remains and none can appear — the fn ctx is released — so
-				// the instance is quiescent forever.
-				in.active.Store(false)
-				return
+// runFire runs fn once under bodyCtx (which carries fnRiders — the enclosing set —
+// so fn's dispatches hold the outer instances), delivers fn's error (returned when
+// onErr is nil, else handed to onErr while bodyCtx is still live), then releases
+// bodyCtx and finally this instance's holds on the enclosing instances (which may
+// cascade to fire an outer). The holds release AFTER releaseBodyContext (defer
+// ordering), so each outer's count is covered until this fire is fully done — no
+// outer fires early regardless of unref order. inline/wave describe how a cascaded
+// outer fires; an inline outer's error joins here (own error first). A panic in fn
+// propagates, like every user body.
+func (in *flowInstance) runFire(
+	bodyCtx context.Context, inline bool, wave *Wave, onErr func(error),
+) (err error) {
+	// Deferred first → runs last: release the enclosing holds only after
+	// releaseBodyContext.
+	//nolint:contextcheck // a cascaded async fire roots at the scheduler ctx by design
+	defer func() {
+		holds := in.holds
+		in.holds = nil
+		for _, out := range holds {
+			if e := out.unref(inline, wave); e != nil {
+				err = errors.Join(err, e)
 			}
 		}
-		// Carriers outstanding (an extension, or a spurious arm that raced a
-		// ref): disarm, then close the missed-wake window — a carrier may have
-		// reached zero between the count load and the disarm, its arm
-		// suppressed by our active flag.
-		in.active.Store(false)
-		if in.count.Load() == 0 && in.active.CompareAndSwap(false, true) {
-			continue
+	}()
+	defer releaseBodyContext(bodyCtx)
+	fnErr := in.fn(bodyCtx, in.val)
+	if onErr != nil {
+		if fnErr != nil {
+			onErr(fnErr) // route to the wave errSink while bodyCtx is still live
 		}
-		return
+	} else {
+		err = fnErr
 	}
-}
-
-// fire runs fn under a fresh framework ctx rooted at context.Background: a
-// follow-up belongs to no wave and no request — cancellation of the work that
-// *ended* must not cancel the reaction to its end. The ctx carries fnRiders,
-// and the borrow takes the same symmetric ref every body borrow takes — the
-// provisional ref: fn's dispatches attach under its cover, and the deferred
-// release drops it (never to zero mid-pass: the pass's own recheck follows).
-// A panic in fn propagates, like every user body; the deferred release keeps
-// the count sound on the unwind.
-//
-//nolint:contextcheck // Background root by design; see the doc comment above
-func (in *flowInstance) fire() {
-	m := bodyMetaPool.Get()
-	m.ctxType = topLevelContext
-	m.riders = in.fnRiders
-	flowRefRiders(m.riders)
-	ctx := ctxpool.WithValue(context.Background(), m)
-	defer releaseBodyContext(ctx)
-	in.fn(ctx)
+	return err
 }
 
 // flowRefRiders / flowUnrefRiders take and release one carrier reference on
@@ -152,30 +150,50 @@ func flowRefRiders(r *flowRiders) {
 	}
 }
 
-func flowUnrefRiders(r *flowRiders) {
+// flowUnrefRiders releases the carrier refs of r against wave — the wave of the
+// context being released (releaseBodyContext reads it from the meta before
+// teardown). A release that ends an instance's flow dispatches a wave-rooted
+// fire; the unref return is always nil on this async path (the fire routes its own
+// error to wave's errSink).
+func flowUnrefRiders(r *flowRiders, wave *Wave) {
 	if r == nil {
 		return
 	}
 	for i := range r.entries {
 		for _, in := range r.entries[i].insts {
-			in.unref(false)
+			_ = in.unref(false, wave)
 		}
 	}
 }
 
-// flowFireWork routes a firing pass through the scheduler onto the executor
-// (the funnelInstance.Execute pattern): the pass runs user code, so it gets a
-// pool worker and never runs inside completion/release machinery. It embeds a
-// bare workq.WorkItem (not poolWork): a follow-up belongs to no wave, so it
-// takes no wave work reference.
+// flowErrSink is the framework-owned, wave-agnostic error sink for follow-up
+// firings (the funnelErrSink shape): its handler returns the error as-is so it
+// surfaces via the target wave's SkimAll path. A single package-level sink serves
+// every follow-up on every wave — the firing supplies the target wave.
+var flowErrSink = newInternalSkimmer[struct{}](NewErrHandler(func(_ context.Context, err error) error {
+	return err
+}))
+
+// flowFireWork carries a wave-rooted follow-up firing to the executor (the
+// funnelInstance pattern): the fire runs user code, so it gets a pool worker and
+// never runs inside completion/release machinery. It embeds a bare workq.WorkItem
+// (not poolWork) — the wave is kept alive by the IncrementReference the dispatch
+// took, dropped in Run — and rides borrowSrcCtx, the stable scheduler ctx stashed
+// by Execute, so the fire body ctx roots at the wave/scheduler, not a recycled
+// per-item ctx.
 type flowFireWork struct {
 	workq.WorkItem
-	inst *flowInstance
+	inst         *flowInstance
+	wave         *Wave
+	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the fire body ctx
 }
 
-// Execute is the scheduler side: hand the pass to the executor. TryPushBack
-// first; when the scheduler worker is prepared to park, a blocking PushBack.
+// Execute is the scheduler side: stash the borrow source for Run (before the
+// publishing handoff, mirroring funnelInstance.Execute), then hand the fire to the
+// executor. TryPushBack first; when the scheduler worker is prepared to park, a
+// blocking PushBack.
 func (wk *flowFireWork) Execute(ctx context.Context, ex workq.Execution) error {
+	wk.borrowSrcCtx = ctx
 	if bodyExecutor.TryPushBack(wk) {
 		ex.Starting()
 		return nil
@@ -190,14 +208,40 @@ func (wk *flowFireWork) Execute(ctx context.Context, ex workq.Execution) error {
 	return err
 }
 
-// Run is the execpool.Task entry: recycle the shell first (inst is all it
-// carries), then run the pass on this executor worker.
+// Run is the execpool.Task entry: recycle the shell first, then run the fire on
+// this executor worker under a wave-rooted body ctx, routing fn's error to the
+// wave's errSink, and finally drop the keep-alive reference the dispatch took.
+//
+//nolint:contextcheck // src is the borrow source for the fire body ctx, not a propagated arg
 func (wk *flowFireWork) Run(ee *workerExEnv) {
-	_ = ee
 	inst := wk.inst
+	wave := wk.wave
+	src := wk.borrowSrcCtx
 	wk.inst = nil
+	wk.wave = nil
+	wk.borrowSrcCtx = nil
 	flowFireWorkPool.Put(wk)
-	inst.firingPass()
+
+	// Wave-rooted fire body ctx: bound to the finishing wave, on this worker's
+	// environment, carrying the instance's peeled enclosing rider set. Rooted at
+	// the stable scheduler ctx (src), never a recycled per-item ctx.
+	m := bodyMetaPool.Get()
+	m.wave = wave
+	m.ctxType = skimContext
+	m.executionEnvironment = ee
+	m.riders = inst.fnRiders
+	flowRefRiders(m.riders)
+	bodyCtx := ctxpool.WithValue(src, m)
+
+	// runFire returns nil here (onErr routes the error); the async fire owns it.
+	_ = inst.runFire(bodyCtx, false, wave, func(fnErr error) {
+		ctx2, meta := wave.ctxMeta(bodyCtx)
+		if e := flowErrSink.submit(ctx2, meta, workq.NewGroupID(), struct{}{}, fnErr); e != nil &&
+			ctx2.Err() == nil {
+			panic(fmt.Sprintf("streampool: unexpected error routing follow-up error: %v", e))
+		}
+	})
+	wave.state.DecrementReference()
 }
 
 // Free is a no-op: the controller calls it right after Execute's successful

@@ -391,14 +391,14 @@ type funnelInstance[T any] struct {
 	// releases c.mu (see Run).
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the flush body ctx
 
-	// flowTags is the union of DAG-scoped flow riders (tags) carried by this
-	// instance's accumulated items — one carrier ref held per distinct
-	// instance (collectFlowTags, called from accumulate under mu). The flush
-	// takeover hands the whole set, refs included, to the flush body ctx
+	// flowTags is the head of the union chain of DAG-scoped flow riders (tags)
+	// carried by this instance's accumulated items — one carrier ref held per
+	// distinct instance (collectFlowTags, called from accumulate under mu). The
+	// flush takeover hands the whole chain, refs included, to the flush body ctx
 	// (flowFanInContext), which is what carries a tag's presence and its
 	// follow-up lifetimes across the accumulate→flush fan-in. Nil'd at
 	// takeover; mutated only under mu.
-	flowTags []flowRiderEntry
+	flowTags *flowRiderNode
 }
 
 // Execute implements [workq.Work] as the scheduler-side admission for a due flush

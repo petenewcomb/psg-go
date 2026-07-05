@@ -24,10 +24,14 @@ import (
 // lifetimes ([FlowTag]) are DAG-scoped: reference counts merge trivially, so
 // they union through everything, including funnels.
 //
-// Mechanically, the rider set is one immutable snapshot pointer on the pooled
-// ctxMeta: dispatches copy the pointer (borrowBodyContext, ensureCtxMeta), a
-// registering [WithFlow] scope builds a fresh snapshot, and the funnel flush
-// severs (funnelInstance.flush). The hot path pays one pointer copy.
+// Mechanically, the rider set is a linked chain of one-binding nodes headed by
+// one pointer on the pooled ctxMeta, walked head→next on read
+// (docs/decisions/flow-rider-chain.md). Dispatches copy the head pointer
+// (borrowBodyContext, ensureCtxMeta); a registering [WithFlow] scope allocates
+// only the nodes for its own additions and links them ahead of the inherited
+// head; the funnel flush severs to the tag union. The hot path pays one pointer
+// copy. Nodes are immutable once published, so any number of goroutines walk a
+// node concurrently without synchronization.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type flowIdentKind int8
@@ -132,12 +136,14 @@ func (k FlowKey[V]) From(ctx context.Context) (V, bool) {
 		return zero, false
 	}
 	m, ok := metaFromContext(ctx)
-	if !ok || m.riders == nil {
+	if !ok {
 		return zero, false
 	}
-	for i := range m.riders.entries {
-		if m.riders.entries[i].id == k.id {
-			v, vok := m.riders.entries[i].val.(V)
+	// Nearest value node wins; a follow-up-only node (hasVal false) under the same
+	// id is transparent — walk past it to the value it inherits.
+	for n := m.riders; n != nil; n = n.next {
+		if n.id == k.id && n.hasVal {
+			v, vok := n.val.(V)
 			return v, vok
 		}
 	}
@@ -153,11 +159,11 @@ func (t FlowTag) InFlow(ctx context.Context) bool {
 		return false
 	}
 	m, ok := metaFromContext(ctx)
-	if !ok || m.riders == nil {
+	if !ok {
 		return false
 	}
-	for i := range m.riders.entries {
-		if m.riders.entries[i].id == t.id {
+	for n := m.riders; n != nil; n = n.next {
+		if n.id == t.id {
 			return true
 		}
 	}
@@ -304,7 +310,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	}
 
 	src, _ := metaFromContext(ctx)
-	var ambient *flowRiders
+	var ambient *flowRiderNode
 	if src != nil {
 		ambient = src.riders
 	}
@@ -356,90 +362,144 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	return err
 }
 
-// flowRiders is an immutable snapshot of the riders in scope. A registering
-// WithFlow builds a fresh one; everything else shares it by pointer. The
-// entries slice is small and scanned linearly; never mutate it after
-// construction — it is read concurrently by every dispatch under the scope.
-type flowRiders struct {
-	entries []flowRiderEntry
+// flowRiderNode is one binding on the flow rider chain: a single identity's
+// value and/or its follow-up instance, inlined (no backing slice). The chain is
+// walked head→next on read; the head is shared by pointer along the causal
+// dispatch chain, so a registering WithFlow allocates only the nodes for its own
+// additions and links them ahead of the inherited head. A node is immutable once
+// published — reads need no synchronization — so a modification (register /
+// suppress / sever) produces fresh nodes and leaves the old ones intact for
+// everything still pointing at them.
+type flowRiderNode struct {
+	id     *flowIdentity  // the key or tag this binding is under
+	val    any            // the key's value, when hasVal
+	hasVal bool           // distinguishes a value binding from a follow-up-only node
+	inst   *flowInstance  // the follow-up instance, when this binding registered one
+	next   *flowRiderNode // the enclosing chain (toward the root); nil at a flow root
 }
 
-// flowRiderEntry is one identity's bundle: its value (path keys; nil for
-// tags) and the follow-up instances registered under it. The insts slice is
-// as immutable as the entry — appending in a nested scope copy-appends, never
-// mutating a backing array shared with the ambient snapshot.
-type flowRiderEntry struct {
-	id    *flowIdentity
-	val   any
-	insts []*flowInstance
+// rebuild walks head down to stop (exclusive), keeping each node keep accepts
+// (with next rewired past the dropped nodes) and skipping the rest, then links
+// the kept prefix onto stop (shared, untouched). stop == nil walks to the root.
+// Because a node is one binding, keep is a whole-node predicate — no in-node
+// filtering, no splitting. Cold path (suppression; later the funnel sever); the
+// kept nodes are copied so the shared originals are never mutated.
+func rebuild(head, stop *flowRiderNode, keep func(*flowRiderNode) bool) *flowRiderNode {
+	var kept []*flowRiderNode
+	for n := head; n != stop; n = n.next {
+		if keep(n) {
+			kept = append(kept, n)
+		}
+	}
+	out := stop
+	for i := len(kept) - 1; i >= 0; i-- {
+		k := kept[i]
+		out = &flowRiderNode{id: k.id, val: k.val, hasVal: k.hasVal, inst: k.inst, next: out}
+	}
+	return out
 }
 
-// buildFlowRiders derives a fresh immutable snapshot: the ambient entries,
-// with each option applied replace-or-append (a nested scope re-registering a
-// key shadows the outer value — nearest scope wins). Values apply in a first
-// pass and follow-up instances are created in a second, so a follow-up's fn
-// ctx captures the bundle's final value regardless of option order
-// (order-independence). Returns the instances THIS scope created — the caller
-// holds one scope ref on each, released at scope exit; inherited instances
-// take no scope ref (the enclosing carrier's ref covers this scope's extent).
-func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*flowInstance) {
-	// Pass 0: validation, and the fresh-root / suppression shape of the base.
-	// Applying suppressions against the inherited set BEFORE any adds is what
-	// makes same-call Suppress+Value/FollowUp order-independent.
+// buildFlowRiders derives a fresh chain head: the inherited chain (dropped for
+// NewFlow, filtered for Suppress) with this scope's addition nodes linked ahead
+// of it. A nested scope re-registering a key prepends a fresh node, so the walk
+// finds it first — nearest scope wins, exactly as the flat snapshot's
+// replace-or-append did. Each identity's value is settled from all its Value
+// options BEFORE any node is built, so a follow-up receives its settled value
+// regardless of option order (order-independence). A key's value and its
+// follow-up share ONE node; the follow-up's own binding is therefore peeled from
+// its fire's enclosing set by construction (it lives on the node, and the fire
+// carries node.next — the value arrives as the follow-up's argument instead).
+// Returns the instances THIS scope created — the caller holds one scope ref on
+// each, released at scope exit; inherited instances take no scope ref (the
+// enclosing carrier's ref covers this scope's extent).
+func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode, []*flowInstance) {
+	// Pass 0: validate and detect a fresh root. Identity-scoped lookups (settled
+	// value, whether a follow-up bundles the id, whether a value node was already
+	// emitted) are linear scans of opts rather than maps — opts is tiny and the
+	// registering path must stay allocation-lean.
 	fresh := false
+	anySuppress := false
 	for i := range opts {
 		switch opts[i].kind {
-		case flowOptValue, flowOptFollowUp, flowOptSuppress:
+		case flowOptValue, flowOptFollowUp:
+		case flowOptSuppress:
+			anySuppress = true
 		case flowOptNewFlow:
 			fresh = true
 		default:
 			panic("streampool: invalid (zero) FlowOption passed to WithFlow")
 		}
 	}
-	var base []flowRiderEntry
-	if ambient != nil && !fresh {
-		base = ambient.entries
-	}
-	entries := make([]flowRiderEntry, len(base), len(base)+len(opts))
-	copy(entries, base)
 
-	entryIdx := func(id *flowIdentity) int {
-		for j := range entries {
-			if entries[j].id == id {
-				return j
+	// settledVal returns id's value from the last Value option under it (order-
+	// independence: settled before any node is built). hasFollowUp reports whether
+	// a follow-up under id will bundle its value onto that follow-up's node.
+	settledVal := func(id *flowIdentity) (any, bool) {
+		var v any
+		found := false
+		for i := range opts {
+			if opts[i].kind == flowOptValue && opts[i].id == id {
+				v, found = opts[i].val, true
 			}
 		}
-		return -1
+		return v, found
+	}
+	hasFollowUp := func(id *flowIdentity) bool {
+		for i := range opts {
+			if opts[i].kind == flowOptFollowUp && opts[i].id == id {
+				return true
+			}
+		}
+		return false
 	}
 
-	for i := range opts {
-		if opts[i].kind != flowOptSuppress {
-			continue
-		}
-		if j := entryIdx(opts[i].id); j >= 0 {
-			entries = append(entries[:j], entries[j+1:]...)
-		}
+	head := ambient
+	if fresh {
+		head = nil
+	}
+	if anySuppress {
+		// Suppressing against the inherited chain BEFORE any add is what makes
+		// same-call Suppress+Value/FollowUp order-independent.
+		head = rebuild(head, nil, func(n *flowRiderNode) bool {
+			for i := range opts {
+				if opts[i].kind == flowOptSuppress && opts[i].id == n.id {
+					return false
+				}
+			}
+			return true
+		})
 	}
 
-	// Pass 1: values.
+	// Value-only nodes first (deepest of this scope's adds), so a later follow-up
+	// under a different key sees the value on its enclosing walk. A value bundled
+	// with a follow-up under the SAME id is emitted with that follow-up instead
+	// (one node), so it is skipped here, as is a repeated Value for an id already
+	// emitted (the last-wins value was resolved by settledVal).
 	for i := range opts {
 		o := &opts[i]
-		if o.kind != flowOptValue {
+		if o.kind != flowOptValue || hasFollowUp(o.id) {
 			continue
 		}
-		if j := entryIdx(o.id); j >= 0 {
-			entries[j].val = o.val
-		} else {
-			entries = append(entries, flowRiderEntry{id: o.id, val: o.val})
+		earlier := false
+		for j := 0; j < i; j++ {
+			if opts[j].kind == flowOptValue && opts[j].id == o.id {
+				earlier = true
+				break
+			}
 		}
+		if earlier {
+			continue
+		}
+		v, _ := settledVal(o.id)
+		head = &flowRiderNode{id: o.id, val: v, hasVal: true, next: head}
 	}
 
-	// Pass 2: follow-up instances. Each fires ONCE at its own end. Its fnRiders is
-	// the ENCLOSING snapshot (entries registered before it, its own identity
-	// peeled — value delivered as the fn arg, instance omitted so it can't
-	// re-fire); its extensions inherit that, holding the outer instances. It also
-	// takes an inner-holds-outer ref on every already-registered instance,
-	// released when it fires — so an outer waits for this whole subtree (LIFO).
+	// Then follow-up nodes in option order (later nearer the head → LIFO peel).
+	// Each fires ONCE at its own end. Its enclosing set is node.next (all bindings
+	// registered before it), and it takes an inner-holds-outer ref on every
+	// instance already on that chain, released when its single fire completes — so
+	// an outer waits for this whole subtree (LIFO). The value bundled under its id
+	// rides its own node (peeled from node.next) and is delivered as the fn arg.
 	var created []*flowInstance
 	for i := range opts {
 		o := &opts[i]
@@ -448,86 +508,49 @@ func buildFlowRiders(ambient *flowRiders, opts []FlowOption) (*flowRiders, []*fl
 		}
 		in := &flowInstance{fn: o.fn}
 		in.count.Store(1) // the registering scope's ref, released at scope exit
-
-		// Enclosing snapshot: entries as they stand BEFORE this instance is added
-		// (so it is naturally absent), copied so later appends don't mutate it,
-		// with this identity's value peeled (From reads absent inside — the value
-		// is the fn argument). The insts slices are shared read-only snapshots:
-		// every future add copy-appends a fresh slice, never mutating these.
-		encl := make([]flowRiderEntry, len(entries))
-		copy(encl, entries)
-		for e := range encl {
-			if encl[e].id == o.id {
-				encl[e].val = nil
+		val, hasVal := settledVal(o.id)
+		in.val = val // settled bundle value (nil for a tag / valueless key)
+		in.enclosing = head
+		for n := head; n != nil; n = n.next {
+			if n.inst != nil {
+				n.inst.ref()
+				in.holds = append(in.holds, n.inst)
 			}
 		}
-		in.fnRiders = &flowRiders{entries: encl}
-
-		// Inner-holds-outer: reference every instance registered before this one.
-		for e := range entries {
-			for _, out := range entries[e].insts {
-				out.ref()
-				in.holds = append(in.holds, out)
-			}
-		}
-
-		// Settle this instance's own value and add it to the live entries.
-		j := entryIdx(o.id)
-		if j < 0 {
-			entries = append(entries, flowRiderEntry{id: o.id})
-			j = len(entries) - 1
-		}
-		in.val = entries[j].val // settled bundle value (nil for a tag / valueless key)
-		// Copy-append: the copied entry's insts may share its backing array
-		// with the ambient snapshot, which other goroutines read.
-		entries[j].insts = append(append([]*flowInstance(nil), entries[j].insts...), in)
+		head = &flowRiderNode{id: o.id, val: val, hasVal: hasVal, inst: in, next: head}
 		created = append(created, in)
 	}
 
-	return &flowRiders{entries: entries}, created
+	return head, created
 }
 
-// collectFlowTags folds the DAG-scoped (tag) riders of ctx's meta into union,
+// collectFlowTags folds the DAG-scoped (tag) riders of ctx's chain into union,
 // taking one carrier ref on each instance newly added — the fan-in transfer.
 // The funnel instance's ref covers the tag from this accumulate until the
 // flush takeover adopts it, overlapping the accumulate item's own ref
 // (ref-before-release: the instance never transits an unreferenced state).
 // One ref per DISTINCT instance suffices — refs are fungible covers, not
 // per-item tokens — so union is a set, not a multiset. Called under the
-// funnel instance's mu; union's backing is owned by the funnel instance.
-func collectFlowTags(union []flowRiderEntry, ctx context.Context) []flowRiderEntry {
+// funnel instance's mu; union's nodes are owned by the funnel instance.
+func collectFlowTags(union *flowRiderNode, ctx context.Context) *flowRiderNode {
 	m, ok := metaFromContext(ctx)
-	if !ok || m.riders == nil {
+	if !ok {
 		return union
 	}
-	for i := range m.riders.entries {
-		e := &m.riders.entries[i]
-		if e.id.kind != flowTagIdent || len(e.insts) == 0 {
+	for n := m.riders; n != nil; n = n.next {
+		if n.id.kind != flowTagIdent || n.inst == nil {
 			continue
 		}
-		ui := -1
-		for j := range union {
-			if union[j].id == e.id {
-				ui = j
+		present := false
+		for u := union; u != nil; u = u.next {
+			if u.inst == n.inst {
+				present = true
 				break
 			}
 		}
-		if ui < 0 {
-			union = append(union, flowRiderEntry{id: e.id})
-			ui = len(union) - 1
-		}
-		for _, in := range e.insts {
-			present := false
-			for _, have := range union[ui].insts {
-				if have == in {
-					present = true
-					break
-				}
-			}
-			if !present {
-				in.ref()
-				union[ui].insts = append(union[ui].insts, in)
-			}
+		if !present {
+			n.inst.ref()
+			union = &flowRiderNode{id: n.id, inst: n.inst, next: union}
 		}
 	}
 	return union
@@ -543,10 +566,10 @@ func collectFlowTags(union []flowRiderEntry, ctx context.Context) []flowRiderEnt
 // transits an unreferenced state and never churns the counts. Reports false
 // (ctx unchanged, nothing to release) when there is nothing to sever or
 // adopt. The severed/adopted extent must be synchronous, like any body ctx.
-func flowFanInContext(ctx context.Context, tags []flowRiderEntry) (context.Context, bool) {
+func flowFanInContext(ctx context.Context, tags *flowRiderNode) (context.Context, bool) {
 	src, ok := metaFromContext(ctx)
 	hasSrcRiders := ok && src.riders != nil
-	if !hasSrcRiders && len(tags) == 0 {
+	if !hasSrcRiders && tags == nil {
 		return ctx, false
 	}
 	m := bodyMetaPool.Get()
@@ -557,8 +580,6 @@ func flowFanInContext(ctx context.Context, tags []flowRiderEntry) (context.Conte
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
 	}
-	if len(tags) > 0 {
-		m.riders = &flowRiders{entries: tags}
-	}
+	m.riders = tags // the tag union takes over; path riders severed (nil when no tags)
 	return ctxpool.WithValue(ctx, m), true
 }

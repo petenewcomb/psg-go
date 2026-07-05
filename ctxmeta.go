@@ -53,13 +53,14 @@ type ctxMeta struct {
 	held        *heldPermit
 	parentWaves map[*Wave]struct{}
 	ctxType     contextType
-	// riders is the flow rider set in scope (docs/decisions/flow-design.md): an
-	// immutable snapshot shared by pointer along the causal dispatch chain. nil when
+	// riders is the head of the flow rider chain in scope
+	// (docs/decisions/flow-rider-chain.md): a linked chain of one-binding nodes
+	// shared by pointer along the causal dispatch chain, walked on read. nil when
 	// no enclosing WithFlow registered anything. Inherited verbatim by derived metas
 	// (ensureCtxMeta) and by body borrows from the dispatch-time ctx
-	// (borrowBodyContext); severed at the funnel accumulate→flush fan-in
-	// (funnelInstance.flush via severFlowRiders).
-	riders *flowRiders
+	// (borrowBodyContext); severed to the tag union at the funnel accumulate→flush
+	// fan-in (funnelInstance.flush via flowFanInContext).
+	riders *flowRiderNode
 	executionEnvironment
 
 	// Recycling bookkeeping for top-level/skim metas minted by ensureCtxMeta (the body

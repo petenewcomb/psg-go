@@ -30,12 +30,13 @@ import (
 //     the peel that makes an outer follow-up wait for the whole nested subtree.
 //
 // The follow-up fires EXACTLY ONCE, when the count reaches zero (a single
-// atomic transition — one winner). Its own rider is PEELED from fnRiders, so
-// its dispatches cannot re-reference it: nothing re-fires it, and re-extending
-// the flow under its identity is an explicit re-stamp inside the body. The fire
-// carries the ENCLOSING rider set (fnRiders), so its extensions hold the outer
-// instances — which is why an outer cannot reach zero (cannot fire) until this
-// instance's fire and everything it spawned have drained (LIFO nesting).
+// atomic transition — one winner). Its own rider is PEELED by construction — its
+// binding lives on its own chain node and the fire carries node.next (enclosing
+// below) — so its dispatches cannot re-reference it: nothing re-fires it, and
+// re-extending the flow under its identity is an explicit re-stamp inside the
+// body. The fire carries the ENCLOSING chain (enclosing), so its extensions hold
+// the outer instances — which is why an outer cannot reach zero (cannot fire)
+// until this instance's fire and everything it spawned have drained (LIFO nesting).
 //
 // Instances are currently GC-owned; pooling arrives with a later allocation
 // pass (a firing is cold — once per flow end — so the alloc is off the hot path).
@@ -47,12 +48,13 @@ type flowInstance struct {
 	// val is the bundle value passed to fn — the key's value, or nil for a tag
 	// or a valueless key. Captured at registration (buildFlowRiders).
 	val any
-	// fnRiders is the ENCLOSING rider set the fire ctx carries: the values and
-	// follow-up instances registered before this one (this instance PEELED, its
-	// value delivered as fn's argument instead). fn's dispatches inherit it, so
-	// they hold the outer instances — the nested-lifetime coupling — while never
+	// enclosing is the ENCLOSING rider chain the fire ctx carries: the node.next
+	// below this instance's own node — the values and follow-up instances
+	// registered before it (this instance PEELED by construction, its value
+	// delivered as fn's argument instead). fn's dispatches inherit it, so they hold
+	// the outer instances — the nested-lifetime coupling — while never
 	// re-referencing this instance.
-	fnRiders *flowRiders
+	enclosing *flowRiderNode
 	// holds is the enclosing instances this (inner) instance references from
 	// registration until its fire completes, released in fire(). Bridges the gap
 	// before the fire's own fnRiders ref takes over, so an outer never reaches
@@ -82,7 +84,7 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 	if inline {
 		m := bodyMetaPool.Get()
 		m.ctxType = topLevelContext
-		m.riders = in.fnRiders
+		m.riders = in.enclosing
 		flowRefRiders(m.riders)
 		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
 		ctx := ctxpool.WithValue(context.Background(), m)
@@ -134,18 +136,16 @@ func (in *flowInstance) runFire(
 }
 
 // flowRefRiders / flowUnrefRiders take and release one carrier reference on
-// every instance in a rider set. Paired by construction: borrowBodyContext
-// and fire ref; releaseBodyContext unrefs. Derived metas (ensureCtxMeta) and
-// the flush sever clone inherit rider sets WITHOUT refs and are released via
-// paths that do not unref (releaseTopLevelContext) or carry nil riders — they
-// are synchronous extents covered by their enclosing carrier's ref.
-func flowRefRiders(r *flowRiders) {
-	if r == nil {
-		return
-	}
-	for i := range r.entries {
-		for _, in := range r.entries[i].insts {
-			in.ref()
+// every follow-up instance in a rider chain (each instance appears on at most one
+// node per chain, so this is one ref per instance). Paired by construction:
+// borrowBodyContext and fire ref; releaseBodyContext unrefs. Derived metas
+// (ensureCtxMeta) and the flush sever clone inherit chains WITHOUT refs and are
+// released via paths that do not unref (releaseTopLevelContext) or carry nil
+// riders — they are synchronous extents covered by their enclosing carrier's ref.
+func flowRefRiders(r *flowRiderNode) {
+	for n := r; n != nil; n = n.next {
+		if n.inst != nil {
+			n.inst.ref()
 		}
 	}
 }
@@ -155,13 +155,10 @@ func flowRefRiders(r *flowRiders) {
 // teardown). A release that ends an instance's flow dispatches a wave-rooted
 // fire; the unref return is always nil on this async path (the fire routes its own
 // error to wave's errSink).
-func flowUnrefRiders(r *flowRiders, wave *Wave) {
-	if r == nil {
-		return
-	}
-	for i := range r.entries {
-		for _, in := range r.entries[i].insts {
-			_ = in.unref(false, wave)
+func flowUnrefRiders(r *flowRiderNode, wave *Wave) {
+	for n := r; n != nil; n = n.next {
+		if n.inst != nil {
+			_ = n.inst.unref(false, wave)
 		}
 	}
 }
@@ -229,7 +226,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 	m.wave = wave
 	m.ctxType = skimContext
 	m.executionEnvironment = ee
-	m.riders = inst.fnRiders
+	m.riders = inst.enclosing
 	flowRefRiders(m.riders)
 	bodyCtx := ctxpool.WithValue(src, m)
 

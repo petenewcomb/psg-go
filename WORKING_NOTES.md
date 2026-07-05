@@ -542,8 +542,48 @@ see open queue item 5).
     firing surfaces via the finished wave's drain, extension delays every outer
     follow-up (nested-lifetime coupling), enclosing value readable in fn, flush-
     triggered firing under live barrier. Reconcile flow-design.md at the docs pass.
-  - **★ NEXT MAJOR: RIDER REPRESENTATION REDESIGN — spec at docs/decisions/flow-rider-chain.md
-    (PN + design session, 2026-07-05; CONVERGED, not yet built).** Replaces the flat COW
+  - **★ RIDER REPRESENTATION REDESIGN — spec at docs/decisions/flow-rider-chain.md.
+    CHECKPOINT PLAN (foundation-first, each -race-gated): R1 chain-swap (no-op) → R2
+    refcount+pooling → R3 FlowOption interface + fluent bundle → R4 surface reframe
+    (FlowFollowUp/Infuse) → R5 rebuild sever (F8) + fan-in union (F7) → R6 definitional-tag
+    coalescing (union-find) → R7 CP-F5b oracle + psgwf/otpsg disposition.**
+    - **CP-R1 LANDED (2026-07-05, worktree — NOT committed; PN commits on request):
+      representation swap, GC-owned still.** Flat `flowRiders{[]flowRiderEntry{id,val,insts}}`
+      snapshot → linked `flowRiderNode{id,val,hasVal,inst,next}` chain, ONE binding per node,
+      walked head→next on read. `flowInstance.fnRiders *flowRiders` → `enclosing *flowRiderNode`
+      = the instance's own node's `.next` (peel is structural — self's binding lives on its node,
+      the fire carries next). `rebuild(head,stop,keep)` primitive added (drives Suppress now via
+      walk-to-root drop-by-id; funnel sever in R5). buildFlowRiders: value-only nodes emitted
+      DEEPEST (globally visible to later follow-ups), then follow-up nodes in option order (later
+      nearer head → LIFO peel); values settled by linear scan of opts (NO maps — was 3 transient
+      maps, cut to keep the registering path lean). collectFlowTags/flowFanInContext/funnel
+      `flowTags` → chain form (union prepends deduped-by-instance-pointer tag nodes). flowRefRiders/
+      flowUnrefRiders walk the chain (each instance on ≤1 node/chain ⇒ one ref/instance). `refs`
+      field NOT added yet (R2). Seams touched: flow.go, flowinst.go, ctxmeta.go (field type),
+      funnel.go (flowTags type), bodyctx.go (unchanged logic, type flows through). NO test touches
+      rider internals — clean blast radius.
+      GATE: vet clean, golangci-lint 0, full -short suite green, all flow tests -race green
+      (incl. concurrent stress + funnel union), alloc floors green, **40/40 TestBySimulation
+      -race (rapid.checks=60, seeds 1-40) — 0 fails, 0 hangs, 0 races** (known pre-existing rare
+      hang did not surface; ambient ~1-2/40). Value-only scope measured **4 allocs/op** (down from
+      flat ~6), tag-followup scope 6; **alloc ceiling lowered 6→4** (flat's meta+snapshot+entries+
+      ctxpool → chain's meta+node+ctxpool). These warm allocs are what R2 pools toward 0.
+    - **TWO INTENTIONAL SEMANTIC DELTAS (untested corners; spec-intended; vanish under R3/R4
+      surface — FLAGGED to PN, PN's read: let them change).** The chain shadows-and-walks where
+      flat merged-then-peeled: (1) ancestor `key.Value(V)` + inner STANDALONE `key.FollowUp(h)`
+      (old surface): inside h's fire flat peeled V (From absent), chain shows V (ancestor value
+      node is in `enclosing`). (2) a value BUNDLED with a follow-up under the same id is invisible
+      to an EARLIER same-scope follow-up (rides the follow-up node, sits above the earlier one);
+      flat's global value pass showed it. Narrow: a PURE value option (no follow-up under its id)
+      stays globally visible (emitted deepest), so only bundled values differ. Both untested; both
+      = the spec's `enclosing = node.next` end-state; standalone key follow-ups + this cross-key
+      visibility go away when R3 makes keys bundle value+follow-up on one node.
+    - **NEXT: CP-R2 — refcount + pooling.** Add `flowRiderNode.refs atomic`, node-refs-next +
+      carriers-ref-head + cascade-reclaim to an omnipool; pool scope meta (freed at WithFlow
+      return — retain-of-scope-ctx is UB); recycle instances gen-free at fire. Interface-stable,
+      behavior identical, allocs drop; tighten alloc floors. THE concurrency-critical CP — gate
+      hardest (the refcount/reclaim vs carrier ref/unref race is exactly what the sim exercises).
+  - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES
     CP-F7 + CP-F8 (the funnel sever becomes a bounded chain rebuild = F8; skim-as-continuation

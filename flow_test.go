@@ -760,7 +760,11 @@ func TestFlowAllocFloors(t *testing.T) {
 	scope := allocsPerOp(t, 100, 1000, func() {
 		_ = streampool.WithFlow(ctx, body, opt)
 	})
-	const scopeCeiling = 6 // meta + riders + entries + ctxpool child bookkeeping
+	// Chain representation (docs/decisions/flow-rider-chain.md): scope meta + one
+	// rider node + ctxpool child bookkeeping. Lowered from 6 (the flat model's
+	// meta + snapshot + entries slice + ctxpool) once the chain removed the
+	// snapshot/slice pair; drops further toward 0 when CP-R2 pools these.
+	const scopeCeiling = 4
 	if scope > scopeCeiling {
 		t.Errorf("value-registering WithFlow allocates %v/op; ceiling %d", scope, scopeCeiling)
 	}

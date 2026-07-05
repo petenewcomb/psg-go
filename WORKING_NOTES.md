@@ -2,6 +2,26 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► VALIDATION-FIRST (before step 3/4/walk-avoidance impl): harden the weighted core.
+Item 1 DONE + FOUND A REAL BUG (2026-07-05, d2ec3e8).** Built TestOverdraftEpisodeModel —
+a GRANT-mode rapid model (the promise-mode TestPermitsModel never exercises grants/
+episodes). Asserts the episode invariants every op (Σ excess + allowance == total;
+conservation; ΣinUse ≤ cap + grant, folded into checkEpisode). It immediately caught an
+overdraft ALLOWANCE LEAK: an exempt claimant under a standing episode ran the ordinary
+w=1 gather (acquireInto), whose STEAL deposits real `held` into an excess-carrying cache,
+covering overdraft WITHOUT refunding the allowance → Σ excess + allowance drifts below
+total (grant capacity silently lost). This VIOLATED the recorded "descendants never
+gather" rule (resolution (b) below). FIX: under a standing episode an exempt acquirer no
+longer steals — up-walk inherits the parked hoard in place, then takes REAL free Resource
+capacity (checkout, no excess) or claims from the allowance; the head's own gather
+(headGather.acquireInto) is unaffected. Validated: episode model 20k×3 clean (was failing
+in 1-2 runs), full gate + sim -race 20/20 regression. NOTE: the bug was UNREACHABLE in
+production/sim (w=1-only, no episodes) — only weighted dispatch (step 4) would hit it, so
+finding it now (cheap 3-line permits repro) vindicates validate-before-extend.
+REMAINING validation item 2 (NEXT): adversarial concurrent -race weighted stress
+interleaving episodes + suspensions + nested drives + invalidation/cancellation (exercise
+promoteScan against the episode/suspension machinery together).
+
 **►►► GATHER WALK-AVOIDANCE DESIGNED + enqueue w=1 gate LANDED (2026-07-05) —
 docs/decisions/gather-walk-avoidance.md. LANDED (0c0623e): enqueue calls headGather
 inline only for w≥2 (a w=1 instant head re-walked redundantly right after its

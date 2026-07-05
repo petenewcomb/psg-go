@@ -184,9 +184,29 @@ func (h *heldPermit) pool() *permits.Pool {
 // wv's cache for the handle's limiter (mkdir-p'd through ensureCache when absent), the
 // drive-target attribution the overdraft stranger check reads (resolution (c)). The
 // native replacement for suspendForEpisode.
+//
+// A reference on wv is held across the ensureCache+SuspendDriver setup — the same guard
+// sweepFunnels uses (see Wave.sweepFunnels). Unlike every other ensureCache caller, which
+// targets a wave its dispatching goroutine keeps Open by construction, this one targets
+// the wave it is DRIVING TO DONE: without the bracket wv can reach Done concurrently, run
+// releaseCaches, and recycle the very cache SuspendDriver is pinning (a use-after-free the
+// race detector catches on the recycled node's fields). The reference keeps wv Open so the
+// cache's self-ref outlives SuspendDriver's ref-add; afterwards the cache survives on that
+// pin (dropped by the matching ResumeDriver) independent of wv's own Done. If wv has
+// already reached Done — the increment lost the race to the last DecrementReference — there
+// is nothing to drive (skimAll returns ErrWaveDone), so suspend is a no-op rather than
+// resurrecting a forest node on a dead wave.
 func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
-	if h := meta.currentHeldPermit(); h != nil && h.permit.Held() &&
-		h.suspend(wv.ensureCache(meta, h.pool())) {
+	h := meta.currentHeldPermit()
+	if h == nil || !h.permit.Held() {
+		return nil
+	}
+	wv.state.IncrementReference()
+	defer wv.state.DecrementReference()
+	if wv.state.IsDone() {
+		return nil
+	}
+	if h.suspend(wv.ensureCache(meta, h.pool())) {
 		return h
 	}
 	return nil

@@ -2,6 +2,29 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► SIM `-race` LIFECYCLE BUG FOUND + FIXED (2026-07-05).** A `TestBySimulation -race`
+batch hung (9m50s timeout) and, run in a loop, ~1/30 tripped the race detector: a
+use-after-recycle of a permit `Cache`. Root cause: `SkimAll`'s suspend path
+(`suspendHeldPermit`→`suspend`→`Cache.SuspendDriver`) is the ONE `ensureCache` caller that
+targets the wave it is DRIVING TO DONE (all others dispatch INTO a wave the caller keeps
+Open by construction). `ensureCache`/`cacheFor` return an UNPINNED cache (valid only under
+the "wv still Open" invariant); that wave can reach Done concurrently → `releaseCaches` →
+`ReleaseRef`→`destroy`→`omnipool.Put`→`Cache.Reset` nils `c.pool` (plain write) and
+recycles the node, WHILE `SuspendDriver` does its `refs.Add(1)`/reads `c.pool`. Under
+`-race` the detector fires on the recycled fields; without it the corrupted/`nil`-pool
+cache is the missed-wake wedge (145 goroutines parked in `rdvq` handoff, no senders). FIX
+(permithandle.go `suspendHeldPermit`): bracket the `ensureCache`+`SuspendDriver` setup with
+`wv.state.IncrementReference()`/`defer DecrementReference()` — the SAME guard
+`Wave.sweepFunnels` uses — so wv can't reach Done during setup; the cache's self-ref
+outlives `SuspendDriver`'s pin, after which the cache survives on that pin (dropped by the
+matching `ResumeDriver`) independent of wv's Done. `IsDone()` after the increment resolves
+the lost-race case → no-op the suspend (nothing to drive; don't resurrect a dead wave's
+forest). No `permits` change. Verified: audited all 3 `ensureCache` callers + the sole
+`SuspendDriver` path (no sibling instances); [re-verify sweep pending]. The stale Jul-4
+`pol_sim1.log` hang was the same defect's non-race face; `dump_1.log` (Jul-5) was NOT a new
+bug — it is the pre-fix capture of the d2ec3e8 leak (failfile 10:53 predates the 11:15 fix;
+now 440k model iters clean). Both prior scratchpad threads resolved.
+
 **►►► VALIDATION-FIRST (before step 3/4/walk-avoidance impl): harden the weighted core.
 Item 1 DONE + FOUND A REAL BUG (2026-07-05, d2ec3e8).** Built TestOverdraftEpisodeModel —
 a GRANT-mode rapid model (the promise-mode TestPermitsModel never exercises grants/

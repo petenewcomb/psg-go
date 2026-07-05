@@ -2,7 +2,23 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► WEIGHTED/PLAIN LIMITER SPLIT DESIGNED (2026-07-05, docs-only this commit) —
+**►►► GATHER WALK-AVOIDANCE DESIGNED + enqueue w=1 gate LANDED (2026-07-05) —
+docs/decisions/gather-walk-avoidance.md. LANDED (0c0623e): enqueue calls headGather
+inline only for w≥2 (a w=1 instant head re-walked redundantly right after its
+fast-path steal failed; the caller's confirm drives the single as-head gather).
+DESIGNED follow-up (with the split/surface work): a seqlock `changeSeq` (bumped on
+release/drain/raise — NOT deposit, which under the barrier only feeds the head's own
+loop) gating three cached "don't walk" facts — pool `nothingBorrowableSeq` (coarse,
+shared, plain+weighted), per-Demand `notEnoughSeq` (fine, weight-aware, weighted),
+per-Cache up-propagated stamp index (weighted-only = the borrowable index; prune
+subtrees stamped ≤ nothingSeq; short-circuits so propagation is O(short) amortized).
+Bounds walks to O(real capacity changes) pool-wide (barrier ⟹ one gatherer) and the
+weighted gather to O(W·changed-paths). Footgun: bump+stamp completeness = a miss is a
+silent wedge; concentrate in counts methods + assert. Library framing (PN): bound the
+worst case, don't measure a workload. Prereq: enumerate wake/re-drive sites to prove
+the bound. NEXT enumeration + implement with step 3/4.**
+
+**►►► WEIGHTED/PLAIN LIMITER SPLIT DESIGNED (2026-07-05) —
 weighted-acquisition.md §"The weighted/plain limiter split". PN chose compile-time
 enforcement (option ii). Supersedes the "collapse to one Limiter, weigher optional"
 framing: weight-CAPABILITY is a limiter property (plain NewSemaphore vs

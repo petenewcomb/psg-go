@@ -633,9 +633,11 @@ disambiguation. And whether the weight-capable type is a concrete `WeightedSemap
 a `WeightedLimiter` interface from the start (asymmetric with `Limiter` being a
 concrete struct) is undecided. Settle with the rest of the step-4 naming.
 
-**Separate perf note — the weighted-path `walkCounts`.** For weighted pools the
-head's proof re-establishment still runs `walkCounts`. The `touch` mechanism cannot
-prune it: `touch` fires on unsatisfied up-walks, not on the releases/steals
+**Separate perf note — the weighted-path `walkCounts`.** The full design for
+bounding these walks — pool `nothingBorrowableSeq`, per-demand `notEnoughSeq`, and a
+weighted-only per-cache tree index — is `gather-walk-avoidance.md`; the summary: for
+weighted pools the head's proof re-establishment still runs `walkCounts`, and the
+`touch` mechanism cannot prune it: `touch` fires on unsatisfied up-walks, not on the releases/steals
 `walkCounts` reads, so an "untouched" subtree that just received a release holds
 borrowable capacity a prune would miss — reopening the grant-while-capacity-exists
 hole. The correct optimization is to fold the `anyInUse` check into the gather's

@@ -73,14 +73,16 @@ func (p *Pool) allowanceRemaining() uint64 {
 }
 
 // checkEpisode asserts the overdraft invariants at a quiescent point: conservation
-// untouched by grants (Σheld == inFlight ≤ capacity) and the episode equation
-// Σ max(inUse−held, 0) + allowance == the episode's grant total (all zero outside
-// an episode).
+// untouched by grants (Σheld == inFlight ≤ capacity), the episode equation
+// Σ max(inUse−held, 0) + allowance == the episode's grant total (all zero outside an
+// episode), and the overdraft concurrency bound ΣinUse ≤ capacity + grant (== the
+// ordinary ΣinUse ≤ capacity when no episode stands).
 func (tp *testPool) checkEpisode(t require.TestingT) {
-	var sumHeld, excess uint64
+	var sumHeld, sumInUse, excess uint64
 	for _, c := range tp.snapshot() {
 		h, u := c.counts.load()
 		sumHeld += h
+		sumInUse += u
 		excess += excessOver(h, u)
 	}
 	//nolint:gosec // G115: small non-negative test values
@@ -96,6 +98,8 @@ func (tp *testPool) checkEpisode(t require.TestingT) {
 	}
 	require.Equal(t, total, excess+allowance,
 		"episode invariant: Σ excess + allowance == the episode's grant total")
+	require.LessOrEqual(t, sumInUse, capacity+total,
+		"concurrency bound: ΣinUse ≤ capacity + episode grant")
 }
 
 // The full arc of a granted overdraft: proven-infeasible head → grant → standing

@@ -670,14 +670,27 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 		// fair victim.
 		a.touch()
 	}
+	// Exempt claimant under a STANDING episode: it must NOT gather/steal — the
+	// recorded "descendants never gather" rule (allowance fungibility and episode
+	// extension substitute). The up-walk above already inherited the parked hoard
+	// in place; take any REAL free Resource capacity (checkout adds held and inUse
+	// equally — no excess, no leak), else claim from the allowance. A steal here
+	// would deposit real held into an excess-carrying cache and silently cover
+	// overdraft without refunding the allowance — the Σ excess + allowance == total
+	// leak the grant-mode episode model surfaced. (A non-sentinel head's own gather
+	// runs through headGather.acquireInto, not this path, so it still steals.)
+	if episodeStanding && anchor != nil {
+		if p.resource.TryAcquire(w) {
+			c.counts.checkout(uw)
+			return Permit{backing: c, weight: uw}, nil
+		}
+		return p.claimOrExtend(claimStartFor(c, home, anchor), anchor, uw)
+	}
 	if w == 1 {
 		// Steps 3–4: free Resource, then steal (the w=1 "gather" degenerates to a
 		// single atomic take-and-occupy).
 		if backing := p.acquireInto(c, w); backing != nil {
 			return Permit{backing: backing, weight: uw}, nil
-		}
-		if episodeStanding && anchor != nil {
-			return p.claimOrExtend(claimStartFor(c, home, anchor), anchor, uw)
 		}
 		return p.enqueue(c, d, uw) // step 5: wait, in arrival order
 	}
@@ -688,9 +701,6 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 	if p.resource.TryAcquire(w) {
 		c.counts.checkout(uw)
 		return Permit{backing: c, weight: uw}, nil
-	}
-	if episodeStanding && anchor != nil {
-		return p.claimOrExtend(claimStartFor(c, home, anchor), anchor, uw)
 	}
 	return p.enqueue(c, d, uw)
 }

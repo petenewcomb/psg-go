@@ -183,3 +183,178 @@ func TestPermitsModel(t *testing.T) {
 		require.Equal(t, int64(0), tp.sem.inFlight.Load(), "the Resource is fully released")
 	})
 }
+
+// TestOverdraftEpisodeModel model-checks the overdraft/episode machinery
+// (weighted-acquisition.md §Overdraft) sequentially against a GRANTING resource —
+// the coverage the promise-mode TestPermitsModel above cannot reach. It drives the
+// same weighted acquire/park/resume/exit forest, but now a head whose gather
+// exhausts a quiescent (nothing-running) pool is GRANTED an overdraft: an episode
+// installs, the sentinel stands, inUse runs past held by the allowance. A dedicated
+// op spawns exempt claimants under the standing episode's anchor, exercising
+// allowance claims and episode extensions. After every operation it asserts the
+// episode invariants — conservation untouched by grants (Σheld == checkedOut), the
+// episode equation (Σ excess + allowance == grant total), and the overdraft
+// concurrency bound (ΣinUse ≤ capacity + grant) — and the internal tripwires
+// (endEpisode's allowance-home assert, occupyTaking coverage, drain-with-inUse
+// panic) stand as additional oracles. A full drain ends every episode and returns
+// all capacity.
+func TestOverdraftEpisodeModel(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		capacity := rapid.IntRange(1, 3).Draw(t, "capacity")
+		tp := newGrantTestPool(capacity)
+
+		var units []*modelUnit
+		running := 0 // count of units whose body currently holds a permit (ΣinUse > 0 ⟺ this > 0)
+
+		check := func() { tp.checkEpisode(t) }
+
+		pick := func(t *rapid.T, label string, want func(*modelUnit) bool) *modelUnit {
+			var cands []*modelUnit
+			for _, u := range units {
+				if want(u) {
+					cands = append(cands, u)
+				}
+			}
+			if len(cands) == 0 {
+				return nil
+			}
+			return cands[rapid.IntRange(0, len(cands)-1).Draw(t, label)]
+		}
+
+		newUnit := func(c *Cache) *modelUnit {
+			u := &modelUnit{cache: c, unitRefHeld: true}
+			u.demand.Init()
+			units = append(units, u)
+			return u
+		}
+
+		t.Repeat(map[string]func(*rapid.T){
+			"newRoot": func(t *rapid.T) {
+				if len(units) >= maxCaches {
+					return
+				}
+				newUnit(tp.NewCache())
+				check()
+			},
+			"newChild": func(t *rapid.T) {
+				if len(units) >= maxCaches {
+					return
+				}
+				parent := pick(t, "child-parent", func(u *modelUnit) bool { return u.cache.alive.Load() })
+				if parent == nil {
+					return
+				}
+				newUnit(tp.newChild(parent.cache))
+				check()
+			},
+			"acquire": func(t *rapid.T) {
+				u := pick(t, "acquire-unit", func(u *modelUnit) bool {
+					return u.unitRefHeld && u.cache.alive.Load() && !u.running
+				})
+				if u == nil {
+					return
+				}
+				var w int
+				if u.demand.pool.Load() != nil {
+					w = int(u.demand.w) //nolint:gosec // G115: stamped from a small drawn int
+				} else {
+					w = rapid.IntRange(1, capacity+2).Draw(t, "weight")
+				}
+				// A fully quiescent pool (no standing head/episode, nothing running)
+				// must satisfy any acquire: gather covers w ≤ capacity, and overdraft
+				// grants w > capacity (the proof passes — zero inUse, no stranger).
+				quiescent := tp.head.Load() == nil && running == 0
+				pm, err := u.cache.Acquire(&u.demand, w)
+				require.NoError(t, err, "a granting resource never refuses")
+				if pm.Held() {
+					u.pm = pm
+					u.running = true
+					running++
+				} else {
+					require.False(t, quiescent,
+						"a quiescent pool must satisfy or grant every acquire")
+				}
+				check()
+			},
+			"claimUnderEpisode": func(t *rapid.T) {
+				// An exempt claimant: a fresh child of the standing episode's anchor.
+				// Its acquire claims from the allowance, or extends the episode when
+				// the allowance falls short — the intra-episode paths the ordinary
+				// acquire op cannot reach.
+				anchor := tp.episodeAnchor()
+				if anchor == nil || len(units) >= maxCaches {
+					return
+				}
+				cu := newUnit(anchor.NewChild())
+				w := rapid.IntRange(1, 2*capacity+2).Draw(t, "claim-weight")
+				pm, err := cu.cache.Acquire(&cu.demand, w)
+				require.NoError(t, err, "a granting resource never refuses")
+				if pm.Held() {
+					cu.pm = pm
+					cu.running = true
+					running++
+				}
+				check()
+			},
+			"release": func(t *rapid.T) {
+				u := pick(t, "release-unit", func(u *modelUnit) bool { return u.running })
+				if u == nil {
+					return
+				}
+				u.pm.Release() // an episode owner's release returns its excess to the allowance
+				u.pm = Permit{}
+				u.running = false
+				running--
+				check()
+			},
+			"invalidate": func(t *rapid.T) {
+				u := pick(t, "invalidate-unit", func(u *modelUnit) bool {
+					return !u.running && (u.demand.pool.Load() != nil || u.demand.cache.Load() != nil)
+				})
+				if u == nil {
+					return
+				}
+				u.demand.Invalidate() // an episode owner's invalidate drops the anchor ref
+				check()
+			},
+			"exitUnit": func(t *rapid.T) {
+				u := pick(t, "exit-unit", func(u *modelUnit) bool {
+					return u.unitRefHeld && u.cache.alive.Load() && !u.running
+				})
+				if u == nil {
+					return
+				}
+				u.demand.Invalidate()
+				u.unitRefHeld = false
+				u.cache.ReleaseRef() // may cascade an anchor destroy → endEpisode
+				check()
+			},
+		})
+
+		// Teardown: release every running body (episode owners return their excess),
+		// withdraw every demand (drops anchor refs), then drop every unit reference —
+		// the destroy cascade ends every standing episode (endEpisode asserts the
+		// allowance is home) and returns all held to the Resource.
+		for _, u := range units {
+			if u.running {
+				u.pm.Release()
+				u.pm = Permit{}
+				u.running = false
+			}
+		}
+		for _, u := range units {
+			u.demand.Invalidate()
+		}
+		for _, u := range units {
+			if u.unitRefHeld {
+				u.unitRefHeld = false
+				u.cache.ReleaseRef()
+			}
+		}
+		require.Nil(t, tp.od.Load(), "every episode ended")
+		require.Nil(t, tp.head.Load(), "an emptied queue opens the head slot")
+		require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
+		require.Equal(t, 0, tp.totalHeld(), "every permit returns to the Resource after a full drain")
+		require.Equal(t, int64(0), tp.sem.inFlight.Load(), "the Resource is fully released")
+	})
+}

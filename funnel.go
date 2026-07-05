@@ -391,13 +391,21 @@ type funnelInstance[T any] struct {
 	// releases c.mu (see Run).
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the flush body ctx
 
+	// boundary is the fan-in boundary this instance adopted from its first
+	// accumulate (the funnel work's dispatch-captured enclosing head above the
+	// wave). flowTags starts AS the boundary (with one carrier ref), so the union
+	// chain's tail is the enclosing flow — a flush walk reads folded per-item tags,
+	// then the enclosing flow intact. collectFlowTags stops its walk here so
+	// per-item riders above it sever. nil when nothing encloses the wave. Nil'd at
+	// takeover; mutated only under mu.
+	boundary *flowRiderNode
 	// flowTags is the head of the union chain of DAG-scoped flow riders (tags)
 	// carried by this instance's accumulated items — one carrier ref held per
-	// distinct instance (collectFlowTags, called from accumulate under mu). The
-	// flush takeover hands the whole chain, refs included, to the flush body ctx
-	// (flowFanInContext), which is what carries a tag's presence and its
-	// follow-up lifetimes across the accumulate→flush fan-in. Nil'd at
-	// takeover; mutated only under mu.
+	// distinct instance (collectFlowTags, called from accumulate under mu), its
+	// tail the boundary above. The flush takeover hands the whole chain, refs
+	// included, to the flush body ctx (flowFanInContext), which is what carries tag
+	// presence, follow-up lifetimes, AND the enclosing flow across the fan-in.
+	// Nil'd at takeover; mutated only under mu.
 	flowTags *flowRiderNode
 }
 
@@ -518,11 +526,13 @@ func (c *funnelInstance[T]) accumulate(
 	traceRegion := "funnelInstance.funnel"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	// Fan-in transfer, collect side: fold this item's DAG-scoped riders into
-	// the instance's union (one ref per distinct flow instance), so tag
-	// presence and follow-up lifetimes survive to the flush regardless of when
-	// the item itself completes. Runs under c.mu (the only accumulate path).
-	c.flowTags = collectFlowTags(c.flowTags, ctx)
+	// Fan-in transfer, collect side: fold this item's per-item DAG-scoped riders
+	// (those above the boundary) into the instance's union, so tag presence and
+	// follow-up lifetimes survive to the flush regardless of when the item itself
+	// completes; per-item values above the boundary sever. Runs under c.mu (the
+	// only accumulate path). The boundary and enclosing tail were established at
+	// the first accumulate (Funnel).
+	c.flowTags = collectFlowTags(c.flowTags, ctx, c.boundary)
 
 	didNotPanic := false
 	defer func() {
@@ -591,6 +601,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	var flushCtx context.Context
 	if fc, adopted := flowFanInContext(ctx, c.flowTags); adopted {
 		c.flowTags = nil
+		c.boundary = nil
 		flushCtx = fc
 		ctx = fc
 	}
@@ -668,6 +679,12 @@ type funnelWork[T any] struct {
 	// onto it.
 	bodyCtx  context.Context //nolint:containedctx // the borrowed body ctx, released in Free
 	bodyMeta *ctxMeta
+	// boundary is the fan-in boundary captured at dispatch (Init) from the submit
+	// ctx's still-intact meta chain: the enclosing flow's rider head above this
+	// funnel's wave. The instance adopts it from the first accumulate to sever
+	// per-item riders and share the enclosing flow at flush (F7/F8). nil when
+	// nothing encloses the wave.
+	boundary *flowRiderNode
 }
 
 func (c *Funnel[T]) newFunnelWork(
@@ -696,6 +713,10 @@ func (wk *funnelWork[T]) Init(
 		wk.h = heldPermitPool.Get()
 		wk.h.ownCache = fn.wave.ensureCache(m, fn.limiter.pool)
 	}
+	// Capture the fan-in boundary while submitCtx's meta.parent chain is intact (the
+	// borrow below severs the body meta's parent). The instance adopts it at the
+	// first accumulate.
+	wk.boundary = flowBoundaryAboveWave(submitCtx, fn.wave)
 	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, wk.h, nil)
 }
 
@@ -757,6 +778,18 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 		hbc.Init(wk.Group())
 		hbc.earliestGroup = wk.Group()
 		hbc.allocate(ctx, wk.fn.factory)
+		// Adopt the fan-in boundary from the first item and seed the union with it:
+		// the union chain's tail is the enclosing flow, kept alive by one carrier ref
+		// until the flush adopts and releases it. Invariant across the instance's
+		// items — later items stop their fold walk at this same pointer. The seed also
+		// takes an instance ref on every follow-up in the enclosing chain (as the fold
+		// does for per-item tags), so the single flush-time release
+		// (releaseBodyContext walks the WHOLE flush chain) stays balanced and the
+		// enclosing follow-ups survive to the flush regardless of the driver's timing.
+		hbc.boundary = wk.boundary
+		hbc.flowTags = wk.boundary
+		nodeRef(hbc.flowTags)
+		flowRefRiders(hbc.flowTags)
 	}
 	defer func() {
 		// If funnel() flushed inline, it did so via ClaimForFlush, which

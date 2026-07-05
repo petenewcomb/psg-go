@@ -672,13 +672,38 @@ see open queue item 5).
       addWorkWhileMaybeBlocking←WaitForNew, NO mutex/semacquire waiters, ZERO flow-rider frames —
       the permits/wake-chain missed-wake class from the OPEN item above, not flow).** 41/42 -race
       runs green.
-    - **NEXT: CP-R5 — funnel sever as chain rebuild (F8) + fan-in tag union on the chain (F7).**
-      The `rebuild(head, stop, keep)` primitive with a STOP boundary (the driving flow's chain head
-      captured at funnel dispatch): sever keeps only tag-kind nodes ABOVE the boundary (per-item
-      path keys sever, enclosing flow shared intact — F8); the per-item tag union folds to the
-      boundary and materializes at flush (F7 — replaces the current collectFlowTags/flowFanInContext
-      instance-set with a boundary-scoped chain union). Then R6 coalescing (union-find), R7 sim
-      oracle + psgwf/otpsg. The pre-existing hang belongs to the permits thread (hand off dossier).
+    - **CP-R5 LANDED (2026-07-05, worktree — NOT committed): funnel fan-in on the chain — flush
+      sees the enclosing driver (F8) + boundary-scoped tag union/sever.** Boundary = Option A
+      (PN-confirmed): `flowBoundaryAboveWave(ctx, wave)` = the rider head of the nearest meta ABOVE
+      the funnel's wave, captured at DISPATCH (funnelWork.Init, from submitCtx — the borrow severs
+      parent) and carried on the funnel work. KEY FIX vs the naive walk: the parent chain is
+      synchronous-only (an async body meta has parent=nil), so the walk stops at the LAST in-wave
+      meta when parent severs — its riders ARE the enclosing driver's head it captured at ITS
+      dispatch (`for m.wave == wave && m.parent != nil`). The instance adopts the boundary from its
+      first accumulate: c.flowTags STARTS as the boundary (union chain's tail = enclosing flow), with
+      nodeRef + flowRefRiders(boundary) so the single flush-time release (releaseBodyContext walks the
+      WHOLE flush chain) balances and enclosing follow-ups survive to flush regardless of driver
+      timing. collectFlowTags(union, ctx, stop=boundary): walks each item's chain, STOPS at boundary
+      (pointer ==), folds tag-kind nodes ABOVE it (per-item tags cross, dedup scans only the folded
+      prefix); per-item VALUES above the boundary drop = the sever. Enclosing (at/below boundary)
+      shared intact. flush riders = folded tags → boundary → enclosing; flowFanInContext adopts,
+      releaseBodyContext releases (node + instance refs) at flush end. c.boundary nil'd at takeover.
+      SEMANTIC FLIP (CP-F8, as predicted): the enclosing/driver flow's VALUES now CROSS to the flush
+      (were severed) — only per-item riders added WITHIN the funnel's wave sever. Tests: rewrote
+      TestFlowSeverAtFlush → TestFlowFlushSeesEnclosing (driver value crosses via a launcher-in-wave
+      per-item scope whose value severs, both flush drives); TestFlowTagCrossesFunnel flushSawVal
+      false→true; sim oracle assertFlowInFlush severs→crosses (+ flowExpectsForCtx comment).
+      GATE: vet, golangci-lint 0, -short (root+sim), all flow + conservation -race, alloc floors,
+      **40/40 TestBySimulation -race (seeds 1-40, rapid.checks=60; 0 fails/hangs/races/underflows)**.
+      NOTE: independent-flows-WITH-values (no common driver) would leak item1's value into the
+      boundary — that is the R6 COALESCING case, not yet handled; tags-only union is correct.
+    - **NEXT: CP-F7 (skim handlers as flow continuations) — SEPARATE from R5.** A queued skim result
+      is a carrier: skimmer.Submit captures the item's riders (ref at submit), the handler runs under
+      them (child of the driver's ctx, per-key nearest-wins ITEM over driver), release at handler
+      end. Currently skim handlers see the DRIVER's chain (sim covers this, 40/40); F7 makes them see
+      the per-item riders. Then R6 coalescing (union-find for independent infused flows), R7 CP-F5b
+      sim oracle extension + psgwf delete/otpsg-v2. The pre-existing permits/wake-chain hang (hand off
+      dossier) remains orthogonal.
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

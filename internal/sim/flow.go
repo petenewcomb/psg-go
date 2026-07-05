@@ -56,7 +56,7 @@ func flowExpectsForCtx(ctx context.Context, t assert.TestingT, parent *controlle
 	for _, e := range parent.flow.expects {
 		v, ok := e.key.From(ctx)
 		if !ok {
-			continue // severed (flush descent) — legal
+			continue // absent (e.g. a NewFlow root) — legal; a present key must match
 		}
 		chk.Equalf(e.val, v, "flow key misdelivery at subjob entry: got %d want %d", v, e.val)
 		chk.Truef(e.tag.InFlow(ctx), "flow tag absent while its bundle value is present")
@@ -85,19 +85,22 @@ func (c *controller) assertFlowInBody(ctx context.Context, t assert.TestingT, wh
 	}
 }
 
-// assertFlowInFlush asserts the fan-in contract inside a funnel Flush body:
-// every enclosing value SEVERS (a flush instance only exists because it
-// accumulated at least one item, and every accumulate of this plan's funnels
-// ran under the scope), while every enclosing tag's presence survives via
-// the collected union.
+// assertFlowInFlush asserts the fan-in contract inside a funnel Flush body
+// (CP-F8): every enclosing value CROSSES intact — the scope wraps the whole run,
+// so it is the driver flow enclosing the funnel's wave, structural context above
+// the fan-in (only per-item riders added within the funnel's wave sever, and the
+// sim adds none) — and every enclosing tag's presence survives via the union.
 func (c *controller) assertFlowInFlush(ctx context.Context, t assert.TestingT) {
 	if c.flow == nil {
 		return
 	}
 	chk := assert.New(t)
 	for _, e := range c.flow.expects {
-		_, ok := e.key.From(ctx)
-		chk.Falsef(ok, "flow value crossed the accumulate→flush fan-in (Plan#%d)", c.Plan.ID)
+		v, ok := e.key.From(ctx)
+		chk.Truef(ok, "enclosing flow value severed at the flush (Plan#%d)", c.Plan.ID)
+		if ok {
+			chk.Equalf(e.val, v, "flow value mismatch at the flush (Plan#%d)", c.Plan.ID)
+		}
 		chk.Truef(e.tag.InFlow(ctx), "flow tag lost at the accumulate→flush fan-in (Plan#%d)", c.Plan.ID)
 	}
 }

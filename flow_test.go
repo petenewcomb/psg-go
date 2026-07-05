@@ -180,12 +180,13 @@ func TestWithFlowInsideBody(t *testing.T) {
 	chk.Equal([2]any{7, true}, saw.Load())
 }
 
-// TestFlowSeverAtFlush: path-scoped values do not cross the funnel
-// accumulate→flush fan-in. Covers both flush drives: the end-of-drain sweep
-// (executor path) and the inline already-past-deadline flush, which runs on
-// the triggering accumulate body's ctx and is the leak path the sever exists
-// to close. Accumulate bodies themselves see their item's rider.
-func TestFlowSeverAtFlush(t *testing.T) {
+// TestFlowFlushSeesEnclosing (CP-F8): the funnel flush sees the ENCLOSING
+// (driver) flow's value intact — it is structural context above the fan-in —
+// while a PER-ITEM value added within the funnel's wave severs. Covers both flush
+// drives: the end-of-drain sweep (executor path) and the inline already-past-
+// deadline flush, which runs on the triggering accumulate body's ctx. Accumulate
+// bodies see both (their full item rider).
+func TestFlowFlushSeesEnclosing(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// deadline returned by Accumulate: zero → flushed by the drain sweep;
@@ -197,10 +198,11 @@ func TestFlowSeverAtFlush(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			chk := require.New(t)
-			key := streampool.NewFlowKey[string]()
+			driverKey := streampool.NewFlowKey[string]()
+			perItem := streampool.NewFlowKey[string]()
 
 			var wave streampool.Wave
-			var accSaw, flushSaw atomic.Value
+			var accDriver, accItem, flushDriver, flushItem atomic.Value
 
 			aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
 				return streampool.NewAccumulator(
@@ -208,28 +210,44 @@ func TestFlowSeverAtFlush(t *testing.T) {
 						if err != nil {
 							return time.Time{}, err
 						}
-						v, ok := key.From(ctx)
-						accSaw.Store([2]any{v, ok})
+						dv, dok := driverKey.From(ctx)
+						iv, iok := perItem.From(ctx)
+						accDriver.Store([2]any{dv, dok})
+						accItem.Store([2]any{iv, iok})
 						return tc.deadline(), nil
 					},
 					func(ctx context.Context) error {
-						v, ok := key.From(ctx)
-						flushSaw.Store([2]any{v, ok})
+						dv, dok := driverKey.From(ctx)
+						iv, iok := perItem.From(ctx)
+						flushDriver.Store([2]any{dv, dok})
+						flushItem.Store([2]any{iv, iok})
 						return nil
 					},
 				)
 			})
 
+			// A launcher on the funnel's OWN wave: its body opens a per-item scope
+			// (running inside that wave) and submits to the funnel, so perItem is added
+			// within the funnel's wave — below the fan-in boundary — and severs, while
+			// driverKey (the enclosing driver's value, above the wave) crosses.
+			launcher := streampool.NewTaskLauncher(func(ctx context.Context) error {
+				return streampool.WithFlow(ctx, func(ctx context.Context) error {
+					return aggregator.Submit(ctx, 1)
+				}, perItem.Value("item-x"))
+			})
+
 			err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-				if err := aggregator.Submit(ctx, 1); err != nil {
+				if err := launcher.In(&wave).Start(ctx); err != nil {
 					return err
 				}
 				return wave.CloseAndSkimAll(ctx)
-			}, key.Value("req-9"))
+			}, driverKey.Value("req-9"))
 			chk.NoError(err)
 
-			chk.Equal([2]any{"req-9", true}, accSaw.Load(), "accumulate sees its item's rider")
-			chk.Equal([2]any{"", false}, flushSaw.Load(), "flush reads absent — fan-in severs")
+			chk.Equal([2]any{"req-9", true}, accDriver.Load(), "accumulate sees the driver value")
+			chk.Equal([2]any{"item-x", true}, accItem.Load(), "accumulate sees its per-item value")
+			chk.Equal([2]any{"req-9", true}, flushDriver.Load(), "CP-F8: enclosing driver value crosses to the flush")
+			chk.Equal([2]any{"", false}, flushItem.Load(), "per-item value severs at the fan-in")
 		})
 	}
 }
@@ -625,7 +643,10 @@ func TestFlowTagCrossesFunnel(t *testing.T) {
 			}
 			chk.False(firedBeforeFlush.Load(), "fired before the flush ran — the fan-in transfer leaked the lifetime")
 			chk.True(flushSawTag.Load(), "tag presence must cross the fan-in")
-			chk.False(flushSawVal.Load(), "key value must sever at the fan-in")
+			// CP-F8: reqCtx is the ENCLOSING (driver) flow's value, above the fan-in,
+			// so it crosses to the flush intact (only per-item values, added within the
+			// funnel's wave, sever — see TestFlowFlushSeesEnclosing).
+			chk.True(flushSawVal.Load(), "enclosing flow's value crosses the fan-in")
 			chk.True(downSawTag.Load(), "flush-dispatched work inherits the tag")
 			chk.EqualValues(1, fires.Load())
 		})

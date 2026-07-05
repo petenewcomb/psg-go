@@ -691,17 +691,41 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 	return head, created
 }
 
-// collectFlowTags folds the DAG-scoped (tag) riders of ctx's chain into union —
-// the fan-in transfer that carries tag presence and follow-up lifetimes across
-// the accumulate→flush boundary. Follow-up nodes contribute one carrier ref per
-// DISTINCT instance (refs are fungible covers, not per-item tokens — union is a
-// set, not a multiset); the funnel's ref covers the tag from this accumulate
-// until the flush takeover adopts it, overlapping the accumulate item's own ref
-// (ref-before-release: the instance never transits unreferenced). Bare-presence
-// (Infuse) nodes carry no instance and contribute presence once per DISTINCT id
-// (no ref — presence is membership, nothing to keep alive). Called under the
-// funnel instance's mu; union's nodes are owned by the funnel instance.
-func collectFlowTags(union *flowRiderNode, ctx context.Context) *flowRiderNode {
+// flowBoundaryAboveWave resolves the fan-in boundary for a funnel on wave: the
+// rider chain head of the nearest meta ABOVE wave in ctx's synchronous derivation
+// chain — the enclosing (driving) flow's head that the funnel's items descend from
+// and share by pointer. It MUST be called at dispatch, where the meta.parent chain
+// is still intact (a borrowed body meta severs parent). Returns nil when ctx has
+// no meta or nothing encloses the wave (a submit from a bare ctx).
+func flowBoundaryAboveWave(ctx context.Context, wave *Wave) *flowRiderNode {
+	m, ok := metaFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	// Walk up past metas belonging to the wave. The parent chain is synchronous-only
+	// (an async body meta severs parent = nil): when it ends inside the wave, that
+	// last body meta's riders ARE the enclosing chain — the driver's head it captured
+	// at its own dispatch — so stop there rather than walking off to a nil boundary.
+	for m.wave == wave && m.parent != nil {
+		m = m.parent
+	}
+	return m.riders
+}
+
+// collectFlowTags folds an accumulate item's DAG-scoped (tag) riders ABOVE the
+// boundary into union — the fan-in transfer (F7). It walks the item's chain from
+// the head and STOPS at stop (== the funnel's captured boundary, by pointer): the
+// nodes above it are the item's per-item additions, so only their tags cross
+// (values drop — the sever, F8), while everything at and below the boundary is the
+// enclosing flow, already shared as union's tail. Follow-up nodes contribute one
+// carrier ref per DISTINCT instance (refs are fungible covers — union is a set,
+// not a multiset; the funnel's ref covers the tag from accumulate until the flush
+// takeover adopts it, overlapping the item's own ref); bare-presence (Infuse)
+// nodes carry no instance and contribute presence once per DISTINCT id with no ref
+// (membership has nothing to keep alive). Dedup scans only the folded prefix
+// (union down to stop). Called under the funnel instance's mu; union's nodes are
+// owned by the funnel instance.
+func collectFlowTags(union *flowRiderNode, ctx context.Context, stop *flowRiderNode) *flowRiderNode {
 	m, ok := metaFromContext(ctx)
 	if !ok {
 		return union
@@ -715,13 +739,13 @@ func collectFlowTags(union *flowRiderNode, ctx context.Context) *flowRiderNode {
 		nodeUnref(union)
 		union = newHead
 	}
-	for n := m.riders; n != nil; n = n.next {
+	for n := m.riders; n != nil && n != stop; n = n.next {
 		if n.id.kind != flowTagIdent {
 			continue
 		}
 		if n.inst != nil {
 			seen := false
-			for u := union; u != nil; u = u.next {
+			for u := union; u != nil && u != stop; u = u.next {
 				if u.inst == n.inst {
 					seen = true
 					break
@@ -733,10 +757,9 @@ func collectFlowTags(union *flowRiderNode, ctx context.Context) *flowRiderNode {
 			}
 			continue
 		}
-		// Presence-only: ensure the id is represented once (any node with the id
-		// already provides presence, including a follow-up node).
+		// Presence-only: ensure the id is represented once in the folded prefix.
 		seen := false
-		for u := union; u != nil; u = u.next {
+		for u := union; u != nil && u != stop; u = u.next {
 			if u.id == n.id {
 				seen = true
 				break

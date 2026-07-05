@@ -542,6 +542,38 @@ see open queue item 5).
     firing surfaces via the finished wave's drain, extension delays every outer
     follow-up (nested-lifetime coupling), enclosing value readable in fn, flush-
     triggered firing under live barrier. Reconcile flow-design.md at the docs pass.
+  - **★ NEXT MAJOR: RIDER REPRESENTATION REDESIGN — spec at docs/decisions/flow-rider-chain.md
+    (PN + design session, 2026-07-05; CONVERGED, not yet built).** Replaces the flat COW
+    flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
+    of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES
+    CP-F7 + CP-F8 (the funnel sever becomes a bounded chain rebuild = F8; skim-as-continuation
+    stays) and supersedes CP-6's flat model, `fnRiders`, standalone `FlowKey.FollowUp`, and the
+    FlowTag-centric follow-up surface. Key decisions locked this session:
+      • Node = one entry (id, val, hasVal, inst) — a key's value+follow-up on ONE node; refcount
+        per node, reclaim cascades (node refs its next; carriers ref the head); instance points
+        at its parent node (peel free, no fnRiders).
+      • FlowOption becomes an INTERFACE (like OpOption, 0-alloc via escape analysis + per-kind
+        concrete types); composed FlowKeyOption[V] embeds it so the fluent `key.Value(v).FollowUpFn(fn)`
+        bundles value+follow-up as ONE option → one node. Key follow-ups exist ONLY via the fluent
+        form (value never ambiguous). Method verb is **Do**.
+      • Surface reframed: **FollowUp is the primitive**, key/tag are qualifiers. `FlowFollowUp`/
+        `FlowFollowUpFn` = anonymous DAG follow-up (default). `tag.Infuse()` = bare presence (valueless
+        marker, no lifetime — new; CP-6 had no way to tag without a follow-up). Decision table +
+        "value severs / lifetime & presence cross" as the teaching frame.
+      • **Definitional tag follow-up** (attached to the tag's identity) fires ONCE per flow regardless
+        of infusion count; complements (does NOT replace, PN) per-scope tag.FollowUp. Coalescing of
+        independently-infused flows at a funnel = **serial union-find under a per-tag merge lock**
+        (find-to-root, same-root no-op, live operands via the accumulate ref-before-release, funnel is
+        the only merge site, flush links a downstream instance into the component). This is the highest-
+        risk concurrent structure — gate hard.
+      • Fan-in union: boundary = driving flow's chain head captured at funnel dispatch (shared intact =
+        F8); collect-to-boundary per item; markers dedup by id, instances by pointer; materialize at flush.
+      • Pooling: scope meta freed at return (retain-of-scope-ctx is UB, same as every framework ctx);
+        nodes reclaimed by refcount; instances recycled at fire (gen-free). Retires both warm per-flow allocs.
+      OPEN (impl-time, non-blocking): holds-off-the-walk (derive inner-holds-outer from the chain vs
+      materialize — safe version known), on-demand read map (deferred until measured), generic-option
+      0-alloc verification (escape analysis + benchmark). BUILD = fresh-session, multi-checkpoint, each
+      -race-gated; supersede CP-6's flat surface as part of it.
   - **THEN CP-F7 — SKIM HANDLERS ARE FLOW CONTINUATIONS (PN, 2026-07-04; REVERSES
     the CP-F3 "skim is not a fan-in edge" note — my gloss was wrong).** A queued
     result is a CARRIER: skimmer.Submit captures the item's riders (ref at submit),

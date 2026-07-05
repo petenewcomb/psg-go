@@ -6,8 +6,10 @@ package streampool
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
+	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +335,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	// which root their own metas and never read the scope ctx.
 	m := bodyMetaPool.Get()
 	m.riders = riders
+	nodeRef(riders) // the scope meta's carrier ref on the chain head
 	if src != nil {
 		m.wave = src.wave
 		m.parent = src
@@ -344,6 +347,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	defer func() {
 		ctxpool.Free(scopeCtx)
 		bodyMetaPool.Put(m)
+		nodeUnref(riders) // release the scope meta's head ref (cascades if last)
 	}()
 
 	if len(created) > 0 {
@@ -387,6 +391,85 @@ type flowRiderNode struct {
 	hasVal bool           // distinguishes a value binding from a follow-up-only node
 	inst   *flowInstance  // the follow-up instance, when this binding registered one
 	next   *flowRiderNode // the enclosing chain (toward the root); nil at a flow root
+	// refs counts the holders of THIS node: its child nodes' downlinks, the carrier
+	// metas whose head is this node, and a follow-up instance's ref on its enclosing
+	// head (docs/decisions/flow-rider-chain.md). At zero the node returns to the
+	// pool and drops its own downlink ref on next, cascading. Distinct from
+	// flowInstance.count, which drives firing: a deep node sees only ONE downlink per
+	// child scope regardless of that scope's carrier count, so node.refs cannot
+	// detect an instance's quiescence.
+	refs atomic.Int64
+}
+
+// flowRiderNodePool recycles rider nodes. A node is immutable but for refs, so a
+// recycled node is fully re-stamped by newRiderNode on its next borrow.
+var flowRiderNodePool = omnipool.For[flowRiderNode]()
+
+// flowNodeAllocHook, when set, receives +1 as a node is drawn from the pool and
+// -1 as one is returned — the seam the conservation test uses to prove no node
+// leaks or is double-freed across a drained flow. Production leaves it nil; the
+// cost is one relaxed atomic load per node borrow/reclaim, uncontended.
+var flowNodeAllocHook atomic.Pointer[func(int)]
+
+func flowNodeAlloc(delta int) {
+	if h := flowNodeAllocHook.Load(); h != nil {
+		(*h)(delta)
+	}
+}
+
+// Reset is the omnipool recycle hook (refs is atomic.Int64, whose noCopy would
+// trip vet copylocks under omnipool's plain-copy zero).
+func (n *flowRiderNode) Reset() {
+	n.id = nil
+	n.val = nil
+	n.hasVal = false
+	n.inst = nil
+	n.next = nil
+	n.refs.Store(0)
+}
+
+// newRiderNode draws a node from the pool, stamps its binding, links it onto
+// next, and takes next's downlink ref (released when this node reclaims). The
+// returned node has refs == 0; the caller publishes it by taking the first ref —
+// a child's downlink (a later newRiderNode) or a carrier's nodeRef.
+func newRiderNode(
+	id *flowIdentity, val any, hasVal bool, inst *flowInstance, next *flowRiderNode,
+) *flowRiderNode {
+	n := flowRiderNodePool.Get()
+	flowNodeAlloc(1)
+	n.id = id
+	n.val = val
+	n.hasVal = hasVal
+	n.inst = inst
+	n.next = next
+	nodeRef(next) // downlink ref
+	return n
+}
+
+// nodeRef takes one reference on n (nil-safe).
+func nodeRef(n *flowRiderNode) {
+	if n != nil {
+		n.refs.Add(1)
+	}
+}
+
+// nodeUnref releases one reference on n; the release that reaches zero reclaims n
+// to the pool and cascades the drop down its next chain (each reclaimed node drops
+// the downlink ref it held on its successor).
+func nodeUnref(n *flowRiderNode) {
+	for n != nil {
+		r := n.refs.Add(-1)
+		if r > 0 {
+			return
+		}
+		if r < 0 {
+			panic("streampool: flow rider node refs underflow (double release)")
+		}
+		next := n.next
+		flowNodeAlloc(-1)
+		flowRiderNodePool.Put(n)
+		n = next
+	}
 }
 
 // rebuild walks head down to stop (exclusive), keeping each node keep accepts
@@ -405,7 +488,7 @@ func rebuild(head, stop *flowRiderNode, keep func(*flowRiderNode) bool) *flowRid
 	out := stop
 	for i := len(kept) - 1; i >= 0; i-- {
 		k := kept[i]
-		out = &flowRiderNode{id: k.id, val: k.val, hasVal: k.hasVal, inst: k.inst, next: out}
+		out = newRiderNode(k.id, k.val, k.hasVal, k.inst, out)
 	}
 	return out
 }
@@ -502,7 +585,7 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 			continue
 		}
 		v, _ := settledVal(o.id)
-		head = &flowRiderNode{id: o.id, val: v, hasVal: true, next: head}
+		head = newRiderNode(o.id, v, true, nil, head)
 	}
 
 	// Then follow-up nodes in option order (later nearer the head → LIFO peel).
@@ -523,13 +606,14 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		val, hasVal := settledVal(o.id)
 		in.val = val // settled bundle value (nil for a tag / valueless key)
 		in.enclosing = head
+		nodeRef(in.enclosing) // hold the enclosing chain alive for the fire (freed at fire-complete)
 		for n := head; n != nil; n = n.next {
 			if n.inst != nil {
 				n.inst.ref()
 				in.holds = append(in.holds, n.inst)
 			}
 		}
-		head = &flowRiderNode{id: o.id, val: val, hasVal: hasVal, inst: in, next: head}
+		head = newRiderNode(o.id, val, hasVal, in, head)
 		created = append(created, in)
 	}
 
@@ -562,7 +646,13 @@ func collectFlowTags(union *flowRiderNode, ctx context.Context) *flowRiderNode {
 		}
 		if !present {
 			n.inst.ref()
-			union = &flowRiderNode{id: n.id, inst: n.inst, next: union}
+			// Prepend a pooled union node and move the funnel's carrier ref from the
+			// old head to the new one (the old head survives via the new node's
+			// downlink). The whole union is adopted by the flush meta at flowFanInContext.
+			newHead := newRiderNode(n.id, nil, false, n.inst, union)
+			nodeRef(newHead)
+			nodeUnref(union)
+			union = newHead
 		}
 	}
 	return union
@@ -592,6 +682,9 @@ func flowFanInContext(ctx context.Context, tags *flowRiderNode) (context.Context
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
 	}
-	m.riders = tags // the tag union takes over; path riders severed (nil when no tags)
+	// The tag union takes over; path riders sever (nil when no tags). The flush meta
+	// ADOPTS the funnel's carrier ref on the union head (no new nodeRef — the funnel
+	// hands it off, nil'ing c.flowTags), released by releaseBodyContext at flush end.
+	m.riders = tags
 	return ctxpool.WithValue(ctx, m), true
 }

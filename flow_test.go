@@ -760,11 +760,12 @@ func TestFlowAllocFloors(t *testing.T) {
 	scope := allocsPerOp(t, 100, 1000, func() {
 		_ = streampool.WithFlow(ctx, body, opt)
 	})
-	// Chain representation with CP-R2a pooling (docs/decisions/flow-rider-chain.md):
-	// the scope meta and its ctxpool child are pooled, leaving just the one GC-owned
-	// rider node. Lowered 6 → 4 (chain removed the flat snapshot/slice pair) → 1
-	// (R2a pooled the meta + ctxpool child); drops to 0 when CP-R2b pools the node.
-	const scopeCeiling = 1
+	// Chain representation with CP-R2 pooling (docs/decisions/flow-rider-chain.md):
+	// the scope meta, its ctxpool child, and the refcounted rider node are all
+	// pooled, so a value-registering scope allocates nothing warm. Lowered 6 → 4
+	// (chain removed the flat snapshot/slice pair) → 1 (R2a pooled meta + ctxpool)
+	// → 0 (R2b pooled the node). A hard floor now, like the degenerate case.
+	const scopeCeiling = 0
 	if scope > scopeCeiling {
 		t.Errorf("value-registering WithFlow allocates %v/op; ceiling %d", scope, scopeCeiling)
 	}

@@ -103,9 +103,11 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 		m.ctxType = topLevelContext
 		m.riders = in.enclosing
 		flowRefRiders(m.riders)
+		nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
 		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
 		ctx := ctxpool.WithValue(context.Background(), m)
 		err := in.runFire(ctx, true, nil, nil)
+		nodeUnref(in.enclosing)  // release the instance's own enclosing ref (fire done)
 		flowInstancePool.Put(in) // fire complete; count is 0 forever, no reader remains
 		return err
 	}
@@ -156,11 +158,13 @@ func (in *flowInstance) runFire(
 
 // flowRefRiders / flowUnrefRiders take and release one carrier reference on
 // every follow-up instance in a rider chain (each instance appears on at most one
-// node per chain, so this is one ref per instance). Paired by construction:
-// borrowBodyContext and fire ref; releaseBodyContext unrefs. Derived metas
-// (ensureCtxMeta) and the flush sever clone inherit chains WITHOUT refs and are
-// released via paths that do not unref (releaseTopLevelContext) or carry nil
-// riders — they are synchronous extents covered by their enclosing carrier's ref.
+// node per chain, so this is one ref per instance) — the instance-firing count,
+// distinct from the node-pooling refs a carrier takes via nodeRef/nodeUnref at the
+// same sites. Paired by construction: borrowBodyContext and fire ref;
+// releaseBodyContext unrefs. Derived metas (ensureCtxMeta) inherit chains WITHOUT
+// either ref (synchronous extents covered by their enclosing carrier); the flush
+// fan-in clone ADOPTS both refs from the funnel (flowFanInContext) and releases
+// them at flush end via releaseBodyContext.
 func flowRefRiders(r *flowRiderNode) {
 	for n := r; n != nil; n = n.next {
 		if n.inst != nil {
@@ -247,6 +251,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 	m.executionEnvironment = ee
 	m.riders = inst.enclosing
 	flowRefRiders(m.riders)
+	nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
 	bodyCtx := ctxpool.WithValue(src, m)
 
 	// runFire returns nil here (onErr routes the error); the async fire owns it.
@@ -257,6 +262,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 			panic(fmt.Sprintf("streampool: unexpected error routing follow-up error: %v", e))
 		}
 	})
+	nodeUnref(inst.enclosing)  // release the instance's own enclosing ref (fire done)
 	flowInstancePool.Put(inst) // fire complete; count is 0 forever, no reader remains
 	wave.state.DecrementReference()
 }

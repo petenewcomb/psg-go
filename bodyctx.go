@@ -68,6 +68,7 @@ func borrowBodyContext(
 		// releaseBodyContext releases them.
 		m.riders = srcMeta.riders
 		flowRefRiders(m.riders)
+		nodeRef(m.riders) // this body's carrier ref on the chain head
 	}
 	return ctxpool.WithValue(srcCtx, m), m
 }
@@ -86,7 +87,8 @@ func releaseBodyContext(ctx context.Context) {
 		wave := m.wave // captured before Put zeroes the meta; wave a fire routes into
 		bodyMetaPool.Put(m)
 		//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
-		flowUnrefRiders(riders, wave)
+		flowUnrefRiders(riders, wave) // walk (may fire) BEFORE the chain can reclaim
+		nodeUnref(riders)             // release this body's head ref (cascades if last)
 	}
 }
 

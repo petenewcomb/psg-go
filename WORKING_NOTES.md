@@ -600,15 +600,37 @@ see open queue item 5).
       GATE: vet, golangci-lint 0, full -short suite, all flow tests -race (incl. concurrent
       stress + funnel union + async firing), alloc floors, **40/40 TestBySimulation -race
       (rapid.checks=60, seeds 1-40) — 0 fails/hangs/races**.
-    - **NEXT: CP-R2b — node refcount + pooling (the concurrency-critical CP; design pass with PN
-      first, union in mind).** Add `flowRiderNode.refs`, node-refs-next + carrier-meta-refs-head +
-      instance-refs-enclosing (reg→fire-complete) + cascade-reclaim to an omnipool. Two parallel
-      counts kept SEPARATE: instance.count (firing, unchanged) vs node.refs (pooling) — node.refs
-      cannot drive firing (a child-scope carrier contributes only ONE downlink to a deep node's
-      refs regardless of carrier count). The fan-in union (collectFlowTags/flowFanInContext, and
-      its R5 boundary rework) is a node-ref holder: funnel instance holds the union head, flush
-      meta adopts it — so make node.refs UNIVERSAL (all nodes pooled incl. union) rather than a
-      mixed pooled/GC chain that would break the reclaim cascade at flush. Gate hardest.
+    - **CP-R2b LANDED (2026-07-05, worktree — NOT committed): node refcount + pooling, universal.**
+      `flowRiderNode` gains `refs atomic.Int64` + a `Reset()` (noCopy) + `flowRiderNodePool =
+      omnipool.For[flowRiderNode]`. Primitives (flow.go): `newRiderNode` (pool Get + downlink
+      nodeRef on next), `nodeRef`/`nodeUnref` (nil-safe; unref cascades reclaim down `next`,
+      panics on underflow = double-release). REF OWNERSHIP (mirrors the flowRefRiders/
+      flowUnrefRiders sites exactly): a node refs its `next` (downlink); a CARRIER meta refs its
+      head — borrowBodyContext / scope meta (WithFlow) / fire meta (unref inline + Run) / flush
+      adopt; an INSTANCE refs its `enclosing` head from registration to fire-complete (decision B —
+      REQUIRED for the async fire: enclosing must survive the gap between count→0-dispatch and the
+      worker building the fire meta, else the cascade from the triggering carrier's nodeUnref
+      reclaims it first). ensureCtxMeta derivations take NEITHER ref (synchronous, parent-covered).
+      UNION (decision A — universal): collectFlowTags prepends pooled union nodes, moving the
+      funnel's carrier ref old→new head; flowFanInContext ADOPTS it (no new ref; c.flowTags nil'd),
+      released by releaseBodyContext at flush end. Universal (all nodes pooled incl. union) avoids
+      a mixed pooled/GC chain whose reclaim cascade would corrupt at flush. Two parallel counts
+      stay separate: instance.count (firing) vs node.refs (pooling).
+      SAFETY: nodeUnref underflow panic (double-free = loud, not silent use-after-recycle); a
+      test-only `flowNodeAllocHook atomic.Pointer[func(int)]` (+1 Get/-1 reclaim; nil in prod, one
+      uncontended relaxed load) drives **TestFlowNodeConservation** (white-box) — asserts balance→0
+      across inline nesting, async drain, and funnel union; a leak leaves it positive.
+      ALLOC: value-only scope **1 → 0** — the warm per-flow allocation is fully retired
+      (meta+ctxpool+node all pooled). tag-followup 2 → 1 (the `created` slice remains). Ceiling
+      **1 → 0** (hard floor now). CP-R2 (a+b) COMPLETE: zero warm allocation for the value path.
+      GATE: vet, golangci-lint 0, -short suite, flow tests + conservation -race (x5),
+      alloc floors (0), **80/80 TestBySimulation -race total (40 pre-safety + 40 with the underflow
+      panic in place; rapid.checks=60, seeds 1-40 each) — 0 fails/hangs/races/panics**.
+    - **NEXT: CP-R3 — FlowOption becomes an interface (per-kind concrete types, 0-alloc boxing) +
+      fluent `key.Value(v).FollowUp(fn)` bundle; drop standalone FlowKey.FollowUp.** Surface change;
+      verify 0-alloc boxing by escape analysis + bench. The two R1 semantic deltas normalize here
+      (keys bundle value+follow-up on one node; no standalone key follow-up). Then R4 surface
+      reframe, R5 sever+union (F7/F8), R6 coalescing, R7 sim oracle + psgwf/otpsg.
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

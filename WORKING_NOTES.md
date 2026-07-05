@@ -45,8 +45,9 @@ SEMAPHORE OVERDRAFT POLICY, see below).**
 - **(7) Tests converted to NewDemand()** (~63 sites); Invalidate calls kept where they
   exercise the public API; modelUnit keeps the embedded-demand host pattern (mirrors
   heldPermit, documented in Demand.Init).
-- (2) p50-for-tail trade ratified; (3) PN to review promoteScan by eye
-  (permits.go: enqueue/promoteScan/retireHead/Invalidate + the headGather proof loop).
+- (2) p50-for-tail trade ratified; (3) PN reviewed promoteScan by eye (2026-07-05) —
+  APPROVED, complexity acknowledged and accepted (enqueue/promoteScan/retireHead/
+  Invalidate + the headGather proof loop). No review items open on W2d.
 - Gate: vet, lint 0, full -short, permits -race, rapid 10k, biased-sim 0/300,
   stock sim -race batch, root -race.
 

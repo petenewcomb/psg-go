@@ -99,7 +99,7 @@ func TestPermitsModel(t *testing.T) {
 					w = rapid.IntRange(1, capacity+1).Draw(t, "weight")
 				}
 				pm, err := u.cache.Acquire(&u.demand, w)
-				require.NoError(t, err, "the promise-mode Overdraft never grants or refuses")
+				require.NoError(t, err, "the 'not now' Overdraft never grants or refuses")
 				if pm.Held() {
 					u.pm = pm
 					u.running = true

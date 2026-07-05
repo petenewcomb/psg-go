@@ -168,13 +168,13 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 	c.ReleaseRef()
 }
 
-// The semaphore's overdraft answer is a standing PROMISE for every weight — the
-// OverdraftResource middle outcome (granted=false, err=nil: "normal operation can
-// eventually satisfy this") — until weighted-acquisition step 4 wires the
+// The semaphore's overdraft answer is "not now" for every weight — the
+// OverdraftResource middle outcome (granted=false, err=nil): the head keeps
+// waiting, no grant, no failure, and no commitment (a later call could refuse).
+// It stays uniformly "not now" until weighted-acquisition step 4 wires the
 // exempt-subtree meta-redirect: pre-step-4 an episode owner's own downstream
-// dispatches would be gated behind its episode and wedge. At step 4 this flips to
-// the ratified two-sided policy (promise while paused, grant past a nonzero
-// ceiling); update this test with it.
+// dispatches would be gated behind its episode and wedge, so granting is unsafe
+// regardless of weight. Step 4 decides the real policy; update this test with it.
 func TestSemaphoreOverdraftPolicy(t *testing.T) {
 	chk := require.New(t)
 
@@ -182,7 +182,7 @@ func TestSemaphoreOverdraftPolicy(t *testing.T) {
 	pc := paused.pool.NewCache()
 	dp := permits.NewDemand()
 	pm, err := pc.Acquire(dp, 3)
-	chk.NoError(err, "paused: a promise, not a refusal")
+	chk.NoError(err, "paused: not now, not a refusal")
 	chk.False(pm.Held(), "limit 0 blocks every weight until raised")
 	dp.Free()
 	pc.ReleaseRef()
@@ -191,7 +191,7 @@ func TestSemaphoreOverdraftPolicy(t *testing.T) {
 	c := sem.pool.NewCache()
 	d := permits.NewDemand()
 	pm, err = c.Acquire(d, 3)
-	chk.NoError(err, "over the ceiling: a promise too, until step 4 makes episodes safe")
+	chk.NoError(err, "over the ceiling: not now too, until step 4 makes episodes safe")
 	chk.False(pm.Held(), "no grant before the exempt subtree is representable")
 	d.Free()
 	chk.True(c.ReleaseRef())

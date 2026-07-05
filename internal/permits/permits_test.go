@@ -223,7 +223,7 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 	g := tp.NewCache()
 	dg := NewDemand()
 	gm, err := g.Acquire(dg, 4)
-	require.NoError(t, err, "the promise-mode Overdraft waits rather than granting or refusing")
+	require.NoError(t, err, "the 'not now' Overdraft waits rather than granting or refusing")
 	require.False(t, gm.Held(), "w=4 cannot be covered by capacity 3")
 	// The hoard holds the stolen 2 in the body cache. The 1 free permit stays in the
 	// Resource: the Resource arm is all-or-nothing at the shortfall until

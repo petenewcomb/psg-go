@@ -328,18 +328,25 @@ means an uncontended pool pays nothing.
   TryAcquire(shortfall) LAST and finish the gather on success; only a truly dry
   forest with a fresh refusal reaches the policy. Consequently a weight-1 head
   reaches the policy only at literally zero capacity.
-- **streampool's `semaphoreResource` answers PROMISE for every weight until
-  step 4.** An episode exempts the grantee's CAUSAL SUBTREE from its own
-  barrier, but the subtree is not representable until step 4 wires the
-  body-cache meta-redirect — pre-step-4 an episode owner's own downstream
-  dispatches are gated behind its own episode, a structural self-wedge (this,
-  not the over-grant itself, is what the sim hang hunt surfaced). At step 4 the
-  policy flips to the ratified two-sided form (PN, 2026-07-04): PROMISE while
-  paused (limit 0 keeps blocking every weight; the raise probe reaches the
-  head), GRANT for a demand heavier than a nonzero ceiling (nothing runs at
-  grant time; the episode's allowance bounds the over-commitment,
-  Σ inUse ≤ capacity + D). A non-implementing resource default-grants at any
-  weight.
+- **streampool's `semaphoreResource` answers "not now" for every weight until
+  step 4.** "Not now" is the middle outcome (granted=false, err=nil): keep
+  waiting, no grant, no failure, no commitment — re-driven by a release or a
+  `SetMaxConcurrency` raise. It cannot GRANT yet because an episode exempts the
+  grantee's CAUSAL SUBTREE from the head-of-line gate, and the subtree is not
+  representable until step 4 wires the body-cache meta-redirect — pre-step-4 an
+  episode owner's own downstream dispatches are gated behind its own episode, a
+  structural self-wedge (this, not any over-grant, is what the sim hang hunt
+  surfaced). **The step-4 policy is OPEN**, not settled (correcting an earlier
+  over-attribution): the only clear part is "not now" while PAUSED (limit 0 keeps
+  blocking every weight until a raise, preserving the pause contract). For a
+  demand heavier than a nonzero fixed ceiling, grant / refuse / not-now are all
+  defensible — grant briefly exceeds a soft cap (the doc's default-grant
+  rationale, but that argument fits demands *near* capacity, not ones structurally
+  larger than the whole limit); refuse matches "weighted infeasibility is a
+  per-unit error" and is natural for a memory limiter (item bigger than the whole
+  budget); not-now waits for a raise that may never come. Decide with the memory
+  limiter and the weigher-error path at step 4. A non-implementing resource still
+  default-grants at any weight.
 - **Latent weight bug found by the policy test**: `semaphoreResource.TryAcquire(n)`
   ignored n for bounded limits (a W2a-era "n is always 1" shortcut) — admitting 1
   while the pool checked out n. Fixed with `InFlightCounter.AddIfUnder(n, limit)`
@@ -370,7 +377,7 @@ means an uncontended pool pays nothing.
   `HoldableResource`; resources without it fall back to the retry loop.
 - **Infeasibility handling**: superseded by the overdraft design (see "Overdraft"
   below) — detection is the armed + zero-in-use proof, needing no capacity
-  visibility from the resource; the outcome is overdraft, wait-on-promise, or the
+  visibility from the resource; the outcome is overdraft, wait ("not now"), or the
   distinct per-unit error.
 
 ## Overdraft: infeasible demand under the armed barrier (PN, 2026-07-03)
@@ -397,8 +404,11 @@ nesting, so nested demands could never overdraft.)
 type OverdraftResource interface {
 	Resource
 	// Called when the pool has exhausted its own means for the head demand.
-	//   granted=true           — overdraft granted
-	//   granted=false, err=nil — a promise: normal operation can eventually satisfy n
+	//   granted=true           — grant: proceed over the limit now (install an episode)
+	//   granted=false, err=nil — not now: the head keeps waiting and re-asks on the
+	//                            next capacity change; NO commitment (a later call may
+	//                            grant, wait again, or refuse). The resource owes a
+	//                            future wake, not eventual satisfaction.
 	//   err != nil             — refuse: the unit fails with err (the resource's own
 	//                            reason — no sentinel required; PN)
 	Overdraft(n int) (granted bool, err error)
@@ -448,7 +458,8 @@ call, for the shortfall, evaluations serialized within the episode. Granted: the
 amount is added to the outstanding aggregate and remains until the *original* head
 completes — one episode, one owner, monotone growth, a single clear point. Refused:
 that unit takes the distinct error path (its sub-wave drains with the error, the
-head resumes and completes — no wedge). Wait: it parks on the promise.
+head resumes and completes — no wedge). Not now: it parks and re-asks on the
+next wake.
 
 **Consumables: the sticky-head+FIFO is the mechanism; there is no consumable
 overdraft (PN, 2026-07-03).** What actually protects a large consumable demand is

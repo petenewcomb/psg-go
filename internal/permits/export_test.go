@@ -37,15 +37,15 @@ func (s *semaphore) TryAcquire(n int) bool {
 
 func (s *semaphore) Release(n int) { s.inFlight.Add(-int64(n)) }
 
-// promiseResource wraps the semaphore with a standing-PROMISE Overdraft (never
-// grant, never refuse): the pre-overdraft blocking semantics preserved exactly, so
-// every W2b-era test built on newTestPool keeps its meaning (a proven-infeasible
-// head parks instead of over-committing, and the blocked-legitimacy oracles stay
-// valid). Granting (a bare semaphore — the non-implementing default) and refusing
-// resources live in overdraft_test.go.
-type promiseResource struct{ *semaphore }
+// waitingResource wraps the semaphore with an Overdraft that always answers "not
+// now" (granted=false, err=nil — never grant, never refuse): the pre-overdraft
+// blocking semantics preserved exactly, so every W2b-era test built on newTestPool
+// keeps its meaning (a proven-infeasible head parks instead of over-committing, and
+// the blocked-legitimacy oracles stay valid). Granting (a bare semaphore — the
+// non-implementing default) and refusing resources live in overdraft_test.go.
+type waitingResource struct{ *semaphore }
 
-func (promiseResource) Overdraft(int) (bool, error) { return false, nil }
+func (waitingResource) Overdraft(int) (bool, error) { return false, nil }
 
 // checkInvariants verifies the model-check targets over the given caches: per-cache
 // inUse ≤ held; Σheld equals the Resource's in-flight count (cross-checking the two
@@ -150,7 +150,7 @@ type testPool struct {
 
 func newTestPool(capacity int) *testPool {
 	sem := &semaphore{capacity: capacity}
-	return &testPool{Pool: NewPool(promiseResource{sem}), sem: sem}
+	return &testPool{Pool: NewPool(waitingResource{sem}), sem: sem}
 }
 
 func (tp *testPool) NewCache() *Cache { return tp.Pool.NewCache() }

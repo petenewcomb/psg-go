@@ -94,7 +94,7 @@ func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 	a := tp.NewCache()
 	da := NewDemand()
 	pa0, err := a.Acquire(da, 4)
-	require.NoError(t, err, "the promise-mode Overdraft waits rather than granting or refusing")
+	require.NoError(t, err, "the 'not now' Overdraft waits rather than granting or refusing")
 	require.False(t, pa0.Held(), "w=4 on capacity 3 is infeasible; a hoards 2 and stays head")
 	require.Equal(t, uint64(2), da.cache.Load().held())
 

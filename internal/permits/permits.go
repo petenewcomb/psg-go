@@ -54,23 +54,33 @@ type Resource interface {
 }
 
 // OverdraftResource is the optional holdable capability consulted when the Pool has
-// dynamically proven a registered demand infeasible at current capacity: barrier
-// armed, the head's gather exhausted, TryAcquire refused, zero inUse anywhere (while
-// armed, occupies are gated and only releases move the world, so the proof is free
-// and exact), and no stranger suspensions (weighted-acquisition.md §Overdraft). It is
-// policy only, with no accounting duties — a granted amount lives in the Pool's
+// dynamically proven a registered demand infeasible at current capacity: a head
+// standing, its gather exhausted, TryAcquire refused, zero inUse anywhere (while a
+// head stands occupies are gated and only releases move the world, so the proof is
+// free and exact), and no stranger suspensions (weighted-acquisition.md §Overdraft).
+// It is policy only, with no accounting duties — a granted amount lives in the Pool's
 // allowance, never in held or checkedOut, so conservation is untouched.
 //
-//	granted=true           — overdraft granted for n
-//	granted=false, err=nil — a promise: normal operation can eventually satisfy n
-//	err != nil             — refuse: the unit fails with err (the resource's own
-//	                         reason), the demand is invalidated, and the barrier passes
+//	granted=true           — grant: the unit proceeds over the current limit now
+//	                         (the Pool installs a standing overdraft episode for n)
+//	granted=false, err=nil — not now: the head keeps waiting and re-asks on the next
+//	                         capacity change. NO commitment — a later call for the
+//	                         same demand may grant, wait again, or refuse. The
+//	                         obligation is the resource's: having said "not now", it
+//	                         must ensure a wake eventually re-drives the head (a
+//	                         release, a SetMaxConcurrency raise, later a NotifyAt
+//	                         timer), or the head wedges.
+//	err != nil             — refuse: the head retires (the promotion scan runs) and
+//	                         the caller fails the unit with err (the resource's own
+//	                         reason; the caller then invalidates the demand)
 //
-// Overdraft runs under the Pool's episode lock and must not call back into the Pool.
-// A Resource that does not implement the capability defaults to GRANT: at the
-// proven-infeasible point the unit is satisfiable only by overdraft, and a briefly
-// exceeded concurrency cap beats a killed unit. Resources whose limits are hard
-// safety walls (e.g. memory) implement the capability to refuse.
+// Overdraft must not call back into the Pool. It is serialized structurally: the
+// initial grant runs only on the standing head (the slot admits one), and episode
+// extensions run under the episode object's own lock. A Resource that does not
+// implement the capability defaults to GRANT: at the proven-infeasible point the unit
+// is satisfiable only by overdraft, and a briefly exceeded concurrency cap beats a
+// killed unit. Resources whose limits are hard safety walls (e.g. memory) implement
+// the capability to refuse.
 type OverdraftResource interface {
 	Resource
 	Overdraft(n int) (granted bool, err error)
@@ -863,8 +873,8 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 		// evaluation uniform across weights (PN): a weight-1 head gets here only
 		// at literally zero capacity, and whether that means "paused, wait for
 		// the raise" or "grant past it" is the RESOURCE's policy call, not a
-		// weight rule (streampool's semaphore promises while paused, preserving
-		// limit-0-blocks; a non-implementing resource grants).
+		// weight rule (streampool's semaphore says "not now" while paused,
+		// preserving limit-0-blocks; a non-implementing resource grants).
 		anyInUse, anyBorrowable := p.walkCounts(home)
 		if anyInUse || p.strangerSuspended(home) {
 			return Permit{}, nil
@@ -935,7 +945,7 @@ func (p *Pool) headOverdraft(d *Demand, uw uint64) (Permit, error) {
 		return Permit{}, err
 	}
 	if !granted {
-		return Permit{}, nil // wait (running work, a stranger, or a promise)
+		return Permit{}, nil // wait (running work, a stranger, or a resource "not now")
 	}
 	// Install the standing episode: od publishes BEFORE its sentinel takes the
 	// slot (wake routing loads od through the sentinel flag, never through the

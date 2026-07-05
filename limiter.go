@@ -118,16 +118,19 @@ func (s *semaphoreResource) Release(n int) {
 }
 
 // Overdraft implements permits.OverdraftResource: the pool has PROVEN the head
-// demand infeasible at current capacity with zero permits in use anywhere. The
-// answer is a standing PROMISE — for every weight, for now: an overdraft episode
-// exempts the grantee's causal subtree from its own barrier, but the subtree is
-// not representable until weighted-acquisition step 4 wires the body-cache
-// meta-redirect, so pre-step-4 an episode owner's own downstream dispatches would
-// be GATED behind its episode and wedge whenever the owner blocks on them. At
-// step 4 this becomes the ratified two-sided policy (PN, 2026-07-04): promise
-// while PAUSED (limit 0 keeps blocking every weight until a raise), GRANT for a
-// demand heavier than a nonzero ceiling (nothing is running at grant time; the
-// episode's allowance accounting bounds the over-commitment).
+// demand infeasible at current capacity with zero permits in use anywhere. For now,
+// for every weight, the answer is "not now" (granted=false, err=nil) — the head
+// keeps waiting, re-driven by a release or a SetMaxConcurrency raise; there is no
+// commitment, and this could be revisited as a refuse or grant once weights exist.
+//
+// Why not grant yet: an overdraft episode exempts the grantee's causal subtree from
+// the head-of-line gate, but that subtree is not representable until
+// weighted-acquisition step 4 wires the body-cache meta-redirect. Pre-step-4 an
+// episode owner's own downstream dispatches would be gated behind its own episode
+// and wedge whenever the owner blocks on them, so granting is unsafe regardless of
+// weight. Step 4 decides the real policy — at minimum "not now" while PAUSED
+// (limit 0 keeps blocking until a raise); grant-vs-refuse for a demand heavier than
+// a nonzero ceiling is an open call (see weighted-acquisition.md).
 func (s *semaphoreResource) Overdraft(int) (bool, error) {
 	return false, nil
 }

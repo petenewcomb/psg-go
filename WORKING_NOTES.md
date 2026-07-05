@@ -17,13 +17,18 @@ SEMAPHORE OVERDRAFT POLICY, see below).**
   Now a loop: gather → walkCounts (anyInUse ⇒ wait; borrowable-elsewhere ⇒ re-gather)
   → re-TryAcquire(shortfall) LAST (finish gather on success) → only a truly dry
   forest reaches policy.
-  (b) **semaphoreResource.Overdraft = PROMISE for every weight UNTIL STEP 4**: an
+  (b) **semaphoreResource.Overdraft = "not now" for every weight UNTIL STEP 4**:
+  "not now" is the middle outcome (granted=false, err=nil) — keep waiting, no grant,
+  no failure, and (PN correction) NO commitment: it is NOT a "promise", a later call
+  can refuse; the resource only owes a future wake. Cannot grant yet because an
   episode owner's downstream dispatches are its causal subtree — exempt by design,
   but UNREPRESENTABLE until step 4's meta-redirect, so pre-step-4 they gate behind
   the owner's own episode = structural self-wedge (the actual sim hang: grants were
   COMMON, 72/120 biased iterations, mostly benign until the owner blocked on gated
-  downstream work). Step 4 flips to the PN-ratified two-sided policy (promise while
-  paused / grant past a nonzero ceiling) — recorded in the doc + the policy test.
+  downstream work). STEP-4 POLICY IS OPEN (de-attributed — I over-claimed a
+  "ratified two-sided policy"): only "not now while paused" is clear; grant vs
+  refuse vs not-now for an oversized demand on a fixed ceiling is a step-4 call,
+  decided with the memory limiter + weigher-error path.
   ALSO FOUND: latent W2a-era weight bug — semaphoreResource.TryAcquire(n) ignored n
   for bounded limits ("n is always 1" shortcut); fixed with InFlightCounter.
   AddIfUnder(n, limit) (atomic all-or-nothing).
@@ -225,13 +230,13 @@ detail, not design changes — flag on review if any smells):
   ask can exceed the true net need when free permits sit stranded — TryAcquireUpTo
   (step 3) shrinks it. Same class: borrowable fragmented across several chain caches is
   unharvestable by one claimant (descendants never gather; per-backing all-or-nothing).
-- **Test posture**: the shared test `semaphore` is now wrapped by `promiseResource`
-  (Overdraft = standing promise) so every W2b-era test keeps its blocking semantics and
+- **Test posture**: the shared test `semaphore` is now wrapped by `waitingResource`
+  (Overdraft = always "not now") so every W2b-era test keeps its blocking semantics and
   oracles; the bare semaphore (default-GRANT) + counting/refusing resources live in
   overdraft_test.go (grant arc incl. extension + owner park/resume round-trip; refusal
   through Acquire and AcquireWait; proof gating on inUse; stranger block/resume;
   episodeNotify wake delivery; serialized concurrent episodes under -race). The rapid
-  model stays promise-mode (blocked-legitimacy oracle unchanged) — a grant-mode model
+  model stays "not now" mode (blocked-legitimacy oracle unchanged) — a grant-mode model
   with allowance accounting is a possible follow-up, not blocking. Sim: production
   limiters are w=1-only until step 4 ⇒ no registration ⇒ no episodes ⇒ pure regression.
 - streampool `semaphoreResource` does NOT implement Overdraft ⇒ default-grant — inert

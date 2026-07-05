@@ -157,6 +157,77 @@ Plain pools stay on `changeSeq` + `nothingBorrowableSeq` + front-camping and pay
 per-demand or per-node cost. Weighted pools add the private `notEnoughSeq` and the
 tree index, paying `O(short)`-amortized propagation to bound the wide-forest gather.
 
+## Prerequisite analysis: the wake / re-drive enumeration (done, 2026-07-05)
+
+Every site that can wake a parked acquirer or re-drive a waiting one, classified by
+whether it fires **only on a real capacity change** (bumps `changeSeq` → the seq gate
+correctly lets the resulting walk run) or **can fire without one** (redundant for the
+capacity walk → the seq gate suppresses the walk it would otherwise cause). This is
+what decides whether the current design already bounds walks to O(capacity changes)
+or the gate is load-bearing.
+
+### Wake producers
+
+| producer | creates capacity? | class |
+|---|---|---|
+| `Permit.Release` → `wake` (`counts.release`: inUse↓) | yes | **real** — bumps |
+| `destroy` drain → `wake` (held returned to Resource) | yes | **real** — bumps |
+| `SetMaxConcurrency` raise → `capacityChangedFn` → `ChainProbe` | yes | **real** — bumps |
+| `endEpisode` → `promoteScan` (preceded by the anchor's destroy-drain) | yes (the drain) | **real** — bumps |
+| `Cache.ResumeDriver` → `wake(true)` (a suspension ended) | **no** — the permit freed at *suspend*, already bumped | **redundant for capacity** (real for the *stranger* check) |
+| `promoteScan` → successor's `mailbox.Notify` (a new head installed) | **no** — a "you're head now" signal, not new capacity | **redundant for capacity** (necessary as the successor's first walk) |
+| `ChainProbe`-on-success (rule-2 forward in AcquireWait / reclaim / blockAcquire) | **no** — a forward of an already-counted event | **redundant on the head path** (needed on the episode-claimant path) |
+
+### Re-drive loops
+
+| loop | walks per fire | class |
+|---|---|---|
+| `headGather` internal loop (`anyBorrowable`/`need==0`/deposit-race `continue`) | 1 per iteration | **real** — each `continue` resolves a concurrent release/steal race, i.e. a real change; bounded by them |
+| `AcquireWait` (confirm + loop-top re-`Acquire`) | up to 2 per wake | **redundant exactly for the redundant wakes above** |
+| `reclaim` / `blockAcquire` (streampool, same shape on the demand mailbox) | up to 2 per wake | same |
+| manager postpone (`gateAcquire` re-`acquire` on a mailbox-listener fire) | 1 per fire | same |
+
+### Findings
+
+1. **The current design does NOT bound walks to O(capacity changes) on its own.**
+   Three producers wake a waiter without a capacity change — `ResumeDriver`,
+   the `promoteScan` cascade, and `ChainProbe` tails — and each drives the
+   re-drive loops into 1–2 forest walks that find nothing new. So the seq gate is
+   **load-bearing as a bound**, not merely an optimization; this settles the open
+   question in the design above.
+
+2. **Two independent version domains.** `changeSeq` covers *capacity* only. The
+   *stranger* check (`strangerSuspended`, an O(depth) chain sum) is gated by its own
+   inputs — the `suspended` / `suspendedDrivers` counters — and `ResumeDriver` bumps
+   *those*, not `changeSeq`. So a head woken by `ResumeDriver` correctly seq-skips the
+   O(caches) forest walks (capacity unchanged) while still re-running the cheap
+   O(depth) stranger check (its inputs changed). The record's `changeSeq` must
+   therefore be documented as *capacity-only*; do not fold the suspension signal into
+   it, or a resume would wrongly suppress the stranger re-evaluation.
+
+3. **Pool-scoping of Layer 1 is specifically what bounds the promotion cascade.**
+   A retiring head that *satisfied* consumed capacity, so its successor promotes at an
+   unchanged `changeSeq`; a per-demand cache would make every successor in a cascade
+   walk once (O(successors) redundant walks per capacity state), whereas the shared
+   pool `nothingBorrowableSeq == changeSeq` lets each successor skip immediately. The
+   shared scope is not a nicety — it is the bound for the cascade.
+
+4. **Cleanup (verify, don't rush): `ChainProbe`-on-success is redundant on the head
+   path but load-bearing on the episode-claimant path.** When a *head* succeeds, its
+   `retireHead → promoteScan` already wakes the successor, so the extra `ChainProbe`
+   coalesces into that wake (single-consumer mailbox) — harmless but pointless. When
+   an *exempt claimant* succeeds under a standing episode, `od.claimants` is a
+   multi-consumer notifier and the rule-2 probe is the real chain that admits the next
+   claimant. So it can't be deleted unconditionally; distinguishing head vs claimant
+   success would let us drop the head-path probe. Low priority — the redundant wake
+   coalesces, and the seq gate suppresses the walk it would cause regardless.
+
+**Net:** walks are bounded to O(capacity changes) pool-wide **only with** the seq
+gate (Layers 1–2) plus the capacity/suspension split of finding 2; the enumeration
+found no wake source outside {release, drain, raise} that the gate fails to cover, so
+the bound is achievable — no new mechanism beyond `changeSeq` + the existing
+suspension counters is required.
+
 ## Sequencing
 
 - **Landed now:** the `enqueue` w = 1 gate (removes redundant walk #2).
@@ -164,7 +235,6 @@ tree index, paying `O(short)`-amortized propagation to bound the wide-forest gat
   `nothingBorrowableSeq` (both pool tiers), then `notEnoughSeq` and the per-cache
   index for weighted pools. Each rests on the one bump/stamp completeness invariant;
   land with the assertion/oracle, not without.
-- **Prerequisite analysis:** enumerate every wake/re-drive site and show, for each,
-  "fires only on a real capacity change" (safe) or "can fire redundantly" (a source
-  the seq gate must cover). That enumeration is what proves the bound rather than
-  assuming it.
+- **Prerequisite analysis: done** (see the section above) — the bound is achievable
+  with `changeSeq` (capacity-only) plus the existing suspension counters; no wake
+  source outside {release, drain, raise} escapes the gate.

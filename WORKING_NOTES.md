@@ -2,9 +2,27 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► W2d REVIEW FOLLOW-UPS LANDED (2026-07-04, this commit) — PN's 7-point response
-applied. NEXT: step 3 (TryAcquireUpTo / NotifyAt), then step 4 (surface + FLIP THE
-SEMAPHORE OVERDRAFT POLICY, see below).**
+**►►► WEIGHTED/PLAIN LIMITER SPLIT DESIGNED (2026-07-05, docs-only this commit) —
+weighted-acquisition.md §"The weighted/plain limiter split". PN chose compile-time
+enforcement (option ii). Supersedes the "collapse to one Limiter, weigher optional"
+framing: weight-CAPABILITY is a limiter property (plain NewSemaphore vs
+NewWeightedSemaphore), the weigher stays an (op,limiter) binding. Rationale: weight is
+what lets "infeasible" be permanent — plain w=1 infeasible ⟺ paused ⟺ WAIT (nil
+overdraft policy ⟹ the headGather nil early-out ⟹ NO walkCounts proof, the fast miss
+path that fixes the limit-1 w=1 hot-path concern); weighted can be w>cap ⟺ per-unit
+error ⟺ REFUSE (real policy, pays the proof). NewWeightLimiter takes a WeightedLimiter
+not a bare Limiter ⟹ weighing a plain semaphore won't COMPILE (closes the silent-wedge
+hole). OPEN: WeightedLimiter-vs-WeightLimiter[T] name collision + concrete-vs-interface
+(naming pass); oversized default refuse-vs-soft-grant (step-4 policy). walkCounts
+optimization: touch can't prune it (touch ≠ counts-changed; unsafe for anyBorrowable) —
+fold anyInUse into searchList's existing walk instead (deferred, weighted-path only).
+Implement with step 4. NEXT: step 3 (TryAcquireUpTo / NotifyAt), then step 4 (surface +
+the split; the "flip semaphore overdraft policy" item below is SUBSUMED by the split —
+plain sheds Overdraft entirely, weighted implements paused→wait/oversized→refuse).**
+
+**►►► W2d REVIEW FOLLOW-UPS LANDED (2026-07-04) — PN's 7-point response
+applied. Step 3 (TryAcquireUpTo / NotifyAt), then step 4 (surface + the limiter split
+above).**
 - **(1)+(5) Overdraft evaluation now UNIFORM across weights** (w≥2 gate removed —
   PN: not wrong, just inefficient; and the proof means w=1 reaches policy only at
   zero capacity). Made sound by TWO hardenings found via a biased-sim hang hunt

@@ -518,17 +518,24 @@ extension serialization; descendant-refusal unwedging; ancestor-exempt detection
 
 ## User-facing surface (settled 2026-07-02; sequencing step 4)
 
-Weight is a property of the **(op, limiter) pair** — a shared memory Limiter needs a
-different extractor per op — so the surface lives on the op. **Builder methods on the
+> **Refined 2026-07-05 — see "The weighted/plain limiter split" below.** Two
+> orthogonal facts the original framing conflated: the *weigher* is an (op, limiter)
+> binding, but weight-*capability* is a *limiter* property (plain vs weighted
+> semaphore), with different overdraft policies and a compile-time guard. That
+> supersedes "the same Limiter may be weighed or not" wherever it appears here.
+
+The *weigher* is a property of the **(op, limiter) pair** — a shared memory Limiter
+needs a different extractor per op — so it lives on the op. **Builder methods on the
 op type, returning the op type** (the `In(wave)` copy-with-modification pattern;
 `With` prefix per the `http.Request.WithContext` copy-semantics convention):
 
 ```go
-// WeightLimiter[T] pairs a Limiter with this op-type's weigher — a reusable
-// typed binding (define once, share across same-T ops). Weight is a property of
-// the BINDING, not the limiter: the same Limiter may be bound weight-1 by one op
-// and weighed by another.
-func NewWeightLimiter[T any](l Limiter, weigh func(T) int) WeightLimiter[T]
+// WeightLimiter[T] pairs a WEIGHT-CAPABLE limiter with this op-type's weigher — a
+// reusable typed binding (define once, share across same-T ops). The WEIGHER is a
+// property of the binding (a weight-capable limiter may still be bound weight-1 by
+// one op and weighed by another); weight-CAPABILITY is a property of the limiter
+// (only NewWeightedSemaphore, not NewSemaphore — the compile-time guard below).
+func NewWeightLimiter[T any](l WeightedLimiter, weigh func(T) int) WeightLimiter[T]
 
 // Reusable canonicalized sets: built once (sorted into canonical acquisition
 // order, duplicate-scanned, frozen), bound to many ops. One-shot homogeneous
@@ -550,7 +557,7 @@ func (r Launcher[T]) WithWeightLimiterSet(s WeightLimiterSet[T]) Launcher[T]
 
 ```go
 var std         = NewLimiterSet(conns, disk)                 // no T: universal reuse
-var memByBuf    = NewWeightLimiter(mem, func(it Item) int { return len(it.Buf) })
+var memByBuf    = NewWeightLimiter(mem, func(it Item) int { return len(it.Buf) }) // mem: NewWeightedSemaphore
 var itemWeights = NewWeightLimiterSet(memByBuf)              // T inferred from members
 
 launcher := NewLauncher(handler).       // T inferred from handler
@@ -566,6 +573,76 @@ weigher is shareable anyway. Verified 0 allocs/chain including multi-arg variadi
 calls: the call-site backing array is constant-size and stack-allocated **provided
 the methods copy out of the variadic slice and never retain it** — storing it would
 heap-allocate and alias the caller's array.)
+
+### The weighted/plain limiter split (PN, 2026-07-05)
+
+Refines — and partly reverses — the "collapse to one Limiter, weigher optional"
+framing. There are two orthogonal facts:
+
+- **The weigher is an (op, limiter) binding** (unchanged): which extractor produces
+  the weight, per op.
+- **Weight-CAPABILITY is a limiter property** (new): whether the limiter's overdraft
+  policy can answer a demand that cannot fit the current capacity.
+
+Why it is a real distinction, not just surface: **weight is what lets "infeasible" be
+permanent.**
+
+- A **plain** (unweighted) semaphore: a w=1 demand fits any capacity ≥ 1, so it
+  reaches the overdraft evaluation only when capacity is 0 (paused) — always
+  transient, always WAIT. It needs no overdraft policy → `pool.overdraftPolicy` is
+  `nil` → the head's miss takes the FAST path (the `nil` early-out in `headGather`,
+  no `walkCounts` proof). The common case.
+- A **weighted** semaphore: infeasibility can also mean `w > cap` — permanent at the
+  current ceiling, a per-unit data error → REFUSE. Needs a real policy.
+
+The semantic split converges with the performance fix (this is what makes it
+compelling): plain = `nil` policy = fast; weighted = policy = pays the proof (rare,
+heavy). Two constructors:
+
+```go
+func NewSemaphore(n int) Limiter                 // plain: nil overdraft, wait-only, FAST miss path
+func NewWeightedSemaphore(n int) WeightedLimiter // paused→wait, oversized→refuse; pays the proof
+```
+
+**Compile-time enforcement (option ii, PN chose 2026-07-05).** The weigher pairing
+takes a weight-capable limiter, so weighing a plain semaphore WON'T COMPILE — this
+closes a silent-wedge hole: a `w > cap` demand on a `nil`-policy pool would hit
+`nil`→wait and hang forever, exactly the failure the "weighted infeasibility is a
+distinct per-unit error" rule exists to prevent. `NewWeightLimiter` (above) takes a
+`WeightedLimiter`, not a bare `Limiter`. A `WeightedLimiter` is still usable weight-1
+in `WithLimits`/`LimiterSet` (a weighted semaphore shared weight-1 by one op and
+weighed by another still works — the settled sharing property survives, scoped to
+weighted limiters); a plain `Limiter` simply cannot be passed where a
+`WeightedLimiter` is required.
+
+**Overdraft policy defaults:**
+
+- plain semaphore: none (`nil`) → wait. "Paused blocks forever" falls straight out of
+  `nil`→wait; the semaphore sheds the standalone `Overdraft` method it carries today.
+- weighted semaphore: `maxConcurrency == 0 → wait` (paused); else the proof
+  guarantees zero inUse, so reaching overdraft means `w > cap` → `refuse` with a
+  per-unit error. **STILL OPEN**: whether a weighted *concurrency* semaphore should
+  soft-GRANT oversized instead (brief over-concurrency is harmless) rather than
+  refuse — a memory limiter refuses (hard wall), a concurrency cap arguably grants.
+  The split does not force this; it only requires weighted ≠ plain.
+
+**Open (naming pass):** `WeightedLimiter` (a weight-CAPABLE limiter) collides
+visually with the settled `WeightLimiter[T]` (a limiter+weigher pairing) — needs
+disambiguation. And whether the weight-capable type is a concrete `WeightedSemaphore`
+(semaphore-specific; generalize to an interface when weighted rate limiters land) or
+a `WeightedLimiter` interface from the start (asymmetric with `Limiter` being a
+concrete struct) is undecided. Settle with the rest of the step-4 naming.
+
+**Separate perf note — the weighted-path `walkCounts`.** For weighted pools the
+head's proof re-establishment still runs `walkCounts`. The `touch` mechanism cannot
+prune it: `touch` fires on unsatisfied up-walks, not on the releases/steals
+`walkCounts` reads, so an "untouched" subtree that just received a release holds
+borrowable capacity a prune would miss — reopening the grant-while-capacity-exists
+hole. The correct optimization is to fold the `anyInUse` check into the gather's
+existing `searchList` traversal: when `acquireInto` returns nil, `searchList` has
+just walked the whole forest confirming no borrowable, so `walkCounts`'s
+`anyBorrowable` is redundant and only `anyInUse` is new — one walk instead of two.
+Deferred until the weighted path is measured.
 
 - **`weigh` is `func(T) int` against the receiver's own type parameter — checked by
   the compiler.** No boxed `any`, no construction-time type assertion; the

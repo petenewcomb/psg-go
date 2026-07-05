@@ -19,8 +19,10 @@
 > pessimization; see "Resource partial grants" and Rejected alternatives). What
 > remains: the **user-facing surface** (the weighted/plain limiter split etc.) next,
 > then **one consumable pass** — the consumable resource class
-> (`limiter-resource-classes.md`) + a rate limiter + `NotifyAt`, INCLUDING weighted
-> consumables — after the surface is in place (one implementation of the consumable
+> (`limiter-resource-classes.md`) + a rate limiter, on the settled resource contract
+> (`TryAcquire(n) (bool, error)` — self-arm + terminal-refuse error; `NotifyAt` and
+> `TryAcquireUpTo` both dropped), INCLUDING weighted consumables — after the surface is
+> in place (one implementation of the consumable
 > class, not two). The weighing *surface* (how ops weigh tasks) was already settled in
 > `dispatch-execution-split.md` and is not revisited here.
 
@@ -502,15 +504,18 @@ classes, with the pass-through mechanics pinned as:
 - while armed, the **barrier check in the pass-through gate blocks all
   acquisition** (one atomic load, the analogue of the `acquireLocal` check);
 - the head is satisfied by the resource's internal accrual under barrier
-  protection, woken by the **single replaceable notify-target**: `NotifyAt(n) error`
-  — set at head-arrival, replaced on head change, cleared on disarm (replacement
-  subsumes cancellation). A *reachable* n arms one exact timer
-  (`(n − level) / rate`, or folds into the gauge poll), and sub-target notifies are
-  suppressible while a target stands — waste by construction, since the barrier
-  blocks everyone they could serve. An *unreachable* n (w > anything the resource
-  can ever accrue) **returns the resource-authored refusal error** — the
-  feasibility answer and the wake mechanism are one call, making `Wait`
-  operational and `Refuse` explicit with no Overdraft involvement;
+  protection. **The wake and feasibility both ride `TryAcquire(w) (bool, error)`
+  now — `NotifyAt` is dropped** (superseded 2026-07-05; the standalone
+  `NotifyAt(n) error` design below is kept only as the record of how we got here).
+  A consumable's ask is `w` (no gather to reduce it), so on a missed `TryAcquire`
+  the resource **self-arms** the wake for `w` — remember the rejected size, arm one
+  exact timer (`(w − level) / rate`, or fold into the gauge poll), post `Adjust`
+  when it matures; sub-target maturations are suppressible while a head stands
+  (waste by construction — the barrier blocks everyone they could serve). An
+  *unreachable* `w` (larger than the resource can ever accrue) is the `error`
+  return of that same `TryAcquire` — terminal refuse, feasibility and the acquire
+  attempt in one call, no separate notify method. (Full contract:
+  `limiter-resource-classes.md` §"Resource contract, settled".)
 - the head **dequeues at admission** — charge-once semantics has no completion
   event, and the standing head is the holdable overdraft-episode mechanism, not a
   barrier feature.
@@ -857,8 +862,9 @@ generic `OpOption[T]` (infects every option's call site).
    w ≥ 2). NEXT.
 4. **One consumable pass** — the consumable resource class
    (`limiter-resource-classes.md`: pass-through, no caching forest) + a rate limiter +
-   the resource-driven wake (`NotifyAt` for the head's exact-target-or-refuse, plus
-   `Adjust`/`balance` for the general consumer wake), INCLUDING weighted consumables.
+   the resource-driven wake (the settled contract: `TryAcquire(n) (bool, error)` —
+   self-arm the wake on a `(false, nil)` miss and post `Adjust`, terminal refuse via
+   the `error`; no `NotifyAt`, no `TryAcquireUpTo`), INCLUDING weighted consumables.
    Done as one pass AFTER the surface (step 3) so the consumable class is implemented
    once, with weighted support from the start, rather than a w=1 rate limiter now and
    weighted consumables later (PN, 2026-07-05).

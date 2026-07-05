@@ -43,22 +43,30 @@ core now validated by: sequential promise + grant rapid models (10-20k), concurr
   body-cache destroy, so the outlier's hoard drains back at completion. (Proactive
   shrink of long-lived IDLE cache = the separate narrower `Reclaim(n)`, motivated by
   shrinking capacity, not concentration.)
-- **`NotifyAt` KEPT** — genuinely load-bearing for consumables (rate limiters): capacity
-  accrues over TIME (resource-internal), no release event for the pool to see, so the
-  resource must own the wake. `NotifyAt(n) error` = wake-at-exact-target + refuse-if-
-  unreachable in one call; also the wake-chatter fix. Nothing the pool can query/compute
-  (unlike free capacity), so it can't be dropped like TryAcquireUpTo.
+- **`NotifyAt` DROPPED too — RESOURCE CONTRACT SETTLED** (PN, 2026-07-05, recorded in
+  limiter-resource-classes.md §"Resource contract, settled" + weighted-acquisition.md).
+  `TryAcquire(n) (bool, error)`: (true,nil)=grant-from-free; (false,nil)="not from free,
+  overdraft on the table" (holdable → gather then maybe Overdraft; consumable → wait,
+  SELF-ARM the accrual wake — remember the rejected size, arm timer/poll, post Adjust —
+  which IS Decision-3's "failed TryAcquire is the demand signal", so NotifyAt is
+  redundant); (false,err)=TERMINAL refuse the resource is certain of regardless of the
+  gather. `HoldableResource` = +Release +Overdraft(n)(bool,error). Overdraft STAYS as the
+  three-way (grant/wait/refuse) because the TRUE ask is only known post-gather (n = w −
+  forest-borrowable the gather assembled; the forest is resource-invisible) — the reason
+  it can't fold into TryAcquire. CHANNEL-CHOICE RULE: err = ask-independent certain
+  refuse (fast-fail); Overdraft = ask-DEPENDENT decision; pick per policy. A resource MAY
+  err AND implement Overdraft consistently (e.g. an INSTANCE config-disabled from
+  overdraft fast-fails via err while the type keeps the dormant Overdraft method) — the
+  sole incoherent case is erring where Overdraft would GRANT. Not structurally enforced;
+  benign if tripped (err wins → stricter policy, not a crash).
 - **SEQUENCING (PN): surface FIRST (step 3), then ONE consumable pass (step 4).** Step 3
   = the weighted/plain surface + split (lights up the validated holdable core; sim can
   dispatch w≥2). Step 4 = one consumable pass — the consumable resource CLASS
-  (limiter-resource-classes.md: pass-through, no caching forest) + a rate limiter +
-  NotifyAt/Adjust wake, INCLUDING weighted consumables — done once AFTER the surface so
-  the consumable class is implemented a single time with weighted support from the start
-  (not a w=1 rate limiter now + weighted later). Note: adding a rate limiter is the
-  framework's FIRST consumable; the consumable class itself is unimplemented today (only
-  the holdable semaphore exists). Open detail for that pass: reconcile Adjust/balance
-  (general consumer wake) with NotifyAt (head exact-target) — does NotifyAt's timer post
-  to the balance or wake the head mailbox directly.
+  (limiter-resource-classes.md: pass-through, no caching forest) + a rate limiter, on the
+  settled contract (TryAcquire(bool,error) self-arm + Adjust/balance wake), INCLUDING
+  weighted consumables — done once AFTER the surface so the class is implemented a single
+  time with weighted support from the start. Adding a rate limiter is the framework's
+  FIRST consumable; the class is unimplemented today (only the holdable semaphore exists).
 NEXT: step 3 (weighted surface + split), then walk-avoidance impl is optional/separable.
 
 **►►► GATHER WALK-AVOIDANCE DESIGNED + enqueue w=1 gate LANDED (2026-07-05) —

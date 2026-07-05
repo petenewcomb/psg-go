@@ -18,9 +18,10 @@
 > lands as the **one consumable pass** at the end of the weighted-acquisition
 > sequencing — *after* the weighted/plain surface is in place — so the class is built
 > once with weighted-consumable support from the start (`weighted-acquisition.md`
-> §"one consumable pass"). The head's exact-target-or-refuse wake for a weighted
-> consumable is `NotifyAt(n) error` (`weighted-acquisition.md` §Overdraft consumables);
-> reconcile it with the `Adjust`/`balance` general wake here at implementation.
+> §"one consumable pass"). The resource-facing interface settled 2026-07-05 — see
+> "Resource contract, settled" below: `NotifyAt` and `TryAcquireUpTo` are both dropped,
+> the wake for a consumable is the self-arm on a failed `TryAcquire` (Decision 3's lazy
+> arm) posting `Adjust`, and its feasibility is `TryAcquire`'s new `error` return.
 
 ## Context: what the forest actually assumes
 
@@ -119,6 +120,74 @@ into the holdable protocol silently. Non-risk in practice — `Limiter` is seale
 resources are framework-authored in a closed internal package, and the constructor set
 is small and deliberate. A marker method can harden this later if the package ever
 opens.
+
+### Resource contract, settled (2026-07-05, multi-session design)
+
+Three sessions of whittling landed the final resource-facing shape. It **supersedes
+the `bool`-only `TryAcquire` above** and **drops both `TryAcquireUpTo` and `NotifyAt`.**
+
+```go
+// Resource: the base admission contract. The error carries TERMINAL infeasibility
+// the resource is certain of independent of any gather.
+type Resource interface {
+	TryAcquire(n int) (bool, error)
+}
+
+// HoldableResource: conserved tokens (the caching forest) + Release + the
+// ask-dependent overdraft decision.
+type HoldableResource interface {
+	Resource
+	Release(n int)
+	Overdraft(n int) (granted bool, err error)
+}
+```
+
+`TryAcquire(n)` returns three signals:
+
+- `(true, nil)` — granted from the free pool.
+- `(false, nil)` — not from free, **overdraft still on the table**. For a *holdable* the
+  Pool then gathers the forest (which may satisfy `n` with no overdraft at all) and,
+  only if that exhausts under the zero-inUse proof, calls `Overdraft`. For a
+  *consumable* there is no forest, so this means "not enough yet — wait," and the
+  resource **self-arms** its wake: it remembers the rejected `n` and arms a timer (or
+  a gauge poll), posting an `Adjust` when its level reaches `n`. That self-arm is
+  exactly Decision 3's "a failed `TryAcquire` is the demand signal," and it is what
+  makes `NotifyAt` unnecessary — the rejection already carries the size, and the
+  barrier guarantees `n` is the head's.
+- `(false, err)` — TERMINAL refusal the resource is certain of regardless of the gather
+  (a consumable's `n >` its bucket ceiling; a hard-wall holdable's "no overdraft,
+  ever"). The unit fails with `err`. The gather is not aborted — `err` bites only if
+  the gather exhausts — but a terminal `n` will exhaust it.
+
+`Overdraft(n)` stays a **separate post-gather call, and must, because the true ask is
+only known there.** For a holdable the `n` handed to `Overdraft` is `w` minus what the
+gather assembled from the resource-INVISIBLE forest borrowable, so the resource cannot
+compute it at `TryAcquire`. Its three outcomes are all ask-dependent — **grant** (a
+soft cap chooses to exceed), **wait** (`granted=false, err=nil`: paused, wait for a
+raise), **refuse** (`err`: e.g. a soft margin `M` that refuses iff `n > M`) — so all
+three need `n` and belong here, not at `TryAcquire`.
+
+**Channel-choice rule.** `TryAcquire err` and `Overdraft` are *alternative* feasibility
+channels: `err` is a refusal you are certain of **independent of the ask** (a
+fast-fail); `Overdraft` is a decision that **depends on the post-gather ask**. Return
+`err` only where you would refuse regardless of `n`; if the outcome depends on `n`,
+return `(false, nil)` and decide at `Overdraft`. A resource MAY use both **consistently**
+— e.g. an instance whose *configuration* disallows overdraft entirely legitimately
+fast-fails at `TryAcquire` with `err` while the type still carries the `Overdraft`
+method (dormant for that instance) — as long as they agree. The sole incoherent case is
+erring at `TryAcquire` where `Overdraft` would have **granted** (pre-refusing a demand
+you'd have granted). Not structurally enforced — both live on the same resource — so a
+documented rule; benign if tripped (the `err` just wins → a stricter policy than
+written, not a crash).
+
+**Dropped by this contract:**
+- **`TryAcquireUpTo`** — `weighted-acquisition.md` Rejected alternatives: unnecessary
+  (the resource self-accounts for its own free; a demand that would fit never reaches
+  overdraft) and a pessimization (it buries reachable free capacity as cached-borrowable
+  others must steal back; concentration is bounded by destroy-drain).
+- **`NotifyAt`** — folded into `TryAcquire`'s `(false, nil)` self-arm (wake) plus `err`
+  (terminal refuse). A consumable's ask is `w`, known at `TryAcquire`, so it needs no
+  separate feasibility+wake call.
 
 ## Decision 2: consumables are a degenerate forest, not a special case
 
@@ -327,10 +396,14 @@ and avoids a per-occupy revalidation hook in the forest.
 The design lands almost entirely in `Pool`; **`Cache` and `counts` change not at all**,
 which is the concrete form of "the forest is untouched; other classes route around it."
 
-- **`Resource`** narrows to `TryAcquire(n int) bool`; `HoldableResource` adds
-  `Release(n int)`. The only internal `Release` caller — `destroy`'s drain — becomes
-  `p.holdable.Release`, unconditionally safe (destroy runs only on caches; consumable
-  pools have none).
+- **`Resource`** becomes `TryAcquire(n int) (bool, error)` (the settled contract
+  above — the `error` is consumable/hard-wall terminal refuse); `HoldableResource` adds
+  `Release(n int)` and `Overdraft(n int) (bool, error)`. Holdable `TryAcquire` returns a
+  nil error (its feasibility is the gather + `Overdraft`); the existing overdraft plumbing
+  in `permits.go` already has `OverdraftResource.Overdraft`, so this pass folds it under
+  `HoldableResource` and drops the standalone `NotifyAt`. The only internal `Release`
+  caller — `destroy`'s drain — becomes `p.holdable.Release`, unconditionally safe
+  (destroy runs only on caches; consumable pools have none).
 - **`Pool` gains three fields**: `holdable HoldableResource` (nil ⇒ pass-through; set
   once in `NewPool`, nil-tested on hot paths), `balance atomic.Int64` (the signed
   ledger — int64, unlike the uint64 `counts` amounts), and `chain atomic.Bool` (CAS-

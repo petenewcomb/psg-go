@@ -651,12 +651,34 @@ see open queue item 5).
       Example_clientTimeout/ExampleFunnel flakes — pass 3/3 standalone), flow + conservation -race,
       alloc floors 0, **40 TestBySimulation -race runs clean (24 distinct seeds; on top of R2b's
       80/80 identical concurrency)**.
-    - **NEXT: CP-R4 — surface reframe.** `FlowFollowUp(h)`/`FlowFollowUpFn(fn)` = anonymous
-      DAG-scoped follow-up (mints an unnamed tag-kind identity per registration; the default when
-      you want "run once at the true end" with no name/value). `tag.Infuse()` = bare presence
-      (valueless marker, no lifetime — new; CP-6 had no tagging without a follow-up). Decision table
-      + "value severs / lifetime & presence cross" as the teaching frame. Then R5 sever+union
-      (F7/F8), R6 coalescing (union-find), R7 sim oracle + psgwf/otpsg.
+    - **CP-R4 LANDED (2026-07-05, worktree — NOT committed): anonymous follow-up + bare presence.**
+      `FlowFollowUp(h)`/`FlowFollowUpFn(fn)` = anonymous DAG-scoped follow-up: mints a fresh unnamed
+      tag-kind identity per call (no handle ⇒ neither InFlow-queryable nor Suppressible), fires once
+      at the true end, crosses funnels. `FlowTag.Infuse()` = bare presence: a valueless,
+      follow-up-less marker so InFlow reports the tag with no lifetime (complements FollowUp;
+      Suppress clears either). New `flowOptInfuse` kind; buildFlowRiders emits a valueless
+      follow-up-less node (skipped when a follow-up under the id already provides presence).
+      PRESENCE CROSSES THE FAN-IN: collectFlowTags now folds bare-presence nodes into the union too
+      — follow-up nodes still ref one carrier per distinct instance; a presence node (no instance)
+      contributes presence once per distinct id with NO ref (membership has nothing to keep alive).
+      Values still sever. (This extends the EXISTING union; the R5 boundary rework subsumes it.)
+      Refcount/firing unchanged. Tests: anonymous fires once + crosses funnel (not before flush) +
+      two-independent; Infuse presence in-scope + downstream-across-fan-in + fires-nothing +
+      Suppress-clears; conservation test gains an Infuse + anonymous-follow-up funnel scenario.
+      GATE: vet, golangci-lint 0, -short (modulo the known psgwf Example_clientTimeout real-clock
+      flake — 3/3 standalone), flow + conservation -race, alloc floors, **TestBySimulation -race:
+      39/40 seeds pass; seed 6 hit the KNOWN PRE-EXISTING hang ONCE (intermittent — passed 2/2 on
+      re-run), signature conclusively pre-existing (6 goroutines, 4 parked skimSelect←
+      addWorkWhileMaybeBlocking←WaitForNew, NO mutex/semacquire waiters, ZERO flow-rider frames —
+      the permits/wake-chain missed-wake class from the OPEN item above, not flow).** 41/42 -race
+      runs green.
+    - **NEXT: CP-R5 — funnel sever as chain rebuild (F8) + fan-in tag union on the chain (F7).**
+      The `rebuild(head, stop, keep)` primitive with a STOP boundary (the driving flow's chain head
+      captured at funnel dispatch): sever keeps only tag-kind nodes ABOVE the boundary (per-item
+      path keys sever, enclosing flow shared intact — F8); the per-item tag union folds to the
+      boundary and materializes at flush (F7 — replaces the current collectFlowTags/flowFanInContext
+      instance-set with a boundary-scoped chain union). Then R6 coalescing (union-find), R7 sim
+      oracle + psgwf/otpsg. The pre-existing hang belongs to the permits thread (hand off dossier).
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

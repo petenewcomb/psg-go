@@ -83,4 +83,21 @@ func TestFlowNodeConservation(t *testing.T) {
 	}, tagB.FollowUpFn(func(context.Context) error { return nil })))
 	chk.NoError(fwave.CloseAndSkimAll(context.Background()))
 	settled("funnel union")
+
+	// (D) Bare presence (Infuse) + anonymous follow-up crossing a funnel: the
+	// presence node (no instance) and the anonymous follow-up node must both fold
+	// into the union, materialize at flush, and reclaim.
+	pres := NewFlowTag()
+	var iwave Wave
+	ifunnel := NewFnFunnel(&iwave, func() Accumulator[int] {
+		return NewAccumulator(
+			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
+			func(context.Context) error { return nil },
+		)
+	})
+	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
+		return ifunnel.Submit(ctx, 1)
+	}, pres.Infuse(), FlowFollowUpFn(func(context.Context) error { return nil })))
+	chk.NoError(iwave.CloseAndSkimAll(context.Background()))
+	settled("infuse + anonymous follow-up funnel")
 }

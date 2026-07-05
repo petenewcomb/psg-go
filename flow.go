@@ -100,6 +100,7 @@ type flowOptionKind int8
 const (
 	flowOptValue flowOptionKind = iota + 1
 	flowOptFollowUp
+	flowOptInfuse
 	flowOptSuppress
 	flowOptNewFlow
 )
@@ -261,6 +262,44 @@ func (t FlowTag) FollowUpFn(fn func(ctx context.Context) error) FlowOption {
 		panic("streampool: FollowUpFn called with a nil function")
 	}
 	return t.FollowUp(FlowTagFollowUpFunc(fn))
+}
+
+// Infuse returns a [FlowOption] that marks the flow with t as bare presence: no
+// value, no follow-up lifetime. Inside the scope and everywhere downstream —
+// across fan-ins, since presence is DAG-scoped — [FlowTag.InFlow] reports t, so a
+// body can ask "am I part of this flow?" without anyone registering a hook. It
+// complements [FlowTag.FollowUp] (presence plus a lifetime); a flow may carry
+// both, and [FlowTag.Suppress] clears either from a subtree.
+func (t FlowTag) Infuse() FlowOption {
+	if t.id == nil {
+		panic("streampool: Infuse called on a zero FlowTag; mint with NewFlowTag")
+	}
+	return FlowOption{kind: flowOptInfuse, id: t.id}
+}
+
+// FlowFollowUp returns a [FlowOption] registering h to run once at the flow's true
+// end — after the registering scope exits and all work in the flow, across any
+// aggregation, has completed. It is the anonymous, DAG-scoped follow-up: it mints
+// a fresh unnamed identity per call, so — unlike a [FlowTag] follow-up — it can be
+// neither queried with InFlow nor cleared with Suppress; reach for it when you
+// just want "run this at the end" with no name to bind. Being DAG-scoped it
+// crosses funnel fan-ins, like a tag's follow-up. See docs/decisions/flow-design.md.
+func FlowFollowUp(h FlowTagFollowUp) FlowOption {
+	if h == nil {
+		panic("streampool: FlowFollowUp called with a nil handler")
+	}
+	return FlowOption{kind: flowOptFollowUp, id: &flowIdentity{kind: flowTagIdent},
+		fn: func(ctx context.Context, _ any) error {
+			return h.Do(ctx)
+		}}
+}
+
+// FlowFollowUpFn is [FlowFollowUp] sugar over a plain function.
+func FlowFollowUpFn(fn func(ctx context.Context) error) FlowOption {
+	if fn == nil {
+		panic("streampool: FlowFollowUpFn called with a nil function")
+	}
+	return FlowFollowUp(FlowTagFollowUpFunc(fn))
 }
 
 // Suppress returns a [FlowOption] that stops k's INHERITED bundle at the
@@ -525,7 +564,7 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 	anySuppress := false
 	for i := range opts {
 		switch opts[i].kind {
-		case flowOptValue, flowOptFollowUp:
+		case flowOptValue, flowOptFollowUp, flowOptInfuse:
 		case flowOptSuppress:
 			anySuppress = true
 		case flowOptNewFlow:
@@ -599,6 +638,27 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		head = newRiderNode(o.id, v, true, nil, head)
 	}
 
+	// Presence-only (Infuse) nodes: a valueless, follow-up-less marker so InFlow
+	// reports the tag. Skipped when a follow-up under the id already provides
+	// presence, or when an earlier Infuse for the id was already emitted.
+	for i := range opts {
+		o := &opts[i]
+		if o.kind != flowOptInfuse || hasFollowUp(o.id) {
+			continue
+		}
+		earlier := false
+		for j := 0; j < i; j++ {
+			if opts[j].kind == flowOptInfuse && opts[j].id == o.id {
+				earlier = true
+				break
+			}
+		}
+		if earlier {
+			continue
+		}
+		head = newRiderNode(o.id, nil, false, nil, head)
+	}
+
 	// Then follow-up nodes in option order (later nearer the head → LIFO peel).
 	// Each fires ONCE at its own end. Its enclosing set is node.next (all bindings
 	// registered before it), and it takes an inner-holds-outer ref on every
@@ -631,39 +691,59 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 	return head, created
 }
 
-// collectFlowTags folds the DAG-scoped (tag) riders of ctx's chain into union,
-// taking one carrier ref on each instance newly added — the fan-in transfer.
-// The funnel instance's ref covers the tag from this accumulate until the
-// flush takeover adopts it, overlapping the accumulate item's own ref
-// (ref-before-release: the instance never transits an unreferenced state).
-// One ref per DISTINCT instance suffices — refs are fungible covers, not
-// per-item tokens — so union is a set, not a multiset. Called under the
+// collectFlowTags folds the DAG-scoped (tag) riders of ctx's chain into union —
+// the fan-in transfer that carries tag presence and follow-up lifetimes across
+// the accumulate→flush boundary. Follow-up nodes contribute one carrier ref per
+// DISTINCT instance (refs are fungible covers, not per-item tokens — union is a
+// set, not a multiset); the funnel's ref covers the tag from this accumulate
+// until the flush takeover adopts it, overlapping the accumulate item's own ref
+// (ref-before-release: the instance never transits unreferenced). Bare-presence
+// (Infuse) nodes carry no instance and contribute presence once per DISTINCT id
+// (no ref — presence is membership, nothing to keep alive). Called under the
 // funnel instance's mu; union's nodes are owned by the funnel instance.
 func collectFlowTags(union *flowRiderNode, ctx context.Context) *flowRiderNode {
 	m, ok := metaFromContext(ctx)
 	if !ok {
 		return union
 	}
+	// prepend attaches a pooled union node and moves the funnel's carrier ref from
+	// the old head to the new one (the old head survives via the new node's
+	// downlink). The whole union is adopted by the flush meta at flowFanInContext.
+	prepend := func(id *flowIdentity, inst *flowInstance) {
+		newHead := newRiderNode(id, nil, false, inst, union)
+		nodeRef(newHead)
+		nodeUnref(union)
+		union = newHead
+	}
 	for n := m.riders; n != nil; n = n.next {
-		if n.id.kind != flowTagIdent || n.inst == nil {
+		if n.id.kind != flowTagIdent {
 			continue
 		}
-		present := false
+		if n.inst != nil {
+			seen := false
+			for u := union; u != nil; u = u.next {
+				if u.inst == n.inst {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				n.inst.ref()
+				prepend(n.id, n.inst)
+			}
+			continue
+		}
+		// Presence-only: ensure the id is represented once (any node with the id
+		// already provides presence, including a follow-up node).
+		seen := false
 		for u := union; u != nil; u = u.next {
-			if u.inst == n.inst {
-				present = true
+			if u.id == n.id {
+				seen = true
 				break
 			}
 		}
-		if !present {
-			n.inst.ref()
-			// Prepend a pooled union node and move the funnel's carrier ref from the
-			// old head to the new one (the old head survives via the new node's
-			// downlink). The whole union is adopted by the flush meta at flowFanInContext.
-			newHead := newRiderNode(n.id, nil, false, n.inst, union)
-			nodeRef(newHead)
-			nodeUnref(union)
-			union = newHead
+		if !seen {
+			prepend(n.id, nil)
 		}
 	}
 	return union

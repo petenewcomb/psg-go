@@ -810,3 +810,98 @@ func TestFlowScopeWithLimiter(t *testing.T) {
 	chk.NoError(err)
 	chk.Equal([2]any{3, true}, saw.Load())
 }
+
+// ─── CP-R4: anonymous follow-up + bare presence ──────────────────────────────
+
+// TestFlowFollowUpAnonymous: FlowFollowUp fires exactly once at the flow's true
+// end and, being DAG-scoped, crosses a funnel fan-in — like a tag follow-up but
+// with no name to query or suppress.
+func TestFlowFollowUpAnonymous(t *testing.T) {
+	chk := require.New(t)
+
+	// Fires once at scope exit for a synchronous scope.
+	var fired atomic.Int32
+	chk.NoError(streampool.WithFlow(context.Background(), func(context.Context) error { return nil },
+		streampool.FlowFollowUp(streampool.FlowTagFollowUpFunc(func(context.Context) error {
+			fired.Add(1)
+			return nil
+		}))))
+	chk.EqualValues(1, fired.Load())
+
+	// Two anonymous registrations in one scope are independent (distinct minted
+	// identities), so both fire.
+	var a, b atomic.Int32
+	chk.NoError(streampool.WithFlow(context.Background(), func(context.Context) error { return nil },
+		streampool.FlowFollowUpFn(func(context.Context) error { a.Add(1); return nil }),
+		streampool.FlowFollowUpFn(func(context.Context) error { b.Add(1); return nil })))
+	chk.EqualValues(1, a.Load())
+	chk.EqualValues(1, b.Load())
+
+	// Crosses a funnel: the anonymous follow-up must not fire before the flush,
+	// and fires once after the aggregate completes.
+	var xfired atomic.Int32
+	var firedBeforeFlush atomic.Bool
+	var wave streampool.Wave
+	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+		return streampool.NewAccumulator(
+			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
+			func(context.Context) error { firedBeforeFlush.Store(xfired.Load() > 0); return nil },
+		)
+	})
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		for i := 0; i < 3; i++ {
+			if err := aggregator.Submit(ctx, i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, streampool.FlowFollowUpFn(func(context.Context) error { xfired.Add(1); return nil }))
+	chk.NoError(err)
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+	chk.Eventually(func() bool { return xfired.Load() == 1 }, 5*time.Second, 5*time.Millisecond)
+	chk.False(firedBeforeFlush.Load(), "anonymous follow-up crossed the funnel — must not fire before flush")
+}
+
+// TestFlowTagInfuse: bare presence — InFlow reports the tag with no follow-up
+// lifetime, presence crosses a funnel (ORs through), and Suppress clears it.
+func TestFlowTagInfuse(t *testing.T) {
+	chk := require.New(t)
+	tag := streampool.NewFlowTag()
+
+	// Present inside, absent outside; no follow-up means nothing to fire.
+	var inScope, downstream atomic.Bool
+	chk.False(tag.InFlow(context.Background()))
+
+	var wave streampool.Wave
+	downTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		downstream.Store(tag.InFlow(ctx))
+		return nil
+	})
+	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+		return streampool.NewAccumulator(
+			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
+			func(ctx context.Context) error {
+				chk.True(tag.InFlow(ctx), "infused presence crosses the fan-in to the flush")
+				return downTask.Submit(ctx, struct{}{})
+			},
+		)
+	})
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		inScope.Store(tag.InFlow(ctx))
+		return aggregator.Submit(ctx, 1)
+	}, tag.Infuse())
+	chk.NoError(err)
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+	chk.True(inScope.Load(), "Infuse marks presence in the scope")
+	chk.True(downstream.Load(), "presence ORs through the fan-in to downstream work")
+
+	// Suppress clears an infused presence in a nested scope.
+	var sup atomic.Bool
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return streampool.WithFlow(ctx, func(c context.Context) error {
+			sup.Store(tag.InFlow(c))
+			return nil
+		}, tag.Suppress())
+	}, tag.Infuse()))
+	chk.False(sup.Load(), "Suppress clears the infused presence in the subtree")
+}

@@ -63,6 +63,23 @@ type flowInstance struct {
 	count atomic.Int64
 }
 
+// flowInstancePool recycles flowInstance values. A follow-up fires exactly once
+// at count→0 (CP-F6), and retain-of-a-scope-ctx is undefined, so after the fire
+// no live chain can reference the instance again — it is recycled
+// generation-free at fire completion, needing no ABA guard
+// (docs/decisions/flow-rider-chain.md, "Pooling summary").
+var flowInstancePool = omnipool.For[flowInstance]()
+
+// Reset zeroes the instance for reuse. It is the omnipool recycle hook, used
+// instead of a plain struct copy because count (atomic.Int64) carries noCopy.
+func (in *flowInstance) Reset() {
+	in.fn = nil
+	in.val = nil
+	in.enclosing = nil
+	in.holds = nil
+	in.count.Store(0)
+}
+
 func (in *flowInstance) ref() {
 	in.count.Add(1)
 }
@@ -88,7 +105,9 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 		flowRefRiders(m.riders)
 		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
 		ctx := ctxpool.WithValue(context.Background(), m)
-		return in.runFire(ctx, true, nil, nil)
+		err := in.runFire(ctx, true, nil, nil)
+		flowInstancePool.Put(in) // fire complete; count is 0 forever, no reader remains
+		return err
 	}
 	wave.state.IncrementReference()
 	wk := flowFireWorkPool.Get()
@@ -238,6 +257,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 			panic(fmt.Sprintf("streampool: unexpected error routing follow-up error: %v", e))
 		}
 	})
+	flowInstancePool.Put(inst) // fire complete; count is 0 forever, no reader remains
 	wave.state.DecrementReference()
 }
 

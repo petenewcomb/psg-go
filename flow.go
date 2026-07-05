@@ -315,6 +315,37 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 		ambient = src.riders
 	}
 	riders, created := buildFlowRiders(ambient, opts)
+
+	// The scope meta clones the ambient meta (when there is one) so it is
+	// transparent to everything but the rider chain: wave resolution, the
+	// permit chain (parent link; held stays nil so currentHeldPermit walks
+	// through), reentrancy typing, and the execution environment all behave
+	// exactly as they would on ctx itself. At top level (no ambient meta) the
+	// remaining fields stay zero: wave nil (ambient dispatch still requires
+	// op.In), ctxType top-level, exEnv nil (minted by the dispatch path).
+	//
+	// The meta and its ctxpool child are POOLED and freed at return
+	// (docs/decisions/flow-rider-chain.md, "Pooling summary"): a scope ctx is
+	// call-scoped like every framework-provided ctx, so retaining one past
+	// WithFlow's return is undefined — dispatched work carries its own body meta
+	// and never resolves the scope meta. The release is registered FIRST among the
+	// trailing defers so it runs LAST — after the inline follow-up fires below,
+	// which root their own metas and never read the scope ctx.
+	m := bodyMetaPool.Get()
+	m.riders = riders
+	if src != nil {
+		m.wave = src.wave
+		m.parent = src
+		m.parentWaves = src.parentWaves
+		m.ctxType = src.ctxType
+		m.executionEnvironment = src.executionEnvironment
+	}
+	scopeCtx := ctxpool.WithValue(ctx, m)
+	defer func() {
+		ctxpool.Free(scopeCtx)
+		bodyMetaPool.Put(m)
+	}()
+
 	if len(created) > 0 {
 		// Release the scope's ref on each instance this scope registered, in
 		// REVERSE registration order (LIFO — innermost first, defer-like). The
@@ -338,27 +369,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 		}()
 	}
 
-	// The scope meta clones the ambient meta (when there is one) so it is
-	// transparent to everything but the rider set: wave resolution, the
-	// permit chain (parent link; held stays nil so currentHeldPermit walks
-	// through), reentrancy typing, and the execution environment all behave
-	// exactly as they would on ctx itself. At top level (no ambient meta) the
-	// remaining fields stay zero: wave nil (ambient dispatch still requires
-	// op.In), ctxType top-level, exEnv nil (minted by the dispatch path).
-	//
-	// The meta and its ctxpool child are deliberately NOT pooled or freed at
-	// return: a retained scope ctx read after a free would resolve a recycled
-	// meta, and no event marks the last such read. GC owns both; the cost is
-	// one small allocation per registering scope, never per dispatch.
-	m := &ctxMeta{riders: riders}
-	if src != nil {
-		m.wave = src.wave
-		m.parent = src
-		m.parentWaves = src.parentWaves
-		m.ctxType = src.ctxType
-		m.executionEnvironment = src.executionEnvironment
-	}
-	err = body(ctxpool.WithValue(ctx, m))
+	err = body(scopeCtx)
 	return err
 }
 
@@ -506,7 +517,8 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		if o.kind != flowOptFollowUp {
 			continue
 		}
-		in := &flowInstance{fn: o.fn}
+		in := flowInstancePool.Get()
+		in.fn = o.fn
 		in.count.Store(1) // the registering scope's ref, released at scope exit
 		val, hasVal := settledVal(o.id)
 		in.val = val // settled bundle value (nil for a tag / valueless key)

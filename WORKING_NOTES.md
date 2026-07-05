@@ -578,11 +578,37 @@ see open queue item 5).
       stays globally visible (emitted deepest), so only bundled values differ. Both untested; both
       = the spec's `enclosing = node.next` end-state; standalone key follow-ups + this cross-key
       visibility go away when R3 makes keys bundle value+follow-up on one node.
-    - **NEXT: CP-R2 — refcount + pooling.** Add `flowRiderNode.refs atomic`, node-refs-next +
-      carriers-ref-head + cascade-reclaim to an omnipool; pool scope meta (freed at WithFlow
-      return — retain-of-scope-ctx is UB); recycle instances gen-free at fire. Interface-stable,
-      behavior identical, allocs drop; tighten alloc floors. THE concurrency-critical CP — gate
-      hardest (the refcount/reclaim vs carrier ref/unref race is exactly what the sim exercises).
+    - **CP-R2 SPLIT (risk asymmetry, PN-approved 2026-07-05): R2a = pool scope meta +
+      instances (existing recycle points, low risk); R2b = node refcount + pooling (new
+      refcount racing carrier ref/unref — the critical part). R2b will be designed with the
+      FAN-IN UNION as a ref holder in mind (PN).**
+    - **CP-R2a LANDED (2026-07-05, worktree — NOT committed): scope meta + instance pooling.**
+      Scope meta now `bodyMetaPool.Get()` (was `&ctxMeta{}` GC-owned), freed at WithFlow return
+      via a defer registered FIRST (runs LAST — after the inline follow-up fires, which root
+      their own metas and never read the scope ctx): `ctxpool.Free(scopeCtx)` + `bodyMetaPool.Put`.
+      Retain-of-scope-ctx is now UB (spec-sanctioned). flowInstance pooled via
+      `flowInstancePool = omnipool.For[flowInstance]()` + a `Reset()` (needed because count
+      atomic.Int64 carries noCopy — omnipool's plain-copy zero would trip vet copylocks);
+      `flowInstancePool.Get()` in buildFlowRiders, `Put` at fire-complete (unref inline branch +
+      flowFireWork.Run async). Safe gen-free: count→0 fires exactly once (CP-F6) and no live
+      chain reaches the instance's own node after that (the count==0 ⇒ no-reader invariant), so
+      no ABA guard — VALIDATED under -race, not just argued.
+      TEST FIX: TestFlowAllocFloors read `key.From` INSIDE the scope now (it previously retained
+      the scope ctx past WithFlow return to measure the read — now UB under pooling).
+      ALLOC WIN: value-only scope **4 → 1** (just the GC-owned node; R2b pools it to 0),
+      tag-followup scope **6 → 2** (node + the `created` slice). Ceiling lowered **4 → 1**.
+      GATE: vet, golangci-lint 0, full -short suite, all flow tests -race (incl. concurrent
+      stress + funnel union + async firing), alloc floors, **40/40 TestBySimulation -race
+      (rapid.checks=60, seeds 1-40) — 0 fails/hangs/races**.
+    - **NEXT: CP-R2b — node refcount + pooling (the concurrency-critical CP; design pass with PN
+      first, union in mind).** Add `flowRiderNode.refs`, node-refs-next + carrier-meta-refs-head +
+      instance-refs-enclosing (reg→fire-complete) + cascade-reclaim to an omnipool. Two parallel
+      counts kept SEPARATE: instance.count (firing, unchanged) vs node.refs (pooling) — node.refs
+      cannot drive firing (a child-scope carrier contributes only ONE downlink to a deep node's
+      refs regardless of carrier count). The fan-in union (collectFlowTags/flowFanInContext, and
+      its R5 boundary rework) is a node-ref holder: funnel instance holds the union head, flush
+      meta adopts it — so make node.refs UNIVERSAL (all nodes pooled incl. union) rather than a
+      mixed pooled/GC chain that would break the reclaim cascade at flush. Gate hardest.
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

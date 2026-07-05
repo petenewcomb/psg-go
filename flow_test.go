@@ -760,20 +760,25 @@ func TestFlowAllocFloors(t *testing.T) {
 	scope := allocsPerOp(t, 100, 1000, func() {
 		_ = streampool.WithFlow(ctx, body, opt)
 	})
-	// Chain representation (docs/decisions/flow-rider-chain.md): scope meta + one
-	// rider node + ctxpool child bookkeeping. Lowered from 6 (the flat model's
-	// meta + snapshot + entries slice + ctxpool) once the chain removed the
-	// snapshot/slice pair; drops further toward 0 when CP-R2 pools these.
-	const scopeCeiling = 4
+	// Chain representation with CP-R2a pooling (docs/decisions/flow-rider-chain.md):
+	// the scope meta and its ctxpool child are pooled, leaving just the one GC-owned
+	// rider node. Lowered 6 → 4 (chain removed the flat snapshot/slice pair) → 1
+	// (R2a pooled the meta + ctxpool child); drops to 0 when CP-R2b pools the node.
+	const scopeCeiling = 1
 	if scope > scopeCeiling {
 		t.Errorf("value-registering WithFlow allocates %v/op; ceiling %d", scope, scopeCeiling)
 	}
 
-	var inScope context.Context
-	_ = streampool.WithFlow(ctx, func(c context.Context) error { inScope = c; return nil }, key.Value(7))
-	reads := allocsPerOp(t, 100, 1000, func() {
-		_, _ = key.From(inScope)
-	})
+	// Read inside the scope: the scope ctx and its meta are pooled and freed at
+	// WithFlow return (retain-of-a-scope-ctx is undefined), so From must be
+	// measured while the scope is live.
+	var reads float64
+	_ = streampool.WithFlow(ctx, func(c context.Context) error {
+		reads = allocsPerOp(t, 100, 1000, func() {
+			_, _ = key.From(c)
+		})
+		return nil
+	}, key.Value(7))
 	if reads != 0 {
 		t.Errorf("key.From allocates %v/op; must be 0", reads)
 	}

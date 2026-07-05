@@ -768,12 +768,24 @@ func claimNeed(c *Cache, w uint64) uint64 {
 // enqueue registers d (weight uw, homed under c) at the back of the demand FIFO
 // and helps establish a head if the slot is empty — the enqueuer-side half of the
 // promotion protocol, closing the race with a retiring head that drained the queue
-// before this entry landed. If the help installs d ITSELF, the acquire completes
-// as the instant head (gather inline) — the uncontended slow-path satisfaction in
-// one call, now shared by every weight. The body cache is created lazily on first
-// registration and reused across the demand's episodes; the demand's fields are
-// caller-serialized and published by the PushBack (and, for the head, by the slot
-// Store), so wake()'s lock-free reads always see a ready mailbox.
+// before this entry landed. The body cache is created lazily on first registration
+// and reused across the demand's episodes; the demand's fields are caller-serialized
+// and published by the PushBack (and, for the head, by the slot Store), so wake()'s
+// lock-free reads always see a ready mailbox.
+//
+// When the help installs d ITSELF as the head, an inline gather satisfies an
+// uncontended acquire in one call — but ONLY for w ≥ 2. The w ≥ 2 fast path does
+// not gather (Acquire tried a whole-grant TryAcquire and stopped), so this is its
+// FIRST gather. A w = 1 acquire, by contrast, reached enqueue only after its
+// fast-path acquireInto (the w=1 steal) JUST failed over the same forest with no
+// intervening change, and its body cache is a fresh empty child that adds no
+// borrowable — so an inline re-gather would redundantly re-walk to the same miss.
+// Skip it: return the miss and let the caller's register-then-confirm recheck
+// (AcquireWait's confirm, or the manager postpone's re-acquire) drive the single
+// as-head gather, which also catches any capacity freed during the transition. A
+// gated w = 1 can never be the instant head (a head already stands), so this only
+// affects the not-gated instant-head case, where the prior fast-path gather is
+// guaranteed to have run.
 func (p *Pool) enqueue(c *Cache, d *Demand, uw uint64) (Permit, error) {
 	if d.cache.Load() == nil {
 		d.cache.Store(c.NewChild())
@@ -784,7 +796,7 @@ func (p *Pool) enqueue(c *Cache, d *Demand, uw uint64) (Permit, error) {
 	if p.head.Load() == nil && p.head.CompareAndSwap(nil, &p.promoting) {
 		p.promoteScan()
 	}
-	if p.head.Load() == d {
+	if uw >= 2 && p.head.Load() == d {
 		return p.headGather(d, uw)
 	}
 	return Permit{}, nil

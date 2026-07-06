@@ -49,6 +49,13 @@ const (
 // minted key identical.
 type flowIdentity struct {
 	kind flowIdentKind
+	// definitionalFn is a tag's DEFINITIONAL follow-up, bound at declaration
+	// (NewFlowTag(FlowFollowUp(h))): it fires ONCE per flow carrying the tag,
+	// regardless of how many points infuse it. nil for a plain tag or a key. The
+	// per-flow instance is minted at the first infusion and found-by-id in a shared
+	// chain thereafter; across independent flows converging at a funnel it
+	// coalesces (CP-R6b). Distinct from per-scope [FlowTag.FollowUp].
+	definitionalFn func(ctx context.Context, value any) error
 }
 
 // FlowKey identifies a path-scoped flow rider carrying a value of type V.
@@ -91,8 +98,26 @@ type FlowTag struct {
 
 // NewFlowTag mints a DAG-scoped flow tag. See [FlowTag] and [NewFlowKey] on
 // minting granularity.
-func NewFlowTag() FlowTag {
-	return FlowTag{id: &flowIdentity{kind: flowTagIdent}}
+//
+// An optional [FlowFollowUp]/[FlowFollowUpFn] binds a DEFINITIONAL follow-up to
+// the tag's identity: it fires ONCE per flow carrying the tag, no matter how many
+// points infuse it (idempotent), and coalesces across independent flows that
+// converge at a funnel. This differs from a per-scope [FlowTag.FollowUp] (a
+// distinct lifetime per registration) and complements it. FlowFollowUp is just an
+// option carrying the handler; here the tag binds it to its own identity.
+func NewFlowTag(definitional ...FlowOption) FlowTag {
+	id := &flowIdentity{kind: flowTagIdent}
+	for i := range definitional {
+		o := definitional[i]
+		if o.kind != flowOptFollowUp || o.hasVal {
+			panic("streampool: NewFlowTag accepts only a FlowFollowUp/FlowFollowUpFn option")
+		}
+		if id.definitionalFn != nil {
+			panic("streampool: NewFlowTag accepts at most one definitional follow-up")
+		}
+		id.definitionalFn = o.fn
+	}
+	return FlowTag{id: id}
 }
 
 type flowOptionKind int8
@@ -640,10 +665,11 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 
 	// Presence-only (Infuse) nodes: a valueless, follow-up-less marker so InFlow
 	// reports the tag. Skipped when a follow-up under the id already provides
-	// presence, or when an earlier Infuse for the id was already emitted.
+	// presence, when an earlier Infuse for the id was already emitted, or when the
+	// tag is DEFINITIONAL (its infuse mints a follow-up instance in the loop below).
 	for i := range opts {
 		o := &opts[i]
-		if o.kind != flowOptInfuse || hasFollowUp(o.id) {
+		if o.kind != flowOptInfuse || hasFollowUp(o.id) || o.id.definitionalFn != nil {
 			continue
 		}
 		earlier := false
@@ -668,11 +694,32 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 	var created []*flowInstance
 	for i := range opts {
 		o := &opts[i]
-		if o.kind != flowOptFollowUp {
+		// A follow-up option (per-scope) or the infusion of a DEFINITIONAL tag (which
+		// mints the tag's identity-bound follow-up) both create a follow-up instance.
+		defInfuse := o.kind == flowOptInfuse && o.id.definitionalFn != nil
+		if o.kind != flowOptFollowUp && !defInfuse {
 			continue
 		}
+		fn := o.fn
+		if defInfuse {
+			// Once per flow: if a definitional instance for this id is already on the
+			// chain (an enclosing infusion, or an earlier one this scope), infusion is
+			// idempotent — reuse it, mint nothing.
+			already := false
+			for n := head; n != nil; n = n.next {
+				if n.id == o.id && n.inst != nil && n.inst.definitional {
+					already = true
+					break
+				}
+			}
+			if already {
+				continue
+			}
+			fn = o.id.definitionalFn
+		}
 		in := flowInstancePool.Get()
-		in.fn = o.fn
+		in.fn = fn
+		in.definitional = defInfuse
 		in.count.Store(1) // the registering scope's ref, released at scope exit
 		val, hasVal := settledVal(o.id)
 		in.val = val // settled bundle value (nil for a tag / valueless key)

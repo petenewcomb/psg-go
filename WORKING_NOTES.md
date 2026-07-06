@@ -712,14 +712,39 @@ see open queue item 5).
       driver's) + item tag present + the item follow-up fires only AFTER its result was skimmed.
       GATE: vet, golangci-lint 0, -short (root+sim), all flow + skim + conservation -race, alloc
       floors, **40/40 TestBySimulation -race (seeds 1-40, rapid.checks=60; 0 fails/hangs/races)**.
-    - **NEXT: CP-R6 — coalescing independent infused flows (union-find under a per-tag merge lock).**
-      The highest-risk concurrent structure (spec §Fan-in "Coalescing"): a definitional tag follow-up
-      fires ONCE per flow even when independent flows (no common ancestor) each infuse T and converge
-      at a funnel — serial union-find under a per-tag merge lock (find-to-root, same-root no-op, live
-      operands via accumulate ref-before-release, funnel is the only merge site). ALSO fixes the R5
-      independent-flows-with-values gap (item1's value leaking into the boundary). DESIGN PASS WITH PN
-      FIRST. Then R7 CP-F5b sim oracle extension + psgwf delete/otpsg-v2. Pre-existing permits/wake-
-      chain hang: hand off dossier (orthogonal).
+    - **CP-R6 SURFACE SETTLED (PN, 2026-07-05): no new `OnFlowEnd`. `FlowFollowUp(h)` is just an
+      option carrying the handler; the CONSUMING CONTEXT binds the identity — `WithFlow(…,
+      FlowFollowUp(h))` mints a fresh anonymous id (per-scope, R4), `NewFlowTag(FlowFollowUp(h))`
+      binds h to the TAG's identity = the definitional follow-up. Coalescing IS how fan-in is really
+      handled (not deferrable). Split: R6a shared-chain definitional (no union-find) → R6b cross-
+      funnel coalescing.**
+    - **CP-R6a LANDED (2026-07-05, worktree — NOT committed): definitional tag follow-up, shared
+      chain.** `flowIdentity.definitionalFn` (bound by `NewFlowTag(FlowFollowUp/FollowUpFn(h))` —
+      validates a valueless follow-up option, at most one). `flowInstance.definitional` marks it
+      (Reset zeroes). buildFlowRiders: a definitional tag's `Infuse()` is skipped in the presence
+      loop and handled in the follow-up loop — mints the definitional instance UNLESS a definitional
+      instance for the id is already on the chain (walk `head`; enclosing infusion or an earlier one
+      this scope ⇒ idempotent, mint nothing). Fires ONCE per flow; R5's pointer-dedup handles fork/
+      reconverge; crosses a funnel once (folds/boundary-seeds like any tag follow-up). NOT coalesced
+      across INDEPENDENT flows yet (2 fires — R6b). Tests: TestFlowDefinitionalFollowUp (once +
+      idempotent-across-N-infusions + funnel-cross-once + not-before-flush), TestFlowDefinitionalTag
+      Panics. GATE: vet, golangci-lint 0, -short (root+sim), all flow + conservation -race, alloc
+      floors, **39/40 TestBySimulation -race (seed 6 = the KNOWN pre-existing hang, intermittent,
+      passed 2/2 on re-run; skimSelect/WaitForNew signature, zero flow frames)**.
+    - **►► NEW OBSERVATION: rare pre-existing funnel borrowSrcCtx -race (distinct from the hang).**
+      Seen ~1/400 in TestFlowDefinitionalFollowUp AND the flow suite: `funnelInstance.Run` →
+      `borrowBodyContext` → `metaFromContext` READS a ctxpool child's value while an execpool worker
+      `ctxpool.(*child).Free()` WRITES it (use-after-free of the flush's scheduler ctx / borrowSrcCtx).
+      NOT R6a — R6a touched NO funnel code (flow.go/flowinst.go only); the identical non-definitional
+      TestFlowFollowUpAnonymous exhibits the same pattern. Funnel/permits-thread infra bug (funnel.go
+      borrowSrcCtx lifecycle — the handoff happens-before vs the scheduler freeing the ctxpool child).
+      Hand off with the hang dossier.
+    - **NEXT: CP-R6b — cross-funnel coalescing (union-find under a per-tag merge lock).** The R2b-class
+      risk: sharedNode hierarchy (parent + refs), per-tag merge lock, merge at collectFlowTags (funnel
+      = only merge site), find-to-root/same-root-no-op/live-operands-via-ref-before-release, deref
+      cascade → root fires once, flush links a downstream instance into the component. DESIGN CARE +
+      heavy -race sim + shared-node conservation. Then R7 CP-F5b oracle + psgwf/otpsg. ALSO the R5
+      independent-flows-with-values boundary gap is separate (not R6).
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

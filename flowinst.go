@@ -60,7 +60,11 @@ type flowInstance struct {
 	// before the fire's own fnRiders ref takes over, so an outer never reaches
 	// zero out from under a not-yet-fired inner regardless of unref order.
 	holds []*flowInstance
-	count atomic.Int64
+	// definitional marks an instance minted for a tag's DEFINITIONAL follow-up
+	// (bound at NewFlowTag): one per flow, found-by-id on the chain walk so repeated
+	// infusion is idempotent, and (CP-R6b) the coalescing target at a fan-in.
+	definitional bool
+	count        atomic.Int64
 }
 
 // flowInstancePool recycles flowInstance values. A follow-up fires exactly once
@@ -77,6 +81,7 @@ func (in *flowInstance) Reset() {
 	in.val = nil
 	in.enclosing = nil
 	in.holds = nil
+	in.definitional = false
 	in.count.Store(0)
 }
 

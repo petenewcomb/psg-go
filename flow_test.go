@@ -988,3 +988,63 @@ func TestFlowSkimContinuation(t *testing.T) {
 	chk.Eventually(followUpSawSkim.Load, 5*time.Second, 5*time.Millisecond,
 		"item follow-up must fire only after its result was skimmed")
 }
+
+// ─── CP-R6a: definitional tag follow-up (shared-chain) ───────────────────────
+
+// TestFlowDefinitionalFollowUp: a follow-up bound to a tag's identity at
+// declaration fires ONCE per flow carrying the tag — idempotent across repeated
+// infusion in a shared chain, and once across a funnel fan-in. (Coalescing of
+// INDEPENDENT flows converging is CP-R6b.)
+func TestFlowDefinitionalFollowUp(t *testing.T) {
+	chk := require.New(t)
+	var fires atomic.Int32
+	audit := streampool.NewFlowTag(
+		streampool.FlowFollowUpFn(func(context.Context) error { fires.Add(1); return nil }))
+
+	// Single infusion → one fire; InFlow reports presence.
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		chk.True(audit.InFlow(ctx), "infused definitional tag reads present")
+		return nil
+	}, audit.Infuse()))
+	chk.EqualValues(1, fires.Load())
+
+	// Repeated (nested) infusion in one flow → still one fire.
+	fires.Store(0)
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		return streampool.WithFlow(ctx, func(ctx context.Context) error {
+			return streampool.WithFlow(ctx, func(context.Context) error { return nil }, audit.Infuse())
+		}, audit.Infuse())
+	}, audit.Infuse()))
+	chk.EqualValues(1, fires.Load(), "fires once per flow despite N infusions")
+
+	// Across a funnel fan-in → one fire after the aggregate completes.
+	fires.Store(0)
+	var wave streampool.Wave
+	agg := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+		return streampool.NewAccumulator(
+			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
+			func(context.Context) error { return nil })
+	})
+	var firedBeforeFlush atomic.Bool
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		for i := 0; i < 3; i++ {
+			if err := agg.Submit(ctx, i); err != nil {
+				return err
+			}
+		}
+		firedBeforeFlush.Store(fires.Load() > 0)
+		return wave.CloseAndSkimAll(ctx)
+	}, audit.Infuse()))
+	chk.Eventually(func() bool { return fires.Load() == 1 }, 5*time.Second, 5*time.Millisecond,
+		"definitional follow-up fires once across the funnel")
+	chk.False(firedBeforeFlush.Load(), "must not fire before the aggregate completes")
+}
+
+// TestFlowDefinitionalTagPanics: NewFlowTag rejects a non-follow-up option.
+func TestFlowDefinitionalTagPanics(t *testing.T) {
+	chk := require.New(t)
+	key := streampool.NewFlowKey[int]()
+	chk.PanicsWithValue(
+		"streampool: NewFlowTag accepts only a FlowFollowUp/FlowFollowUpFn option",
+		func() { _ = streampool.NewFlowTag(key.Value(1)) })
+}

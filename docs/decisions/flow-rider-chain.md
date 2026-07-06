@@ -247,9 +247,22 @@ one instance (found by id on the walk, not re-created); no coalescing needed. It
 replace it.
 
 **Coalescing (independent flows).** When flows with **no common ancestor** each infuse T and
-converge at a funnel, their separate instances must merge into one lifetime so the
-definitional follow-up fires once. Mechanism — **serial union-find under a per-tag merge
-lock**:
+converge into the **same funnel instance**, their separate instances must merge into one
+lifetime so the definitional follow-up fires once.
+
+> **Refined during CP-R6b (2026-07-06, w/ PN): the unit of aggregation is a funnel
+> INSTANCE, not a funnel.** A flow is defined by its data, not its operations, so the set of
+> items one funnel instance accumulates *is* one aggregated flow — its definitional follow-up
+> fires once. Independent flows coalesce **only when they co-accumulate in the same instance**;
+> flows that land in different instances are different flows and fire separately, which is
+> correct. Whether two independent submits meet in one instance is a **runtime property**
+> (`Funnel.submit` runs inline or async; a funnel keeps a queue of instances, so a
+> concurrent/late submit finding it empty spins a fresh one) — not a merge the framework
+> forces. Consequently there is **no deterministic black-box "N submits → one fire"** — the
+> single-fire invariant is proven white-box over the union-find primitives, and integration
+> tests assert conservation + a fire-count range, never an exact cross-instance count.
+
+Mechanism — **serial union-find under a per-tag merge lock**:
 
 - Each definitional-tag instance keeps its own refcount (its carriers) plus a **shared-node
   pointer**, nil until it first merges. Shared nodes form a refcounted hierarchy; a

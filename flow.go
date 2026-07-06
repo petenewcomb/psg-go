@@ -6,6 +6,7 @@ package streampool
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
@@ -56,6 +57,13 @@ type flowIdentity struct {
 	// chain thereafter; across independent flows converging at a funnel it
 	// coalesces (CP-R6b). Distinct from per-scope [FlowTag.FollowUp].
 	definitionalFn func(ctx context.Context, value any) error
+	// mergeMu serializes this tag's coalescing union-find (CP-R6b): every merge of
+	// two independent definitional instances and every count→0 deref of one takes
+	// it, so the shared-node tree is mutated single-threaded. Per-tag granularity —
+	// unrelated tags never contend, and a plain tag/key never locks it. It covers
+	// the residual the funnel mu cannot: two different funnels racing to union the
+	// same still-unmerged roots, and sibling derefs happening outside any funnel.
+	mergeMu sync.Mutex
 }
 
 // FlowKey identifies a path-scoped flow rider carrying a value of type V.
@@ -720,6 +728,9 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		in := flowInstancePool.Get()
 		in.fn = fn
 		in.definitional = defInfuse
+		if defInfuse {
+			in.id = o.id // reaches the tag's mergeMu for coalescing at count→0 (CP-R6b)
+		}
 		in.count.Store(1) // the registering scope's ref, released at scope exit
 		val, hasVal := settledVal(o.id)
 		in.val = val // settled bundle value (nil for a tag / valueless key)
@@ -801,6 +812,26 @@ func collectFlowTags(union *flowRiderNode, ctx context.Context, stop *flowRiderN
 			if !seen {
 				n.inst.ref()
 				prepend(n.id, n.inst)
+				// Coalesce independent flows (CP-R6b): if another definitional instance
+				// for this same tag already lives on the union, this item descends from a
+				// different flow root that infused the tag independently — merge the two
+				// into one lifetime so the definitional follow-up fires once. The scan
+				// walks the WHOLE union to nil, PAST stop: the driver flow's own
+				// definitional instance rides the shared boundary tail (below stop, F8),
+				// never folded, so it is only reachable there. Every candidate is live
+				// (funnel-ref'd until flush — the boundary via the seed flowRefRiders, a
+				// folded instance via its own ref above), so the merge is death-race-free.
+				// The first fold merges; union-find makes every later meeting a no-op.
+				if n.inst.definitional {
+					for u := union.next; u != nil; u = u.next {
+						if u.inst != nil && u.inst.definitional && u.id == n.id {
+							n.id.mergeMu.Lock()
+							mergeDefinitional(n.inst, u.inst)
+							n.id.mergeMu.Unlock()
+							break
+						}
+					}
+				}
 			}
 			continue
 		}

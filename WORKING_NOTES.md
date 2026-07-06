@@ -188,19 +188,37 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
   meta-redirect wiring) follow, each separable.
 
-**►►► RIDER-CHAIN REDESIGN: R1–R6a LANDED + COMMITTED (2026-07-05). NEXT = CP-R6b
-(cross-funnel coalescing, union-find) — START WITH A DESIGN SKETCH (highest-risk CP,
-R2b-class). Spec: `docs/decisions/flow-rider-chain.md` §Fan-in "Coalescing"; the R6b
-build pointers + the R6 surface decision are in the flow section below (search
-"CP-R6b" / "CP-R6a LANDED").** Commit chain (newest first): 806a506 R6a (definitional
-tag follow-up, shared chain) · 4c2be2e F7 (skim continuations) · 5441c9a R5 (funnel
-fan-in/F8) · d661035 R4 (anonymous follow-up + Infuse) · ae7065a R3 (typed key
-follow-up, struct option) · 473ebe0 R2b (node refcount+pool) · ea4ca51 R2a (meta+
-instance pool) · 210a0dc R1 (walked chain) · dbe0213 spec. AFTER R6b: R7 (CP-F5b sim
-oracle + psgwf delete/otpsg-v2). TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS to hand off
-(NOT flow, do not chase in flow-impl): the skimSelect/WaitForNew HANG (intermittent,
-~seed 6) and the funnel `borrowSrcCtx` -race (funnelInstance.Run borrowBodyContext vs
-ctxpool child Free, ~1/400) — dossiers below.
+**►►► RIDER-CHAIN REDESIGN: R1–R6b LANDED (2026-07-06). NEXT = CP-R7 (CP-F5b sim
+oracle extension — model flow scopes/follow-ups + coalescing in the oracle — +
+psgwf delete/otpsg-v2 disposition).** R6b (definitional coalescing, union-find) is
+implemented + green in the worktree (see "CP-R6b LANDED" in the flow section for
+build pointers). Commit chain (newest first): effded2 R6b-handoff-banner · 806a506
+R6a (definitional tag follow-up, shared chain) · 4c2be2e F7 · 5441c9a R5 (funnel
+fan-in/F8) · d661035 R4 · ae7065a R3 · 473ebe0 R2b · ea4ca51 R2a · 210a0dc R1 ·
+dbe0213 spec. TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS to hand off (NOT flow, do
+not chase in flow-impl): the skimSelect/WaitForNew HANG (intermittent, ~seed 6) and
+the funnel `borrowSrcCtx` -race (funnelInstance.Run borrowBodyContext vs ctxpool
+child Free, ~1/400) — dossiers below.
+
+**►►► CP-R6b CORRECTED MODEL (2026-07-06, w/ PN) — CRITICAL for anyone touching
+coalescing or writing its tests.** The spec's premise "independent flows converging
+at a funnel coalesce" is refined: **the unit of aggregation is a funnel INSTANCE, not
+a funnel.** A flow is defined by its DATA, not its operations — the set of items one
+funnel instance accumulates IS one aggregated flow, whose definitional follow-up
+fires once. Independent flows coalesce ONLY when they **co-accumulate in the same
+instance**; flows in different instances are different flows and fire separately —
+correctly. Whether two independent submits land in one instance is a **runtime
+accident** (`Funnel.submit` → `ExecuteNowOrQueue` runs inline OR async; a funnel
+keeps a QUEUE of instances, `funnel.go:~726`, and a concurrent/late submit that finds
+the queue empty spins a fresh instance). ⇒ **No black-box "N submits → 1 fire"
+assertion is deterministic** (2-flow scatters ~0.2% w/o race, more w/ race). Tests:
+`TestFlowCoalesceMechanism` (white-box, DETERMINISTIC single-fire proof — drives the
+union-find primitives directly); `TestFlowDefinitionalCoalesce` (black-box, robust:
+requires coalescing OBSERVED across 40 iters + count always in [1,2], never asserts
+==1); `TestFlowCoalesceConservation` (conservation + concurrent-downstream deref
+stress, fire count range-checked not pinned). ⚠️ **Alloc-floor tests (`TestFlowAlloc*`)
+must run WITHOUT -race** — `testing.AllocsPerRun` counts race-instrumentation allocs;
+gate alloc floors no-race, concurrency tests with -race, separately.
 
 **►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN); IMPLEMENTATION IN
 PROGRESS on branch `flow-impl` (worktree). Parallel thread to the weighted-acquisition
@@ -745,6 +763,22 @@ see open queue item 5).
       Panics. GATE: vet, golangci-lint 0, -short (root+sim), all flow + conservation -race, alloc
       floors, **39/40 TestBySimulation -race (seed 6 = the KNOWN pre-existing hang, intermittent,
       passed 2/2 on re-run; skimSelect/WaitForNew signature, zero flow frames)**.
+    - **CP-R6b LANDED (2026-07-06, worktree — NOT committed): definitional coalescing, union-find.**
+      See the CORRECTED-MODEL banner up top (funnel INSTANCE = one aggregated flow; coalesce only
+      co-accumulated flows; count is nondeterministic by design). Mechanism (flowinst.go "Coalescing
+      (CP-R6b)" section): `sharedNode{parent,refs int,holds}` union-find hierarchy pooled via
+      `sharedNodePool` (+`flowSharedAllocHook` conservation seam); `flowIdentity.mergeMu` (per-tag
+      serial lock); `flowInstance.{id,shared}` (Reset zeroes). `mergeDefinitional` (link two live
+      instances/roots under a fresh parent; idempotent no-op if same root; ref-before-release ⇒ no
+      merge-vs-death race), `derefShared` (cascade + holds-migrate-up + underflow panic), `coalesceAtZero`
+      (at count→0 under mergeMu: shared==nil→fire solo; merged-not-last→step aside, migrate holds,
+      release enclosing, recycle; merged-last→adopt component holds, fire once). Merge site =
+      `collectFlowTags` (walks the WHOLE union incl. boundary tail — the driver flow's own definitional
+      instance rides there, never folded). Tests: TestFlowCoalesceMechanism (deterministic proof),
+      TestFlowDefinitionalCoalesce (robust black-box), TestFlowCoalesceConservation (concurrent deref +
+      shared/node conservation). GATE: vet, golangci-lint 0, full suite no-race (incl alloc floors),
+      all flow/coalesce -race ×20+, **700 TestBySimulation -race checks (400+300, 0 fails)**. Full sim
+      ORACLE modeling of coalescing deferred to R7.
     - **►► NEW OBSERVATION: rare pre-existing funnel borrowSrcCtx -race (distinct from the hang).**
       Seen ~1/400 in TestFlowDefinitionalFollowUp AND the flow suite: `funnelInstance.Run` →
       `borrowBodyContext` → `metaFromContext` READS a ctxpool child's value while an execpool worker

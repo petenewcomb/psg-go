@@ -1040,6 +1040,47 @@ func TestFlowDefinitionalFollowUp(t *testing.T) {
 	chk.False(firedBeforeFlush.Load(), "must not fire before the aggregate completes")
 }
 
+// TestFlowDefinitionalCoalesce: two INDEPENDENT flows (no common ancestor) that
+// converge into the SAME funnel instance coalesce so the definitional follow-up
+// fires ONCE for that aggregate, not once per input flow (CP-R6b). A funnel
+// instance IS one aggregated flow — a flow is defined by its data, not its
+// operations — so whether two independent submits land in one instance is a runtime
+// accident (submit runs inline or async). This test therefore requires only that
+// coalescing is OBSERVED across iterations and the count is always in the valid
+// [1,2] range (never zero — a hang — never over-firing); the deterministic
+// single-fire proof is the white-box TestFlowCoalesceMechanism.
+func TestFlowDefinitionalCoalesce(t *testing.T) {
+	chk := require.New(t)
+	coalesced := 0
+	for iter := 0; iter < 40; iter++ {
+		var fires atomic.Int32
+		audit := streampool.NewFlowTag(
+			streampool.FlowFollowUpFn(func(context.Context) error { fires.Add(1); return nil }))
+		var wave streampool.Wave
+		agg := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+			return streampool.NewAccumulator(
+				func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
+				func(context.Context) error { return nil })
+		})
+		// Two independent flow roots (each rooted at Background — no common ancestor),
+		// each infusing the tag, both feeding one funnel.
+		for i := 0; i < 2; i++ {
+			v := i
+			chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+				return agg.Submit(ctx, v)
+			}, audit.Infuse()))
+		}
+		chk.NoError(wave.CloseAndSkimAll(context.Background()))
+		chk.Eventually(func() bool { return fires.Load() >= 1 }, 5*time.Second, 5*time.Millisecond,
+			"the definitional follow-up fires (no hang)")
+		chk.LessOrEqual(fires.Load(), int32(2), "never fires more than once per input flow")
+		if fires.Load() == 1 {
+			coalesced++
+		}
+	}
+	chk.Positive(coalesced, "co-accumulated independent flows coalesce to a single fire")
+}
+
 // TestFlowDefinitionalTagPanics: NewFlowTag rejects a non-follow-up option.
 func TestFlowDefinitionalTagPanics(t *testing.T) {
 	chk := require.New(t)

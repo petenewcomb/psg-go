@@ -64,7 +64,17 @@ type flowInstance struct {
 	// (bound at NewFlowTag): one per flow, found-by-id on the chain walk so repeated
 	// infusion is idempotent, and (CP-R6b) the coalescing target at a fan-in.
 	definitional bool
-	count        atomic.Int64
+	// id is the tag identity behind a definitional instance — nil for every other
+	// instance. It reaches id.mergeMu (the per-tag coalescing lock) at count→0, and
+	// id.definitionalFn is what fn already wraps. Set at buildFlowRiders.
+	id *flowIdentity
+	// shared is this definitional instance's node in the coalescing union-find
+	// hierarchy (CP-R6b), nil until it first merges with an independent flow's
+	// instance at a funnel. While nil the instance fires on its own count→0 (the
+	// common case); once set, count→0 instead derefs the shared tree and the fire
+	// happens once, at the component root. Read/written only under id.mergeMu.
+	shared *sharedNode
+	count  atomic.Int64
 }
 
 // flowInstancePool recycles flowInstance values. A follow-up fires exactly once
@@ -82,6 +92,8 @@ func (in *flowInstance) Reset() {
 	in.enclosing = nil
 	in.holds = nil
 	in.definitional = false
+	in.id = nil
+	in.shared = nil
 	in.count.Store(0)
 }
 
@@ -102,6 +114,18 @@ func (in *flowInstance) ref() {
 func (in *flowInstance) unref(inline bool, wave *Wave) error {
 	if in.count.Add(-1) != 0 {
 		return nil
+	}
+	if in.definitional {
+		// A definitional instance may have coalesced with independent flows'
+		// instances at a funnel (CP-R6b). If so, its count→0 is not its own fire: it
+		// derefs the shared component and only the branch that closes the component
+		// fires — once. coalesceAtZero returns false when this branch merely stepped
+		// aside (it already released its enclosing chain and recycled itself); true
+		// when this branch runs the single fire (with the component's accumulated
+		// holds adopted onto in.holds) or when it never merged at all.
+		if !in.coalesceAtZero() {
+			return nil
+		}
 	}
 	if inline {
 		m := bodyMetaPool.Get()
@@ -159,6 +183,186 @@ func (in *flowInstance) runFire(
 		err = fnErr
 	}
 	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coalescing (CP-R6b): definitional-tag follow-ups across INDEPENDENT flows.
+//
+// A definitional follow-up fires once per flow (R6a) — trivially, within a shared
+// chain, because every infusion dedups to one instance. But when flows with no
+// common ancestor each infuse the same tag, they arrive as SEPARATE instances; left
+// alone each fires. The unit of aggregation is a funnel INSTANCE: a flow is defined
+// by its data, not its operations, so the set of items one funnel instance
+// accumulates IS one aggregated flow, and its definitional follow-up must fire once.
+// Independent flows that co-accumulate in the same instance therefore coalesce into
+// one lifetime; flows that land in DIFFERENT instances are different flows and fire
+// separately (correctly — whether two independent submits meet in one instance is a
+// runtime property, since submit runs inline or async, not a merge we force).
+//
+// Coalescing merges the co-accumulated instances via a serial union-find under the
+// tag's mergeMu: the instances are the leaves (an explicit leaf would be 1:1 with
+// its instance, so there is none — inst.shared points straight at a merge parent),
+// every merge links two roots under a fresh parent, and the follow-up fires once
+// when the component root's refs reach zero. The merge happens in collectFlowTags —
+// the funnel is the ONLY merge site (skim is a continuation, a nested subwave shares
+// an ancestor — docs/decisions/flow-rider-chain.md); the day another op introduces a
+// fan-in, mergeDefinitional's "only merge site" assumption reopens.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// sharedNode is a node in the coalescing union-find hierarchy. refs counts the
+// live things pointing here: definitional instances whose shared field references
+// this node, plus child nodes whose parent references it. Every field is
+// read/written only under the owning tag's mergeMu (reached via a member
+// instance's id), so refs is a plain int, not an atomic.
+type sharedNode struct {
+	parent *sharedNode
+	refs   int
+	// holds accumulates the enclosing-instance holds of every merged branch,
+	// migrated up the tree as branches complete (derefShared) and released once at
+	// the component fire, so each branch's outer follow-ups unblock — inner-holds-
+	// outer carried across the fan-in.
+	holds []*flowInstance
+}
+
+// sharedNodePool recycles shared nodes; freeSharedNode returns them as components
+// dissolve. flowSharedAllocHook is the conservation seam (mirrors flowNodeAllocHook).
+var sharedNodePool = omnipool.For[sharedNode]()
+
+// Reset is the omnipool recycle hook: drop the slice backing promptly and zero the
+// node for reuse.
+func (s *sharedNode) Reset() {
+	s.parent = nil
+	s.refs = 0
+	s.holds = nil
+}
+
+var flowSharedAllocHook atomic.Pointer[func(int)]
+
+func flowSharedAlloc(delta int) {
+	if h := flowSharedAllocHook.Load(); h != nil {
+		(*h)(delta)
+	}
+}
+
+func newSharedNode() *sharedNode {
+	s := sharedNodePool.Get()
+	flowSharedAlloc(1)
+	return s
+}
+
+func freeSharedNode(s *sharedNode) {
+	flowSharedAlloc(-1)
+	sharedNodePool.Put(s)
+}
+
+// findRoot walks parent pointers to the component root (no path compression — a
+// deref is O(component depth) and merges are rare). Caller holds the tag's mergeMu.
+func findRoot(s *sharedNode) *sharedNode {
+	for s.parent != nil {
+		s = s.parent
+	}
+	return s
+}
+
+// mergeDefinitional coalesces two live definitional instances of the same tag into
+// one component. Caller holds a.id.mergeMu (== b.id.mergeMu; same tag). Both
+// operands are provably LIVE — the accumulate item and the funnel each hold a ref,
+// so count>0 and neither can be reaching count→0 concurrently (ref-before-release,
+// so there is no merge-vs-death race). Idempotent: already-shared roots are a
+// no-op, which is the common case (a funnel re-meets the same instances every
+// item). refs invariant: a node counts its direct instances plus its child nodes.
+func mergeDefinitional(a, b *flowInstance) {
+	switch {
+	case a.shared == nil && b.shared == nil:
+		p := newSharedNode()
+		p.refs = 2 // a and b both anchor here
+		a.shared = p
+		b.shared = p
+	case a.shared == nil:
+		r := findRoot(b.shared)
+		r.refs++ // a joins the component as a direct instance
+		a.shared = r
+	case b.shared == nil:
+		r := findRoot(a.shared)
+		r.refs++
+		b.shared = r
+	default:
+		ra := findRoot(a.shared)
+		rb := findRoot(b.shared)
+		if ra == rb {
+			return // already one component
+		}
+		p := newSharedNode()
+		p.refs = 2 // ra and rb become its children
+		ra.parent = p
+		rb.parent = p
+	}
+}
+
+// derefShared drops one ref on s and cascades: a node reaching zero migrates its
+// accumulated holds up to its parent and is freed, then the parent is dereffed. It
+// returns (root, true) when the cascade reaches a root (no parent) at zero — the
+// whole aggregated flow is done, and the caller fires once and frees root — or
+// (nil, false) when a node stops above zero (the component is still live). Caller
+// holds the tag's mergeMu.
+func derefShared(s *sharedNode) (*sharedNode, bool) {
+	for {
+		s.refs--
+		if s.refs > 0 {
+			return nil, false
+		}
+		if s.refs < 0 {
+			panic("streampool: shared coalesce node refs underflow")
+		}
+		if s.parent == nil {
+			return s, true // component root reached zero → fire once
+		}
+		p := s.parent
+		p.holds = append(p.holds, s.holds...)
+		s.holds = nil
+		freeSharedNode(s)
+		s = p
+	}
+}
+
+// coalesceAtZero runs at a definitional instance's count→0, under its tag's
+// mergeMu. It decides whether THIS instance runs the follow-up's single fire:
+//
+//   - never merged (shared == nil, the common case) → true: fire directly, on its
+//     own holds and enclosing, exactly as a non-coalesced definitional instance;
+//   - merged, but the component is still live after this branch's deref → false:
+//     the branch has stepped aside — its holds are migrated into the tree (released
+//     later at the component fire), its enclosing chain released, and it is
+//     recycled here; the caller just returns;
+//   - merged, and this branch closed the component → true: it adopts the whole
+//     component's accumulated holds onto in.holds and fires once (under its own
+//     enclosing — a fan-in has no single canonical context; the last-standing
+//     branch, typically the downstream output flow, is the principled "true end").
+//
+// The fire itself runs in the caller AFTER mergeMu is released — user code never
+// runs under the lock.
+func (in *flowInstance) coalesceAtZero() (fire bool) {
+	mu := &in.id.mergeMu
+	mu.Lock()
+	if in.shared == nil {
+		mu.Unlock()
+		return true
+	}
+	s := in.shared
+	s.holds = append(s.holds, in.holds...)
+	in.holds = nil
+	root, done := derefShared(s)
+	if !done {
+		mu.Unlock()
+		nodeUnref(in.enclosing) // this branch will not fire; drop its enclosing chain
+		flowInstancePool.Put(in)
+		return false
+	}
+	in.holds = root.holds // every branch's holds, released by this single fire
+	root.holds = nil
+	freeSharedNode(root)
+	mu.Unlock()
+	return true
 }
 
 // flowRefRiders / flowUnrefRiders take and release one carrier reference on

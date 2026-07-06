@@ -198,7 +198,9 @@ fan-in/F8) · d661035 R4 · ae7065a R3 · 473ebe0 R2b · ea4ca51 R2a · 210a0dc 
 dbe0213 spec. TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS to hand off (NOT flow, do
 not chase in flow-impl): the skimSelect/WaitForNew HANG (intermittent, ~seed 6) and
 the funnel `borrowSrcCtx` -race (funnelInstance.Run borrowBodyContext vs ctxpool
-child Free, ~1/400) — dossiers below.
+child Free, ~1/400) — full dossiers MOVED to the combiner branch WORKING_NOTES
+(2026-07-06); reconcile there against combiner's "pol_sim1 HANG ASSESSED FIXED
+(5574a40)" finding.
 
 **►►► CP-R6b CORRECTED MODEL (2026-07-06, w/ PN) — CRITICAL for anyone touching
 coalescing or writing its tests.** The spec's premise "independent flows converging

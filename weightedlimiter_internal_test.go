@@ -58,6 +58,31 @@ func TestWeightedSemaphore_OversizedRefuses(t *testing.T) {
 	c.ReleaseRef()
 }
 
+// Reaching Overdraft does NOT imply oversized: the proof requires zero forest inUse but
+// not zero HELD, so a demand of weight <= ceiling can arrive here transiently (capacity
+// held borrowable by idle caches the gather has not assembled). It must WAIT, not refuse —
+// refusing a fitting demand is a terminal failure that strands its postponed work (the
+// weighted-sim wedge this regresses). Only n > ceiling is a permanent refusal.
+func TestWeightedSemaphore_OverdraftWaitsWhenItFits(t *testing.T) {
+	chk := require.New(t)
+	r := &weightedSemaphoreResource{}
+	r.maxConcurrency.Store(3)
+
+	for _, n := range []int{1, 2, 3} { // n <= ceiling: wait, never refuse
+		granted, err := r.Overdraft(n)
+		chk.False(granted)
+		chk.NoErrorf(err, "weight %d fits ceiling 3: must wait at overdraft, not refuse", n)
+	}
+	granted, err := r.Overdraft(4) // n > ceiling: permanent refuse
+	chk.False(granted)
+	chk.ErrorIs(err, ErrWeightExceedsCapacity)
+
+	r.maxConcurrency.Store(0) // paused: wait for a raise, never refuse
+	granted, err = r.Overdraft(5)
+	chk.False(granted)
+	chk.NoError(err)
+}
+
 func TestWeightedSemaphore_PausedWaits(t *testing.T) {
 	chk := require.New(t)
 	wl := NewWeightedSemaphore(0) // paused

@@ -100,21 +100,27 @@ type weightedSemaphoreResource struct {
 }
 
 // Overdraft implements [permits.OverdraftResource] with the weighted policy, overriding
-// the embedded plain (false,nil)=wait. It is consulted only on a PASSED proof: the Pool
-// has shown the head infeasible at current capacity with zero permits in use anywhere. So
-// either the ceiling is 0 (PAUSED — wait, a SetMaxConcurrency raise re-drives the head),
-// or zero-inUse-yet-infeasible means the weight is permanently larger than a nonzero
-// ceiling (w > cap) → REFUSE with a per-unit [ErrWeightExceedsCapacity]. Refuse never
-// grants, so it is safe pre-step-4 (unlike a grant, which would exempt a subtree the
-// meta-redirect cannot yet represent).
+// the embedded plain (false,nil)=wait. It refuses ONLY a permanently-oversized demand —
+// weight strictly beyond a nonzero ceiling (n > limit), which can never fit at any point —
+// with a per-unit [ErrWeightExceedsCapacity]. Every other demand WAITS, exactly like the
+// plain semaphore.
+//
+// Crucially, reaching here does NOT imply n > limit. The overdraft proof requires zero
+// forest inUse, but NOT zero held: capacity checked out from the Resource yet sitting idle
+// in caches (cache-don't-return) counts against the ceiling while the forest inUse is
+// zero, so a demand of weight n <= limit can reach here transiently when the gather did
+// not (yet) assemble that borrowable capacity. Refusing it would be a terminal failure of
+// a demand that will fit once a release or steal re-drives it — so it must wait. Paused
+// (limit 0) waits too (a SetMaxConcurrency raise admits it); unlimited (limit < 0) never
+// reaches overdraft. Refuse never grants, so it is safe pre-step-4.
 //
 // STILL OPEN (step-4 policy): a weighted *concurrency* cap could soft-GRANT brief
 // over-concurrency for an oversized demand instead of refusing; a memory budget refuses
-// (hard wall). Layer 1 refuses uniformly.
+// (hard wall). Layer 1 refuses the oversized case uniformly.
 func (s *weightedSemaphoreResource) Overdraft(n int) (bool, error) {
 	limit := s.maxConcurrency.Load()
-	if limit == 0 {
-		return false, nil // paused: wait for a raise
+	if limit > 0 && int64(n) > int64(limit) {
+		return false, fmt.Errorf("%w: weight %d exceeds capacity %d", ErrWeightExceedsCapacity, n, limit)
 	}
-	return false, fmt.Errorf("%w: weight %d exceeds capacity %d", ErrWeightExceedsCapacity, n, limit)
+	return false, nil // paused, or transient (n <= limit, capacity held borrowable): wait
 }

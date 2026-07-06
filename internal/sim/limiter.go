@@ -18,6 +18,12 @@ var defaultLimiterConfig = LimiterConfig{
 	// pattern disallowed (subwork goes through funnels/tasks, which are
 	// demand-driven), the committed suspend/reclaim brackets suffice.
 	Inherit: BiasedBoolConfig{Probability: 0.25},
+	// Weighted is the probability that a TASK limiter is weight-capable
+	// (streampool.NewWeightedSemaphore): its bound launchers dispatch with a
+	// per-runner weight in [1, permits], exercising w>=2 acquisition/gather.
+	// Ignored for funnel limiters (a funnel body runs over an accumulated
+	// instance, not a single weighable value, so funnels stay plain).
+	Weighted: BiasedBoolConfig{Probability: 0.35},
 }
 
 // LimiterConfig controls generation of a kind of Limiter (task-bound or
@@ -29,6 +35,9 @@ var defaultLimiterConfig = LimiterConfig{
 type LimiterConfig struct {
 	Count   BiasedIntConfig
 	Permits BiasedIntConfig
+	// Weighted is the probability a task limiter is weight-capable. See
+	// defaultLimiterConfig; ignored for funnel limiters.
+	Weighted BiasedBoolConfig
 	// Inherit is the probability that a limiter generated for a nested
 	// (subjob) Plan aliases a same-kind limiter of the parent Plan
 	// instead of being fresh — sharing the parent's streampool.Limiter and
@@ -42,6 +51,12 @@ type LimiterConfig struct {
 type Limiter struct {
 	ID      int
 	Permits int
+	// Weighted marks a task limiter as weight-capable
+	// (streampool.NewWeightedSemaphore): its launchers dispatch a per-runner
+	// weight. Always false for funnel limiters and for permits < 2 (a
+	// weight-1-only limiter is indistinguishable from plain). An inherited
+	// entry mirrors its parent's flag.
+	Weighted bool
 	// InheritFromParent, when >= 0, marks this entry as an alias of the
 	// parent Plan's same-kind limiter at that index: the runtime shares
 	// the parent's streampool.Limiter and its concurrency tracker instead of

@@ -63,6 +63,7 @@ func newController(plan *Plan, wave *streampool.Wave, parent *controller) *contr
 		Wave:                  wave,
 		parent:                parent,
 		TaskLimiters:          make([]streampool.Limiter, len(plan.TaskLimiters)),
+		TaskWeightedLimiters:  make([]streampool.WeightedLimiter, len(plan.TaskLimiters)),
 		FunnelLimiters:        make([]streampool.Limiter, len(plan.FunnelLimiters)),
 		Skimmers:              make([]*streampool.Skimmer[*simValue], len(plan.Skimmers)),
 		Funnels:               make([]*streampool.Funnel[*simValue], len(plan.Funnels)),
@@ -85,12 +86,15 @@ type limiterTracker struct {
 	max atomicMaxInt64
 }
 
-func (lt *limiterTracker) enter() {
-	lt.max.UpdateMax(lt.cur.Add(1))
+// enter/exit take the body's permit weight (1 for a plain limiter), so the
+// tracker measures the max concurrent WEIGHT held — which the framework caps at
+// the ceiling exactly as it caps a plain count.
+func (lt *limiterTracker) enter(weight int64) {
+	lt.max.UpdateMax(lt.cur.Add(weight))
 }
 
-func (lt *limiterTracker) exit() {
-	lt.cur.Add(-1)
+func (lt *limiterTracker) exit(weight int64) {
+	lt.cur.Add(-weight)
 }
 
 // simValue is the uniform value type that flows through all sim ops.
@@ -107,6 +111,10 @@ type controller struct {
 	Wave           *streampool.Wave
 	TaskLimiters   []streampool.Limiter
 	FunnelLimiters []streampool.Limiter
+	// TaskWeightedLimiters[i] is non-nil iff TaskLimiters[i] is weighted; the
+	// launcher binds it via WithWeightLimits with a per-runner weigher. The
+	// plain TaskLimiters[i] slot is left zero for a weighted entry.
+	TaskWeightedLimiters []streampool.WeightedLimiter
 	Skimmers       []*streampool.Skimmer[*simValue]
 	Funnels        []*streampool.Funnel[*simValue]
 	// Launchers holds one streampool.TaskLauncher per Plan Launcher. The
@@ -258,10 +266,15 @@ func (c *controller) ensurePools() {
 				// parent's streampool.Limiter AND its tracker so permits and the
 				// observed-max assertion both cover the joint topology.
 				c.TaskLimiters[i] = c.parent.TaskLimiters[lim.InheritFromParent]
+				c.TaskWeightedLimiters[i] = c.parent.TaskWeightedLimiters[lim.InheritFromParent]
 				c.taskLimiterTrackers[i] = c.parent.taskLimiterTrackers[lim.InheritFromParent]
 				continue
 			}
-			c.TaskLimiters[i] = streampool.NewSemaphore(lim.Permits)
+			if lim.Weighted {
+				c.TaskWeightedLimiters[i] = streampool.NewWeightedSemaphore(lim.Permits)
+			} else {
+				c.TaskLimiters[i] = streampool.NewSemaphore(lim.Permits)
+			}
 			c.taskLimiterTrackers[i] = &limiterTracker{}
 		}
 		for i, lim := range c.Plan.FunnelLimiters {
@@ -333,15 +346,27 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	// assertion in Run.
 	var tracker *limiterTracker
 	var limits []streampool.Limiter
+	var wLimits []streampool.WeightLimiter[struct{}]
+	weight := 1
 	if len(runner.LimiterIndexes) > 0 {
 		limIdx := runner.LimiterIndexes[0]
-		limits = append(limits, c.TaskLimiters[limIdx])
 		tracker = c.taskLimiterTrackers[limIdx]
+		if wl := c.TaskWeightedLimiters[limIdx]; wl != nil {
+			// Weighted: this runner dispatches its fixed per-runner weight
+			// (a constant weigher over the void task value).
+			weight = runner.Weight
+			w := weight
+			wLimits = append(wLimits, streampool.NewWeightLimiter(wl, func(struct{}) int { return w }))
+		} else {
+			limits = append(limits, c.TaskLimiters[limIdx])
+		}
 	}
+	//nolint:gosec // G115: weight is a small positive plan value bounded by permits
+	weight64 := int64(weight)
 	body := streampool.NewTask(func(ctx context.Context) error {
 		if tracker != nil {
-			tracker.enter()
-			defer tracker.exit()
+			tracker.enter(weight64)
+			defer tracker.exit(weight64)
 		}
 		// Plan-baked structural cancellation trigger: this designated
 		// launcher's body cancels the subwave while holding its permit,
@@ -352,7 +377,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 			c.cancel()
 		}
 		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
-		if err := c.executeFuncInTask(ctx, t, runner.Body, v, tracker); err != nil {
+		if err := c.executeFuncInTask(ctx, t, runner.Body, v, tracker, weight64); err != nil {
 			return err
 		}
 		if c.shouldReturnError(runner.Body) {
@@ -364,7 +389,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	if bindWave {
 		w = c.Wave
 	}
-	return streampool.NewLauncher(body).WithLimits(limits...).In(w)
+	return streampool.NewLauncher(body).WithLimits(limits...).WithWeightLimits(wLimits...).In(w)
 }
 
 // disposition tells an op driver how to react to an error returned by a psg
@@ -475,7 +500,7 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) s
 		// Skimmers are deliberately limiter-free (drain must stay
 		// permit-free — see docs/limiter-suspend-resume.md), so no
 		// tracker rides this walk.
-		if err := c.executeFunc(ctx, t, g.Handle, v, nil); err != nil {
+		if err := c.executeFunc(ctx, t, g.Handle, v, nil, 1); err != nil {
 			return ExpectedHandlerError{OpKind: opNameSkimmer, OpID: g.ID, Err: err}
 		}
 		if c.shouldReturnError(g.Handle) {
@@ -505,10 +530,10 @@ func (c *controller) newFunnelFactory(
 		return streampool.FuncAccumulator[*simValue]{
 			AccumulateFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
 				if tracker != nil {
-					tracker.enter()
-					defer tracker.exit()
+					tracker.enter(1) // funnels are plain: one body execution == weight 1
+					defer tracker.exit(1)
 				}
-				err := c.executeFunc(ctx, t, cmb.Accumulate, v, tracker)
+				err := c.executeFunc(ctx, t, cmb.Accumulate, v, tracker, 1)
 				if err == nil && c.shouldReturnError(cmb.Accumulate) {
 					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}
@@ -527,7 +552,7 @@ func (c *controller) newFunnelFactory(
 				// so Subjob steps in a Flush body don't drop a
 				// contribution that was never added.
 				v := &simValue{DispatchTime: time.Now()}
-				err := c.executeFunc(ctx, t, cmb.Flush, v, nil)
+				err := c.executeFunc(ctx, t, cmb.Flush, v, nil, 1)
 				if err == nil && c.shouldReturnError(cmb.Flush) {
 					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
 				}
@@ -543,25 +568,26 @@ func (c *controller) newFunnelFactory(
 // sink; StartTask dispatches a runner; Subjob spawns a nested Pool.
 // active is the enclosing body's concurrency tracker (nil when the body
 // is not limiter-bound), threaded down so Subjob steps can drop the
-// body's contribution while it drives the subwave.
+// body's contribution while it drives the subwave. weight is that body's
+// permit weight (1 for a plain limiter or none), dropped/restored with it.
 func (c *controller) executeFunc(
-	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active *limiterTracker,
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active *limiterTracker, weight int64,
 ) error {
-	return c.executeFuncBody(ctx, t, fn, v, true, active)
+	return c.executeFuncBody(ctx, t, fn, v, true, active, weight)
 }
 
 // executeFuncInTask walks a Func's Steps from a task body. StartTask
 // is skipped because the current psg API forbids dispatching new work
 // from a task context (post-Wave-5 will relax this).
 func (c *controller) executeFuncInTask(
-	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active *limiterTracker,
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active *limiterTracker, weight int64,
 ) error {
-	return c.executeFuncBody(ctx, t, fn, v, false, active)
+	return c.executeFuncBody(ctx, t, fn, v, false, active, weight)
 }
 
 func (c *controller) executeFuncBody(
 	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, allowStartTask bool,
-	active *limiterTracker,
+	active *limiterTracker, weight int64,
 ) error {
 	chk := assert.New(t)
 	timer := timerp.Get()
@@ -601,11 +627,11 @@ func (c *controller) executeFuncBody(
 			// making this change safe to land before the suspend
 			// brackets do).
 			if active != nil {
-				active.exit()
+				active.exit(weight)
 			}
 			c.runSubjob(ctx, t, s)
 			if active != nil {
-				active.enter()
+				active.enter(weight)
 			}
 		default:
 			chk.Fail(fmt.Sprintf("unknown Step type %T", step))

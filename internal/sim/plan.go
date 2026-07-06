@@ -81,6 +81,18 @@ type idCounters struct {
 // parentPlan is non-nil when generating a nested (subjob) Plan; it
 // enables cross-subjob limiter inheritance (see Limiter.InheritFromParent).
 //
+// drawWeight picks a launcher's per-dispatch permit weight: a value in
+// [1, permits] when bound to a weighted task limiter (exercising w>=2
+// acquisition), else 1. The clamp to permits keeps the demand feasible — the
+// sim exercises the weighted acquire/gather path, not the oversized-refuse one
+// (that is covered by the weighted limiter's unit tests).
+func drawWeight(t *rapid.T, lim Limiter, name string) int {
+	if !lim.Weighted {
+		return 1
+	}
+	return rapid.IntRange(1, lim.Permits).Draw(t, name+".Weight")
+}
+
 //nolint:gocognit,funlen // see above
 func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) *Plan {
 	planID := nextIDs.Plan
@@ -101,13 +113,19 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 			k := rapid.IntRange(0, len(parentLimiters)-1).Draw(t,
 				fmt.Sprintf("%s.%sLimiters[%d].InheritFrom", planName, kind, i))
 			parent := parentLimiters[k]
-			return Limiter{ID: parent.ID, Permits: parent.Permits, InheritFromParent: k}
+			return Limiter{ID: parent.ID, Permits: parent.Permits, Weighted: parent.Weighted, InheritFromParent: k}
 		}
 		id := *nextID
 		*nextID++
+		permits := cfg.Permits.Draw(t, fmt.Sprintf("%sLimiter#%d.Permits", kind, id))
+		// Only task limiters can be weighted, and only when permits >= 2 (a
+		// weight-1-only ceiling is plain by another name).
+		weighted := kind == "Task" && permits >= 2 &&
+			cfg.Weighted.Draw(t, fmt.Sprintf("%sLimiter#%d.Weighted", kind, id))
 		return Limiter{
 			ID:                id,
-			Permits:           cfg.Permits.Draw(t, fmt.Sprintf("%sLimiter#%d.Permits", kind, id)),
+			Permits:           permits,
+			Weighted:          weighted,
 			InheritFromParent: -1,
 		}
 	}
@@ -261,6 +279,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 		if taskLimiterCount > 0 {
 			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, name+".LimiterIndex")
 			runner.LimiterIndexes = []int{limIdx}
+			runner.Weight = drawWeight(t, plan.TaskLimiters[limIdx], name)
 		}
 		plan.Launchers = append(plan.Launchers, runner)
 		return len(plan.Launchers) - 1
@@ -356,6 +375,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 		if taskLimiterCount > 0 {
 			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, fmt.Sprintf("Launcher#%d.LimiterIndex", id))
 			runner.LimiterIndexes = []int{limIdx}
+			runner.Weight = drawWeight(t, plan.TaskLimiters[limIdx], fmt.Sprintf("Launcher#%d", id))
 		}
 		runner.Body.Steps = append(runner.Body.Steps, Submit{
 			Prob:      probValue(config, 1.0),

@@ -2,6 +2,28 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► WEIGHTED SIM WIRING LANDED + FIXED A LAYER-1 OVERDRAFT BUG IT EXPOSED (2026-07-05).**
+Wired weighted task limiters into internal/sim (sim/{launcher,limiter,plan,run}.go):
+LimiterConfig.Weighted prob (task limiters only, permits≥2), sim.Launcher.Weight ∈[1,permits]
+(clamped), weight-aware limiterTracker (enter/exit(w), max weight-sum ≤ permits), ensurePools
+builds NewWeightedSemaphore + binds via .WithWeightLimits with a constant weigher. It dispatches
+w≥2 and immediately wedged the sim (~1/3), which a runtime trace (725M, PSGTRACEINTERNALS + pair-
+tallying poolWork.Init/Close WorkItem IDs) root-caused: 18 taskWorks Init'd (IncrementWork) but
+never Closed → inFlightWork stuck nonzero → wave never Done → SkimAll/WaitForNew wedges (SAME
+STACK as the Jul-4 pol_sim1 hang, but a DIFFERENT cause — red herring). ROOT: Layer-1
+`weightedSemaphoreResource.Overdraft` REFUSED every demand at a nonzero ceiling on the false
+premise "reaching overdraft ⟹ w>cap". It ignores HELD-BORROWABLE capacity: the proof requires
+zero forest inUse but NOT zero held, so a demand of weight n≤cap reaches Overdraft transiently
+when the gather hasn't assembled idle held capacity — the plain semaphore WAITS there; weighted
+wrongly refused (terminal), stranding the postponed work. FIX (weightedlimiter.go): refuse ONLY
+n>limit (permanently oversized); else wait, exactly like plain. Regression:
+TestWeightedSemaphore_OverdraftWaitsWhenItFits. Verified: biased hunt config 0/12 (was 2-3/10);
+sim -race 28 runs/~5600 cases clean at default Weighted=0.35; weighted+permits+sim unit green.
+NOTE: this was NOT the pre-existing pol_sim1 hang (that remains a separate, still-latent ~1/900
+w=1 wedge to chase later — the identical SkimAll-wedge stack is just the shared symptom of "work
+never drains").
+
+
 **►►► WEIGHTED SURFACE — LAYER 1 LANDED (2026-07-05).** The weighted/plain limiter split +
 weigher + w≥2 dispatch, single-limiter (multi-composition deferred). DESIGN REVISIONS this
 session (recorded in weighted-acquisition.md): (1) plain and weighted limiters are FULLY

@@ -115,8 +115,8 @@ type controller struct {
 	// launcher binds it via WithWeightLimits with a per-runner weigher. The
 	// plain TaskLimiters[i] slot is left zero for a weighted entry.
 	TaskWeightedLimiters []streampool.WeightedLimiter
-	Skimmers       []*streampool.Skimmer[*simValue]
-	Funnels        []*streampool.Funnel[*simValue]
+	Skimmers             []*streampool.Skimmer[*simValue]
+	Funnels              []*streampool.Funnel[*simValue]
 	// Launchers holds one streampool.TaskLauncher per Plan Launcher. The
 	// closure inside each runs the runner's Body Func, which Submits
 	// directly to downstream Skimmers/Funnels.

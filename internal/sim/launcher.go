@@ -33,8 +33,8 @@ type Launcher struct {
 	LimiterIndexes []int // indexes into Plan.TaskLimiters (v1: at most one)
 	// Weight is the per-dispatch permit weight when bound to a weighted task
 	// limiter (in [1, permits]); 1 (or unset) for a plain limiter or none.
-	Weight int
-	Body   *Func
+	Weight       int
+	Body         *Func
 	pathDuration time.Duration
 }
 

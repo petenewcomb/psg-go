@@ -45,16 +45,22 @@ func TestWeightedLauncher_WeightSerializesDispatch(t *testing.T) {
 	).WithWeightLimits(streampool.NewWeightLimiter(wl, func(int) int { return 3 })).In(&wave)
 
 	// Submit blocks under backpressure (a full limiter), so the three weight-3 dispatches
-	// must be launched concurrently for the second/third to queue behind the first.
+	// must be launched concurrently for the second/third to queue behind the first. Submit
+	// errors are collected and asserted on the test goroutine (require must not fire off it).
 	var wg sync.WaitGroup
+	errs := make(chan error, 3)
 	for range 3 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			chk.NoError(launcher.Submit(ctx, 0))
+			errs <- launcher.Submit(ctx, 0)
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		chk.NoError(err)
+	}
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 
 	chk.Equal(int32(1), peak.Load(), "weight-3 bodies serialize under ceiling 4: peak concurrency 1")

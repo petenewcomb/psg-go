@@ -5,7 +5,6 @@ package streampool
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/petenewcomb/streampool/internal/permits"
@@ -50,8 +49,7 @@ func TestWeightedSemaphore_OversizedRefuses(t *testing.T) {
 
 	d := permits.NewDemand()
 	pm, err := c.Acquire(d, 6)
-	chk.Error(err, "weight 6 permanently exceeds ceiling 5: refuse, not wait")
-	chk.True(errors.Is(err, ErrWeightExceedsCapacity))
+	chk.ErrorIs(err, ErrWeightExceedsCapacity, "weight 6 permanently exceeds ceiling 5: refuse, not wait")
 	chk.False(pm.Held())
 
 	d.Free()

@@ -188,6 +188,20 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
   meta-redirect wiring) follow, each separable.
 
+**►►► RIDER-CHAIN REDESIGN: R1–R6a LANDED + COMMITTED (2026-07-05). NEXT = CP-R6b
+(cross-funnel coalescing, union-find) — START WITH A DESIGN SKETCH (highest-risk CP,
+R2b-class). Spec: `docs/decisions/flow-rider-chain.md` §Fan-in "Coalescing"; the R6b
+build pointers + the R6 surface decision are in the flow section below (search
+"CP-R6b" / "CP-R6a LANDED").** Commit chain (newest first): 806a506 R6a (definitional
+tag follow-up, shared chain) · 4c2be2e F7 (skim continuations) · 5441c9a R5 (funnel
+fan-in/F8) · d661035 R4 (anonymous follow-up + Infuse) · ae7065a R3 (typed key
+follow-up, struct option) · 473ebe0 R2b (node refcount+pool) · ea4ca51 R2a (meta+
+instance pool) · 210a0dc R1 (walked chain) · dbe0213 spec. AFTER R6b: R7 (CP-F5b sim
+oracle + psgwf delete/otpsg-v2). TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS to hand off
+(NOT flow, do not chase in flow-impl): the skimSelect/WaitForNew HANG (intermittent,
+~seed 6) and the funnel `borrowSrcCtx` -race (funnelInstance.Run borrowBodyContext vs
+ctxpool child Free, ~1/400) — dossiers below.
+
 **►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN); IMPLEMENTATION IN
 PROGRESS on branch `flow-impl` (worktree). Parallel thread to the weighted-acquisition
 work. SUPERSEDES the Flow-object surface everywhere it appears (API_DESIGN.md Flow

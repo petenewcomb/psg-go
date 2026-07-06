@@ -188,9 +188,14 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
   meta-redirect wiring) follow, each separable.
 
-**►►► RIDER-CHAIN REDESIGN: R1–R6b LANDED (2026-07-06). NEXT = CP-R7 (CP-F5b sim
-oracle extension — model flow scopes/follow-ups + coalescing in the oracle — +
-psgwf delete/otpsg-v2 disposition).** R6b (definitional coalescing, union-find) is
+**►►► RIDER-CHAIN REDESIGN: R1–R6b LANDED (2026-07-06). CP-R7 IN PROGRESS —
+disposition first (PN's call): psgwf DELETED ✅ (benchapp migrated off it; cancellation
+gap resolved as the "manual pattern" — carry a CancelCauseFunc under a FlowKey +
+follow-up-cancels-at-end — ported as ExampleWithFlow_perRequestCancellation; kills the
+Example_clientTimeout flake). NEXT: otpsg-v2-on-flows (span=FlowKey value, End()=follow-up;
+delete propagation/tracing, keep metrics/logging), THEN the CP-F5b sim-oracle extension
+(steps-only scopes + conservation/carrier-counter oracle; note R6b: coalescing count is
+nondeterministic → oracle asserts conservation + ranges, not exact fire counts).** R6b (definitional coalescing, union-find) is
 implemented + green in the worktree (see "CP-R6b LANDED" in the flow section for
 build pointers). Commit chain (newest first): effded2 R6b-handoff-banner · 806a506
 R6a (definitional tag follow-up, shared chain) · 4c2be2e F7 · 5441c9a R5 (funnel

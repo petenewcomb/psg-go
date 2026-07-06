@@ -8,14 +8,13 @@ import (
 	"time"
 
 	"github.com/petenewcomb/streampool/internal/omnipool"
-	"github.com/petenewcomb/streampool/psgwf"
 )
 
-type task[T, C any] struct {
-	pool         *omnipool.Pool[task[T, C]]
+type task[T any] struct {
+	pool         *omnipool.Pool[task[T]]
 	creationTime time.Time
-	taskFn       psgwf.GenericTaskFunc[T, C]
-	wrappedFn    psgwf.GenericTaskFunc[TaskResult[T], C]
+	taskFn       func(context.Context) (T, error)
+	wrappedFn    func(context.Context) (TaskResult[T], error)
 }
 
 type TaskResult[T any] struct {
@@ -25,10 +24,10 @@ type TaskResult[T any] struct {
 	Value        T
 }
 
-func NewTask[T, C any](
-	taskFn func(context.Context, *psgwf.GenericWorkflow[C]) (T, error),
-) psgwf.GenericTaskFunc[TaskResult[T], C] {
-	pool := omnipool.For[task[T, C]]()
+func NewTask[T any](
+	taskFn func(context.Context) (T, error),
+) func(context.Context) (TaskResult[T], error) {
+	pool := omnipool.For[task[T]]()
 	task := pool.Get()
 	task.pool = pool
 	task.creationTime = time.Now()
@@ -36,19 +35,19 @@ func NewTask[T, C any](
 	return task.wrappedFn
 }
 
-func (t *task[T, C]) Init() {
+func (t *task[T]) Init() {
 	t.wrappedFn = t.execute
 }
 
-func (t *task[T, C]) Reset() {
-	*t = task[T, C]{
+func (t *task[T]) Reset() {
+	*t = task[T]{
 		wrappedFn: t.wrappedFn,
 	}
 }
 
-func (t *task[T, C]) execute(ctx context.Context, wf *psgwf.GenericWorkflow[C]) (TaskResult[T], error) {
+func (t *task[T]) execute(ctx context.Context) (TaskResult[T], error) {
 	startTime := time.Now()
-	value, err := t.taskFn(ctx, wf)
+	value, err := t.taskFn(ctx)
 	duration := time.Since(startTime)
 	res := TaskResult[T]{
 		StartTime:    startTime,

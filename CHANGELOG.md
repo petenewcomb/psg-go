@@ -15,7 +15,7 @@ format.
 - Job.CancelAndWait to ensure that task goroutines have fully shut down
 - Job.Close and Job.CloseAndGatherAll
 - Combine, et. al. for scalable aggregation of task results before passing to gather operations
-- psgwf package providing workflow context propagation and lifecycle management utilities
+- Flow riders (`WithFlow`, `FlowKey`, `FlowTag`, follow-ups) for path- and DAG-scoped context propagation and end-of-flow lifecycle hooks (subsumes the removed psgwf package)
 - otpsg module providing OpenTelemetry integration and observability patterns
 - Comprehensive options pattern implementation via psgopt package
 - SetOptions methods for atomic configuration updates across all components

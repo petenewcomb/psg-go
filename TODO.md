@@ -148,7 +148,7 @@ Items to complete before merging to main branch.
 - **Make sure that calls to Gosched are interleaved with checks for deadline/cancellation**
 - **Consider refactoring `taskPostWork.Execute()` to reduce duplication with `workq.ExecuteOrWait`** — about 80 lines of similar try/subscribe/block logic. Has unique requirements (custom TryPushBack, demand-registration side effects, blocking via PushBackFunc + BasicPushSelect) so not trivial. Evaluate if a `TryPostBehavior` abstraction is worth the complexity. See WORKING_NOTES "ExecuteOrWait duplication".
 - Improve detection of top-level vs. child tasks to prevent adding new top-level tasks after Close() (use ctxMeta to allow new scatters only to finish workflows already started)
-- Refactor otpsg module to build on psgwf workflow context propagation instead of directly on core psg
+- Rebuild otpsg module as v2 on flows: span carried as a FlowKey value, span.End() as a follow-up firing at the flow's true end; delete propagation.go/tracing.go (subsumed), keep metrics.go/logging.go as op-instrumentation (CP-R7)
 - consider removing combiner goroutines' doneCh and dedicated goroutine now that select on it happens only in the slow path
 - profile (memory, cpu, blocking) again after all the recent refactoring, see if there are any more obvious targets or low-hanging fruit
 - review again for readability
@@ -197,7 +197,6 @@ Items that can be deferred to GitHub issues after the combiner branch is merged.
 - consider adding https://github.com/glycerine/gown annotations and supporting Gown analysis of application code
 
 ### Additional Tests and Examples
-- Investigate and fix workflow cancellation test flakiness in psgwf (observed timing-dependent failures in example tests)
 - Make sure that combiner pools scale down to zero
 - Test automatic flushing behavior based on timeout settings somewhere other than just benchmarks
 - Ensure no goroutine leaks in any scenario

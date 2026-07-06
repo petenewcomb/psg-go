@@ -189,13 +189,18 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   meta-redirect wiring) follow, each separable.
 
 **►►► RIDER-CHAIN REDESIGN: R1–R6b LANDED (2026-07-06). CP-R7 IN PROGRESS —
-disposition first (PN's call): psgwf DELETED ✅ (benchapp migrated off it; cancellation
-gap resolved as the "manual pattern" — carry a CancelCauseFunc under a FlowKey +
-follow-up-cancels-at-end — ported as ExampleWithFlow_perRequestCancellation; kills the
-Example_clientTimeout flake). NEXT: otpsg-v2-on-flows (span=FlowKey value, End()=follow-up;
-delete propagation/tracing, keep metrics/logging), THEN the CP-F5b sim-oracle extension
-(steps-only scopes + conservation/carrier-counter oracle; note R6b: coalescing count is
-nondeterministic → oracle asserts conservation + ranges, not exact fire counts).** R6b (definitional coalescing, union-find) is
+disposition DONE (PN's call): psgwf DELETED ✅ + otpsg-v2-on-flows DONE ✅. psgwf: benchapp
+migrated off it; cancellation gap resolved as the "manual pattern" (carry a CancelCauseFunc
+under a FlowKey + follow-up-cancels-at-end — ExampleWithFlow_perRequestCancellation); kills
+the Example_clientTimeout flake. otpsg v2 (separate module): span's lifetime IS the flow —
+`Traced(ctx,name)→(ctx,[]FlowOption)` carries the span as a path-scoped FlowKey value (for
+child-span/log correlation, severs at fan-in) + a DAG-scoped anonymous FlowFollowUpFn that
+ends it once at the flow's TRUE end (crosses funnels, covers async outliving the handler);
+`Correlate`/`FlowSpan` read it in async bodies; propagation.go+per-op TracedTask/Skim/Funnel
+DELETED, metrics.go+logging.go KEPT, Instrumented*=metrics∘logging. NEXT (the last R7 piece):
+CP-F5b sim-oracle extension (steps-only scopes + conservation/carrier-counter oracle; note
+R6b: coalescing count is nondeterministic → oracle asserts conservation + ranges, not exact
+fire counts).** R6b (definitional coalescing, union-find) is
 implemented + green in the worktree (see "CP-R6b LANDED" in the flow section for
 build pointers). Commit chain (newest first): effded2 R6b-handoff-banner · 806a506
 R6a (definitional tag follow-up, shared chain) · 4c2be2e F7 · 5441c9a R5 (funnel

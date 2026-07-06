@@ -926,3 +926,65 @@ func TestFlowTagInfuse(t *testing.T) {
 	}, tag.Infuse()))
 	chk.False(sup.Load(), "Suppress clears the infused presence in the subtree")
 }
+
+// ─── CP-F7: skim handlers as flow continuations ──────────────────────────────
+
+// TestFlowSkimContinuation: a skim result is a CONTINUATION, not a fan-in — the
+// handler runs under the PRODUCING ITEM's riders (item-over-driver shadowing),
+// and a follow-up on the item's flow must not fire while the result awaits
+// skimming.
+func TestFlowSkimContinuation(t *testing.T) {
+	chk := require.New(t)
+	driverKey := streampool.NewFlowKey[string]()
+	itemKey := streampool.NewFlowKey[string]()
+	itemTag := streampool.NewFlowTag()
+
+	var wave streampool.Wave
+	var skimSawDriver, skimSawItem atomic.Value
+	var skimRan, followUpSawSkim atomic.Bool
+
+	collector := streampool.NewSkimmer(streampool.HandlerFunc[int](
+		func(ctx context.Context, _ int, err error) error {
+			if err != nil {
+				return err
+			}
+			dv, dok := driverKey.From(ctx)
+			iv, iok := itemKey.From(ctx)
+			skimSawDriver.Store([2]any{dv, dok})
+			skimSawItem.Store([2]any{iv, iok})
+			// The item's own tag is peeled inside its handler? No — the tag rides the
+			// continuation and is present (it is not the follow-up's own body here).
+			chk.True(itemTag.InFlow(ctx), "item's tag present in the skim continuation")
+			skimRan.Store(true)
+			return nil
+		},
+	))
+
+	// A launcher whose body opens a per-item scope and submits a skim result under
+	// it, plus a follow-up on the item's flow.
+	producer := streampool.NewFnLauncher(func(ctx context.Context, _ int, err error) error {
+		if err != nil {
+			return err
+		}
+		return streampool.WithFlow(ctx, func(ctx context.Context) error {
+			return collector.Submit(ctx, 1)
+		}, itemKey.Value("item-x"),
+			itemTag.FollowUpFn(func(context.Context) error {
+				followUpSawSkim.Store(skimRan.Load())
+				return nil
+			}))
+	})
+
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		if err := producer.In(&wave).Submit(ctx, 0); err != nil {
+			return err
+		}
+		return wave.CloseAndSkimAll(ctx)
+	}, driverKey.Value("driver"))
+	chk.NoError(err)
+
+	chk.Equal([2]any{"driver", true}, skimSawDriver.Load(), "skim continuation inherits the driver value")
+	chk.Equal([2]any{"item-x", true}, skimSawItem.Load(), "CP-F7: skim continuation carries the producing item's value")
+	chk.Eventually(followUpSawSkim.Load, 5*time.Second, 5*time.Millisecond,
+		"item follow-up must fire only after its result was skimmed")
+}

@@ -216,6 +216,22 @@ type skimWork[T any] struct {
 	handler Handler[T]
 	value   T
 	err     error
+	// riders is the producing item's flow rider chain, captured at submit and held
+	// (node + instance refs) until Free. A skim result is a flow CONTINUATION, not a
+	// fan-in (CP-F7): the handler runs under the ITEM's riders (shadowing the
+	// driver's — the item descends from it), and holding the refs keeps a tag
+	// follow-up from firing while the result awaits skimming. nil for a result
+	// submitted from a rider-free ctx.
+	riders *flowRiderNode
+}
+
+// captureRiders records the producing item's rider chain and takes the carrier
+// refs (node + instance) that hold it alive from submit until Free — overlapping
+// the item's own refs, so the chain never transits unreferenced.
+func (wk *skimWork[T]) captureRiders(riders *flowRiderNode) {
+	wk.riders = riders
+	flowRefRiders(riders)
+	nodeRef(riders)
 }
 
 // newSkimWork creates a new skim work item with the provided values
@@ -249,6 +265,14 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	ex.Starting()
 	ctx, meta := wk.wave.ctxMeta(ctx)
 
+	// CP-F7: run the handler under the PRODUCING ITEM's riders (a continuation),
+	// not the driver's — the item's chain descends from the driver, so this is
+	// nearest-wins item-over-driver. The refs were taken at submit and are held
+	// until Free; handler dispatches take their own refs on borrow. A rider-free
+	// item leaves the driver-derived riders in place.
+	if wk.riders != nil {
+		meta.riders = wk.riders
+	}
 	meta.PushGroup(wk.Group())
 	defer meta.PopGroup()
 
@@ -260,6 +284,14 @@ func (wk *skimWork[T]) Free() {
 	traceRegion := "skimWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", wk)
+
+	// Release the producing item's rider refs captured at submit (CP-F7). A release
+	// that ends a follow-up's flow dispatches a wave-rooted fire; do it while
+	// wk.wave is still valid, before the recycle.
+	//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
+	flowUnrefRiders(wk.riders, wk.wave)
+	nodeUnref(wk.riders)
+	wk.riders = nil
 
 	wk.DownstreamWork.Close()
 	wk.poolWork.Close(wk.wave)
@@ -276,6 +308,7 @@ func (g Skimmer[T]) submit(
 	err error,
 ) error {
 	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	skimWork.captureRiders(meta.riders)
 	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
@@ -290,6 +323,7 @@ func (g Skimmer[T]) trySubmit(
 	deadline time.Time,
 ) (bool, error) {
 	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	skimWork.captureRiders(meta.riders)
 	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {

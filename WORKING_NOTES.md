@@ -697,13 +697,29 @@ see open queue item 5).
       **40/40 TestBySimulation -race (seeds 1-40, rapid.checks=60; 0 fails/hangs/races/underflows)**.
       NOTE: independent-flows-WITH-values (no common driver) would leak item1's value into the
       boundary — that is the R6 COALESCING case, not yet handled; tags-only union is correct.
-    - **NEXT: CP-F7 (skim handlers as flow continuations) — SEPARATE from R5.** A queued skim result
-      is a carrier: skimmer.Submit captures the item's riders (ref at submit), the handler runs under
-      them (child of the driver's ctx, per-key nearest-wins ITEM over driver), release at handler
-      end. Currently skim handlers see the DRIVER's chain (sim covers this, 40/40); F7 makes them see
-      the per-item riders. Then R6 coalescing (union-find for independent infused flows), R7 CP-F5b
-      sim oracle extension + psgwf delete/otpsg-v2. The pre-existing permits/wake-chain hang (hand off
-      dossier) remains orthogonal.
+    - **CP-F7 LANDED (2026-07-05, worktree — NOT committed): skim handlers are flow continuations.**
+      A queued skim result is a CARRIER of its producing item's riders, not a fan-in. skimWork gains
+      `riders *flowRiderNode`; `captureRiders(meta.riders)` at submit (both submit + trySubmit) takes
+      node + instance refs (overlapping the item's own — never transits unreferenced); skimWork.Execute
+      overrides `meta.riders = wk.riders` so the handler runs under the ITEM's chain (item-over-driver
+      shadowing — the item descends from the driver, whose cancellation ancestry the handler still
+      rides via wk.wave.ctxMeta); skimWork.Free releases (flowUnrefRiders + nodeUnref), balanced across
+      all paths (Free fires once — dequeued+executed, or freed-if-never-posted per skimPostWork.Free).
+      REVERSES the CP-F3 "skim is not a fan-in edge" note: a tag follow-up on the item's flow now must
+      NOT fire while the result awaits skimming — the skimWork's refs hold it until the handler
+      completes. Applies to internal errSinks too (harmless — they read no riders; refs balance).
+      Test: TestFlowSkimContinuation — skim handler sees the producing item's value (not just the
+      driver's) + item tag present + the item follow-up fires only AFTER its result was skimmed.
+      GATE: vet, golangci-lint 0, -short (root+sim), all flow + skim + conservation -race, alloc
+      floors, **40/40 TestBySimulation -race (seeds 1-40, rapid.checks=60; 0 fails/hangs/races)**.
+    - **NEXT: CP-R6 — coalescing independent infused flows (union-find under a per-tag merge lock).**
+      The highest-risk concurrent structure (spec §Fan-in "Coalescing"): a definitional tag follow-up
+      fires ONCE per flow even when independent flows (no common ancestor) each infuse T and converge
+      at a funnel — serial union-find under a per-tag merge lock (find-to-root, same-root no-op, live
+      operands via accumulate ref-before-release, funnel is the only merge site). ALSO fixes the R5
+      independent-flows-with-values gap (item1's value leaking into the boundary). DESIGN PASS WITH PN
+      FIRST. Then R7 CP-F5b sim oracle extension + psgwf delete/otpsg-v2. Pre-existing permits/wake-
+      chain hang: hand off dossier (orthogonal).
   - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
     flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
     of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES

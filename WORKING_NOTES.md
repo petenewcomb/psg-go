@@ -37,6 +37,45 @@ sync.Mutex.Lock waiters + progressing runnables; a real missed-wake has ZERO mut
 [select].
 
 
+**►►► HANDED OFF FROM flow-impl (2026-07-06): two pre-existing funnel/permits infra
+observations surfaced during the flow-rider-chain work.** Moved here so this thread owns
+them — neither is a flow bug (flow code audited as nil-rider no-ops on the sim paths; sim
+never calls WithFlow).
+
+**(1) Rare sim HANG — skimSelect/WaitForNew.** LIKELY the same pol_sim1 hang the banner
+above assesses FIXED by 5574a40 (Cache use-after-recycle corrupting the wake chain) — flow-
+impl saw the IDENTICAL signature and independently attributed it PRE-EXISTING. Reconcile
+against that finding; the flow-impl repro recipe below should let you confirm it no longer
+wedges post-5574a40 (vs. the delayq-convoy false-timeout).
+  - Signature (flow-impl, first seen 2026-07-04, CP-F4 batch iter 27; last seen 2026-07-05
+    R6a batch seed 6, intermittent, passed 2/2 on re-run): 10m -race timeout; 6 goroutines;
+    NO mutex/semacquire waiters; 4 skim drivers parked ~9m in Wave.skimSelect via
+    addWorkWhileMaybeBlocking/rdvq (top-level Run + two subjobs + a funnel-flush-driven
+    subjob: funnelInstance.Run→flush→sim runSubjob→CloseAndSkimAll→WaitForNew); all executor
+    workers idle-exited ⇒ missed-wake / stuck-reference class (some wave never Done-signaled
+    its skimmer). Distinguish from the delayq convoy: convoy has many sync.Mutex.Lock waiters
+    + progressing runnables; this hang has ZERO mutex waiters, all in [select].
+  - ATTRIBUTION (flow-impl A/B): the pre-flow base 300576b — ZERO flow code — hung 1/30
+    under the subjob/flush-heavy bias with the identical signature.
+  - VALIDATED REPRO RECIPE (~9× ambient — use to confirm fixed or residual): -race,
+    -rapid.checks=10, DEFAULT SelfTimes (zero-delay KILLS the repro — it needs real
+    delays/parked-worker windows), planConfig Subjob.Add probabilities raised: Launcher.Body
+    0.5, Funnel.Accumulate 0.3, Funnel.Flush 0.5, Skimmer.Handle 0.3 → ≈1/300 checks (vs
+    ~1/2600 ambient). Dead configs: zero-SelfTime no-race ×300 and zero-SelfTime -race ×2500,
+    0 hits both. Dumps preserved at flow-impl scratchpad: sim4_race_27.log, bias3_base_hang_1.log.
+
+**(2) Funnel `borrowSrcCtx` -race (DISTINCT from the hang), ~1/400.** NOT obviously covered
+by 5574a40 (different mechanism — confirm whether still live). Seen ~1/400 in
+TestFlowDefinitionalFollowUp AND the broad flow suite (2026-07-05): `funnelInstance.Run` →
+`borrowBodyContext` → `metaFromContext` READS a ctxpool child's value while an execpool worker
+`ctxpool.(*child).Free()` WRITES it — use-after-free of the flush's scheduler ctx
+(borrowSrcCtx). Root: funnel.go borrowSrcCtx lifecycle — the Run→body handoff does not
+happen-before the scheduler freeing the ctxpool child. Attribution: the identical
+non-definitional TestFlowFollowUpAnonymous exhibits the same pattern; flow code touches no
+funnel.go. NOTE: flow-impl's 2026-07-06 R6b gate (700 TestBySimulation -race checks +
+flow/coalesce -race ×20) did NOT surface it — may be very rare or affected by 5574a40; treat
+as unconfirmed-post-fix.
+
 **►►► WEIGHTED SURFACE — LAYER 1 LANDED (2026-07-05).** The weighted/plain limiter split +
 weigher + w≥2 dispatch, single-limiter (multi-composition deferred). DESIGN REVISIONS this
 session (recorded in weighted-acquisition.md): (1) plain and weighted limiters are FULLY

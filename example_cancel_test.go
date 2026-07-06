@@ -39,7 +39,7 @@ func ExampleWave_cancellation() {
 		// Simulate a long-running task
 		time.Sleep(20 * time.Millisecond)
 		return printResult.Submit(ctx, "first task result")
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	if err := firstRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
@@ -51,7 +51,7 @@ func ExampleWave_cancellation() {
 		// Simulate a longer-running task
 		time.Sleep(100 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	if err := secondRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
@@ -99,7 +99,7 @@ func ExampleWave_cancellation_task() {
 	fmt.Println("Launching first task")
 	firstRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		return printResult.Submit(ctx, "first task result")
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	if err := firstRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
@@ -115,7 +115,7 @@ func ExampleWave_cancellation_task() {
 		cancel()
 		time.Sleep(10 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	if err := secondRunner.In(&wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}

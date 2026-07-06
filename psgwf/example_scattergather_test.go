@@ -53,7 +53,7 @@ func Example_scatterSkim() {
 			clock.Sleep(10 * time.Millisecond)
 			fmt.Printf("%3dms Quick task completed\n", msSinceStart())
 			return "Quick result", nil
-		}, streampool.WithLimits(poolLimit))
+		}, poolLimit)
 	err := quickRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting quick task: %v\n", msSinceStart(), err)
@@ -70,7 +70,7 @@ func Example_scatterSkim() {
 			fmt.Printf("%3dms Failing task failed - cancelling workflow\n", msSinceStart())
 			wf.Ctx().Cancel(fmt.Errorf("critical failure"))
 			return "", fmt.Errorf("task failed")
-		}, streampool.WithLimits(poolLimit))
+		}, poolLimit)
 	err = failingRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting failing task: %v\n", msSinceStart(), err)
@@ -93,7 +93,7 @@ func Example_scatterSkim() {
 				fmt.Printf("%3dms Slow task cancelled\n", msSinceStart())
 				return "", context.Canceled
 			}
-		}, streampool.WithLimits(poolLimit))
+		}, poolLimit)
 	err = slowRunner.Start(context.Background())
 	if err != nil {
 		fmt.Printf("%3dms Error starting slow task: %v\n", msSinceStart(), err)

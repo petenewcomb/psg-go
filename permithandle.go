@@ -32,6 +32,11 @@ type heldPermit struct {
 	ownCache *permits.Cache
 	permit   permits.Permit
 
+	// weight is the number of permits this admission acquires — 1 for a plain limiter,
+	// or the op's weigher applied to the dispatched value for a weighted limiter. Set at
+	// dispatch (newScatterWork); the acquire presents it to every Acquire on this handle.
+	weight int
+
 	// demand is the caller-held demand identity this handle presents to every
 	// Acquire (weighted-acquisition.md Decision 4): the postpone/retry cycle
 	// re-presents the SAME identity, deduping to one FIFO entry once registration
@@ -82,7 +87,7 @@ func (h *heldPermit) acquire() bool {
 	if h.acquireErr != nil {
 		return false
 	}
-	pm, err := h.ownCache.Acquire(&h.demand, 1)
+	pm, err := h.ownCache.Acquire(&h.demand, h.weight)
 	if err != nil {
 		h.acquireErr = err
 		return false

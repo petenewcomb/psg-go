@@ -85,8 +85,7 @@ func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*Aggrega
 			v, err := s.Fetch(ctx, key)
 			return collect.SubmitResult(ctx, v, err)
 		}),
-		streampool.WithLimits(s.Gate),
-	)
+	).WithLimits(s.Gate)
 
 	for _, k := range in.Keys {
 		if err := run.In(&sub).Submit(ctx, k); err != nil {

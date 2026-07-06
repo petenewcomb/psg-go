@@ -48,7 +48,7 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 			close(gate)
 		}
 		return nil
-	}, streampool.WithLimits(streampool.NewSemaphore(1)))
+	}).WithLimits(streampool.NewSemaphore(1))
 
 	require.NoError(t, launcher.In(&wave).Submit(ctx, 1))
 	require.NoError(t, launcher.In(&wave).Submit(ctx, 2))

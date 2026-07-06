@@ -91,7 +91,7 @@ func ExampleFunnel() {
 			fmt.Printf("%3dms:   task %d (%v -> %q) complete, in-flight count now %d\n",
 				msSinceStart(), number, delay, result, inFlight.Add(-1))
 			return funnelOp.Submit(ctx, result)
-		}, streampool.WithLimits(taskLimit))
+		}).WithLimits(taskLimit)
 	}
 
 	// Launch some tasks

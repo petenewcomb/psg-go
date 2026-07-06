@@ -626,6 +626,19 @@ permanent.**
   transient, always WAIT. It needs no overdraft policy → `pool.overdraftPolicy` is
   `nil` → the head's miss takes the FAST path (the `nil` early-out in `headGather`,
   no `walkCounts` proof). The common case.
+
+  > **CORRECTION (PN, 2026-07-05, Layer-1 impl):** this "plain → `nil` policy → wait,
+  > fast path" is WRONG against the code. `evaluateOverdraft` (permits.go) treats a
+  > `nil` policy as **GRANT** ("non-implementing holdable: grant"), not wait — the
+  > permissive default for a resource that opts out of overdraft. Plain
+  > `semaphoreResource` implements `Overdraft` returning `(false,nil)`=wait PRECISELY
+  > to override that nil-default grant, because granting is unsafe pre-step-4 (the
+  > episode owner's own downstream dispatches wedge behind its episode;
+  > `TestSemaphoreOverdraftPolicy` pins a paused semaphore to wait). So in Layer 1
+  > **plain KEEPS its explicit wait policy** — the "shed `Overdraft` → `nil` → fast, no
+  > proof" step is a PERF optimization deferred to the gather-walk-avoidance /
+  > meta-redirect seam, where the `nil`→grant-vs-wait semantics get resolved. Layer 1
+  > loses no correctness, only the not-yet-built fast path.
 - A **weighted** semaphore: infeasibility can also mean `w > cap` — permanent at the
   current ceiling, a per-unit data error → REFUSE. Needs a real policy.
 
@@ -643,16 +656,28 @@ takes a weight-capable limiter, so weighing a plain semaphore WON'T COMPILE — 
 closes a silent-wedge hole: a `w > cap` demand on a `nil`-policy pool would hit
 `nil`→wait and hang forever, exactly the failure the "weighted infeasibility is a
 distinct per-unit error" rule exists to prevent. `NewWeightLimiter` (above) takes a
-`WeightedLimiter`, not a bare `Limiter`. A `WeightedLimiter` is still usable weight-1
-in `WithLimits`/`LimiterSet` (a weighted semaphore shared weight-1 by one op and
-weighed by another still works — the settled sharing property survives, scoped to
-weighted limiters); a plain `Limiter` simply cannot be passed where a
-`WeightedLimiter` is required.
+`WeightedLimiter`, not a bare `Limiter`.
+
+**REVERSED (PN, 2026-07-05): plain and weighted limiters are fully SEPARATE — the
+types do not cross-assign in either direction.** The earlier "a `WeightedLimiter` is
+still usable weight-1 in `WithLimits`/`LimiterSet`" convenience is dropped. Rationale:
+weight-capability exists because the resource measures something NON-uniform (bytes,
+cost units), so using such a limiter weight-1 charges a meaningless "1 byte"/"1 unit"
+per dispatch — almost always a mistake. The legitimate cases separate cleanly (a
+concurrency cap is always weight-1 → plain `Limiter`; a byte/cost budget always
+weighs → weighted), and genuine weight-1-on-a-weighted-pool survives EXPLICITLY as
+`NewWeightLimiter(wl, func(T) int { return 1 })` — more honest than an implicit
+cross-assign. Separation makes the option-ii guard automatic in BOTH directions:
+plain→weighted won't compile (the silent-wedge hole) AND weighted→plain won't compile
+(no accidental byte-budget-as-weight-1), with NO subtyping — so `Limiter` STAYS a
+concrete struct (no interface-ification; the hot path is unchanged and the surface
+stays allocation-neutral).
 
 **Overdraft policy defaults:**
 
-- plain semaphore: none (`nil`) → wait. "Paused blocks forever" falls straight out of
-  `nil`→wait; the semaphore sheds the standalone `Overdraft` method it carries today.
+- plain semaphore: **Layer 1 keeps the explicit `Overdraft`→`(false,nil)`=wait method**
+  (NOT `nil` — see the CORRECTION above: `nil`→grant, which is unsafe pre-step-4). The
+  "shed to `nil` for the fast path" is deferred.
 - weighted semaphore: `maxConcurrency == 0 → wait` (paused); else the proof
   guarantees zero inUse, so reaching overdraft means `w > cap` → `refuse` with a
   per-unit error. **STILL OPEN**: whether a weighted *concurrency* semaphore should
@@ -660,12 +685,15 @@ weighted limiters); a plain `Limiter` simply cannot be passed where a
   refuse — a memory limiter refuses (hard wall), a concurrency cap arguably grants.
   The split does not force this; it only requires weighted ≠ plain.
 
-**Open (naming pass):** `WeightedLimiter` (a weight-CAPABLE limiter) collides
-visually with the settled `WeightLimiter[T]` (a limiter+weigher pairing) — needs
-disambiguation. And whether the weight-capable type is a concrete `WeightedSemaphore`
-(semaphore-specific; generalize to an interface when weighted rate limiters land) or
-a `WeightedLimiter` interface from the start (asymmetric with `Limiter` being a
-concrete struct) is undecided. Settle with the rest of the step-4 naming.
+**Naming SETTLED (PN, 2026-07-05):** the weight-capable type is a **`WeightedLimiter`
+interface from the start** (not a concrete `WeightedSemaphore`) — so weighted rate
+limiters implement the same interface later with no breaking change. The concrete impl
+is `*weightedSemaphore` (a pointer, so interface storage never boxes/allocates); the
+interface is sealed via an unexported pool accessor. The concrete-`Limiter` /
+interface-`WeightedLimiter` asymmetry is deliberate and accepted: plain stays a simple
+sealed value, weighted gets extensibility. `WeightedLimiter` (weight-CAPABLE) and
+`WeightLimiter[T]` (limiter+weigher pairing) coexist — the `-ed` and the `[T]` carry
+the distinction; no rename.
 
 **Separate perf note — the weighted-path `walkCounts`.** The full design for
 bounding these walks — pool `nothingBorrowableSeq`, per-demand `notEnoughSeq`, and a

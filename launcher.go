@@ -36,9 +36,15 @@ import (
 // any), and internal error sink, so they can be passed by value or
 // stored in structures and used concurrently.
 type Launcher[T any] struct {
-	wave     *Wave
-	handler  Handler[T]
-	limiter  Limiter
+	wave    *Wave
+	handler Handler[T]
+	// limiter holds the permit Pool this op draws on (plain or weighted); the zero
+	// Limiter (pool == nil) means unlimited. Bound via [Launcher.WithLimits] or
+	// [Launcher.WithWeightLimits].
+	limiter Limiter
+	// weigh maps a dispatched value to the weight its work acquires. nil ⟹ weight 1 (a
+	// plain limiter, or none); non-nil ⟹ a weighted limiter bound via WithWeightLimits.
+	weigh    func(T) int
 	errSink  ErrSkimmer
 	workPool *omnipool.Pool[launcherWork[T]]
 }
@@ -46,23 +52,59 @@ type Launcher[T any] struct {
 // NewLauncher creates a Launcher for handler. The op is wave-agnostic:
 // each dispatch resolves the target wave from the ambient body ctx, or
 // bind one explicitly with [Launcher.In] (required at top level, where
-// there is no ambient wave). Pass [WithLimits] in opts to bind one or
-// more [Limiter]s that throttle dispatch.
+// there is no ambient wave). Chain [Launcher.WithLimits] (plain) or
+// [Launcher.WithWeightLimits] (weighted) to throttle dispatch.
 //
 // The framework manages an internal error sink that surfaces
 // unexpected errors returned by Handle through the dispatching
 // Wave's SkimAll path.
-func NewLauncher[T any](handler Handler[T], opts ...OpOption) Launcher[T] {
+func NewLauncher[T any](handler Handler[T]) Launcher[T] {
 	if handler == nil {
 		panic("handler must be non-nil")
 	}
-	cfg := resolveOpConfig(opts)
 	return Launcher[T]{
 		handler:  handler,
-		limiter:  cfg.singleLimiter(),
 		errSink:  newTaskErrSink(),
 		workPool: omnipool.For[launcherWork[T]](),
 	}
+}
+
+// WithLimits returns a copy of the Launcher bound to the given plain [Limiter]s (the
+// In(wave) copy-with-modification pattern), so each dispatch acquires a weight-1 permit
+// from each before the work runs. Bind a weight-capable limiter instead with
+// [Launcher.WithWeightLimits].
+//
+// The variadic shape is forward-compat for AND-composition; in this release only a single
+// limiter total (across WithLimits and WithWeightLimits) is supported — binding more
+// panics.
+func (r Launcher[T]) WithLimits(limiters ...Limiter) Launcher[T] {
+	for _, l := range limiters {
+		r.bindLimiter(l, nil)
+	}
+	return r
+}
+
+// WithWeightLimits returns a copy of the Launcher bound to the given [WeightLimiter]
+// bindings, so each dispatch acquires a permit of weight weigh(value) from the weighted
+// limiter. See [Launcher.WithLimits] for the plain case and the single-limiter
+// restriction.
+func (r Launcher[T]) WithWeightLimits(wls ...WeightLimiter[T]) Launcher[T] {
+	for _, wl := range wls {
+		r.bindLimiter(Limiter{pool: wl.limiter.weightedPool()}, wl.weigh)
+	}
+	return r
+}
+
+// bindLimiter records l (and its optional weigher) as this op's single limiter, panicking
+// if one is already bound — multi-limiter AND-composition is a forthcoming follow-up, so
+// it is rejected at construction time rather than partially enforced at runtime. Mutates
+// the receiver copy the builder methods return by value.
+func (r *Launcher[T]) bindLimiter(l Limiter, weigh func(T) int) {
+	if r.limiter.pool != nil {
+		panic("multi-Limiter composition is not yet implemented (Wave 4 follow-up)")
+	}
+	r.limiter = l
+	r.weigh = weigh
 }
 
 // In returns a copy of the Launcher bound to wave, so its dispatches place
@@ -74,14 +116,13 @@ func (r Launcher[T]) In(wave *Wave) Launcher[T] {
 }
 
 // NewFnLauncher creates a Launcher from a closure-based handler.
-// Convenience wrapper for `NewLauncher(NewHandler(handle), opts...)`.
+// Convenience wrapper for `NewLauncher(NewHandler(handle))`.
 // T is inferred from handle's value parameter, sparing the user the
 // [T] annotation. Wave-agnostic; see [NewLauncher] and [Launcher.In].
 func NewFnLauncher[T any](
 	handle func(ctx context.Context, value T, err error) error,
-	opts ...OpOption,
 ) Launcher[T] {
-	return NewLauncher(NewHandler(handle), opts...)
+	return NewLauncher(NewHandler(handle))
 }
 
 // TaskLauncher is the [Launcher][struct{}] case — a launcher for
@@ -90,10 +131,10 @@ func NewFnLauncher[T any](
 type TaskLauncher = Launcher[struct{}]
 
 // NewTaskLauncher creates a Launcher for a no-arg task body. Convenience
-// wrapper for `NewLauncher(NewTask(task), opts...)`. Wave-agnostic; see
+// wrapper for `NewLauncher(NewTask(task))`. Wave-agnostic; see
 // [NewLauncher] and [Launcher.In].
-func NewTaskLauncher(task func(ctx context.Context) error, opts ...OpOption) TaskLauncher {
-	return NewLauncher(NewTask(task), opts...)
+func NewTaskLauncher(task func(ctx context.Context) error) TaskLauncher {
+	return NewLauncher(NewTask(task))
 }
 
 // ErrLauncher is the [Launcher][struct{}] case viewed as an err
@@ -103,10 +144,10 @@ func NewTaskLauncher(task func(ctx context.Context) error, opts ...OpOption) Tas
 type ErrLauncher = Launcher[struct{}]
 
 // NewErrLauncher creates a Launcher for an err-receiving handler.
-// Convenience wrapper for `NewLauncher(NewErrHandler(handle), opts...)`.
+// Convenience wrapper for `NewLauncher(NewErrHandler(handle))`.
 // Wave-agnostic; see [NewLauncher] and [Launcher.In].
-func NewErrLauncher(handle func(ctx context.Context, err error) error, opts ...OpOption) ErrLauncher {
-	return NewLauncher(NewErrHandler(handle), opts...)
+func NewErrLauncher(handle func(ctx context.Context, err error) error) ErrLauncher {
+	return NewLauncher(NewErrHandler(handle))
 }
 
 // Submit dispatches Handle(ctx, value, nil) on the bound Wave's
@@ -246,6 +287,13 @@ func (r Launcher[T]) newScatterWork(
 		m, _ := metaFromContext(submitCtx)
 		h = heldPermitPool.Get()
 		h.ownCache = wv.ensureCache(m, r.limiter.pool)
+		// Weight: the weigher applied to this value for a weighted limiter, else 1. Set
+		// per dispatch (the pooled handle comes back zeroed) so the gate acquires the
+		// right amount.
+		h.weight = 1
+		if r.weigh != nil {
+			h.weight = r.weigh(value)
+		}
 	}
 	taskWork := wv.newTaskWork(submitCtx, group, inner, h)
 	postWork := wv.newTaskPostWork(group, deadline, taskWork)

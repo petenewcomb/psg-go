@@ -32,33 +32,33 @@ type Launcher[T any] = GenericLauncher[T, Context]
 
 // NewGenericLauncher binds a workflow-aware task to wave. wave may
 // be nil to defer wave binding to the dispatching ctx at
-// [GenericLauncher.Start] time (see [streampool.NewLauncher0]). Pass psg op
-// options (e.g. [streampool.WithLimits]) via opts to throttle dispatch.
+// [GenericLauncher.Start] time (see [streampool.NewLauncher0]). Pass plain
+// [streampool.Limiter]s via limits to throttle dispatch.
 func NewGenericLauncher[T, C any](
 	wave *streampool.Wave,
 	sink GenericSkimOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
-	opts ...streampool.OpOption,
+	limits ...streampool.Limiter,
 ) GenericLauncher[T, C] {
-	return newGenericLauncher(wave, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
+	return newGenericLauncher(wave, wf, taskFn, limits, func(ctx context.Context, value T, err error) error {
 		return sink.inner().SubmitResult(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
 
 // NewGenericLauncherForFunnel binds a workflow-aware task to wave,
 // forwarding results to the supplied Funnel sink. wave may be nil to
-// defer wave binding to the dispatching ctx. Pass psg op options
-// (e.g. [streampool.WithLimits]) via opts to throttle dispatch.
+// defer wave binding to the dispatching ctx. Pass plain
+// [streampool.Limiter]s via limits to throttle dispatch.
 func NewGenericLauncherForFunnel[T, C any](
 	wave *streampool.Wave,
 	sink GenericFunnelOp[T, C],
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
-	opts ...streampool.OpOption,
+	limits ...streampool.Limiter,
 ) GenericLauncher[T, C] {
 	funnel := sink.inner()
-	return newGenericLauncher(wave, wf, taskFn, opts, func(ctx context.Context, value T, err error) error {
+	return newGenericLauncher(wave, wf, taskFn, limits, func(ctx context.Context, value T, err error) error {
 		return funnel.SubmitResult(ctx, result[T, C]{Workflow: wf, Value: value}, err)
 	})
 }
@@ -67,7 +67,7 @@ func newGenericLauncher[T, C any](
 	wave *streampool.Wave,
 	wf *GenericWorkflow[C],
 	taskFn GenericTaskFunc[T, C],
-	opts []streampool.OpOption,
+	limits []streampool.Limiter,
 	submitFn func(context.Context, T, error) error,
 ) GenericLauncher[T, C] {
 	body := streampool.NewTask(func(ctx context.Context) error {
@@ -76,7 +76,7 @@ func newGenericLauncher[T, C any](
 	})
 	return GenericLauncher[T, C]{
 		wf:    wf,
-		inner: streampool.NewLauncher(body, opts...).In(wave),
+		inner: streampool.NewLauncher(body).WithLimits(limits...).In(wave),
 	}
 }
 

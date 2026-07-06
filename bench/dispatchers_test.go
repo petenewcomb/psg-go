@@ -99,15 +99,15 @@ type streampoolDispatcher struct {
 
 func (d *streampoolDispatcher) name() string { return "streampool" }
 func (d *streampoolDispatcher) start(capacity int) {
-	var opts []streampool.OpOption
-	if capacity > 0 {
-		opts = append(opts, streampool.WithLimits(streampool.NewSemaphore(capacity)))
-	}
-	d.launcher = streampool.NewFnLauncher(
+	launcher := streampool.NewFnLauncher(
 		func(_ context.Context, task func(), _ error) error {
 			task()
 			return nil
-		}, opts...).In(&d.wave)
+		})
+	if capacity > 0 {
+		launcher = launcher.WithLimits(streampool.NewSemaphore(capacity))
+	}
+	d.launcher = launcher.In(&d.wave)
 }
 func (d *streampoolDispatcher) submit(ctx context.Context, task func()) {
 	_ = d.launcher.Submit(ctx, task)

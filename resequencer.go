@@ -38,10 +38,9 @@ type Resequencer[T any] struct {
 // Resequencing is a reducer (a serial fold over shared next-sequence state), so
 // the funnel is capped to a single instance with a concurrency-1 limiter;
 // handler is therefore invoked sequentially and needs no internal
-// synchronization. Any opts compose with that cap (limiters AND together), so the
-// single-instance guarantee always holds.
-func NewResequencer[T any](wave *Wave, start uint64, handler Handler[T], opts ...OpOption) Resequencer[T] {
-	return Resequencer[T]{funnel: newResequenceFunnel[T](wave, start, handler, opts...)}
+// synchronization.
+func NewResequencer[T any](wave *Wave, start uint64, handler Handler[T]) Resequencer[T] {
+	return Resequencer[T]{funnel: newResequenceFunnel[T](wave, start, handler)}
 }
 
 // NewFnResequencer is [NewResequencer] with a function handler.
@@ -49,9 +48,8 @@ func NewFnResequencer[T any](
 	wave *Wave,
 	start uint64,
 	handle func(ctx context.Context, value T, err error) error,
-	opts ...OpOption,
 ) Resequencer[T] {
-	return NewResequencer[T](wave, start, HandlerFunc[T](handle), opts...)
+	return NewResequencer[T](wave, start, HandlerFunc[T](handle))
 }
 
 // Submit hands value to the resequencer at position seq. Sugar for
@@ -86,8 +84,8 @@ type RangeResequencer[T any] struct {
 // NewRangeResequencer returns a RangeResequencer beginning at start (the first
 // offset it will deliver — usually 0). See [NewResequencer] for the
 // single-instance/limiter semantics, which are identical.
-func NewRangeResequencer[T any](wave *Wave, start uint64, handler Handler[T], opts ...OpOption) RangeResequencer[T] {
-	return RangeResequencer[T]{funnel: newResequenceFunnel[T](wave, start, handler, opts...)}
+func NewRangeResequencer[T any](wave *Wave, start uint64, handler Handler[T]) RangeResequencer[T] {
+	return RangeResequencer[T]{funnel: newResequenceFunnel[T](wave, start, handler)}
 }
 
 // NewFnRangeResequencer is [NewRangeResequencer] with a function handler.
@@ -95,9 +93,8 @@ func NewFnRangeResequencer[T any](
 	wave *Wave,
 	start uint64,
 	handle func(ctx context.Context, value T, err error) error,
-	opts ...OpOption,
 ) RangeResequencer[T] {
-	return NewRangeResequencer[T](wave, start, HandlerFunc[T](handle), opts...)
+	return NewRangeResequencer[T](wave, start, HandlerFunc[T](handle))
 }
 
 // Submit hands value, covering [offset, offset+length), to the resequencer.
@@ -121,8 +118,7 @@ type rangeItem[T any] struct {
 	value  T
 }
 
-func newResequenceFunnel[T any](wave *Wave, start uint64, handler Handler[T], opts ...OpOption) Funnel[rangeItem[T]] {
-	opts = append([]OpOption{WithLimits(NewSemaphore(1))}, opts...)
+func newResequenceFunnel[T any](wave *Wave, start uint64, handler Handler[T]) Funnel[rangeItem[T]] {
 	return NewFunnel[rangeItem[T]](
 		wave,
 		AccumulatorFactoryFunc[rangeItem[T]](func() Accumulator[rangeItem[T]] {
@@ -132,8 +128,7 @@ func newResequenceFunnel[T any](wave *Wave, start uint64, handler Handler[T], op
 				handler: handler,
 			}
 		}),
-		opts...,
-	)
+	).WithLimits(NewSemaphore(1))
 }
 
 type pendingRange[T any] struct {

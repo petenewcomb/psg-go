@@ -53,7 +53,7 @@ func Example() {
 				case <-wf.Ctx().Done():
 					return "", fmt.Errorf("[%s] cancelled", requestID)
 				}
-			}, streampool.WithLimits(poolLimit))
+			}, poolLimit)
 		err := runner.Start(clientCtx)
 
 		if err != nil {

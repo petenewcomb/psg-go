@@ -106,7 +106,7 @@ func TestAllocsFunnelSubmitSteady(t *testing.T) {
 			AccumulateFn: func(_ context.Context, v int, _ error) (time.Time, error) { s += v; return time.Time{}, nil },
 			FlushFn:      func(fctx context.Context) error { return collector.Submit(fctx, s) },
 		}
-	}, streampool.WithLimits(streampool.NewSemaphore(1)))
+	}).WithLimits(streampool.NewSemaphore(1))
 
 	op := func() {
 		if err := funnel.Submit(ctx, 1); err != nil {
@@ -143,7 +143,7 @@ func TestAllocsWaveReuseCycle(t *testing.T) {
 				AccumulateFn: func(_ context.Context, v int, _ error) (time.Time, error) { s += v; return time.Time{}, nil },
 				FlushFn:      func(fctx context.Context) error { return collector.Submit(fctx, s) },
 			}
-		}, streampool.WithLimits(streampool.NewSemaphore(1)))
+		}).WithLimits(streampool.NewSemaphore(1))
 		for k := 0; k < 4; k++ {
 			if err := funnel.Submit(ctx, 1); err != nil {
 				t.Fatalf("submit: %v", err)

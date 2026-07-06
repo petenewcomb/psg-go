@@ -61,7 +61,7 @@ func Example_clientTimeout() {
 		wf := psgwf.New(clientCtx)
 		// Launch operation
 		runner := psgwf.NewGenericLauncher(&wave, skimmer, wf, newRequestTaskFn(requestID),
-			streampool.WithLimits(poolLimit))
+			poolLimit)
 		err := runner.Start(ctx)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)

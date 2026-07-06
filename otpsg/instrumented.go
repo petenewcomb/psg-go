@@ -68,8 +68,8 @@ func InstrumentedFunnel[T any](
 // Scatter wraps the value-producing task in a one-shot [streampool.TaskLauncher]
 // that submits the result to skim, and dispatches it. The Launcher is
 // constructed with a nil wave and resolves the dispatching wave from
-// ctx at Start time (see [streampool.NewLauncher0]). Pass psg op options
-// (e.g. [streampool.WithLimits]) via opts to throttle dispatch.
+// ctx at Start time (see [streampool.NewLauncher0]). Pass plain
+// [streampool.Limiter]s via limits to throttle dispatch.
 //
 // Example:
 //
@@ -84,11 +84,11 @@ func Scatter[T any](
 	wave *streampool.Wave,
 	skim streampool.Skimmer[PropagatedResult[T]],
 	task func(context.Context) (PropagatedResult[T], error),
-	opts ...streampool.OpOption,
+	limits ...streampool.Limiter,
 ) error {
 	runner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skim.SubmitResult(ctx, result, err)
-	}, opts...)
+	}).WithLimits(limits...)
 	return runner.In(wave).Start(ctx)
 }

@@ -2,6 +2,33 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► WEIGHTED SURFACE — LAYER 1 LANDED (2026-07-05).** The weighted/plain limiter split +
+weigher + w≥2 dispatch, single-limiter (multi-composition deferred). DESIGN REVISIONS this
+session (recorded in weighted-acquisition.md): (1) plain and weighted limiters are FULLY
+SEPARATE — no cross-assign either direction (dropped "weighted usable weight-1 in
+WithLimits"); weight-1-on-weighted is explicit `NewWeightLimiter(wl, func(T)int{return 1})`.
+So `Limiter` STAYS a concrete struct (no interface-ification; hot path & allocs unchanged).
+(2) `WeightedLimiter` is an INTERFACE from the start (sealed via unexported `weightedPool()`;
+concrete `*weightedSemaphore` — pointer-in-interface, no box); coexists with `WeightLimiter[T]`
+(the limiter+weigher binding). (3) CORRECTION: `evaluateOverdraft` treats nil policy as
+GRANT (not wait) — so plain semaphore KEEPS its explicit `Overdraft→(false,nil)`=wait; the
+"shed to nil for the fast path" is a perf optimization DEFERRED to the walk-avoidance/
+meta-redirect seam (nil→grant unsafe pre-step-4). Weighted policy: paused(cap0)→wait,
+oversized(w>cap)→REFUSE `ErrWeightExceedsCapacity` (refuse is safe — never grants).
+DISSOLVED `OpOption`/opoption.go → builder methods `Launcher[T].WithLimits(...Limiter)` /
+`.WithWeightLimits(...WeightLimiter[T])`, `Funnel[T].WithLimits` (plain only — a funnel body
+runs over an accumulated instance, no per-value weigher); constructors dropped `opts ...`;
+migrated all call sites (main+psgwf+otpsg+streamgrpc+bench+tests). `heldPermit.weight` fed
+from `weigh(value)` at dispatch (newScatterWork), else 1; `acquire` presents it.
+Files: weightedlimiter.go (+ _internal_test/_test), errs.go, launcher.go, funnel.go,
+resequencer.go, permithandle.go. Verified: weighted pool-level + end-to-end serialization
+tests green; -short -race + permits -race green; sim -race 18 runs (~2700 cases) clean.
+DEFERRED to Layer 2: sets (LimiterSet/WeightLimiterSet) + multi-limiter AND-composition
+(they ride on unbuilt joint-acquisition core); binding >1 limiter panics as today. Then the
+consumable pass (step 4). The sim still dispatches w=1 plain only — wiring weighted limiters
+INTO the sim config to exercise w≥2 under simulation is a follow-on.
+
+
 **►►► SIM `-race` LIFECYCLE BUG FOUND + FIXED (2026-07-05).** A `TestBySimulation -race`
 batch hung (9m50s timeout) and, run in a loop, ~1/30 tripped the race detector: a
 use-after-recycle of a permit `Cache`. Root cause: `SkimAll`'s suspend path

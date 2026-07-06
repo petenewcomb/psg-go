@@ -148,14 +148,14 @@ func TestTrySubmitZeroDeadlineFailFast(t *testing.T) {
 		close(blocking)
 		<-released
 		return nil
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	chk.NoError(runner.In(&wave).Start(ctx))
 	<-blocking // first task is now occupying the limiter permit
 
 	// Zero deadline → fail-fast.
 	contender := streampool.NewTaskLauncher(func(_ context.Context) error {
 		return nil
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	ok, err := contender.In(&wave).TryStart(ctx, time.Time{})
 	chk.False(ok, "TryStart with zero deadline should fail-fast when contended")
 	chk.NoError(err, "fail-fast should not return an error")
@@ -180,7 +180,7 @@ func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 		close(blocking)
 		<-released
 		return nil
-	}, streampool.WithLimits(limit))
+	}).WithLimits(limit)
 	chk.NoError(runner.In(&wave).Start(ctx))
 	<-blocking
 
@@ -189,7 +189,7 @@ func TestSubmitBlocksOnContendedLimiter(t *testing.T) {
 	go func() {
 		contender := streampool.NewTaskLauncher(func(_ context.Context) error {
 			return nil
-		}, streampool.WithLimits(limit))
+		}).WithLimits(limit)
 		err := contender.In(&wave).Start(ctx) // uses Forever internally
 		contended = err == nil
 		close(contenderRan)

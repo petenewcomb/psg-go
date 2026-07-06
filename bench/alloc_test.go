@@ -28,13 +28,12 @@ func BenchmarkSPDispatch(b *testing.B) {
 	for _, capacity := range []int{0, 8} {
 		b.Run(fmt.Sprintf("cap=%d", capacity), func(b *testing.B) {
 			var w streampool.Wave
-			var opts []streampool.OpOption
+			launcher := streampool.NewFnLauncher(
+				func(_ context.Context, t func(), _ error) error { t(); return nil })
 			if capacity > 0 {
-				opts = append(opts, streampool.WithLimits(streampool.NewSemaphore(capacity)))
+				launcher = launcher.WithLimits(streampool.NewSemaphore(capacity))
 			}
-			l := streampool.NewFnLauncher(
-				func(_ context.Context, t func(), _ error) error { t(); return nil },
-				opts...).In(&w)
+			l := launcher.In(&w)
 			for range 1000 { // warm the pools
 				_ = l.Submit(ctx, noop)
 			}

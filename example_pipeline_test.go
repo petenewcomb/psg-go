@@ -61,7 +61,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		return streampool.NewTaskLauncher(func(ctx context.Context) error {
 			//nolint:gosec // non-cryptographic use case
 			return skimmer.Submit(ctx, md5.Sum(data))
-		}, streampool.WithLimits(digestLimit))
+		}).WithLimits(digestLimit)
 	}
 
 	// Creates a skimmer for a reading task whose handler dispatches a

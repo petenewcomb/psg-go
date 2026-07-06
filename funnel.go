@@ -85,9 +85,9 @@ var nextFunnelID atomic.Uint64
 
 func newFunnelID() funnelID { return funnelID(nextFunnelID.Add(1)) }
 
-// NewFunnel creates a new Funnel operation. Pass [WithLimits] in opts to bind a
-// [Limiter] (e.g. via [NewSemaphore]) that caps the number of concurrent funnel-work
-// executions for this Funnel.
+// NewFunnel creates a new Funnel operation. Chain [Funnel.WithLimits] to bind a [Limiter]
+// (e.g. via [NewSemaphore]) that caps the number of concurrent funnel-work executions for
+// this Funnel.
 //
 // The framework manages an internal error sink (owned by the wave) that surfaces
 // Accumulator errors through the Wave's SkimAll path; the user's Accumulator body is
@@ -98,7 +98,6 @@ func newFunnelID() funnelID { return funnelID(nextFunnelID.Add(1)) }
 func NewFunnel[T any](
 	wave *Wave,
 	funnelFactory AccumulatorFactory[T],
-	opts ...OpOption,
 ) Funnel[T] {
 	traceRegion := "NewFunnel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
@@ -110,12 +109,9 @@ func NewFunnel[T any](
 		panic("funnelFactory must be non-nil")
 	}
 
-	cfg := resolveOpConfig(opts)
-
 	c := Funnel[T]{
 		wave:         wave,
 		factory:      funnelFactory,
-		limiter:      cfg.singleLimiter(),
 		id:           newFunnelID(),
 		instancePool: omnipool.For[funnelInstance[T]](),
 		workPool:     omnipool.For[funnelWork[T]](),
@@ -128,14 +124,29 @@ func NewFunnel[T any](
 	return c
 }
 
+// WithLimits returns a copy of the Funnel bound to limiter (the In(wave)
+// copy-with-modification pattern), capping concurrent funnel-work executions. Only a
+// single limiter is supported in this release; binding more panics. Funnels take a
+// weight-1 permit per body execution — a funnel body runs over an accumulated instance,
+// not a single value, so there is no per-value weigher (use a plain [NewSemaphore]).
+func (c Funnel[T]) WithLimits(limiters ...Limiter) Funnel[T] {
+	for _, l := range limiters {
+		if c.limiter.pool != nil {
+			panic("multi-Limiter composition is not yet implemented (Wave 4 follow-up)")
+		}
+		c.limiter = l
+	}
+	return c
+}
+
 // NewFnFunnel binds a closure-based factory function to a Funnel. Convenience
-// wrapper for `NewFunnel(wave, NewAccumulatorFactory(newAccumulator), opts...)`.
+// wrapper for `NewFunnel(wave, NewAccumulatorFactory(newAccumulator))`. Chain
+// [Funnel.WithLimits] to bind a limiter.
 func NewFnFunnel[T any](
 	wave *Wave,
 	newAccumulator func() Accumulator[T],
-	opts ...OpOption,
 ) Funnel[T] {
-	return NewFunnel(wave, NewAccumulatorFactory(newAccumulator), opts...)
+	return NewFunnel(wave, NewAccumulatorFactory(newAccumulator))
 }
 
 // ErrFunnel is the [Funnel][struct{}] case viewed as an err
@@ -161,9 +172,8 @@ func NewErrFunnel(
 	wave *Wave,
 	accumulate func(ctx context.Context, err error) (time.Time, error),
 	flush func(ctx context.Context) error,
-	opts ...OpOption,
 ) ErrFunnel {
-	return NewFunnel(wave, NewErrAccumulatorFactory(accumulate, flush), opts...)
+	return NewFunnel(wave, NewErrAccumulatorFactory(accumulate, flush))
 }
 
 // Submit posts a value to the Funnel. Sugar for
@@ -651,6 +661,7 @@ func (wk *funnelWork[T]) Init(
 		m, _ := metaFromContext(submitCtx)
 		wk.h = heldPermitPool.Get()
 		wk.h.ownCache = fn.wave.ensureCache(m, fn.limiter.pool)
+		wk.h.weight = 1 // funnels take a plain weight-1 permit (no weigher)
 	}
 	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, wk.h, nil)
 }

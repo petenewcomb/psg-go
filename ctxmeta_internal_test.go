@@ -149,7 +149,7 @@ func TestHeldPermitStampedDuringBodies(t *testing.T) {
 		subCtx, subTopMeta, _ := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subwaveSeenHeld = subTopMeta.currentHeldPermit()
 		return subWave.CloseAndSkimAll(subCtx)
-	}, WithLimits(NewSemaphore(1)))
+	}).WithLimits(NewSemaphore(1))
 	require.NoError(t, limited.In(&wave).Start(ctx))
 
 	var unlimitedHeld = &heldPermit{} // sentinel, overwritten
@@ -180,7 +180,7 @@ func TestHeldPermitStampedDuringBodies(t *testing.T) {
 			},
 			FlushFn: func(context.Context) error { return nil },
 		}
-	}, WithLimits(NewSemaphore(1)))
+	}).WithLimits(NewSemaphore(1))
 	require.NoError(t, f.Submit(ctx2, 1))
 	require.NoError(t, wave2.CloseAndSkimAll(ctx2))
 	require.NotNil(t, funnelHeld, "limited Accumulate body must see its stamped handle")

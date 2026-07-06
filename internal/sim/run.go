@@ -159,11 +159,11 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 	for i, cmb := range c.Plan.Funnels {
 		cp := cmb
 		idx := i
-		var opts []streampool.OpOption
+		var limits []streampool.Limiter
 		if len(cp.LimiterIndexes) > 0 {
-			opts = append(opts, streampool.WithLimits(c.FunnelLimiters[cp.LimiterIndexes[0]]))
+			limits = append(limits, c.FunnelLimiters[cp.LimiterIndexes[0]])
 		}
-		funnel := streampool.NewFunnel(c.Wave, c.newFunnelFactory(t, cp, idx), opts...)
+		funnel := streampool.NewFunnel(c.Wave, c.newFunnelFactory(t, cp, idx)).WithLimits(limits...)
 		c.Funnels[i] = &funnel
 	}
 	// Construct Launchers after Funnels/Skimmers so the bodies can
@@ -332,10 +332,10 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	// drives the subwave. Used by the per-Limiter max-concurrency
 	// assertion in Run.
 	var tracker *limiterTracker
-	var opts []streampool.OpOption
+	var limits []streampool.Limiter
 	if len(runner.LimiterIndexes) > 0 {
 		limIdx := runner.LimiterIndexes[0]
-		opts = append(opts, streampool.WithLimits(c.TaskLimiters[limIdx]))
+		limits = append(limits, c.TaskLimiters[limIdx])
 		tracker = c.taskLimiterTrackers[limIdx]
 	}
 	body := streampool.NewTask(func(ctx context.Context) error {
@@ -364,7 +364,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 	if bindWave {
 		w = c.Wave
 	}
-	return streampool.NewLauncher(body, opts...).In(w)
+	return streampool.NewLauncher(body).WithLimits(limits...).In(w)
 }
 
 // disposition tells an op driver how to react to an error returned by a psg

@@ -39,7 +39,7 @@ func Example_simple() {
 	runner := psgwf.NewGenericLauncher(&wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "Hello from workflow", nil
-		}, streampool.WithLimits(poolLimit))
+		}, poolLimit)
 	err := runner.Start(ctx)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

@@ -64,7 +64,7 @@ func Example_observable() {
 			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
 			// Return mock data
 			return skimmer.Submit(ctx, "result for task "+taskName)
-		}, streampool.WithLimits(limit))
+		}).WithLimits(limit)
 	}
 
 	// Launch some tasks

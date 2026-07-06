@@ -53,7 +53,7 @@ func TestWorkflowAfterFunc(t *testing.T) {
 	runner := psgwf.NewGenericLauncher(&wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "test", nil
-		}, streampool.WithLimits(poolLimit))
+		}, poolLimit)
 	err := runner.Start(context.Background())
 	assert.NoError(t, err)
 
@@ -119,7 +119,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 		runner := psgwf.NewGenericLauncher(&wave, skimmer, newWf,
 			func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 				return "new task", nil
-			}, streampool.WithLimits(poolLimit))
+			}, poolLimit)
 		err := runner.Start(ctx)
 		assert.NoError(t, err)
 	})
@@ -132,7 +132,7 @@ func TestWorkflowAfterFuncWithNewTasks(t *testing.T) {
 	outerRunner := psgwf.NewGenericLauncher(&wave, skimmer, wf,
 		func(ctx context.Context, wf *psgwf.Workflow) (string, error) {
 			return "original task", nil
-		}, streampool.WithLimits(poolLimit))
+		}, poolLimit)
 	err := outerRunner.Start(context.Background())
 	assert.NoError(t, err)
 

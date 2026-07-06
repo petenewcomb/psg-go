@@ -20,7 +20,7 @@
 //     cleanup hooks). Most programs never construct one.
 //   - Pool — the workers. Internal and fungible: a single process-wide pool is
 //     used implicitly and sized automatically. You do not construct or tune it;
-//     per-op concurrency is expressed with Limiters (see [WithLimits]).
+//     per-op concurrency is expressed with Limiters (see [Launcher.WithLimits]).
 //
 // Work is performed by wave-agnostic ops, defined once and reusable:
 // [NewLauncher] (stateless dispatch), [NewFunnel] (stateful aggregation), and

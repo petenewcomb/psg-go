@@ -19,9 +19,22 @@ wrongly refused (terminal), stranding the postponed work. FIX (weightedlimiter.g
 n>limit (permanently oversized); else wait, exactly like plain. Regression:
 TestWeightedSemaphore_OverdraftWaitsWhenItFits. Verified: biased hunt config 0/12 (was 2-3/10);
 sim -race 28 runs/~5600 cases clean at default Weighted=0.35; weighted+permits+sim unit green.
-NOTE: this was NOT the pre-existing pol_sim1 hang (that remains a separate, still-latent ~1/900
-w=1 wedge to chase later — the identical SkimAll-wedge stack is just the shared symptom of "work
-never drains").
+NOTE: this was NOT the pre-existing pol_sim1 hang (identical SkimAll-wedge stack, different cause).
+
+**►►► pol_sim1 w=1 HANG ASSESSED FIXED (by 5574a40); remaining -race timeouts = delayq CONVOY
+(perf, not a wedge) (2026-07-06).** Chased the Jul-4 pol_sim1 missed-wake (145 goroutines parked
+in rdvq handoff, ZERO mutex waiters). Cannot reproduce it: 20k non-race cases clean; ~1800 -race
+cases (checks=150, generous 200s timeout, weighted OFF, zero selftime) 0 true wedges. 5574a40's
+commit msg explicitly targets that exact signature ("missed-wake wedge, workers parked in rdvq
+handoff with no senders") — the Cache use-after-recycle corrupted the wake chain; -race caught
+the clean race while un-raced it cascaded to the 145-goroutine handoff wedge. So pol_sim1 = fixed.
+The ONLY -race timeouts now are the DELAYQ CONVOY: hundreds of scheduler workers blocked on the
+delayq Queue mutex (drainScheduled→delayq.Drain→foldUpdates, O(n) under a global lock) with
+runnables still PROGRESSING — a slow-but-live convoy, NOT a deadlock. It false-times-out only at
+high checks vs tight timeout (e.g. checks=300 / 110s; checks≤150 completes in <45s). SEPARATE perf
+item (foldUpdates scalability), not a liveness bug. Signature to distinguish: convoy has many
+sync.Mutex.Lock waiters + progressing runnables; a real missed-wake has ZERO mutex waiters, all
+[select].
 
 
 **►►► WEIGHTED SURFACE — LAYER 1 LANDED (2026-07-05).** The weighted/plain limiter split +

@@ -252,13 +252,19 @@ func (wv *Wave) initState() {
 // pool — running NO user code — so the transition goroutine never re-enters the
 // framework; the flushes themselves run later on pool workers.
 //
-// The IncrementReference/DecrementReference bracket holds the wave open across the
-// ranging: a deadline-driven Execute that drained before this sweep (and which the
-// per-instance sweep skips via ClaimForFlush==false) could otherwise drop the last
-// barrier mid-sweep, drive the wave to Done, and let a concurrent re-arm clear the map
-// under us. This is the analogue of the old joinFlusher-before-rearm barrier.
+// The reference bracket holds the wave open across the ranging: a deadline-driven
+// Execute that drained before this sweep (and which the per-instance sweep skips via
+// ClaimForFlush==false) could otherwise drop the last barrier mid-sweep, drive the wave
+// to Done, and let a concurrent re-arm clear the map under us. This is the analogue of
+// the old joinFlusher-before-rearm barrier. The pin is the conditional
+// TryIncrementReference for the same reason as suspendHeldPermit's: an increment
+// resurrecting the count from zero cannot stop a Flushing→Done transition already in
+// flight, so a failed pin means the wave's Done is reached or committed — every
+// instance has flushed and there is nothing to sweep.
 func (wv *Wave) sweepFunnels() {
-	wv.state.IncrementReference()
+	if !wv.state.TryIncrementReference() {
+		return
+	}
 	defer wv.state.DecrementReference()
 	wv.funnelInstances.Range(func(_, v any) bool {
 		v.(funnelSweep).sweepFlush()
@@ -415,8 +421,12 @@ func (wv *Wave) block(
 	// correctness-required, not just utilization — without it, a
 	// subwave-top-level dispatch acquiring a limiter held by this same
 	// goroutine's enclosing body self-deadlocks (see "Where suspend
-	// fires" in docs/limiter-suspend-resume.md). Re-entrant: the
-	// reclaim's own suspend finds the handle already suspended and no-ops.
+	// fires" in docs/limiter-suspend-resume.md). Re-entrant: while an
+	// enclosing bracket holds the whole set suspended this one no-ops
+	// (nothing held); inside an enclosing reclaimJoint it suspends —
+	// and on unwind reclaims — exactly the holds held at this level
+	// (per-hold suspendTarget scoping, see reclaimJoint), so no wait
+	// in the reclaim ever parks while holding a permit.
 	if h := suspendHeldPermit(meta, wv); h != nil {
 		defer h.reclaimJoint(ctx, wv)
 	}

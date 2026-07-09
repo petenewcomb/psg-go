@@ -183,6 +183,47 @@ Model-check additions: the ordered-wait DAG (blocked-at-L ⟹ holds only < L);
 no-lending-mid-sequence; descending-order drain with consumables-last; interleaved
 armed barriers across pools under joint admission; consumable-base autonomy.
 
+### The joint reclaim: every park holds only a canonical prefix (2026-07-09, pending PN review)
+
+The induction above covers admission, where the order is enforced by construction.
+The **suspend/reclaim path breaks it structurally**: a drive episode lends the whole
+joint set, and the reacquire cannot avoid re-taking a LOWER limiter after a higher
+one has re-landed — a rest hold's help-block confirm acquires that rest hold while
+the head sits suspended, and the interior bracket's unwind must then wait for the
+head. That is precisely the "re-take A while holding B" down-order edge the
+admission policy avoids by never lending mid-sequence — but a reclaim has no such
+option: lending is its purpose. The sim's multi wiring produced both faces as real
+deadlocks (2026-07-09, trace-confirmed):
+
+- **Permit face**: the reclaim parks waiting the lower rank while holding the
+  higher-rank permit; a canonical-posture admitter (holds lower, postponed on
+  higher) closes the cycle.
+- **Headship face**: the reclaim parks waiting the lower rank while its
+  higher-rank demand stands REGISTERED — at the pool's FIFO head, that
+  registration reserves capacity exactly like a permit (only the head gathers), so
+  the same cycle closes through the queue: the admitter holding the lower-rank
+  permit waits for the reserved slot, and the slot's owner waits for that permit.
+
+**The rule**: a reclaim-time park on hold X must hold NOTHING of rank above X —
+neither a permit (lend it: plain release + a `lent` mark for the joint fixpoint to
+reacquire) nor a queue registration (withdraw it: `Demand.Invalidate`, the FIFO's
+lazy dequeue — a head's withdrawal promotes and wakes the successor). The canonical
+below-X prefix may stay held: with both permit and registration holds counted, every
+wait-for edge again points strictly up the order, restoring the admission
+induction's acyclicity argument for reclaims. The withdrawn demand's owner loop
+re-registers on its next confirm (Acquire re-enqueues an invalidated demand),
+paying only its queue position; each surrender lets a canonical-posture admitter
+complete, so progress is global — a surrendered slot is consumed by an admission
+that then releases capacity.
+
+Mechanics as implemented (permithandle.go): per-hold `suspendTarget` scopes each
+suspend bracket to exactly the holds it suspended; `reclaimJoint` runs a
+lowest-rank-first fixpoint over (suspended ∨ lent) holds; `heldPermit.reclaim`
+applies the lend/withdraw rule before every park, in both its helping and plain
+branches. Admission is untouched: mid-sequence holds stay inUse and un-lent (the
+policy above is load-bearing and unchanged — the gate runs before the body exists,
+so the suspend machinery never resolves a set mid-admission).
+
 ## Decision 3: arm only for w ≥ 2
 
 > **SUPERSEDED (2026-07-04)** by "Queue unification" below. Excluding weight-1 from

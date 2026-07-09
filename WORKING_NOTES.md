@@ -2,6 +2,110 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► MULTI SUSPEND/RECLAIM BUGS ROOT-CAUSED + FIXED (2026-07-09) — FOUR defects. Roots 1-3
+diagnosed from the preserved dumps; root 4 (the persistent deadlock) required biased-repro
+iteration + fmttrace runtime traces + NEW permits-layer instrumentation (kept). NOTE FOR PN:
+roots 3-4 add a DESIGN rule — "a joint reclaim park holds only a canonical prefix, counting
+FIFO registrations as holds" — recorded in weighted-acquisition.md §"The joint reclaim"
+(marked pending PN review; implemented under debugging pressure, review before it
+calcifies). GATE GREEN (2026-07-09): vet, lint 0, full -short -race, permits -race,
+TestBySimulation -race 19×100 checks (11+8 across the sim alias-guard fix below; the one
+intervening FAIL was a SIM plan-gen bug, not a wedge: drawLimiterBinding's alias guard
+compared one inheritance level, so two indexes aliasing one Pool TRANSITIVELY dup-bound and
+tripped addBinding's panic — fixed by comparing ultimate limiter IDs, which inheritance
+mirrors); biased no-race multi repro 8/10 wedged → 0/12; single-limiter control 0/8 clean.
+2b-iii COMMITTED with the fixes.**
+- **BUG A root — Wave-pin TOCTOU at the Flushing→Done boundary (NOT a rest-hold-specific path).**
+  suspendHeldPermit's IncrementReference-then-IsDone guard (5574a40) has a hole: an increment
+  that RESURRECTS totalReferences 0→1 cannot stop a noMoreReferences already committed on the
+  goroutine that dropped the last reference (wavestate ran `refs hit 0 → CAS(Flushing→Done) →
+  onDone/releaseCaches` with the CAS AFTER the zero-crossing), while IsDone still reads the
+  pre-CAS stage. The suspend then targets a cache mid-teardown and SuspendDriver's unconditional
+  refs.Add(1) resurrects a DESTROYED node → ResumeDriver's ReleaseRef re-runs destroy on a node
+  omnipool already re-issued → the second destroy corrupts an innocent wave's live cache. That
+  one root explains BOTH race reports in multi_race_9.log (SuspendDriver-vs-Reset and
+  Acquire-vs-Reset) AND the `demand homed under a different cache` panic (downstream corruption).
+  Multi didn't create it — it widened the window (more pools per bracket) and added funnel-flush
+  waves as frequent last-reference droppers. FIX (root-cause, not band-aid): the Done commit now
+  CLAIMS the zero count before the CAS — InFlightCounter gains ClaimZero/ReleaseClaim (sentinel
+  1<<40; stray misuse-class increments survive the release arithmetically) +
+  IncrementUnlessClaimed; WaveState.TryIncrementReference = IncrementUnlessClaimed + IsDone
+  backout. A pin and the transition serialize through the ONE atomic: pin-first → claim fails →
+  wave stays Flushing, the pin's release re-triggers; claim-first → pin fails (Done committed).
+  A pin on an idle-but-open wave (refs 0, stage Open) SUCCEEDS — required: a parked skim driver
+  must keep lending its permit for work dispatched later (the simpler increment-if-nonzero form
+  was rejected for exactly that liveness regression). noMoreReferences also gained the
+  stage!=Flushing fast-out (so idle zero-crossings never claim) and releases the claim BEFORE
+  close(doneChan) (a re-arm racing a standing claim would refuse the new cycle's pins).
+  suspendHeldPermit + sweepFunnels use the pin. Unit: wavestate/inflight_internal_test.go.
+- **BUG B root 1 — ctxmeta.go ExecuteNowOrQueue bracket reclaimed HEAD ONLY** (`h.reclaim`, a
+  2b-ii oversight — wave.go's three sites got reclaimJoint): every multi body dispatching
+  through the blocking path leaked its rest holds' suspensions permanently — permits lent and
+  never reacquired, suspendedDrivers/pool.suspended pinned forever, so any overdraft evaluation
+  waiting out suspensions waits forever (the WaitForNew mass-park in multi_wedge_4.log; g127 sits
+  exactly in this call path). FIX: defer reclaimJoint.
+- **BUG B root 2 — bracket re-entrancy premise false mid-reclaimJoint.** Wave.block's bracket
+  comment assumed "the reclaim's own suspend finds the handle already suspended and no-ops" —
+  true single-limiter (handle un-held during its own reclaim), FALSE for a joint set: after
+  reclaimJoint reacquires the head, a rest hold's help-block re-engages the bracket (head held),
+  and the nested unwind's UNCONDITIONAL joint reclaim re-drove holds the OUTER frame owns (its
+  mid-reclaim rest hold, or a mid-admission hold owned by the gate loop) — two waiters on ONE
+  demand mailbox (single-consumer by design) = dropped-wake wedge (g11's nested
+  block→reclaimJoint→plain-Wait stack in multi_wedge_4.log). FIX: a bracket reclaims EXACTLY the
+  holds it suspended — reclaimJoint gates each hold on its own suspendTarget (set by suspend,
+  cleared by reclaim; an un-held hold's no-op suspend leaves it nil). Canonical order preserved;
+  nested brackets now suspend/reclaim only the already-reacquired prefix, which is order-safe
+  (every wait still points up-rank).
+- **BUG B root 3 — RANK-INVERSION PARKS in the joint reclaim (found via runtime trace after
+  fixes 1-3 unmasked it to 5/5 sim -race timeouts, then a 6-goroutine no-race wedge traced
+  with fmttrace).** Mechanism (trace-confirmed): during reclaimJoint, a rest hold's
+  help-block can reacquire that rest hold via its confirm WHILE the head is suspended (lent
+  by the interior bracket) — order-inverted transiently, fine — but the unwind's head reclaim
+  then PARKS waiting for the LOWER-rank permit while HOLDING the higher-rank one. A joint
+  admitter parks in the CANONICAL posture (holds the lower rank, postponed on the higher):
+  cycle closed. The head-only Held gate in suspendHeldPermit prevented the lend exactly when
+  needed, and the reclaim's PLAIN-Wait branch (help domain exhausted, wv Done — the common
+  case for the ctxmeta bracket) has NO bracket at all, so no lender exists there. FIX:
+  (a) suspendHeldPermit engages if ANY hold of the set is held (not just the head), suspending
+      each held one (per-hold suspendTarget scoping unchanged);
+  (b) heldPermit.reclaim takes the set's higher-rank siblings and, before EVERY park (helping
+      AND plain), LENDS any still held — plain Release + a new `lent` mark (no drive-target
+      attribution; the Release wakes the sibling pool's head) — and reclaimJoint became a
+      fixpoint loop over (suspendTarget != nil || lent), always resuming from the lowest
+      rank; terminates because a park marks only ranks above the hold being reclaimed.
+      Single-limiter path unchanged (rest empty, lends no-op).
+  Admission is deliberately untouched: mid-sequence holds stay inUse (the gate runs before the
+  body exists, so currentHeldPermit never resolves the set being admitted).
+- **BUG B root 4 — FIFO-HEADSHIP INVERSION (the LAST down-edge; still 8/10 wedged after root
+  3's lend rule; nailed by ADDING permits-layer trace instrumentation — enqueue/promote/
+  retire/wake/Release/Suspend/Resume/gather-wait + handle-level suspend/lend/reclaim/acquire
+  logs, now permanent).** Trace showed every wedged pool RESOLVING (release → wake head →
+  retire) and permits activity CEASING while skimmers idled: the final cycle is through the
+  DEMAND QUEUE, not permits alone. Shape: admitter W holds pool-A's permit (canonical
+  mid-sequence), postponed waiting pool B. G's rest-hold-B demand is B's FIFO HEAD; the
+  B-wake lands in its mailbox — but the block-unwind's deferred bracket reclaim must
+  reacquire A (held by W) BEFORE the outer loop can consume that wake. G parks waiting A
+  (low) while HOLDING B's HEADSHIP (high): headship reserves capacity exactly like a permit,
+  so W can never take B, and B's free capacity is FIFO-reserved for a head that can never
+  gather. THE ORDERING INVARIANT MUST COUNT QUEUE REGISTRATIONS AS HOLDS. FIX: the reclaim
+  lend rule extends to registrations — before parking on X, any higher-rank sibling whose
+  demand is Registered (new permits.Demand.Registered accessor) is WITHDRAWN via
+  Demand.Invalidate (the FIFO's lazy dequeue; a head's withdrawal promotes + wakes the
+  successor, so W admits). The owning loop (outer reclaim or admission gate) re-registers on
+  its next confirm — Acquire re-enqueues an invalidated demand — losing only queue position;
+  each surrender lets a canonical-posture admitter COMPLETE, so global progress is preserved.
+  VERIFIED: biased no-race repro went 8/10 wedged → 0/12 clean at checks=30 (single-limiter
+  control 0/8 clean throughout).
+Files: internal/wavestate/{inflight,state}.go (+ new inflight_internal_test.go),
+permithandle.go, wave.go (sweepFunnels + block comment), ctxmeta.go. A CONCURRENT SESSION
+(stopped mid-flight 2026-07-09) contributed three behavior-preserving lint refinements to the
+still-uncommitted sim wiring (plan.go maxBindings const; run.go make-with-cap + defer-in-loop →
+single deferred closure); reviewed and kept. Its checks=200 batch was killed at iter 1 (no
+results). NEXT: gate green (vet, lint, -short -race, permits -race, 12× sim -race checks=100
+with the multi wiring) → commit wavestate+handle fixes and the 2b-iii sim wiring.
+
+**Previous banner (the pre-diagnosis state, kept for the record):**
+
 **►►► WEIGHTED SURFACE — LAYER 2 (multi-limiter). CHECKPOINT 2a LANDED (2026-07-08).** Design is
 settled (weighted-acquisition.md §"Multi-limiter: the FIFO under joint admission"): CANONICAL
 GLOBAL ACQUISITION ORDER → acyclic wait-for graph → deadlock-free; mid-sequence holds stay inUse

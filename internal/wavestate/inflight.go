@@ -105,6 +105,50 @@ func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	return true
 }
 
+// transitionClaim is the sentinel ClaimZero installs in place of a zero count while
+// a zero-crossing transition commits. It sits far above any real count so a claimed
+// counter is unmistakable to IncrementUnlessClaimed, and so a stray concurrent
+// increment (a misuse-class late arrival) neither unclaims it nor is lost —
+// ReleaseClaim subtracts the sentinel, preserving any such delta arithmetically.
+const transitionClaim = int64(1) << 40
+
+// ClaimZero atomically claims a zero count, reporting success. It is the commit
+// point of a zero-crossing transition (Flushing→Done): claiming excludes
+// IncrementUnlessClaimed pinners for the transition's duration, and failing means
+// some reference (a pin or a fresh increment) landed first — the transition must
+// abort, and that reference's own release will re-trigger it. Balance with
+// [InFlightCounter.ReleaseClaim].
+func (c *InFlightCounter) ClaimZero() bool {
+	return c.v.CompareAndSwap(0, transitionClaim)
+}
+
+// ReleaseClaim ends a ClaimZero claim, restoring the count (plus any increments
+// that arrived during the claim).
+func (c *InFlightCounter) ReleaseClaim() {
+	if c.v.Add(-transitionClaim) < 0 {
+		panic("unbalanced claim release detected")
+	}
+}
+
+// IncrementUnlessClaimed atomically increments the counter unless a zero-crossing
+// transition has claimed it (see [InFlightCounter.ClaimZero]), reporting success.
+// It is the counter-level tryPin: an unconditional increment cannot stop a claimed
+// transition — the count would be resurrected under a teardown already committed on
+// another goroutine. Incrementing from an UNCLAIMED zero is allowed and excludes
+// any later claim, which is what lets a pinner hold open an idle state that has not
+// committed to draining.
+func (c *InFlightCounter) IncrementUnlessClaimed() bool {
+	for {
+		cur := c.v.Load()
+		if cur >= transitionClaim {
+			return false
+		}
+		if c.v.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
 //nolint:contextcheck // background context used only for tracing
 func (c *InFlightCounter) Decrement() bool {
 	traceRegion := "InFlightCounter.Decrement"

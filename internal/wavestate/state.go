@@ -124,6 +124,35 @@ func (ws *WaveState) IncrementReference() {
 	ws.totalReferences.Increment()
 }
 
+// TryIncrementReference adds a non-work reference only if the wave has not reached
+// (or irrevocably committed to) Done, reporting success. It is the pin a caller must
+// use when it needs to hold open a wave whose liveness it cannot otherwise
+// guarantee — e.g. the suspend bracket and the flush sweep, which pin the very wave
+// they are driving to Done. A plain IncrementReference cannot serve there: an
+// increment that resurrects the count from zero cannot stop a Flushing→Done
+// transition already in flight on the goroutine that dropped the last reference (the
+// Done CAS and the onDone cache teardown would run regardless), so the "pinned"
+// wave's forest could be torn down under the pinner. The pin therefore serializes
+// against the transition through the counter itself: noMoreReferences claims the
+// zero count before committing Done, a claimed counter refuses pins, and a pin that
+// lands first (including on an idle-but-open wave, where holding the wave open is
+// exactly the point) makes the claim fail — the pin's own release re-triggers the
+// transition. Failure means Done is reached or committed: there is nothing left to
+// drive, and the caller must not touch the wave's forest.
+func (ws *WaveState) TryIncrementReference() bool {
+	if !ws.totalReferences.IncrementUnlessClaimed() {
+		return false
+	}
+	if ws.IsDone() {
+		// The transition fully completed before our increment landed (a claim no
+		// longer excludes us once released). Back the pin out; the zero-crossing
+		// re-runs noMoreReferences, which no-ops on a Done stage.
+		ws.DecrementReference()
+		return false
+	}
+	return true
+}
+
 // DecrementReference drops a reference added by [WaveState.IncrementReference],
 // advancing the wave to Done if it was the last outstanding reference.
 //
@@ -223,6 +252,20 @@ func (ws *WaveState) noMoreReferences() {
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "WaveState=%p", ws)
 
+	// Only a Flushing wave can advance; any other stage makes this zero-crossing a
+	// no-op (an Open/Closed wave draining to zero is idle, not done). Checked before
+	// claiming so the transient claim never appears on a wave that cannot advance —
+	// a TryIncrementReference pin on an idle wave must not be refused.
+	if lifecycleStage(ws.currentStage.Load()) != stageFlushing {
+		return
+	}
+	// Claim the zero count before committing Done: this is the serialization against
+	// TryIncrementReference. A pin (or misuse-class late increment) that landed first
+	// makes the claim fail — the wave stays Flushing on that reference, and its
+	// release re-triggers this transition.
+	if !ws.totalReferences.ClaimZero() {
+		return
+	}
 	var swapped bool
 	trace.WithRegion(context.Background(), traceRegion+".CompareAndSwap(flushing, done)", func() {
 		swapped = ws.currentStage.CompareAndSwap(int32(stageFlushing), int32(stageDone))
@@ -232,12 +275,17 @@ func (ws *WaveState) noMoreReferences() {
 		// BEFORE closing doneChan: the close releases a CloseAndSkimAll waiter, which may
 		// immediately re-arm the wave (initState → Init re-writes onDone and the substrate),
 		// racing both the onDone field read here and the teardown itself. Running it first
-		// keeps the whole Done transition strictly before any reuse.
+		// keeps the whole Done transition strictly before any reuse. The claim is held
+		// across the teardown (pins fail throughout) and released BEFORE the close: a
+		// re-arm racing a still-standing claim would refuse the new cycle's pins.
 		if ws.onDone != nil {
 			ws.onDone()
 		}
+		ws.totalReferences.ReleaseClaim()
 		trace.WithRegion(context.Background(), traceRegion+".close(ws.doneChan)", func() {
 			close(ws.doneChan)
 		})
+		return
 	}
+	ws.totalReferences.ReleaseClaim()
 }

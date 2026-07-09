@@ -30,12 +30,12 @@ type LauncherConfig struct {
 type Launcher struct {
 	ID             int
 	Depth          int   // higher than any Launcher this body may StartTask, prevents cycles
-	LimiterIndexes []int // indexes into Plan.TaskLimiters (v1: at most one)
-	// Weight is the per-dispatch permit weight when bound to a weighted task
-	// limiter (in [1, permits]); 1 (or unset) for a plain limiter or none.
-	Weight       int
-	Body         *Func
-	pathDuration time.Duration
+	LimiterIndexes []int // indexes into Plan.TaskLimiters; joint AND-composed at dispatch
+	// LimiterWeights[i] is the per-dispatch weight for LimiterIndexes[i]: in [1, permits]
+	// for a weighted limiter, 1 for a plain one. Parallel to LimiterIndexes.
+	LimiterWeights []int
+	Body           *Func
+	pathDuration   time.Duration
 }
 
 func (r *Launcher) PathDuration() time.Duration {

@@ -219,9 +219,11 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 			// after the inner post: on self-acquisition (the dispatched
 			// op shares the holder's limiter), reclaiming any earlier
 			// waits on a task that hasn't been queued yet. Interior
-			// brackets (Wave.block) no-op via re-entrancy.
+			// brackets (Wave.block) no-op while the whole set stays
+			// suspended, and reclaim exactly what they re-suspend once
+			// this bracket's own reclaim is in flight (see reclaimJoint).
 			if h := suspendHeldPermit(cm, cm.wave); h != nil {
-				defer h.reclaim(ctx, cm.wave)
+				defer h.reclaimJoint(ctx, cm.wave)
 			}
 
 			// Make sure existing work has a chance to run before we add more.

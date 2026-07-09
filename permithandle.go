@@ -10,6 +10,7 @@ import (
 
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/permits"
+	"github.com/petenewcomb/streampool/internal/trace"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
 
@@ -82,6 +83,13 @@ type heldPermit struct {
 	// bracket (§Overdraft resolution (c)): suspend counts this handle's lend on it,
 	// and reclaim ends the suspension there before reacquiring.
 	suspendTarget *permits.Cache
+
+	// lent marks a permit given back by a SIBLING hold's reclaim park (see
+	// reclaim's lend rule): unlike a suspend it carries no drive-target
+	// attribution — the permit is plainly released — and it exists so the joint
+	// reclaim's fixpoint loop (reclaimJoint) knows this hold needs reacquiring.
+	// Cleared by the hold's own reclaim.
+	lent bool
 }
 
 // acquire performs the non-blocking admission acquire through ownCache: own cache, then
@@ -90,6 +98,8 @@ type heldPermit struct {
 // occupying a permit returns true without taking a second — so the block loop can call
 // it as both its guard and its confirm without double-acquiring. A refusal error
 // latches in acquireErr (terminal — see the field), and the loops surface it.
+//
+//nolint:contextcheck // background context used only for tracing
 func (h *heldPermit) acquire() bool {
 	if h.permit.Held() {
 		return true
@@ -104,6 +114,10 @@ func (h *heldPermit) acquire() bool {
 	}
 	if pm.Held() {
 		h.permit = pm
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), "heldPermit.acquire",
+				"h=%p Pool=%p Demand=%p w=%d acquired", h, h.pool(), &h.demand, h.weight)
+		}
 	}
 	return pm.Held()
 }
@@ -114,9 +128,14 @@ func (h *heldPermit) acquire() bool {
 // belongs to that episode. target is the drive-target wave's cache for this handle's
 // limiter: the suspension counts there BEFORE the permit frees, so no overdraft
 // evaluation can observe the lent capacity without the suspension that produced it.
+//
+//nolint:contextcheck // background context used only for tracing
 func (h *heldPermit) suspend(target *permits.Cache) bool {
 	if !h.permit.Held() {
 		return false
+	}
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "heldPermit.suspend", "h=%p Pool=%p target=%p", h, h.pool(), target)
 	}
 	target.SuspendDriver()
 	h.suspendTarget = target
@@ -134,7 +153,20 @@ func (h *heldPermit) suspend(target *permits.Cache) bool {
 // help, since abandoning would let the body resume UNPERMITTED while a sibling holds the
 // slot. On cancellation it leaves the handle un-acquired (the completion release no-ops).
 // Void so it defers cleanly. Mirrors the eager reclaimRequest.
-func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
+//
+// above holds the joint set's HIGHER-rank siblings (nil for a single-limiter handle).
+// Before every park, any of them still held is LENT — plainly released, marked for the
+// joint fixpoint (reclaimJoint) to reacquire. The park may then hold only the canonical
+// BELOW-prefix of the rank order, the same posture a joint admission waits in, so every
+// wait-for edge points up-rank and no reclaim can close a deadlock cycle. Without the
+// lend, a sibling reacquired out of order (a help-block's confirm lands it while this
+// hold was suspended) would be held across a wait for a LOWER rank — the inversion that
+// deadlocks against an admitter parked in the canonical posture.
+func (h *heldPermit) reclaim(ctx context.Context, wv *Wave, above []*heldPermit) {
+	if trace.IsEnabled() {
+		trace.Logf(ctx, "heldPermit.reclaim", "h=%p Pool=%p Demand=%p wv=%p lent=%v suspended=%v",
+			h, h.pool(), &h.demand, wv, h.lent, h.suspendTarget != nil)
+	}
 	// End the suspend bracket BEFORE reacquiring: the resumed holder becomes a
 	// visible parked demand instead of a suspension, which is what lets a standing
 	// overdraft evaluation waiting on this suspension proceed (resolution (c)).
@@ -142,6 +174,7 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 		h.suspendTarget = nil
 		t.ResumeDriver()
 	}
+	h.lent = false
 	confirmFn := func() bool { return h.acquireErr == nil && !h.acquire() } // block only while still un-acquired
 	helping := true
 	var m workq.Notification
@@ -157,6 +190,37 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 		if m.Received() {
 			// Couldn't use the wake productively; pass it along (renotify conservation).
 			m.Forward()
+		}
+		// The lend rule (see the doc comment): never park holding a rank above the
+		// one being waited on — where "holding" covers BOTH a permit and a standing
+		// queue registration. A held sibling is lent (released + marked for the
+		// joint fixpoint); each Release wakes the sibling pool's head, so a joint
+		// admitter parked on that pool proceeds. A registered-but-unheld sibling —
+		// an outer frame's reclaim or admission mid-wait — has its demand
+		// WITHDRAWN (Invalidate: the FIFO's lazy dequeue; a head's withdrawal
+		// promotes and wakes the successor): its queue position, ultimately the
+		// pool's headship, reserves capacity just like a permit, and parking here
+		// while it stands closes the same inversion cycle through the FIFO — the
+		// admitter holding OUR pool's permit waits for THAT slot, while the slot
+		// waits for us (trace-confirmed wedge shape). The owning loop re-registers
+		// on its next confirm (Acquire re-enqueues an invalidated demand), losing
+		// only its queue position — the price of the surrendered slot; each
+		// surrender lets a canonical-posture admitter complete, so global progress
+		// is preserved.
+		for _, y := range above {
+			if y.permit.Held() {
+				if trace.IsEnabled() {
+					trace.Logf(ctx, "heldPermit.reclaim", "h=%p lends y=%p Pool=%p", h, y, y.pool())
+				}
+				y.permit.Release()
+				y.permit = permits.Permit{}
+				y.lent = true
+			} else if y.demand.Registered() {
+				if trace.IsEnabled() {
+					trace.Logf(ctx, "heldPermit.reclaim", "h=%p withdraws y=%p Pool=%p", h, y, y.pool())
+				}
+				y.demand.Invalidate()
+			}
 		}
 		var err error
 		if helping {
@@ -181,20 +245,53 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 	// Acquired: the last wake (if any) was used productively — drop it (do not
 	// Forward). A CHAINED wake additionally owes the chain one probe (rule 2): its
 	// multi-permit capacity may satisfy more waiters behind us.
+	if trace.IsEnabled() {
+		trace.Logf(ctx, "heldPermit.reclaim", "h=%p Pool=%p reacquired", h, h.pool())
+	}
 	if m.Chained() {
 		h.pool().ChainProbe()
 	}
 }
 
 // reclaimJoint ends the suspend bracket for the whole joint set at drive-episode end,
-// reacquiring each per-limiter hold in canonical global acquisition order (head first, then
-// rest ascending) so the reacquire honors the same acyclic order as the original admission.
-// Each hold reacquires against a distinct Pool, so the sequencing couples only latency, not
-// liveness.
+// reacquiring in canonical global acquisition order (head first, then rest ascending) so
+// the reacquire honors the same acyclic order as the original admission.
+//
+// A bracket reclaims EXACTLY the holds it suspended — each hold's own suspendTarget is
+// the record (set by its suspend, cleared by its reclaim) — plus any holds its own
+// reclaims LEND along the way (the lent mark; see reclaim's lend rule). The scoping
+// matters because brackets nest around a joint set with per-hold state: a reclaim's own
+// interior waits (reclaim's help-block, an admission's block-and-help) open inner
+// brackets that find some holds held and others mid-reclaim or mid-admission —
+// suspending only the held ones. An unconditional joint reclaim on the inner unwind
+// would also re-drive holds the outer frame owns, competing with the outer reclaim (or
+// the admission loop, which owns a never-suspended hold's acquisition) for the same
+// demand — and a demand's mailbox is single-consumer, so the second waiter is a
+// dropped-wake wedge.
+//
+// The loop runs to a fixpoint rather than a single pass: reclaiming a low-rank hold may
+// lend a higher one (its parks release every held rank above it), so the scan repeats —
+// always resuming from the LOWEST marked hold — until no hold is marked. It terminates
+// because each reclaim clears its own mark and a park can mark only ranks above the one
+// being reclaimed.
 func (h *heldPermit) reclaimJoint(ctx context.Context, wv *Wave) {
-	h.reclaim(ctx, wv)
-	for _, r := range h.rest {
-		r.reclaim(ctx, wv)
+	needs := func(x *heldPermit) bool { return x.suspendTarget != nil || x.lent }
+	for {
+		if needs(h) {
+			h.reclaim(ctx, wv, h.rest)
+			continue
+		}
+		reclaimed := false
+		for i, r := range h.rest {
+			if needs(r) {
+				r.reclaim(ctx, wv, h.rest[i+1:])
+				reclaimed = true
+				break // rescan from the lowest rank — this reclaim may have lent
+			}
+		}
+		if !reclaimed {
+			return
+		}
 	}
 }
 
@@ -219,28 +316,60 @@ func (h *heldPermit) pool() *permits.Pool {
 // releaseCaches, and recycle the very cache SuspendDriver is pinning (a use-after-free the
 // race detector catches on the recycled node's fields). The reference keeps wv Open so the
 // cache's self-ref outlives SuspendDriver's ref-add; afterwards the cache survives on that
-// pin (dropped by the matching ResumeDriver) independent of wv's own Done. If wv has
-// already reached Done — the increment lost the race to the last DecrementReference — there
-// is nothing to drive (skimAll returns ErrWaveDone), so suspend is a no-op rather than
-// resurrecting a forest node on a dead wave.
+// pin (dropped by the matching ResumeDriver) independent of wv's own Done.
+//
+// The pin must be the CONDITIONAL TryIncrementReference, not increment-then-IsDone: an
+// increment that resurrects the count from zero cannot stop a Flushing→Done transition
+// already in flight on another goroutine (the Done CAS and releaseCaches run regardless),
+// while IsDone here still reads the pre-CAS stage — so the suspend would proceed onto a
+// cache mid-teardown, and SuspendDriver's ref-add would resurrect a destroyed node into a
+// double-destroy that corrupts its next (recycled) owner. TryIncrementReference
+// serializes against that transition through the reference count itself (the transition
+// claims the zero count before committing), so a failed pin means wv's Done is reached or
+// committed: there is nothing to drive (skimAll returns ErrWaveDone), and suspend is a
+// no-op rather than resurrecting a forest node on a dead wave. A pin on an idle-but-open
+// wave succeeds and holds the wave open — a parked skim driver must keep lending its
+// permit there, since work dispatched later may need it.
 func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
 	h := meta.currentHeldPermit()
-	if h == nil || !h.permit.Held() {
+	if h == nil {
 		return nil
 	}
-	wv.state.IncrementReference()
+	// Engage if ANY hold of the joint set is held — not just the head. The gate must
+	// not key on the head alone: mid-reclaimJoint a rest hold's help-block can
+	// reacquire that rest hold (its confirm is the acquire) while the head is still
+	// un-held, and the unwind's head reclaim then parks again. If that park could not
+	// lend the held rest hold, the goroutine would wait for a LOWER-rank permit while
+	// holding a HIGHER-rank one — the inversion of the canonical acquisition order —
+	// and close a deadlock cycle with any joint admitter parked in the canonical
+	// posture (holding the lower rank, waiting on the higher). Lending every held
+	// hold makes every reclaim-time wait hold nothing, which is cycle-free
+	// unconditionally. (An ADMISSION's mid-sequence holds are unaffected: the gate
+	// runs before the body starts, so currentHeldPermit never resolves the set being
+	// admitted — mid-sequence holds stay inUse by design.)
+	anyHeld := h.permit.Held()
+	for _, r := range h.rest {
+		anyHeld = anyHeld || r.permit.Held()
+	}
+	if !anyHeld {
+		return nil
+	}
+	if !wv.state.TryIncrementReference() {
+		return nil
+	}
 	defer wv.state.DecrementReference()
-	if wv.state.IsDone() {
-		return nil
-	}
-	// Suspend the whole joint set: each per-limiter hold onto ITS OWN drive-target cache
-	// (wv's cache for that limiter's Pool). The head is held (checked above) so its
-	// suspend takes; the rest are held jointly, so they take too.
-	if !h.suspend(wv.ensureCache(meta, h.pool())) {
-		return nil
+	// Suspend each HELD hold onto ITS OWN drive-target cache (wv's cache for that
+	// limiter's Pool). An un-held hold — mid-admission, or mid-reclaim by an outer
+	// bracket — is skipped, leaving its suspendTarget nil, which is what scopes the
+	// matching reclaimJoint to exactly the holds THIS bracket suspended (see
+	// reclaimJoint).
+	if h.permit.Held() {
+		h.suspend(wv.ensureCache(meta, h.pool()))
 	}
 	for _, r := range h.rest {
-		r.suspend(wv.ensureCache(meta, r.pool()))
+		if r.permit.Held() {
+			r.suspend(wv.ensureCache(meta, r.pool()))
+		}
 	}
 	return h
 }
@@ -261,6 +390,9 @@ func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
 func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermit) (bool, error) {
 	if h.acquire() {
 		return true, nil
+	}
+	if trace.IsEnabled() {
+		trace.Logf(ctx, "gateAcquire", "h=%p Pool=%p Demand=%p miss", h, h.pool(), &h.demand)
 	}
 	if h.acquireErr != nil {
 		return false, h.acquireErr // overdraft refusal: the unit fails, no retry
@@ -368,7 +500,8 @@ func (h *heldPermit) Reset() {
 	h.blockingCalled = false
 	h.acquireErr = nil
 	h.suspendTarget = nil // reclaim always brackets; nil'd here as recycling hygiene
-	h.rest = nil          // the rest holds are recycled separately by their owner (taskWork.Free)
+	h.lent = false
+	h.rest = nil // the rest holds are recycled separately by their owner (taskWork.Free)
 }
 
 // confirm is blockAcquire's block-confirm: abort the wait if the permit is now held,

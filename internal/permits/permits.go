@@ -11,6 +11,7 @@ import (
 	"github.com/petenewcomb/streampool/internal/nbcq"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/rdvq"
+	"github.com/petenewcomb/streampool/internal/trace"
 )
 
 // Concurrency model (Phase 2a-ii, hybrid: lock-free hot path, locked forest)
@@ -607,6 +608,16 @@ func (d *Demand) Invalidate() {
 	}
 }
 
+// Registered reports whether d currently stands in a Pool's demand queue — from its
+// registering miss until satisfaction retires it or Invalidate withdraws it. A
+// registration is an admission slot (ultimately the pool's FIFO headship), which makes
+// it a held resource for deadlock-ordering purposes: a joint reclaim must not park on
+// a lower-rank pool while one of its higher-rank demands stands registered (see the
+// streampool reclaim lend rule).
+func (d *Demand) Registered() bool {
+	return d.pool.Load() != nil
+}
+
 // Acquire makes w permits available for a body in c to run and returns a Permit
 // recording the backing cache and weight. A zero Permit (Held false) with a nil
 // error means the body must wait; a non-nil error is a resource-authored overdraft
@@ -812,12 +823,17 @@ func claimNeed(c *Cache, w uint64) uint64 {
 // gated w = 1 can never be the instant head (a head already stands), so this only
 // affects the not-gated instant-head case, where the prior fast-path gather is
 // guaranteed to have run.
+//
+//nolint:contextcheck // background context used only for tracing
 func (p *Pool) enqueue(c *Cache, d *Demand, uw uint64) (Permit, error) {
 	if d.cache.Load() == nil {
 		d.cache.Store(c.NewChild())
 	}
 	d.w = uw
 	d.pool.Store(p)
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.enqueue", "Pool=%p Demand=%p w=%d cache=%p", p, d, uw, c)
+	}
 	p.queue.PushBack(demandEntry{d: d, gen: d.gen.Load()})
 	if p.head.Load() == nil && p.head.CompareAndSwap(nil, &p.promoting) {
 		p.promoteScan()
@@ -836,6 +852,8 @@ func (p *Pool) enqueue(c *Cache, d *Demand, uw uint64) (Permit, error) {
 // validation and install is reclaimed by the post-install re-check: its
 // Invalidate may race us to the slot, and whichever party wins the marker swap
 // owns the continued scan.
+//
+//nolint:contextcheck // background context used only for tracing
 func (p *Pool) promoteScan() {
 	for {
 		e, ok := p.queue.TryPopFront()
@@ -864,6 +882,9 @@ func (p *Pool) promoteScan() {
 			}
 			return
 		}
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), "permits.promoteScan", "Pool=%p promoted Demand=%p w=%d", p, e.d, e.d.w)
+		}
 		e.d.mailbox.Notify(nil) // promotion wake: a parked waiter or a postponed listener
 		return
 	}
@@ -888,6 +909,8 @@ func (p *Pool) queuedAcquire(d *Demand, uw uint64) (Permit, error) {
 // remain, and the promotion cascade replaces the old chained-wake walk (each
 // satisfied head promotes the next, whose confirm re-reads counts). An exhausted
 // gather runs the overdraft evaluation instead of returning a bare miss.
+//
+//nolint:contextcheck // background context used only for tracing
 func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 	home := d.cache.Load() // queued ⇒ non-nil, stable until this call retires it
 	for {
@@ -915,6 +938,10 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 		// preserving limit-0-blocks; a non-implementing resource grants).
 		anyInUse, anyBorrowable := p.walkCounts(home)
 		if anyInUse || p.strangerSuspended(home) {
+			if trace.IsEnabled() {
+				trace.Logf(context.Background(), "permits.headGather",
+					"Pool=%p Demand=%p w=%d wait: anyInUse=%v suspended=%d", p, d, uw, anyInUse, p.suspended.Load())
+			}
 			return Permit{}, nil
 		}
 		if anyBorrowable {
@@ -947,9 +974,14 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 // a non-nil slot, so this CAS cannot lose) and scanning the successor in. The
 // demand's registration clears; its body cache persists as its home until
 // Invalidate.
+//
+//nolint:contextcheck // background context used only for tracing
 func (p *Pool) retireHead(d *Demand) {
 	if !p.head.CompareAndSwap(d, &p.promoting) {
 		panic("permits: retiring head does not hold the slot")
+	}
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.retireHead", "Pool=%p Demand=%p", p, d)
 	}
 	d.w = 0
 	d.pool.Store(nil)
@@ -1379,9 +1411,14 @@ func (pm Permit) Held() bool {
 // crossing, yet a second waiter could take it. A WEIGHTED release seeds a chained
 // wake — its w freed permits may satisfy several waiters, and plain wake-one would
 // strand all but the first over borrowable capacity.
+//
+//nolint:contextcheck // background context used only for tracing
 func (pm Permit) Release() {
 	if pm.backing == nil {
 		panic("permits: Release of a zero Permit")
+	}
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.Release", "Pool=%p backing=%p w=%d", pm.backing.pool, pm.backing, pm.weight)
 	}
 	if excess := pm.backing.counts.release(pm.weight); excess > 0 {
 		// Overdraft excess goes home to the allowance BEFORE the wake, so a woken
@@ -1421,8 +1458,13 @@ func (pm Permit) Release() {
 // counts). A wake dropped into a stale head's empty mailbox during a barrier
 // transition is compensated by the successor's park-time confirm re-reading counts
 // (see the barrier field's comment).
+//
+//nolint:contextcheck // background context used only for tracing
 func (p *Pool) wake(chained bool) {
 	hd := p.head.Load()
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.wake", "Pool=%p head=%p chained=%v", p, hd, chained)
+	}
 	if hd == nil || hd == &p.promoting {
 		// Nobody waits (or a promotion scan is mid-flight — the installed head's
 		// park-time confirm re-reads counts, the standard compensation). The
@@ -1469,10 +1511,14 @@ func (p *Pool) ChainProbe() {
 // goroutine, bracketed with [Cache.ResumeDriver]; the cache is ref-pinned for the
 // suspension's duration so the counter's home outlives the drive. The cache is
 // alive by construction: the driver runs within the target wave's still-open scope.
+//
+//nolint:contextcheck // background context used only for tracing
 func (c *Cache) SuspendDriver() {
 	c.refs.Add(1)
 	c.suspendedDrivers.Add(1)
-	c.pool.suspended.Add(1)
+	if n := c.pool.suspended.Add(1); trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.SuspendDriver", "Pool=%p Cache=%p suspended=%d", c.pool, c, n)
+	}
 }
 
 // ResumeDriver ends a SuspendDriver bracket. Call it BEFORE the reacquire: the
@@ -1481,9 +1527,13 @@ func (c *Cache) SuspendDriver() {
 // waiting out this suspension may then be granted, rather than waiting for the
 // holder's full release (which the barrier gates, and so would wedge). An armed
 // pool is nudged so a parked evaluator re-evaluates its stranger check.
+//
+//nolint:contextcheck // background context used only for tracing
 func (c *Cache) ResumeDriver() {
 	p := c.pool
-	p.suspended.Add(-1)
+	if n := p.suspended.Add(-1); trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.ResumeDriver", "Pool=%p Cache=%p suspended=%d", p, c, n)
+	}
 	c.suspendedDrivers.Add(-1)
 	c.ReleaseRef() // may destroy c — nothing below touches it
 	if p.head.Load() != nil {

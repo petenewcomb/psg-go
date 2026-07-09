@@ -93,6 +93,45 @@ func drawWeight(t *rapid.T, lim Limiter, name string) int {
 	return rapid.IntRange(1, lim.Permits).Draw(t, name+".Weight")
 }
 
+// drawLimiterBinding samples a runner's task-limiter binding: a small deduped subset
+// (1-2) of the count limiters, ascending, each with its per-limiter weight. Binding more
+// than one exercises joint AND-composition. Distinct indexes are drawn without rejection
+// (the second maps around the first) so the draw count stays deterministic.
+func drawLimiterBinding(t *rapid.T, limiters []Limiter, count int, name string) (idxs, weights []int) {
+	if count == 0 {
+		return nil, nil
+	}
+	const maxBindings = 2
+	n := rapid.IntRange(1, min(maxBindings, count)).Draw(t, name+".LimiterBindCount")
+	i0 := rapid.IntRange(0, count-1).Draw(t, name+".LimiterIndex0")
+	idxs = append(idxs, i0)
+	if n == maxBindings {
+		// count-1 choices remain once i0 is excluded (j maps around i0 below).
+		j := rapid.IntRange(0, count-maxBindings).Draw(t, name+".LimiterIndex1")
+		if j >= i0 {
+			j++ // skip i0 so the two are distinct
+		}
+		// Two DISTINCT sim indexes can still alias the SAME streampool Pool through
+		// inheritance — including transitively, when two chains reach one ancestor
+		// limiter via different intermediate indexes — and binding one op to the same
+		// Pool twice would panic (addBinding's duplicate check). An inherited entry
+		// mirrors its ancestor's ID (genLimiter), so equal IDs ⟺ same Pool; drop the
+		// second in that case.
+		alias := limiters[i0].ID == limiters[j].ID
+		if !alias {
+			if j < i0 {
+				idxs = []int{j, i0} // keep ascending
+			} else {
+				idxs = append(idxs, j)
+			}
+		}
+	}
+	for _, idx := range idxs {
+		weights = append(weights, drawWeight(t, limiters[idx], fmt.Sprintf("%s.Limiter%d", name, idx)))
+	}
+	return idxs, weights
+}
+
 //nolint:gocognit,funlen // see above
 func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) *Plan {
 	planID := nextIDs.Plan
@@ -277,9 +316,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 			Body:  body,
 		}
 		if taskLimiterCount > 0 {
-			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, name+".LimiterIndex")
-			runner.LimiterIndexes = []int{limIdx}
-			runner.Weight = drawWeight(t, plan.TaskLimiters[limIdx], name)
+			runner.LimiterIndexes, runner.LimiterWeights = drawLimiterBinding(t, plan.TaskLimiters, taskLimiterCount, name)
 		}
 		plan.Launchers = append(plan.Launchers, runner)
 		return len(plan.Launchers) - 1
@@ -373,9 +410,8 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 				fmt.Sprintf("Launcher#%d.Body", id), true),
 		}
 		if taskLimiterCount > 0 {
-			limIdx := rapid.IntRange(0, taskLimiterCount-1).Draw(t, fmt.Sprintf("Launcher#%d.LimiterIndex", id))
-			runner.LimiterIndexes = []int{limIdx}
-			runner.Weight = drawWeight(t, plan.TaskLimiters[limIdx], fmt.Sprintf("Launcher#%d", id))
+			runner.LimiterIndexes, runner.LimiterWeights = drawLimiterBinding(
+				t, plan.TaskLimiters, taskLimiterCount, fmt.Sprintf("Launcher#%d", id))
 		}
 		runner.Body.Steps = append(runner.Body.Steps, Submit{
 			Prob:      probValue(config, 1.0),

@@ -197,10 +197,30 @@ the Example_clientTimeout flake. otpsg v2 (separate module): span's lifetime IS 
 child-span/log correlation, severs at fan-in) + a DAG-scoped anonymous FlowFollowUpFn that
 ends it once at the flow's TRUE end (crosses funnels, covers async outliving the handler);
 `Correlate`/`FlowSpan` read it in async bodies; propagation.go+per-op TracedTask/Skim/Funnel
-DELETED, metrics.go+logging.go KEPT, Instrumented*=metrics∘logging. NEXT (the last R7 piece):
-CP-F5b sim-oracle extension (steps-only scopes + conservation/carrier-counter oracle; note
-R6b: coalescing count is nondeterministic → oracle asserts conservation + ranges, not exact
-fire counts).** R6b (definitional coalescing, union-find) is
+DELETED, metrics.go+logging.go KEPT, Instrumented*=metrics∘logging.
+
+►► NEXT = CP: ctxMeta PARENT REFCOUNT (fresh focused session — highest-risk core change).
+SPEC: docs/decisions/ctxmeta-parent-refcount.md (6bc8644). Refcount ctxMeta.parent so a
+borrowed-from ctx outlives every body borrowed from it — fixes the pre-existing borrowSrcCtx
+UAF at the root + makes the parent chain walkable across async. Atomic change (sync-derive +
+async-borrow + flush/fire Execute-stash + both release paths at once); keep the `parent` name;
+replace the async sever's lifetime role w/ refs and its isolation role w/ a `permitRoot` flag
+(currentHeldPermit/vetNotNestedInSkim stop there); ref at synchronous safe points (dispatch;
+Execute-stash for flush/fire via borrowBodyContext taking srcMeta explicitly); unify release
+onto an unrefMeta cascade that subsumes releaseParent; meta conservation hook + large -race sim
+gate, NO false green. This is the prerequisite for driver-link tracing and IS the fix for the
+race handed to the funnel/permits (combiner) thread — coordinate so it lands once.
+
+►► DESIGN LANDED THIS PHASE (2026-07-08): otel tracing model — docs/decisions/otel-tracing-on-flows.md
+(9c6d950). Flow-native observability via existing riders (not an event stream); otel is one
+lossy projection. Flow=primary=trace; spans bounded by (sub-)flows via follow-ups, not waves
+(wave ID = attribute); 3 axes → parent/child (async lineage), aggregation links, driver links;
+tag-defined flow = multi-trace graph (no trace-ID unify — non-scaling). streamotel = rename
+otpsg→otel/, delete metrics/logging/instrumented, patterns + one fan-in helper (FOLLOW-UP,
+after the refcount lands). CP-F5b sim-oracle extension (steps-only scopes + conservation oracle;
+coalescing count is nondeterministic → assert conservation + ranges) also still pending.
+
+R6b (definitional coalescing, union-find) is
 implemented + green in the worktree (see "CP-R6b LANDED" in the flow section for
 build pointers). Commit chain (newest first): effded2 R6b-handoff-banner · 806a506
 R6a (definitional tag follow-up, shared chain) · 4c2be2e F7 · 5441c9a R5 (funnel

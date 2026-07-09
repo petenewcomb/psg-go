@@ -260,7 +260,44 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
-►► DRIVER-CONTEXTS STEP 2 LANDED (2026-07-09, this commit) — flush rolling node-only
+►► DRIVER-CONTEXTS STEP 3 LANDED (2026-07-09, this commit) — fire = the last carrier's
+continuation (driver-contexts.md §Fire). CARRIER PLUMBING: unref/flowUnrefRiders gain a
+carrier *ctxMeta — the meta whose release drops the ref — passed from every count→0 site
+while its owner ref is still held: releaseBodyContext (m), skimWork.Free (the step-1
+per-item child meta, whose OWNER REF NOW TRANSFERS Execute→Free so it survives to be the
+carrier; nil if never executed), WithFlow scope exit (scope meta; inline fires always
+COW), runFire's holds cascade (the inner fire's meta, pinned refMeta+nodeRef across the
+cascade — without the node pin the outer's chain build would walk nodes freed by
+releaseBodyContext). FIRE CHAIN BUILT AT DISPATCH (buildFireChain), NOT at fire-run —
+THE key soundness lesson (cost two crashes): instance-ref cover is positional and
+momentary. Every release walk drops instance refs head→tail, so at the count→0 trigger
+only the SUFFIX (below the fired binding's node) is still covered; PREFIX instances
+(post-registration bindings) may already be fired+recycled in the same walk → prefix is
+copied VALUE-ONLY (id+val, inst=nil: reads yes, pinning/re-fire no). SECOND crash
+(TestFlowCoalesceConservation): "one node per id per chain" is FALSE on the R6b fan-in
+union chain (one node per coalesced LEAF); ref'ing sibling leaves re-drove
+coalesceAtZero on recycled components → buildFireChain peels ALL matching nodes
+(definitional: by id) and partitions at the DEEPEST match (the closing ref can't be
+later; between-trigger-and-deepest live siblings degrade to value-only — conservatism
+costs only lifetime pinning, same trade as the flush pin). ADOPT-OR-COW at fire-run
+(flowFireWork.Run): refs==1 (only the dispatch pin) ⇒ returned custody ⇒ ADOPT the
+carrier meta in place — keep position (parent+ref, parentWaves, wave), re-stamp
+execution (ee, held=nil, permitRoot=true, ctxType=skim), riders=fireRiders, selfCtx
+RE-HOMED onto the scheduler src ctx; the dispatch pin becomes the owner ref. Else COW
+sibling via newBorrowedMeta(src, carrier.parent) + parentWaves copy, drop the pin.
+fireRidersSet flag distinguishes empty-chain-carrier from no-carrier (teardown) legacy
+fallback (enclosing-at-registration, unchanged). CANCELLATION RESOLVED (the doc's open
+point): SHIELDED — fires are end-of-flow cleanup (otel span end); every arm roots ctx
+ancestry at the scheduler src, the carrier contributes riders never cancellation;
+TestFollowUpFireShieldedFromCancellation pins it. SEMANTIC REFINEMENT test (red first):
+TestFollowUpFiresAsCarrierContinuation — fire sees a post-registration rider value +
+fired-tag peeled. GATE: vet, lint 0, full -short ./..., root -race -short,
+flow/funnel/ctxmeta -race ×20, step tests ×10, TestBySimulation -race batch (see
+commit). NEXT: streamotel consumer (otel-tracing-on-flows.md open points; driver
+attribution machinery now complete: skim child meta 9bb6af6, flush pin 86912a8, fire
+continuation this commit).
+
+►► DRIVER-CONTEXTS STEP 2 LANDED (2026-07-09, 86912a8) — flush rolling node-only
 driver pin, per driver-contexts.md §Flush. As landed (funnel.go): funnelInstance gains
 {driverMeta *ctxMeta, driverRiders *flowRiderNode} (mutated only under c.mu); accumulate
 re-points the pin at its own body meta (refMeta) + that meta's rider head (nodeRef),

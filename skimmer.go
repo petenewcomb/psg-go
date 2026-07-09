@@ -232,6 +232,13 @@ type skimWork[T any] struct {
 	// follow-up from firing while the result awaits skimming. nil for a result
 	// submitted from a rider-free ctx.
 	riders *flowRiderNode
+	// itemMeta is the per-item child meta the handler ran under (Execute),
+	// retained past the handler so Free can pass it as the LAST CARRIER of any
+	// fire its rider release triggers (driver-contexts.md, "Fire"): the item's
+	// refs are what end the flow here, and the item's continuation context is
+	// the handler's per-item meta. nil when the work is freed without
+	// executing (teardown) — the fire then takes the no-carrier fallback.
+	itemMeta *ctxMeta
 }
 
 // captureRiders records the producing item's rider chain and takes the carrier
@@ -305,10 +312,11 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	}
 	ctx = ctxpool.WithValue(ctx, meta)
 	meta.selfCtx = ctx
-	// The owner ref drops at handler exit; async work dispatched from the
-	// handler keeps the meta (and, via the cascade, the drive meta) alive
-	// through its own parent ref.
-	defer unrefMeta(meta)
+	// The owner ref transfers to the work item: Free passes the meta as the
+	// last carrier of any fire its rider release triggers, then drops it.
+	// Async work dispatched from the handler keeps the meta (and, via the
+	// cascade, the drive meta) alive through its own parent ref.
+	wk.itemMeta = meta
 
 	meta.PushGroup(wk.Group())
 	defer meta.PopGroup()
@@ -323,12 +331,16 @@ func (wk *skimWork[T]) Free() {
 	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
 	// Release the producing item's rider refs captured at submit (CP-F7). A release
-	// that ends a follow-up's flow dispatches a wave-rooted fire; do it while
-	// wk.wave is still valid, before the recycle.
+	// that ends a follow-up's flow dispatches a wave-rooted fire whose last
+	// carrier is the item — its continuation context is the handler's per-item
+	// meta (alive here on the owner ref Execute transferred; nil if the work
+	// never executed). Do it while wk.wave is still valid, before the recycle.
 	//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
-	flowUnrefRiders(wk.riders, wk.wave)
+	flowUnrefRiders(wk.riders, wk.wave, wk.itemMeta)
 	nodeUnref(wk.riders)
 	wk.riders = nil
+	unrefMeta(wk.itemMeta)
+	wk.itemMeta = nil
 
 	wk.DownstreamWork.Close()
 	wk.poolWork.Close(wk.wave)

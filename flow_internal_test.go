@@ -139,11 +139,11 @@ func TestFlowCoalesceMechanism(t *testing.T) {
 	chk.EqualValues(1, sharedBal.Load(), "one shared component node for the merged trio")
 
 	// Drain in order (inline fire path, no wave): only the LAST reaching zero fires.
-	chk.NoError(inA.unref(true, nil))
+	chk.NoError(inA.unref(true, nil, nil))
 	chk.Equal(0, fires, "no fire while the component is still live")
-	chk.NoError(inB.unref(true, nil))
+	chk.NoError(inB.unref(true, nil, nil))
 	chk.Equal(0, fires, "no fire while the component is still live")
-	chk.NoError(inC.unref(true, nil))
+	chk.NoError(inC.unref(true, nil, nil))
 	chk.Equal(1, fires, "the last drain fires the coalesced follow-up exactly once")
 
 	chk.EqualValues(0, sharedBal.Load(), "the component node reclaims when it fires")

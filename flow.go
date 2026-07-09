@@ -452,7 +452,10 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 		//nolint:contextcheck // inline scope-exit fire runs on the caller's own frame
 		defer func() {
 			for i := len(created) - 1; i >= 0; i-- {
-				if fireErr := created[i].unref(true, nil); fireErr != nil {
+				// The scope meta is the fire's carrier (its own release is the
+				// outermost defer, so it is still alive here); the inline fire
+				// COWs from it.
+				if fireErr := created[i].unref(true, nil, m); fireErr != nil {
 					err = errors.Join(err, fireErr)
 				}
 			}

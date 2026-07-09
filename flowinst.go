@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
@@ -100,6 +101,77 @@ func (in *flowInstance) ref() {
 	in.count.Add(1)
 }
 
+// buildFireChain assembles, AT THE COUNT→0 DISPATCH, the rider chain the fire
+// runs under as the carrier's continuation: the carrier chain minus the fired
+// binding (F6: no re-fire, no self-presence), with the fire's own refs already
+// taken. It MUST run at the dispatch site, not at fire-run, because cover for
+// instance refs is positional and momentary: every release walk
+// (flowUnrefRiders, the scope-exit LIFO loop, the holds cascade) drops its
+// instance refs in chain order head→tail, so when the fired binding's node
+// triggers this call, the walker's refs on the SUFFIX (below the fired node)
+// are still held — those instances are provably alive and safely re-ref'd —
+// while PREFIX instances (above it: bindings the carrier acquired after this
+// registration) may already have fired and recycled in the same walk. Prefix
+// nodes are therefore copied VALUE-ONLY (id + val kept for reads, inst
+// dropped): the fire still sees post-registration values and tag presence,
+// but neither pins nor re-fires prefix follow-ups.
+//
+// Fired-binding matching is by instance, or by tag identity for a
+// definitional instance — and ALL matching nodes are peeled, not just one: a
+// fan-in union chain carries one node per coalesced leaf instance of the same
+// tag (R6b), all of them one fired component, and any of them other than the
+// one that closed the component may already be a stepped-aside, recycled
+// instance. The partition point is therefore the DEEPEST matching node: the
+// component's closing ref cannot be released later than it in the walk, so
+// everything below it is still walk-covered and safely shared+ref'd, while
+// everything above it — including live non-matching bindings between the
+// closing node and the deepest match — is conservatively value-only. (The
+// conservatism only costs lifetime pinning: a fire-dispatched body does not
+// extend such a sibling's flow. Observability must not delay fires — same
+// trade as the flush pin.) No match (not reachable from today's sites, which
+// all release the fired binding through the carrier's own chain) degrades to
+// the same value-only treatment for the whole chain.
+//
+// The returned head carries one node ref (the fire meta's) and one instance
+// ref per suffix follow-up — exactly what releaseBodyContext releases at fire
+// end (value-only prefix nodes have no inst and are skipped by
+// flowUnrefRiders).
+func buildFireChain(chain *flowRiderNode, fired *flowInstance) *flowRiderNode {
+	matches := func(n *flowRiderNode) bool {
+		if fired.definitional {
+			return n.id == fired.id
+		}
+		return n.inst == fired
+	}
+	var target *flowRiderNode // deepest matching node
+	for n := chain; n != nil; n = n.next {
+		if matches(n) {
+			target = n
+		}
+	}
+	var suffix *flowRiderNode
+	if target != nil {
+		suffix = target.next
+	}
+	flowRefRiders(suffix) // covered: the walker's suffix refs are still held here
+	// Rebuild above target: peel every matching node, value-only copies for the
+	// rest (recursion depth = chain length, short by construction); each copy
+	// takes its own downlink ref via newRiderNode.
+	var rebuild func(n *flowRiderNode) *flowRiderNode
+	rebuild = func(n *flowRiderNode) *flowRiderNode {
+		if n == target {
+			return suffix
+		}
+		if matches(n) {
+			return rebuild(n.next) // a coalesced sibling node of the fired binding
+		}
+		return newRiderNode(n.id, n.val, n.hasVal, nil, rebuild(n.next))
+	}
+	head := rebuild(chain)
+	nodeRef(head) // the fire meta's node ref (released by releaseBodyContext)
+	return head
+}
+
 // unref releases one carrier; the release that reaches zero fires the follow-up
 // EXACTLY ONCE. inline selects how fn runs:
 //   - true (WithFlow scope exit only): directly on the caller's own frame; fn's
@@ -110,7 +182,17 @@ func (in *flowInstance) ref() {
 //     item's wave; it is kept alive across the hop (IncrementReference, sound
 //     because the triggering item's own work reference has not yet dropped) and
 //     the fire's error routes to its errSink. Returns nil (the fire is async).
-func (in *flowInstance) unref(inline bool, wave *Wave) error {
+//
+// carrier is the meta whose release dropped this ref — the fire, if this is
+// the final ref, runs as that carrier's CONTINUATION (driver-contexts.md,
+// "Fire: the last carrier's continuation"): its riders are the carrier's chain
+// minus the fired binding. Every count→0 site passes it from a synchronous
+// safe point where the carrier's owner ref is still held (rider release
+// precedes the meta release at every site), so the dispatch pin below is
+// sound. nil when no carrier context exists (work freed without executing on
+// a teardown path) — the fire then falls back to the instance's
+// enclosing-at-registration set.
+func (in *flowInstance) unref(inline bool, wave *Wave, carrier *ctxMeta) error {
 	if in.count.Add(-1) != 0 {
 		return nil
 	}
@@ -127,11 +209,24 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 		}
 	}
 	if inline {
+		// The inline scope-exit fire always takes the COW path (the scope meta —
+		// the carrier — is alive but still referenced; its own release runs
+		// after the fires). The fire ctx roots at Background: a fire is
+		// end-of-flow work, shielded from cancellation by design (see
+		// flowFireWork.Run).
+		var riders *flowRiderNode
+		var parent *ctxMeta
+		if carrier != nil {
+			riders = buildFireChain(carrier.riders, in) // refs pre-taken
+			parent = carrier.parent
+		} else {
+			riders = in.enclosing
+			flowRefRiders(riders)
+			nodeRef(riders)
+		}
 		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
-		ctx, m := newBorrowedMeta(context.Background(), nil, nil, topLevelContext)
-		m.riders = in.enclosing
-		flowRefRiders(m.riders)
-		nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
+		ctx, m := newBorrowedMeta(context.Background(), parent, nil, topLevelContext)
+		m.riders = riders // refs arrive with the chain (released by runFire's releaseBodyContext)
 		err := in.runFire(ctx, true, nil, nil)
 		nodeUnref(in.enclosing)  // release the instance's own enclosing ref (fire done)
 		flowInstancePool.Put(in) // fire complete; count is 0 forever, no reader remains
@@ -142,6 +237,18 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 	wk.Init(workq.NewGroupID())
 	wk.inst = in
 	wk.wave = wave
+	if carrier != nil && carrier.wave == wave {
+		// Pin the carrier meta (and, via the cascade, its whole parent chain)
+		// until the fire completes — the driver chain stays walkable DURING the
+		// fire, by design — and build the fire's rider chain NOW, at the
+		// synchronous safe point where suffix cover still holds (see
+		// buildFireChain). The chain crosses to the fire with its refs already
+		// taken.
+		refMeta(carrier)
+		wk.carrierMeta = carrier
+		wk.fireRiders = buildFireChain(carrier.riders, in)
+		wk.fireRidersSet = true
+	}
 	defaultPool.ForceFresh(wk)
 	return nil
 }
@@ -158,6 +265,17 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 func (in *flowInstance) runFire(
 	bodyCtx context.Context, inline bool, wave *Wave, onErr func(error),
 ) (err error) {
+	// A cascaded outer fire's last carrier is THIS fire: pin the fire meta AND
+	// its rider chain nodes across the cascade, which runs after
+	// releaseBodyContext has dropped the meta's owner ref and the chain's
+	// node/instance refs — without the node pin, the outer's buildFireChain
+	// would walk freed nodes. Instance-ref cover for the outer's suffix needs
+	// no pin here: those are exactly the instances the outer's own holds (its
+	// registration refs) keep alive until ITS fire completes.
+	fireMeta, _ := metaFromContext(bodyCtx)
+	fireRiders := fireMeta.riders
+	refMeta(fireMeta)
+	nodeRef(fireRiders)
 	// Deferred first → runs last: release the enclosing holds only after
 	// releaseBodyContext.
 	//nolint:contextcheck // a cascaded async fire roots at the scheduler ctx by design
@@ -165,10 +283,12 @@ func (in *flowInstance) runFire(
 		holds := in.holds
 		in.holds = nil
 		for _, out := range holds {
-			if e := out.unref(inline, wave); e != nil {
+			if e := out.unref(inline, wave, fireMeta); e != nil {
 				err = errors.Join(err, e)
 			}
 		}
+		nodeUnref(fireRiders)
+		unrefMeta(fireMeta)
 	}()
 	defer releaseBodyContext(bodyCtx)
 	fnErr := in.fn(bodyCtx, in.val)
@@ -383,11 +503,14 @@ func flowRefRiders(r *flowRiderNode) {
 // context being released (releaseBodyContext reads it from the meta before
 // teardown). A release that ends an instance's flow dispatches a wave-rooted
 // fire; the unref return is always nil on this async path (the fire routes its own
-// error to wave's errSink).
-func flowUnrefRiders(r *flowRiderNode, wave *Wave) {
+// error to wave's errSink). carrier is the meta being released — the last
+// carrier whose continuation a fire dispatched here runs as; callers pass it
+// while its owner ref is still held (nil only on teardown paths with no
+// context, e.g. work freed without executing).
+func flowUnrefRiders(r *flowRiderNode, wave *Wave, carrier *ctxMeta) {
 	for n := r; n != nil; n = n.next {
 		if n.inst != nil {
-			_ = n.inst.unref(false, wave)
+			_ = n.inst.unref(false, wave, carrier)
 		}
 	}
 }
@@ -416,6 +539,17 @@ type flowFireWork struct {
 	// Execute (the synchronous safe point) for Run to borrow from — same
 	// discipline as funnelInstance.borrowSrcMeta.
 	borrowSrcMeta *ctxMeta
+	// carrierMeta is the LAST CARRIER — the meta whose release dropped the
+	// final carrier ref — pinned at the count→0 dispatch (refMeta; see unref).
+	// The fire runs as its continuation: same tree position, riders =
+	// fireRiders, the chain buildFireChain assembled at the dispatch (the
+	// carrier chain minus the fired binding, refs pre-taken —
+	// driver-contexts.md, "Fire"). fireRidersSet distinguishes a legitimately
+	// empty fire chain from the no-carrier teardown case (carrierMeta nil),
+	// where Run falls back to the instance's enclosing-at-registration set.
+	carrierMeta   *ctxMeta
+	fireRiders    *flowRiderNode
+	fireRidersSet bool
 }
 
 // Execute is the scheduler side: stash the borrow source for Run — ctx plus its
@@ -456,22 +590,71 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 	wave := wk.wave
 	src := wk.borrowSrcCtx
 	srcMeta := wk.borrowSrcMeta
+	carrier := wk.carrierMeta
+	fireRiders := wk.fireRiders
+	fireRidersSet := wk.fireRidersSet
 	wk.inst = nil
 	wk.wave = nil
 	wk.borrowSrcCtx = nil
 	wk.borrowSrcMeta = nil
+	wk.carrierMeta = nil
+	wk.fireRiders = nil
+	wk.fireRidersSet = false
 	flowFireWorkPool.Put(wk)
 
-	// Wave-rooted fire body ctx: bound to the finishing wave, on this worker's
-	// environment, carrying the instance's peeled enclosing rider set (never the
-	// scheduler ctx's riders). Rooted at the stable scheduler ctx (src), never a
-	// recycled per-item ctx, borrowing from the meta PINNED at Execute — a
-	// re-read here would race the driver's release.
-	bodyCtx, m := newBorrowedMeta(src, srcMeta, wave, skimContext)
+	// The fire body ctx is the LAST CARRIER's continuation
+	// (driver-contexts.md, "Fire"): the carrier's tree position (same parent),
+	// riders = fireRiders (the carrier's chain minus the fired binding, built
+	// and ref'd at the dispatch) — so the fire sees riders the carrier
+	// acquired after registration. Its ctx ANCESTRY stays rooted at the stable
+	// scheduler ctx (src) in every arm: a fire is end-of-flow work with its
+	// own error routing, deliberately SHIELDED from a long-gone submitter's
+	// cancellation (the resolution of the design record's open point —
+	// cleanup semantics: a fire, e.g. an otel span end, must run even when
+	// the request that spawned the flow was canceled).
+	var bodyCtx context.Context
+	var m *ctxMeta
+	switch {
+	case !fireRidersSet:
+		// No carrier context (teardown-freed work): the instance's
+		// enclosing-at-registration set, borrowed from the pinned scheduler meta.
+		bodyCtx, m = newBorrowedMeta(src, srcMeta, wave, skimContext)
+		m.riders = inst.enclosing
+		flowRefRiders(m.riders)
+		nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
+	case carrier.refs.Load() == 1:
+		// Sole holder is our dispatch pin: the carrier's owner release has
+		// completed and no async children survive — custody has RETURNED, so
+		// ADOPTING and mutating in place satisfies the immutability invariant
+		// rather than excepting it. Position fields (parent + its ref,
+		// parentWaves, wave) stay; execution fields are re-stamped for the
+		// fire extent: worker ee (exEnv is NEVER carried across extents), no
+		// held handle (the carrier's was released with its body), permitRoot
+		// (the fire runs on a fungible worker), skim ctxType (fires are
+		// skim-class for the nesting vet). The selfCtx is re-homed onto the
+		// scheduler ctx for the shielded ancestry above (sole custody: nothing
+		// can still resolve the old child). Our dispatch pin becomes the
+		// meta's owner ref, dropped by runFire's releaseBodyContext.
+		m = carrier
+		m.riders = fireRiders // refs arrived with the chain
+		m.held = nil
+		m.permitRoot = true
+		m.ctxType = skimContext
+		ctxpool.Free(m.selfCtx)
+		bodyCtx = ctxpool.WithValue(src, m)
+		m.selfCtx = bodyCtx
+	default:
+		// Other holders remain (async children of the carrier are still
+		// running): COPY-ON-WRITE sibling — a fresh pooled meta at the SAME
+		// tree position (carrier's parent, ref'd by the borrow), the fire
+		// chain's refs adopted, a fresh execution stamp, never the carrier's
+		// exEnv.
+		bodyCtx, m = newBorrowedMeta(src, carrier.parent, wave, skimContext)
+		m.parentWaves = carrier.parentWaves
+		m.riders = fireRiders // refs arrived with the chain
+		unrefMeta(carrier)    // drop the dispatch pin; the sibling holds its own parent ref
+	}
 	m.executionEnvironment = ee
-	m.riders = inst.enclosing
-	flowRefRiders(m.riders)
-	nodeRef(m.riders)  // the fire meta's carrier ref (released by runFire's releaseBodyContext)
 	unrefMeta(srcMeta) // the borrow holds its own parent ref now; drop the Execute pin
 
 	// runFire returns nil here (onErr routes the error); the async fire owns it.

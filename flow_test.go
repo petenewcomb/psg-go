@@ -1169,3 +1169,99 @@ func TestFlowDefinitionalTagPanics(t *testing.T) {
 		"streampool: NewFlowTag accepts only a FlowFollowUp/FlowFollowUpFn option",
 		func() { _ = streampool.NewFlowTag(key.Value(1)) })
 }
+
+// ─── driver-contexts step 3: fire = the last carrier's continuation ──────────
+
+// TestFollowUpFiresAsCarrierContinuation: the fire runs under the LAST
+// CARRIER's context — it sees riders the last carrier acquired AFTER the
+// follow-up's registration (a nested WithFlow's value), with the fired
+// binding itself peeled (no re-fire, no self-presence)
+// (docs/decisions/driver-contexts.md, "Fire: the last carrier's continuation").
+func TestFollowUpFiresAsCarrierContinuation(t *testing.T) {
+	chk := require.New(t)
+	key := streampool.NewFlowKey[string]()
+	tag := streampool.NewFlowTag()
+
+	var wave streampool.Wave
+	var fireSawKey atomic.Value
+	var fireSawTag, fired atomic.Bool
+
+	release := make(chan struct{})
+	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		<-release
+		return nil
+	})
+
+	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		// The task is dispatched from a nested value scope INSIDE the tag's
+		// flow: its rider chain is [key=post-reg] → [tag] → …, and it is the
+		// flow's last carrier (the enclosing scope exits while it still runs).
+		return streampool.WithFlow(ctx, func(ctx context.Context) error {
+			return task.In(&wave).Start(ctx)
+		}, key.Value("post-reg"))
+	}, tag.FollowUpFn(func(ctx context.Context) error {
+		v, ok := key.From(ctx)
+		fireSawKey.Store([2]any{v, ok})
+		fireSawTag.Store(tag.InFlow(ctx))
+		fired.Store(true)
+		return nil
+	}))
+	chk.NoError(err)
+
+	// The scope has exited (its carrier ref released); the task is the last
+	// carrier. Its completion fires the follow-up as its continuation.
+	close(release)
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+
+	chk.Eventually(fired.Load, 5*time.Second, 2*time.Millisecond, "follow-up fires after the last carrier")
+	chk.Equal([2]any{"post-reg", true}, fireSawKey.Load(),
+		"fire sees the rider the last carrier acquired after registration")
+	chk.False(fireSawTag.Load(), "the fired binding is peeled from the fire's chain")
+}
+
+// TestFollowUpFireShieldedFromCancellation pins the resolution of the design
+// record's open point (docs/decisions/driver-contexts.md, "Fire"): a follow-up
+// fire is end-of-flow work — it must run, with a usable (non-canceled) ctx,
+// even when the last carrier's submit ctx was canceled long before the fire.
+// The carrier's context contributes its RIDERS to the fire (the continuation
+// semantics), never its cancellation.
+func TestFollowUpFireShieldedFromCancellation(t *testing.T) {
+	chk := require.New(t)
+	key := streampool.NewFlowKey[string]()
+	tag := streampool.NewFlowTag()
+
+	var wave streampool.Wave
+	var fireCtxErr atomic.Value
+	var fireSawKey atomic.Value
+	var fired atomic.Bool
+
+	release := make(chan struct{})
+	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		<-release
+		return nil
+	})
+
+	cancelable, cancel := context.WithCancel(context.Background())
+	err := streampool.WithFlow(cancelable, func(ctx context.Context) error {
+		return streampool.WithFlow(ctx, func(ctx context.Context) error {
+			return task.In(&wave).Start(ctx)
+		}, key.Value("v"))
+	}, tag.FollowUpFn(func(ctx context.Context) error {
+		fireCtxErr.Store([1]any{ctx.Err()})
+		v, ok := key.From(ctx)
+		fireSawKey.Store([2]any{v, ok})
+		fired.Store(true)
+		return nil
+	}))
+	chk.NoError(err)
+
+	// The submitter's ctx dies while the task — the flow's last carrier — is
+	// still running.
+	cancel()
+	close(release)
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+
+	chk.Eventually(fired.Load, 5*time.Second, 2*time.Millisecond, "fire runs despite the canceled submit ctx")
+	chk.Equal([1]any{error(nil)}, fireCtxErr.Load(), "fire ctx is not canceled by the carrier's chain")
+	chk.Equal([2]any{"v", true}, fireSawKey.Load(), "carrier riders still delivered")
+}

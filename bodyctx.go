@@ -114,9 +114,13 @@ func releaseBodyContext(ctx context.Context) {
 	}
 	riders := m.riders
 	wave := m.wave // the wave a fire dispatched by the rider release routes into
-	//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
-	flowUnrefRiders(riders, wave) // walk (may fire) BEFORE the chain can reclaim
-	nodeUnref(riders)             // release this body's head ref (cascades if last)
+	// m is the carrier whose release may end a flow: a fire dispatched by this
+	// walk runs as m's continuation. m's owner ref is still held here (dropped
+	// by the unrefMeta below), which is what makes the fire's dispatch pin on
+	// it sound — the doc's "count→0 dispatch is a synchronous safe point".
+	//nolint:contextcheck // an async fire's body ctx roots at the scheduler ctx by design
+	flowUnrefRiders(riders, wave, m) // walk (may fire) BEFORE the chain can reclaim
+	nodeUnref(riders)                // release this body's head ref (cascades if last)
 	unrefMeta(m)
 }
 

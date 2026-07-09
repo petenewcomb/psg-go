@@ -25,10 +25,35 @@ suspendHeldPermit suspends each hold onto ITS OWN drive-target cache; reclaimJoi
 canonical order. newScatterWork builds head + rest from r.bindings; checkSingleBinding dropped —
 multi AND-composes. Green: joint-admission unit test (a body bound to A+B blocks both an only-A and
 an only-B op → holds both), set/weighted units, lint 0, -short -race, permits -race, sim -race 12
-runs/2400 cases (single-limiter path = set-of-one, no regression). NEXT — 2b-iii: wire MULTI
-limiter into the sim (runner binds >1 task limiter; per-limiter weight+tracker; thread a LIST of
-(tracker,weight) through executeFunc's Subjob suspend) to stress the multi path under -race — the
-new concurrency (mid-sequence holds, joint block/reclaim ordering) is only unit-tested so far.
+runs/2400 cases (single-limiter path = set-of-one, no regression). 2b-iii (sim MULTI wiring, UNCOMMITTED — internal/sim/{launcher,plan,run}.go): runner binds a
+deduped 1-2 subset of task limiters (drawLimiterBinding; guards against binding two indexes that
+alias one Pool via shared inheritance); per-limiter weight (LimiterWeights) + tracker; threads a
+LIST []activeLimit through executeFunc's Subjob suspend. It WORKS (checks=60 -race clean, joint
+admission exercised) and IMMEDIATELY found TWO real multi suspend/reclaim bugs (dumps:
+scratchpad/multi_race_9.log, multi_wedge_4.log):
+
+  **BUG A — DATA RACE, rest-hold SUSPEND use-after-recycle (same class as 5574a40).** In
+  suspendHeldPermit's rest loop, `r.suspend(wv.ensureCache(meta, r.pool()))` calls SuspendDriver
+  on a Cache that a concurrent `funnelInstance.flush → DecrementReference → releaseCaches →
+  destroy → Cache.Reset` is recycling. The head's IncrementReference(wv) bracket (5574a40) does
+  NOT cover this — the recycling wave/cache is reached via a DIFFERENT path for the rest holds
+  (the destroy is on a funnel-flush wave, not wv). Root-cause the exact wave/cache identity
+  (is it an ancestor node in the rest pool's ensureCacheChain, unpinned by wv's ref?) then extend
+  the pin to cover every hold's target.
+
+  **BUG B — TRUE-WEDGE, reclaimJoint missed-wake.** 116 goroutines parked in WaitForNew (zero
+  mutex, all select), reclaimJoint/reclaim on the stack. The rest-hold REACQUIRE (reclaimJoint
+  reacquiring head then rest in canonical order, each help-shaped) strands — a wave never Done-
+  signals its skimmer. Likely the reclaim of a rest hold help-drains the wrong wave, or the
+  ResumeDriver/reacquire ordering across multiple holds drops a wake.
+
+Both are in the 2b-ii multi suspend/reclaim machinery (the flagged-trickiest part), reachable
+only when a MULTI-limiter body drives a subwave. The core joint GATE (5e09825) is unaffected
+(single-limiter clean, joint-admission unit test green). The sim-wiring stays UNCOMMITTED until
+these are fixed (it makes TestBySimulation red on multi). REPRO: the uncommitted sim-wiring at
+checks=100 -race (or checks=200 for higher hit rate; distinguish real wedge [0 mutex] from the
+delayq convoy [many mutex + progressing], which multi-limiter amplifies). NEXT (fresh session):
+trace-hunt BUG A (pair-tally / cache identity) + BUG B (missed-wake), fix, then commit 2b-iii.
 (Funnel stays single-WithLimits; funnel multi is a later extension.)
 
 **►►► WEIGHTED SIM WIRING LANDED + FIXED A LAYER-1 OVERDRAFT BUG IT EXPOSED (2026-07-05).**

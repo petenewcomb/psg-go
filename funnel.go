@@ -750,7 +750,7 @@ func (wk *funnelWork[T]) gate(ctx context.Context, ex workq.Execution) (bool, er
 	if wk.h == nil {
 		return true, nil
 	}
-	return gateAcquire(ctx, ex, wk.fn.wave, wk.h)
+	return wk.h.acquireJoint(ctx, ex, wk.fn.wave)
 }
 
 // releasePermit gives back a permit acquired by gate when the body could not start (the

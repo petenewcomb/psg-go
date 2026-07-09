@@ -15,10 +15,21 @@ for In()-style immutability); WithLimiterSet/WithWeightLimiterSet added; Limiter
 []*Pool) + WeightLimiterSet[T] ([]binding[T]) constructors sort+dedup+freeze. checkSingleBinding
 panics on resolved >1 (multi deferred to 2b). Files: permits.go, limiterset.go (+_internal_test),
 launcher.go, weightedlimiter_internal_test.go. Green: set/weighted unit, lint 0, -short -race,
-permits -race, sim 300 checks. NEXT — 2b: heldPermitSet (ordered []*heldPermit); joint gate
-acquires all bindings in canonical order (help-shaped block per limiter, mid-sequence holds inUse);
-release/suspend/reclaim bracket all; drop checkSingleBinding; wire multi-limiter into the sim +
--race validate. (Funnel stays single-WithLimits for now; funnel multi-limiter is a later extension.)
+permits -race, sim 300 checks. CHECKPOINT 2b LANDED (2026-07-08): the joint gate. Rep realized as (A)-variant: heldPermit stays
+the per-limiter unit and carries an ordered `rest []*heldPermit` (the higher-rank holds; nil for
+single/funnel — 0-alloc common case) rather than a separate threaded wrapper (which would add a
+per-dispatch slice+struct alloc). acquireJoint drives head→rest via gateAcquire in canonical order
+(mid-sequence block holds earlier limiters inUse; already-held pass through idempotently on
+re-drive; overdraft refusal terminal). release()/taskWork.Free recurse over head+rest;
+suspendHeldPermit suspends each hold onto ITS OWN drive-target cache; reclaimJoint reacquires in
+canonical order. newScatterWork builds head + rest from r.bindings; checkSingleBinding dropped —
+multi AND-composes. Green: joint-admission unit test (a body bound to A+B blocks both an only-A and
+an only-B op → holds both), set/weighted units, lint 0, -short -race, permits -race, sim -race 12
+runs/2400 cases (single-limiter path = set-of-one, no regression). NEXT — 2b-iii: wire MULTI
+limiter into the sim (runner binds >1 task limiter; per-limiter weight+tracker; thread a LIST of
+(tracker,weight) through executeFunc's Subjob suspend) to stress the multi path under -race — the
+new concurrency (mid-sequence holds, joint block/reclaim ordering) is only unit-tested so far.
+(Funnel stays single-WithLimits; funnel multi is a later extension.)
 
 **►►► WEIGHTED SIM WIRING LANDED + FIXED A LAYER-1 OVERDRAFT BUG IT EXPOSED (2026-07-05).**
 Wired weighted task limiters into internal/sim (sim/{launcher,limiter,plan,run}.go):

@@ -110,10 +110,4 @@ func TestWithWeightLimits_BindsWeigher(t *testing.T) {
 	chk.Equal(6, bound.bindings[0].weigh(3), "the recorded weigher is the one supplied")
 
 	chk.Empty(base.bindings, "the original op copy is unmodified")
-
-	chk.PanicsWithValue(
-		"multi-Limiter composition is not yet implemented (Wave 4 follow-up)",
-		func() { bound.WithLimits(NewSemaphore(1)) },
-		"binding a second limiter panics",
-	)
 }

@@ -170,7 +170,7 @@ func newLimiterScatterWork(wv *Wave, inner workq.Work, h *heldPermit) *limiterSc
 }
 
 func (wk *limiterScatterWork) Execute(ctx context.Context, ex workq.Execution) error {
-	held, err := gateAcquire(ctx, ex, wk.wave, wk.h)
+	held, err := wk.h.acquireJoint(ctx, ex, wk.wave)
 	if err != nil || !held {
 		return err
 	}

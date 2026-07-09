@@ -54,20 +54,21 @@ func TestWeightLimiterSet_CanonicalOrder(t *testing.T) {
 	)
 }
 
-func TestWithLimiterSet_SingleBindsMultiPanics(t *testing.T) {
+func TestWithLimiterSet_BindsInCanonicalOrder(t *testing.T) {
 	chk := require.New(t)
-	a := NewSemaphore(1)
+	a := NewSemaphore(1) // a < b in rank
 	b := NewSemaphore(2)
 	base := NewFnLauncher(func(_ context.Context, _ int, _ error) error { return nil })
 
-	bound := base.WithLimiterSet(NewLimiterSet(a))
-	chk.Len(bound.bindings, 1)
-	chk.Same(a.pool, bound.bindings[0].pool)
-	chk.Nil(bound.bindings[0].weigh, "a plain-set binding carries no weigher")
+	// A multi-member set AND-composes: two bindings, canonically ordered, no panic.
+	bound := base.WithLimiterSet(NewLimiterSet(b, a))
+	chk.Len(bound.bindings, 2)
+	chk.Same(a.pool, bound.bindings[0].pool, "ascending rank")
+	chk.Same(b.pool, bound.bindings[1].pool)
 
+	// Accumulating across binder calls merges into one canonical order; a duplicate panics.
 	chk.PanicsWithValue(
-		"multi-Limiter composition is not yet implemented (Wave 4 follow-up)",
-		func() { base.WithLimiterSet(NewLimiterSet(a, b)) },
-		"binding a multi-member set exceeds the single-limiter cap (2a)",
+		"streampool: the same limiter is bound more than once to an op",
+		func() { base.WithLimits(a).WithLimits(a) },
 	)
 }

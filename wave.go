@@ -177,9 +177,13 @@ func (wk *taskWork) Free() {
 		// Normal completion already released (completedFn); release here is the
 		// idempotent backstop for tasks freed without executing (dispatch failure,
 		// cancellation drain) — a held permit is given back, a never-acquired handle
-		// no-ops. Then recycle the handle.
+		// no-ops. release() and Put recurse over the whole joint set (head + rest).
 		wk.h.release()
-		heldPermitPool.Put(wk.h)
+		rest := wk.h.rest
+		heldPermitPool.Put(wk.h) // Reset nils rest, so capture it first
+		for _, r := range rest {
+			heldPermitPool.Put(r)
+		}
 		wk.h = nil
 	}
 	// Return the body context borrowed at dispatch — its child ctx to ctxpool and
@@ -328,7 +332,7 @@ func (wv *Wave) Skim(ctx context.Context) error {
 	// Suspend-class episode: a body driving this skim lends its limiter permit for the
 	// duration (a sub-wave inherits it; deadlock-free) and reacquires on return.
 	if h := suspendHeldPermit(meta, wv); h != nil {
-		defer h.reclaim(ctx, wv)
+		defer h.reclaimJoint(ctx, wv)
 	}
 	_, err := wv.skim(ctx)
 	return err
@@ -414,7 +418,7 @@ func (wv *Wave) block(
 	// fires" in docs/limiter-suspend-resume.md). Re-entrant: the
 	// reclaim's own suspend finds the handle already suspended and no-ops.
 	if h := suspendHeldPermit(meta, wv); h != nil {
-		defer h.reclaim(ctx, wv)
+		defer h.reclaimJoint(ctx, wv)
 	}
 	adder := blockingWorkAdderPool.Get()
 	defer blockingWorkAdderPool.Put(adder)
@@ -779,7 +783,7 @@ func (wv *Wave) SkimAll(ctx context.Context) error {
 	// sole serial skim driver and deadlock; redirect to a funnel/task.
 	meta.vetNotNestedInSkim()
 	if h := suspendHeldPermit(meta, wv); h != nil {
-		defer h.reclaim(ctx, wv)
+		defer h.reclaimJoint(ctx, wv)
 	}
 
 	err := wv.skimAll(ctx, wv.skim)

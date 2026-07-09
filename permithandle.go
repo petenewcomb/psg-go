@@ -37,6 +37,16 @@ type heldPermit struct {
 	// dispatch (newScatterWork); the acquire presents it to every Acquire on this handle.
 	weight int
 
+	// rest are the additional per-limiter holds for a MULTI-limiter body, in canonical
+	// global acquisition order (ascending pool rank) AFTER this one — i.e. this handle is
+	// the lowest-rank limiter and rest holds the higher-rank ones. nil for a single-limiter
+	// body or a funnel (the 0-alloc common case). The composition operations (gate, release,
+	// suspend/reclaim) iterate this handle then rest, in order; the per-limiter acquire/
+	// gather/overdraft logic stays on the individual heldPermit. Joint admission in this
+	// fixed order is what keeps the wait-for graph acyclic (weighted-acquisition.md
+	// §"Multi-limiter: the FIFO under joint admission").
+	rest []*heldPermit
+
 	// demand is the caller-held demand identity this handle presents to every
 	// Acquire (weighted-acquisition.md Decision 4): the postpone/retry cycle
 	// re-presents the SAME identity, deduping to one FIFO entry once registration
@@ -176,6 +186,18 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave) {
 	}
 }
 
+// reclaimJoint ends the suspend bracket for the whole joint set at drive-episode end,
+// reacquiring each per-limiter hold in canonical global acquisition order (head first, then
+// rest ascending) so the reacquire honors the same acyclic order as the original admission.
+// Each hold reacquires against a distinct Pool, so the sequencing couples only latency, not
+// liveness.
+func (h *heldPermit) reclaimJoint(ctx context.Context, wv *Wave) {
+	h.reclaim(ctx, wv)
+	for _, r := range h.rest {
+		r.reclaim(ctx, wv)
+	}
+}
+
 // pool returns the Pool this handle draws from — the manager-listener target for the
 // postpone path.
 func (h *heldPermit) pool() *permits.Pool {
@@ -211,10 +233,16 @@ func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
 	if wv.state.IsDone() {
 		return nil
 	}
-	if h.suspend(wv.ensureCache(meta, h.pool())) {
-		return h
+	// Suspend the whole joint set: each per-limiter hold onto ITS OWN drive-target cache
+	// (wv's cache for that limiter's Pool). The head is held (checked above) so its
+	// suspend takes; the rest are held jointly, so they take too.
+	if !h.suspend(wv.ensureCache(meta, h.pool())) {
+		return nil
 	}
-	return nil
+	for _, r := range h.rest {
+		r.suspend(wv.ensureCache(meta, r.pool()))
+	}
+	return h
 }
 
 // gateAcquire drives h to held under the dispatch context's discipline — the native
@@ -251,6 +279,26 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermi
 	// Top-level: block-and-help.
 	if err := blockAcquire(ctx, ex, wv, h); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+// acquireJoint drives this handle and all its rest holds to held, in canonical global
+// acquisition order (this handle first — the lowest rank — then rest ascending), under the
+// dispatch discipline. A mid-sequence block holds the earlier (lower-rank) limiters inUse:
+// every wait-for edge points up the order, so no cycle can close. Returns whether ALL are
+// held; a miss on any (one-shot or postpone) returns not-held, and the retry re-drives from
+// the top where already-held handles pass through idempotently (gateAcquire's acquire is
+// latched). An overdraft refusal on any is terminal for the whole admission.
+func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *Wave) (bool, error) {
+	held, err := gateAcquire(ctx, ex, wv, h)
+	if err != nil || !held {
+		return held, err
+	}
+	for _, r := range h.rest {
+		if held, err = gateAcquire(ctx, ex, wv, r); err != nil || !held {
+			return held, err
+		}
 	}
 	return true, nil
 }
@@ -300,6 +348,9 @@ func (h *heldPermit) release() {
 		h.permit.Release()
 		h.permit = permits.Permit{}
 	}
+	for _, r := range h.rest {
+		r.release()
+	}
 }
 
 // Reset implements omnipool.Resetter for the handle pool. A recycled handle must hold
@@ -317,6 +368,7 @@ func (h *heldPermit) Reset() {
 	h.blockingCalled = false
 	h.acquireErr = nil
 	h.suspendTarget = nil // reclaim always brackets; nil'd here as recycling hygiene
+	h.rest = nil          // the rest holds are recycled separately by their owner (taskWork.Free)
 }
 
 // confirm is blockAcquire's block-confirm: abort the wait if the permit is now held,

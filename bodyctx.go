@@ -32,64 +32,92 @@ import (
 // never pins a wave, execution environment, or limiter request between borrows.
 var bodyMetaPool = omnipool.For[ctxMeta]()
 
+// newBorrowedMeta is the refcount core shared by every async-body meta (op-body
+// borrows, funnel-flush and follow-up-fire continuations): a fresh meta, owner
+// ref included, whose parent is srcMeta — PINNED (refMeta) so the borrowed-from
+// context outlives this body however long it runs — and which is a permitRoot
+// (the body runs on a fungible worker goroutine; synchronous-extent walks stop
+// here). srcMeta must be provably alive at the call: resolved synchronously at
+// dispatch, or held by an Execute-stash pin. The caller stamps the
+// call-specific fields (held, exEnv, parentWaves, riders) and eventually
+// releases via releaseBodyContext.
+func newBorrowedMeta(
+	srcCtx context.Context, srcMeta *ctxMeta, wv *Wave, ctxType contextType,
+) (context.Context, *ctxMeta) {
+	m := newCtxMeta()
+	m.wave = wv
+	m.ctxType = ctxType
+	m.parent = srcMeta
+	refMeta(srcMeta)
+	m.permitRoot = true
+	ctx := ctxpool.WithValue(srcCtx, m)
+	m.selfCtx = ctx
+	return ctx, m
+}
+
 // borrowBodyContext returns a body context for running an op body of the given ctxType,
 // bound to wv and descended from srcCtx, together with the *ctxMeta it carries. The
 // meta is stamped:
 //   - wave        = wv (the dispatch target)
 //   - ctxType     = ctxType
 //   - held        = h (the limiter handle, nil for unlimited ops)
-//   - parentWaves = parentWavesForSource(srcCtx, wv)
+//   - parent      = srcMeta, ref-pinned (the borrowed-from context stays alive
+//     for the body's whole life); permitRoot is set, so synchronous-extent
+//     walks still treat the body as a fresh root
+//   - parentWaves = parentWavesForSource(srcMeta, wv)
 //
-// parent stays nil: a borrowed body is always a fresh permit-root, severing the
-// permit-root chain for an async body that runs on a fungible worker (it must not
-// inherit a dispatcher's permit across the goroutine boundary). The pooled meta is
-// zeroed on release, so parent needs no explicit stamp.
+// srcMeta is passed in explicitly rather than re-read from srcCtx: dispatch
+// sites resolve it synchronously on the dispatcher's goroutine, and the
+// stashed-continuation sites (flush/fire) resolve-and-pin it in Execute — a
+// lazy read at Run was the borrowSrcCtx use-after-free
+// (docs/decisions/ctxmeta-parent-refcount.md).
 //
 // The caller runs the body under the returned ctx and then calls releaseBodyContext.
 func borrowBodyContext(
-	srcCtx context.Context, wv *Wave, ctxType contextType,
+	srcCtx context.Context, srcMeta *ctxMeta, wv *Wave, ctxType contextType,
 	h *heldPermit, exEnv executionEnvironment,
 ) (context.Context, *ctxMeta) {
-	m := bodyMetaPool.Get()
-	m.wave = wv
-	m.ctxType = ctxType
+	ctx, m := newBorrowedMeta(srcCtx, srcMeta, wv, ctxType)
 	m.held = h
 	m.executionEnvironment = exEnv
-	srcMeta, srcOk := metaFromContext(srcCtx)
-	m.parentWaves = parentWavesForSource(srcMeta, srcOk, wv)
-	if srcOk {
+	m.parentWaves = parentWavesForSource(srcMeta, srcMeta != nil, wv)
+	if srcMeta != nil {
 		// Flow riders ride the DISPATCH chain: captured from the submit-time ctx
-		// here at borrow (which body-creating call sites perform synchronously at
-		// dispatch), unlike parent — the permit chain — which stays severed for a
-		// body that runs on a fungible worker. The borrow takes one carrier ref
-		// per follow-up instance in the set — synchronously at dispatch, under
-		// the registering scope's own ref (parent-covers-children), so an
-		// instance live at the submit call provably cannot reach zero first.
-		// releaseBodyContext releases them.
+		// here at borrow, which every borrowBodyContext call site performs
+		// synchronously at dispatch — so the chain's own refs are provably held
+		// by the registering scope (parent-covers-children) and an instance live
+		// at the submit call cannot reach zero first. The borrow takes one
+		// carrier ref per follow-up instance plus a node ref on the head;
+		// releaseBodyContext releases them. (The stashed-continuation paths do
+		// NOT capture riders: the meta pin does not cover the dispatcher's rider
+		// chain — that is the deferred driver-link rider pin.)
 		m.riders = srcMeta.riders
 		flowRefRiders(m.riders)
 		nodeRef(m.riders) // this body's carrier ref on the chain head
 	}
-	return ctxpool.WithValue(srcCtx, m), m
+	return ctx, m
 }
 
-// releaseBodyContext returns a borrowed body context's child ctx to ctxpool and its
-// *ctxMeta to bodyMetaPool. The meta is read out before ctxpool.Free clears the child's
-// value, then returned (and zeroed) — so neither pool retains a cross-borrow reference.
-// It also releases the flow carrier refs the borrow took; a release that ends an
-// instance's flow hands the firing to the executor (never inline — this path runs
-// inside completion/Free machinery, before the item's wave reference drops).
+// releaseBodyContext is the owner's release of a borrowed body context: it
+// releases the flow carrier refs the borrow took (a release that ends an
+// instance's flow hands the firing to the executor — never inline, since this
+// path runs inside completion/Free machinery, before the item's wave reference
+// drops) and then drops the meta's owner ref. The meta, its ctxpool child, and
+// its pins up the parent chain recycle in unrefMeta when the count drains —
+// immediately in the common case, or when the last body borrowed FROM this
+// context completes.
 func releaseBodyContext(ctx context.Context) {
 	m, _ := ctxpool.GetValue[*ctxMeta](ctx)
-	ctxpool.Free(ctx)
-	if m != nil {
-		riders := m.riders
-		wave := m.wave // captured before Put zeroes the meta; wave a fire routes into
-		bodyMetaPool.Put(m)
-		//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
-		flowUnrefRiders(riders, wave) // walk (may fire) BEFORE the chain can reclaim
-		nodeUnref(riders)             // release this body's head ref (cascades if last)
+	if m == nil {
+		ctxpool.Free(ctx)
+		return
 	}
+	riders := m.riders
+	wave := m.wave // the wave a fire dispatched by the rider release routes into
+	//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
+	flowUnrefRiders(riders, wave) // walk (may fire) BEFORE the chain can reclaim
+	nodeUnref(riders)             // release this body's head ref (cascades if last)
+	unrefMeta(m)
 }
 
 // parentWavesForSource computes the cross-wave ancestry a body bound to wv should

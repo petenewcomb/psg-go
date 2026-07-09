@@ -205,9 +205,13 @@ func (c *Funnel[T]) SubmitResult(
 	// cross-wave submit redirects into the funnel's wave, recording the source as
 	// parent). No ctx-type restriction — a value may be submitted to a funnel from
 	// anywhere.
-	// Funnel does not yet recycle its minted meta (its body borrows from the
-	// meta-stamped ctx, so freeing it needs the borrow-source fix first); owned ignored.
-	ctx, meta, _ := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// Safe now that the body borrow ref-pins this meta as its parent: the
+		// meta (and its ctxpool child) survives on that ref until the async
+		// body completes, then recycles via the unrefMeta cascade.
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -252,9 +256,12 @@ func (c *Funnel[T]) TrySubmitResult(
 	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
 	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
-	// Funnel does not yet recycle its minted meta (its body borrows from the
-	// meta-stamped ctx, so freeing it needs the borrow-source fix first); owned ignored.
-	ctx, meta, _ := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// Safe now that the body borrow ref-pins this meta as its parent (see
+		// SubmitResult).
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -390,6 +397,14 @@ type funnelInstance[T any] struct {
 	// owner reuse-pop, which may recycle a non-detached spent shell the instant Run
 	// releases c.mu (see Run).
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the flush body ctx
+	// borrowSrcMeta is the meta on borrowSrcCtx, resolved AND ref-pinned in Execute —
+	// a synchronous safe point, where the scheduler stack provably holds the ctx's
+	// meta alive. Run borrows from the pinned meta (never re-reading it from the
+	// stashed ctx, whose ctxpool child the driver could otherwise free and re-stamp
+	// first — the pre-refcount borrowSrcCtx use-after-free) and drops the pin once
+	// the borrow holds its own parent ref. Same write/read discipline as
+	// borrowSrcCtx. See docs/decisions/ctxmeta-parent-refcount.md.
+	borrowSrcMeta *ctxMeta
 
 	// boundary is the fan-in boundary this instance adopted from its first
 	// accumulate (the funnel work's dispatch-captured enclosing head above the
@@ -423,19 +438,27 @@ type funnelInstance[T any] struct {
 // subsequent Free is a no-op, and after Starting the controller drops its buffer slot, so
 // nothing on the scheduler side touches the instance once it is handed off.
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
-	// Stash the borrow source for Run; see the field and Run for why writing it here
-	// (before the publishing handoff) and reading it once at the top of Run is race-free.
+	// Stash the borrow source for Run — ctx plus its meta, pinned here at the
+	// synchronous safe point; see the fields and Run for the write/read and
+	// pin-lifetime rules. A path that does NOT hand off (postpone, PushBack
+	// error) drops the pin again: the retry's Execute re-pins.
+	srcMeta, _ := metaFromContext(ctx)
+	refMeta(srcMeta)
 	c.borrowSrcCtx = ctx
+	c.borrowSrcMeta = srcMeta
 	if bodyExecutor.TryPushBack(c) {
 		ex.Starting()
 		return nil
 	}
 	if !ex.ShouldBlockOrPostpone() {
+		unrefMeta(srcMeta)
 		return nil // postpone; retried (and blocked) when the scheduler worker parks
 	}
 	err := bodyExecutor.PushBack(ctx, c)
 	if err == nil {
 		ex.Starting()
+	} else {
+		unrefMeta(srcMeta)
 	}
 	return err
 }
@@ -452,8 +475,19 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 //nolint:contextcheck // src is the borrow source for the flush body ctx, not a propagated arg
 func (c *funnelInstance[T]) Run(ee *workerExEnv) {
 	src := c.borrowSrcCtx
+	srcMeta := c.borrowSrcMeta
 	c.borrowSrcCtx = nil
-	bodyCtx, _ := borrowBodyContext(src, c.wave, funnelContext, nil, ee)
+	c.borrowSrcMeta = nil
+	// Borrow from the PINNED meta — never re-read it from src, whose ctxpool
+	// child's value the driver may free and re-stamp concurrently. Riders are
+	// deliberately NOT captured from it: the pin covers the meta's lifetime,
+	// not the driver's rider chain (reading that needs the driver-link rider
+	// pin, a documented follow-up), and the flush fan-in severs path riders
+	// before any user code runs anyway.
+	bodyCtx, m := newBorrowedMeta(src, srcMeta, c.wave, funnelContext)
+	m.executionEnvironment = ee
+	m.parentWaves = parentWavesForSource(srcMeta, srcMeta != nil, c.wave)
+	unrefMeta(srcMeta) // the borrow holds its own parent ref now; drop the Execute pin
 	defer releaseBodyContext(bodyCtx)
 	c.mu.Lock()
 	c.flush(bodyCtx)
@@ -703,21 +737,24 @@ func (wk *funnelWork[T]) Init(
 	wk.fn = fn
 	wk.input = input
 	wk.inputErr = inputErr
+	// Resolve the dispatching meta once, here on the dispatcher's goroutine where
+	// it is provably alive: it feeds the limiter forest, the fan-in boundary, and
+	// the body borrow below.
+	m, _ := metaFromContext(submitCtx)
 	// For a limited funnel, resolve the body's own wave cache (mkdir-p'ing the forest
 	// along the dispatching ancestry) at dispatch, where that ancestry is available;
 	// the permit is acquired from it at the gate in Execute. Stamp the handle on the
-	// body meta now so currentHeldPermit finds it. Worker bodies are fresh permit-roots
+	// body meta now so currentHeldPermit finds it. Worker bodies are permit-roots
 	// (the worker's E is stamped at Execute, not known here).
 	if fn.limiter.pool != nil {
-		m, _ := metaFromContext(submitCtx)
 		wk.h = heldPermitPool.Get()
 		wk.h.ownCache = fn.wave.ensureCache(m, fn.limiter.pool)
 	}
-	// Capture the fan-in boundary while submitCtx's meta.parent chain is intact (the
-	// borrow below severs the body meta's parent). The instance adopts it at the
-	// first accumulate.
-	wk.boundary = flowBoundaryAboveWave(submitCtx, fn.wave)
-	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, wk.h, nil)
+	// Capture the fan-in boundary from the dispatch-time synchronous chain (the
+	// borrowed body meta below is a permitRoot, so the boundary walk could not
+	// see past it). The instance adopts it at the first accumulate.
+	wk.boundary = flowBoundaryAboveWave(m, fn.wave)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, m, fn.wave, funnelContext, wk.h, nil)
 }
 
 // instanceQueue returns the wave's per-funnel instance cache for this work's funnel,

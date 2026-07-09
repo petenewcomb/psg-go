@@ -1,10 +1,11 @@
 # ctxMeta parent refcount: pin the borrowed-from context, not sever it
 
-> Decision record (2026-07-08, design session with PN). **Status: spec — converged,
-> not yet implemented.** Fixes the pre-existing `borrowSrcCtx` use-after-free (the
+> Decision record (2026-07-08, design session with PN). **Status: IMPLEMENTED
+> (2026-07-08), with the deviations recorded in "As implemented" at the end.**
+> Fixes the pre-existing `borrowSrcCtx` use-after-free (the
 > race handed to the funnel/permits thread) at its root, and makes the ctx/meta
 > parent chain walkable across async boundaries — the prerequisite for driver-link
-> tracing (`otel-tracing-on-flows.md`). Foundational core change; land as its own
+> tracing (`otel-tracing-on-flows.md`). Foundational core change; landed as its own
 > `-race`-gated checkpoint.
 
 ## The bug
@@ -148,3 +149,57 @@ top:
 This is the principled fix for the `borrowSrcCtx` race handed to the funnel/permits
 thread (combiner branch `WORKING_NOTES`). Landing it here means the flow-observability
 work is what finally forces it — coordinate so it lands once, not twice.
+
+## As implemented (2026-07-08)
+
+The implementation matches the spec with these deviations, found during the code
+pass:
+
+- **Four sync-only walkers, not two.** Besides `currentHeldPermit` and
+  `vetNotNestedInSkim`, two more parent walks relied on the async sever:
+  `flowBoundaryAboveWave` (the funnel fan-in boundary — walking past the async
+  body meta would lose a worker-goroutine `WithFlow` scope's riders) and
+  `ensureCache`/`ensureCacheChain` (permit-forest construction — whose liveness
+  argument, "each ancestor wave stays alive because the dispatching goroutine
+  runs within its still-Open driving scope", holds only within one synchronous
+  extent). All four step via one helper, `ctxMeta.syncParent()`, which returns
+  nil at a `permitRoot`; a node is always inspected before the step, so a
+  permitRoot meta's own `held`/`ctxType` stay visible (a fire meta still reads
+  as a skim continuation to the nesting vet).
+- **The spec's `vetNotNestedInSkim` pseudo-code was wrong**: it started the walk
+  at `cm.parent` unconditionally, which for a task body dispatched FROM a skim
+  handler would walk into the handler and panic — the documented-legal remedy
+  pattern. `syncParent` stepping (`for m := cm.syncParent(); …`) reproduces the
+  old severed-chain reach exactly.
+- **Stashed-continuation borrows do not capture riders.** The Execute pin covers
+  the source META's lifetime, not the driver's rider chain refs, so the flush
+  borrow reading `srcMeta.riders` at Run would be the same UAF one level up.
+  Behavior-neutral: the flush fan-in severs path riders before any user code,
+  and the fire path already carries its own `inst.enclosing`. Reading a
+  driver's riders remains the deferred driver-link rider pin. The shared core
+  is `newBorrowedMeta` (parent pin + permitRoot + selfCtx); `borrowBodyContext`
+  layers the dispatch-time rider capture on top.
+- **Skim owned-chain ownership transfer.** With every derivation taking a parent
+  ref, the bare-ctx skim's freshly minted top-level meta would hold one count
+  too many (its mint ref plus the skim meta's parent ref); `skimCtxMeta` drops
+  the mint ref when it minted the parent itself — the explicit form of what
+  `releaseParent` used to encode.
+- **Funnel/skimmer submit mints are now released.** The four submit sites that
+  deliberately leaked their minted top-level meta ("recycling needs the
+  borrow-source fix first") gain the standard owned-release; the accumulate
+  body's parent ref keeps the meta alive for exactly as long as needed.
+- **Pooling-pressure note:** a minted meta's `topLevelExEnv` now returns to its
+  pool when the refcount drains (possibly after async children complete) rather
+  than at dispatch end. Async bodies never use the parent's exEnv, so this is
+  pool latency, not correctness.
+- **Validation:** `TestCtxMetaConservation` (the ctxMetaAllocHook seam) plus
+  `TestBorrowBodyContext_ParentPinnedAcrossSourceRelease` pin the lifetime
+  rules; the pre-existing permit-root tests now assert `permitRoot` +
+  `syncParent()==nil` instead of `parent==nil`. Gate: vet, lint, full `-short`,
+  root `-race -short`, a 30× `TestBySimulation -race` batch (checks=200), and a
+  sustained flow-suite `-race` loop. The original ~1/400 race did not reproduce
+  on the PRE-fix base in 8,000 targeted -race executions in this session's
+  environment (it was originally seen under heavy ambient machine load), so
+  "stops reproducing" could not be demonstrated empirically; the fix argument
+  is structural — the child's value can no longer be freed or re-stamped while
+  a refcount holder can still read it.

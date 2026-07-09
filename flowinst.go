@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
@@ -128,13 +127,11 @@ func (in *flowInstance) unref(inline bool, wave *Wave) error {
 		}
 	}
 	if inline {
-		m := bodyMetaPool.Get()
-		m.ctxType = topLevelContext
+		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
+		ctx, m := newBorrowedMeta(context.Background(), nil, nil, topLevelContext)
 		m.riders = in.enclosing
 		flowRefRiders(m.riders)
 		nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
-		//nolint:contextcheck // scope-exit fire runs on the caller's own frame
-		ctx := ctxpool.WithValue(context.Background(), m)
 		err := in.runFire(ctx, true, nil, nil)
 		nodeUnref(in.enclosing)  // release the instance's own enclosing ref (fire done)
 		flowInstancePool.Put(in) // fire complete; count is 0 forever, no reader remains
@@ -415,24 +412,36 @@ type flowFireWork struct {
 	inst         *flowInstance
 	wave         *Wave
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the fire body ctx
+	// borrowSrcMeta is the meta on borrowSrcCtx, resolved and ref-pinned in
+	// Execute (the synchronous safe point) for Run to borrow from — same
+	// discipline as funnelInstance.borrowSrcMeta.
+	borrowSrcMeta *ctxMeta
 }
 
-// Execute is the scheduler side: stash the borrow source for Run (before the
-// publishing handoff, mirroring funnelInstance.Execute), then hand the fire to the
+// Execute is the scheduler side: stash the borrow source for Run — ctx plus its
+// meta, pinned here at the synchronous safe point (before the publishing
+// handoff, mirroring funnelInstance.Execute) — then hand the fire to the
 // executor. TryPushBack first; when the scheduler worker is prepared to park, a
-// blocking PushBack.
+// blocking PushBack. A path that does not hand off drops the pin; the retry
+// re-pins.
 func (wk *flowFireWork) Execute(ctx context.Context, ex workq.Execution) error {
+	srcMeta, _ := metaFromContext(ctx)
+	refMeta(srcMeta)
 	wk.borrowSrcCtx = ctx
+	wk.borrowSrcMeta = srcMeta
 	if bodyExecutor.TryPushBack(wk) {
 		ex.Starting()
 		return nil
 	}
 	if !ex.ShouldBlockOrPostpone() {
+		unrefMeta(srcMeta)
 		return nil // postpone; retried (and blocked) when the scheduler worker parks
 	}
 	err := bodyExecutor.PushBack(ctx, wk)
 	if err == nil {
 		ex.Starting()
+	} else {
+		unrefMeta(srcMeta)
 	}
 	return err
 }
@@ -446,22 +455,24 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 	inst := wk.inst
 	wave := wk.wave
 	src := wk.borrowSrcCtx
+	srcMeta := wk.borrowSrcMeta
 	wk.inst = nil
 	wk.wave = nil
 	wk.borrowSrcCtx = nil
+	wk.borrowSrcMeta = nil
 	flowFireWorkPool.Put(wk)
 
 	// Wave-rooted fire body ctx: bound to the finishing wave, on this worker's
-	// environment, carrying the instance's peeled enclosing rider set. Rooted at
-	// the stable scheduler ctx (src), never a recycled per-item ctx.
-	m := bodyMetaPool.Get()
-	m.wave = wave
-	m.ctxType = skimContext
+	// environment, carrying the instance's peeled enclosing rider set (never the
+	// scheduler ctx's riders). Rooted at the stable scheduler ctx (src), never a
+	// recycled per-item ctx, borrowing from the meta PINNED at Execute — a
+	// re-read here would race the driver's release.
+	bodyCtx, m := newBorrowedMeta(src, srcMeta, wave, skimContext)
 	m.executionEnvironment = ee
 	m.riders = inst.enclosing
 	flowRefRiders(m.riders)
-	nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
-	bodyCtx := ctxpool.WithValue(src, m)
+	nodeRef(m.riders)  // the fire meta's carrier ref (released by runFire's releaseBodyContext)
+	unrefMeta(srcMeta) // the borrow holds its own parent ref now; drop the Execute pin
 
 	// runFire returns nil here (onErr routes the error); the async fire owns it.
 	_ = inst.runFire(bodyCtx, false, wave, func(fnErr error) {

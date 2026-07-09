@@ -138,8 +138,13 @@ func (g Skimmer[T]) SubmitResult(
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
-	// Skimmer submit does not yet recycle its minted meta (follow-on); owned ignored.
-	ctx, meta, _ := target.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// The submit uses the minted meta only synchronously (skimWork captures
+		// riders by value with its own refs; nothing retains the meta), so the
+		// dispatch releases it — recycling rides the unrefMeta cascade.
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 
@@ -189,8 +194,11 @@ func (g Skimmer[T]) TrySubmitResult(
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
-	// Skimmer submit does not yet recycle its minted meta (follow-on); owned ignored.
-	ctx, meta, _ := target.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// The submit uses the minted meta only synchronously (see SubmitResult).
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 

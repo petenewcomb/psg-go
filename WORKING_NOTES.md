@@ -199,17 +199,42 @@ ends it once at the flow's TRUE end (crosses funnels, covers async outliving the
 `Correlate`/`FlowSpan` read it in async bodies; propagation.go+per-op TracedTask/Skim/Funnel
 DELETED, metrics.go+logging.go KEPT, Instrumented*=metrics∘logging.
 
-►► NEXT = CP: ctxMeta PARENT REFCOUNT (fresh focused session — highest-risk core change).
-SPEC: docs/decisions/ctxmeta-parent-refcount.md (6bc8644). Refcount ctxMeta.parent so a
-borrowed-from ctx outlives every body borrowed from it — fixes the pre-existing borrowSrcCtx
-UAF at the root + makes the parent chain walkable across async. Atomic change (sync-derive +
-async-borrow + flush/fire Execute-stash + both release paths at once); keep the `parent` name;
-replace the async sever's lifetime role w/ refs and its isolation role w/ a `permitRoot` flag
-(currentHeldPermit/vetNotNestedInSkim stop there); ref at synchronous safe points (dispatch;
-Execute-stash for flush/fire via borrowBodyContext taking srcMeta explicitly); unify release
-onto an unrefMeta cascade that subsumes releaseParent; meta conservation hook + large -race sim
-gate, NO false green. This is the prerequisite for driver-link tracing and IS the fix for the
-race handed to the funnel/permits (combiner) thread — coordinate so it lands once.
+►► ctxMeta PARENT REFCOUNT LANDED (2026-07-08, this commit) — the borrowSrcCtx UAF fixed
+at the root. SPEC + as-implemented deviations: docs/decisions/ctxmeta-parent-refcount.md
+(read "As implemented"). As landed: ctxMeta.refs (atomic, +Reset for pool copylocks) with
+newCtxMeta/refMeta/unrefMeta cascade (subsumes releaseParent — skimCtxMeta transfers the
+mint ref on the owned bare-ctx-skim chain); every meta stores selfCtx, freed ONLY at
+refs==0, so a ctxpool child can never be re-stamped while reachable; parent stays linked
+across async (keeps the name), permitRoot takes the sever's isolation role. KEY DEVIATIONS
+from spec: (1) FOUR sync-only walkers needed the permitRoot stop, not two —
+currentHeldPermit, vetNotNestedInSkim, flowBoundaryAboveWave, ensureCache/ensureCacheChain
+(forest liveness argument is synchronous-extent-only) — all via ctxMeta.syncParent();
+(2) spec's vetNotNestedInSkim pseudo-code would falsely panic task-from-skim-handler
+(started at cm.parent unconditionally) — syncParent stepping fixes it; (3) stash-path
+borrows (flush/fire Run) do NOT capture srcMeta.riders — the pin covers the meta, not the
+rider chain (that's the deferred driver-link rider pin); behavior-neutral (fan-in severs
+first). Shared core newBorrowedMeta (pin+permitRoot+selfCtx); borrowBodyContext takes
+srcMeta explicitly (dispatch sites resolve it synchronously; funnelInstance/flowFireWork
+Execute resolve-and-pin, Run borrows from the pin, unpins after borrow; non-handoff
+Execute paths unpin). BONUS: the four funnel/skimmer submit sites that leaked their minted
+meta ("needs the borrow-source fix first") now release it. Validation:
+TestCtxMetaConservation (ctxMetaAllocHook seam, mirrors node conservation) +
+TestBorrowBodyContext_ParentPinnedAcrossSourceRelease; permit-root tests re-pinned to
+permitRoot/syncParent. GATE (all green, no false green): vet, lint 0, full -short ./...,
+root -race -short, 30/30 TestBySimulation -race (checks=200, ~6000 cases), 2284 flow-suite
+-race iterations — 0 DATA RACE, 0 unexpected failures (19× the known union flake, 0.8%,
+matches base).
+REPRO CAVEAT (honest): the ~1/400 race did NOT reproduce on the pre-fix base in 8000
+targeted -race runs this session (originally seen under heavy ambient load), so the fix
+rests on the structural argument, not an observed before/after. PRE-EXISTING FLAKES
+surfaced while looping the flow suite -race on the BASE commit (not this change; not
+chased): TestFlowAllocFloors fails under -race (alloc floors are documented no-race runs —
+consider a skip-under-race guard) and TestFlowTagFunnelUnion (the KNOWN pre-existing flake,
+see the CP-F6 note — "flushSawB, zero-deadline flush racing the 2nd accumulate"; re-measured
+IDENTICAL base vs fixed this session: 4/400 each standalone -race, ~1/4 per full-suite -race
+iter under load, ~≤1/300 no-race).
+NEXT: streamotel consumer (otel-tracing-on-flows.md follow-up) + driver-link rider pin;
+CP-F5b sim-oracle extension still pending. Tell the combiner thread obs (2) is FIXED here.
 
 ►► DESIGN LANDED THIS PHASE (2026-07-08): otel tracing model — docs/decisions/otel-tracing-on-flows.md
 (9c6d950). Flow-native observability via existing riders (not an event stream); otel is one
@@ -225,12 +250,12 @@ implemented + green in the worktree (see "CP-R6b LANDED" in the flow section for
 build pointers). Commit chain (newest first): effded2 R6b-handoff-banner · 806a506
 R6a (definitional tag follow-up, shared chain) · 4c2be2e F7 · 5441c9a R5 (funnel
 fan-in/F8) · d661035 R4 · ae7065a R3 · 473ebe0 R2b · ea4ca51 R2a · 210a0dc R1 ·
-dbe0213 spec. TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS to hand off (NOT flow, do
-not chase in flow-impl): the skimSelect/WaitForNew HANG (intermittent, ~seed 6) and
-the funnel `borrowSrcCtx` -race (funnelInstance.Run borrowBodyContext vs ctxpool
-child Free, ~1/400) — full dossiers MOVED to the combiner branch WORKING_NOTES
-(2026-07-06); reconcile there against combiner's "pol_sim1 HANG ASSESSED FIXED
-(5574a40)" finding.
+dbe0213 spec. TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS handed off (full dossiers in
+the combiner branch WORKING_NOTES, 2026-07-06): the skimSelect/WaitForNew HANG —
+combiner reconciled it CONFIRMED FIXED by 5574a40 — and the funnel `borrowSrcCtx`
+-race (funnelInstance.Run borrowBodyContext vs ctxpool child Free, ~1/400) — NOW
+FIXED HERE by the ctxMeta parent refcount CP (2026-07-08, banner above); combiner's
+WORKING_NOTES entry (2) should be closed pointing at that commit when this merges.
 
 **►►► CP-R6b CORRECTED MODEL (2026-07-06, w/ PN) — CRITICAL for anyone touching
 coalescing or writing its tests.** The spec's premise "independent flows converging

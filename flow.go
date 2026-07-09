@@ -408,27 +408,31 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	// remaining fields stay zero: wave nil (ambient dispatch still requires
 	// op.In), ctxType top-level, exEnv nil (minted by the dispatch path).
 	//
-	// The meta and its ctxpool child are POOLED and freed at return
+	// The meta and its ctxpool child are POOLED and released at return
 	// (docs/decisions/flow-rider-chain.md, "Pooling summary"): a scope ctx is
 	// call-scoped like every framework-provided ctx, so retaining one past
 	// WithFlow's return is undefined — dispatched work carries its own body meta
-	// and never resolves the scope meta. The release is registered FIRST among the
-	// trailing defers so it runs LAST — after the inline follow-up fires below,
-	// which root their own metas and never read the scope ctx.
-	m := bodyMetaPool.Get()
+	// and never resolves the scope meta THROUGH the ctx. Bodies dispatched in the
+	// scope do ref-pin the meta as their parent, so recycling waits on the
+	// unrefMeta cascade when they outlive the scope. The release is registered
+	// FIRST among the trailing defers so it runs LAST — after the inline
+	// follow-up fires below, which root their own metas and never read the
+	// scope ctx.
+	m := newCtxMeta()
 	m.riders = riders
 	nodeRef(riders) // the scope meta's carrier ref on the chain head
 	if src != nil {
 		m.wave = src.wave
 		m.parent = src
+		refMeta(src)
 		m.parentWaves = src.parentWaves
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
 	}
 	scopeCtx := ctxpool.WithValue(ctx, m)
+	m.selfCtx = scopeCtx
 	defer func() {
-		ctxpool.Free(scopeCtx)
-		bodyMetaPool.Put(m)
+		unrefMeta(m)
 		nodeUnref(riders) // release the scope meta's head ref (cascades if last)
 	}()
 
@@ -750,22 +754,27 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 }
 
 // flowBoundaryAboveWave resolves the fan-in boundary for a funnel on wave: the
-// rider chain head of the nearest meta ABOVE wave in ctx's synchronous derivation
-// chain — the enclosing (driving) flow's head that the funnel's items descend from
-// and share by pointer. It MUST be called at dispatch, where the meta.parent chain
-// is still intact (a borrowed body meta severs parent). Returns nil when ctx has
-// no meta or nothing encloses the wave (a submit from a bare ctx).
-func flowBoundaryAboveWave(ctx context.Context, wave *Wave) *flowRiderNode {
-	m, ok := metaFromContext(ctx)
-	if !ok {
+// rider chain head of the nearest meta ABOVE wave in the dispatching meta m's
+// synchronous derivation chain — the enclosing (driving) flow's head that the
+// funnel's items descend from and share by pointer. It MUST be called at
+// dispatch, on the dispatcher's goroutine, with the meta resolved there (m may
+// be nil for a submit from a bare ctx). Returns nil when there is no meta or
+// nothing encloses the wave.
+func flowBoundaryAboveWave(m *ctxMeta, wave *Wave) *flowRiderNode {
+	if m == nil {
 		return nil
 	}
-	// Walk up past metas belonging to the wave. The parent chain is synchronous-only
-	// (an async body meta severs parent = nil): when it ends inside the wave, that
-	// last body meta's riders ARE the enclosing chain — the driver's head it captured
-	// at its own dispatch — so stop there rather than walking off to a nil boundary.
-	for m.wave == wave && m.parent != nil {
-		m = m.parent
+	// Walk up past metas belonging to the wave, within the synchronous extent
+	// (syncParent stops at an async body meta — a permitRoot): when the chain
+	// ends inside the wave, that last body meta's riders ARE the enclosing
+	// chain — the driver's head it captured at its own dispatch — so stop
+	// there rather than walking off to a nil boundary.
+	for m.wave == wave {
+		p := m.syncParent()
+		if p == nil {
+			break
+		}
+		m = p
 	}
 	return m.riders
 }
@@ -866,10 +875,11 @@ func flowFanInContext(ctx context.Context, tags *flowRiderNode) (context.Context
 	if !hasSrcRiders && tags == nil {
 		return ctx, false
 	}
-	m := bodyMetaPool.Get()
+	m := newCtxMeta()
 	if ok {
 		m.wave = src.wave
 		m.parent = src // preserve the permit chain; held stays nil on the clone
+		refMeta(src)
 		m.parentWaves = src.parentWaves
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
@@ -878,5 +888,7 @@ func flowFanInContext(ctx context.Context, tags *flowRiderNode) (context.Context
 	// ADOPTS the funnel's carrier ref on the union head (no new nodeRef — the funnel
 	// hands it off, nil'ing c.flowTags), released by releaseBodyContext at flush end.
 	m.riders = tags
-	return ctxpool.WithValue(ctx, m), true
+	fc := ctxpool.WithValue(ctx, m)
+	m.selfCtx = fc
+	return fc, true
 }

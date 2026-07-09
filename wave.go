@@ -104,9 +104,12 @@ func (wv *Wave) newTaskWork(
 	}
 	wk.wave = wv
 	// Borrow the body context at dispatch (descended from the submit ctx, so
-	// cancellation rides ancestry). Async worker bodies are fresh permit-roots
-	// (parent nil); the worker's E is stamped at Execute, not known yet here.
-	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, wv, taskContext, h, nil)
+	// cancellation rides ancestry), resolving the source meta here on the
+	// dispatcher's goroutine where it is provably alive. The borrow pins it as
+	// parent but stays a permitRoot for synchronous-extent walks; the worker's
+	// E is stamped at Execute, not known yet here.
+	srcMeta, _ := metaFromContext(submitCtx)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, srcMeta, wv, taskContext, h, nil)
 
 	trace.Logf(context.Background(), traceRegion, "Wave=%p created %v", wv, wk)
 	return wk

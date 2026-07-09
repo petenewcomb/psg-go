@@ -242,7 +242,23 @@ type Pool struct {
 	// completion and can never observe the over-commitment — while any other
 	// suspension is a stranger whose resume races it.
 	suspended atomic.Int64
+
+	// rank is a process-global monotonic identity assigned at construction. It is
+	// the canonical global acquisition order over Pools: an op that binds several
+	// limiters acquires them in ascending rank, and because every op uses the same
+	// order, a joint acquirer blocked at one limiter holds only limiters ordered
+	// before it — every wait-for edge points strictly up the order, so no cycle can
+	// close (weighted-acquisition.md §"Multi-limiter: the FIFO under joint
+	// admission"). Consumable-sorts-last is a step-4 refinement; all limiters are
+	// holdable today, so creation order — a stable total order — suffices.
+	rank uint64
 }
+
+// nextPoolRank issues the process-global monotonic Pool ranks.
+var nextPoolRank atomic.Uint64
+
+// Rank returns this Pool's position in the canonical global acquisition order.
+func (p *Pool) Rank() uint64 { return p.rank }
 
 // demandEntry is one queue slot: the demand plus its generation at enqueue time.
 // A popped entry whose generation no longer matches was invalidated while queued
@@ -322,7 +338,7 @@ func NewPool(r Resource) *Pool {
 	if r == nil {
 		panic("permits: nil Resource")
 	}
-	p := &Pool{resource: r}
+	p := &Pool{resource: r, rank: nextPoolRank.Add(1)}
 	if odr, ok := r.(OverdraftResource); ok {
 		p.overdraftPolicy = odr
 	}

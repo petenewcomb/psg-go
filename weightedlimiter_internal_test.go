@@ -104,12 +104,12 @@ func TestWithWeightLimits_BindsWeigher(t *testing.T) {
 	base := NewFnLauncher(func(_ context.Context, _ int, _ error) error { return nil })
 
 	bound := base.WithWeightLimits(NewWeightLimiter(wl, func(v int) int { return v * 2 }))
-	chk.Same(wl.weightedPool(), bound.limiter.pool, "the weighted pool is bound")
-	chk.NotNil(bound.weigh, "the weigher is recorded")
-	chk.Equal(6, bound.weigh(3), "the recorded weigher is the one supplied")
+	chk.Len(bound.bindings, 1)
+	chk.Same(wl.weightedPool(), bound.bindings[0].pool, "the weighted pool is bound")
+	chk.NotNil(bound.bindings[0].weigh, "the weigher is recorded")
+	chk.Equal(6, bound.bindings[0].weigh(3), "the recorded weigher is the one supplied")
 
-	chk.Nil(base.limiter.pool, "the original op copy is unmodified")
-	chk.Nil(base.weigh)
+	chk.Empty(base.bindings, "the original op copy is unmodified")
 
 	chk.PanicsWithValue(
 		"multi-Limiter composition is not yet implemented (Wave 4 follow-up)",

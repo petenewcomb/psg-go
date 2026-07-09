@@ -38,13 +38,12 @@ import (
 type Launcher[T any] struct {
 	wave    *Wave
 	handler Handler[T]
-	// limiter holds the permit Pool this op draws on (plain or weighted); the zero
-	// Limiter (pool == nil) means unlimited. Bound via [Launcher.WithLimits] or
-	// [Launcher.WithWeightLimits].
-	limiter Limiter
-	// weigh maps a dispatched value to the weight its work acquires. nil ⟹ weight 1 (a
-	// plain limiter, or none); non-nil ⟹ a weighted limiter bound via WithWeightLimits.
-	weigh    func(T) int
+	// bindings are the limiters this op acquires from, in canonical global acquisition
+	// order (ascending pool rank); nil ⟹ unlimited. Each carries an optional weigher
+	// (nil ⟹ weight 1). Bound via WithLimits/WithWeightLimits/WithLimiterSet/
+	// WithWeightLimiterSet. Currently at most one is supported at dispatch (multi-limiter
+	// joint admission is the 2b follow-up); binding more panics.
+	bindings []binding[T]
 	errSink  ErrSkimmer
 	workPool *omnipool.Pool[launcherWork[T]]
 }
@@ -79,8 +78,11 @@ func NewLauncher[T any](handler Handler[T]) Launcher[T] {
 // panics.
 func (r Launcher[T]) WithLimits(limiters ...Limiter) Launcher[T] {
 	for _, l := range limiters {
-		r.bindLimiter(l, nil)
+		if l.pool != nil { // the zero (unlimited) Limiter gates nothing
+			r.bindings = addBinding(r.bindings, l.pool, nil)
+		}
 	}
+	r.checkSingleBinding()
 	return r
 }
 
@@ -90,21 +92,41 @@ func (r Launcher[T]) WithLimits(limiters ...Limiter) Launcher[T] {
 // restriction.
 func (r Launcher[T]) WithWeightLimits(wls ...WeightLimiter[T]) Launcher[T] {
 	for _, wl := range wls {
-		r.bindLimiter(Limiter{pool: wl.limiter.weightedPool()}, wl.weigh)
+		r.bindings = addBinding(r.bindings, wl.limiter.weightedPool(), wl.weigh)
 	}
+	r.checkSingleBinding()
 	return r
 }
 
-// bindLimiter records l (and its optional weigher) as this op's single limiter, panicking
-// if one is already bound — multi-limiter AND-composition is a forthcoming follow-up, so
-// it is rejected at construction time rather than partially enforced at runtime. Mutates
-// the receiver copy the builder methods return by value.
-func (r *Launcher[T]) bindLimiter(l Limiter, weigh func(T) int) {
-	if r.limiter.pool != nil {
+// WithLimiterSet returns a copy of the Launcher bound to every plain limiter in the
+// canonicalized [LimiterSet]. See [Launcher.WithLimits].
+func (r Launcher[T]) WithLimiterSet(s LimiterSet) Launcher[T] {
+	for _, pool := range s.pools {
+		r.bindings = addBinding(r.bindings, pool, nil)
+	}
+	r.checkSingleBinding()
+	return r
+}
+
+// WithWeightLimiterSet returns a copy of the Launcher bound to every weighted binding in
+// the canonicalized [WeightLimiterSet]. See [Launcher.WithWeightLimits].
+func (r Launcher[T]) WithWeightLimiterSet(s WeightLimiterSet[T]) Launcher[T] {
+	for _, b := range s.bindings {
+		r.bindings = addBinding(r.bindings, b.pool, b.weigh)
+	}
+	r.checkSingleBinding()
+	return r
+}
+
+// checkSingleBinding rejects a resolved binding count above one: multi-limiter joint
+// admission is the 2b follow-up, so it is refused at construction time (across all four
+// binder methods and any accumulation between them) rather than partially enforced at
+// runtime. The ordered-binding representation is already in place, so 2b lifts this by
+// implementing the joint gate — no surface change.
+func (r Launcher[T]) checkSingleBinding() {
+	if len(r.bindings) > 1 {
 		panic("multi-Limiter composition is not yet implemented (Wave 4 follow-up)")
 	}
-	r.limiter = l
-	r.weigh = weigh
 }
 
 // In returns a copy of the Launcher bound to wave, so its dispatches place
@@ -280,19 +302,22 @@ func (r Launcher[T]) newScatterWork(
 ) *launcherScatterWork {
 	inner := r.newTask(wv, group, value, callerErr)
 	var h *heldPermit
-	if r.limiter.pool != nil {
+	if len(r.bindings) > 0 {
+		// 2a: a single binding (checkSingleBinding panics on more). 2b iterates all
+		// bindings into a heldPermitSet acquired jointly in canonical order.
+		b := r.bindings[0]
 		// Resolve the body's own wave cache (mkdir-p'ing the forest along the
 		// dispatching ancestry) at dispatch, where that ancestry is available; the
 		// permit is acquired from it at the gate.
 		m, _ := metaFromContext(submitCtx)
 		h = heldPermitPool.Get()
-		h.ownCache = wv.ensureCache(m, r.limiter.pool)
+		h.ownCache = wv.ensureCache(m, b.pool)
 		// Weight: the weigher applied to this value for a weighted limiter, else 1. Set
 		// per dispatch (the pooled handle comes back zeroed) so the gate acquires the
 		// right amount.
 		h.weight = 1
-		if r.weigh != nil {
-			h.weight = r.weigh(value)
+		if b.weigh != nil {
+			h.weight = b.weigh(value)
 		}
 	}
 	taskWork := wv.newTaskWork(submitCtx, group, inner, h)

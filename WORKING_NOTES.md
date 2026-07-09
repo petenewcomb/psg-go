@@ -2,6 +2,24 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► WEIGHTED SURFACE — LAYER 2 (multi-limiter). CHECKPOINT 2a LANDED (2026-07-08).** Design is
+settled (weighted-acquisition.md §"Multi-limiter: the FIFO under joint admission"): CANONICAL
+GLOBAL ACQUISITION ORDER → acyclic wait-for graph → deadlock-free; mid-sequence holds stay inUse
+(safe, overdraft proof already accounts); consumables sort last (step-4). Rep chosen (PN): (A)
+keep heldPermit as the per-limiter unit, add a heldPermitSet ordered wrapper in 2b. 2a (this
+commit — ordering + sets + ordered-binding rep, NO behavior change, single-limiter runtime
+unchanged): permits.Pool gets a process-global monotonic `rank` (Pool.Rank()) = the canonical sort
+key. Launcher stores a canonically-ordered `bindings []binding[T]` ({pool, weigh}) replacing the
+single (limiter, weigh); builder methods addBinding (sorted-insert by rank, dup=panic, copy-on-write
+for In()-style immutability); WithLimiterSet/WithWeightLimiterSet added; LimiterSet (untyped,
+[]*Pool) + WeightLimiterSet[T] ([]binding[T]) constructors sort+dedup+freeze. checkSingleBinding
+panics on resolved >1 (multi deferred to 2b). Files: permits.go, limiterset.go (+_internal_test),
+launcher.go, weightedlimiter_internal_test.go. Green: set/weighted unit, lint 0, -short -race,
+permits -race, sim 300 checks. NEXT — 2b: heldPermitSet (ordered []*heldPermit); joint gate
+acquires all bindings in canonical order (help-shaped block per limiter, mid-sequence holds inUse);
+release/suspend/reclaim bracket all; drop checkSingleBinding; wire multi-limiter into the sim +
+-race validate. (Funnel stays single-WithLimits for now; funnel multi-limiter is a later extension.)
+
 **►►► WEIGHTED SIM WIRING LANDED + FIXED A LAYER-1 OVERDRAFT BUG IT EXPOSED (2026-07-05).**
 Wired weighted task limiters into internal/sim (sim/{launcher,limiter,plan,run}.go):
 LimiterConfig.Weighted prob (task limiters only, permits≥2), sim.Launcher.Weight ∈[1,permits]

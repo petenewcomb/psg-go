@@ -149,7 +149,15 @@ func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
 		})
 	}
 	if len(expects) > 0 {
-		c.flow = &flowState{expects: expects, own: c.Plan.Flow}
+		c.flow = &flowState{
+			expects:   expects,
+			own:       c.Plan.Flow,
+			stepsOnly: c.Plan.Flow && c.Plan.FlowSteps,
+			// The carrier conservation oracle holds only when every dispatched
+			// unit completes; plan-baked cancellation abandons units without
+			// running them, stranding the sim-side count.
+			carrierAssert: c.Plan.Flow && c.Plan.CancelTriggerRunnerID < 0,
+		}
 	}
 	return c.runWithFlowScope(ctx, t, func(ctx context.Context) error {
 		return c.runInner(ctx, t)
@@ -202,14 +210,34 @@ func (c *controller) runInner(ctx context.Context, t assert.TestingT) error {
 		c.Launchers[i] = c.newLauncher(t, runner, i%2 == 0)
 	}
 
-	// Execute top-level Steps.
-	for i, step := range c.Plan.Steps {
-		trace.Logf(ctx, traceRegion, "%v step %d/%d: %T", c.Plan, i+1, len(c.Plan.Steps)+1, step)
-		c.executeStep(ctx, t, step)
+	// Execute top-level Steps. A steps-only flow scope wraps EXACTLY this
+	// loop: the scope exits with dispatched work still outstanding, so the
+	// follow-up fires asynchronously (the flowFireWork executor path) when
+	// the last carrier releases during the drain below.
+	chk := assert.New(t)
+	runSteps := func(ctx context.Context) error {
+		for i, step := range c.Plan.Steps {
+			trace.Logf(ctx, traceRegion, "%v step %d/%d: %T", c.Plan, i+1, len(c.Plan.Steps)+1, step)
+			c.executeStep(ctx, t, step)
+		}
+		return nil
+	}
+	if fs := c.flow; fs != nil && fs.own && fs.stepsOnly {
+		own := &fs.expects[len(fs.expects)-1]
+		err := streampool.WithFlow(ctx, runSteps,
+			own.key.Value(own.val),
+			own.tag.FollowUpFn(c.flowFollowUpFn(t)))
+		// runSteps and the oracle fn both return nil; an inline fire at scope
+		// exit (all work already complete) is legal and also error-free.
+		chk.NoErrorf(err, "steps-only flow scope returned an error (Plan#%d)", c.Plan.ID)
+		if fs.fires.Load() == 0 {
+			flowStepsAsyncFires.Add(1) // fire still pending at scope exit → async path
+		}
+	} else {
+		_ = runSteps(ctx)
 	}
 
 	// Drain.
-	chk := assert.New(t)
 	for {
 		err := c.Wave.CloseAndSkimAll(ctx)
 		if d := classify(err); d == dispRetry {
@@ -222,6 +250,13 @@ func (c *controller) runInner(ctx context.Context, t assert.TestingT) error {
 	}
 	if c.flow != nil {
 		c.flow.drained.Store(true)
+		if c.flow.own && c.flow.stepsOnly {
+			// The steps-only scope exited before the drain; its async fire is
+			// due now that the wave has drained (the wave keep-alive makes the
+			// drain wait for a dispatched fire; only the flush ctx's adopted
+			// refs can release just after the barrier — see assertFlowFired).
+			c.assertFlowFired(t)
+		}
 	}
 
 	// Per-Skimmer sink-invocation bounds.
@@ -366,6 +401,10 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 		tracker = c.taskLimiterTrackers[limIdx]
 	}
 	body := streampool.NewTask(func(ctx context.Context) error {
+		// Carrier oracle: this body's unit was counted at startTask; it stops
+		// carrying the flow scope when the body completes (the framework's
+		// rider release strictly follows).
+		defer c.carrierAdd(-1)
 		if tracker != nil {
 			tracker.enter()
 			defer tracker.exit()
@@ -437,15 +476,25 @@ func classify(err error) disposition {
 func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx int) {
 	chk := assert.New(t)
 	runner := &c.Launchers[runnerIdx]
+	// Carrier oracle: the dispatched task carries the flow scope from here
+	// until its body completes (the body's own defer decrements). A retry
+	// keeps the count (the freed work never ran; the retry re-dispatches the
+	// same unit); a dispatch that ends any other way than success gives it
+	// back (no body will run).
+	c.carrierAdd(1)
 	for {
 		// Top-level dispatch binds the wave (a bare top-level ctx carries no ambient
 		// wave). Nil-wave launchers stay exercised for their in-body submits.
 		err := runner.In(c.Wave).Start(ctx)
-		switch classify(err) {
-		case dispRetry:
+		d := classify(err)
+		if d == dispRetry {
 			continue
-		case dispFail:
+		}
+		if d == dispFail {
 			chk.NoError(err)
+		}
+		if d != dispDone {
+			c.carrierAdd(-1)
 		}
 		return
 	}
@@ -467,6 +516,12 @@ func (c *controller) submitTo(
 	ctx context.Context, t assert.TestingT, kind SinkKind, idx int, v *simValue, valErr error,
 ) {
 	chk := assert.New(t)
+	// Carrier oracle: the submitted item carries the flow scope from here until
+	// its skim handler completes (handler defer) or its funnel instance's flush
+	// body completes (per-instance count in newFunnelFactory). Retry keeps the
+	// count (the freed submit never queued; the loop re-submits the same item);
+	// any other non-success gives it back.
+	c.carrierAdd(1)
 	for {
 		var err error
 		switch kind {
@@ -476,13 +531,18 @@ func (c *controller) submitTo(
 			err = c.Skimmers[idx].SubmitResult(ctx, v, valErr)
 		default:
 			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
+			c.carrierAdd(-1)
 			return
 		}
-		switch classify(err) {
-		case dispRetry:
+		d := classify(err)
+		if d == dispRetry {
 			continue
-		case dispFail:
+		}
+		if d == dispFail {
 			chk.NoError(err)
+		}
+		if d != dispDone {
+			c.carrierAdd(-1)
 		}
 		return
 	}
@@ -499,6 +559,10 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) s
 	return func(ctx context.Context, v *simValue, valErr error) error {
 		_ = valErr
 		_ = v
+		// Carrier oracle: one invocation consumes one submitted item (counted
+		// in submitTo); it stops carrying the flow scope when the handler
+		// completes (the framework's rider release strictly follows).
+		defer c.carrierAdd(-1)
 		c.skimmerInvocations[idx].Add(1)
 		c.assertFlowInBody(ctx, t, "skim handler")
 		// Skimmers are deliberately limiter-free (drain must stay
@@ -531,8 +595,15 @@ func (c *controller) newFunnelFactory(
 		tracker = c.funnelLimiterTrackers[cmb.LimiterIndexes[0]]
 	}
 	return streampool.NewAccumulatorFactory(func() streampool.Accumulator[*simValue] {
+		// Carrier oracle: accumulated counts this INSTANCE's items (one factory
+		// call = one instance; accumulate and flush serialize under the
+		// instance mutex, so a plain int suffices). Their submitTo counts are
+		// given back when the flush body completes — the funnel holds the
+		// scope's tag refs until the flush ctx releases, strictly after.
+		var accumulated int64
 		return streampool.FuncAccumulator[*simValue]{
 			AccumulateFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
+				accumulated++
 				if tracker != nil {
 					tracker.enter()
 					defer tracker.exit()
@@ -556,6 +627,10 @@ func (c *controller) newFunnelFactory(
 				// subjob op's Accumulate on the shared tracker. Pass nil
 				// so Subjob steps in a Flush body don't drop a
 				// contribution that was never added.
+				defer func() {
+					c.carrierAdd(-accumulated)
+					accumulated = 0
+				}()
 				c.assertFlowInFlush(ctx, t)
 				v := &simValue{DispatchTime: time.Now()}
 				err := c.executeFunc(ctx, t, cmb.Flush, v, nil)

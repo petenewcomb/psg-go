@@ -233,8 +233,36 @@ consider a skip-under-race guard) and TestFlowTagFunnelUnion (the KNOWN pre-exis
 see the CP-F6 note — "flushSawB, zero-deadline flush racing the 2nd accumulate"; re-measured
 IDENTICAL base vs fixed this session: 4/400 each standalone -race, ~1/4 per full-suite -race
 iter under load, ~≤1/300 no-race).
-NEXT: streamotel consumer (otel-tracing-on-flows.md follow-up) + driver-link rider pin;
-CP-F5b sim-oracle extension still pending. Tell the combiner thread obs (2) is FIXED here.
+Tell the combiner thread obs (2) is FIXED here.
+
+►► CP-F5b LANDED (2026-07-08, this commit) — sim steps-only flow scopes + carrier
+conservation oracle; the async fire path (flowFireWork) is now under the sim's adversarial
+schedules (it wasn't: CP-F5a's whole-run scopes always fire inline at scope exit). As
+landed: Plan.FlowSteps (drawn with FlowConfig.StepsOnlyProb=0.5 given Flow → ~1/8 of
+generated plans ambient) wraps ONLY the Steps loop in the WithFlow scope — the scope exits
+with dispatched work outstanding, the follow-up fires async from the drain (the wave
+keep-alive makes the drain wait for it; fires-exactly-once asserted via Eventually AFTER
+the drain, replacing whole-run's fired-after-drained assert, which a legal mid-drain async
+fire would violate). CARRIER ORACLE (flowState.carriers): the sim counts its own model
+units — dispatched task (startTask → launcher-body defer), submitted skim item (submitTo →
+handler defer), submitted funnel item (submitTo → per-INSTANCE accumulated count,
+decremented at FlushFn end; one factory call = one instance, serialized under the instance
+mu) — and the follow-up asserts carriers==0 at fire: every sim decrement happens-before
+the framework's rider release, so nonzero ⇒ premature fire. Retry semantics follow the
+existing exact-invocation-bounds invariant (dispRetry ⇒ work Freed-not-queued ⇒ keep the
+count for the retry). DISABLED (carrierAssert=false) on cancellation plans — teardown
+abandons units without running them, stranding the sim-side count (framework refs still
+release; fires-once still asserted). Steps-only skim handlers also exercise F7 item-chain
+riders in the sim for the first time (drain runs post-scope; handler sees the ITEM's
+riders). NON-VACUOUS: TestFlowStepsOnlyScopeEndToEnd (hand plan: tasks + funnel w/
+flush-submit + steps-only subjob, 50 runs = 150 scopes) asserts ≥1 async fire via the
+flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips the
+oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
+./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
+cases, steps-only scopes ambient).
+NEXT: streamotel consumer (otel-tracing-on-flows.md — open design points need a PN
+session: fan-in helper shape, driver-attribution at fan-in, wave-participation
+delimitation) + driver-link rider pin (concurrency-critical; design pass with PN first).
 
 ►► DESIGN LANDED THIS PHASE (2026-07-08): otel tracing model — docs/decisions/otel-tracing-on-flows.md
 (9c6d950). Flow-native observability via existing riders (not an event stream); otel is one

@@ -16,7 +16,7 @@ var DefaultConfig = Config{
 	Skimmer:       defaultSkimmerConfig,
 	Funnel:        defaultFunnelConfig,
 	Subjob:        SubjobConfig{MaxDepth: 3},
-	Flow:          FlowConfig{ScopeProb: 0.25},
+	Flow:          FlowConfig{ScopeProb: 0.25, StepsOnlyProb: 0.5},
 }
 
 // Config controls plan generation. The Deterministic flag forces all

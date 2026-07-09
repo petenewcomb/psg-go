@@ -260,9 +260,36 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
-NEXT: streamotel consumer (otel-tracing-on-flows.md — open design points need a PN
-session: fan-in helper shape, driver-attribution at fan-in, wave-participation
-delimitation) + driver-link rider pin (concurrency-critical; design pass with PN first).
+►► DRIVER-CONTEXTS DESIGN CONVERGED (2026-07-09, PN design session) —
+docs/decisions/driver-contexts.md (supersedes the refcount doc's "driver-link rider pin"
+follow-up; read the doc, this is the summary). TWO CONTRACTS: (1) a ctxMeta is IMMUTABLE
+for its ref'd lifetime, in all cases — mutation only in single-party custody (pre-publish,
+or refs==1 returned-custody); (2) exEnv is OUTSIDE that invariant under a CUSTODY contract
+(slot of the currently-executing extent; stamped at extent entry; NEVER read across an
+async boundary — no structural enforcement possible, documented rule). DRIVERS: task/acc =
+dispatcher (already have its chain); skim = drive flow via PER-ITEM CHILD META (parent =
+drive meta, sync non-permitRoot, riders = item chain — kills the in-place override, which
+is BOTH an invariant violation AND a live misdelivery bug: a rider-free item after a
+rider-carrying one sees the previous item's riders (never restored); fix behind a failing
+regression test; per-drive-restamp alternative REJECTED — unsound under lazy parent.riders
+reads); flush = THE LAST ACCUMULATE (its returned deadline/finality made the flush due —
+unifies inline/deadline/sweep; scheduler = just the timer) via a ROLLING NODE-ONLY PIN on
+the instance (refMeta+nodeRef per accumulate, release prev pair, release after flush body;
+NO flowRefRiders — observability must not delay driver fires; driver's follow-ups may have
+fired, values stay readable); fire = THE LAST CARRIER'S CONTINUATION (fire ctx = carrier's
+context, same tree position, riders = carrier chain MINUS fired binding — semantic
+refinement: fire sees riders the carrier acquired post-registration, consistent w/ R6b
+last-standing-branch; pin taken at count→0 dispatch while owner ref still held; refs==1 at
+fire-run ⇒ ADOPT+mutate in place (returned custody), else COW SIBLING (same parent
+refMeta'd, nodeRef'd remaining riders, NEVER copy exEnv); inline scope-exit fire always
+COW). Executor-pumped bodies have NO driver link ever (framework plumbing; wave-ID
+attribute covers substrate). OPEN (flagged in doc): fire cancellation ancestry under
+adoption (carrier chain vs scheduler) — resolve at implementation with a test. Accessor
+surface = streamotel session scope, not this record's.
+NEXT: implement driver-contexts.md (fresh focused session; regression test for the skim
+rider-leak FIRST, then skim child meta, then flush pin, then fire continuation — each
+sim-gated), THEN streamotel consumer (otel-tracing-on-flows.md open points: fan-in helper
+shape, wave-participation delimitation — driver attribution now settled here).
 
 ►► DESIGN LANDED THIS PHASE (2026-07-08): otel tracing model — docs/decisions/otel-tracing-on-flows.md
 (9c6d950). Flow-native observability via existing riders (not an event stream); otel is one

@@ -141,6 +141,10 @@ top:
 - **driver-link rider pin** — reading a driver's *flow values* (`parent.riders`)
   needs an additional pin on the driver's rider head, because the child only refs the
   riders it inherited and skim *overrides* them with the item's chain;
+  **→ superseded (2026-07-09) by `driver-contexts.md`**: the pin as sketched here
+  targeted the wrong context (the framework pump); the converged design is a
+  per-item skim child meta, a rolling last-accumulate pin on the funnel
+  instance, and fire-as-last-carrier's-continuation;
 - **`streamotel` consumer** — the tracing patterns + fan-in helper that read the
   parent/driver/wave via these accessors (`otel-tracing-on-flows.md`).
 

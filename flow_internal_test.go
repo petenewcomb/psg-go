@@ -5,6 +5,7 @@ package streampool
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -242,4 +243,97 @@ func TestFlowCoalesceConservation(t *testing.T) {
 	chk.Eventually(func() bool { n := fires.Load(); return n >= 1 && n <= 4 }, 5*time.Second, 5*time.Millisecond,
 		"merged component fires after concurrent downstream drain")
 	settled("concurrent downstream drain")
+}
+
+// TestFunnelDriverPin: each accumulate re-points the instance's rolling driver
+// pin at its own body meta and that meta's rider head, releasing the previous
+// pair; the flush releases the final pair after the flush body runs
+// (docs/decisions/driver-contexts.md, "Flush: a rolling node-only driver pin on
+// the instance"). White-box: between accumulates the cached live instance is
+// inspected via the owner lineage (pop → read under mu → push back), safe while
+// the wave is otherwise quiescent. The alloc-hook balance proves the flush-time
+// release: a pin left standing would hold the last accumulate's meta out of the
+// pool forever.
+func TestFunnelDriverPin(t *testing.T) {
+	chk := require.New(t)
+	key := NewFlowKey[int]()
+
+	var balance atomic.Int64
+	hook := func(delta int) { balance.Add(int64(delta)) }
+	ctxMetaAllocHook.Store(&hook)
+	defer ctxMetaAllocHook.Store(nil)
+
+	var mu sync.Mutex
+	var accMetas []*ctxMeta
+	var accRiders []*flowRiderNode
+
+	var wave Wave
+	f := NewFnFunnel(&wave, func() Accumulator[int] {
+		return NewAccumulator(
+			func(ctx context.Context, _ int, _ error) (time.Time, error) {
+				m, ok := metaFromContext(ctx)
+				chk.True(ok)
+				mu.Lock()
+				accMetas = append(accMetas, m)
+				accRiders = append(accRiders, m.riders)
+				mu.Unlock()
+				return time.Time{}, nil // no deadline: flushed by the end-of-work sweep
+			},
+			func(context.Context) error { return nil },
+		)
+	})
+
+	accumulated := func(n int) func() bool {
+		return func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(accMetas) == n
+		}
+	}
+
+	// inspect reads the pin off the cached live instance via the owner lineage.
+	// Eventually covers the window between the accumulate's return and the
+	// lineage's deferred push-back.
+	inspect := func(assert func(inst *funnelInstance[int])) {
+		v, ok := wave.funnelInstances.Load(f.id)
+		chk.True(ok, "instance queue registered")
+		q := v.(*funnelInstanceQueue[int])
+		var inst *funnelInstance[int]
+		chk.Eventually(func() bool {
+			var popped bool
+			inst, popped = q.queue.TryPopFront()
+			return popped
+		}, 5*time.Second, time.Millisecond, "cached live instance")
+		inst.mu.Lock()
+		assert(inst)
+		inst.mu.Unlock()
+		q.queue.PushBack(inst)
+	}
+
+	submit := func(v int) {
+		chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
+			return f.Submit(ctx, v)
+		}, key.Value(v)))
+	}
+
+	submit(1)
+	chk.Eventually(accumulated(1), 5*time.Second, time.Millisecond)
+	inspect(func(inst *funnelInstance[int]) {
+		chk.Same(accMetas[0], inst.driverMeta, "pin holds the first accumulate's meta")
+		chk.NotNil(accRiders[0], "scope value rides the accumulate body")
+		chk.Same(accRiders[0], inst.driverRiders, "pin holds the first accumulate's rider head")
+	})
+
+	submit(2)
+	chk.Eventually(accumulated(2), 5*time.Second, time.Millisecond)
+	inspect(func(inst *funnelInstance[int]) {
+		chk.Same(accMetas[1], inst.driverMeta, "pin re-points to the LAST accumulate's meta")
+		chk.Same(accRiders[1], inst.driverRiders, "pin re-points to the LAST accumulate's rider head")
+		chk.NotSame(accMetas[0], inst.driverMeta, "previous pin released, not accumulated")
+	})
+
+	chk.NoError(wave.CloseAndSkimAll(context.Background()))
+	// Flush released the final pair: every meta drawn during the test returns.
+	chk.Eventually(func() bool { return balance.Load() == 0 }, 5*time.Second, 2*time.Millisecond,
+		"ctxMeta balance settles to zero after the drain (pin released at flush)")
 }

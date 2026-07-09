@@ -422,6 +422,21 @@ type funnelInstance[T any] struct {
 	// presence, follow-up lifetimes, AND the enclosing flow across the fan-in.
 	// Nil'd at takeover; mutated only under mu.
 	flowTags *flowRiderNode
+
+	// driverMeta/driverRiders are the instance's rolling driver pin
+	// (docs/decisions/driver-contexts.md, "Flush: a rolling node-only driver pin
+	// on the instance"): the flush's driver is THE LAST ACCUMULATE — the one
+	// whose returned deadline (or finality before close) made the flush due —
+	// so each accumulate re-points the pin at its own body meta (refMeta) and
+	// that meta's rider head (nodeRef), releasing the previous pair; flush
+	// releases the final pair after the flush body runs. Node-only,
+	// deliberately: NO flowRefRiders — instance refs would make the driver's
+	// own follow-ups wait on the aggregate's flush. The driver's follow-ups may
+	// therefore already have fired when a flush-time reader walks these; the
+	// values live on the pinned nodes and stay readable regardless. Mutated
+	// only under mu.
+	driverMeta   *ctxMeta
+	driverRiders *flowRiderNode
 }
 
 // Execute implements [workq.Work] as the scheduler-side admission for a due flush
@@ -568,6 +583,19 @@ func (c *funnelInstance[T]) accumulate(
 	// the first accumulate (Funnel).
 	c.flowTags = collectFlowTags(c.flowTags, ctx, c.boundary)
 
+	// Re-point the rolling driver pin at this accumulate (see the field docs):
+	// a synchronous safe point — the body meta and its rider head are provably
+	// alive here, held by the running funnelWork until Free. Four uncontended
+	// atomics per accumulate, no allocation.
+	if m, ok := metaFromContext(ctx); ok {
+		refMeta(m)
+		nodeRef(m.riders)
+		unrefMeta(c.driverMeta)
+		nodeUnref(c.driverRiders)
+		c.driverMeta = m
+		c.driverRiders = m.riders
+	}
+
 	didNotPanic := false
 	defer func() {
 		if !didNotPanic {
@@ -620,6 +648,18 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 		return false
 	}
 	c.accumulator = nil
+
+	// Release the rolling driver pin (the last accumulate's meta + rider head)
+	// once the flush body has run — deferred so a panicking Flush still
+	// releases it. Ordering against the other trailing defers is immaterial:
+	// the release only returns pooled objects, it fires nothing and touches no
+	// wave state. Runs under c.mu like every pin mutation.
+	defer func() {
+		unrefMeta(c.driverMeta)
+		nodeUnref(c.driverRiders)
+		c.driverMeta = nil
+		c.driverRiders = nil
+	}()
 
 	// Flow fan-in (docs/decisions/flow-design.md): path-scoped riders SEVER —
 	// the inline already-past-deadline flush arrives here on the TRIGGERING

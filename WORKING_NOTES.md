@@ -260,7 +260,30 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
-►► DRIVER-CONTEXTS STEP 1 LANDED (2026-07-09, this commit) — skim per-item child meta;
+►► DRIVER-CONTEXTS STEP 2 LANDED (2026-07-09, this commit) — flush rolling node-only
+driver pin, per driver-contexts.md §Flush. As landed (funnel.go): funnelInstance gains
+{driverMeta *ctxMeta, driverRiders *flowRiderNode} (mutated only under c.mu); accumulate
+re-points the pin at its own body meta (refMeta) + that meta's rider head (nodeRef),
+releasing the previous pair — four uncontended atomics, no alloc; flush releases the
+final pair in a defer AFTER the flush body (panic-safe; release only returns pooled
+objects, fires nothing, so ordering vs the barrier/tag-union defers is immaterial).
+Node-only per the doc: NO flowRefRiders — the driver's own follow-ups may fire before
+the flush reads; values stay readable on the pinned nodes. The inline past-deadline
+flush trivially satisfies "driver = last accumulate" (it RUNS on the triggering
+accumulate's ctx; the pin is released by its flush call). NO reader surface yet — the
+accessor is streamotel-scope (otel-tracing-on-flows.md Open); the pin is reachable
+through the instance. Validation: TestFunnelDriverPin (flow_internal_test.go) — white-box
+pop/inspect/push-back via the owner lineage between accumulates (pin tracks the LAST
+accumulate's meta+rider head) + ctxMetaAllocHook balance proves the flush release;
+MUTATION-CHECKED both arcs (dropping the accumulate-side release of the previous pair,
+or the flush-side release, each trips the balance assert). Leak backstop in every suite:
+TestCtxMetaConservation's funnel workload. GATE: vet, lint 0, full -short ./..., root
+-race -short, flow+funnel -race ×20, pin test ×10 plain ×20 -race, TestBySimulation
+-race batch (see commit). NEXT: fire continuation (driver-contexts.md §Fire — last
+carrier's context, adopt-or-COW, exEnv never carried, cancellation-ancestry OPEN needs a
+test either way), then streamotel consumer.
+
+►► DRIVER-CONTEXTS STEP 1 LANDED (2026-07-09, 9bb6af6) — skim per-item child meta;
 the in-place rider override (skimmer.go skimWork.Execute) is GONE. The regression test
 came first and pinned the misdelivery WORSE than the doc's prediction: within one drive,
 a rider-free item after a rider-carrying one didn't just see the previous item's values —

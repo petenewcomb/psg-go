@@ -1,11 +1,12 @@
 # Driver contexts: who drove a body, and how its context stays readable
 
-> Decision record (2026-07-09, design session with PN). **Status: converged, not
-> yet implemented.** Supersedes the "driver-link rider pin" follow-up sketched in
-> `ctxmeta-parent-refcount.md` — the pin as sketched there mostly dissolves under
-> scrutiny, and what replaces it is smaller, differently placed, and states two
-> load-bearing contracts. This is the prerequisite for driver links in
-> `otel-tracing-on-flows.md`.
+> Decision record (2026-07-09, design session with PN). **Status: implemented
+> (2026-07-09) — skim child meta, flush pin, fire continuation; see "As
+> implemented" at the end.** Supersedes the "driver-link rider pin" follow-up
+> sketched in `ctxmeta-parent-refcount.md` — the pin as sketched there mostly
+> dissolves under scrutiny, and what replaces it is smaller, differently
+> placed, and states two load-bearing contracts. This is the prerequisite for
+> driver links in `otel-tracing-on-flows.md`.
 
 ## The question
 
@@ -159,12 +160,13 @@ Mechanics settled:
   per-item ctx was a ctxpool-lifetime trap" (CP-F6 4a) — no longer binds: the
   pin is exactly what keeps the carrier's ctx un-recycled.
 
-**Open implementation detail, flagged not settled**: cancellation ancestry.
-Adopting the carrier's context makes the fire cancelable by the carrier's
-ctx chain, where today it rides the scheduler's. A fire is end-of-flow
-work with its own error routing (the wave errSink); whether it should be
-shielded from a long-gone submitter's cancellation is to be resolved at
-implementation, with a test either way.
+**Cancellation ancestry — resolved at implementation (2026-07-09): SHIELDED.**
+A fire is end-of-flow cleanup (the otel span-end consumer) with its own error
+routing (the wave errSink); it must run to completion even when the request
+that spawned the flow was canceled long ago. Every arm — adopt included, via
+the selfCtx re-home — roots the fire ctx's ancestry at the scheduler source
+ctx, so the carrier contributes its riders, never its cancellation. Pinned by
+`TestFollowUpFireShieldedFromCancellation`.
 
 ## What the otel layer gets
 
@@ -190,3 +192,29 @@ paths without one (framework pumps), absence is honest and deliberate.
   base ctx carried): the pump is machinery; a link to it is noise.
 - **Hoisting exEnv off the meta**: ctx is the only channel from a body extent
   into submit internals; a separate carrier would just be this slot again.
+
+## As implemented (2026-07-09)
+
+Landed as three sim-gated checkpoints — skim child meta (9bb6af6), flush
+rolling pin (86912a8), fire continuation (55e16e6) — faithful to the record,
+with two load-bearing discoveries the record had not reached:
+
+- **The fire's rider chain is assembled at the count→0 dispatch, not at
+  fire-run** (`buildFireChain`). Instance-ref cover is positional and
+  momentary: every release walk drops its instance refs head→tail, so at the
+  trigger only the suffix below the fired binding's node is still covered and
+  safely re-ref'd. Prefix bindings (acquired after this registration) may
+  already have fired and recycled in the same walk, so prefix nodes cross as
+  value-only copies — the fire reads post-registration values and tag
+  presence but neither pins nor re-fires prefix follow-ups.
+- **All nodes matching the fired binding are peeled, partitioned at the
+  deepest match**: an R6b fan-in union chain carries one node per coalesced
+  leaf instance of the same tag — "one node per id per chain" does not hold
+  there, and any leaf other than the one that closed the component may be a
+  stepped-aside, recycled instance.
+
+The skim item's carrier is the per-item child meta, whose owner ref transfers
+from the handler extent to the work item (`Execute`→`Free`) so the item's
+continuation context is alive when its rider release fires; work freed
+without executing (teardown) has no carrier and takes the
+enclosing-at-registration fallback.

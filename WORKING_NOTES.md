@@ -21,20 +21,22 @@ TestWeightedSemaphore_OverdraftWaitsWhenItFits. Verified: biased hunt config 0/1
 sim -race 28 runs/~5600 cases clean at default Weighted=0.35; weighted+permits+sim unit green.
 NOTE: this was NOT the pre-existing pol_sim1 hang (identical SkimAll-wedge stack, different cause).
 
-**►►► pol_sim1 w=1 HANG ASSESSED FIXED (by 5574a40); remaining -race timeouts = delayq CONVOY
-(perf, not a wedge) (2026-07-06).** Chased the Jul-4 pol_sim1 missed-wake (145 goroutines parked
-in rdvq handoff, ZERO mutex waiters). Cannot reproduce it: 20k non-race cases clean; ~1800 -race
-cases (checks=150, generous 200s timeout, weighted OFF, zero selftime) 0 true wedges. 5574a40's
-commit msg explicitly targets that exact signature ("missed-wake wedge, workers parked in rdvq
-handoff with no senders") — the Cache use-after-recycle corrupted the wake chain; -race caught
-the clean race while un-raced it cascaded to the 145-goroutine handoff wedge. So pol_sim1 = fixed.
-The ONLY -race timeouts now are the DELAYQ CONVOY: hundreds of scheduler workers blocked on the
-delayq Queue mutex (drainScheduled→delayq.Drain→foldUpdates, O(n) under a global lock) with
-runnables still PROGRESSING — a slow-but-live convoy, NOT a deadlock. It false-times-out only at
-high checks vs tight timeout (e.g. checks=300 / 110s; checks≤150 completes in <45s). SEPARATE perf
-item (foldUpdates scalability), not a liveness bug. Signature to distinguish: convoy has many
-sync.Mutex.Lock waiters + progressing runnables; a real missed-wake has ZERO mutex waiters, all
-[select].
+**►►► pol_sim1 / skimSelect-WaitForNew w=1 HANG CONFIRMED FIXED (by 5574a40) via the CORRECT
+recipe; remaining -race timeouts = delayq CONVOY (perf, not a wedge) (2026-07-06).** The Jul-4
+pol_sim1 missed-wake (145 goroutines parked in rdvq handoff, ZERO mutex waiters) — same class as
+flow-impl obs (1) below. CAVEAT ON THE FIRST PASS: an initial chase used ZERO SelfTime, which the
+flow-impl recipe flags as a DEAD CONFIG (zero-delay -race ×2500 → 0 hits; the hang NEEDS real
+delays/parked-worker windows), so that pass was uninformative. RE-VALIDATED with the flow-impl
+recipe (DEFAULT SelfTimes, subjob-add probs raised: Launcher.Body 0.5 / Funnel.Accumulate 0.3 /
+Funnel.Flush 0.5 / Skimmer.Handle 0.3, weighted OFF, -race, checks=10 → ~1/300 checks expected):
+0 true wedges in 1200+ checks (~4 expected if unfixed; also 0 DATA RACE for obs (2)). Combined
+with 5574a40's commit explicitly targeting the signature (Cache use-after-recycle corrupting the
+wake chain; -race caught the clean race, un-raced it cascaded to the handoff wedge) → fixed.
+The only -race timeouts under this recipe are the DELAYQ CONVOY: hundreds of scheduler workers on
+the delayq Queue mutex (drainScheduled→delayq.Drain→foldUpdates, O(n) under a global lock) with
+runnables still PROGRESSING — a slow-but-live convoy, NOT a deadlock (~2/120 iters). SEPARATE perf
+item (foldUpdates scalability). Distinguish: convoy = many sync.Mutex.Lock waiters + progressing
+runnables; real missed-wake = ZERO mutex waiters, all [select].
 
 
 **►►► HANDED OFF FROM flow-impl (2026-07-06): two pre-existing funnel/permits infra
@@ -42,11 +44,11 @@ observations surfaced during the flow-rider-chain work.** Moved here so this thr
 them — neither is a flow bug (flow code audited as nil-rider no-ops on the sim paths; sim
 never calls WithFlow).
 
-**(1) Rare sim HANG — skimSelect/WaitForNew.** LIKELY the same pol_sim1 hang the banner
-above assesses FIXED by 5574a40 (Cache use-after-recycle corrupting the wake chain) — flow-
-impl saw the IDENTICAL signature and independently attributed it PRE-EXISTING. Reconcile
-against that finding; the flow-impl repro recipe below should let you confirm it no longer
-wedges post-5574a40 (vs. the delayq-convoy false-timeout).
+**(1) Rare sim HANG — skimSelect/WaitForNew. → RECONCILED 2026-07-06: CONFIRMED FIXED by
+5574a40** (see the pol_sim1 banner above). Ran the flow-impl recipe below verbatim on combiner
+(default SelfTimes + raised subjob-add probs, weighted off, -race, checks=10): 0 true wedges in
+1200+ checks (~4 expected if live). Same class as pol_sim1; 5574a40's Cache use-after-recycle fix
+covers it. (My own earlier chase's zero-SelfTime config was the dead zone the recipe warns about.)
   - Signature (flow-impl, first seen 2026-07-04, CP-F4 batch iter 27; last seen 2026-07-05
     R6a batch seed 6, intermittent, passed 2/2 on re-run): 10m -race timeout; 6 goroutines;
     NO mutex/semacquire waiters; 4 skim drivers parked ~9m in Wave.skimSelect via
@@ -64,8 +66,20 @@ wedges post-5574a40 (vs. the delayq-convoy false-timeout).
     ~1/2600 ambient). Dead configs: zero-SelfTime no-race ×300 and zero-SelfTime -race ×2500,
     0 hits both. Dumps preserved at flow-impl scratchpad: sim4_race_27.log, bias3_base_hang_1.log.
 
-**(2) Funnel `borrowSrcCtx` -race (DISTINCT from the hang), ~1/400.** NOT obviously covered
-by 5574a40 (different mechanism — confirm whether still live). Seen ~1/400 in
+**(2) Funnel `borrowSrcCtx` -race (DISTINCT from the hang), ~1/400. → FIXED ON flow-impl
+(2026-07-08): the ctxMeta parent refcount CP (docs/decisions/ctxmeta-parent-refcount.md on that
+branch, "As implemented") pins the borrowed-from meta so its ctxpool child can never be freed or
+re-stamped while a reader can still reach it. Do NOT fix separately here
+(coordinate-so-it-lands-once); close this entry when flow-impl merges. Pre-fix status kept for
+the record: STILL OPEN / UNCONFIRMED on combiner (2026-07-06)** — did NOT surface in the
+1200+-check flush-heavy -race recipe run above
+(0 DATA RACE), but that exercises TestBySimulation, not the flow-specific tests where flow-impl saw
+it ~1/400 — so NOT disproven, just not reproduced here. The funnel.go borrowSrcCtx lifecycle
+(Execute stashes c.borrowSrcCtx before the publishing handoff; Run reads it once at the top before
+c.mu — funnel.go:421/447) exists identically on combiner, so the race is plausibly live; needs a
+targeted repro (raise funnel-flush churn + ctxpool child reuse pressure) to confirm. NOT obviously
+covered by 5574a40 (different mechanism: scheduler ctxpool-child Free racing Run's metaFromContext
+read of the borrowed src ctx). Seen ~1/400 in
 TestFlowDefinitionalFollowUp AND the broad flow suite (2026-07-05): `funnelInstance.Run` →
 `borrowBodyContext` → `metaFromContext` READS a ctxpool child's value while an execpool worker
 `ctxpool.(*child).Free()` WRITES it — use-after-free of the flush's scheduler ctx

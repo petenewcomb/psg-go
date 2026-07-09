@@ -260,6 +260,32 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
+►► DRIVER-CONTEXTS STEP 1 LANDED (2026-07-09, this commit) — skim per-item child meta;
+the in-place rider override (skimmer.go skimWork.Execute) is GONE. The regression test
+came first and pinned the misdelivery WORSE than the doc's prediction: within one drive,
+a rider-free item after a rider-carrying one didn't just see the previous item's values —
+by its turn the leaked chain was already RECYCLED (its refs die at the previous item's
+skimWork.Free), so the handler read a DANGLING rider head and lost the drive's riders
+entirely (TestFlowSkimRiderFreeItemIsolation; ordering made structural: the rider-carrying
+item's handler submits the rider-free item, so it necessarily skims later in the same
+drive — queue-order approaches were nondeterministic, warmed pools consistently reordered
+two body-posted items). As landed (skimmer.go): per-item child meta in skimWork.Execute —
+parent = drive meta via refMeta (synchronous, NOT permitRoot: vetNotNestedInSkim/permit
+walk see through), ctxType skim, riders = item chain or driveMeta.riders for a rider-free
+item (nearest-wins now structural), exEnv shared (ownsExEnv false), selfCtx via
+ctxpool.WithValue, owner unrefMeta at handler exit (async handler dispatches keep it via
+their parent ref). NO rider refs on the child: item chain held by wk's submit refs until
+Free, drive chain by the drive scope — both cover the handler's synchronous extent;
+handler dispatches take their own refs at borrow. flowBoundaryAboveWave/vet/held walks
+audited: one extra in-wave link, same results. TestPermitScopingChains updated to the new
+topology (child → drive skim meta → top-level). ALSO: TestFlowAllocFloors now skips under
+-race via a root-package raceEnabled guard (race_on/off_test.go) — the documented
+pre-existing -race flake from the refcount CP's dossier. GATE: vet, lint 0, full -short
+./..., root -race -short, flow-suite -race ×20 + skim/ctxmeta -race ×50, regression test
+red-on-base green-on-fix verified both ways, TestBySimulation -race batch (see commit).
+NEXT: flush rolling node-only pin, then fire continuation (driver-contexts.md), each
+sim-gated; THEN streamotel consumer.
+
 ►► DRIVER-CONTEXTS DESIGN CONVERGED (2026-07-09, PN design session) —
 docs/decisions/driver-contexts.md (supersedes the refcount doc's "driver-link rider pin"
 follow-up; read the doc, this is the summary). TWO CONTRACTS: (1) a ctxMeta is IMMUTABLE

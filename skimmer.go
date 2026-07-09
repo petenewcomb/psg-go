@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/trace"
 
 	"github.com/petenewcomb/streampool/internal/omnipool"
@@ -271,16 +272,44 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	trace.Logf(ctx, traceRegion, "%v", wk)
 
 	ex.Starting()
-	ctx, meta := wk.wave.ctxMeta(ctx)
+	ctx, driveMeta := wk.wave.ctxMeta(ctx)
 
-	// CP-F7: run the handler under the PRODUCING ITEM's riders (a continuation),
-	// not the driver's — the item's chain descends from the driver, so this is
-	// nearest-wins item-over-driver. The refs were taken at submit and are held
-	// until Free; handler dispatches take their own refs on borrow. A rider-free
-	// item leaves the driver-derived riders in place.
+	// The handler runs under a PER-ITEM child meta of the drive meta
+	// (docs/decisions/driver-contexts.md, "Skim handlers get a per-item child
+	// context") rather than overriding the drive meta's riders in place — the
+	// drive meta is ref'd-lifetime immutable, and the override was a live
+	// misdelivery bug (never restored, so a rider-free item skimmed after a
+	// rider-carrying one read the previous item's — possibly already recycled —
+	// chain instead of the drive's).
+	//
+	// parent = the drive meta, a SYNCHRONOUS derivation, not a permitRoot: the
+	// handler runs on the drive goroutine, so vetNotNestedInSkim and the permit
+	// walk must see through to the drive. riders = the item's chain (the CP-F7
+	// nearest-wins continuation, now structural), or the drive's own for a
+	// rider-free item — per item, correctly. No rider refs are taken here: the
+	// item chain is held by wk's submit-time refs until Free, the drive chain by
+	// the drive scope, and both cover the handler's synchronous extent; handler
+	// dispatches take their own refs on borrow. exEnv is shared with the drive
+	// like any derived skim meta (ownsExEnv stays false).
+	meta := newCtxMeta()
+	meta.wave = wk.wave
+	meta.ctxType = skimContext
+	meta.parent = driveMeta
+	refMeta(driveMeta)
+	meta.parentWaves = driveMeta.parentWaves
+	meta.executionEnvironment = driveMeta.executionEnvironment
 	if wk.riders != nil {
 		meta.riders = wk.riders
+	} else {
+		meta.riders = driveMeta.riders
 	}
+	ctx = ctxpool.WithValue(ctx, meta)
+	meta.selfCtx = ctx
+	// The owner ref drops at handler exit; async work dispatched from the
+	// handler keeps the meta (and, via the cascade, the drive meta) alive
+	// through its own parent ref.
+	defer unrefMeta(meta)
+
 	meta.PushGroup(wk.Group())
 	defer meta.PopGroup()
 

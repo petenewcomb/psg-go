@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -765,6 +766,11 @@ func TestFlowNewFlowRoot(t *testing.T) {
 // snapshot + ctxpool child on first use — never per dispatch); reads are
 // free. Floors use the allocsPerOp minimum like the other alloc guards.
 func TestFlowAllocFloors(t *testing.T) {
+	if raceEnabled {
+		// Alloc floors are documented no-race runs: the race runtime adds its
+		// own allocations, tripping the hard 0-floors spuriously.
+		t.Skip("alloc floors are measured without the race detector")
+	}
 	key := streampool.NewFlowKey[int]()
 	body := func(context.Context) error { return nil }
 	ctx := context.Background()
@@ -987,6 +993,80 @@ func TestFlowSkimContinuation(t *testing.T) {
 	chk.Equal([2]any{"item-x", true}, skimSawItem.Load(), "CP-F7: skim continuation carries the producing item's value")
 	chk.Eventually(followUpSawSkim.Load, 5*time.Second, 5*time.Millisecond,
 		"item follow-up must fire only after its result was skimmed")
+}
+
+// TestFlowSkimRiderFreeItemIsolation: within one skim drive, a RIDER-FREE item
+// processed after a rider-carrying one must not see the previous item's flow
+// values — it runs under the drive's own riders (docs/decisions/
+// driver-contexts.md, "Skim handlers get a per-item child context"). Pins the
+// misdelivery in the pre-child-meta in-place rider override, which fired only
+// for rider-carrying items and was never restored: the rider-free item then
+// read the previous item's (by that point recycled) chain instead of the
+// drive's. The rider-carrying→rider-free order is structural here: the
+// rider-carrying item's own handler submits the rider-free item, so it is
+// necessarily handled later in the same drive.
+func TestFlowSkimRiderFreeItemIsolation(t *testing.T) {
+	chk := require.New(t)
+	driverKey := streampool.NewFlowKey[string]()
+	itemKey := streampool.NewFlowKey[string]()
+
+	var wave streampool.Wave
+
+	type seen struct {
+		value     int
+		itemVal   string
+		itemOK    bool
+		driverVal string
+		driverOK  bool
+	}
+	var mu sync.Mutex
+	var handled []seen
+
+	var collector streampool.Skimmer[int]
+	collector = streampool.NewSkimmer(streampool.HandlerFunc[int](
+		func(ctx context.Context, v int, err error) error {
+			if err != nil {
+				return err
+			}
+			iv, iok := itemKey.From(ctx)
+			dv, dok := driverKey.From(ctx)
+			mu.Lock()
+			handled = append(handled, seen{v, iv, iok, dv, dok})
+			mu.Unlock()
+			if v == 1 {
+				// The rider-free item, submitted from a bare ctx (NO riders
+				// captured) while the rider-carrying item is being handled — so
+				// it is skimmed after this one, in this same drive.
+				//nolint:contextcheck // deliberately rider-free: a bare-ctx submit is the regression case
+				return collector.In(&wave).Submit(context.Background(), 2)
+			}
+			return nil
+		},
+	))
+
+	// The producer body posts the rider-carrying item from a per-item scope.
+	producer := streampool.NewFnLauncher(func(ctx context.Context, _ int, err error) error {
+		if err != nil {
+			return err
+		}
+		return streampool.WithFlow(ctx, func(ctx context.Context) error {
+			return collector.Submit(ctx, 1)
+		}, itemKey.Value("carry-x"))
+	})
+
+	// Dispatch outside any flow scope: the producer's body ctx is rider-free.
+	chk.NoError(producer.In(&wave).Submit(context.Background(), 0))
+
+	// Drive under a scope of its own: the rider-free item must inherit THESE
+	// riders — not the previous item's.
+	err := streampool.WithFlow(context.Background(), wave.CloseAndSkimAll,
+		driverKey.Value("driver"))
+	chk.NoError(err)
+
+	chk.Equal([]seen{
+		{1, "carry-x", true, "", false},
+		{2, "", false, "driver", true},
+	}, handled)
 }
 
 // ─── CP-R6a: definitional tag follow-up (shared-chain) ───────────────────────

@@ -62,10 +62,15 @@ func TestPermitScopingChains(t *testing.T) {
 	)
 
 	skimmer := NewFnSkimmer(func(sctx context.Context, _ int, _ error) error {
+		// The handler runs under a PER-ITEM child of the drive's skim meta
+		// (docs/decisions/driver-contexts.md): child → drive skim meta →
+		// top-level meta, all one synchronous extent (no permitRoot between).
 		_, skimMeta := wave.ctxMeta(sctx)
 		skimSeen = true
 		skimCtxType = skimMeta.ctxType
-		skimParentIsTop = skimMeta.parent == topMeta
+		skimParentIsTop = skimMeta.syncParent() != nil &&
+			skimMeta.syncParent().ctxType == skimContext &&
+			skimMeta.syncParent().syncParent() == topMeta
 		return nil
 	})
 
@@ -125,7 +130,8 @@ func TestPermitScopingChains(t *testing.T) {
 
 	require.True(t, skimSeen)
 	assert.Equal(t, skimContext, skimCtxType)
-	assert.True(t, skimParentIsTop, "top-level→skim derivation must chain parent")
+	assert.True(t, skimParentIsTop,
+		"per-item skim meta must chain synchronously through the drive skim meta to the top-level meta")
 }
 
 // TestHeldPermitStampedDuringBodies pins the end-to-end stamp+walk property: a limited

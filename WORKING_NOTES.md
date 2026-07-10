@@ -260,6 +260,30 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
+►► PinFlow/UnpinFlow LANDED (2026-07-10, this commit) — the retention half of
+context-pinning-and-origin-access.md (read its "As implemented"). pin.go: PinFlow MINTS
+the pinned ctx (fresh meta: topLevelContext, permitRoot, pinLive marker, parent=src
+ref'd for origin-chain walkability, riders=src chain under the pin's OWN
+flowRefRiders+nodeRef, Background-rooted ctxpool child = the token); UnpinFlow validates
+exact token (selfCtx identity + marker) + CAS pinLive→pinExpired (racing double-unpin
+loses loudly), releases carrier refs in chain order (same walk-cover discipline as every
+release site; the pin meta is the fire's last carrier), fires INLINE — DEVIATION: UnpinFlow
+RETURNS error (fires join it, the WithFlow-scope-exit shape; async has no wave to root
+at). ctxMeta gains pin atomic.Int32 (pinNone/pinLive/pinExpired) + vetNotExpiredPin,
+checked at ensureCtxMeta (all dispatch derivations), WithFlow, PinFlow — detection window
+= the meta's survival (an immediately-recycled token's re-pin degrades to an empty pin,
+the documented residual; the validation test creates the deterministic window with an
+in-flight task). Tests (pin_test.go): retention (values readable post-scope; follow-up
+gated on unpin; fire error joins), dispatch-from-pin end-to-end (body reads values;
+follow-up waits for work AND unpin; wave-less ⇒ op.In required, panic pinned),
+exact-token/double/derivative/expired validation, compose+handoff (fires once),
+degenerate bare-ctx pin, multi-goroutine concurrent dispatch (-race). Conservation: BOTH
+conservation tests gain pin arcs asserting the standing pin as a DELIBERATE POSITIVE
+(leaked pin visible) and zero after release. GATE: vet, lint 0, full -short ./..., root
+-race -short, flow+pin -race ×20, pin+conservation -race ×20, TestBySimulation -race
+batch (see commit). NEXT: OriginFlow + the flush origin link (the read half), then
+streamotel.
+
 ►► FLOW OPTION VOCABULARY + SEQUENTIAL SEMANTICS LANDED (2026-07-10, this commit, PN
 design session) — TWO changes, one checkpoint. (1) NewFlow() → Disconnect(): the old name
 contradicted flow-design's own ontology ("flows are not created"); trail in flow-design.md

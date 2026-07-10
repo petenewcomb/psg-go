@@ -405,6 +405,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	src, _ := metaFromContext(ctx)
 	var ambient *flowRiderNode
 	if src != nil {
+		src.vetNotExpiredPin()
 		ambient = src.riders
 	}
 	riders, created := buildFlowRiders(ambient, opts)

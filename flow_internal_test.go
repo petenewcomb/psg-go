@@ -60,6 +60,18 @@ func TestFlowNodeConservation(t *testing.T) {
 		Disconnect(), key.Value(6)))
 	settled("sequential-layer disposal")
 
+	// (A3) Pinned flow: the pin's node refs hold the chain past the source
+	// scope (a deliberate positive while it stands); UnpinFlow releases it,
+	// firing the follow-up inline, and every node returns.
+	var pinned context.Context
+	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
+		pinned = PinFlow(ctx)
+		return nil
+	}, key.Value(7), tag.FollowUpFn(func(context.Context) error { return nil })))
+	chk.Positive(balance.Load(), "a standing pin holds rider nodes — a leaked pin is visible")
+	chk.NoError(UnpinFlow(pinned))
+	settled("pinned flow released")
+
 	// (B) Async work outliving the scope: the follow-up fires from the wave drain,
 	// so the instance's enclosing ref (and the chain behind it) must survive the
 	// gap between count→0 and the async fire, then reclaim.

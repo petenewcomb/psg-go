@@ -93,6 +93,29 @@ type ctxMeta struct {
 	// double-free it).
 	selfCtx   context.Context //nolint:containedctx // the ctxpool child this meta rides; freed at refs==0
 	ownsExEnv bool
+
+	// pin marks a meta minted by PinFlow (docs/decisions/
+	// context-pinning-and-origin-access.md): pinNone for every ordinary meta,
+	// pinLive from mint until UnpinFlow, pinExpired after. The live→expired
+	// flip is a CAS so a racing double-unpin loses loudly; expired is what the
+	// cold entry paths (PinFlow, UnpinFlow, ensureCtxMeta, WithFlow) panic on
+	// — best-effort use-after-unpin detection, impossible once the ctxpool
+	// child is reused (the documented residual).
+	pin atomic.Int32
+}
+
+const (
+	pinNone int32 = iota
+	pinLive
+	pinExpired
+)
+
+// vetNotExpiredPin panics on a context whose pin has been released: past the
+// pin window a framework ctx is invalid, the same rule as every extent.
+func (cm *ctxMeta) vetNotExpiredPin() {
+	if cm.pin.Load() == pinExpired {
+		panic("streampool: use of an unpinned flow context (UnpinFlow already called)")
+	}
 }
 
 // Reset implements omnipool.Resetter (refs is atomic.Int32, whose noCopy would
@@ -108,6 +131,7 @@ func (cm *ctxMeta) Reset() {
 	cm.selfCtx = nil
 	cm.ownsExEnv = false
 	cm.permitRoot = false
+	cm.pin.Store(pinNone)
 	cm.refs.Store(0)
 }
 
@@ -512,6 +536,9 @@ func (wv *Wave) ensureCtxMeta(
 	// Source/parent meta via the read seam. The derived meta below is stamped onto a
 	// fresh ctxpool child so a later metaFromContext resolves IT (nearest child wins).
 	sourceMeta, _ := metaFromContext(ctx)
+	if sourceMeta != nil {
+		sourceMeta.vetNotExpiredPin()
+	}
 
 	ctxType := topLevelContext
 	var parentWaves map[*Wave]struct{}

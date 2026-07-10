@@ -1,8 +1,8 @@
 # Context pinning and origin access: retention and the read surface
 
-> Decision record (2026-07-09/10, design sessions with PN). **Status: converged,
-> not yet implemented. Names settled: `OriginFlow`, `PinFlow`/`UnpinFlow`
-> (see "Naming").**
+> Decision record (2026-07-09/10, design sessions with PN). **Status:
+> `PinFlow`/`UnpinFlow` implemented (2026-07-10; see "As implemented");
+> `OriginFlow` designed, not yet implemented. Names settled (see "Naming").**
 > Builds on `driver-contexts.md` (implemented), which put the lifetime
 > machinery in place; this record designs the two public surfaces that read
 > and retain it. Generalizes what `otel-tracing-on-flows.md` needs — the otel
@@ -39,9 +39,9 @@ is actually pinned: carrier semantics holds the FLOW open, while the
 context's extent (wave, permit, exEnv) is deliberately dropped:
 
 ```go
-pinned := psg.PinFlow(ctx)  // inside the extent where ctx is valid
-...                         // pinned is an ordinary Go context: share, store, retain
-psg.UnpinFlow(pinned)       // releases; the flow may now end
+pinned := psg.PinFlow(ctx)    // inside the extent where ctx is valid
+...                           // pinned is an ordinary Go context: share, store, retain
+err := psg.UnpinFlow(pinned)  // releases; a flow ending here fires inline, errors join
 ```
 
 `PinFlow` MINTS the pinned context rather than blessing the argument in
@@ -314,3 +314,28 @@ also lands symmetric: pin flows, unpin flows, get the origin flow.
   as a deliberate positive; UnpinFlow restores zero), a pinned-dispatch end-to-end
   test (values delivered, follow-up waits for UnpinFlow), and a
   multi-goroutine pinned-dispatch -race test.
+
+## As implemented: PinFlow / UnpinFlow (2026-07-10)
+
+Faithful to the record, with two clarifications discovered at implementation:
+
+- **`UnpinFlow` returns `error`.** The unpin is a synchronous user call site —
+  the same shape as a `WithFlow` scope exit — so a fire it triggers runs
+  INLINE as the pin's continuation and its error joins the return, exactly
+  like scope-exit fires join `WithFlow`'s. (The alternative, a wave-rooted
+  async fire, has no wave to root at: the pin is wave-less by design.)
+- **The expired-marker detection window is exactly the meta's survival.** A
+  pin with no surviving children recycles at the unpin, taking the marker
+  with it — so a re-pin of an immediately-recycled token degrades to minting
+  an empty pin rather than panicking. While anything still holds the meta
+  (in-flight work dispatched from the pin), every framework entry — `PinFlow`,
+  `WithFlow`, dispatch derivation (`ensureCtxMeta`) — panics on the expired
+  pin. This is the record's "best-effort, honestly bounded" made precise.
+
+The pin meta carries `parent` (ref'd) to the source meta, keeping the origin
+chain walkable for the pin's lifetime — the position half of "structurally a
+scope meta." Validation: retention/dispatch/compose/degenerate/validation
+tests (pin_test.go), a multi-goroutine pinned-dispatch -race test, and
+conservation arcs in both TestCtxMetaConservation and TestFlowNodeConservation
+that assert the standing pin as a DELIBERATE positive (a leaked pin is
+visible) and zero after release.

@@ -16,6 +16,7 @@ format.
 - Job.Close and Job.CloseAndGatherAll
 - Combine, et. al. for scalable aggregation of task results before passing to gather operations
 - Flow riders (`WithFlow`, `FlowKey`, `FlowTag`, follow-ups) for path- and DAG-scoped context propagation and end-of-flow lifecycle hooks (subsumes the removed psgwf package)
+- Pinned flow contexts (`PinFlow`/`UnpinFlow`): explicit, refcounted retention of a flow beyond its extent — the pinned context is an ordinary shareable Go context that carries the flow until unpinned
 - otpsg module providing OpenTelemetry integration and observability patterns
 - Comprehensive options pattern implementation via psgopt package
 - SetOptions methods for atomic configuration updates across all components

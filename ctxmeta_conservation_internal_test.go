@@ -103,4 +103,22 @@ func TestCtxMetaConservation(t *testing.T) {
 			NewFlowTag().FollowUpFn(func(context.Context) error { return nil }))
 	}, FlowFollowUpFn(func(context.Context) error { return nil })))
 	settled("inline scope fires")
+
+	// (F) Pinned flow: while the pin stands, the metas it holds are a
+	// DELIBERATE positive — a leaked pin is visible here by design — and
+	// UnpinFlow restores zero. The pin arc covers mint (PinFlow), retention
+	// past the source scope, dispatch from the pin, and the unpin release.
+	pinKey := NewFlowKey[int]()
+	var pinned context.Context
+	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
+		pinned = PinFlow(ctx)
+		return nil
+	}, pinKey.Value(1), NewFlowTag().FollowUpFn(func(context.Context) error { return nil })))
+	chk.Positive(balance.Load(), "a standing pin holds metas out of the pool — a leaked pin is visible")
+	var pwave Wave
+	ptask := NewTaskLauncher(func(context.Context) error { return nil })
+	chk.NoError(ptask.In(&pwave).Start(pinned))
+	chk.NoError(pwave.CloseAndSkimAll(context.Background()))
+	chk.NoError(UnpinFlow(pinned))
+	settled("pinned flow released")
 }

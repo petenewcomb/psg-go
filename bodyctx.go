@@ -112,6 +112,12 @@ func releaseBodyContext(ctx context.Context) {
 		ctxpool.Free(ctx)
 		return
 	}
+	// The origin link's validity ends with the extent (the rolling pin that
+	// guarantees the linked meta is released right after the flush body); the
+	// meta itself may outlive this release on its children's refs, so the
+	// link cannot wait for Reset. Unconditional: origin is nil on all but
+	// flush metas, and the refs.Add below dirties this cache line anyway.
+	m.origin.Store(nil)
 	riders := m.riders
 	wave := m.wave // the wave a fire dispatched by the rider release routes into
 	// m is the carrier whose release may end a flow: a fire dispatched by this

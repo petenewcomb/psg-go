@@ -94,6 +94,17 @@ type ctxMeta struct {
 	selfCtx   context.Context //nolint:containedctx // the ctxpool child this meta rides; freed at refs==0
 	ownsExEnv bool
 
+	// origin is the flush body's origin link (docs/decisions/
+	// context-pinning-and-origin-access.md): the last accumulate's meta,
+	// stamped from the funnel instance's rolling driver pin while that pin is
+	// still held — the ONE origin that is not the meta's own parent (a flush
+	// body's parent is the scheduler-side borrow source, framework plumbing).
+	// Set under single-party custody (the flush's own borrow or fan-in clone,
+	// before the user body runs), cleared by releaseBodyContext; atomic so a
+	// composed OriginFlow walk racing the clear reads a coherent pointer. nil
+	// on every non-flush meta.
+	origin atomic.Pointer[ctxMeta]
+
 	// pin marks a meta minted by PinFlow (docs/decisions/
 	// context-pinning-and-origin-access.md): pinNone for every ordinary meta,
 	// pinLive from mint until UnpinFlow, pinExpired after. The live→expired
@@ -131,6 +142,7 @@ func (cm *ctxMeta) Reset() {
 	cm.selfCtx = nil
 	cm.ownsExEnv = false
 	cm.permitRoot = false
+	cm.origin.Store(nil)
 	cm.pin.Store(pinNone)
 	cm.refs.Store(0)
 }

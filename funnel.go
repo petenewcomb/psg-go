@@ -505,7 +505,7 @@ func (c *funnelInstance[T]) Run(ee *workerExEnv) {
 	unrefMeta(srcMeta) // the borrow holds its own parent ref now; drop the Execute pin
 	defer releaseBodyContext(bodyCtx)
 	c.mu.Lock()
-	c.flush(bodyCtx)
+	c.flush(bodyCtx, true)
 	detached := c.detached
 	c.mu.Unlock()
 	if detached {
@@ -624,7 +624,11 @@ func (c *funnelInstance[T]) accumulate(
 		// already drained, so its pending Execute will flush the data just accumulated
 		// and we leave the accumulator live (rule R1).
 		if defaultPool.ClaimForFlush(c) {
-			c.flush(ctx)
+			// ownMeta false: the inline flush runs on the TRIGGERING accumulate's
+			// own (published) ctx, which must not be stamped; with no fan-in
+			// clone, OriginFlow inside such a flush resolves the accumulate's
+			// parent — the reader is already AT the last accumulate's position.
+			c.flush(ctx, false)
 		}
 	default:
 		// Future deadline: (re)schedule on the shared pool's queue, where a worker
@@ -639,7 +643,10 @@ func (c *funnelInstance[T]) accumulate(
 // (false if the instance was already flushed). Drops the per-instance wave
 // barrier reference, but NOT the pooled object — the caller does that after
 // releasing c.mu (an owner reuse-pop, a detached Execute, or the end-of-work sweep).
-func (c *funnelInstance[T]) flush(ctx context.Context) bool {
+// ownMeta reports that ctx's meta is this flush's own single-custody borrow
+// (the executor path), stampable with the origin link; the fan-in clone below
+// is always stampable regardless.
+func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	traceRegion := "funnelInstance.flush"
 
 	accumulator := c.accumulator
@@ -678,6 +685,21 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 		c.boundary = nil
 		flushCtx = fc
 		ctx = fc
+		ownMeta = true
+	}
+
+	// Stamp the flush body's origin link (docs/decisions/
+	// context-pinning-and-origin-access.md): the flush's origin is THE LAST
+	// ACCUMULATE, reachable through the instance's rolling driver pin — held
+	// right now (released by the defer below, after the body), which is
+	// exactly the origin's validity window. Only a meta this flush owns is
+	// stamped (single-party custody; the inline tag-free path runs on the
+	// triggering accumulate's published ctx and stays unstamped — the reader
+	// there is already at the last accumulate's position).
+	if ownMeta {
+		if m, ok := metaFromContext(ctx); ok {
+			m.origin.Store(c.driverMeta)
+		}
 	}
 
 	// Release the per-instance flush barrier reference acquired at

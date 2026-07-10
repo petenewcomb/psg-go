@@ -260,6 +260,34 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
+►► OriginFlow LANDED (2026-07-10, this commit) — the READ half; the pinning/origin record
+is now FULLY IMPLEMENTED (PinFlow/UnpinFlow 08aae99, HoldFlow fdcafbf+ea7241f, OriginFlow
+here; §"As implemented: OriginFlow"). origin.go: one switch over the resolved meta —
+(1) explicit origin link wins (NEW atomic field ctxMeta.origin): the FLUSH case — the last
+accumulate's meta stamped from the step-2 rolling driver pin while held (in flush under
+c.mu, onto the fan-in clone OR the executor path's own borrow via the new flush(ctx,
+ownMeta) flag — both single-custody at stamp; cleared by releaseBodyContext = the pin's
+validity window; the INLINE TAG-FREE flush runs ON the triggering accumulate's published
+ctx — unstampable — and resolves its parent: the reader is already AT the origin's
+position); (2) fire metas → ok=false (async = skim-typed permitRoot; INLINE scope-exit
+fire = TOP-LEVEL-typed permitRoot — caught during impl; the pin MARKER disambiguates
+pinned ctxs, also top-level permitRoots, whose origin IS their parent = the source ref
+PinFlow deliberately kept); (3) default → meta.parent (dispatcher/drive/enclosing),
+deliberately ignoring permitRoot — origin IS the cross-extent hop the refcounted parent
+link exists for. Returns origin.selfCtx (alive for the caller's extent via parent-chain
+refs; flush origin for the flush extent via the pin) so From/InFlow/PinFlow/HoldFlow
+compose unchanged; expired-pin vet on entry (cold path per record). Tests
+(origin_test.go): task+scope hops w/ composition; skim handler drive-vs-item
+discrimination (item value on ctx NOT on origin; drive value on origin); flush sweep +
+inline-tagged (SHARP assert via the sever: per-item value absent on flush ctx, present on
+origin); fire absence async+inline; pin→source; hold→absent; pin-the-origin retention.
+GATE: vet, lint 0, full -short ./..., root -race -short, flow/origin/pin/hold -race ×20
+×9 runs (2 hits of the KNOWN pre-existing TestFlowTagFunnelUnion flake under concurrent
+sim load — flushSawB line 692, the documented signature, rate matches the dossier; 0
+DATA RACE, 0 origin/pin/hold failures), 20/20 TestBySimulation -race (see commit). NEXT:
+streamotel consumer (otel-tracing-on-flows.md) — the full driver-attribution + retention
++ read stack is now in place.
+
 ►► HoldFlow LANDED (2026-07-10, this commit, PN design session) — the SAFE retention tier
 (record §HoldFlow — read it; three designs died first: AfterFunc pattern SWALLOWED fire
 errors; the fires→cancel→teardown sandwich failed because CANCEL IS A NOTIFICATION NOT A

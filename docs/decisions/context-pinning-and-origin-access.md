@@ -1,9 +1,9 @@
 # Context pinning and origin access: retention and the read surface
 
-> Decision record (2026-07-09/10, design sessions with PN). **Status:
-> `PinFlow`/`UnpinFlow` and `HoldFlow` implemented (2026-07-10; see "As
-> implemented" and "HoldFlow"); `OriginFlow` designed, not yet implemented.
-> Names settled (see "Naming").**
+> Decision record (2026-07-09/10, design sessions with PN). **Status: FULLY
+> IMPLEMENTED (2026-07-10) — `PinFlow`/`UnpinFlow`, `HoldFlow`, and
+> `OriginFlow` (see the "As implemented" sections). Names settled (see
+> "Naming").**
 > Builds on `driver-contexts.md` (implemented), which put the lifetime
 > machinery in place; this record designs the two public surfaces that read
 > and retain it. Generalizes what `otel-tracing-on-flows.md` needs — the otel
@@ -424,3 +424,38 @@ token — far past "same operation, variant ergonomics", so the same-verb rule
 that rejected RetainFlow now cuts the other way and demands a different
 verb); the release-func objection stays answered (the `(ctx,
 CancelCauseFunc)` pair is Go's standard issue).
+
+
+## As implemented: OriginFlow (2026-07-10)
+
+Faithful to the design, with the per-path resolution realized as one switch
+over the resolved meta (origin.go):
+
+- an explicit `origin` link (a new atomic field on `ctxMeta`) wins — the
+  flush case: the last accumulate's meta, stamped from the funnel instance's
+  rolling driver pin while it is held (in `flush`, under `c.mu`, onto the
+  fan-in clone or the executor path's own borrow — both single-party custody
+  at stamp), cleared by `releaseBodyContext` with the extent, exactly the
+  pin's validity window. The inline tag-free flush runs directly ON the
+  triggering accumulate's published ctx (unstampable by the immutability
+  contract) and resolves that accumulate's parent instead — the reader is
+  already at the origin's position, so nothing is lost;
+- a fire meta reports absence: async fires are the skim-typed permit roots,
+  the inline scope-exit fire the top-level-typed one, and the pin marker is
+  what distinguishes a pinned ctx (also a top-level permit root, whose origin
+  IS its parent, the pinned source — the ref `PinFlow` deliberately keeps);
+- everything else hops to `meta.parent` — the dispatcher for a borrowed body,
+  the drive for a skim handler's per-item child, the enclosing meta for a
+  scope. The hop deliberately ignores `permitRoot`: origin is exactly the
+  cross-extent relationship the refcounted parent link exists to support,
+  where the synchronous-extent walks must stop.
+
+The returned context is the origin meta's own `selfCtx` — alive for the
+caller's extent via the parent-chain refs (the flush origin specifically via
+the rolling pin, for the flush body's extent), which is why every read and
+`PinFlow`/`HoldFlow` compose against it unchanged. Validation: per-path tests
+(task/scope hops with composition, skim handler drive-vs-item discrimination,
+flush via both the sweep and inline-tagged paths — the severing fan-in makes
+that assertion sharp: the per-item value absent on the flush ctx, present on
+its origin — fire absence both async and inline, pin resolution, hold
+absence, and pin-the-origin retention).

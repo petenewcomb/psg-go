@@ -92,7 +92,7 @@ func flowExpectsForCtx(ctx context.Context, t assert.TestingT, parent *controlle
 	for _, e := range parent.flow.expects {
 		v, ok := e.key.From(ctx)
 		if !ok {
-			continue // absent (e.g. a NewFlow root) — legal; a present key must match
+			continue // absent (e.g. a FlowDisconnect root) — legal; a present key must match
 		}
 		chk.Equalf(e.val, v, "flow key misdelivery at subjob entry: got %d want %d", v, e.val)
 		chk.Truef(e.tag.InFlow(ctx), "flow tag absent while its bundle value is present")

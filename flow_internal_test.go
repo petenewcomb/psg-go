@@ -43,7 +43,7 @@ func TestFlowNodeConservation(t *testing.T) {
 	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
 		return WithFlow(ctx, func(ctx context.Context) error {
 			return WithFlow(ctx, func(context.Context) error { return nil },
-				NewFlow(), key.Value(9), inner.FollowUpFn(func(context.Context) error { return nil }))
+				FlowDisconnect(), key.Value(9), inner.FollowUpFn(func(context.Context) error { return nil }))
 		}, key.Suppress(), tag.FollowUpFn(func(context.Context) error { return nil }))
 	}, key.Value(1), tag.FollowUpFn(func(context.Context) error { return nil })))
 	settled("inline nesting")

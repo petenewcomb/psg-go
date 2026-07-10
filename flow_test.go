@@ -741,9 +741,9 @@ func TestFlowSuppress(t *testing.T) {
 		"suppressed identities read absent in the subtree body")
 }
 
-// TestFlowNewFlowRoot: NewFlow() clears the whole inherited set; sibling
+// TestFlowDisconnectRoot: FlowDisconnect() clears the whole inherited set; sibling
 // options add to the fresh root, in any order.
-func TestFlowNewFlowRoot(t *testing.T) {
+func TestFlowDisconnectRoot(t *testing.T) {
 	chk := require.New(t)
 	inherited := streampool.NewFlowKey[string]()
 	freshKey := streampool.NewFlowKey[int]()
@@ -756,7 +756,7 @@ func TestFlowNewFlowRoot(t *testing.T) {
 			chk.True(ok)
 			chk.Equal(9, v)
 			return nil
-		}, freshKey.Value(9), streampool.NewFlow()) // NewFlow listed last: order-independent
+		}, freshKey.Value(9), streampool.FlowDisconnect()) // Disconnect listed last: order-independent
 	}, inherited.Value("outer"))
 	chk.NoError(err)
 }

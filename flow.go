@@ -135,11 +135,11 @@ const (
 	flowOptFollowUp
 	flowOptInfuse
 	flowOptSuppress
-	flowOptNewFlow
+	flowOptDisconnect
 )
 
 // FlowOption configures a [WithFlow] scope. Obtain options from the methods on
-// [FlowKey] and [FlowTag] (Value, FollowUp, Suppress) or from [NewFlow]; the zero
+// [FlowKey] and [FlowTag] (Value, FollowUp, Suppress) or from [FlowDisconnect]; the zero
 // FlowOption is invalid and panics when passed to WithFlow. It is a value type
 // (no interface boxing), so a registering scope allocates nothing warm.
 type FlowOption struct {
@@ -357,13 +357,16 @@ func (t FlowTag) Suppress() FlowOption {
 	return FlowOption{kind: flowOptSuppress, id: t.id}
 }
 
-// NewFlow returns a [FlowOption] that roots a fresh flow: the scope starts
-// from an EMPTY rider set instead of inheriting the ambient one — the
-// explicit form of what a funnel fan-in does implicitly for path-scoped
-// riders. Sibling options add to the fresh set, in any order; per-identity
-// [FlowKey.Suppress]/[FlowTag.Suppress] are its targeted counterparts.
-func NewFlow() FlowOption {
-	return FlowOption{kind: flowOptNewFlow}
+// FlowDisconnect returns a [FlowOption] that disconnects the scope from the
+// ambient rider set: it starts EMPTY — nothing inherited, values or tags, a
+// stricter cut than a funnel fan-in (which severs values but unions tags
+// through). The causal flow itself continues (work dispatched inside still
+// descends from this scope; cancellation still rides ctx ancestry); only the
+// inherited riders are dropped. Sibling options add to the fresh set, in any
+// order; per-identity [FlowKey.Suppress]/[FlowTag.Suppress] are its targeted
+// counterparts.
+func FlowDisconnect() FlowOption {
+	return FlowOption{kind: flowOptDisconnect}
 }
 
 // WithFlow runs body inline on the calling goroutine with a context whose
@@ -583,7 +586,7 @@ func rebuild(head, stop *flowRiderNode, keep func(*flowRiderNode) bool) *flowRid
 }
 
 // buildFlowRiders derives a fresh chain head: the inherited chain (dropped for
-// NewFlow, filtered for Suppress) with this scope's addition nodes linked ahead
+// Disconnect, filtered for Suppress) with this scope's addition nodes linked ahead
 // of it. A nested scope re-registering a key prepends a fresh node, so the walk
 // finds it first — nearest scope wins, exactly as the flat snapshot's
 // replace-or-append did. Each identity's value is settled from all its Value
@@ -607,7 +610,7 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		case flowOptValue, flowOptFollowUp, flowOptInfuse:
 		case flowOptSuppress:
 			anySuppress = true
-		case flowOptNewFlow:
+		case flowOptDisconnect:
 			fresh = true
 		default:
 			panic("streampool: invalid (zero) FlowOption passed to WithFlow")

@@ -16,7 +16,7 @@ format.
 - Job.Close and Job.CloseAndGatherAll
 - Combine, et. al. for scalable aggregation of task results before passing to gather operations
 - Flow riders (`WithFlow`, `FlowKey`, `FlowTag`, follow-ups) for path- and DAG-scoped context propagation and end-of-flow lifecycle hooks (subsumes the removed psgwf package)
-- Flow retention: `PinFlow`/`UnpinFlow`, the pooled in-place primitive (extent rules apply), and `HoldFlow`, the GC-owned safe tier — a cancelable held context whose release fires follow-ups, merges their errors into the cancellation cause, and leaves the handle fully usable as a snapshot (no undefined behavior, before or after release)
+- Flow retention: `PinFlow`/`UnpinFlow`, the pooled in-place primitive (extent rules apply), and `HoldFlow`, the GC-owned safe tier — a cancelable held context whose cancel fires follow-ups, merges their errors into the cancellation cause, and leaves the handle fully usable as a snapshot (no undefined behavior, before or after release)
 - otpsg module providing OpenTelemetry integration and observability patterns
 - Comprehensive options pattern implementation via psgopt package
 - SetOptions methods for atomic configuration updates across all components

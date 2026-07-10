@@ -78,13 +78,13 @@ func TestFlowNodeConservation(t *testing.T) {
 	// and every pooled node returns.
 	var heldFires atomic.Int64
 	var held context.Context
-	var releaseHold context.CancelCauseFunc
+	var cancelHold context.CancelCauseFunc
 	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		held, releaseHold = HoldFlow(ctx)
+		held, cancelHold = HoldFlow(ctx)
 		return nil
 	}, key.Value(8), tag.FollowUpFn(func(context.Context) error { heldFires.Add(1); return nil })))
 	chk.Equal(int64(0), heldFires.Load(), "the hold carries the flow past the scope")
-	releaseHold(nil)
+	cancelHold(nil)
 	chk.Equal(int64(1), heldFires.Load(), "release ends the flow")
 	_ = held
 	settled("held flow released")

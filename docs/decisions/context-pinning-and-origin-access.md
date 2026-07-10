@@ -376,9 +376,9 @@ the codebase already uses for carrier refs keeping instances alive:
 `flowInstance.holds`).
 
 ```go
-held, release := psg.HoldFlow(ctx) // inside the extent where ctx is valid
-...                                // held: ordinary GC-owned cancelable ctx
-release(cause)                     // fires → sever → cancel(Join(cause, fireErrs))
+held, cancel := psg.HoldFlow(ctx) // inside the extent where ctx is valid
+...                               // held: ordinary GC-owned cancelable ctx
+cancel(cause)                     // fires → sever → cancel(Join(cause, fireErrs))
 ```
 
 Mechanics:
@@ -410,11 +410,13 @@ Mechanics:
   sequencing its own dispatches against its own release is the natural
   contract. POST-release dispatch is defined but ordinary-canceled: the work
   carries the severed value-only snapshot and a canceled ancestry.
-- **Release order** is fires → sever → cancel: errors must exist before the
-  cancel that carries them, and dispatch after the sever sees the value-only
-  chain. `sync.Once` makes release idempotent per the CancelCauseFunc
-  convention. A hold whose release never runs keeps its flow open forever —
-  a resource-closer discipline, deliberately.
+- **The returned func is named `cancel`, not `release`** (PN): canceling held
+  is its most user-visible effect, and "release" hides it; canceling IS how
+  the hold releases. Order: fires → sever → cancel — errors must exist before
+  the cancel that carries them, and dispatch after the sever sees the
+  value-only chain. `sync.Once` makes cancel idempotent per the
+  CancelCauseFunc convention. A hold whose cancel never runs keeps its flow
+  open forever — a resource-closer discipline, deliberately.
 
 Superseded along the way: `RetainFlow` and `PinFlowWithCancel` as names (the
 semantics diverged from the pin — GC ownership, snapshot reads, no exact

@@ -273,13 +273,13 @@ TWO GC copies of the chain, permanent +1 ref bias (never poolable): LIVE (real i
 dispatch extends real lifetimes) + SEVERED (value-only); wrapper delegates ctx methods to
 an atomically-swapped inner ctxpool child (both over one WithCancelCause(Background);
 ctxpool cooperates — children of canceled parents fall out of the pool by design).
-release (Once, idempotent): FIRES (inline, carrier=live hold meta, chain-order cover, GC
+the returned CANCEL (PN: name it cancel not release — canceling is its visible effect; Once, idempotent): FIRES (inline, carrier=live hold meta, chain-order cover, GC
 chain ⇒ concurrent readers safe) → SEVER (swap to value-only) → CANCEL(Join(cause,
 fireErrs)); nil cause defaults to context.Canceled FIRST (fire error never the primary
 cause). POST-RELEASE: reads = snapshot-as-of-hold FOREVER (copy-over-absent: the copy
 must exist for race-freedom anyway; liveness truth lives in Err()/Cause, values are
 facts); dispatch = defined ordinary-canceled (value-only riders). Documented asymmetry:
-reads race-free vs release; dispatch is not (same class as any ending extent). Tests:
+reads race-free vs cancel; dispatch is not (same class as any ending extent). Tests:
 retention+snapshot-reads, nil-cause primary, dispatch (waits for work AND release),
 post-release dispatch defined, CONCURRENT-READS-DURING-RELEASE -race (the crown jewel:
 zero misses before/during/after), UnpinFlow(held) rejected, conservation arc (A4). GC

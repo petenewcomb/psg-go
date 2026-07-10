@@ -31,9 +31,9 @@ func TestHoldFlowRetention(t *testing.T) {
 	var fires atomic.Int32
 	var fireSawLive atomic.Bool
 	var held context.Context
-	var release context.CancelCauseFunc
+	var cancel context.CancelCauseFunc
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		held, release = streampool.HoldFlow(ctx)
+		held, cancel = streampool.HoldFlow(ctx)
 		return nil
 	}, key.Value("kept"), tag.FollowUpFn(func(context.Context) error {
 		// Fires run before the cancel: held is readable and not yet canceled.
@@ -53,7 +53,7 @@ func TestHoldFlowRetention(t *testing.T) {
 	_, hasDeadline := held.Deadline()
 	chk.False(hasDeadline)
 
-	release(causeErr)
+	cancel(causeErr)
 	chk.Equal(int32(1), fires.Load(), "the release ends the flow; the follow-up fires inline")
 	chk.True(fireSawLive.Load(), "fires run before the cancel")
 	chk.ErrorIs(held.Err(), context.Canceled)
@@ -68,7 +68,7 @@ func TestHoldFlowRetention(t *testing.T) {
 	chk.True(tag.InFlow(held), "tag presence reads from the snapshot too")
 
 	// Idempotent: no panic, first cause wins, no re-fire.
-	release(errors.New("second"))
+	cancel(errors.New("second"))
 	chk.Equal(int32(1), fires.Load())
 	chk.ErrorIs(context.Cause(held), causeErr)
 }
@@ -78,20 +78,20 @@ func TestHoldFlowRetention(t *testing.T) {
 func TestHoldFlowNilCause(t *testing.T) {
 	chk := require.New(t)
 
-	held, release := streampool.HoldFlow(context.Background())
-	release(nil)
+	held, cancel := streampool.HoldFlow(context.Background())
+	cancel(nil)
 	chk.ErrorIs(held.Err(), context.Canceled)
 	chk.ErrorIs(context.Cause(held), context.Canceled)
 
 	fireErr := errors.New("fire error")
 	tag := streampool.NewFlowTag()
 	var h2 context.Context
-	var r2 context.CancelCauseFunc
+	var c2 context.CancelCauseFunc
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		h2, r2 = streampool.HoldFlow(ctx)
+		h2, c2 = streampool.HoldFlow(ctx)
 		return nil
 	}, tag.FollowUpFn(func(context.Context) error { return fireErr })))
-	r2(nil)
+	c2(nil)
 	cause := context.Cause(h2)
 	chk.ErrorIs(cause, context.Canceled, "nil cause defaults to Canceled as primary")
 	chk.ErrorIs(cause, fireErr, "the fire error rides along")
@@ -107,9 +107,9 @@ func TestHoldFlowDispatch(t *testing.T) {
 
 	var fired atomic.Bool
 	var held context.Context
-	var release context.CancelCauseFunc
+	var cancel context.CancelCauseFunc
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		held, release = streampool.HoldFlow(ctx)
+		held, cancel = streampool.HoldFlow(ctx)
 		return nil
 	}, key.Value("carried"), tag.FollowUpFn(func(context.Context) error {
 		fired.Store(true)
@@ -129,7 +129,7 @@ func TestHoldFlowDispatch(t *testing.T) {
 
 	// Release while the dispatched body still runs: the work's own carrier
 	// refs hold the flow, so the follow-up waits for the body too.
-	release(nil)
+	cancel(nil)
 	chk.False(fired.Load(), "follow-up waits for work dispatched through the hold")
 
 	close(blocked)
@@ -139,8 +139,8 @@ func TestHoldFlowDispatch(t *testing.T) {
 		"the follow-up fires once hold and work have both released")
 
 	// A hold carries no ambient wave.
-	held2, release2 := streampool.HoldFlow(context.Background())
-	defer release2(nil)
+	held2, cancel2 := streampool.HoldFlow(context.Background())
+	defer cancel2(nil)
 	chk.PanicsWithValue(
 		"op constructed with nil wave dispatched without op.In(&wave) and outside any wave body",
 		func() { _ = task.Start(held2) })
@@ -155,12 +155,12 @@ func TestHoldFlowPostReleaseDispatch(t *testing.T) {
 	key := streampool.NewFlowKey[string]()
 
 	var held context.Context
-	var release context.CancelCauseFunc
+	var cancel context.CancelCauseFunc
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		held, release = streampool.HoldFlow(ctx)
+		held, cancel = streampool.HoldFlow(ctx)
 		return nil
 	}, key.Value("snap")))
-	release(nil)
+	cancel(nil)
 
 	var wave streampool.Wave
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error { return nil })
@@ -183,9 +183,9 @@ func TestHoldFlowConcurrentReadsDuringRelease(t *testing.T) {
 	tag := streampool.NewFlowTag()
 
 	var held context.Context
-	var release context.CancelCauseFunc
+	var cancel context.CancelCauseFunc
 	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		held, release = streampool.HoldFlow(ctx)
+		held, cancel = streampool.HoldFlow(ctx)
 		return nil
 	}, key.Value("stable"), tag.FollowUpFn(func(context.Context) error { return nil })))
 
@@ -215,7 +215,7 @@ func TestHoldFlowConcurrentReadsDuringRelease(t *testing.T) {
 		}()
 	}
 	time.Sleep(2 * time.Millisecond) // let readers spin up across the release
-	release(nil)
+	cancel(nil)
 	time.Sleep(2 * time.Millisecond) // and keep reading past it
 	close(stop)
 	wg.Wait()
@@ -226,7 +226,7 @@ func TestHoldFlowConcurrentReadsDuringRelease(t *testing.T) {
 // TestHoldFlowUnpinRejects: a held ctx is not a pin token.
 func TestHoldFlowUnpinRejects(t *testing.T) {
 	chk := require.New(t)
-	held, release := streampool.HoldFlow(context.Background())
-	defer release(nil)
+	held, cancel := streampool.HoldFlow(context.Background())
+	defer cancel(nil)
 	chk.Panics(func() { _ = streampool.UnpinFlow(held) })
 }

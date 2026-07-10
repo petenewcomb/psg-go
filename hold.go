@@ -26,34 +26,36 @@ import (
 // top-level submission into an explicitly named wave (op.In(&wave) — a hold
 // carries no ambient wave), under the ordinary multi-goroutine caveats.
 //
-// release runs in three phases: the hold's follow-up references are released
-// in chain order — a flow ending here fires its follow-ups inline, errors
-// collected — then held severs from the flow, then held is canceled with the
-// passed cause MERGED with those errors (a nil cause defaults to
-// [context.Canceled] first, so a follow-up error never becomes the primary
-// cause). Every holder observes both through [context.Cause].
+// cancel is named for what it visibly does — it cancels held — and canceling
+// is how the hold is released, in three phases: the hold's follow-up
+// references are released in chain order — a flow ending here fires its
+// follow-ups inline, errors collected — then held severs from the flow, then
+// held is canceled with the passed cause MERGED with those errors (a nil
+// cause defaults to [context.Canceled] first, so a follow-up error never
+// becomes the primary cause). Every holder observes both through
+// [context.Cause].
 //
-// After release, held remains fully usable, exactly as Go's contract says a
+// After cancellation, held remains fully usable, exactly as Go's contract says a
 // canceled context is: Err() and Done() report the cancellation, and reads
 // return the flow's riders AS OF THE HOLD — held is a snapshot handle. The
 // flow's liveness is signaled by Err(), never by read availability; the
 // snapshot is what lets the goroutine woken by Done() still read the request
-// ID for its cancellation log line. Post-release dispatch through held is
+// ID for its cancellation log line. Post-cancel dispatch through held is
 // defined but ordinary-canceled: the work carries the snapshot's values, no
 // follow-up lifetimes, and a canceled ancestry.
 //
-// Reads through held are race-free against release: they only ever touch
+// Reads through held are race-free against the cancel: they only ever touch
 // GC-owned snapshot state, never pooled framework memory. Dispatch is the one
-// asymmetry — dispatch racing the release may misattribute or panic, the same
+// asymmetry — dispatch racing the cancel may misattribute or panic, the same
 // hazard class as dispatching from any ending extent; the owner sequencing
-// dispatches against its own release is the natural contract.
+// dispatches against its own cancel is the natural contract.
 //
-// release is idempotent (later calls are no-ops, per the CancelCauseFunc
-// convention). A hold whose release is never called keeps its flow open
-// forever — treat release like any resource closer. HoldFlow must be called
+// cancel is idempotent (later calls are no-ops, per the CancelCauseFunc
+// convention). A hold whose cancel is never called keeps its flow open
+// forever — treat cancel like any resource closer. HoldFlow must be called
 // inside the extent where ctx is valid; holding a bare, flow-less ctx yields
 // a hold of the empty flow.
-func HoldFlow(ctx context.Context) (held context.Context, release context.CancelCauseFunc) {
+func HoldFlow(ctx context.Context) (held context.Context, cancel context.CancelCauseFunc) {
 	srcMeta, _ := metaFromContext(ctx)
 	if srcMeta != nil {
 		srcMeta.vetNotExpiredPin()
@@ -75,7 +77,7 @@ func HoldFlow(ctx context.Context) (held context.Context, release context.Cancel
 	liveMeta := newHoldMeta(live)
 	sevMeta := newHoldMeta(severed)
 
-	cancelCtx, cancel := context.WithCancelCause(context.Background())
+	cancelCtx, cancelInner := context.WithCancelCause(context.Background())
 	h := &heldFlowCtx{}
 	h.cur.Store(&heldState{valueCtx: ctxpool.WithValue(cancelCtx, liveMeta)})
 	// Both value children share cancelCtx ancestry, so Done/Err/Deadline and
@@ -87,7 +89,7 @@ func HoldFlow(ctx context.Context) (held context.Context, release context.Cancel
 	sevMeta.selfCtx = h
 
 	var once sync.Once
-	release = func(cause error) {
+	cancel = func(cause error) {
 		once.Do(func() {
 			if cause == nil {
 				cause = context.Canceled
@@ -110,10 +112,10 @@ func HoldFlow(ctx context.Context) (held context.Context, release context.Cancel
 			h.cur.Store(&heldState{valueCtx: sevCtx})
 			// Announce: cancellation is the liveness signal, its cause the
 			// error delivery path.
-			cancel(errors.Join(cause, err))
+			cancelInner(errors.Join(cause, err))
 		})
 	}
-	return h, release
+	return h, cancel
 }
 
 // snapshotRiders builds the hold's two GC-owned copies of chain: the live
@@ -160,9 +162,9 @@ func newHoldMeta(riders *flowRiderNode) *ctxMeta {
 }
 
 // heldFlowCtx is the held context: an ordinary GC-owned object delegating to
-// the current inner value ctx (live before release, severed after), both of
+// the current inner value ctx (live before the cancel, severed after), both of
 // which share the hold's cancelable ancestry. The swap is atomic; every
-// method on a context is safe concurrently with release.
+// method on a context is safe concurrently with the cancel.
 type heldFlowCtx struct {
 	cur atomic.Pointer[heldState]
 }

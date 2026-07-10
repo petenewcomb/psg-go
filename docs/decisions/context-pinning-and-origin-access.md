@@ -198,6 +198,11 @@ guarantees exactly that extent). To keep it, `PinFlow` it while still inside —
 which is the whole retention story in one line, and why the accessor needs no
 lifetime rules of its own.
 
+Conceptually, the relationship is a hop across the nearest **branch point** of
+the causal river network — see `flow-design.md`, "The river network" (PN,
+2026-07-10), which grounds the per-path table, the single-hop composition
+grain, and the fire's honest absence in one picture.
+
 ## Naming (settled: `OriginFlow`, `PinFlow`/`UnpinFlow`)
 
 The accessor's relationship is *causal attribution of execution across

@@ -62,6 +62,33 @@ exists at fan-in**:
 That one property drives the whole surface: path-scoped identities are **keys** (they
 carry a value), DAG-scoped identities are **tags** (structurally valueless — see below).
 
+### The river network
+
+The DAG's geometry has a faithful hydrological reading (PN, 2026-07-10), and it earns
+its keep by unifying several things this document otherwise motivates separately. The
+network's joints are **branch points** — divergences and convergences of flows:
+
+- **Divergences** are dispatch (a body scattering work braids the river apart) and
+  registering `WithFlow` scopes (a sub-flow branching off within the ambient one).
+- **Convergences** come in two species. The funnel is the **severing confluence**: many
+  tributaries fold into one aggregate, path-scoped values cut (no canonical merge),
+  DAG-scoped tags union across. The skim is the **layering confluence**: the item's
+  flow meets the drive's flow without severing — the handler is the item's
+  continuation, its riders layered nearest-wins over the drive's, which stays intact
+  beneath. The funnel-vs-skim asymmetry that the fan-in rules express operationally is
+  just this: two kinds of river junction.
+
+Two consequences fall out. The **origin** relationship
+(`docs/decisions/context-pinning-and-origin-access.md`) is "the flow on the other side
+of the nearest branch point" — the last tributary to arrive at a flush's confluence,
+the flow a task body braided off from, the drive a handler's item merged into — which
+is why `OriginFlow` composes by single hops (each application crosses exactly one
+branch point; "ultimate origin" would be the wrong grain) and why the relationship is
+passive (branch points relate flows; they pump nothing). And a follow-up's fire is the
+**mouth**: the continuation past the final re-convergence, where the last-standing
+branch (CP-R6b's own words) is the whole river — there is no branch point above it,
+which is why `OriginFlow` truthfully reports absence there.
+
 ## The surface
 
 One function, two constructors, method-shaped options, two reads. Everything else —

@@ -153,19 +153,37 @@ the granularity: one shared across many flows, or one per flow).
   call, so `key.From(ctx)` reads absent inside; the argument is the value's channel, named
   to mirror the key (`txn.FollowUpFn(func(ctx, txn *Tx) error { return txn.Commit() })`).
 - `key.Suppress()` / `tag.Suppress()` — stop inheriting that identity into this scope.
-- `streampool.FlowDisconnect()` — the one package-level option: disconnects the scope from
-  the entire *inherited* rider set (it starts empty — values AND tags, a stricter cut
-  than a fan-in, which unions tags through). The absolute form of `Suppress`; it is
-  order-independent with respect to sibling options, which add to the fresh set.
+- `streampool.Disconnect()` — the one package-level option: disconnects the scope from
+  everything registered so far — the inherited chain plus any options listed before it
+  (values AND tags, a stricter cut than a fan-in, which unions tags through). The
+  absolute form of `Suppress`; normally listed first, per the layering rule below.
   (Renamed from `NewFlow` (PN, 2026-07-10): the old name contradicted "flows are not
   created" — the ontology's own load-bearing sentence — and mis-framed a *cut* as a
   *construction*. The trail: `Diverge`/`Divert` rejected because a divergence
   preserves inheritance — a distributary carries the same water, and ordinary
   registering scopes already ARE the river network's divergences; `Dam` rejected as
   more noun than verb in an imperative option family, and an under-claiming analogy —
-  dams spill, this must be total; `Isolate` suggests sandboxing the work;
-  `Stop` overclaims worst of all. `FlowDisconnect` names the exact act (Flow-prefixed per the package-level option convention — FlowFollowUp — and because DisconnectFlow would read "disconnect the flow," the very overclaim the doc sentence above denies) — the causal flow
-  continues, only the inherited riders are dropped.)
+  dams spill, this must be total; `Isolate` suggests sandboxing the work; `Stop`
+  overclaims worst of all. `Disconnect` names the exact act — the causal flow
+  continues, only riders are dropped. Bare, not Flow-prefixed: the prefix rule is
+  disambiguate-never-decorate — `FlowFollowUp` needs it against its method siblings
+  `k.FollowUp`/`t.FollowUp`, while `Disconnect` has no sibling and lives only inside a
+  `WithFlow` call, where flow is maximally implied; `FlowDisconnect` read as a
+  namespace artifact and `DisconnectFlow` would claim the flow itself is disconnected,
+  the very overclaim the semantics deny.)
+
+**Options apply left to right, one nested layer each — an option list is sugar for
+nested scopes, the first option outermost (PN, 2026-07-10; supersedes the original
+order-independent build).** The single rule covers everything the old model
+special-cased: a later `Value` shadows an earlier sibling exactly as an inner scope
+shadows an outer; `Suppress` filters the chain as built so far (inherited or
+earlier-sibling alike), and a later re-add lands after it; `Disconnect` drops the
+whole working set. Options before a `Disconnect` are shadowed — well-defined nonsense
+for a `Value`, while an earlier follow-up still registers in its outer layer, gains no
+carriers from the body (which runs under the post-`Disconnect` layer), and fires at
+scope exit as an empty flow — the nesting equivalence's own answer, conservation-sound
+by construction. Ordering between *nested scopes* was always the documented rule;
+sequential options extend it inward instead of carving out sibling exceptions.
 
 A key's bundle `{value?, follow-ups...}` propagates **as a unit** under the key's
 scoping (one identity namespace; scoping is a key property). So "fire when all work
@@ -366,7 +384,7 @@ Recorded so none of this is relitigated.
   `WithoutFlow(key)`, …) — the `With`/`Flow` prefix stutter, weaker static typing (no
   compile-time key→value binding), and worse prose at call sites; method-shaped options
   won, and `WithoutFlow` became redundant next to per-key `Suppress()` plus the
-  suppress-all option (then `NewFlow()`, now `FlowDisconnect()`).
+  suppress-all option (then `NewFlow()`, briefly `FlowDisconnect()`, now `Disconnect()`).
 - **Naming trail, `FollowUp`**: `After` was rejected for its harmful echo of
   `context.AfterFunc`, which fires on *cancel* — the opposite trigger;
   `Close`/`Commit`/`Cleanup`/`Done`/`End` all suggest termination, where a follow-up may

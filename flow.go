@@ -139,7 +139,7 @@ const (
 )
 
 // FlowOption configures a [WithFlow] scope. Obtain options from the methods on
-// [FlowKey] and [FlowTag] (Value, FollowUp, Suppress) or from [FlowDisconnect]; the zero
+// [FlowKey] and [FlowTag] (Value, FollowUp, Suppress) or from [Disconnect]; the zero
 // FlowOption is invalid and panics when passed to WithFlow. It is a value type
 // (no interface boxing), so a registering scope allocates nothing warm.
 type FlowOption struct {
@@ -357,24 +357,30 @@ func (t FlowTag) Suppress() FlowOption {
 	return FlowOption{kind: flowOptSuppress, id: t.id}
 }
 
-// FlowDisconnect returns a [FlowOption] that disconnects the scope from the
-// ambient rider set: it starts EMPTY — nothing inherited, values or tags, a
-// stricter cut than a funnel fan-in (which severs values but unions tags
-// through). The causal flow itself continues (work dispatched inside still
-// descends from this scope; cancellation still rides ctx ancestry); only the
-// inherited riders are dropped. Sibling options add to the fresh set, in any
-// order; per-identity [FlowKey.Suppress]/[FlowTag.Suppress] are its targeted
-// counterparts.
-func FlowDisconnect() FlowOption {
+// Disconnect returns a [FlowOption] that disconnects the scope from
+// everything registered so far: the working rider set — the inherited chain
+// plus any options listed before it — is dropped, values AND tags, a stricter
+// cut than a funnel fan-in (which severs values but unions tags through). The
+// causal flow itself continues (work dispatched inside still descends from
+// this scope; cancellation still rides ctx ancestry); only riders are
+// dropped. Options apply left to right, each a nested layer (see [WithFlow]),
+// so Disconnect is normally listed FIRST: options after it add to the fresh
+// set; a Value before it is shadowed, and a follow-up before it still
+// registers and fires at scope exit as an empty flow. Per-identity
+// [FlowKey.Suppress]/[FlowTag.Suppress] are its targeted counterparts.
+func Disconnect() FlowOption {
 	return FlowOption{kind: flowOptDisconnect}
 }
 
 // WithFlow runs body inline on the calling goroutine with a context whose
-// flow rider set is the ambient one modified by opts. It is a plain function
-// call, not a dispatched work item: no wave membership, no permits, no
-// backpressure; a panic in body propagates (the framework never recovers);
-// body's error is returned verbatim. With no options the call degenerates to
-// body(ctx).
+// flow rider set is the ambient one modified by opts. Options apply LEFT TO
+// RIGHT, one nested layer each — an option list is sugar for nested WithFlow
+// scopes, the first option outermost: a later Value shadows an earlier
+// sibling, Suppress filters the set as built so far, and Disconnect drops it
+// (so Disconnect is normally listed first). It is a plain function call, not
+// a dispatched work item: no wave membership, no permits, no backpressure; a
+// panic in body propagates (the framework never recovers); body's error is
+// returned verbatim. With no options the call degenerates to body(ctx).
 //
 // The ctx parameter is execution ancestry — cancellation for work dispatched
 // inside rides it, and ambient riders are inherited from it. A request ctx
@@ -585,165 +591,67 @@ func rebuild(head, stop *flowRiderNode, keep func(*flowRiderNode) bool) *flowRid
 	return out
 }
 
-// buildFlowRiders derives a fresh chain head: the inherited chain (dropped for
-// Disconnect, filtered for Suppress) with this scope's addition nodes linked ahead
-// of it. A nested scope re-registering a key prepends a fresh node, so the walk
-// finds it first — nearest scope wins, exactly as the flat snapshot's
-// replace-or-append did. Each identity's value is settled from all its Value
-// options BEFORE any node is built, so a follow-up receives its settled value
-// regardless of option order (order-independence). A key's value and its
-// follow-up share ONE node; the follow-up's own binding is therefore peeled from
-// its fire's enclosing set by construction (it lives on the node, and the fire
-// carries node.next — the value arrives as the follow-up's argument instead).
-// Returns the instances THIS scope created — the caller holds one scope ref on
-// each, released at scope exit; inherited instances take no scope ref (the
-// enclosing carrier's ref covers this scope's extent).
+// buildFlowRiders derives a fresh chain head by folding the options over the
+// inherited chain LEFT TO RIGHT — an option list is sugar for nested scopes,
+// one layer per option, the first option outermost (PN, 2026-07-10; replaces
+// the earlier order-independent build). Additive options (Value, FollowUp,
+// Infuse) prepend a node, so a later option under the same identity shadows an
+// earlier one exactly as an inner scope shadows an outer (nearest-wins walk).
+// Subtractive options act on the chain AS BUILT SO FAR: Suppress filters its
+// identity out (inherited or earlier-sibling alike), Disconnect drops the
+// whole working chain. Options before a Disconnect are therefore shadowed —
+// well-defined nonsense for a Value, while an earlier follow-up still
+// registers: its instance keeps the scope ref, gains no carriers from the
+// body (which runs under the post-Disconnect layer), and fires at scope exit
+// as an empty flow — the nesting equivalence's answer, conservation-sound.
+//
+// A follow-up's node bundles its own captured value (the explicit argument —
+// no ambient settling), and its fire's enclosing set is node.next: the
+// bindings layered before it, its own binding peeled by construction (the
+// value arrives as the follow-up's argument instead). Returns the instances
+// THIS scope created — the caller holds one scope ref on each, released at
+// scope exit; inherited instances take no scope ref (the enclosing carrier's
+// ref covers this scope's extent).
 func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode, []*flowInstance) {
-	// Pass 0: validate and detect a fresh root. Identity-scoped lookups (settled
-	// value, whether a follow-up bundles the id, whether a value node was already
-	// emitted) are linear scans of opts rather than maps — opts is tiny and the
-	// registering path must stay allocation-lean.
-	fresh := false
-	anySuppress := false
+	// Validate before building — a mid-build panic must not leak nodes.
 	for i := range opts {
 		switch opts[i].kind {
-		case flowOptValue, flowOptFollowUp, flowOptInfuse:
-		case flowOptSuppress:
-			anySuppress = true
-		case flowOptDisconnect:
-			fresh = true
+		case flowOptValue, flowOptFollowUp, flowOptInfuse, flowOptSuppress, flowOptDisconnect:
 		default:
 			panic("streampool: invalid (zero) FlowOption passed to WithFlow")
 		}
 	}
 
-	// settledVal returns id's value from the last value-bearing option under it —
-	// a Value or a key FollowUp, both of which set hasVal (order-independence:
-	// settled before any node is built). hasFollowUp reports whether a follow-up
-	// under id will bundle its value onto that follow-up's node.
-	settledVal := func(id *flowIdentity) (any, bool) {
-		var v any
-		found := false
-		for i := range opts {
-			if opts[i].id == id && opts[i].hasVal {
-				v, found = opts[i].val, true
-			}
-		}
-		return v, found
-	}
-	hasFollowUp := func(id *flowIdentity) bool {
-		for i := range opts {
-			if opts[i].kind == flowOptFollowUp && opts[i].id == id {
-				return true
-			}
-		}
-		return false
-	}
-
 	head := ambient
-	if fresh {
-		head = nil
-	}
-	if anySuppress {
-		// Suppressing against the inherited chain BEFORE any add is what makes
-		// same-call Suppress+Value/FollowUp order-independent.
-		head = rebuild(head, nil, func(n *flowRiderNode) bool {
-			for i := range opts {
-				if opts[i].kind == flowOptSuppress && opts[i].id == n.id {
-					return false
-				}
-			}
-			return true
-		})
-	}
-
-	// Value-only nodes first (deepest of this scope's adds), so a later follow-up
-	// under a different key sees the value on its enclosing walk. A value bundled
-	// with a follow-up under the SAME id is emitted with that follow-up instead
-	// (one node), so it is skipped here, as is a repeated Value for an id already
-	// emitted (the last-wins value was resolved by settledVal).
-	for i := range opts {
-		o := &opts[i]
-		if o.kind != flowOptValue || hasFollowUp(o.id) {
-			continue
-		}
-		earlier := false
-		for j := 0; j < i; j++ {
-			if opts[j].kind == flowOptValue && opts[j].id == o.id {
-				earlier = true
-				break
-			}
-		}
-		if earlier {
-			continue
-		}
-		v, _ := settledVal(o.id)
-		head = newRiderNode(o.id, v, true, nil, head)
-	}
-
-	// Presence-only (Infuse) nodes: a valueless, follow-up-less marker so InFlow
-	// reports the tag. Skipped when a follow-up under the id already provides
-	// presence, when an earlier Infuse for the id was already emitted, or when the
-	// tag is DEFINITIONAL (its infuse mints a follow-up instance in the loop below).
-	for i := range opts {
-		o := &opts[i]
-		if o.kind != flowOptInfuse || hasFollowUp(o.id) || o.id.definitionalFn != nil {
-			continue
-		}
-		earlier := false
-		for j := 0; j < i; j++ {
-			if opts[j].kind == flowOptInfuse && opts[j].id == o.id {
-				earlier = true
-				break
-			}
-		}
-		if earlier {
-			continue
-		}
-		head = newRiderNode(o.id, nil, false, nil, head)
-	}
-
-	// Then follow-up nodes in option order (later nearer the head → LIFO peel).
-	// Each fires ONCE at its own end. Its enclosing set is node.next (all bindings
-	// registered before it), and it takes an inner-holds-outer ref on every
-	// instance already on that chain, released when its single fire completes — so
-	// an outer waits for this whole subtree (LIFO). The value bundled under its id
-	// rides its own node (peeled from node.next) and is delivered as the fn arg.
 	var created []*flowInstance
-	for i := range opts {
-		o := &opts[i]
-		// A follow-up option (per-scope) or the infusion of a DEFINITIONAL tag (which
-		// mints the tag's identity-bound follow-up) both create a follow-up instance.
-		defInfuse := o.kind == flowOptInfuse && o.id.definitionalFn != nil
-		if o.kind != flowOptFollowUp && !defInfuse {
-			continue
-		}
-		fn := o.fn
-		if defInfuse {
-			// Once per flow: if a definitional instance for this id is already on the
-			// chain (an enclosing infusion, or an earlier one this scope), infusion is
-			// idempotent — reuse it, mint nothing.
-			already := false
-			for n := head; n != nil; n = n.next {
-				if n.id == o.id && n.inst != nil && n.inst.definitional {
-					already = true
-					break
-				}
-			}
-			if already {
-				continue
-			}
-			fn = o.id.definitionalFn
-		}
+
+	// replace swaps the working chain for a rebuilt (or empty) one, disposing
+	// of the previous structure: the transient ref covers a refs-0 fresh top,
+	// and the reclaim cascade stops at the first node someone else still holds
+	// — an ambient carrier\'s ref, or an earlier follow-up\'s enclosing pin
+	// (whose snapshot legitimately outlives the swap, freed at its fire).
+	// Net zero on a purely inherited chain.
+	replace := func(nh *flowRiderNode) {
+		old := head
+		head = nh
+		nodeRef(old)
+		nodeUnref(old)
+	}
+
+	// mint creates a follow-up instance layered on the chain so far: enclosing
+	// = head (node.next once its own node links ahead), an inner-holds-outer
+	// ref on every instance already on that chain (released when its single
+	// fire completes, so an outer waits for this whole subtree — LIFO), and
+	// one scope ref released at scope exit.
+	mint := func(o *FlowOption, fn func(context.Context, any) error, definitional bool) {
 		in := flowInstancePool.Get()
 		in.fn = fn
-		in.definitional = defInfuse
-		if defInfuse {
-			in.id = o.id // reaches the tag's mergeMu for coalescing at count→0 (CP-R6b)
+		in.definitional = definitional
+		if definitional {
+			in.id = o.id // reaches the tag\'s mergeMu for coalescing at count→0 (CP-R6b)
 		}
-		in.count.Store(1) // the registering scope's ref, released at scope exit
-		val, hasVal := settledVal(o.id)
-		in.val = val // settled bundle value (nil for a tag / valueless key)
+		in.count.Store(1) // the registering scope\'s ref, released at scope exit
+		in.val = o.val    // the option\'s own captured value (nil for a tag / valueless key)
 		in.enclosing = head
 		nodeRef(in.enclosing) // hold the enclosing chain alive for the fire (freed at fire-complete)
 		for n := head; n != nil; n = n.next {
@@ -752,8 +660,42 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 				in.holds = append(in.holds, n.inst)
 			}
 		}
-		head = newRiderNode(o.id, val, hasVal, in, head)
+		head = newRiderNode(o.id, o.val, o.hasVal, in, head)
 		created = append(created, in)
+	}
+
+	for i := range opts {
+		o := &opts[i]
+		switch o.kind {
+		case flowOptValue:
+			head = newRiderNode(o.id, o.val, true, nil, head)
+		case flowOptFollowUp:
+			mint(o, o.fn, false)
+		case flowOptInfuse:
+			if o.id.definitionalFn == nil {
+				// Presence-only marker so InFlow reports the tag.
+				head = newRiderNode(o.id, nil, false, nil, head)
+				continue
+			}
+			// A DEFINITIONAL tag\'s infusion mints its identity-bound follow-up —
+			// once per flow: if an instance for this id is already on the chain
+			// (an enclosing infusion, or an earlier one this scope), infusion is
+			// idempotent — reuse it, mint nothing.
+			already := false
+			for n := head; n != nil; n = n.next {
+				if n.id == o.id && n.inst != nil && n.inst.definitional {
+					already = true
+					break
+				}
+			}
+			if !already {
+				mint(o, o.id.definitionalFn, true)
+			}
+		case flowOptSuppress:
+			replace(rebuild(head, nil, func(n *flowRiderNode) bool { return n.id != o.id }))
+		case flowOptDisconnect:
+			replace(nil)
+		}
 	}
 
 	return head, created

@@ -260,6 +260,35 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
+►► FLOW OPTION VOCABULARY + SEQUENTIAL SEMANTICS LANDED (2026-07-10, this commit, PN
+design session) — TWO changes, one checkpoint. (1) NewFlow() → Disconnect(): the old name
+contradicted flow-design's own ontology ("flows are not created"); trail in flow-design.md
+(diverge/divert = divergences PRESERVE inheritance; dam = noun-not-verb + dams spill;
+isolate = sandboxes the work; stop = overclaims; FlowDisconnect = namespace artifact;
+DisconnectFlow = claims the flow itself is cut). PREFIX RULE settled:
+disambiguate-never-decorate — FlowFollowUp keeps its prefix (method siblings
+k.FollowUp/t.FollowUp); Disconnect is bare (no sibling; lives only inside WithFlow where
+flow is implied). Word-order families: verb+Flow when flow is the operation's object
+(PinFlow/UnpinFlow/OriginFlow); Flow+noun for package-level flow-namespace symbols
+(FlowKey/FlowTag/FlowOption/FlowFollowUp). (2) SEQUENTIAL OPTION SEMANTICS (PN, replacing
+the order-independent build): an option list is SUGAR FOR NESTED SCOPES, one layer per
+option, first outermost — later Value shadows earlier sibling; Suppress filters the chain
+AS BUILT SO FAR (can suppress an earlier sibling; later re-add lands after); Disconnect
+drops the whole working set (a preceding Value = well-defined shadowed nonsense; a
+preceding follow-up still registers, gains no carriers, fires EMPTY at scope exit — the
+nesting equivalence's answer, conservation-sound). buildFlowRiders rewritten as a
+left-to-right fold: mint() layers instances; replace() swaps the working chain with
+nodeRef/nodeUnref disposal (transient ref covers a refs-0 fresh top; the cascade stops at
+the first held node — ambient carrier or an earlier follow-up's enclosing pin; net-zero on
+purely inherited chains). Same-id Value+FollowUp no longer merge onto one node (each
+option = own node; the fire's enclosing may now include an EARLIER same-key Value — F6
+peel = own NODE only, coherent under nesting). settledVal/hasFollowUp/dedupe machinery
+deleted. Tests: TestFlowDisconnectRoot FLIPPED (was pinning order-independence);
+TestFlowOptionOrder (shadowing, sibling-suppress both orders, follow-up-behind-Disconnect
+fires); TestFlowNodeConservation gains (A2) sequential-layer disposal arcs. GATE: vet,
+lint 0, full -short ./..., root -race -short, flow/funnel -race ×20, conservation ×5,
+TestBySimulation -race batch (see commit).
+
 ►► CONTEXT PINNING + ORIGIN ACCESS DESIGN CONVERGED (2026-07-09, PN design session) —
 docs/decisions/context-pinning-and-origin-access.md (read it; this is the summary). TWO
 SURFACES on top of the driver-contexts machinery: (1) PinFlow(ctx)→pinned / UnpinFlow(pinned) —

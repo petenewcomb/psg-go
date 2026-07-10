@@ -43,10 +43,22 @@ func TestFlowNodeConservation(t *testing.T) {
 	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
 		return WithFlow(ctx, func(ctx context.Context) error {
 			return WithFlow(ctx, func(context.Context) error { return nil },
-				FlowDisconnect(), key.Value(9), inner.FollowUpFn(func(context.Context) error { return nil }))
+				Disconnect(), key.Value(9), inner.FollowUpFn(func(context.Context) error { return nil }))
 		}, key.Suppress(), tag.FollowUpFn(func(context.Context) error { return nil }))
 	}, key.Value(1), tag.FollowUpFn(func(context.Context) error { return nil })))
 	settled("inline nesting")
+
+	// (A2) Sequential-layer disposal arcs: subtractive options over fresh
+	// sibling layers exercise the working-chain replace/dispose path — a
+	// Suppress dropping an earlier sibling's node, a Disconnect dropping a
+	// whole fresh prefix including a follow-up's node (whose instance still
+	// fires empty at scope exit) — every dropped node must reclaim.
+	chk.NoError(WithFlow(context.Background(), func(context.Context) error { return nil },
+		key.Value(3), tag.Infuse(), tag.Suppress(), key.Value(4)))
+	chk.NoError(WithFlow(context.Background(), func(context.Context) error { return nil },
+		key.Value(5), inner.FollowUpFn(func(context.Context) error { return nil }),
+		Disconnect(), key.Value(6)))
+	settled("sequential-layer disposal")
 
 	// (B) Async work outliving the scope: the follow-up fires from the wave drain,
 	// so the instance's enclosing ref (and the chain behind it) must survive the

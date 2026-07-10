@@ -741,24 +741,85 @@ func TestFlowSuppress(t *testing.T) {
 		"suppressed identities read absent in the subtree body")
 }
 
-// TestFlowDisconnectRoot: FlowDisconnect() clears the whole inherited set; sibling
-// options add to the fresh root, in any order.
+// TestFlowDisconnectRoot: options apply left to right, one nested layer each
+// (an option list is sugar for nested scopes). Disconnect drops the working
+// set — the inherited chain AND earlier-listed siblings — so listed first it
+// roots a fresh set that later siblings furnish; listed after a Value it
+// drops that value too.
 func TestFlowDisconnectRoot(t *testing.T) {
 	chk := require.New(t)
 	inherited := streampool.NewFlowKey[string]()
 	freshKey := streampool.NewFlowKey[int]()
 
 	err := streampool.WithFlow(context.Background(), func(outerCtx context.Context) error {
-		return streampool.WithFlow(outerCtx, func(inCtx context.Context) error {
+		// Disconnect FIRST: fresh root; later siblings add to it.
+		if err := streampool.WithFlow(outerCtx, func(inCtx context.Context) error {
 			_, ok := inherited.From(inCtx)
 			chk.False(ok, "fresh root inherits nothing")
 			v, ok := freshKey.From(inCtx)
 			chk.True(ok)
 			chk.Equal(9, v)
 			return nil
-		}, freshKey.Value(9), streampool.FlowDisconnect()) // Disconnect listed last: order-independent
+		}, streampool.Disconnect(), freshKey.Value(9)); err != nil {
+			return err
+		}
+		// Disconnect AFTER a Value: the earlier layer is dropped with the
+		// working set.
+		return streampool.WithFlow(outerCtx, func(inCtx context.Context) error {
+			_, ok := inherited.From(inCtx)
+			chk.False(ok, "inherited set dropped")
+			_, ok = freshKey.From(inCtx)
+			chk.False(ok, "a Value listed before Disconnect is dropped too")
+			return nil
+		}, freshKey.Value(9), streampool.Disconnect())
 	}, inherited.Value("outer"))
 	chk.NoError(err)
+}
+
+// TestFlowOptionOrder pins the left-to-right layering rule beyond Disconnect:
+// a later Value shadows an earlier sibling (inner layer wins), Suppress acts
+// on the chain as built so far (it can suppress an earlier sibling, and a
+// later re-add lands after it), and a follow-up listed before Disconnect
+// still registers — it gains no carriers from the body and fires at scope
+// exit as an empty flow.
+func TestFlowOptionOrder(t *testing.T) {
+	chk := require.New(t)
+	key := streampool.NewFlowKey[int]()
+	tag := streampool.NewFlowTag()
+
+	// Later sibling shadows earlier.
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		v, ok := key.From(ctx)
+		chk.True(ok)
+		chk.Equal(2, v, "the later Value is the inner layer and wins")
+		return nil
+	}, key.Value(1), key.Value(2)))
+
+	// Suppress acts on the working chain: it removes an earlier sibling…
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		chk.False(tag.InFlow(ctx), "Suppress removes the earlier sibling Infuse")
+		return nil
+	}, tag.Infuse(), tag.Suppress()))
+	// …and a later re-add lands after it.
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		chk.True(tag.InFlow(ctx), "an Infuse after Suppress re-establishes presence")
+		return nil
+	}, tag.Suppress(), tag.Infuse()))
+
+	// A follow-up listed before Disconnect registers in the outer layer: the
+	// body runs disconnected from it, and it fires at scope exit, empty.
+	var fired atomic.Bool
+	var bodySawKey atomic.Bool
+	chk.NoError(streampool.WithFlow(context.Background(), func(ctx context.Context) error {
+		_, ok := key.From(ctx)
+		bodySawKey.Store(ok)
+		return nil
+	}, key.FollowUpFn(7, func(context.Context, int) error {
+		fired.Store(true)
+		return nil
+	}), streampool.Disconnect()))
+	chk.False(bodySawKey.Load(), "the body runs under the post-Disconnect layer")
+	chk.True(fired.Load(), "a pre-Disconnect follow-up still fires, at scope exit")
 }
 
 // TestFlowAllocFloors guards the flow cost model: the degenerate WithFlow is

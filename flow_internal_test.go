@@ -72,6 +72,23 @@ func TestFlowNodeConservation(t *testing.T) {
 	chk.NoError(UnpinFlow(pinned))
 	settled("pinned flow released")
 
+	// (A4) Held flow: the hold's snapshot is GC-owned (invisible to the node
+	// hook), but its carrier refs keep the instances — and through their
+	// enclosing refs, pooled chain — alive until release; the release fires
+	// and every pooled node returns.
+	var heldFires atomic.Int64
+	var held context.Context
+	var releaseHold context.CancelCauseFunc
+	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
+		held, releaseHold = HoldFlow(ctx)
+		return nil
+	}, key.Value(8), tag.FollowUpFn(func(context.Context) error { heldFires.Add(1); return nil })))
+	chk.Equal(int64(0), heldFires.Load(), "the hold carries the flow past the scope")
+	releaseHold(nil)
+	chk.Equal(int64(1), heldFires.Load(), "release ends the flow")
+	_ = held
+	settled("held flow released")
+
 	// (B) Async work outliving the scope: the follow-up fires from the wave drain,
 	// so the instance's enclosing ref (and the chain behind it) must survive the
 	// gap between count→0 and the async fire, then reclaim.

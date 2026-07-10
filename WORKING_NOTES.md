@@ -260,7 +260,34 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
-►► PinFlow/UnpinFlow LANDED (2026-07-10, this commit) — the retention half of
+►► HoldFlow LANDED (2026-07-10, this commit, PN design session) — the SAFE retention tier
+(record §HoldFlow — read it; three designs died first: AfterFunc pattern SWALLOWED fire
+errors; the fires→cancel→teardown sandwich failed because CANCEL IS A NOTIFICATION NOT A
+BARRIER (Go contract: canceled ctx stays usable, esp. value reads — the woken-by-Done
+goroutine arrives after teardown by construction); the forever-readable GC-snapshot pin
+either LIES or HOLDS FLOWS OPEN for the handle's GC lifetime). RESOLUTION (PN): two
+tiers — PinFlow/UnpinFlow unchanged (pooled primitive, one extent rule, body-ctx-class UB
+caveats), HoldFlow = GC wrapper, NO UB ever, NOT sugar (own carrier refs, own state ⇒ own
+verb; "hold" = the codebase's own word: flowInstance.holds). hold.go: snapshot at hold =
+TWO GC copies of the chain, permanent +1 ref bias (never poolable): LIVE (real inst ptrs —
+dispatch extends real lifetimes) + SEVERED (value-only); wrapper delegates ctx methods to
+an atomically-swapped inner ctxpool child (both over one WithCancelCause(Background);
+ctxpool cooperates — children of canceled parents fall out of the pool by design).
+release (Once, idempotent): FIRES (inline, carrier=live hold meta, chain-order cover, GC
+chain ⇒ concurrent readers safe) → SEVER (swap to value-only) → CANCEL(Join(cause,
+fireErrs)); nil cause defaults to context.Canceled FIRST (fire error never the primary
+cause). POST-RELEASE: reads = snapshot-as-of-hold FOREVER (copy-over-absent: the copy
+must exist for race-freedom anyway; liveness truth lives in Err()/Cause, values are
+facts); dispatch = defined ordinary-canceled (value-only riders). Documented asymmetry:
+reads race-free vs release; dispatch is not (same class as any ending extent). Tests:
+retention+snapshot-reads, nil-cause primary, dispatch (waits for work AND release),
+post-release dispatch defined, CONCURRENT-READS-DURING-RELEASE -race (the crown jewel:
+zero misses before/during/after), UnpinFlow(held) rejected, conservation arc (A4). GC
+metas/nodes bypass alloc hooks (not pooled) ⇒ conservation clean by construction. Gate:
+vet, lint 0, full -short ./..., root -race -short, hold+pin -race ×20, concurrent-read
+×50 -race. NEXT: OriginFlow + the flush origin link, then streamotel.
+
+►► PinFlow/UnpinFlow LANDED (2026-07-10, 08aae99) — the retention half of
 context-pinning-and-origin-access.md (read its "As implemented"). pin.go: PinFlow MINTS
 the pinned ctx (fresh meta: topLevelContext, permitRoot, pinLive marker, parent=src
 ref'd for origin-chain walkability, riders=src chain under the pin's OWN

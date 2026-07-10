@@ -1,8 +1,9 @@
 # Context pinning and origin access: retention and the read surface
 
 > Decision record (2026-07-09/10, design sessions with PN). **Status:
-> `PinFlow`/`UnpinFlow` implemented (2026-07-10; see "As implemented");
-> `OriginFlow` designed, not yet implemented. Names settled (see "Naming").**
+> `PinFlow`/`UnpinFlow` and `HoldFlow` implemented (2026-07-10; see "As
+> implemented" and "HoldFlow"); `OriginFlow` designed, not yet implemented.
+> Names settled (see "Naming").**
 > Builds on `driver-contexts.md` (implemented), which put the lifetime
 > machinery in place; this record designs the two public surfaces that read
 > and retain it. Generalizes what `otel-tracing-on-flows.md` needs — the otel
@@ -339,3 +340,85 @@ tests (pin_test.go), a multi-goroutine pinned-dispatch -race test, and
 conservation arcs in both TestCtxMetaConservation and TestFlowNodeConservation
 that assert the standing pin as a DELIBERATE positive (a leaked pin is
 visible) and zero after release.
+
+## HoldFlow: the safe retention tier (2026-07-10)
+
+What began as sugar over the pin ("compose `WithCancel` + `AfterFunc`") became
+a third first-class surface, forced there by a sequence of PN objections that
+each killed a cheaper design:
+
+1. The hand-rolled AfterFunc pattern **swallows** a follow-up error firing at
+   the release — promoting an error-dropping pattern is unacceptable. Fix:
+   release as a `context.CancelCauseFunc` that fires first, then cancels with
+   the passed cause MERGED with the fire errors (nil cause defaulting to
+   `context.Canceled` first, so a fire error never becomes the primary cause).
+   The cancellation cause channel becomes the error delivery path.
+2. Ordering the release as fires→cancel→teardown (the "sandwich") does not
+   protect holders, because **cancel is a notification, not a barrier**: Go's
+   own contract says a canceled context remains usable — reading values off a
+   canceled ctx is idiomatic (the cancellation log line that wants the request
+   ID) — and a goroutine woken BY the cancel arrives after the teardown by
+   construction. The consumers most likely to read post-cancel are exactly the
+   ones a teardown strands.
+3. A forever-readable GC snapshot pin (bias-ref'd, never recycled) fixes the
+   reads but either **lies** (values and presence of an ended flow) or, to
+   stay truthful, must **hold flows open for the handle's GC lifetime** —
+   follow-ups hostage to the garbage collector. Unacceptable.
+
+The resolution (PN): **two tiers.** `PinFlow`/`UnpinFlow` stay exactly as
+they are — the pooled in-place primitive under the framework's one extent
+rule, with the same undefined-behavior caveats as any body context. The safe
+tier is a **GC-based wrapper that severs its relationship to the flow upon
+release and remains usable with no undefined behavior** — and it is not sugar
+over the pin (it takes its own carrier refs and owns its own state), so it
+earned its own verb: not a pin so much as a **hold** (`HoldFlow` — the word
+the codebase already uses for carrier refs keeping instances alive:
+`flowInstance.holds`).
+
+```go
+held, release := psg.HoldFlow(ctx) // inside the extent where ctx is valid
+...                                // held: ordinary GC-owned cancelable ctx
+release(cause)                     // fires → sever → cancel(Join(cause, fireErrs))
+```
+
+Mechanics:
+
+- **Snapshot at hold.** The rider chain is copied into GC-owned nodes with a
+  permanent +1 ref bias (never poolable, reclaimed with the handle), in two
+  forms: a LIVE copy carrying the real instance pointers, and a SEVERED
+  value-only copy. The copy is not an option but a necessity: race-free reads
+  require that a reader mid-walk when release lands is walking GC memory —
+  and since rider chains are immutable, the copy is exactly equivalent to the
+  live chain, not stale.
+- **Copy over absent, post-release.** The copy must exist anyway, so hiding
+  it would save nothing; and post-cancel value reads are the idiomatic Go
+  case. The lying-snapshot concern dissolves because liveness has its own
+  truthful channel: release closed the flow (fires ran, `Cause` carries their
+  errors) and `Err()` says so. Values are facts-as-of-hold; liveness is
+  `Err()`. One sentence: *the hold is a snapshot handle; release ends the
+  carrier relationship, never the snapshot's readability.*
+- **The wrapper** delegates all four context methods to an atomically-swapped
+  inner value ctx (live → severed), both children of one
+  `WithCancelCause(Background)` ctx, so `Done`/`Err`/`Cause` are stable
+  across the sever. ctxpool cooperates: a child over a canceled parent falls
+  out of the pool by design and is GC'd with the hold.
+- **Dispatch** through a live hold works as an ordinary top-level submission
+  (explicit wave; the live chain's instance pointers let work extend the real
+  follow-up lifetimes). The one documented asymmetry: reads are race-free
+  against release, dispatch is not — dispatch racing the release is the same
+  hazard class as dispatching from any ending extent, and the owner
+  sequencing its own dispatches against its own release is the natural
+  contract. POST-release dispatch is defined but ordinary-canceled: the work
+  carries the severed value-only snapshot and a canceled ancestry.
+- **Release order** is fires → sever → cancel: errors must exist before the
+  cancel that carries them, and dispatch after the sever sees the value-only
+  chain. `sync.Once` makes release idempotent per the CancelCauseFunc
+  convention. A hold whose release never runs keeps its flow open forever —
+  a resource-closer discipline, deliberately.
+
+Superseded along the way: `RetainFlow` and `PinFlowWithCancel` as names (the
+semantics diverged from the pin — GC ownership, snapshot reads, no exact
+token — far past "same operation, variant ergonomics", so the same-verb rule
+that rejected RetainFlow now cuts the other way and demands a different
+verb); the release-func objection stays answered (the `(ctx,
+CancelCauseFunc)` pair is Go's standard issue).

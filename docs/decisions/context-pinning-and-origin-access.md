@@ -1,7 +1,8 @@
-# Context pinning and driver access: retention and the read surface
+# Context pinning and origin access: retention and the read surface
 
 > Decision record (2026-07-09, design session with PN). **Status: converged,
-> not yet implemented; the accessor's public name is OPEN (see "Naming").**
+> not yet implemented. The accessor's public name is settled: `OriginContext`
+> (see "Naming").**
 > Builds on `driver-contexts.md` (implemented), which put the lifetime
 > machinery in place; this record designs the two public surfaces that read
 > and retain it. Generalizes what `otel-tracing-on-flows.md` needs — the otel
@@ -112,19 +113,21 @@ that pins its own ctx and immediately dispatches through it gets top-level
 treatment (blocking, fresh permit root) rather than in-body treatment — legal,
 but almost never what it wanted.
 
-## The driver accessor
+## The origin accessor
 
-One composable, ctx-shaped read (working name; see "Naming"):
+One composable, ctx-shaped read. "Origin" is the public name; "driver" remains
+the internal term of art (`driver-contexts.md`) for the same relationship:
 
 ```go
-// DriverContext returns a read-only context positioned at the driver of the
-// body ctx belongs to, so the existing reads compose: key.From(d),
-// tag.InFlow(d) — and DriverContext(d) walks further up the driver chain.
-// ok is false where there is no driver.
-func DriverContext(ctx context.Context) (d context.Context, ok bool)
+// OriginContext returns a read-only context positioned at the origin of the
+// body ctx belongs to — the context of whatever made this body run — so the
+// existing reads compose: key.From(origin), tag.InFlow(origin), and
+// OriginContext(origin) walks further up the chain. ok is false where there
+// is no origin.
+func OriginContext(ctx context.Context) (origin context.Context, ok bool)
 ```
 
-Ctx-shaped rather than per-identity (`k.FromDriver`, `t.InDriverFlow`): one
+Ctx-shaped rather than per-identity (`k.FromOrigin`, `t.InOriginFlow`): one
 function instead of two per identity type, and composition gives the chain
 walk — the property that makes this more general than the otel use case. What
 it returns follows the driver table in `driver-contexts.md`:
@@ -143,10 +146,12 @@ guarantees exactly that extent). To keep it, `Pin` it while still inside —
 which is the whole retention story in one line, and why the accessor needs no
 lifetime rules of its own.
 
-## Naming (OPEN)
+## Naming (settled: `OriginContext`)
 
 The accessor's relationship is *causal attribution of execution across
-extents*: what made this body run. Candidates examined and why they fell:
+extents*: what made this body run. The test every candidate had to pass: "the
+X of a flush is the last accumulate; the X of a handler is the drive" — both
+sentences true without qualification. Candidates examined and why they fell:
 
 - **parent** — collides with Go's derivation intuition (and cancellation
   expectations) and with the internal `meta.parent`, which for a flush is a
@@ -164,15 +169,30 @@ extents*: what made this body run. Candidates examined and why they fell:
   is the severed boundary-above view, while this accessor returns the driving
   item's full chain — the word under-describes the result.
 - **driver** — accurate everywhere, and the term of art in the decision
-  records; PN finds it confusing, though the colliding senses
-  (`SuspendDriver`, "the sole serial skim driver") are internal vocabulary a
-  public API user never meets. Kept as the working name.
+  records, but confusing in practice; the colliding senses (`SuspendDriver`,
+  "the sole serial skim driver") are internal-only, yet the word never read
+  cleanly even so. Stays as internal vocabulary; not the public name.
+- **source** — fails the way "upstream" did, more quietly: it reads as *where
+  the data came from*, and a handler's data source is the item's producer —
+  whose context the handler already runs under (the CP-F7 continuation) —
+  while this accessor returns the drive. Internally, `borrowSrcCtx`/`srcMeta`
+  already mean the borrow source, which for a flush or fire is the scheduler
+  stash — precisely what this accessor looks past — so the implementation
+  would have `src` and `Source` meaning different things.
 
-A scope-flavored word cannot be right because the relationship is causal, not
-scoped; the search continues among causal words (driver, origin, cause) and
-the codebase's watery register, which so far has produced nothing that both
-fits and stays clear (headwaters ⇒ ultimate origin; wake ⇒ notification
-vocabulary; current/channel/stream ⇒ collisions).
+**`origin` wins**: the causal word without the data-lineage reading — the
+origin of an execution is what made it run. Its one risk, an
+ultimate-vs-immediate reading, is softened twice over: in graph vocabulary an
+edge's origin is its immediate predecessor, and composition
+(`OriginContext(OriginContext(ctx))` walking toward the root) makes
+single-hop-ness self-evident. It is collision-free at the public surface
+(internally only rdvq's `ProbeOrigin`), passes the qualification test on
+every path, and — since a scope-flavored word cannot be right for a causal
+relationship — it is also the one causal word in the codebase's watery
+register: the origin of a river is where the flow begins. (The rest of that
+register produced nothing that both fits and stays clear: headwaters ⇒
+ultimate origin; wake ⇒ notification vocabulary; current/channel/stream ⇒
+collisions.)
 
 ## Rejected alternatives
 

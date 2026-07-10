@@ -260,8 +260,8 @@ flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips
 oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
 ./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
 cases, steps-only scopes ambient).
-►► CONTEXT PINNING + DRIVER ACCESS DESIGN CONVERGED (2026-07-09, PN design session) —
-docs/decisions/context-pinning-and-driver-access.md (read it; this is the summary). TWO
+►► CONTEXT PINNING + ORIGIN ACCESS DESIGN CONVERGED (2026-07-09, PN design session) —
+docs/decisions/context-pinning-and-origin-access.md (read it; this is the summary). TWO
 SURFACES on top of the driver-contexts machinery: (1) Pin(ctx)→pinned / Unpin(pinned) —
 the pin MINTS a fresh ctx (the token IS the ctx, no release func); carrier refs (flow
 stays open until last Unpin — leaked pin = follow-ups held open, documented like an
@@ -271,17 +271,17 @@ cancellation) — "an explicit pin is the purchase of Go's normal context contra
 Dispatch from a pin = ordinary bare-ctx top-level submission: resolveWave already forces
 op.In(&wave) (PN's move — replaced my just-block special mode; consistency over modes),
 help-shaped blocking + the usual multi-goroutine skim caveats apply since the wave is
-EXPLICIT. (2) DriverContext(ctx)→(ctx,ok) — ctx-shaped composable read (walks the chain
-by re-application): task/acc→dispatcher, skim handler→the drive, flush→last accumulate
-via the step-2 rolling pin + ONE new field (driver link stamped on the flush body meta),
-fire→ok=false (the fire IS the continuation), pumps/top→false. Read-within-extent; Pin
-it to keep it. NAMING OPEN (PN): parent/upstream/trigger/enclosing all rejected — the
-scope-flavored words fail because the relationship is CAUSAL across extents, not scoped
-(async drivers don't enclose; F8's "enclosing flow" is the severed boundary-above view,
-this returns the full item chain); "driver" stays the working name (its confusing
-collisions are internal-only vocabulary). NEXT: PN review of the record (esp. naming),
-then implement (Pin/Unpin first, then the accessor + flush driver link), each sim-gated;
-streamotel consumer follows on top.
+EXPLICIT. (2) OriginContext(ctx)→(ctx,ok) — NAME SETTLED (PN, after
+parent/upstream/trigger/enclosing/driver/source all fell; scope words fail because the
+relationship is CAUSAL across extents, not scoped — async drivers don't enclose;
+"source"/"upstream" read as data-lineage, wrong at the skim handler; the record's Naming
+section has the full trail + the qualification test). Ctx-shaped composable read (walks
+the chain by re-application): task/acc→dispatcher, skim handler→the drive, flush→last
+accumulate via the step-2 rolling pin + ONE new field (origin link stamped on the flush
+body meta), fire→ok=false (the fire IS the continuation), pumps/top→false.
+Read-within-extent; Pin it to keep it. "Driver" stays internal vocabulary
+(driver-contexts.md). NEXT: implement (Pin/Unpin first, then OriginContext + the flush
+origin link), each sim-gated; streamotel consumer follows on top.
 
 ►► DRIVER-CONTEXTS STEP 3 LANDED (2026-07-09, 55e16e6) — fire = the last carrier's
 continuation (driver-contexts.md §Fire). CARRIER PLUMBING: unref/flowUnrefRiders gain a

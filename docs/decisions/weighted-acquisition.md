@@ -183,7 +183,7 @@ Model-check additions: the ordered-wait DAG (blocked-at-L ⟹ holds only < L);
 no-lending-mid-sequence; descending-order drain with consumables-last; interleaved
 armed barriers across pools under joint admission; consumable-base autonomy.
 
-### The joint reclaim: every park holds only a canonical prefix (2026-07-09, pending PN review)
+### The joint reclaim: every park holds only a canonical prefix (2026-07-09; reviewed PN 2026-07-10)
 
 The induction above covers admission, where the order is enforced by construction.
 The **suspend/reclaim path breaks it structurally**: a drive episode lends the whole
@@ -215,6 +215,39 @@ re-registers on its next confirm (Acquire re-enqueues an invalidated demand),
 paying only its queue position; each surrender lets a canonical-posture admitter
 complete, so progress is global — a surrendered slot is consumed by an admission
 that then releases capacity.
+
+**Fairness cost, bounded (review resolution, PN 2026-07-10).** Only reclaims pay
+the position loss, and the loss is per-round bounded: the overtaking window is
+[withdraw → re-registration], which closes when the down-rank wait resolves —
+arrivals after re-registration queue behind the returning demand as usual. A
+repeat round requires an interior bracket to re-suspend the lower hold AND that
+permit to be lost again during the help window, so repeats are coupled to system
+progress (helped work ran), never a tight loop. Admissions lose nothing at all,
+by two existing mechanisms working together: Decision 4 keeps a postponed
+admission's demand identity registered as ONE FIFO entry across the whole
+postpone/retry cycle (it never surrenders its position), and workq's selection
+pass re-attempts every postponed work item before ACCEPTING any new work (a
+blocked accept is interrupted by a postponed item's readiness wake), so new work
+that might consume overlapping permits is structurally behind every pending
+retry.
+
+Rejected alternatives for restoring the reclaimer's exact position:
+
+- **Yielding head** — a fifth head-slot state that keeps queue position but
+  releases the capacity reservation while its owner waits down-rank. Position
+  and reservation are fused in the standing-head discipline on purpose, and
+  unfusing them inside the W2b/W2d promotion/retirement CAS protocol (a re-arm
+  must displace a successor possibly mid-gather) is the pool's most delicate
+  machinery, bought for a per-round-bounded fairness gain.
+- **Senior re-entry tier** — a second demand queue, served ahead of fresh
+  registrations, that withdrawn demands re-enter (the workq fresh/postponed
+  shape with the priority inverted: seniority restoration rather than
+  failed-once deprioritization). Cheaper than the yielding head and
+  order-preserving within the tier, but still a second queue threaded through
+  promoteScan and the empty-slot reopen dance, for the same bounded gain.
+
+Revisit either only if reclaim-latency tails surface in the multi-limiter
+benchmarks.
 
 Mechanics as implemented (permithandle.go): per-hold `suspendTarget` scopes each
 suspend bracket to exactly the holds it suspended; `reclaimJoint` runs a

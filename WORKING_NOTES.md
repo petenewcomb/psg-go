@@ -6,9 +6,15 @@ This document contains working notes and context for development on the `combine
 diagnosed from the preserved dumps; root 4 (the persistent deadlock) required biased-repro
 iteration + fmttrace runtime traces + NEW permits-layer instrumentation (kept). NOTE FOR PN:
 roots 3-4 add a DESIGN rule — "a joint reclaim park holds only a canonical prefix, counting
-FIFO registrations as holds" — recorded in weighted-acquisition.md §"The joint reclaim"
-(marked pending PN review; implemented under debugging pressure, review before it
-calcifies). GATE GREEN (2026-07-09): vet, lint 0, full -short -race, permits -race,
+FIFO registrations as holds" — recorded in weighted-acquisition.md §"The joint reclaim".
+REVIEWED + SETTLED (PN, 2026-07-10): withdraw-and-requeue stands as committed, NO new
+machinery. The review resolved the fairness concern: overtaking is per-round bounded
+([withdraw → re-registration] window; repeats are progress-coupled), and ADMISSIONS never
+lose position at all (Decision 4 single-FIFO-entry across the postpone/retry cycle + workq's
+retry-all-postponed-before-ACCEPTING-new-work pass — a fact the workq docs misstated as
+"fresh > postponed" priority; docs fixed). Yielding-head and senior-re-entry-tier recorded
+as rejected alternatives; revisit only on reclaim-latency tails in multi benchmarks.
+Side item from review → TODO.md: rename `permits` package → `pforest` (naming pass). GATE GREEN (2026-07-09): vet, lint 0, full -short -race, permits -race,
 TestBySimulation -race 19×100 checks (11+8 across the sim alias-guard fix below; the one
 intervening FAIL was a SIM plan-gen bug, not a wedge: drawLimiterBinding's alias guard
 compared one inheritance level, so two indexes aliasing one Pool TRANSITIVELY dup-bound and

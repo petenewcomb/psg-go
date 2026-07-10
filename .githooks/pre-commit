@@ -3,10 +3,16 @@
 set -e
 
 echo "$0: Entering directory \``pwd`'"
-goimports -w .
-gofmt -s -w .
 
-find . -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
+# Operate on THIS worktree only: .claude hosts session state and nested git
+# worktrees (other sessions' in-flight checkouts). Formatting or validating
+# them from here both mutates concurrent work in place (goimports/gofmt/tidy/
+# generate all write) and fails this commit on a foreign tree's transient
+# state.
+find . -name .claude -prune -o -type f -name '*.go' -print0 | xargs -0 -r goimports -w
+find . -name .claude -prune -o -type f -name '*.go' -print0 | xargs -0 -r gofmt -s -w
+
+find . -name .claude -prune -o -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
     set -e
     cd "${file%/*}"
     echo "$0: Entering directory \``pwd`'"

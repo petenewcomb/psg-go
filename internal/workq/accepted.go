@@ -19,14 +19,22 @@ import (
 	"github.com/petenewcomb/streampool/internal/rdvq"
 )
 
-// Queue manages work items with single-item processing logic using a two-queue
-// priority system. It implements the priority-based backpressure algorithm that
-// prioritizes newly accepted work over postponed work over new work, maintaining
-// liveness through single-item processing and non-blocking retry logic.
+// Accepted manages work items with single-item processing logic across two
+// accepted-work queues, fresh and postponed. A selection pass drains fresh,
+// then postponed, and only then ACCEPTS new work — so, despite appearances,
+// fresh-before-postponed does not prioritize new arrivals over retries:
+// postponed work is re-attempted before any new work is accepted, and the
+// fresh queue can only hold work accepted after the previous postponed retry
+// (plus newly-due scheduled items). A worker blocked accepting new work is
+// likewise interrupted by a postponed item's readiness wake, which restarts
+// the pass at the accepted queues — by the time fresh work exists, every
+// pending postponed item was just attempted.
 //
-// The two-queue design prevents starvation: newly accepted work gets first
-// priority, work that has failed once goes to the postponed queue for lower
-// priority retry, and new work is only processed if no accepted work succeeds.
+// The effective guarantee, and the reason for the two-queue design: work that
+// could not start earlier (typically for lack of permits) is retried
+// consistently ahead of accepting new work that might consume overlapping
+// resources, while single-item processing and non-blocking retries preserve
+// liveness. Ordering within each queue is FIFO.
 type Accepted struct {
 	fresh     nbcq.Queue[Work]
 	postponed nbcq.Queue[Work]
@@ -278,7 +286,10 @@ func (q *Accepted) ExecuteNowOrQueue(
 // operations. If no immediately executable work is found, waits for new work
 // or notification that a postponed work item is ready.
 //
-// Priority order: fresh → postponed → new work
+// Pass order: fresh → postponed → new work. This is not a prioritization of
+// new arrivals over retries — new work is accepted only after the postponed
+// queue was just exhausted, so every acceptance is immediately preceded by a
+// full postponed retry (see the [Accepted] type comment).
 //
 // The queue's demand-spawn signal (see [Accepted.Init]) is fired when
 // excess fresh work accumulates (count > 1) and no idle worker is
@@ -334,7 +345,9 @@ type TryAddWorkFunc func(context.Context, QueueWorkFunc) error
 // (exhausting that queue), then new work via addWorkFn, all as non-blocking operations.
 // If no immediately executable work is found, returns false without blocking.
 //
-// Priority order: fresh → postponed → new work
+// Pass order: fresh → postponed → new work — not a prioritization of new
+// arrivals over retries; see [Accepted.ExecuteOne] and the [Accepted] type
+// comment.
 //
 // Returns true if a work item was executed, false if no work was ready to execute.
 //

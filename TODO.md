@@ -116,6 +116,10 @@ The sections below are the original pre-refactor TODO. Many items are now stale 
   limiter.go, job.go doc comment). Fold into the broader Job→Pool/Wave naming
   reconciliation with the other deferred combiner-era renames.
 
+- **Rename the `permits` package → something like `pforest` (PN, 2026-07-10).**
+  The package is the permit-cache forest, not the permits themselves; fold into
+  the same naming-reconciliation pass as the item above.
+
 ## Combiner Branch Pre-Merge Tasks (original list — partially stale)
 
 Items to complete before merging to main branch.

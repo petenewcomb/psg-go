@@ -220,20 +220,33 @@ sentences true without qualification. Candidates examined and why they fell:
   the last accumulate's frame. Even at the flow level, F8's "enclosing flow"
   is the severed boundary-above view, while this accessor returns the driving
   item's full chain — the word under-describes the result.
-- **driver** — accurate everywhere, and the term of art in the decision
-  records, but confusing in practice; the colliding senses (`SuspendDriver`,
-  "the sole serial skim driver") are internal-only, yet the word never read
-  cleanly even so. Stays as internal vocabulary; not the public name.
+- **driver / driving** — rejected on a principle, not a feel (PN, closing
+  the search): drive vocabulary names ACTIVE execution-pumping, and this
+  relationship is PASSIVE. The origin merely occasioned the body — returned
+  a deadline, submitted a value, completed — and the framework's machinery
+  ran it; nothing in the origin pumps its execution. The codebase's
+  drive/driver vocabulary is all on the active side — the skim drive loop,
+  `SuspendDriver`/`ResumeDriver`, drive-target attribution — and even for
+  top-level submit and skimming it is precisely their HIDDEN block-and-help
+  roles that vocabulary captures, not their primary source/sink roles. The
+  internal collisions were therefore never user-invisible noise: the word
+  correctly belongs to a different relationship, which is also why
+  `driver-contexts.md`'s use of it for the passive relation kept reading
+  badly. It stays internal vocabulary there; not the public name.
 - **source** — fails the way "upstream" did, more quietly: it reads as *where
   the data came from*, and a handler's data source is the item's producer —
   whose context the handler already runs under (the CP-F7 continuation) —
-  while this accessor returns the drive. Internally, `borrowSrcCtx`/`srcMeta`
+  while this accessor returns the drive. Worse, source/sink is live domain
+  vocabulary in this framework (a Skimmer is documented as "a terminal
+  sink"), so "the source flow" points at the pipeline's production end —
+  near-opposite of the referent. Internally, `borrowSrcCtx`/`srcMeta`
   already mean the borrow source, which for a flush or fire is the scheduler
   stash — precisely what this accessor looks past — so the implementation
   would have `src` and `Source` meaning different things.
 
-**`origin` wins**: the causal word without the data-lineage reading — the
-origin of an execution is what made it run. Its one risk, an
+**`origin` wins**: the passive-causal word — the origin of an execution is
+what occasioned it, with no claim of having run it and no data-lineage
+reading. Its one risk, an
 ultimate-vs-immediate reading, is softened twice over: in graph vocabulary an
 edge's origin is its immediate predecessor, and composition
 (`OriginFlow(OriginFlow(ctx))` walking toward the root) makes

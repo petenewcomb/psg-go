@@ -1,7 +1,7 @@
 # Context pinning and origin access: retention and the read surface
 
-> Decision record (2026-07-09, design session with PN). **Status: converged,
-> not yet implemented. The accessor's public name is settled: `OriginContext`
+> Decision record (2026-07-09/10, design sessions with PN). **Status: converged,
+> not yet implemented. Names settled: `FlowOrigin`, `PinFlow`/`UnpinFlow`
 > (see "Naming").**
 > Builds on `driver-contexts.md` (implemented), which put the lifetime
 > machinery in place; this record designs the two public surfaces that read
@@ -28,32 +28,34 @@ The two questions meet: a driver context read inside an extent is only valid
 within that extent, so retaining *it* needs the same answer as retaining any
 framework ctx.
 
-## Pin / Unpin: buying back the Go contract
+## PinFlow / UnpinFlow: buying back the Go contract
 
 **An explicit pin is the purchase of Go's normal context contract.** The
 parent-refcount work already made a `ctxMeta` immutable for its ref'd
 lifetime, so a context whose meta is deliberately held *is* an ordinary
 immutable, shareable, retainable Go context — the pin makes the holding
-explicit and paid-for:
+explicit and paid-for. The names are flow-anchored because the flow is what
+is actually pinned: carrier semantics holds the FLOW open, while the
+context's extent (wave, permit, exEnv) is deliberately dropped:
 
 ```go
-pinned := psg.Pin(ctx)   // must be called inside the extent where ctx is valid
-...                      // pinned is an ordinary Go context: share, store, retain
-psg.Unpin(pinned)        // releases; the flow may now end
+pinned := psg.PinFlow(ctx)  // inside the extent where ctx is valid
+...                         // pinned is an ordinary Go context: share, store, retain
+psg.UnpinFlow(pinned)       // releases; the flow may now end
 ```
 
-`Pin` MINTS the pinned context rather than blessing the argument in place: a
-fresh pooled meta and ctxpool child, stamped from the source at a synchronous
-safe point. The pinned ctx itself is the token — there is no side-band release
-handle to propagate, because the ctx is the thing the caller wanted to
-propagate all along. Minting is what makes the hard parts true by
-construction:
+`PinFlow` MINTS the pinned context rather than blessing the argument in
+place: a fresh pooled meta and ctxpool child, stamped from the source at a
+synchronous safe point. The pinned ctx itself is the token — there is no
+side-band release handle to propagate, because the ctx is the thing the
+caller wanted to propagate all along. Minting is what makes the hard parts
+true by construction:
 
-- **Carrier semantics.** Pin takes instance refs (plus node refs) on the
+- **Carrier semantics.** PinFlow takes instance refs (plus node refs) on the
   source's rider chain — takeable safely only inside the extent, where the
   extent's own refs provably cover them (the positional-cover rule that shaped
   `buildFireChain`). A pinned ctx therefore *carries* its flows: follow-ups
-  wait for the last Unpin. This is the semantically honest reading of
+  wait for the last UnpinFlow. This is the semantically honest reading of
   retention — keeping a context that says "I am part of flow X" means flow X
   is not over — and it is what makes later dispatch sound (the chain's
   instances cannot have been recycled). The corollary is stated like any
@@ -74,13 +76,62 @@ construction:
   cancellation or `context.WithValue` ancestry. (An application that wants a
   cancelable retained ctx composes one: flow values ride the pin; its own
   cancellation is its own business.)
-- **Validated Unpin.** The minted meta carries a pin marker, so `Unpin` on a
-  non-pin or an already-unpinned ctx fails loudly instead of corrupting a
-  bystander. Pins may be counted (Pin the same pinned ctx again) with the
-  existing refcount underflow panic as the double-release tripwire.
+- **Exact-token UnpinFlow.** The minted meta records a pin marker and its own
+  `selfCtx`, so `UnpinFlow` requires the exact ctx `PinFlow` returned
+  (`ctx == meta.selfCtx`) — unpinning a derivative, a non-pin, or the same
+  token twice fails loudly at the call site instead of corrupting a
+  bystander.
 
 Concurrent use of one pinned ctx from many goroutines is safe: the pinned meta
 is immutable, and every dispatch mints its own per-dispatch state (below).
+
+### Pins compose; unpin ends the extent
+
+**Pinning a pinned ctx mints a new, independent pin** — no counting on a
+shared token. Each `PinFlow` call returns its own token with its own single
+`UnpinFlow`; two subsystems handed the same pinned ctx each take their own
+pin and never coordinate. (Counting on one token was considered and dropped:
+it reintroduces aliasing within the pin family — one party's double-unpin
+silently steals the other's.) Because a pinned source is stably valid by
+definition, pinning FROM a pin has no extent-window precondition: pins
+compose freely, anywhere, anytime. The handoff idiom follows: overlap, then
+release — `p2 := PinFlow(p1); UnpinFlow(p1)`.
+
+**Derivation is ordinary Go.** `metaFromContext` resolves through plain
+wrappers, so `context.WithValue(pinned, …)` and `context.WithCancel(pinned)`
+still find the pin — dispatch, `FlowOrigin`, and `PinFlow` all work through
+them — and `WithCancel(pinned)` is precisely the promised composition for a
+cancelable retained ctx: the pin contributes the flow; cancellation is the
+application's own layer, riding ordinary Go ancestry into dispatched bodies.
+A framework derivation (`WithFlow(pinned, …)`) is a normal call-scoped scope,
+not itself pinned; pin inside it to keep it. `PinFlow` of a bare, meta-less
+ctx is the allowed degenerate case — a pin of the empty flow, consistent with
+every bare Submit extending the ambient (possibly empty) flow.
+
+**After `UnpinFlow`, the ctx — and every derivative of it — is invalid**:
+the pin window IS the extent, and past its extent a framework ctx is invalid,
+the same single rule as everywhere. Mechanically the refs drop, the meta's
+count drains, and the ctxpool child recycles for re-stamping — a retained
+unpinned handle can misdeliver a foreign flow's values through the reused
+node. Three consequences stated plainly:
+
+- **UnpinFlow is not cancellation.** Work dispatched from the pin before the
+  unpin took its own refs at borrow and completes normally, holding the flow
+  open until it is done. Those child refs can keep the pin meta alive PAST
+  the unpin — so an unpinned handle may coincidentally keep working until
+  the last child completes, then rot. Liveness after unpin is coincidental,
+  never contractual.
+- **Re-pinning cannot resurrect.** `PinFlow` after the unpin is invalid for
+  the same positional-cover reason as everything else: the flow may have
+  ended and its instances recycled. Overlap instead (the handoff idiom
+  above).
+- **Detection is best-effort, honestly bounded.** `UnpinFlow` flips the pin
+  marker to expired (a monotonic write on a meta we minted), so the cold
+  paths — dispatch, `PinFlow`, `UnpinFlow`, `FlowOrigin` — panic on an
+  expired pin caught before pool reuse. The hot value reads (`From`,
+  `InFlow`) are not taxed with the check and stay documented-undefined;
+  after the ctxpool node is reused, no detection is possible — the accepted
+  residual class.
 
 ### Dispatch from a pinned ctx: outside the framework, explicitly
 
@@ -113,18 +164,19 @@ that pins its own ctx and immediately dispatches through it gets top-level
 treatment (blocking, fresh permit root) rather than in-body treatment — legal,
 but almost never what it wanted.
 
-## The origin accessor
+## The flow-origin accessor
 
-One composable, ctx-shaped read. "Origin" is the public name; "driver" remains
-the internal term of art (`driver-contexts.md`) for the same relationship:
+One composable, ctx-shaped read. `FlowOrigin` is the public name; "driver"
+remains the internal term of art (`driver-contexts.md`) for the same
+relationship:
 
 ```go
-// OriginContext returns a read-only context positioned at the origin of the
-// body ctx belongs to — the context of whatever made this body run — so the
-// existing reads compose: key.From(origin), tag.InFlow(origin), and
-// OriginContext(origin) walks further up the chain. ok is false where there
-// is no origin.
-func OriginContext(ctx context.Context) (origin context.Context, ok bool)
+// FlowOrigin returns a read-only context positioned at the originating flow
+// of the body ctx belongs to — the context of whatever made this body run —
+// so the existing reads compose: key.From(origin), tag.InFlow(origin), and
+// FlowOrigin(origin) walks further up the chain. ok is false where there is
+// no origin.
+func FlowOrigin(ctx context.Context) (origin context.Context, ok bool)
 ```
 
 Ctx-shaped rather than per-identity (`k.FromOrigin`, `t.InOriginFlow`): one
@@ -142,11 +194,11 @@ it returns follows the driver table in `driver-contexts.md`:
 
 Validity: the returned ctx is readable within the current synchronous extent
 (its liveness comes from the machinery `driver-contexts.md` built, which
-guarantees exactly that extent). To keep it, `Pin` it while still inside —
+guarantees exactly that extent). To keep it, `PinFlow` it while still inside —
 which is the whole retention story in one line, and why the accessor needs no
 lifetime rules of its own.
 
-## Naming (settled: `OriginContext`)
+## Naming (settled: `FlowOrigin`, `PinFlow`/`UnpinFlow`)
 
 The accessor's relationship is *causal attribution of execution across
 extents*: what made this body run. The test every candidate had to pass: "the
@@ -184,7 +236,7 @@ sentences true without qualification. Candidates examined and why they fell:
 origin of an execution is what made it run. Its one risk, an
 ultimate-vs-immediate reading, is softened twice over: in graph vocabulary an
 edge's origin is its immediate predecessor, and composition
-(`OriginContext(OriginContext(ctx))` walking toward the root) makes
+(`FlowOrigin(FlowOrigin(ctx))` walking toward the root) makes
 single-hop-ness self-evident. It is collision-free at the public surface
 (internally only rdvq's `ProbeOrigin`), passes the qualification test on
 every path, and — since a scope-flavored word cannot be right for a causal
@@ -193,6 +245,19 @@ register: the origin of a river is where the flow begins. (The rest of that
 register produced nothing that both fits and stays clear: headwaters ⇒
 ultimate origin; wake ⇒ notification vocabulary; current/channel/stream ⇒
 collisions.)
+
+**Flow-anchored surfaces (PN):** `FlowOrigin` rather than `OriginContext`,
+`PinFlow`/`UnpinFlow` rather than `Pin`/`Unpin` — the flow is what these
+represent and manipulate through the contexts involved. For the pin pair the
+anchoring is outright more accurate: carrier semantics pins the FLOW open
+while the context's extent is deliberately dropped, so `PinFlow` names the
+true object and makes the leaked-pin consequence self-documenting. For the
+accessor, the compound admits a double parse — "origin of my flow" (the
+producer: wrong) vs "the originating flow" (the drive: intended) — but the
+intended reading is how the driver table itself speaks ("skim handler | the
+drive (skim) *flow*"), and the qualification test still passes with "flow"
+attached to what is returned: the flow-origin of a flush is the last
+accumulate's flow; of a handler, the drive's.
 
 ## Rejected alternatives
 
@@ -218,7 +283,7 @@ collisions.)
 
 ## Implementation notes
 
-- `Pin` = structurally a top-level `WithFlow` scope meta (wave nil, riders
+- `PinFlow` = structurally a top-level `WithFlow` scope meta (wave nil, riders
   carried) plus `permitRoot`, carrier refs (`flowRefRiders` + node ref), a pin
   marker, and a `context.Background()` root; pins are cold, so the pooled
   meta + child alloc is off the hot path.
@@ -227,6 +292,6 @@ collisions.)
   rolling pin is still held; cleared with it).
 - Gate expectations when implemented: the usual per-CP gate plus conservation
   extensions (a pinned-and-leaked ctx must show up in `TestCtxMetaConservation`
-  as a deliberate positive; Unpin restores zero), a pinned-dispatch end-to-end
-  test (values delivered, follow-up waits for Unpin), and a
+  as a deliberate positive; UnpinFlow restores zero), a pinned-dispatch end-to-end
+  test (values delivered, follow-up waits for UnpinFlow), and a
   multi-goroutine pinned-dispatch -race test.

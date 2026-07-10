@@ -1,7 +1,7 @@
 # Context pinning and origin access: retention and the read surface
 
 > Decision record (2026-07-09/10, design sessions with PN). **Status: converged,
-> not yet implemented. Names settled: `FlowOrigin`, `PinFlow`/`UnpinFlow`
+> not yet implemented. Names settled: `OriginFlow`, `PinFlow`/`UnpinFlow`
 > (see "Naming").**
 > Builds on `driver-contexts.md` (implemented), which put the lifetime
 > machinery in place; this record designs the two public surfaces that read
@@ -99,7 +99,7 @@ release — `p2 := PinFlow(p1); UnpinFlow(p1)`.
 
 **Derivation is ordinary Go.** `metaFromContext` resolves through plain
 wrappers, so `context.WithValue(pinned, …)` and `context.WithCancel(pinned)`
-still find the pin — dispatch, `FlowOrigin`, and `PinFlow` all work through
+still find the pin — dispatch, `OriginFlow`, and `PinFlow` all work through
 them — and `WithCancel(pinned)` is precisely the promised composition for a
 cancelable retained ctx: the pin contributes the flow; cancellation is the
 application's own layer, riding ordinary Go ancestry into dispatched bodies.
@@ -127,7 +127,7 @@ node. Three consequences stated plainly:
   above).
 - **Detection is best-effort, honestly bounded.** `UnpinFlow` flips the pin
   marker to expired (a monotonic write on a meta we minted), so the cold
-  paths — dispatch, `PinFlow`, `UnpinFlow`, `FlowOrigin` — panic on an
+  paths — dispatch, `PinFlow`, `UnpinFlow`, `OriginFlow` — panic on an
   expired pin caught before pool reuse. The hot value reads (`From`,
   `InFlow`) are not taxed with the check and stay documented-undefined;
   after the ctxpool node is reused, no detection is possible — the accepted
@@ -166,17 +166,17 @@ but almost never what it wanted.
 
 ## The flow-origin accessor
 
-One composable, ctx-shaped read. `FlowOrigin` is the public name; "driver"
+One composable, ctx-shaped read. `OriginFlow` is the public name; "driver"
 remains the internal term of art (`driver-contexts.md`) for the same
 relationship:
 
 ```go
-// FlowOrigin returns a read-only context positioned at the originating flow
+// OriginFlow returns a read-only context positioned at the originating flow
 // of the body ctx belongs to — the context of whatever made this body run —
 // so the existing reads compose: key.From(origin), tag.InFlow(origin), and
-// FlowOrigin(origin) walks further up the chain. ok is false where there is
+// OriginFlow(origin) walks further up the chain. ok is false where there is
 // no origin.
-func FlowOrigin(ctx context.Context) (origin context.Context, ok bool)
+func OriginFlow(ctx context.Context) (origin context.Context, ok bool)
 ```
 
 Ctx-shaped rather than per-identity (`k.FromOrigin`, `t.InOriginFlow`): one
@@ -198,7 +198,7 @@ guarantees exactly that extent). To keep it, `PinFlow` it while still inside —
 which is the whole retention story in one line, and why the accessor needs no
 lifetime rules of its own.
 
-## Naming (settled: `FlowOrigin`, `PinFlow`/`UnpinFlow`)
+## Naming (settled: `OriginFlow`, `PinFlow`/`UnpinFlow`)
 
 The accessor's relationship is *causal attribution of execution across
 extents*: what made this body run. The test every candidate had to pass: "the
@@ -236,7 +236,7 @@ sentences true without qualification. Candidates examined and why they fell:
 origin of an execution is what made it run. Its one risk, an
 ultimate-vs-immediate reading, is softened twice over: in graph vocabulary an
 edge's origin is its immediate predecessor, and composition
-(`FlowOrigin(FlowOrigin(ctx))` walking toward the root) makes
+(`OriginFlow(OriginFlow(ctx))` walking toward the root) makes
 single-hop-ness self-evident. It is collision-free at the public surface
 (internally only rdvq's `ProbeOrigin`), passes the qualification test on
 every path, and — since a scope-flavored word cannot be right for a causal
@@ -246,18 +246,19 @@ register produced nothing that both fits and stays clear: headwaters ⇒
 ultimate origin; wake ⇒ notification vocabulary; current/channel/stream ⇒
 collisions.)
 
-**Flow-anchored surfaces (PN):** `FlowOrigin` rather than `OriginContext`,
+**Flow-anchored surfaces (PN):** `OriginFlow` rather than `OriginContext`,
 `PinFlow`/`UnpinFlow` rather than `Pin`/`Unpin` — the flow is what these
 represent and manipulate through the contexts involved. For the pin pair the
 anchoring is outright more accurate: carrier semantics pins the FLOW open
 while the context's extent is deliberately dropped, so `PinFlow` names the
-true object and makes the leaked-pin consequence self-documenting. For the
-accessor, the compound admits a double parse — "origin of my flow" (the
-producer: wrong) vs "the originating flow" (the drive: intended) — but the
-intended reading is how the driver table itself speaks ("skim handler | the
-drive (skim) *flow*"), and the qualification test still passes with "flow"
-attached to what is returned: the flow-origin of a flush is the last
-accumulate's flow; of a handler, the drive's.
+true object and makes the leaked-pin consequence self-documenting. Word
+order matters for the accessor (PN caught the first cut, `FlowOrigin`,
+before it shipped): "flow origin" parses as *origin of my flow* — the
+producer, the wrong reading, the very ambiguity that killed "source" —
+while `OriginFlow`, adjective-noun, just IS *the originating flow*: the
+drive of a handler, the last accumulate's flow at a flush, exactly how the
+driver table speaks ("skim handler | the drive (skim) *flow*"). The family
+also lands symmetric: pin flows, unpin flows, get the origin flow.
 
 ## Rejected alternatives
 

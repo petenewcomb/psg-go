@@ -271,7 +271,7 @@ cancellation) — "an explicit pin is the purchase of Go's normal context contra
 Dispatch from a pin = ordinary bare-ctx top-level submission: resolveWave already forces
 op.In(&wave) (PN's move — replaced my just-block special mode; consistency over modes),
 help-shaped blocking + the usual multi-goroutine skim caveats apply since the wave is
-EXPLICIT. (2) FlowOrigin(ctx)→(ctx,ok) — NAMES SETTLED as FLOW-ANCHORED (PN): FlowOrigin + PinFlow/UnpinFlow (after
+EXPLICIT. (2) OriginFlow(ctx)→(ctx,ok) — NAMES SETTLED as FLOW-ANCHORED (PN): OriginFlow + PinFlow/UnpinFlow (after
 parent/upstream/trigger/enclosing/driver/source all fell; scope words fail because the
 relationship is CAUSAL across extents, not scoped — async drivers don't enclose;
 "source"/"upstream" read as data-lineage, wrong at the skim handler; the record's Naming
@@ -280,7 +280,7 @@ the chain by re-application): task/acc→dispatcher, skim handler→the drive, f
 accumulate via the step-2 rolling pin + ONE new field (origin link stamped on the flush
 body meta), fire→ok=false (the fire IS the continuation), pumps/top→false.
 Read-within-extent; PinFlow it to keep it. PIN SEMANTICS SETTLED (2026-07-10): pinning a pinned ctx = a NEW INDEPENDENT pin (no shared counting — aliasing; handoff idiom = overlap: p2:=PinFlow(p1); UnpinFlow(p1)); pins compose freely (pinned source = stably valid, no extent-window precondition); UnpinFlow requires the EXACT token (ctx==selfCtx, loud on derivative/double); plain Go derivation transparent (WithCancel(pinned) IS the cancelable-retention composition); WithFlow(pinned)=normal call-scoped scope; PinFlow(bare ctx)=degenerate empty-flow pin; AFTER UnpinFlow the ctx + every derivative is INVALID (pin window IS the extent — one rule): unpin is NOT cancellation (in-flight work unaffected; post-unpin liveness coincidental never contractual), re-pin cannot resurrect (positional cover), detection best-effort (expired marker on cold paths; hot reads untaxed; post-reuse undetectable — accepted residual). "Driver" stays internal vocabulary
-(driver-contexts.md). NEXT: implement (PinFlow/UnpinFlow first — incl. independent-pin composition, exact-token unpin, expired-marker checks on cold paths — then FlowOrigin + the flush
+(driver-contexts.md). NEXT: implement (PinFlow/UnpinFlow first — incl. independent-pin composition, exact-token unpin, expired-marker checks on cold paths — then OriginFlow + the flush
 origin link), each sim-gated; streamotel consumer follows on top.
 
 ►► DRIVER-CONTEXTS STEP 3 LANDED (2026-07-09, 55e16e6) — fire = the last carrier's

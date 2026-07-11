@@ -285,7 +285,8 @@ covers it. (My own earlier chase's zero-SelfTime config was the dead zone the re
     delays/parked-worker windows), planConfig Subjob.Add probabilities raised: Launcher.Body
     0.5, Funnel.Accumulate 0.3, Funnel.Flush 0.5, Skimmer.Handle 0.3 → ≈1/300 checks (vs
     ~1/2600 ambient). Dead configs: zero-SelfTime no-race ×300 and zero-SelfTime -race ×2500,
-    0 hits both. Dumps preserved at flow-impl scratchpad: sim4_race_27.log, bias3_base_hang_1.log.
+    0 hits both. (Dumps were preserved at the flow-impl scratchpad; discarded with that
+    worktree 2026-07-11 after the merge — the issue is closed and re-derivable via the recipe.)
 
 **(2) Funnel `borrowSrcCtx` -race (DISTINCT from the hang), ~1/400. → CLOSED (2026-07-11): the
 flow-impl merge landed the ctxMeta parent refcount CP (f193c7f;

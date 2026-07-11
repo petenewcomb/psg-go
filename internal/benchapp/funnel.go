@@ -11,7 +11,6 @@ import (
 	"github.com/influxdata/tdigest"
 	"github.com/petenewcomb/streampool"
 	"github.com/petenewcomb/streampool/internal/omnipool"
-	"github.com/petenewcomb/streampool/psgwf"
 )
 
 type FunnelResult[T any] struct {
@@ -25,11 +24,11 @@ type FunnelResult[T any] struct {
 	Value                   T
 }
 
-type Funnel[T, C any] struct {
-	pool                    *omnipool.Pool[Funnel[T, C]]
+type Funnel[T any] struct {
+	pool                    *omnipool.Pool[Funnel[T]]
 	skimmer                 *FunnelSkimmer[T]
 	creationTime            time.Time
-	wrapped                 psgwf.GenericFunnel[T, C]
+	wrapped                 streampool.Accumulator[T]
 	taskStartLatenciesSec   *tdigest.TDigest
 	taskDurationsSec        *tdigest.TDigest
 	funnelStartLatenciesSec *tdigest.TDigest
@@ -37,12 +36,12 @@ type Funnel[T, C any] struct {
 	fallbackFn              func(res FunnelResult[T])
 }
 
-func NewFunnel[T, C any](
+func NewFunnel[T any](
 	skimmer *FunnelSkimmer[T],
-	wrappedFunnel psgwf.GenericFunnel[T, C],
+	wrappedFunnel streampool.Accumulator[T],
 	fallbackFn func(res FunnelResult[T]),
-) *Funnel[T, C] {
-	pool := omnipool.For[Funnel[T, C]]()
+) *Funnel[T] {
+	pool := omnipool.For[Funnel[T]]()
 	c := pool.Get()
 	c.pool = pool
 	c.skimmer = skimmer
@@ -56,7 +55,7 @@ func NewFunnel[T, C any](
 	return c
 }
 
-func (c *Funnel[T, C]) Accumulate(ctx context.Context, wf *psgwf.GenericWorkflow[C],
+func (c *Funnel[T]) Accumulate(ctx context.Context,
 	res TaskResult[T], err error) (time.Time, error) {
 	funnelStartTime := time.Now()
 	funnelStartLatency := funnelStartTime.Sub(res.StartTime.Add(res.Duration))
@@ -65,14 +64,14 @@ func (c *Funnel[T, C]) Accumulate(ctx context.Context, wf *psgwf.GenericWorkflow
 	c.taskStartLatenciesSec.Add(res.StartLatency.Seconds(), 1.0)
 	c.taskDurationsSec.Add(res.Duration.Seconds(), 1.0)
 
-	flushDeadline, err := c.wrapped.Accumulate(ctx, wf, res.Value, err)
+	flushDeadline, err := c.wrapped.Accumulate(ctx, res.Value, err)
 
 	c.funnelDurationsSec.Add(time.Since(funnelStartTime).Seconds(), 1.0)
 
 	return flushDeadline, err
 }
 
-func (c *Funnel[T, C]) Flush(ctx context.Context) error {
+func (c *Funnel[T]) Flush(ctx context.Context) error {
 	flushStartTime := time.Now()
 
 	err := c.wrapped.Flush(ctx)

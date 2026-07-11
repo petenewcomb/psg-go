@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/trace"
 
 	"github.com/petenewcomb/streampool/internal/omnipool"
@@ -138,8 +139,13 @@ func (g Skimmer[T]) SubmitResult(
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
-	// Skimmer submit does not yet recycle its minted meta (follow-on); owned ignored.
-	ctx, meta, _ := target.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// The submit uses the minted meta only synchronously (skimWork captures
+		// riders by value with its own refs; nothing retains the meta), so the
+		// dispatch releases it — recycling rides the unrefMeta cascade.
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 
@@ -189,8 +195,11 @@ func (g Skimmer[T]) TrySubmitResult(
 	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
-	// Skimmer submit does not yet recycle its minted meta (follow-on); owned ignored.
-	ctx, meta, _ := target.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// The submit uses the minted meta only synchronously (see SubmitResult).
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 
@@ -216,6 +225,29 @@ type skimWork[T any] struct {
 	handler Handler[T]
 	value   T
 	err     error
+	// riders is the producing item's flow rider chain, captured at submit and held
+	// (node + instance refs) until Free. A skim result is a flow CONTINUATION, not a
+	// fan-in (CP-F7): the handler runs under the ITEM's riders (shadowing the
+	// driver's — the item descends from it), and holding the refs keeps a tag
+	// follow-up from firing while the result awaits skimming. nil for a result
+	// submitted from a rider-free ctx.
+	riders *flowRiderNode
+	// itemMeta is the per-item child meta the handler ran under (Execute),
+	// retained past the handler so Free can pass it as the LAST CARRIER of any
+	// fire its rider release triggers (driver-contexts.md, "Fire"): the item's
+	// refs are what end the flow here, and the item's continuation context is
+	// the handler's per-item meta. nil when the work is freed without
+	// executing (teardown) — the fire then takes the no-carrier fallback.
+	itemMeta *ctxMeta
+}
+
+// captureRiders records the producing item's rider chain and takes the carrier
+// refs (node + instance) that hold it alive from submit until Free — overlapping
+// the item's own refs, so the chain never transits unreferenced.
+func (wk *skimWork[T]) captureRiders(riders *flowRiderNode) {
+	wk.riders = riders
+	flowRefRiders(riders)
+	nodeRef(riders)
 }
 
 // newSkimWork creates a new skim work item with the provided values
@@ -247,7 +279,44 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	trace.Logf(ctx, traceRegion, "%v", wk)
 
 	ex.Starting()
-	ctx, meta := wk.wave.ctxMeta(ctx)
+	ctx, driveMeta := wk.wave.ctxMeta(ctx)
+
+	// The handler runs under a PER-ITEM child meta of the drive meta
+	// (docs/decisions/driver-contexts.md, "Skim handlers get a per-item child
+	// context") rather than overriding the drive meta's riders in place — the
+	// drive meta is ref'd-lifetime immutable, and the override was a live
+	// misdelivery bug (never restored, so a rider-free item skimmed after a
+	// rider-carrying one read the previous item's — possibly already recycled —
+	// chain instead of the drive's).
+	//
+	// parent = the drive meta, a SYNCHRONOUS derivation, not a permitRoot: the
+	// handler runs on the drive goroutine, so vetNotNestedInSkim and the permit
+	// walk must see through to the drive. riders = the item's chain (the CP-F7
+	// nearest-wins continuation, now structural), or the drive's own for a
+	// rider-free item — per item, correctly. No rider refs are taken here: the
+	// item chain is held by wk's submit-time refs until Free, the drive chain by
+	// the drive scope, and both cover the handler's synchronous extent; handler
+	// dispatches take their own refs on borrow. exEnv is shared with the drive
+	// like any derived skim meta (ownsExEnv stays false).
+	meta := newCtxMeta()
+	meta.wave = wk.wave
+	meta.ctxType = skimContext
+	meta.parent = driveMeta
+	refMeta(driveMeta)
+	meta.parentWaves = driveMeta.parentWaves
+	meta.executionEnvironment = driveMeta.executionEnvironment
+	if wk.riders != nil {
+		meta.riders = wk.riders
+	} else {
+		meta.riders = driveMeta.riders
+	}
+	ctx = ctxpool.WithValue(ctx, meta)
+	meta.selfCtx = ctx
+	// The owner ref transfers to the work item: Free passes the meta as the
+	// last carrier of any fire its rider release triggers, then drops it.
+	// Async work dispatched from the handler keeps the meta (and, via the
+	// cascade, the drive meta) alive through its own parent ref.
+	wk.itemMeta = meta
 
 	meta.PushGroup(wk.Group())
 	defer meta.PopGroup()
@@ -260,6 +329,18 @@ func (wk *skimWork[T]) Free() {
 	traceRegion := "skimWork.Free"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "%v", wk)
+
+	// Release the producing item's rider refs captured at submit (CP-F7). A release
+	// that ends a follow-up's flow dispatches a wave-rooted fire whose last
+	// carrier is the item — its continuation context is the handler's per-item
+	// meta (alive here on the owner ref Execute transferred; nil if the work
+	// never executed). Do it while wk.wave is still valid, before the recycle.
+	//nolint:contextcheck // a fire dispatched here roots at the scheduler ctx by design
+	flowUnrefRiders(wk.riders, wk.wave, wk.itemMeta)
+	nodeUnref(wk.riders)
+	wk.riders = nil
+	unrefMeta(wk.itemMeta)
+	wk.itemMeta = nil
 
 	wk.DownstreamWork.Close()
 	wk.poolWork.Close(wk.wave)
@@ -276,6 +357,7 @@ func (g Skimmer[T]) submit(
 	err error,
 ) error {
 	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	skimWork.captureRiders(meta.riders)
 	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
@@ -290,6 +372,7 @@ func (g Skimmer[T]) trySubmit(
 	deadline time.Time,
 ) (bool, error) {
 	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	skimWork.captureRiders(meta.riders)
 	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {

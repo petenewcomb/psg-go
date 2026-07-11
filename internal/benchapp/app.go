@@ -7,14 +7,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/petenewcomb/streampool/psgwf"
+	"github.com/petenewcomb/streampool"
 )
-
-type Context struct {
-	WorkflowStartTime time.Time
-}
-
-type Workflow = psgwf.GenericWorkflow[Context]
 
 type topLevelTask[T any] struct {
 	duration       time.Duration
@@ -23,7 +17,7 @@ type topLevelTask[T any] struct {
 }
 
 func NewTopLevelTask[T any](duration time.Duration, simulateWorkFn func(time.Duration),
-	value T) psgwf.GenericTaskFunc[TaskResult[T], Context] {
+	value T) func(context.Context) (TaskResult[T], error) {
 	t := &topLevelTask[T]{
 		duration:       duration,
 		simulateWorkFn: simulateWorkFn,
@@ -32,7 +26,7 @@ func NewTopLevelTask[T any](duration time.Duration, simulateWorkFn func(time.Dur
 	return NewTask(t.execute)
 }
 
-func (t *topLevelTask[T]) execute(context.Context, *Workflow) (T, error) {
+func (t *topLevelTask[T]) execute(context.Context) (T, error) {
 	t.simulateWorkFn(t.duration)
 	return t.value, nil
 }
@@ -50,17 +44,17 @@ func NewFanOutFunnel[T any](
 	subtaskCount int,
 	scatterFn func(context.Context, T, error) error,
 	fallbackFn func(res FunnelResult[T]),
-) psgwf.GenericFunnel[TaskResult[T], Context] {
+) streampool.Accumulator[TaskResult[T]] {
 	c := &fanOutFunnel[T]{
 		funnelDuration:       funnelDuration,
 		simulateFunnelWorkFn: simulateFunnelWorkFn,
 		subtaskCount:         subtaskCount,
 		scatterFn:            scatterFn,
 	}
-	return NewFunnel[T, Context](nil, c, fallbackFn)
+	return NewFunnel[T](nil, c, fallbackFn)
 }
 
-func (c *fanOutFunnel[T]) Accumulate(ctx context.Context, wf *Workflow,
+func (c *fanOutFunnel[T]) Accumulate(ctx context.Context,
 	inputValue T, inputErr error) (time.Time, error) {
 	c.simulateFunnelWorkFn(c.funnelDuration)
 	for range c.subtaskCount {
@@ -88,16 +82,16 @@ func NewFanInFunnel[T any](
 	funnelDuration time.Duration,
 	simulateFunnelWorkFn func(time.Duration),
 	subtaskCount int,
-) psgwf.GenericFunnel[TaskResult[T], Context] {
+) streampool.Accumulator[TaskResult[T]] {
 	c := &fanInFunnel[T]{
 		funnelDuration:       funnelDuration,
 		simulateFunnelWorkFn: simulateFunnelWorkFn,
 		subtaskCount:         subtaskCount,
 	}
-	return NewFunnel[T, Context](nil, c, nil)
+	return NewFunnel[T](nil, c, nil)
 }
 
-func (c *fanInFunnel[T]) Accumulate(ctx context.Context, wf *Workflow,
+func (c *fanInFunnel[T]) Accumulate(ctx context.Context,
 	inputValue T, inputErr error) (time.Time, error) {
 	c.simulateFunnelWorkFn(c.funnelDuration)
 	for range c.subtaskCount {

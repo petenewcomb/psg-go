@@ -215,9 +215,13 @@ func (c *Funnel[T]) SubmitResult(
 	// cross-wave submit redirects into the funnel's wave, recording the source as
 	// parent). No ctx-type restriction — a value may be submitted to a funnel from
 	// anywhere.
-	// Funnel does not yet recycle its minted meta (its body borrows from the
-	// meta-stamped ctx, so freeing it needs the borrow-source fix first); owned ignored.
-	ctx, meta, _ := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// Safe now that the body borrow ref-pins this meta as its parent: the
+		// meta (and its ctxpool child) survives on that ref until the async
+		// body completes, then recycles via the unrefMeta cascade.
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -262,9 +266,12 @@ func (c *Funnel[T]) TrySubmitResult(
 	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
 	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
-	// Funnel does not yet recycle its minted meta (its body borrows from the
-	// meta-stamped ctx, so freeing it needs the borrow-source fix first); owned ignored.
-	ctx, meta, _ := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	if owned {
+		// Safe now that the body borrow ref-pins this meta as its parent (see
+		// SubmitResult).
+		defer releaseTopLevelContext(ctx)
+	}
 	meta.Lock()
 	defer meta.Unlock()
 	group := meta.Group()
@@ -400,6 +407,46 @@ type funnelInstance[T any] struct {
 	// owner reuse-pop, which may recycle a non-detached spent shell the instant Run
 	// releases c.mu (see Run).
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the flush body ctx
+	// borrowSrcMeta is the meta on borrowSrcCtx, resolved AND ref-pinned in Execute —
+	// a synchronous safe point, where the scheduler stack provably holds the ctx's
+	// meta alive. Run borrows from the pinned meta (never re-reading it from the
+	// stashed ctx, whose ctxpool child the driver could otherwise free and re-stamp
+	// first — the pre-refcount borrowSrcCtx use-after-free) and drops the pin once
+	// the borrow holds its own parent ref. Same write/read discipline as
+	// borrowSrcCtx. See docs/decisions/ctxmeta-parent-refcount.md.
+	borrowSrcMeta *ctxMeta
+
+	// boundary is the fan-in boundary this instance adopted from its first
+	// accumulate (the funnel work's dispatch-captured enclosing head above the
+	// wave). flowTags starts AS the boundary (with one carrier ref), so the union
+	// chain's tail is the enclosing flow — a flush walk reads folded per-item tags,
+	// then the enclosing flow intact. collectFlowTags stops its walk here so
+	// per-item riders above it sever. nil when nothing encloses the wave. Nil'd at
+	// takeover; mutated only under mu.
+	boundary *flowRiderNode
+	// flowTags is the head of the union chain of DAG-scoped flow riders (tags)
+	// carried by this instance's accumulated items — one carrier ref held per
+	// distinct instance (collectFlowTags, called from accumulate under mu), its
+	// tail the boundary above. The flush takeover hands the whole chain, refs
+	// included, to the flush body ctx (flowFanInContext), which is what carries tag
+	// presence, follow-up lifetimes, AND the enclosing flow across the fan-in.
+	// Nil'd at takeover; mutated only under mu.
+	flowTags *flowRiderNode
+
+	// driverMeta/driverRiders are the instance's rolling driver pin
+	// (docs/decisions/driver-contexts.md, "Flush: a rolling node-only driver pin
+	// on the instance"): the flush's driver is THE LAST ACCUMULATE — the one
+	// whose returned deadline (or finality before close) made the flush due —
+	// so each accumulate re-points the pin at its own body meta (refMeta) and
+	// that meta's rider head (nodeRef), releasing the previous pair; flush
+	// releases the final pair after the flush body runs. Node-only,
+	// deliberately: NO flowRefRiders — instance refs would make the driver's
+	// own follow-ups wait on the aggregate's flush. The driver's follow-ups may
+	// therefore already have fired when a flush-time reader walks these; the
+	// values live on the pinned nodes and stay readable regardless. Mutated
+	// only under mu.
+	driverMeta   *ctxMeta
+	driverRiders *flowRiderNode
 }
 
 // Execute implements [workq.Work] as the scheduler-side admission for a due flush
@@ -416,19 +463,27 @@ type funnelInstance[T any] struct {
 // subsequent Free is a no-op, and after Starting the controller drops its buffer slot, so
 // nothing on the scheduler side touches the instance once it is handed off.
 func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
-	// Stash the borrow source for Run; see the field and Run for why writing it here
-	// (before the publishing handoff) and reading it once at the top of Run is race-free.
+	// Stash the borrow source for Run — ctx plus its meta, pinned here at the
+	// synchronous safe point; see the fields and Run for the write/read and
+	// pin-lifetime rules. A path that does NOT hand off (postpone, PushBack
+	// error) drops the pin again: the retry's Execute re-pins.
+	srcMeta, _ := metaFromContext(ctx)
+	refMeta(srcMeta)
 	c.borrowSrcCtx = ctx
+	c.borrowSrcMeta = srcMeta
 	if bodyExecutor.TryPushBack(c) {
 		ex.Starting()
 		return nil
 	}
 	if !ex.ShouldBlockOrPostpone() {
+		unrefMeta(srcMeta)
 		return nil // postpone; retried (and blocked) when the scheduler worker parks
 	}
 	err := bodyExecutor.PushBack(ctx, c)
 	if err == nil {
 		ex.Starting()
+	} else {
+		unrefMeta(srcMeta)
 	}
 	return err
 }
@@ -445,11 +500,22 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 //nolint:contextcheck // src is the borrow source for the flush body ctx, not a propagated arg
 func (c *funnelInstance[T]) Run(ee *workerExEnv) {
 	src := c.borrowSrcCtx
+	srcMeta := c.borrowSrcMeta
 	c.borrowSrcCtx = nil
-	bodyCtx, _ := borrowBodyContext(src, c.wave, funnelContext, nil, ee)
+	c.borrowSrcMeta = nil
+	// Borrow from the PINNED meta — never re-read it from src, whose ctxpool
+	// child's value the driver may free and re-stamp concurrently. Riders are
+	// deliberately NOT captured from it: the pin covers the meta's lifetime,
+	// not the driver's rider chain (reading that needs the driver-link rider
+	// pin, a documented follow-up), and the flush fan-in severs path riders
+	// before any user code runs anyway.
+	bodyCtx, m := newBorrowedMeta(src, srcMeta, c.wave, funnelContext)
+	m.executionEnvironment = ee
+	m.parentWaves = parentWavesForSource(srcMeta, srcMeta != nil, c.wave)
+	unrefMeta(srcMeta) // the borrow holds its own parent ref now; drop the Execute pin
 	defer releaseBodyContext(bodyCtx)
 	c.mu.Lock()
-	c.flush(bodyCtx)
+	c.flush(bodyCtx, true)
 	detached := c.detached
 	c.mu.Unlock()
 	if detached {
@@ -519,6 +585,27 @@ func (c *funnelInstance[T]) accumulate(
 	traceRegion := "funnelInstance.funnel"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
+	// Fan-in transfer, collect side: fold this item's per-item DAG-scoped riders
+	// (those above the boundary) into the instance's union, so tag presence and
+	// follow-up lifetimes survive to the flush regardless of when the item itself
+	// completes; per-item values above the boundary sever. Runs under c.mu (the
+	// only accumulate path). The boundary and enclosing tail were established at
+	// the first accumulate (Funnel).
+	c.flowTags = collectFlowTags(c.flowTags, ctx, c.boundary)
+
+	// Re-point the rolling driver pin at this accumulate (see the field docs):
+	// a synchronous safe point — the body meta and its rider head are provably
+	// alive here, held by the running funnelWork until Free. Four uncontended
+	// atomics per accumulate, no allocation.
+	if m, ok := metaFromContext(ctx); ok {
+		refMeta(m)
+		nodeRef(m.riders)
+		unrefMeta(c.driverMeta)
+		nodeUnref(c.driverRiders)
+		c.driverMeta = m
+		c.driverRiders = m.riders
+	}
+
 	didNotPanic := false
 	defer func() {
 		if !didNotPanic {
@@ -547,7 +634,11 @@ func (c *funnelInstance[T]) accumulate(
 		// already drained, so its pending Execute will flush the data just accumulated
 		// and we leave the accumulator live (rule R1).
 		if defaultPool.ClaimForFlush(c) {
-			c.flush(ctx)
+			// ownMeta false: the inline flush runs on the TRIGGERING accumulate's
+			// own (published) ctx, which must not be stamped; with no fan-in
+			// clone, OriginFlow inside such a flush resolves the accumulate's
+			// parent — the reader is already AT the last accumulate's position.
+			c.flush(ctx, false)
 		}
 	default:
 		// Future deadline: (re)schedule on the shared pool's queue, where a worker
@@ -562,7 +653,10 @@ func (c *funnelInstance[T]) accumulate(
 // (false if the instance was already flushed). Drops the per-instance wave
 // barrier reference, but NOT the pooled object — the caller does that after
 // releasing c.mu (an owner reuse-pop, a detached Execute, or the end-of-work sweep).
-func (c *funnelInstance[T]) flush(ctx context.Context) bool {
+// ownMeta reports that ctx's meta is this flush's own single-custody borrow
+// (the executor path), stampable with the origin link; the fan-in clone below
+// is always stampable regardless.
+func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	traceRegion := "funnelInstance.flush"
 
 	accumulator := c.accumulator
@@ -572,15 +666,72 @@ func (c *funnelInstance[T]) flush(ctx context.Context) bool {
 	}
 	c.accumulator = nil
 
+	// Release the rolling driver pin (the last accumulate's meta + rider head)
+	// once the flush body has run — deferred so a panicking Flush still
+	// releases it. Ordering against the other trailing defers is immaterial:
+	// the release only returns pooled objects, it fires nothing and touches no
+	// wave state. Runs under c.mu like every pin mutation.
+	defer func() {
+		unrefMeta(c.driverMeta)
+		nodeUnref(c.driverRiders)
+		c.driverMeta = nil
+		c.driverRiders = nil
+	}()
+
+	// Flow fan-in (docs/decisions/flow-design.md): path-scoped riders SEVER —
+	// the inline already-past-deadline flush arrives here on the TRIGGERING
+	// accumulate body's ctx, whose meta carries that one item's riders, one of
+	// many folded into this flush — while the DAG-scoped tags collected from
+	// ALL accumulated items TAKE OVER as the flush body's rider set, their
+	// funnel-held refs adopted by the flush ctx and released with it. The
+	// executor-driven path (Run) borrows from the scheduler ctx and is
+	// naturally rider-free on the sever side; doing both here makes the rule
+	// structural for every drive. The extent is synchronous (the user Flush
+	// and its dispatches complete within this call).
+	//nolint:contextcheck // flushCtx holds the adopted fan-in ctx to defer its release after the barrier
+	var flushCtx context.Context
+	if fc, adopted := flowFanInContext(ctx, c.flowTags); adopted {
+		c.flowTags = nil
+		c.boundary = nil
+		flushCtx = fc
+		ctx = fc
+		ownMeta = true
+	}
+
+	// Stamp the flush body's origin link (docs/decisions/
+	// context-pinning-and-origin-access.md): the flush's origin is THE LAST
+	// ACCUMULATE, reachable through the instance's rolling driver pin — held
+	// right now (released by the defer below, after the body), which is
+	// exactly the origin's validity window. Only a meta this flush owns is
+	// stamped (single-party custody; the inline tag-free path runs on the
+	// triggering accumulate's published ctx and stays unstamped — the reader
+	// there is already at the last accumulate's position).
+	if ownMeta {
+		if m, ok := metaFromContext(ctx); ok {
+			m.origin.Store(c.driverMeta)
+		}
+	}
+
 	// Release the per-instance flush barrier reference acquired at
-	// allocation. Deferred so a panicking Flush still releases it, and
-	// ordered after the accumulator.Flush body below so that any
-	// downstream Submit performed by Flush takes its work reference
-	// before this reference drops — totalReferences cannot transiently
-	// reach zero across an emitting flush. (c.wave is read here, while
-	// c.mu is held, so the deferred call captures the state pointer, not
-	// the instance.)
+	// allocation. Registered FIRST among the trailing defers so it runs
+	// LAST — after the accumulator.Flush body (so any downstream Submit
+	// takes its work reference before this reference drops) AND after the
+	// tag-union release below (so a tag follow-up fired by that release
+	// takes its wave reference while this barrier still holds the wave open;
+	// otherwise the wave-rooted fire could IncrementReference a Done wave).
+	// totalReferences cannot transiently reach zero across an emitting flush.
+	// Deferred so a panicking Flush still releases it. (c.wave is read here,
+	// while c.mu is held, so the deferred call captures the state pointer,
+	// not the instance.)
 	defer c.wave.state.DecrementReference()
+
+	// Tag-union release: registered after the barrier so it runs BEFORE it —
+	// firing the adopted tag follow-ups while the wave is still held. Registered
+	// before the panicked defer below so it runs AFTER it (that defer reads
+	// ctx=flushCtx, which this release frees).
+	if flushCtx != nil {
+		defer releaseBodyContext(flushCtx)
+	}
 
 	panicked := true // Assume the worst
 	defer func() {
@@ -634,6 +785,12 @@ type funnelWork[T any] struct {
 	// onto it.
 	bodyCtx  context.Context //nolint:containedctx // the borrowed body ctx, released in Free
 	bodyMeta *ctxMeta
+	// boundary is the fan-in boundary captured at dispatch (Init) from the submit
+	// ctx's still-intact meta chain: the enclosing flow's rider head above this
+	// funnel's wave. The instance adopts it from the first accumulate to sever
+	// per-item riders and share the enclosing flow at flush (F7/F8). nil when
+	// nothing encloses the wave.
+	boundary *flowRiderNode
 }
 
 func (c *Funnel[T]) newFunnelWork(
@@ -652,18 +809,25 @@ func (wk *funnelWork[T]) Init(
 	wk.fn = fn
 	wk.input = input
 	wk.inputErr = inputErr
+	// Resolve the dispatching meta once, here on the dispatcher's goroutine where
+	// it is provably alive: it feeds the limiter forest, the fan-in boundary, and
+	// the body borrow below.
+	m, _ := metaFromContext(submitCtx)
 	// For a limited funnel, resolve the body's own wave cache (mkdir-p'ing the forest
 	// along the dispatching ancestry) at dispatch, where that ancestry is available;
 	// the permit is acquired from it at the gate in Execute. Stamp the handle on the
-	// body meta now so currentHeldPermit finds it. Worker bodies are fresh permit-roots
+	// body meta now so currentHeldPermit finds it. Worker bodies are permit-roots
 	// (the worker's E is stamped at Execute, not known here).
 	if fn.limiter.pool != nil {
-		m, _ := metaFromContext(submitCtx)
 		wk.h = heldPermitPool.Get()
 		wk.h.ownCache = fn.wave.ensureCache(m, fn.limiter.pool)
 		wk.h.weight = 1 // funnels take a plain weight-1 permit (no weigher)
 	}
-	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, fn.wave, funnelContext, wk.h, nil)
+	// Capture the fan-in boundary from the dispatch-time synchronous chain (the
+	// borrowed body meta below is a permitRoot, so the boundary walk could not
+	// see past it). The instance adopts it at the first accumulate.
+	wk.boundary = flowBoundaryAboveWave(m, fn.wave)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, m, fn.wave, funnelContext, wk.h, nil)
 }
 
 // instanceQueue returns the wave's per-funnel instance cache for this work's funnel,
@@ -724,6 +888,18 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 		hbc.Init(wk.Group())
 		hbc.earliestGroup = wk.Group()
 		hbc.allocate(ctx, wk.fn.factory)
+		// Adopt the fan-in boundary from the first item and seed the union with it:
+		// the union chain's tail is the enclosing flow, kept alive by one carrier ref
+		// until the flush adopts and releases it. Invariant across the instance's
+		// items — later items stop their fold walk at this same pointer. The seed also
+		// takes an instance ref on every follow-up in the enclosing chain (as the fold
+		// does for per-item tags), so the single flush-time release
+		// (releaseBodyContext walks the WHOLE flush chain) stays balanced and the
+		// enclosing follow-ups survive to the flush regardless of the driver's timing.
+		hbc.boundary = wk.boundary
+		hbc.flowTags = wk.boundary
+		nodeRef(hbc.flowTags)
+		flowRefRiders(hbc.flowTags)
 	}
 	defer func() {
 		// If funnel() flushed inline, it did so via ClaimForFlush, which

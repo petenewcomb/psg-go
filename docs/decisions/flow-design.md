@@ -1,13 +1,17 @@
 # Flow: riders on the causal DAG
 
-> Decision record (2026-07-03, design session). **Status: converged design; NOT
-> implemented — no code exists yet.** Companion to the WORKING_NOTES "FLOW DESIGN
-> CONVERGED" block, which this doc renders permanent. It **supersedes the refcounted
-> `Flow` object** everywhere it appears (`API_DESIGN.md`'s `NewFlow` / `FlowFromContext`
-> / `Dup` / `Close` / `WithAfterFunc`, `programming-model.md`'s "two user-facing types"
-> framing, the surface-lineage Flow mentions): **there is no Flow type anymore.** What
-> replaced it is a facility — one scope function plus user-minted keys and tags — over
-> a structure the framework already maintains.
+> Decision record (2026-07-03, design session; **implemented and reconciled 2026-07-05
+> through CP-F6**). **Status: implemented (CP-F1–F6).** The follow-up surface, lifetime
+> semantics, and error model below describe the shipped behavior; two later checkpoints
+> remain and are flagged inline — **CP-F7** (skim handlers as flow continuations) and
+> **CP-F8** (a funnel flush seeing its enclosing chain, not just severing per item).
+> Companion to the WORKING_NOTES flow block, which this doc renders permanent. It
+> **supersedes the refcounted `Flow` object** everywhere it appears (`API_DESIGN.md`'s
+> `NewFlow` / `FlowFromContext` / `Dup` / `Close` / `WithAfterFunc`,
+> `programming-model.md`'s "two user-facing types" framing, the surface-lineage Flow
+> mentions): **there is no Flow type anymore.** What replaced it is a facility — one
+> scope function plus user-minted keys and tags — over a structure the framework already
+> maintains.
 
 ## The problem
 
@@ -58,6 +62,33 @@ exists at fan-in**:
 That one property drives the whole surface: path-scoped identities are **keys** (they
 carry a value), DAG-scoped identities are **tags** (structurally valueless — see below).
 
+### The river network
+
+The DAG's geometry has a faithful hydrological reading (PN, 2026-07-10), and it earns
+its keep by unifying several things this document otherwise motivates separately. The
+network's joints are **branch points** — divergences and convergences of flows:
+
+- **Divergences** are dispatch (a body scattering work braids the river apart) and
+  registering `WithFlow` scopes (a sub-flow branching off within the ambient one).
+- **Convergences** come in two species. The funnel is the **severing confluence**: many
+  tributaries fold into one aggregate, path-scoped values cut (no canonical merge),
+  DAG-scoped tags union across. The skim is the **layering confluence**: the item's
+  flow meets the drive's flow without severing — the handler is the item's
+  continuation, its riders layered nearest-wins over the drive's, which stays intact
+  beneath. The funnel-vs-skim asymmetry that the fan-in rules express operationally is
+  just this: two kinds of river junction.
+
+Two consequences fall out. The **origin** relationship
+(`docs/decisions/context-pinning-and-origin-access.md`) is "the flow on the other side
+of the nearest branch point" — the last tributary to arrive at a flush's confluence,
+the flow a task body braided off from, the drive a handler's item merged into — which
+is why `OriginFlow` composes by single hops (each application crosses exactly one
+branch point; "ultimate origin" would be the wrong grain) and why the relationship is
+passive (branch points relate flows; they pump nothing). And a follow-up's fire is the
+**mouth**: the continuation past the final re-convergence, where the last-standing
+branch (CP-R6b's own words) is the whole river — there is no branch point above it,
+which is why `OriginFlow` truthfully reports absence there.
+
 ## The surface
 
 One function, two constructors, method-shaped options, two reads. Everything else —
@@ -68,7 +99,7 @@ instances, refcounts, the COW rider sets — is internal.
 ```go
 err := streampool.WithFlow(ctx, body,
     requestCtx.Value(r.Context()),
-    checkout.FollowUp(commitFn),
+    checkout.FollowUpFn(commit),
     audit.Suppress())
 ```
 
@@ -111,15 +142,48 @@ the granularity: one shared across many flows, or one per flow).
 
 - `key.Value(v V)` — attach a value under a path-scoped key. Compile-time key→value type
   binding; `FlowTag` has no `Value` method at all.
-- `key.FollowUp(fn)` / `tag.FollowUp(fn)` — register a completion hook that fires at the
-  identity's nominal end (below). The name teaches the extension semantics: the handler
-  is potentially *more flow*, a follow-up, not a terminator.
+- `key.FollowUp(h)` / `tag.FollowUp(h)` — register a follow-up that runs **once** at the
+  identity's end (below). It takes an interface, not a bare func: `FlowKeyFollowUp[V]`
+  (method `Do(ctx, value V) error`) for a key, `FlowTagFollowUp` (`Do(ctx) error`) for a
+  tag — two interfaces because a tag has no value to pass, and `Do` (not `Handle`) because
+  a follow-up is an action to perform, not an input to handle (the `sync.Once.Do`
+  fire-once resonance). `key.FollowUpFn` / `tag.FollowUpFn` are closure sugar, and
+  `FlowKeyFollowUpFunc[V]` / `FlowTagFollowUpFunc` are the named adapters. A key's value
+  is delivered as the `Do` **argument** — the follow-up's own rider is peeled before the
+  call, so `key.From(ctx)` reads absent inside; the argument is the value's channel, named
+  to mirror the key (`txn.FollowUpFn(func(ctx, txn *Tx) error { return txn.Commit() })`).
 - `key.Suppress()` / `tag.Suppress()` — stop inheriting that identity into this scope.
-- `streampool.NewFlow()` — the one package-level option: clears the entire *inherited*
-  rider set (fresh flow root). Suppress-all reframed with positive intent-naming; it is
-  order-independent with respect to sibling options, which add to the fresh set. ("New"
-  here is semantic — a new flow — accepted over the New\*-means-constructor convention
-  nit.)
+- `streampool.Disconnect()` — the one package-level option: disconnects the scope from
+  everything registered so far — the inherited chain plus any options listed before it
+  (values AND tags, a stricter cut than a fan-in, which unions tags through). The
+  absolute form of `Suppress`; normally listed first, per the layering rule below.
+  (Renamed from `NewFlow` (PN, 2026-07-10): the old name contradicted "flows are not
+  created" — the ontology's own load-bearing sentence — and mis-framed a *cut* as a
+  *construction*. The trail: `Diverge`/`Divert` rejected because a divergence
+  preserves inheritance — a distributary carries the same water, and ordinary
+  registering scopes already ARE the river network's divergences; `Dam` rejected as
+  more noun than verb in an imperative option family, and an under-claiming analogy —
+  dams spill, this must be total; `Isolate` suggests sandboxing the work; `Stop`
+  overclaims worst of all. `Disconnect` names the exact act — the causal flow
+  continues, only riders are dropped. Bare, not Flow-prefixed: the prefix rule is
+  disambiguate-never-decorate — `FlowFollowUp` needs it against its method siblings
+  `k.FollowUp`/`t.FollowUp`, while `Disconnect` has no sibling and lives only inside a
+  `WithFlow` call, where flow is maximally implied; `FlowDisconnect` read as a
+  namespace artifact and `DisconnectFlow` would claim the flow itself is disconnected,
+  the very overclaim the semantics deny.)
+
+**Options apply left to right, one nested layer each — an option list is sugar for
+nested scopes, the first option outermost (PN, 2026-07-10; supersedes the original
+order-independent build).** The single rule covers everything the old model
+special-cased: a later `Value` shadows an earlier sibling exactly as an inner scope
+shadows an outer; `Suppress` filters the chain as built so far (inherited or
+earlier-sibling alike), and a later re-add lands after it; `Disconnect` drops the
+whole working set. Options before a `Disconnect` are shadowed — well-defined nonsense
+for a `Value`, while an earlier follow-up still registers in its outer layer, gains no
+carriers from the body (which runs under the post-`Disconnect` layer), and fires at
+scope exit as an empty flow — the nesting equivalence's own answer, conservation-sound
+by construction. Ordering between *nested scopes* was always the documented rule;
+sequential options extend it inward instead of carving out sibling exceptions.
 
 A key's bundle `{value?, follow-ups...}` propagates **as a unit** under the key's
 scoping (one identity namespace; scoping is a key property). So "fire when all work
@@ -163,12 +227,33 @@ The scope's own reference covers entry→return, so the attach window is race-fr
 sibling attaches) is unwritable. Multi-root — several top-level submits in one scope —
 is therefore never special. An empty scope fires its follow-ups at return.
 
-- **Nominal end**: the identity's count reaches zero after the scope has exited → the
-  follow-up fires.
-- **Extension**: the follow-up's own dispatches inherit the firing instance ambiently (a
-  framework-held provisional ref bridges fire→admission), so a follow-up that submits
-  more work extends the flow — a later nominal end fires the follow-up again.
-- **True end**: a firing that extends nothing.
+- **End**: the identity's count reaches zero after the scope has exited → the follow-up
+  fires **exactly once** (a single atomic zero-crossing has one winner).
+- **No re-fire.** Before the follow-up runs, its **own rider is peeled** — the body runs
+  under the *enclosing* rider set, not one containing itself — so nothing it dispatches
+  re-references it. Re-extending the flow *under the follow-up's own identity* is an
+  explicit re-stamp inside the body (a nested `WithFlow`), an opt-in, not the default. So
+  "no extension" is the safe default and a user never has to remember `Suppress` to avoid
+  an accidental re-fire. (This is the CP-F6 reversal of the original re-fire/true-end
+  model, which fired the follow-up again at each later nominal end; fire-once is truer to
+  the `defer` intuition the name carries.)
+- **Nested lifetimes (LIFO).** Follow-ups registered in one scope fire innermost-first,
+  like `defer`. Because the peeled body still carries the *enclosing* follow-up instances,
+  a follow-up's extensions hold the outer ones — and each inner instance additionally
+  holds a reference on every enclosing instance from registration until its own single
+  fire completes. So an outer follow-up cannot reach zero (cannot fire) until the whole
+  nested subtree beneath it — inner follow-ups **and any async work they spawned** — has
+  drained. That coupling is the `defer` guarantee made to hold across async extension,
+  which plain `defer` cannot express; the escape hatch for decoupling is a single
+  follow-up that itself submits N concurrent tasks.
+- **Errors.** `Do` returns an error. A follow-up that fires **inline** — its end reached
+  before the scope exits — has its error joined into `WithFlow`'s return, body error
+  first, then follow-ups in LIFO order. A follow-up that fires **async** — its end reached
+  after `WithFlow` returned, while a wave still drains its work — routes its error to that
+  **finishing wave's error sink**, where it surfaces through the wave's drain like a body
+  error (see "Context roles" below). (This reverses the original "`fn` returns nothing"
+  decision, whose rationale — "a follow-up has no wave to surface an error through" — was
+  simply false: an async end is always within some wave's drain.)
 
 At a funnel fan-in, an accumulate item's DAG-scoped refs **transfer** to the funnel
 instance at the item's completion — the instance never transits an unreferenced state
@@ -182,9 +267,12 @@ owner's user code.
 Internally there are two identities, and only one is visible. The minted key or tag is
 the **shaping** identity — what you suppress, read, and mix-and-match; minted cold,
 shared or per-flow at the user's discretion. Each *registration* creates an **instance**
-(pooled, generation-stamped state) — the **lifetime** identity — and instances are fully
-internal: no user handle exists. Same-type instances never auto-merge; merging by type
-would weld together concurrent requests that happen to share a package-level key.
+— the **lifetime** identity — fully internal: no user handle exists. Instances are
+currently GC-owned; pooling them is a later allocation pass and is **generation-free**
+(no ABA stamp): a follow-up fires once, and its count reaching zero means no other
+reference exists and none can appear, so recycling at that point is sound without a
+generation guard. Same-type instances never auto-merge; merging by type would weld
+together concurrent requests that happen to share a package-level key.
 
 ## Context roles and cancellation
 
@@ -196,10 +284,25 @@ deadline, or span explicitly; it is **never a parent of framework ctx derivation
 
 Riders are pure values — no framework cancellation derives from any flow value, and the
 framework never merges cancellation scopes. An AfterFunc-on-cancel remains user-space on
-the user's own ctx; nominal-end events are the framework's. The completion hook is the
-required primitive: "commit the upstream transaction at flow end" and "cancel a carried
-ctx once nothing references it" are both just things `fn` does at nominal end — one
-mechanism, no cancellation machinery.
+the user's own ctx; end events are the framework's. The follow-up is the required
+primitive: "commit the upstream transaction at flow end" and "cancel a carried ctx once
+nothing references it" are both just things `Do` does at the end — one mechanism, no
+cancellation machinery.
+
+**The follow-up fire's own ctx.** An **inline** fire runs on the caller's own goroutine
+under the scope ctx — the user's own frame. An **async** fire is **wave-rooted**: it is
+dispatched to the executor bound to the *finishing wave* (the wave of the item whose
+completion drove the count to zero), keeps that wave alive across the hop with the same
+per-instance reference the funnel flush uses (`IncrementReference`, taken while the
+triggering item's own work reference is still held, so the wave cannot be Done), roots
+its body ctx at the stable scheduler ctx, and routes `Do`'s error to that wave's error
+sink. This is the funnel-flush model applied to a follow-up. Cancellation is therefore
+the wave's, not the specific finished item's: literally riding the finished item's ctx
+was considered and rejected — that ctx is pooled and recycled the instant the item
+completes (`body-context-pool.md`), so a fire ctx borrowed as its child would dangle. A
+follow-up that must react to the finished work's cancellation reads it from a flow value,
+as any body would; deciding what to do with a cancelled ctx is the user's, per the usual
+consultative-value rule.
 
 This resolves TODO.md's "joined-context adapter" question (deferred "until Flows
 decides"): nothing merges two independent cancellation scopes, so no adapter is needed.
@@ -227,16 +330,20 @@ the edges where the set changes:
 
 - **Inheritance is by pointer**: a dispatch under an unchanged rider set copies one
   pointer, zero allocation.
-- A **pooled copy-on-write node** is built only at registration/suppression edges
-  (i.e., inside a `WithFlow` that actually modifies the set).
-- Each funnel instance keeps a **small multiset** of inherited refs (dedupe by identity
-  plus a count — the bindings-slice allocation pattern already used elsewhere).
+- A **copy-on-write node** is built only at registration/suppression edges (i.e., inside
+  a `WithFlow` that actually modifies the set).
+- Each funnel instance collects a **set** of the DAG-scoped (tag) instances its
+  accumulated items carried — **one reference per distinct instance**, not a multiset:
+  references are fungible covers, not per-item tokens, so the funnel's single ref per
+  instance covers accumulate→flush and is adopted outright by the flush body (no churn of
+  the counts across the fan-in).
 - **Keys and tags are minted cold**; reads are a small linear scan over the rider set.
 - Options follow the **copy-out-never-retain** variadic discipline verified 0-alloc for
   `WithLimits`: the option values (and their boxed payloads) stay on the caller's stack.
 
-Instances are pooled, generation-stamped, and internal — no per-flow allocation escapes
-to the user.
+Instances are internal — no per-flow handle escapes to the user. They are currently
+GC-owned; a firing is cold (once per flow end), so the allocation is off the hot path,
+and pooling them (generation-free, per "Lifetime semantics") is a later pass.
 
 ## Rejected alternatives
 
@@ -276,11 +383,16 @@ Recorded so none of this is relitigated.
 - **A free-function / `With*`-prefixed option family** (`WithFlowValue(key, v)`,
   `WithoutFlow(key)`, …) — the `With`/`Flow` prefix stutter, weaker static typing (no
   compile-time key→value binding), and worse prose at call sites; method-shaped options
-  won, and `WithoutFlow` became redundant next to per-key `Suppress()` plus `NewFlow()`.
+  won, and `WithoutFlow` became redundant next to per-key `Suppress()` plus the
+  suppress-all option (then `NewFlow()`, briefly `FlowDisconnect()`, now `Disconnect()`).
 - **Naming trail, `FollowUp`**: `After` was rejected for its harmful echo of
   `context.AfterFunc`, which fires on *cancel* — the opposite trigger;
-  `Close`/`Commit`/`Cleanup`/`Done`/`End` all suggest termination, where the semantics
-  are extension (the handler is potentially more flow).
+  `Close`/`Commit`/`Cleanup`/`Done`/`End` all suggest termination, where a follow-up may
+  still spawn continuation. CP-F6 made the follow-up **fire-once** (see "Lifetime
+  semantics"), which reopened `Defer` — parked again: the registration is a value-bearing
+  handoff with nested-LIFO coupling, not a bare deferred call, and `FollowUp` reads right
+  for a once-fired end action that may extend the DAG. The interface **method** is `Do`,
+  not the registration verb, precisely so the passed value (a noun) carries the call site.
 - **Naming trail, `InFlow`**: `Tags` (plural-noun misparse), `Tagged`/`Marked`/`Labeled`
   (participial dodge), bare `In`/`On` (wrong object — the tag is on the *flow*; the ctx
   merely reaches the flow, and collapsing the two hops lands the tag on the ctx),
@@ -293,13 +405,20 @@ Recorded so none of this is relitigated.
 
 ## Open details
 
-Small items deliberately left to the implementation pass; nothing here moves the design:
-
-- **Follow-up signature sugar**: whether `fn` optionally receives the bundle's value for
-  a path-scoped key (a typed handoff is free under the unified bundle). Undecided.
+- **Follow-up signature sugar** — **decided (CP-F6): the value is passed as the `Do`
+  argument**, and the follow-up interface is split key (`FlowKeyFollowUp[V]`, value arg)
+  vs tag (`FlowTagFollowUp`, none). See "The surface". The typed handoff the unified
+  bundle made free is the shipped shape; `From` reading absent inside (the peel) makes the
+  argument the honest channel rather than a redundant one.
+- **Later checkpoints** — **CP-F7** (skim handlers as flow continuations: a queued result
+  is a carrier, so a skim handler runs under the item's riders and can extend the flow —
+  not a fan-in, values flow through) and **CP-F8** (a funnel flush sees its enclosing
+  chain, so an outer flow's values and tags remain visible in a flush of an inner funnel;
+  today values sever per item at the fan-in, tags union). Both change behavior above where
+  flagged and are not yet implemented.
 - **Option allocation verification**: confirm the variadic options and their boxed
   payloads stay on the stack (the `WithLimits` discipline), with the usual escape
   analysis + benchmark check.
-- **Constructor naming remainder**: whether the shaping-identity constructors stay the
-  `NewFlowKey[V]`/`NewFlowTag` pair or unify further (WORKING_NOTES open-queue item 4);
-  the option, function, and read names above are settled.
+- **Constructor naming remainder**: the shaping-identity constructors stay the
+  `NewFlowKey[V]`/`NewFlowTag` pair; the option, function, read, and follow-up interface
+  names are settled.

@@ -2,34 +2,37 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► NEXT: MERGE flow-impl INTO combiner (planned 2026-07-10, PN-approved; fresh session).**
-Preconditions CONFIRMED by PN: flow-impl's final gate passed and its session is parked (tree
-clean at 70ebff7 "flow: OriginFlow"). Divergence: 53 commits (flow-impl) vs 33 (combiner)
-since merge-base 300576b. Plan:
-1. **Read first**: flow-impl's WORKING_NOTES (its top banner is STALE — the flow story is in
-   its later sections), docs/decisions/ctxmeta-parent-refcount.md and flow-design.md (both on
-   that branch), and the CP-R7 commit (164ff63, "delete psgwf; flows subsume the
-   workflow-context layer").
-2. **Merge combiner ← flow-impl.** merge-tree dry-run (2026-07-10) says: content conflicts
-   ONLY in internal/sim/run.go (combiner's multi-limiter wiring — activeLimit list,
-   drawLimiterBinding wiring — vs flow-impl's sim changes; keep BOTH capabilities) and
-   otpsg/instrumented.go; psgwf modify/deletes resolve as DELETE per CP-R7 (combiner's psgwf
-   edits were incidental lint/test churn) — but CHECK whether otpsg references psgwf before
-   resolving. ctxmeta.go/wave.go/funnel.go auto-merge textually — DO NOT TRUST THAT:
-   flow-impl's ctxMeta parent-refcount/pin lifecycle and combiner's joint suspend/reclaim
-   brackets + wavestate claim interlock (TryIncrementReference/ClaimZero) occupy the same
-   lifecycle paths; review the merged union of those files by hand before gating.
-3. **Combined gate** (the union of both branches' recipes): vet, lint 0, full -short -race,
-   permits -race, TestBySimulation -race ≥12×100 checks WITH the multi wiring, flow/coalesce
-   -race suites (flow-impl's), the flush-heavy biased recipe (default SelfTimes, raised
-   subjob/flush probs — see the pol_sim1 banner below), and a BenchmarkMultiLimiter +
-   Dispatch/streampool spot-check against the 2026-07-10 numbers (scratchpad may be gone;
-   medians are recorded in the benchmarks banner below).
-4. **Post-merge bookkeeping**: reconcile WORKING_NOTES/TODO interleave (auto-merge produces
-   a mess; keep one coherent narrative); CLOSE the borrowSrcCtx race entry (obs (2) below —
-   the ctxmeta-parent-refcount CP fixes it); delete stale psgwf references (README/docs);
-   CHANGELOG entries for flows + psgwf removal (flow-impl's CHANGELOG edits should carry).
-5. THEN step 4 (consumable pass) starts on the merged base.
+**►►► flow-impl MERGED INTO combiner (2026-07-11).** 53 flow-impl commits (flow riders,
+FlowKey/FlowTag/follow-ups, ctxMeta parent-refcount CP f193c7f, PinFlow/HoldFlow/OriginFlow,
+CP-R7 psgwf deletion + otpsg v2) joined with combiner's 33 (weighted Layers 1-2, multi
+suspend/reclaim fixes, benchmarks) from merge-base 300576b. Resolution record:
+- Content conflicts (only two): internal/sim/run.go — union kept BOTH the multi-limiter
+  wiring (activeLimit list) and the flow carrier oracle (carrierAdd/assertFlowInBody);
+  otpsg/instrumented.go — flow-impl's v2 structure taken whole. psgwf modify/deletes →
+  DELETE per CP-R7 (benchapp already migrated there; otpsg has no psgwf refs). One API
+  migration site (flow_test.go WithLimits — flow-impl predates the Layer-1 OpOption
+  dissolution; everything else auto-resolved to post-dissolution code).
+- SILENT-RISK fixES (both flagged by the pre-merge briefing, both in wave/permit refcounts):
+  (1) flowinst.go's async follow-up fire took a plain IncrementReference on the wave —
+  sound on flow-impl (its premise: the triggering item's owner ref is still held), but
+  under combiner's Flushing→Done claim interlock a broken premise would resurrect a claimed
+  count SILENTLY; converted to TryIncrementReference with a panic tripwire (unreachable
+  while the count→0 ordering invariant holds — riders release before owner refs at every
+  site; funnel.go's flush-barrier defer ordering is the enforcing interlock and survived
+  the merge intact). (2) flow-impl un-severed ctxMeta.parent across goroutine boundaries
+  (refcounted lifetime link) and moved the old isolation onto permitRoot/syncParent();
+  verified every permit/skim-nesting walk in the merged tree (currentHeldPermit,
+  vetNotNestedInSkim, ensureCacheChain) steps via syncParent() — no bare .parent walks.
+- GATE (merged tree): vet, lint 0, full -short -race, permits -race, flow/pin/hold/origin
+  -race ×20, TestBySimulation -race 12×100 checks (multi wiring + flow oracle BOTH active),
+  flush-heavy biased recipe 0/60 (600 checks, subjob/flush-heavy, default SelfTimes),
+  differential benchmark spot-check: gate pair clean (±2%); subwave pair tails clean
+  (p99-e2e +6.0% merged vs +3.5% pre-merge at count=12, within spread; p99.9 +1.4%) —
+  subwave THROUGHPUT deltas were unusable (unpinned clock this run; pre-merge itself showed
+  −28.5% with 3× run-to-run spreads, re-confirming the recorded judge-by-tails caveat).
+  borrowSrcCtx entry CLOSED (obs (2) below).
+NEXT: step 4 (consumable pass) on the merged base; streamotel (flow-impl's parked NEXT) is
+the other open thread.
 
 **►►► MULTI-LIMITER BENCHMARKS LANDED + BASELINE CLEAN (2026-07-10).** New
 bench/BenchmarkMultiLimiter: differential pairs on the BenchmarkDispatch harness — limits1 vs
@@ -284,12 +287,13 @@ covers it. (My own earlier chase's zero-SelfTime config was the dead zone the re
     ~1/2600 ambient). Dead configs: zero-SelfTime no-race ×300 and zero-SelfTime -race ×2500,
     0 hits both. Dumps preserved at flow-impl scratchpad: sim4_race_27.log, bias3_base_hang_1.log.
 
-**(2) Funnel `borrowSrcCtx` -race (DISTINCT from the hang), ~1/400. → FIXED ON flow-impl
-(2026-07-08): the ctxMeta parent refcount CP (docs/decisions/ctxmeta-parent-refcount.md on that
-branch, "As implemented") pins the borrowed-from meta so its ctxpool child can never be freed or
-re-stamped while a reader can still reach it. Do NOT fix separately here
-(coordinate-so-it-lands-once); close this entry when flow-impl merges. Pre-fix status kept for
-the record: STILL OPEN / UNCONFIRMED on combiner (2026-07-06)** — did NOT surface in the
+**(2) Funnel `borrowSrcCtx` -race (DISTINCT from the hang), ~1/400. → CLOSED (2026-07-11): the
+flow-impl merge landed the ctxMeta parent refcount CP (f193c7f;
+docs/decisions/ctxmeta-parent-refcount.md, "As implemented"), which pins the borrowed-from meta
+so its ctxpool child can never be freed or re-stamped while a reader can still reach it. NOTE
+the record's own caveat: the original race was never reproduced empirically even on the pre-fix
+base (8,000 targeted runs) — the fix argument is structural, not observed before/after. Pre-fix
+status kept for the record: STILL OPEN / UNCONFIRMED on combiner (2026-07-06)** — did NOT surface in the
 1200+-check flush-heavy -race recipe run above
 (0 DATA RACE), but that exercises TestBySimulation, not the flow-specific tests where flow-impl saw
 it ~1/400 — so NOT disproven, just not reproduced here. The funnel.go borrowSrcCtx lifecycle
@@ -892,12 +896,1039 @@ gates every CP as regression). Design-to-implementation resolutions (2026-07-03,
   Steps 3 (TryAcquireUpTo/NotifyAt) and 4 (surface builders + sets + opoption removal + the
   meta-redirect wiring) follow, each separable.
 
-**►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN) — NOT implemented, no code
-touched; parallel thread to the weighted-acquisition work above. SUPERSEDES the Flow-object
-surface everywhere it appears (API_DESIGN.md Flow section, programming-model.md Wave+Flow
-framing, surface-lineage Flow bullet): there is NO Flow type anymore.** Rationale chain
-recorded below so it isn't relitigated; `docs/decisions/flow-design.md` is now the
-permanent record (docs pass done 2026-07-03 — see open queue item 5).
+**►►► RIDER-CHAIN REDESIGN: R1–R6b LANDED (2026-07-06); CP-R7 LANDED (164ff63 + 923c57a;
+headline was stale "IN PROGRESS" at merge time — the ►► sub-banners below record the later
+landings through OriginFlow 2026-07-10). Disposition (PN's call): psgwf DELETED ✅ +
+otpsg-v2-on-flows DONE ✅. psgwf: benchapp
+migrated off it; cancellation gap resolved as the "manual pattern" (carry a CancelCauseFunc
+under a FlowKey + follow-up-cancels-at-end — ExampleWithFlow_perRequestCancellation); kills
+the Example_clientTimeout flake. otpsg v2 (separate module): span's lifetime IS the flow —
+`Traced(ctx,name)→(ctx,[]FlowOption)` carries the span as a path-scoped FlowKey value (for
+child-span/log correlation, severs at fan-in) + a DAG-scoped anonymous FlowFollowUpFn that
+ends it once at the flow's TRUE end (crosses funnels, covers async outliving the handler);
+`Correlate`/`FlowSpan` read it in async bodies; propagation.go+per-op TracedTask/Skim/Funnel
+DELETED, metrics.go+logging.go KEPT, Instrumented*=metrics∘logging.
+
+►► ctxMeta PARENT REFCOUNT LANDED (2026-07-08, this commit) — the borrowSrcCtx UAF fixed
+at the root. SPEC + as-implemented deviations: docs/decisions/ctxmeta-parent-refcount.md
+(read "As implemented"). As landed: ctxMeta.refs (atomic, +Reset for pool copylocks) with
+newCtxMeta/refMeta/unrefMeta cascade (subsumes releaseParent — skimCtxMeta transfers the
+mint ref on the owned bare-ctx-skim chain); every meta stores selfCtx, freed ONLY at
+refs==0, so a ctxpool child can never be re-stamped while reachable; parent stays linked
+across async (keeps the name), permitRoot takes the sever's isolation role. KEY DEVIATIONS
+from spec: (1) FOUR sync-only walkers needed the permitRoot stop, not two —
+currentHeldPermit, vetNotNestedInSkim, flowBoundaryAboveWave, ensureCache/ensureCacheChain
+(forest liveness argument is synchronous-extent-only) — all via ctxMeta.syncParent();
+(2) spec's vetNotNestedInSkim pseudo-code would falsely panic task-from-skim-handler
+(started at cm.parent unconditionally) — syncParent stepping fixes it; (3) stash-path
+borrows (flush/fire Run) do NOT capture srcMeta.riders — the pin covers the meta, not the
+rider chain (that's the deferred driver-link rider pin); behavior-neutral (fan-in severs
+first). Shared core newBorrowedMeta (pin+permitRoot+selfCtx); borrowBodyContext takes
+srcMeta explicitly (dispatch sites resolve it synchronously; funnelInstance/flowFireWork
+Execute resolve-and-pin, Run borrows from the pin, unpins after borrow; non-handoff
+Execute paths unpin). BONUS: the four funnel/skimmer submit sites that leaked their minted
+meta ("needs the borrow-source fix first") now release it. Validation:
+TestCtxMetaConservation (ctxMetaAllocHook seam, mirrors node conservation) +
+TestBorrowBodyContext_ParentPinnedAcrossSourceRelease; permit-root tests re-pinned to
+permitRoot/syncParent. GATE (all green, no false green): vet, lint 0, full -short ./...,
+root -race -short, 30/30 TestBySimulation -race (checks=200, ~6000 cases), 2284 flow-suite
+-race iterations — 0 DATA RACE, 0 unexpected failures (19× the known union flake, 0.8%,
+matches base).
+REPRO CAVEAT (honest): the ~1/400 race did NOT reproduce on the pre-fix base in 8000
+targeted -race runs this session (originally seen under heavy ambient load), so the fix
+rests on the structural argument, not an observed before/after. PRE-EXISTING FLAKES
+surfaced while looping the flow suite -race on the BASE commit (not this change; not
+chased): TestFlowAllocFloors fails under -race (alloc floors are documented no-race runs —
+consider a skip-under-race guard) and TestFlowTagFunnelUnion (the KNOWN pre-existing flake,
+see the CP-F6 note — "flushSawB, zero-deadline flush racing the 2nd accumulate"; re-measured
+IDENTICAL base vs fixed this session: 4/400 each standalone -race, ~1/4 per full-suite -race
+iter under load, ~≤1/300 no-race).
+Tell the combiner thread obs (2) is FIXED here.
+
+►► CP-F5b LANDED (2026-07-08, this commit) — sim steps-only flow scopes + carrier
+conservation oracle; the async fire path (flowFireWork) is now under the sim's adversarial
+schedules (it wasn't: CP-F5a's whole-run scopes always fire inline at scope exit). As
+landed: Plan.FlowSteps (drawn with FlowConfig.StepsOnlyProb=0.5 given Flow → ~1/8 of
+generated plans ambient) wraps ONLY the Steps loop in the WithFlow scope — the scope exits
+with dispatched work outstanding, the follow-up fires async from the drain (the wave
+keep-alive makes the drain wait for it; fires-exactly-once asserted via Eventually AFTER
+the drain, replacing whole-run's fired-after-drained assert, which a legal mid-drain async
+fire would violate). CARRIER ORACLE (flowState.carriers): the sim counts its own model
+units — dispatched task (startTask → launcher-body defer), submitted skim item (submitTo →
+handler defer), submitted funnel item (submitTo → per-INSTANCE accumulated count,
+decremented at FlushFn end; one factory call = one instance, serialized under the instance
+mu) — and the follow-up asserts carriers==0 at fire: every sim decrement happens-before
+the framework's rider release, so nonzero ⇒ premature fire. Retry semantics follow the
+existing exact-invocation-bounds invariant (dispRetry ⇒ work Freed-not-queued ⇒ keep the
+count for the retry). DISABLED (carrierAssert=false) on cancellation plans — teardown
+abandons units without running them, stranding the sim-side count (framework refs still
+release; fires-once still asserted). Steps-only skim handlers also exercise F7 item-chain
+riders in the sim for the first time (drain runs post-scope; handler sees the ITEM's
+riders). NON-VACUOUS: TestFlowStepsOnlyScopeEndToEnd (hand plan: tasks + funnel w/
+flush-submit + steps-only subjob, 50 runs = 150 scopes) asserts ≥1 async fire via the
+flowStepsAsyncFires counter; MUTATION-CHECKED: removing the skim decrement trips the
+oracle ("fired with 1 model carrier(s) outstanding"). GATE: vet, lint 0, full -short
+./..., targeted ×5 plain + ×40 -race, 20/20 TestBySimulation -race (checks=200, ~4000
+cases, steps-only scopes ambient).
+►► OriginFlow LANDED (2026-07-10, this commit) — the READ half; the pinning/origin record
+is now FULLY IMPLEMENTED (PinFlow/UnpinFlow 08aae99, HoldFlow fdcafbf+ea7241f, OriginFlow
+here; §"As implemented: OriginFlow"). origin.go: one switch over the resolved meta —
+(1) explicit origin link wins (NEW atomic field ctxMeta.origin): the FLUSH case — the last
+accumulate's meta stamped from the step-2 rolling driver pin while held (in flush under
+c.mu, onto the fan-in clone OR the executor path's own borrow via the new flush(ctx,
+ownMeta) flag — both single-custody at stamp; cleared by releaseBodyContext = the pin's
+validity window; the INLINE TAG-FREE flush runs ON the triggering accumulate's published
+ctx — unstampable — and resolves its parent: the reader is already AT the origin's
+position); (2) fire metas → ok=false (async = skim-typed permitRoot; INLINE scope-exit
+fire = TOP-LEVEL-typed permitRoot — caught during impl; the pin MARKER disambiguates
+pinned ctxs, also top-level permitRoots, whose origin IS their parent = the source ref
+PinFlow deliberately kept); (3) default → meta.parent (dispatcher/drive/enclosing),
+deliberately ignoring permitRoot — origin IS the cross-extent hop the refcounted parent
+link exists for. Returns origin.selfCtx (alive for the caller's extent via parent-chain
+refs; flush origin for the flush extent via the pin) so From/InFlow/PinFlow/HoldFlow
+compose unchanged; expired-pin vet on entry (cold path per record). Tests
+(origin_test.go): task+scope hops w/ composition; skim handler drive-vs-item
+discrimination (item value on ctx NOT on origin; drive value on origin); flush sweep +
+inline-tagged (SHARP assert via the sever: per-item value absent on flush ctx, present on
+origin); fire absence async+inline; pin→source; hold→absent; pin-the-origin retention.
+GATE: vet, lint 0, full -short ./..., root -race -short, flow/origin/pin/hold -race ×20
+×9 runs (2 hits of the KNOWN pre-existing TestFlowTagFunnelUnion flake under concurrent
+sim load — flushSawB line 692, the documented signature, rate matches the dossier; 0
+DATA RACE, 0 origin/pin/hold failures), 20/20 TestBySimulation -race (see commit). NEXT:
+streamotel consumer (otel-tracing-on-flows.md) — the full driver-attribution + retention
++ read stack is now in place.
+
+►► HoldFlow LANDED (2026-07-10, this commit, PN design session) — the SAFE retention tier
+(record §HoldFlow — read it; three designs died first: AfterFunc pattern SWALLOWED fire
+errors; the fires→cancel→teardown sandwich failed because CANCEL IS A NOTIFICATION NOT A
+BARRIER (Go contract: canceled ctx stays usable, esp. value reads — the woken-by-Done
+goroutine arrives after teardown by construction); the forever-readable GC-snapshot pin
+either LIES or HOLDS FLOWS OPEN for the handle's GC lifetime). RESOLUTION (PN): two
+tiers — PinFlow/UnpinFlow unchanged (pooled primitive, one extent rule, body-ctx-class UB
+caveats), HoldFlow = GC wrapper, NO UB ever, NOT sugar (own carrier refs, own state ⇒ own
+verb; "hold" = the codebase's own word: flowInstance.holds). hold.go: snapshot at hold =
+TWO GC copies of the chain, permanent +1 ref bias (never poolable): LIVE (real inst ptrs —
+dispatch extends real lifetimes) + SEVERED (value-only); wrapper delegates ctx methods to
+an atomically-swapped inner ctxpool child (both over one WithCancelCause(Background);
+ctxpool cooperates — children of canceled parents fall out of the pool by design).
+the returned CANCEL (PN: name it cancel not release — canceling is its visible effect; Once, idempotent): FIRES (inline, carrier=live hold meta, chain-order cover, GC
+chain ⇒ concurrent readers safe) → SEVER (swap to value-only) → CANCEL(Join(cause,
+fireErrs)); nil cause defaults to context.Canceled FIRST (fire error never the primary
+cause). POST-RELEASE: reads = snapshot-as-of-hold FOREVER (copy-over-absent: the copy
+must exist for race-freedom anyway; liveness truth lives in Err()/Cause, values are
+facts); dispatch = defined ordinary-canceled (value-only riders). Documented asymmetry:
+reads race-free vs cancel; dispatch is not (same class as any ending extent). Tests:
+retention+snapshot-reads, nil-cause primary, dispatch (waits for work AND release),
+post-release dispatch defined, CONCURRENT-READS-DURING-RELEASE -race (the crown jewel:
+zero misses before/during/after), UnpinFlow(held) rejected, conservation arc (A4). GC
+metas/nodes bypass alloc hooks (not pooled) ⇒ conservation clean by construction. Gate:
+vet, lint 0, full -short ./..., root -race -short, hold+pin -race ×20, concurrent-read
+×50 -race. NEXT: OriginFlow + the flush origin link, then streamotel.
+
+►► PinFlow/UnpinFlow LANDED (2026-07-10, 08aae99) — the retention half of
+context-pinning-and-origin-access.md (read its "As implemented"). pin.go: PinFlow MINTS
+the pinned ctx (fresh meta: topLevelContext, permitRoot, pinLive marker, parent=src
+ref'd for origin-chain walkability, riders=src chain under the pin's OWN
+flowRefRiders+nodeRef, Background-rooted ctxpool child = the token); UnpinFlow validates
+exact token (selfCtx identity + marker) + CAS pinLive→pinExpired (racing double-unpin
+loses loudly), releases carrier refs in chain order (same walk-cover discipline as every
+release site; the pin meta is the fire's last carrier), fires INLINE — DEVIATION: UnpinFlow
+RETURNS error (fires join it, the WithFlow-scope-exit shape; async has no wave to root
+at). ctxMeta gains pin atomic.Int32 (pinNone/pinLive/pinExpired) + vetNotExpiredPin,
+checked at ensureCtxMeta (all dispatch derivations), WithFlow, PinFlow — detection window
+= the meta's survival (an immediately-recycled token's re-pin degrades to an empty pin,
+the documented residual; the validation test creates the deterministic window with an
+in-flight task). Tests (pin_test.go): retention (values readable post-scope; follow-up
+gated on unpin; fire error joins), dispatch-from-pin end-to-end (body reads values;
+follow-up waits for work AND unpin; wave-less ⇒ op.In required, panic pinned),
+exact-token/double/derivative/expired validation, compose+handoff (fires once),
+degenerate bare-ctx pin, multi-goroutine concurrent dispatch (-race). Conservation: BOTH
+conservation tests gain pin arcs asserting the standing pin as a DELIBERATE POSITIVE
+(leaked pin visible) and zero after release. GATE: vet, lint 0, full -short ./..., root
+-race -short, flow+pin -race ×20, pin+conservation -race ×20, TestBySimulation -race
+batch (see commit). NEXT: OriginFlow + the flush origin link (the read half), then
+streamotel.
+
+►► FLOW OPTION VOCABULARY + SEQUENTIAL SEMANTICS LANDED (2026-07-10, this commit, PN
+design session) — TWO changes, one checkpoint. (1) NewFlow() → Disconnect(): the old name
+contradicted flow-design's own ontology ("flows are not created"); trail in flow-design.md
+(diverge/divert = divergences PRESERVE inheritance; dam = noun-not-verb + dams spill;
+isolate = sandboxes the work; stop = overclaims; FlowDisconnect = namespace artifact;
+DisconnectFlow = claims the flow itself is cut). PREFIX RULE settled:
+disambiguate-never-decorate — FlowFollowUp keeps its prefix (method siblings
+k.FollowUp/t.FollowUp); Disconnect is bare (no sibling; lives only inside WithFlow where
+flow is implied). Word-order families: verb+Flow when flow is the operation's object
+(PinFlow/UnpinFlow/OriginFlow); Flow+noun for package-level flow-namespace symbols
+(FlowKey/FlowTag/FlowOption/FlowFollowUp). (2) SEQUENTIAL OPTION SEMANTICS (PN, replacing
+the order-independent build): an option list is SUGAR FOR NESTED SCOPES, one layer per
+option, first outermost — later Value shadows earlier sibling; Suppress filters the chain
+AS BUILT SO FAR (can suppress an earlier sibling; later re-add lands after); Disconnect
+drops the whole working set (a preceding Value = well-defined shadowed nonsense; a
+preceding follow-up still registers, gains no carriers, fires EMPTY at scope exit — the
+nesting equivalence's answer, conservation-sound). buildFlowRiders rewritten as a
+left-to-right fold: mint() layers instances; replace() swaps the working chain with
+nodeRef/nodeUnref disposal (transient ref covers a refs-0 fresh top; the cascade stops at
+the first held node — ambient carrier or an earlier follow-up's enclosing pin; net-zero on
+purely inherited chains). Same-id Value+FollowUp no longer merge onto one node (each
+option = own node; the fire's enclosing may now include an EARLIER same-key Value — F6
+peel = own NODE only, coherent under nesting). settledVal/hasFollowUp/dedupe machinery
+deleted. Tests: TestFlowDisconnectRoot FLIPPED (was pinning order-independence);
+TestFlowOptionOrder (shadowing, sibling-suppress both orders, follow-up-behind-Disconnect
+fires); TestFlowNodeConservation gains (A2) sequential-layer disposal arcs. GATE: vet,
+lint 0, full -short ./..., root -race -short, flow/funnel -race ×20, conservation ×5,
+TestBySimulation -race batch (see commit).
+
+►► CONTEXT PINNING + ORIGIN ACCESS DESIGN CONVERGED (2026-07-09, PN design session) —
+docs/decisions/context-pinning-and-origin-access.md (read it; this is the summary). TWO
+SURFACES on top of the driver-contexts machinery: (1) PinFlow(ctx)→pinned / UnpinFlow(pinned) —
+the pin MINTS a fresh ctx (the token IS the ctx, no release func); carrier refs (flow
+stays open until last Unpin — leaked pin = follow-ups held open, documented like an
+unclosed resource); WAVE-LESS + no parentWaves + permitRoot + no held/exEnv + pin marker
++ context.Background() root (stable ancestry; carries riders/values, never the source's
+cancellation) — "an explicit pin is the purchase of Go's normal context contract".
+Dispatch from a pin = ordinary bare-ctx top-level submission: resolveWave already forces
+op.In(&wave) (PN's move — replaced my just-block special mode; consistency over modes),
+help-shaped blocking + the usual multi-goroutine skim caveats apply since the wave is
+EXPLICIT. (2) OriginFlow(ctx)→(ctx,ok) — NAMES SETTLED as FLOW-ANCHORED (PN): OriginFlow + PinFlow/UnpinFlow (after
+parent/upstream/trigger/enclosing/driver/source all fell; scope words fail because the
+relationship is CAUSAL across extents, not scoped — async drivers don't enclose;
+"source"/"upstream" read as data-lineage, wrong at the skim handler; the record's Naming
+section has the full trail + the qualification test). Ctx-shaped composable read (walks
+the chain by re-application): task/acc→dispatcher, skim handler→the drive, flush→last
+accumulate via the step-2 rolling pin + ONE new field (origin link stamped on the flush
+body meta), fire→ok=false (the fire IS the continuation), pumps/top→false.
+Read-within-extent; PinFlow it to keep it. PIN SEMANTICS SETTLED (2026-07-10): pinning a pinned ctx = a NEW INDEPENDENT pin (no shared counting — aliasing; handoff idiom = overlap: p2:=PinFlow(p1); UnpinFlow(p1)); pins compose freely (pinned source = stably valid, no extent-window precondition); UnpinFlow requires the EXACT token (ctx==selfCtx, loud on derivative/double); plain Go derivation transparent (WithCancel(pinned) IS the cancelable-retention composition); WithFlow(pinned)=normal call-scoped scope; PinFlow(bare ctx)=degenerate empty-flow pin; AFTER UnpinFlow the ctx + every derivative is INVALID (pin window IS the extent — one rule): unpin is NOT cancellation (in-flight work unaffected; post-unpin liveness coincidental never contractual), re-pin cannot resurrect (positional cover), detection best-effort (expired marker on cold paths; hot reads untaxed; post-reuse undetectable — accepted residual). "Driver" stays internal vocabulary
+(driver-contexts.md). NEXT: implement (PinFlow/UnpinFlow first — incl. independent-pin composition, exact-token unpin, expired-marker checks on cold paths — then OriginFlow + the flush
+origin link), each sim-gated; streamotel consumer follows on top.
+
+►► DRIVER-CONTEXTS STEP 3 LANDED (2026-07-09, 55e16e6) — fire = the last carrier's
+continuation (driver-contexts.md §Fire). CARRIER PLUMBING: unref/flowUnrefRiders gain a
+carrier *ctxMeta — the meta whose release drops the ref — passed from every count→0 site
+while its owner ref is still held: releaseBodyContext (m), skimWork.Free (the step-1
+per-item child meta, whose OWNER REF NOW TRANSFERS Execute→Free so it survives to be the
+carrier; nil if never executed), WithFlow scope exit (scope meta; inline fires always
+COW), runFire's holds cascade (the inner fire's meta, pinned refMeta+nodeRef across the
+cascade — without the node pin the outer's chain build would walk nodes freed by
+releaseBodyContext). FIRE CHAIN BUILT AT DISPATCH (buildFireChain), NOT at fire-run —
+THE key soundness lesson (cost two crashes): instance-ref cover is positional and
+momentary. Every release walk drops instance refs head→tail, so at the count→0 trigger
+only the SUFFIX (below the fired binding's node) is still covered; PREFIX instances
+(post-registration bindings) may already be fired+recycled in the same walk → prefix is
+copied VALUE-ONLY (id+val, inst=nil: reads yes, pinning/re-fire no). SECOND crash
+(TestFlowCoalesceConservation): "one node per id per chain" is FALSE on the R6b fan-in
+union chain (one node per coalesced LEAF); ref'ing sibling leaves re-drove
+coalesceAtZero on recycled components → buildFireChain peels ALL matching nodes
+(definitional: by id) and partitions at the DEEPEST match (the closing ref can't be
+later; between-trigger-and-deepest live siblings degrade to value-only — conservatism
+costs only lifetime pinning, same trade as the flush pin). ADOPT-OR-COW at fire-run
+(flowFireWork.Run): refs==1 (only the dispatch pin) ⇒ returned custody ⇒ ADOPT the
+carrier meta in place — keep position (parent+ref, parentWaves, wave), re-stamp
+execution (ee, held=nil, permitRoot=true, ctxType=skim), riders=fireRiders, selfCtx
+RE-HOMED onto the scheduler src ctx; the dispatch pin becomes the owner ref. Else COW
+sibling via newBorrowedMeta(src, carrier.parent) + parentWaves copy, drop the pin.
+fireRidersSet flag distinguishes empty-chain-carrier from no-carrier (teardown) legacy
+fallback (enclosing-at-registration, unchanged). CANCELLATION RESOLVED (the doc's open
+point): SHIELDED — fires are end-of-flow cleanup (otel span end); every arm roots ctx
+ancestry at the scheduler src, the carrier contributes riders never cancellation;
+TestFollowUpFireShieldedFromCancellation pins it. SEMANTIC REFINEMENT test (red first):
+TestFollowUpFiresAsCarrierContinuation — fire sees a post-registration rider value +
+fired-tag peeled. GATE: vet, lint 0, full -short ./..., root -race -short,
+flow/funnel/ctxmeta -race ×20, step tests ×10, TestBySimulation -race batch (see
+commit). NEXT: streamotel consumer (otel-tracing-on-flows.md open points; driver
+attribution machinery now complete: skim child meta 9bb6af6, flush pin 86912a8, fire
+continuation this commit).
+
+►► DRIVER-CONTEXTS STEP 2 LANDED (2026-07-09, 86912a8) — flush rolling node-only
+driver pin, per driver-contexts.md §Flush. As landed (funnel.go): funnelInstance gains
+{driverMeta *ctxMeta, driverRiders *flowRiderNode} (mutated only under c.mu); accumulate
+re-points the pin at its own body meta (refMeta) + that meta's rider head (nodeRef),
+releasing the previous pair — four uncontended atomics, no alloc; flush releases the
+final pair in a defer AFTER the flush body (panic-safe; release only returns pooled
+objects, fires nothing, so ordering vs the barrier/tag-union defers is immaterial).
+Node-only per the doc: NO flowRefRiders — the driver's own follow-ups may fire before
+the flush reads; values stay readable on the pinned nodes. The inline past-deadline
+flush trivially satisfies "driver = last accumulate" (it RUNS on the triggering
+accumulate's ctx; the pin is released by its flush call). NO reader surface yet — the
+accessor is streamotel-scope (otel-tracing-on-flows.md Open); the pin is reachable
+through the instance. Validation: TestFunnelDriverPin (flow_internal_test.go) — white-box
+pop/inspect/push-back via the owner lineage between accumulates (pin tracks the LAST
+accumulate's meta+rider head) + ctxMetaAllocHook balance proves the flush release;
+MUTATION-CHECKED both arcs (dropping the accumulate-side release of the previous pair,
+or the flush-side release, each trips the balance assert). Leak backstop in every suite:
+TestCtxMetaConservation's funnel workload. GATE: vet, lint 0, full -short ./..., root
+-race -short, flow+funnel -race ×20, pin test ×10 plain ×20 -race, TestBySimulation
+-race batch (see commit). NEXT: fire continuation (driver-contexts.md §Fire — last
+carrier's context, adopt-or-COW, exEnv never carried, cancellation-ancestry OPEN needs a
+test either way), then streamotel consumer.
+
+►► DRIVER-CONTEXTS STEP 1 LANDED (2026-07-09, 9bb6af6) — skim per-item child meta;
+the in-place rider override (skimmer.go skimWork.Execute) is GONE. The regression test
+came first and pinned the misdelivery WORSE than the doc's prediction: within one drive,
+a rider-free item after a rider-carrying one didn't just see the previous item's values —
+by its turn the leaked chain was already RECYCLED (its refs die at the previous item's
+skimWork.Free), so the handler read a DANGLING rider head and lost the drive's riders
+entirely (TestFlowSkimRiderFreeItemIsolation; ordering made structural: the rider-carrying
+item's handler submits the rider-free item, so it necessarily skims later in the same
+drive — queue-order approaches were nondeterministic, warmed pools consistently reordered
+two body-posted items). As landed (skimmer.go): per-item child meta in skimWork.Execute —
+parent = drive meta via refMeta (synchronous, NOT permitRoot: vetNotNestedInSkim/permit
+walk see through), ctxType skim, riders = item chain or driveMeta.riders for a rider-free
+item (nearest-wins now structural), exEnv shared (ownsExEnv false), selfCtx via
+ctxpool.WithValue, owner unrefMeta at handler exit (async handler dispatches keep it via
+their parent ref). NO rider refs on the child: item chain held by wk's submit refs until
+Free, drive chain by the drive scope — both cover the handler's synchronous extent;
+handler dispatches take their own refs at borrow. flowBoundaryAboveWave/vet/held walks
+audited: one extra in-wave link, same results. TestPermitScopingChains updated to the new
+topology (child → drive skim meta → top-level). ALSO: TestFlowAllocFloors now skips under
+-race via a root-package raceEnabled guard (race_on/off_test.go) — the documented
+pre-existing -race flake from the refcount CP's dossier. GATE: vet, lint 0, full -short
+./..., root -race -short, flow-suite -race ×20 + skim/ctxmeta -race ×50, regression test
+red-on-base green-on-fix verified both ways, TestBySimulation -race batch (see commit).
+NEXT: flush rolling node-only pin, then fire continuation (driver-contexts.md), each
+sim-gated; THEN streamotel consumer.
+
+►► DRIVER-CONTEXTS DESIGN CONVERGED (2026-07-09, PN design session) —
+docs/decisions/driver-contexts.md (supersedes the refcount doc's "driver-link rider pin"
+follow-up; read the doc, this is the summary). TWO CONTRACTS: (1) a ctxMeta is IMMUTABLE
+for its ref'd lifetime, in all cases — mutation only in single-party custody (pre-publish,
+or refs==1 returned-custody); (2) exEnv is OUTSIDE that invariant under a CUSTODY contract
+(slot of the currently-executing extent; stamped at extent entry; NEVER read across an
+async boundary — no structural enforcement possible, documented rule). DRIVERS: task/acc =
+dispatcher (already have its chain); skim = drive flow via PER-ITEM CHILD META (parent =
+drive meta, sync non-permitRoot, riders = item chain — kills the in-place override, which
+is BOTH an invariant violation AND a live misdelivery bug: a rider-free item after a
+rider-carrying one sees the previous item's riders (never restored); fix behind a failing
+regression test; per-drive-restamp alternative REJECTED — unsound under lazy parent.riders
+reads); flush = THE LAST ACCUMULATE (its returned deadline/finality made the flush due —
+unifies inline/deadline/sweep; scheduler = just the timer) via a ROLLING NODE-ONLY PIN on
+the instance (refMeta+nodeRef per accumulate, release prev pair, release after flush body;
+NO flowRefRiders — observability must not delay driver fires; driver's follow-ups may have
+fired, values stay readable); fire = THE LAST CARRIER'S CONTINUATION (fire ctx = carrier's
+context, same tree position, riders = carrier chain MINUS fired binding — semantic
+refinement: fire sees riders the carrier acquired post-registration, consistent w/ R6b
+last-standing-branch; pin taken at count→0 dispatch while owner ref still held; refs==1 at
+fire-run ⇒ ADOPT+mutate in place (returned custody), else COW SIBLING (same parent
+refMeta'd, nodeRef'd remaining riders, NEVER copy exEnv); inline scope-exit fire always
+COW). Executor-pumped bodies have NO driver link ever (framework plumbing; wave-ID
+attribute covers substrate). OPEN (flagged in doc): fire cancellation ancestry under
+adoption (carrier chain vs scheduler) — resolve at implementation with a test. Accessor
+surface = streamotel session scope, not this record's.
+NEXT: implement driver-contexts.md (fresh focused session; regression test for the skim
+rider-leak FIRST, then skim child meta, then flush pin, then fire continuation — each
+sim-gated), THEN streamotel consumer (otel-tracing-on-flows.md open points: fan-in helper
+shape, wave-participation delimitation — driver attribution now settled here).
+
+►► DESIGN LANDED THIS PHASE (2026-07-08): otel tracing model — docs/decisions/otel-tracing-on-flows.md
+(9c6d950). Flow-native observability via existing riders (not an event stream); otel is one
+lossy projection. Flow=primary=trace; spans bounded by (sub-)flows via follow-ups, not waves
+(wave ID = attribute); 3 axes → parent/child (async lineage), aggregation links, driver links;
+tag-defined flow = multi-trace graph (no trace-ID unify — non-scaling). streamotel = rename
+otpsg→otel/, delete metrics/logging/instrumented, patterns + one fan-in helper (FOLLOW-UP,
+after the refcount lands). CP-F5b sim-oracle extension (steps-only scopes + conservation oracle;
+coalescing count is nondeterministic → assert conservation + ranges) also still pending.
+
+R6b (definitional coalescing, union-find) is
+implemented + green in the worktree (see "CP-R6b LANDED" in the flow section for
+build pointers). Commit chain (newest first): effded2 R6b-handoff-banner · 806a506
+R6a (definitional tag follow-up, shared chain) · 4c2be2e F7 · 5441c9a R5 (funnel
+fan-in/F8) · d661035 R4 · ae7065a R3 · 473ebe0 R2b · ea4ca51 R2a · 210a0dc R1 ·
+dbe0213 spec. TWO PRE-EXISTING FUNNEL/PERMITS INFRA BUGS handed off (full dossiers in
+the combiner branch WORKING_NOTES, 2026-07-06): the skimSelect/WaitForNew HANG —
+combiner reconciled it CONFIRMED FIXED by 5574a40 — and the funnel `borrowSrcCtx`
+-race (funnelInstance.Run borrowBodyContext vs ctxpool child Free, ~1/400) — NOW
+FIXED HERE by the ctxMeta parent refcount CP (2026-07-08, banner above); combiner's
+WORKING_NOTES entry (2) should be closed pointing at that commit when this merges.
+
+**►►► CP-R6b CORRECTED MODEL (2026-07-06, w/ PN) — CRITICAL for anyone touching
+coalescing or writing its tests.** The spec's premise "independent flows converging
+at a funnel coalesce" is refined: **the unit of aggregation is a funnel INSTANCE, not
+a funnel.** A flow is defined by its DATA, not its operations — the set of items one
+funnel instance accumulates IS one aggregated flow, whose definitional follow-up
+fires once. Independent flows coalesce ONLY when they **co-accumulate in the same
+instance**; flows in different instances are different flows and fire separately —
+correctly. Whether two independent submits land in one instance is a **runtime
+accident** (`Funnel.submit` → `ExecuteNowOrQueue` runs inline OR async; a funnel
+keeps a QUEUE of instances, `funnel.go:~726`, and a concurrent/late submit that finds
+the queue empty spins a fresh instance). ⇒ **No black-box "N submits → 1 fire"
+assertion is deterministic** (2-flow scatters ~0.2% w/o race, more w/ race). Tests:
+`TestFlowCoalesceMechanism` (white-box, DETERMINISTIC single-fire proof — drives the
+union-find primitives directly); `TestFlowDefinitionalCoalesce` (black-box, robust:
+requires coalescing OBSERVED across 40 iters + count always in [1,2], never asserts
+==1); `TestFlowCoalesceConservation` (conservation + concurrent-downstream deref
+stress, fire count range-checked not pinned). ⚠️ **Alloc-floor tests (`TestFlowAlloc*`)
+must run WITHOUT -race** — `testing.AllocsPerRun` counts race-instrumentation allocs;
+gate alloc floors no-race, concurrency tests with -race, separately.
+
+**►►► FLOW DESIGN CONVERGED (2026-07-03, design session w/ PN); IMPLEMENTATION IN
+PROGRESS on branch `flow-impl` (worktree). Parallel thread to the weighted-acquisition
+work. SUPERSEDES the Flow-object surface everywhere it appears (API_DESIGN.md Flow
+section, programming-model.md Wave+Flow framing, surface-lineage Flow bullet): there is
+NO Flow type anymore.** Rationale chain recorded below so it isn't relitigated;
+`docs/decisions/flow-design.md` is now the permanent record (docs pass done 2026-07-03 —
+see open queue item 5).
+- **CP-F1 LANDED (2026-07-03, this commit): keys/tags + path-scoped values end-to-end.**
+  `flow.go`: FlowKey[V]/FlowTag/NewFlowKey/NewFlowTag (identity = *flowIdentity pointer,
+  NONZERO size on purpose — zero-size allocs share an address), key.Value / key.From /
+  tag.InFlow live; FollowUp/Suppress/NewFlow() declared per API-first but panic
+  ("not yet implemented", CP-F2/F4). WithFlow = plain inline call; zero-opt degenerates
+  to body(ctx); scope meta CLONES the ambient meta (wave/parent/parentWaves/ctxType/
+  exEnv) so it is transparent to wave resolution, permit-chain walks (held stays nil,
+  parent link preserved), and reentrancy typing; rider set = immutable snapshot
+  `*flowRiders` (small slice, linear scan, replace-or-append shadowing).
+  - **Propagation seams (one pointer copy each)**: borrowBodyContext captures riders
+    from the submit-time ctx (body borrows happen synchronously AT DISPATCH — verified
+    launcher newTaskWork + funnel newFunnelWork; the riders ride the DISPATCH chain,
+    unlike meta.parent = the severed permit chain); ensureCtxMeta inherits riders
+    verbatim on every derivation (+ gained a sourceMeta.wave==nil branch so a top-level
+    scope meta doesn't pollute parentWaves with a nil key).
+  - **Fan-in sever is STRUCTURAL**: funnelInstance.flush severs at entry via
+    severFlowRiders (bodyMetaPool clone with riders=nil, released at flush return —
+    synchronous extent). Covers BOTH drive paths: the executor Run path (naturally
+    rider-free src) and the INLINE already-past-deadline flush, which arrives on the
+    triggering accumulate item's ctx and was the leak path. Tested both.
+  - **Scope meta/child NOT pooled** (plain alloc, GC-owned): the scope has no
+    completion event until CP-F2 refcounts provide one, and a freed-then-recycled meta
+    read through a retained scope ctx would misdeliver. One alloc per REGISTERING
+    scope, never per dispatch; BenchmarkLauncherSkim floor CONFIRMED unchanged at
+    1 alloc/op. Revisit pooling with CP-F2 (refcount zero = safe recycle point).
+  - Gate: vet, lint 0 (after cache clean — a stale main-tree golangci cache leaked 5
+    permits-WIP gosec findings into worktree runs; `golangci-lint cache clean` fixed),
+    full -short suite, flow tests (propagation chain incl. sub-wave + skim, absence,
+    degenerate, shadowing, in-body scope, sever ×2 paths, zero-identity panics),
+    40× TestBySimulation -race batch (regression — sim has no flow surface yet).
+  - **CP-F2 LANDED (2026-07-03, this commit): follow-ups end-to-end.** `flowinst.go`:
+    flowInstance {fn, fnRiders, count atomic, active atomic} — one per FollowUp option
+    per scope. Carriers: +1 scope (entry→exit, the lexical cover), +1 per work item
+    (ref in borrowBodyContext at dispatch / unref in releaseBodyContext — SYMMETRIC BY
+    CONSTRUCTION with the existing borrow/release pairing), +1 while fn runs (fire()
+    borrows its ctx through the same ref/unref path ⇒ the design's "provisional ref"
+    falls out of the symmetry for free). Derived metas (ensureCtxMeta) and the flush
+    sever clone inherit WITHOUT refs — synchronous extents covered by their enclosing
+    carrier; their release paths don't unref. Conservation is pairing-structural.
+    - **Firing = {count, active} state machine**: 1→0 arms via CAS(active); the pass
+      fires fn iff count==0, then resolves: count==0 after fn = TRUE END (quiescent
+      forever — no carrier remains to re-ref; extensions that completed within the
+      pass count as observed — kills the inline-drain refire livelock); count>0 =
+      disarm + closed missed-wake window (recheck-and-reCAS after Store(false)).
+      Each real extension's last release arms a fresh pass = "fires at each nominal
+      end".
+    - **Two firing paths**: scope-exit unref fires INLINE (user's own call site;
+      makes "empty scope fires at return" deterministic); work-item completion unrefs
+      fire via scheduler→executor (flowFireWork: bare workq.WorkItem embed — NO wave
+      ref; funnelInstance.Execute handoff pattern verbatim; Free no-op, Run recycles)
+      because release sites run inside Free machinery BEFORE the item's wave ref
+      drops — an inline fn draining that wave would deadlock.
+    - **fn ctx**: rooted at context.Background (a flow's end-reaction must not
+      inherit the ended work's cancellation — nolint:contextcheck by design), meta
+      carries fnRiders = single-entry bundle {id, settled val, [this instance only —
+      NOT siblings]}; fn's dispatches work via the CP-F1 nil-wave ensureCtxMeta
+      branch. **fn SIGNATURE DECISION (flag for PN): func(context.Context), NO error
+      return** — a follow-up has no wave to surface an error through; an error return
+      would be silent-discard dressed as API. Errors belong inside fn (dispatch into a
+      wave fn drains).
+    - buildFlowRiders two-pass (values settle, then instances wire against final
+      bundle values ⇒ option order-independence); copy-append on entry.insts
+      (ambient snapshot sharing); instances GC-owned this CP (pool + gen = CP-F4;
+      firing is cold).
+    - KNOWN CP-F3 GAP (documented in FollowUp godoc): tag refs release at accumulate
+      completion — DAG union across funnels needs the transfer multiset.
+    - Gate: vet, lint 0, full -short suite, follow-up tests (scope-exit inline,
+      empty scope, async completion via executor path, extension-refire-then-true-end,
+      bundle value + order-independence, concurrent stress ×5 -race), all flow tests
+      -race ×2, alloc floor 1/op, 40× TestBySimulation -race batch.
+  - **CP-F3 LANDED (2026-07-04, this commit): fan-in transfer/union.** Two design
+    simplifications found at implementation (both RECORD for the doc pass —
+    flow-design.md says "multiset ... count per entry"; reality is simpler):
+    (1) **SET, not multiset**: refs are fungible covers, not per-item tokens — the
+    funnel holds ONE ref per DISTINCT instance (first accumulate refs it; later ones
+    see it present). collectFlowTags at accumulate entry (under c.mu, the only
+    accumulate path), ref-before-item-release ⇒ never-transit-unreferenced without
+    any skip-marking. (2) **ADOPTION, not ref-churn**: the flush takeover hands the
+    union — refs included — to the flush body ctx (flowFanInContext replaces
+    severFlowRiders: path riders sever, tag union takes over as the flush meta's
+    rider set); releaseBodyContext at flush end releases exactly one ref per
+    distinct instance = the one collect took. Pure handoff, zero churn. Downstream
+    dispatches from the flush body ref the union insts themselves ⇒ the lifetime
+    survives through arbitrary post-flush chains; InFlow(ctx) true in the flush body
+    (presence ORs through fan-ins, as designed). funnelInstance gains `flowTags
+    []flowRiderEntry` (mu-guarded; nil'd at takeover; flush ALWAYS runs — the
+    per-instance wave barrier — so the refs always release).
+    - NOTED for docs pass: SKIM is not a fan-in edge — results are data pulled by
+      the driver, not a submit edge; per-item riders don't reach skim handlers (the
+      driver's chain applies) and tag refs release at item completion, not skim.
+      Matches the ontology (edges = submits + funnel accumulate→flush); flag if PN
+      wants it reconsidered.
+    - Gate: vet, lint 0, full -short suite, new tests (tag-crosses-funnel ×2 drive
+      paths incl. not-before-flush + downstream-keeps-alive + value-still-severed;
+      two-scope union) -race ×2 + all flow tests, alloc floor 1/op, 40×
+      TestBySimulation -race.
+  - **CP-F4 LANDED (2026-07-04, this commit): shaping complete — Suppress()/NewFlow()
+    live + alloc guards.** buildFlowRiders is now phased for order-independence:
+    pass 0 validates + detects NewFlow (fresh root = skip inheriting the base) +
+    applies suppressions against the INHERITED set only; pass 1 values; pass 2
+    follow-up instances. Same-call Suppress+Value/FollowUp on one id = suppress
+    inherited, register fresh — documented in godoc. A suppressed subtree takes NO
+    refs on the suppressed bundle's follow-ups (cannot delay their nominal end —
+    tested with a still-running suppressed body). TestFlowAllocFloors guards the
+    cost model in the suite (allocsPerOp floors): degenerate WithFlow = 0,
+    value-registering scope ≤ 6 (meta + snapshot + entries + ctxpool child
+    bookkeeping — per REGISTERING SCOPE, never per dispatch), key.From = 0;
+    BenchmarkLauncherSkim floor unchanged at 1 alloc/op.
+    **INSTANCE POOLING: CP-F4 dropped it claiming captured-gen ABA machinery was
+    needed — WRONG (PN challenge, 2026-07-04; REVERSED).** ref==0 at terminal
+    resolution (firingPass true-end branch) IS the no-readers guarantee: the scope
+    exited, all items under any containing snapshot completed, fn ctx released; a
+    ref-from-zero needs a ctx carrying the instance and all are dead by the same
+    escape contract as body ctxs (violation = the EXISTING body-meta hazard class,
+    not new). Pooling is sound with NO gen: recycle at the true-end branch (sole
+    terminal point, serialized by the active flag), omnipool zero-on-Put. Land in
+    a later CP; registration stays cold either way. Reconcile flow-design.md
+    "pooled, generation-stamped" → "pooled, no generation needed" at the docs
+    pass.
+    Gate: vet, lint 0, full -short suite, new tests (suppress key+tag incl.
+    no-refs-taken liveness, NewFlow fresh root w/ trailing-position
+    order-independence, alloc floors) + all flow tests -race ×2; sim -race batch
+    26/40 clean then ONE HANG at iteration 27 — see the OPEN hang item below.
+  - **►► OPEN: RARE SIM HANG (1× observed, 2026-07-04, CP-F4 batch iter 27; dump
+    preserved at scratchpad sim4_race_27.log — do NOT delete until fixed).**
+    Signature: 10m -race timeout; 6 goroutines; NO mutex/semacquire waiters; 4 skim
+    drivers parked 9m in Wave.skimSelect via addWorkWhileMaybeBlocking/rdvq
+    (top-level Run + two subjobs + a funnel-flush-driven subjob:
+    funnelInstance.Run→flush→sim runSubjob→CloseAndSkimAll→WaitForNew); all executor
+    workers idle-exited ⇒ missed-wake / stuck-reference class (some wave never
+    Done-signaled its skimmer).
+    - **ATTRIBUTION RESOLVED: PRE-EXISTING, NOT FLOW (2026-07-04).** The A/B landed:
+      the pre-flow base 300576b — ZERO flow code — hung 1/30 under the
+      subjob/flush-heavy bias with the IDENTICAL signature (6 goroutines, 4 parked
+      selects in skimSelect/WaitForNew, no lock waiters; dump preserved at
+      scratchpad bias3_base_hang_1.log). Corroborating: flow seams audited
+      line-by-line as nil-rider no-ops on sim paths (sim never calls WithFlow); 146
+      clean 10m -race iterations across the CP-F1..F3 batches with flow code
+      present.
+    - **VALIDATED REPRO RECIPE (~9× the ambient rate — use this to hunt it):**
+      -race, -rapid.checks=10, default SelfTimes (zero-delay KILLS the repro — it
+      needs real delays/parked-worker windows), planConfig Subjob.Add probabilities
+      raised: Launcher.Body 0.5, Funnel.Accumulate 0.3, Funnel.Flush 0.5,
+      Skimmer.Handle 0.3 → ≈1/300 checks (vs ~1/2600 ambient: 1 hit in ~26
+      100-check 10m iterations). Other configs tried and DEAD: zero-SelfTime
+      no-race ×300 checks and zero-SelfTime -race ×2500 checks, 0 hits both trees.
+    - **Leading hypothesis (unproven):** latent wake-loss in the W2b-i/ii
+      rdvq/workq wake-chain rewiring (1f27117 chained-bit consumer discipline /
+      cd09e5a per-demand mailboxes) — the only recent commits touching the
+      implicated machinery; failure class (missed wake) matches change class (wake
+      conservation). Surfaced now simply by exposure (~150 additional 10m -race
+      iterations against this base across the flow batches).
+    - **Next step (decision for PN):** this belongs to the permits/wake-chain
+      thread, not flow-impl — hand this dossier + recipe over (or trace here:
+      capture the biased repro with PSGTRACEINTERNALS + -trace per the
+      sim-trace-debugging skill; the recipe makes the trace small enough to read).
+  - **CP-F5a LANDED (2026-07-04, this commit): sim flow oracle, whole-run scopes.**
+    internal/sim/flow.go + Config.Flow{ScopeProb:0.25} + Plan.Flow: a scoped
+    (sub)plan's ENTIRE run (steps + drain) wraps in WithFlow with a per-plan
+    NewFlowKey[int] (val=plan ID) + NewFlowTag FollowUp. Oracles: (1) propagation —
+    every launcher/accumulate/skim body asserts each enclosing scope's value
+    present+correct and tag present (drain inside scope ⇒ skim handlers covered);
+    flush bodies assert value SEVERED + tag PRESENT (union); (2) inheritance probes
+    DYNAMICALLY at subjob entry (flush-descended subjobs legitimately see severed
+    ancestor values — only the ctx knows the path; present ⇒ value must match =
+    misdelivery check); (3) nominal end — follow-up fires EXACTLY once, only after
+    drained flag, within Eventually(10s) (not inline-deterministic: the flush ctx's
+    adopted refs release just after the wave barrier drops). Covers cancellation
+    plans too (fn fires under teardown — refcount soundness under cancel).
+    **SIM PAID OFF IMMEDIATELY: found a real CP-F1 gap** — limiter-bound dispatch
+    from a top-level scope panicked in ensureCache/ensureCacheChain (nil wave on the
+    scope meta; unit tests never combined limiter+scope). Fix: wave-less metas are
+    TRANSPARENT to permit ancestry (walk to nearest wave-bearing meta; skip in the
+    ancestor-chain walk) — wavepermits.go, + TestFlowScopeWithLimiter regression.
+    Gate: vet, lint 0, full -short suite (ExampleFunnel flaked once under parallel
+    load, 3/3 standalone — the documented real-clock-example class, not a
+    regression), sim -short ×5 with oracle active, 40× -race batch (counting
+    failures; expected ambient hit rate of the KNOWN pre-existing hang ≈1-2/40 —
+    verdict recorded with signature check against the OPEN item above).
+    CP-F5b (steps-only scopes + carrier-counter async-fire oracle) deferred — own
+    checkpoint.
+  - **NEXT: CP-F6 — FollowUp ERROR PROPAGATION (PN, 2026-07-04; REVERSES the CP-F2
+    no-error signature decision — my "no wave exists" rationale was FALSE).**
+    ★★★ FINAL API + SEMANTICS (PN 2026-07-04 — this block SUPERSEDES the detailed
+    mechanism prose below wherever they conflict; the below is kept for the reasoning
+    trail). ★★★
+    IMPLEMENTATION PROGRESS (worktree, uncommitted): STEPS 1-3 LANDED GREEN.
+    1 (KeyFollowUp/TagFollowUp interfaces + Func adapters + FollowUpFn sugar, value as
+    arg, type-erased fn on flowInstance), 2 (fnRiders = prefix-minus-self peel +
+    inner-holds-outer via flowInstance.holds released at the single fire's completion;
+    firingPass/active/re-fire DELETED; fires exactly once), 3 (unref/fire return error;
+    WithFlow named-return joins inline fires body-FIRST then LIFO). Tests added:
+    TestFollowUpFiresOnce, TestFollowUpNestedCoupling, TestFollowUpInlineErrors; re-fire
+    test removed. Root suite + 200-check -race sim green. NOTE: TestFlowTagFunnelUnion is
+    a PRE-EXISTING flake (~1/40 broad, verified by stash-A/B vs base — same flushSawB
+    signature; zero-deadline flush racing the 2nd accumulate; CP-F3 code untouched). NOT
+    a CP-F6 regression.
+    STEP 4a LANDED (async flush-model dispatch, WAVE-ROOTED — PN chose option 1 over
+    item-rooted/Background, 2026-07-05): unref(inline,wave); async path takes
+    wave.state.IncrementReference() at the unref site (sound — triggering item's work ref
+    not yet dropped: releaseBodyContext wave.go:189 precedes DecrementWork :193), dispatches
+    flowFireWork carrying the wave; flowFireWork.Execute stashes the scheduler ctx as
+    borrowSrcCtx (funnel precedent), Run builds a skimContext fire meta bound to the wave
+    rooted at borrowSrcCtx (NOT the recycled per-item ctx — that was the ctxpool-lifetime
+    trap), runs fn via runFire, routes fn's error through package-level flowErrSink to the
+    wave (funnelErrSink shape), then DecrementReference. wave threaded
+    releaseBodyContext(capture m.wave before Put) → flowUnrefRiders(r,wave) → unref → fire.
+    Consequence: the wave's drain now WAITS for the fire (keep-alive), so a follow-up on an
+    outstanding-work flow fires as part of the drain — verified by the async unit tests
+    under -race. Gate (40x rapid.checks=60 -race) running.
+    STEP 4b LANDED (funnel flush defer reorder): flush() now computes flushCtx at :590
+    without deferring its release there; registers `defer c.wave.state.DecrementReference()`
+    FIRST (runs LAST) then `defer releaseBodyContext(flushCtx)` AFTER (runs before the
+    barrier), keeping the panicked-emitErr defer registered LAST (runs FIRST — it reads
+    ctx=flushCtx before the release frees it). So a tag follow-up fired from the flush's
+    union-release takes its wave keep-alive while the funnel barrier still holds the wave
+    open — no Done-wave IncrementReference. Test TestFollowUpErrorCrossesFunnel (erroring
+    tag follow-up crosses a funnel, error surfaces via wave.CloseAndSkimAll) green -race 30x.
+    STEP 4 COMPLETE (4a+4b). -race gate 40/40 on 4a; RE-GATE after the 4b funnel change
+    40/40 (rapid.checks=60 each, 0 hangs). golangci-lint clean. CP-F6 COMPLETE — all 5
+    steps green. NOT committed yet (PN commits on request). CP-F5b (sim async-fire
+    oracle) and CP-F7/F8 remain separate future checkpoints; the sim currently fires the
+    scope follow-up INLINE (plan drains inside the scope body), so async firing is covered
+    only by unit tests until CP-F5b.
+      FIRE-ONCE, NO RE-FIRE. A followup's own rider is PEELED before its body runs
+      (fnRiders = prefix-MINUS-self = the enclosing set), so its dispatches don't re-ref
+      it: it fires EXACTLY ONCE on count→0 (a single atomic transition — one winner).
+      DELETES the firingPass loop, the active flag, the true-end-vs-extension recheck,
+      and the missed-wake window (flowinst.go:93–116) ENTIRELY. Re-attachment (extending
+      the flow under the followup's own identity) is an EXPLICIT re-stamp inside the
+      body — opt-IN, so "no extension" is the safe default and users never have to
+      remember Suppress to avoid accidental re-fire (PN). NESTED-LIFETIME COUPLING
+      SURVIVES: the peeled body still carries the ENCLOSING instances, so its extensions
+      ref them and every OUTER followup still waits for the inner's subtree (the peel IS
+      the LIFO unwind, made literal). The inner-holds-outer ref releases when the single
+      fire COMPLETES (inline: body returns; async: fire-task completes) — no true-end
+      loop needed.
+      VALUE DELIVERED AS THE ARG. A key followup gets its key's value directly (From()
+      reads absent inside, since self is peeled — the arg is the honest channel).
+      TWO UNIQUE INTERFACES + Func adapters + Fn sugar (NOT bare func; NOT Handler/Task —
+      both carry a callerErr arg a followup has no analog for; dropped, not repurposed —
+      a coherent "flow failed" value is inline-only, so disqualified). NAMES LOCKED (PN
+      2026-07-05): method Do (not Handle — Handle/Submit take a NOUN to handle; a followup
+      is intrinsically a VERB/action; sync.Once.Do fire-once resonance). Interfaces fully
+      Flow-qualified for consistency with FlowKey/FlowTag (future non-flow keys/tags):
+        key:  FlowKeyFollowUp[T]{Do(ctx,value T)error} + FlowKeyFollowUpFunc[T] +
+              k.FollowUp(iface) / k.FollowUpFn(func(ctx,T)error)
+        tag:  FlowTagFollowUp{Do(ctx)error} + FlowTagFollowUpFunc + t.FollowUp(iface) /
+              t.FollowUpFn(func(ctx)error)
+      (Follower+Follow considered & rejected — -er begs Follow, clashes with Do; kept the
+      noun FollowUp type + Do.) Value delivered as the Do arg, named to MIRROR/EQUAL the
+      key var (txn key → `txn` value, deliberately shadowing; peel makes From absent inside
+      so the shadow removes only what you shouldn't reach for). Op-builder sugar (In/limits)
+      NOT added: the fire-wave is dynamic, no meaning for a followup; own pass if ever.
+      ASYNC DISPATCH unchanged from the flush-model block below (IncrementReference on the
+      finished wave + global-pool dispatch + package errSink), MINUS the re-fire delta.
+    `FollowUp(fn func(context.Context) error)`. Propagation: INLINE (scope-exit)
+    firing's error joins WithFlow's return via errors.Join, body error FIRST
+    (first-error-primary; multiple followups fire + join in INVERSE registration
+    order — LIFO, defer-like unwind [PN 2026-07-04]; guarantee scoped to SAME-PASS
+    firings — cross-identity async ends have no relative order; name stays FollowUp:
+    Defer REJECTED, run-once echo contradicts extension/refire semantics);
+    innermost-scope-first is COMPOSITIONAL (inner
+    WithFlow's join is the outer body's error — no mechanism). ASYNC (post-return)
+    firing's error routes to the TRIGGERING work item's wave via the errSink →
+    surfaces through its drain like a body error; errSink submission keeps the wave
+    alive like any skim work (PN). Arm-time wave ref is sound: item unref precedes
+    its wave-ref drop — EXCEPT the flush-adopted-union release, which currently runs
+    AFTER the barrier drop (LIFO defers in flush()); FIX: register the
+    releaseBodyContext defer AFTER the barrier defer so it runs BEFORE it (safe: the
+    flush body has returned; dispatches captured riders at admission). Tests:
+    inline-error-joins-return (body+followup, multi-followup order), async-error via
+    drain, extension-firing error routing, flush-triggered firing under live
+    barrier. Reconcile flow-design.md (fn signature + this model) at the docs pass.
+    MECHANISM SETTLED (2026-07-04, after a full design pass — SUPERSEDES the earlier
+    "capture + IncrementReference + bespoke errSink + misattribution corner" sketch,
+    which was me hand-reimplementing what an ordinary WAVE WORK ITEM already gives).
+    The firing STOPS being wave-less. Two firing sites, keyed by the existing `inline`
+    flag, which now means DIRECT-CALL vs SUBMIT-INTO-FINISHED-WAVE:
+      • inline=true (scope exit): direct `fn(scopeCtx)` on the user's own WithFlow call
+        frame (safe — their goroutine); its error joins WithFlow's return (body err
+        FIRST, created instances LIFO).
+      • inline=false (work-item completion): fire via the FUNNEL-FLUSH MODEL (PN chose
+        flush as the model, 2026-07-04 — SUPERSEDES the "submit as an ordinary task"
+        idea; a direct inline fn is still rejected: that site, releaseBodyContext inside
+        taskWork.Free wave.go:189, runs on a pool worker mid-completion and a direct fn
+        draining its own wave on a saturated pool would wedge). Lift the flush trio:
+          – KEEP-ALIVE BARRIER: at count→0 inside the finished item's completion, its
+            wave W is still live (item DecrementWork wave.go:193 runs AFTER
+            releaseBodyContext wave.go:189), so take W.state.IncrementReference() there —
+            the funnel barrier (funnel.go:733), just taken at true-end on a dynamic W
+            instead of at accumulate on a fixed wave.
+          – DISPATCH: hand the body to the global pool (the existing flowFireWork /
+            ForceFresh path, retained), riding the finished item's ctx, carrying
+            fnRiders (prefix).
+          – ERROR ROUTING: a package-level flow errSink (funnelErrSink shape,
+            funnel.go:75/505) submits the body's error to W → surfaces via W's drain;
+            release the IncrementReference AFTER any downstream Submit so totalReferences
+            never transiently zeroes (flush defer ordering, funnel.go:604).
+        The earlier "capture across an executor hop + misattribution corner" framing is
+        RETIRED — this is the IncrementReference pattern adopted wholesale from flush,
+        not hand-rolled.
+      STRUCTURAL DELTA (the two things a follow-up has that a flush doesn't; both handled
+      by keeping existing machinery): a funnel instance is bound to ONE wave and fires
+      ONCE; a follow-up's wave is DYNAMIC (whichever DAG item finished last) and it can
+      RE-FIRE (extension → re-quiesce). So the IncrementReference is taken/released PER
+      FIRING on that firing's W, and the firingPass/count/active state machine is RETAINED
+      (fire-once-per-quiescence, true-end detection, nested-lifetime holds). Flush supplies
+      dispatch+keepalive+errSink; firingPass supplies the re-fire logic.
+      DROP context.Background rooting (flowinst.go:118): the firing rides the finished
+      item's ctx; if it's cancelled that's the user's call (fn checks ctx.Err()). The
+      follow-up body is a launchable Task internally (Handler[struct{}]) so the errSink
+      path is the ordinary one; user-facing signature stays func(context.Context) error
+      (wrapped) — a bare Handler only earns its keep if follow-ups take op-options, which
+      they don't.
+    NESTED-LIFETIME RIDER MODEL (PN confirmed 2026-07-04; REPLACES the singleton
+    fnRiders — flat siblings were wrong, LIFO held only for same-pass inline firings):
+      • A follow-up fires with the rider set AS OF ITS OWN REGISTRATION POINT (the
+        prefix: all values + follow-up instances registered at or before it), NOT a
+        singleton {self}. VISIBILITY half: fn reads the ENCLOSING values/tags it was
+        registered under (reqKey.From in an audit follow-up), not only its own key.
+        LIFO firing peels the stack one layer per firing (innermost fires first seeing
+        the whole stack; each outer sees one fewer).
+      • ORDERING half — inner-holds-outer: at registration, an inner (later-registered)
+        follow-up takes a persistent ref() on EACH enclosing instance, held for its
+        whole life, RELEASED AT ITS OWN TRUE END (firingPass count-still-zero branch,
+        flowinst.go:99). So an outer's count cannot reach zero — cannot fire — until the
+        inner has fully quiesced. This sequences LIFO even when firings go async (the
+        prefix set alone gives visibility but NOT ordering: shared body carriers drive
+        all instances to zero together otherwise).
+      • EXTENSION COUPLING IS INTENDED: true end = count still zero after firing = fn
+        fired AND nothing it spawned is outstanding, so an extension re-raises the count
+        and defers true end (and thus the peel) until the extension's whole subtree
+        quiesces. Every ENCLOSING follow-up waits, transitively (cascade one layer at a
+        time). This is the defer guarantee made to hold across async extension — plain
+        defer can't express it. Real coupling (a slow inner extension holds every outer
+        follow-up open); the decoupling escape hatch is a SINGLE follow-up that itself
+        submits N concurrent tasks (PN).
+    Return threading: fire()→raw fn err; firingPass()→errors.Join of its fires;
+    inline path returns it up through unref(true) to WithFlow; Submit path routes the
+    firing task's error through the wave's ordinary errSink. WithFlow's scope-exit defer
+    must release created instances in REVERSE registration order (LIFO). Flush defer
+    reorder (releaseBodyContext AFTER the barrier defer so it runs BEFORE it) still
+    applies. Tests: inline-error-joins-return (body+multi-followup LIFO order), async
+    firing surfaces via the finished wave's drain, extension delays every outer
+    follow-up (nested-lifetime coupling), enclosing value readable in fn, flush-
+    triggered firing under live barrier. Reconcile flow-design.md at the docs pass.
+  - **★ RIDER REPRESENTATION REDESIGN — spec at docs/decisions/flow-rider-chain.md.
+    CHECKPOINT PLAN (foundation-first, each -race-gated): R1 chain-swap (no-op) → R2
+    refcount+pooling → R3 FlowOption interface + fluent bundle → R4 surface reframe
+    (FlowFollowUp/Infuse) → R5 rebuild sever (F8) + fan-in union (F7) → R6 definitional-tag
+    coalescing (union-find) → R7 CP-F5b oracle + psgwf/otpsg disposition.**
+    - **CP-R1 LANDED (2026-07-05, worktree — NOT committed; PN commits on request):
+      representation swap, GC-owned still.** Flat `flowRiders{[]flowRiderEntry{id,val,insts}}`
+      snapshot → linked `flowRiderNode{id,val,hasVal,inst,next}` chain, ONE binding per node,
+      walked head→next on read. `flowInstance.fnRiders *flowRiders` → `enclosing *flowRiderNode`
+      = the instance's own node's `.next` (peel is structural — self's binding lives on its node,
+      the fire carries next). `rebuild(head,stop,keep)` primitive added (drives Suppress now via
+      walk-to-root drop-by-id; funnel sever in R5). buildFlowRiders: value-only nodes emitted
+      DEEPEST (globally visible to later follow-ups), then follow-up nodes in option order (later
+      nearer head → LIFO peel); values settled by linear scan of opts (NO maps — was 3 transient
+      maps, cut to keep the registering path lean). collectFlowTags/flowFanInContext/funnel
+      `flowTags` → chain form (union prepends deduped-by-instance-pointer tag nodes). flowRefRiders/
+      flowUnrefRiders walk the chain (each instance on ≤1 node/chain ⇒ one ref/instance). `refs`
+      field NOT added yet (R2). Seams touched: flow.go, flowinst.go, ctxmeta.go (field type),
+      funnel.go (flowTags type), bodyctx.go (unchanged logic, type flows through). NO test touches
+      rider internals — clean blast radius.
+      GATE: vet clean, golangci-lint 0, full -short suite green, all flow tests -race green
+      (incl. concurrent stress + funnel union), alloc floors green, **40/40 TestBySimulation
+      -race (rapid.checks=60, seeds 1-40) — 0 fails, 0 hangs, 0 races** (known pre-existing rare
+      hang did not surface; ambient ~1-2/40). Value-only scope measured **4 allocs/op** (down from
+      flat ~6), tag-followup scope 6; **alloc ceiling lowered 6→4** (flat's meta+snapshot+entries+
+      ctxpool → chain's meta+node+ctxpool). These warm allocs are what R2 pools toward 0.
+    - **TWO INTENTIONAL SEMANTIC DELTAS (untested corners; spec-intended; vanish under R3/R4
+      surface — FLAGGED to PN, PN's read: let them change).** The chain shadows-and-walks where
+      flat merged-then-peeled: (1) ancestor `key.Value(V)` + inner STANDALONE `key.FollowUp(h)`
+      (old surface): inside h's fire flat peeled V (From absent), chain shows V (ancestor value
+      node is in `enclosing`). (2) a value BUNDLED with a follow-up under the same id is invisible
+      to an EARLIER same-scope follow-up (rides the follow-up node, sits above the earlier one);
+      flat's global value pass showed it. Narrow: a PURE value option (no follow-up under its id)
+      stays globally visible (emitted deepest), so only bundled values differ. Both untested; both
+      = the spec's `enclosing = node.next` end-state; standalone key follow-ups + this cross-key
+      visibility go away when R3 makes keys bundle value+follow-up on one node.
+    - **CP-R2 SPLIT (risk asymmetry, PN-approved 2026-07-05): R2a = pool scope meta +
+      instances (existing recycle points, low risk); R2b = node refcount + pooling (new
+      refcount racing carrier ref/unref — the critical part). R2b will be designed with the
+      FAN-IN UNION as a ref holder in mind (PN).**
+    - **CP-R2a LANDED (2026-07-05, worktree — NOT committed): scope meta + instance pooling.**
+      Scope meta now `bodyMetaPool.Get()` (was `&ctxMeta{}` GC-owned), freed at WithFlow return
+      via a defer registered FIRST (runs LAST — after the inline follow-up fires, which root
+      their own metas and never read the scope ctx): `ctxpool.Free(scopeCtx)` + `bodyMetaPool.Put`.
+      Retain-of-scope-ctx is now UB (spec-sanctioned). flowInstance pooled via
+      `flowInstancePool = omnipool.For[flowInstance]()` + a `Reset()` (needed because count
+      atomic.Int64 carries noCopy — omnipool's plain-copy zero would trip vet copylocks);
+      `flowInstancePool.Get()` in buildFlowRiders, `Put` at fire-complete (unref inline branch +
+      flowFireWork.Run async). Safe gen-free: count→0 fires exactly once (CP-F6) and no live
+      chain reaches the instance's own node after that (the count==0 ⇒ no-reader invariant), so
+      no ABA guard — VALIDATED under -race, not just argued.
+      TEST FIX: TestFlowAllocFloors read `key.From` INSIDE the scope now (it previously retained
+      the scope ctx past WithFlow return to measure the read — now UB under pooling).
+      ALLOC WIN: value-only scope **4 → 1** (just the GC-owned node; R2b pools it to 0),
+      tag-followup scope **6 → 2** (node + the `created` slice). Ceiling lowered **4 → 1**.
+      GATE: vet, golangci-lint 0, full -short suite, all flow tests -race (incl. concurrent
+      stress + funnel union + async firing), alloc floors, **40/40 TestBySimulation -race
+      (rapid.checks=60, seeds 1-40) — 0 fails/hangs/races**.
+    - **CP-R2b LANDED (2026-07-05, worktree — NOT committed): node refcount + pooling, universal.**
+      `flowRiderNode` gains `refs atomic.Int64` + a `Reset()` (noCopy) + `flowRiderNodePool =
+      omnipool.For[flowRiderNode]`. Primitives (flow.go): `newRiderNode` (pool Get + downlink
+      nodeRef on next), `nodeRef`/`nodeUnref` (nil-safe; unref cascades reclaim down `next`,
+      panics on underflow = double-release). REF OWNERSHIP (mirrors the flowRefRiders/
+      flowUnrefRiders sites exactly): a node refs its `next` (downlink); a CARRIER meta refs its
+      head — borrowBodyContext / scope meta (WithFlow) / fire meta (unref inline + Run) / flush
+      adopt; an INSTANCE refs its `enclosing` head from registration to fire-complete (decision B —
+      REQUIRED for the async fire: enclosing must survive the gap between count→0-dispatch and the
+      worker building the fire meta, else the cascade from the triggering carrier's nodeUnref
+      reclaims it first). ensureCtxMeta derivations take NEITHER ref (synchronous, parent-covered).
+      UNION (decision A — universal): collectFlowTags prepends pooled union nodes, moving the
+      funnel's carrier ref old→new head; flowFanInContext ADOPTS it (no new ref; c.flowTags nil'd),
+      released by releaseBodyContext at flush end. Universal (all nodes pooled incl. union) avoids
+      a mixed pooled/GC chain whose reclaim cascade would corrupt at flush. Two parallel counts
+      stay separate: instance.count (firing) vs node.refs (pooling).
+      SAFETY: nodeUnref underflow panic (double-free = loud, not silent use-after-recycle); a
+      test-only `flowNodeAllocHook atomic.Pointer[func(int)]` (+1 Get/-1 reclaim; nil in prod, one
+      uncontended relaxed load) drives **TestFlowNodeConservation** (white-box) — asserts balance→0
+      across inline nesting, async drain, and funnel union; a leak leaves it positive.
+      ALLOC: value-only scope **1 → 0** — the warm per-flow allocation is fully retired
+      (meta+ctxpool+node all pooled). tag-followup 2 → 1 (the `created` slice remains). Ceiling
+      **1 → 0** (hard floor now). CP-R2 (a+b) COMPLETE: zero warm allocation for the value path.
+      GATE: vet, golangci-lint 0, -short suite, flow tests + conservation -race (x5),
+      alloc floors (0), **80/80 TestBySimulation -race total (40 pre-safety + 40 with the underflow
+      panic in place; rapid.checks=60, seeds 1-40 each) — 0 fails/hangs/races/panics**.
+    - **CP-R3 LANDED (2026-07-05, worktree — NOT committed): typed key follow-up via explicit
+      value arg; FlowOption stays a value STRUCT.** The spec's "FlowOption→interface + fluent
+      `key.Value(v).FollowUp(fn)`" design was BUILT, MEASURED, and REJECTED: it costs ~2 warm
+      allocs per registering WithFlow (value-only 0→2). Root cause: a generic `valueOption[V]` in a
+      heterogeneous variadic can only dispatch through an interface method (`applyToFlow`), and
+      interface dispatch is OPAQUE to escape analysis — `go build -gcflags=-m` confirmed BOTH the
+      `...FlowOption` variadic and the builder escape to heap. OpOption's interface is fine because
+      op construction is COLD; WithFlow is WARM (per request-scope), so the fluent surface would
+      forfeit CP-R2's zero-warm-alloc win. Go constraint: typed-fluent-followup ⟹ generic option ⟹
+      interface variadic ⟹ heap. **Decision (PN, Option 3): keep FlowOption a struct; a key
+      follow-up takes its value as an EXPLICIT first arg** — `key.FollowUp(v, h)` /
+      `key.FollowUpFn(v, fn)` (typed `func(ctx, V)`, the generic on the FlowKey[V] receiver, not a
+      boxed option). Same `FollowUp` verb as tags; value unambiguous (written right there, captured
+      at registration); one option → one bundle node. No standalone valueless key follow-up, no
+      fluent chain; `Suppress`/`NewFlow`/bare-key have no FollowUp method so `Suppress().FollowUp()`
+      is unexpressible (type-safety survives without composed interfaces). PN vetoed "Bundle" (too
+      generic) — FollowUp(v, …) reads right and composes with Fn. Internal: FlowOption gains
+      `hasVal` (true for Value + key follow-up, false for tag follow-up/suppress/new-flow);
+      settledVal reads the bound value off either. buildFlowRiders / refcount / firing UNCHANGED
+      from R2b (surface-only). Spec `flow-rider-chain.md` Options section rewritten to record the
+      rejection + Option 3. ALLOC: value-only scope stays **0**; key bundle 1 (the `created` slice,
+      cold). Floor unchanged (0). GATE: vet, lint 0, -short (modulo the known real-clock
+      Example_clientTimeout/ExampleFunnel flakes — pass 3/3 standalone), flow + conservation -race,
+      alloc floors 0, **40 TestBySimulation -race runs clean (24 distinct seeds; on top of R2b's
+      80/80 identical concurrency)**.
+    - **CP-R4 LANDED (2026-07-05, worktree — NOT committed): anonymous follow-up + bare presence.**
+      `FlowFollowUp(h)`/`FlowFollowUpFn(fn)` = anonymous DAG-scoped follow-up: mints a fresh unnamed
+      tag-kind identity per call (no handle ⇒ neither InFlow-queryable nor Suppressible), fires once
+      at the true end, crosses funnels. `FlowTag.Infuse()` = bare presence: a valueless,
+      follow-up-less marker so InFlow reports the tag with no lifetime (complements FollowUp;
+      Suppress clears either). New `flowOptInfuse` kind; buildFlowRiders emits a valueless
+      follow-up-less node (skipped when a follow-up under the id already provides presence).
+      PRESENCE CROSSES THE FAN-IN: collectFlowTags now folds bare-presence nodes into the union too
+      — follow-up nodes still ref one carrier per distinct instance; a presence node (no instance)
+      contributes presence once per distinct id with NO ref (membership has nothing to keep alive).
+      Values still sever. (This extends the EXISTING union; the R5 boundary rework subsumes it.)
+      Refcount/firing unchanged. Tests: anonymous fires once + crosses funnel (not before flush) +
+      two-independent; Infuse presence in-scope + downstream-across-fan-in + fires-nothing +
+      Suppress-clears; conservation test gains an Infuse + anonymous-follow-up funnel scenario.
+      GATE: vet, golangci-lint 0, -short (modulo the known psgwf Example_clientTimeout real-clock
+      flake — 3/3 standalone), flow + conservation -race, alloc floors, **TestBySimulation -race:
+      39/40 seeds pass; seed 6 hit the KNOWN PRE-EXISTING hang ONCE (intermittent — passed 2/2 on
+      re-run), signature conclusively pre-existing (6 goroutines, 4 parked skimSelect←
+      addWorkWhileMaybeBlocking←WaitForNew, NO mutex/semacquire waiters, ZERO flow-rider frames —
+      the permits/wake-chain missed-wake class from the OPEN item above, not flow).** 41/42 -race
+      runs green.
+    - **CP-R5 LANDED (2026-07-05, worktree — NOT committed): funnel fan-in on the chain — flush
+      sees the enclosing driver (F8) + boundary-scoped tag union/sever.** Boundary = Option A
+      (PN-confirmed): `flowBoundaryAboveWave(ctx, wave)` = the rider head of the nearest meta ABOVE
+      the funnel's wave, captured at DISPATCH (funnelWork.Init, from submitCtx — the borrow severs
+      parent) and carried on the funnel work. KEY FIX vs the naive walk: the parent chain is
+      synchronous-only (an async body meta has parent=nil), so the walk stops at the LAST in-wave
+      meta when parent severs — its riders ARE the enclosing driver's head it captured at ITS
+      dispatch (`for m.wave == wave && m.parent != nil`). The instance adopts the boundary from its
+      first accumulate: c.flowTags STARTS as the boundary (union chain's tail = enclosing flow), with
+      nodeRef + flowRefRiders(boundary) so the single flush-time release (releaseBodyContext walks the
+      WHOLE flush chain) balances and enclosing follow-ups survive to flush regardless of driver
+      timing. collectFlowTags(union, ctx, stop=boundary): walks each item's chain, STOPS at boundary
+      (pointer ==), folds tag-kind nodes ABOVE it (per-item tags cross, dedup scans only the folded
+      prefix); per-item VALUES above the boundary drop = the sever. Enclosing (at/below boundary)
+      shared intact. flush riders = folded tags → boundary → enclosing; flowFanInContext adopts,
+      releaseBodyContext releases (node + instance refs) at flush end. c.boundary nil'd at takeover.
+      SEMANTIC FLIP (CP-F8, as predicted): the enclosing/driver flow's VALUES now CROSS to the flush
+      (were severed) — only per-item riders added WITHIN the funnel's wave sever. Tests: rewrote
+      TestFlowSeverAtFlush → TestFlowFlushSeesEnclosing (driver value crosses via a launcher-in-wave
+      per-item scope whose value severs, both flush drives); TestFlowTagCrossesFunnel flushSawVal
+      false→true; sim oracle assertFlowInFlush severs→crosses (+ flowExpectsForCtx comment).
+      GATE: vet, golangci-lint 0, -short (root+sim), all flow + conservation -race, alloc floors,
+      **40/40 TestBySimulation -race (seeds 1-40, rapid.checks=60; 0 fails/hangs/races/underflows)**.
+      NOTE: independent-flows-WITH-values (no common driver) would leak item1's value into the
+      boundary — that is the R6 COALESCING case, not yet handled; tags-only union is correct.
+    - **CP-F7 LANDED (2026-07-05, worktree — NOT committed): skim handlers are flow continuations.**
+      A queued skim result is a CARRIER of its producing item's riders, not a fan-in. skimWork gains
+      `riders *flowRiderNode`; `captureRiders(meta.riders)` at submit (both submit + trySubmit) takes
+      node + instance refs (overlapping the item's own — never transits unreferenced); skimWork.Execute
+      overrides `meta.riders = wk.riders` so the handler runs under the ITEM's chain (item-over-driver
+      shadowing — the item descends from the driver, whose cancellation ancestry the handler still
+      rides via wk.wave.ctxMeta); skimWork.Free releases (flowUnrefRiders + nodeUnref), balanced across
+      all paths (Free fires once — dequeued+executed, or freed-if-never-posted per skimPostWork.Free).
+      REVERSES the CP-F3 "skim is not a fan-in edge" note: a tag follow-up on the item's flow now must
+      NOT fire while the result awaits skimming — the skimWork's refs hold it until the handler
+      completes. Applies to internal errSinks too (harmless — they read no riders; refs balance).
+      Test: TestFlowSkimContinuation — skim handler sees the producing item's value (not just the
+      driver's) + item tag present + the item follow-up fires only AFTER its result was skimmed.
+      GATE: vet, golangci-lint 0, -short (root+sim), all flow + skim + conservation -race, alloc
+      floors, **40/40 TestBySimulation -race (seeds 1-40, rapid.checks=60; 0 fails/hangs/races)**.
+    - **CP-R6 SURFACE SETTLED (PN, 2026-07-05): no new `OnFlowEnd`. `FlowFollowUp(h)` is just an
+      option carrying the handler; the CONSUMING CONTEXT binds the identity — `WithFlow(…,
+      FlowFollowUp(h))` mints a fresh anonymous id (per-scope, R4), `NewFlowTag(FlowFollowUp(h))`
+      binds h to the TAG's identity = the definitional follow-up. Coalescing IS how fan-in is really
+      handled (not deferrable). Split: R6a shared-chain definitional (no union-find) → R6b cross-
+      funnel coalescing.**
+    - **CP-R6a LANDED (2026-07-05, worktree — NOT committed): definitional tag follow-up, shared
+      chain.** `flowIdentity.definitionalFn` (bound by `NewFlowTag(FlowFollowUp/FollowUpFn(h))` —
+      validates a valueless follow-up option, at most one). `flowInstance.definitional` marks it
+      (Reset zeroes). buildFlowRiders: a definitional tag's `Infuse()` is skipped in the presence
+      loop and handled in the follow-up loop — mints the definitional instance UNLESS a definitional
+      instance for the id is already on the chain (walk `head`; enclosing infusion or an earlier one
+      this scope ⇒ idempotent, mint nothing). Fires ONCE per flow; R5's pointer-dedup handles fork/
+      reconverge; crosses a funnel once (folds/boundary-seeds like any tag follow-up). NOT coalesced
+      across INDEPENDENT flows yet (2 fires — R6b). Tests: TestFlowDefinitionalFollowUp (once +
+      idempotent-across-N-infusions + funnel-cross-once + not-before-flush), TestFlowDefinitionalTag
+      Panics. GATE: vet, golangci-lint 0, -short (root+sim), all flow + conservation -race, alloc
+      floors, **39/40 TestBySimulation -race (seed 6 = the KNOWN pre-existing hang, intermittent,
+      passed 2/2 on re-run; skimSelect/WaitForNew signature, zero flow frames)**.
+    - **CP-R6b LANDED (2026-07-06, worktree — NOT committed): definitional coalescing, union-find.**
+      See the CORRECTED-MODEL banner up top (funnel INSTANCE = one aggregated flow; coalesce only
+      co-accumulated flows; count is nondeterministic by design). Mechanism (flowinst.go "Coalescing
+      (CP-R6b)" section): `sharedNode{parent,refs int,holds}` union-find hierarchy pooled via
+      `sharedNodePool` (+`flowSharedAllocHook` conservation seam); `flowIdentity.mergeMu` (per-tag
+      serial lock); `flowInstance.{id,shared}` (Reset zeroes). `mergeDefinitional` (link two live
+      instances/roots under a fresh parent; idempotent no-op if same root; ref-before-release ⇒ no
+      merge-vs-death race), `derefShared` (cascade + holds-migrate-up + underflow panic), `coalesceAtZero`
+      (at count→0 under mergeMu: shared==nil→fire solo; merged-not-last→step aside, migrate holds,
+      release enclosing, recycle; merged-last→adopt component holds, fire once). Merge site =
+      `collectFlowTags` (walks the WHOLE union incl. boundary tail — the driver flow's own definitional
+      instance rides there, never folded). Tests: TestFlowCoalesceMechanism (deterministic proof),
+      TestFlowDefinitionalCoalesce (robust black-box), TestFlowCoalesceConservation (concurrent deref +
+      shared/node conservation). GATE: vet, golangci-lint 0, full suite no-race (incl alloc floors),
+      all flow/coalesce -race ×20+, **700 TestBySimulation -race checks (400+300, 0 fails)**. Full sim
+      ORACLE modeling of coalescing deferred to R7.
+    - **►► NEW OBSERVATION: rare pre-existing funnel borrowSrcCtx -race (distinct from the hang).**
+      Seen ~1/400 in TestFlowDefinitionalFollowUp AND the flow suite: `funnelInstance.Run` →
+      `borrowBodyContext` → `metaFromContext` READS a ctxpool child's value while an execpool worker
+      `ctxpool.(*child).Free()` WRITES it (use-after-free of the flush's scheduler ctx / borrowSrcCtx).
+      NOT R6a — R6a touched NO funnel code (flow.go/flowinst.go only); the identical non-definitional
+      TestFlowFollowUpAnonymous exhibits the same pattern. Funnel/permits-thread infra bug (funnel.go
+      borrowSrcCtx lifecycle — the handoff happens-before vs the scheduler freeing the ctxpool child).
+      Hand off with the hang dossier.
+    - **NEXT: CP-R6b — cross-funnel coalescing (union-find under a per-tag merge lock).** The R2b-class
+      risk: sharedNode hierarchy (parent + refs), per-tag merge lock, merge at collectFlowTags (funnel
+      = only merge site), find-to-root/same-root-no-op/live-operands-via-ref-before-release, deref
+      cascade → root fires once, flush links a downstream instance into the component. DESIGN CARE +
+      heavy -race sim + shared-node conservation. Then R7 CP-F5b oracle + psgwf/otpsg. ALSO the R5
+      independent-flows-with-values boundary gap is separate (not R6).
+  - **ORIGINAL REDESIGN SPEC NOTES (PN + design session, 2026-07-05; CONVERGED).** Replaces the flat COW
+    flowRiders snapshot + per-instance fnRiders with a **refcounted, pooled linked chain**
+    of one-entry nodes; **walk on read** (same complexity as the flat scan). Reshapes/SUBSUMES
+    CP-F7 + CP-F8 (the funnel sever becomes a bounded chain rebuild = F8; skim-as-continuation
+    stays) and supersedes CP-6's flat model, `fnRiders`, standalone `FlowKey.FollowUp`, and the
+    FlowTag-centric follow-up surface. Key decisions locked this session:
+      • Node = one entry (id, val, hasVal, inst) — a key's value+follow-up on ONE node; refcount
+        per node, reclaim cascades (node refs its next; carriers ref the head); instance points
+        at its parent node (peel free, no fnRiders).
+      • FlowOption becomes an INTERFACE (like OpOption, 0-alloc via escape analysis + per-kind
+        concrete types); composed FlowKeyOption[V] embeds it so the fluent `key.Value(v).FollowUpFn(fn)`
+        bundles value+follow-up as ONE option → one node. Key follow-ups exist ONLY via the fluent
+        form (value never ambiguous). Method verb is **Do**.
+      • Surface reframed: **FollowUp is the primitive**, key/tag are qualifiers. `FlowFollowUp`/
+        `FlowFollowUpFn` = anonymous DAG follow-up (default). `tag.Infuse()` = bare presence (valueless
+        marker, no lifetime — new; CP-6 had no way to tag without a follow-up). Decision table +
+        "value severs / lifetime & presence cross" as the teaching frame.
+      • **Definitional tag follow-up** (attached to the tag's identity) fires ONCE per flow regardless
+        of infusion count; complements (does NOT replace, PN) per-scope tag.FollowUp. Coalescing of
+        independently-infused flows at a funnel = **serial union-find under a per-tag merge lock**
+        (find-to-root, same-root no-op, live operands via the accumulate ref-before-release, funnel is
+        the only merge site, flush links a downstream instance into the component). This is the highest-
+        risk concurrent structure — gate hard.
+      • Fan-in union: boundary = driving flow's chain head captured at funnel dispatch (shared intact =
+        F8); collect-to-boundary per item; markers dedup by id, instances by pointer; materialize at flush.
+      • Pooling: scope meta freed at return (retain-of-scope-ctx is UB, same as every framework ctx);
+        nodes reclaimed by refcount; instances recycled at fire (gen-free). Retires both warm per-flow allocs.
+      OPEN (impl-time, non-blocking): holds-off-the-walk (derive inner-holds-outer from the chain vs
+      materialize — safe version known), on-demand read map (deferred until measured), generic-option
+      0-alloc verification (escape analysis + benchmark). BUILD = fresh-session, multi-checkpoint, each
+      -race-gated; supersede CP-6's flat surface as part of it.
+  - **THEN CP-F7 — SKIM HANDLERS ARE FLOW CONTINUATIONS (PN, 2026-07-04; REVERSES
+    the CP-F3 "skim is not a fan-in edge" note — my gloss was wrong).** A queued
+    result is a CARRIER: skimmer.Submit captures the item's riders (ref at submit),
+    the handler runs under them stamped as a CHILD of the driver's ctx (normal
+    shadowing — per-key nearest-wins, ITEM over driver; no merge mechanism exists
+    or is needed), release at handler end; handler dispatches extend the flow. A
+    tag follow-up must NOT fire while results await skimming (reverses the CP-F2/F3
+    behavior). NOT a fan-in: each invocation continues ONE item's path — values flow
+    through. IMPLEMENTATION WRINKLE (mine): From() reads the nearest FLAT snapshot,
+    sound only because every snapshot is merged at construction; the skim stamp
+    must restore that invariant — either merge item-over-driver at stamp
+    (per-invocation cost) or teach reads to walk meta.parent (then the flush sever
+    clone must be an explicit BARRIER — a walking read must not see through
+    riders=nil). Decide by alloc floors. Sim oracle: whole-run scopes coincide on
+    both chains (CP-F5a assertions survive); add a divergent-chain oracle with
+    CP-F7.
+  - **THEN CP-F8 — FLUSH SEES THE ENCLOSING CHAIN (PN, 2026-07-04): the fan-in
+    sever applies ONLY to per-item riders.** A flow-A body driving a subwave
+    containing flow-B's funnel: Flush must still see A's values AND tags — A is
+    invariant structural context ABOVE the fan-in (not part of the per-item
+    ambiguity). Semantics: flush riders = enclosing-chain riders (ordinary
+    inheritance) + item-tag union; item VALUES still sever. Current impl anchors
+    the flush borrow at the scheduler ctx (rider-free) / triggering item — WRONG
+    anchor. ANCHOR SETTLED (PN): NO capture — walk the meta parent chain up to the
+    first meta ABOVE the funnel's wave; its flat snapshot IS the enclosing chain
+    (merged-at-construction makes it one pointer read; sever-per-item and
+    inherit-enclosing are the same act: take the boundary meta's riders, not the
+    item's). CAVEAT (from CP-F1's own design): body metas have parent=nil — the meta
+    chain is SYNCHRONOUS-ONLY (permit severing, load-bearing). FIX: resolve the
+    boundary AT DISPATCH (submit ctx's chain is intact there): walk above the
+    target wave, stamp the enclosing snapshot as ONE extra riders-only pointer on
+    the body meta (currentHeldPermit walks meta.parent, a different field —
+    permits untouched). Flush reaches the enclosing chain in one hop from any
+    item; the executor-path borrowSrcCtx problem dissolves (boundary snapshot is
+    invariant across a funnel's items by construction — take it from any).
+    Think through wave reuse + multiple drivers. Sim oracle: ancestor expects in
+    flush bodies flip from severed to PRESENT for values once this lands (adjust
+    assertFlowInFlush).
+  - **THEN CP-F5b** — sim model extension: flow scopes/followups in
+    internal/sim scenarios + conservation oracle (every registered follow-up fires
+    ≥1 and reaches true end after its subtree quiesces; no fire while carriers
+    outstanding). Own model-design pass. Then the psgwf/otpsg disposition pass
+    (below).
+  - **psgwf/otpsg DISPOSITION SETTLED (PN, 2026-07-04; supersedes the audit-only
+    framing below): psgwf = FULL DELETE after CP-F6–F8 land**, gated on a
+    per-symbol audit (anything lacking a flow equivalent gets SURFACED, not
+    silently dropped — pin.go semantics unread), examples ported as flow examples
+    (kills the Example_clientTimeout flake). **otpsg = REBUILD AS V2 ON FLOWS, not
+    shrink**: an otel span's lifecycle maps exactly onto a flow — span starts at
+    scope entry, rides as a flow VALUE (child spans/log correlation in every
+    body, fan-in semantics per tags), and span.End() is a FOLLOW-UP firing at the
+    flow's TRUE END (covers async work outliving the handler; extension = honest
+    span extension — previously inexpressible). V2 ≈ one helper returning
+    []FlowOption (span value + end follow-up). propagation.go/tracing.go deleted
+    as subsumed; metrics.go/logging.go/instrumented.go audited (keep iff they
+    instrument ops in ways flows don't touch). Original recon notes:** psgwf's own doc.go
+    is the flow facility's job description ("workflow context propagation…
+    cancellation domains and context values that flow through PSG task chains") on the
+    dead vocabulary — HIGH-confidence delete once follow-ups land; audit each exported
+    symbol for a flow-native equivalent, port examples worth keeping as flow docs
+    (kills the Example_clientTimeout real-clock flake with it). otpsg is PARTIALLY
+    subsumed: propagation.go/tracing.go = what flow values do natively; but
+    metrics.go/logging.go/instrumented.go = op instrumentation flows don't replace —
+    decide shrink-to-instrumentation-core vs delete-and-compose. Check
+    internal/benchapp/funnel.go's reference. Isolated module (own go.mod), so removal
+    is clean either way.
 - **Ontology: "flow" = the causal DAG itself** (nodes = work items; edges = submits + the
   funnel accumulate→flush fan-in). Two rider kinds propagate along it, split by ONE property
   — whether a merge operator exists at fan-in:
@@ -1033,15 +2064,36 @@ permanent record (docs pass done 2026-07-03 — see open queue item 5).
   stops bodies only if the request ctx is in the execution ancestry (user's explicit
   choice + cost).
 - **Open queue**: (3) verify opt alloc discipline (variadic +
-  boxed payloads stay on stack); (4) naming REMAINDER — shaping-identity constructors
-  only (NewFlowKey[V] / follow-up type mint, possibly unified); the option/function names
-  are SETTLED (see surface bullet); (5) docs pass DONE (2026-07-03): new
+  boxed payloads stay on stack); (4) naming SETTLED IN FULL (PN, 2026-07-04): NewFlowKey[V]/NewFlowTag stay a
+  pair — no further unification; all option/function/read names settled (see surface
+  bullet); (5) docs pass DONE (2026-07-03): new
   `docs/decisions/flow-design.md` (definitive record incl. the full rejection trail; its
   "Open details" section carries the follow-up-fn-receives-value sugar decision as OPEN,
   plus items (3)/(4) here); reconciled API_DESIGN.md (banner bullet + superseded notes on
   the Flow model item / API block / example), programming-model.md (Wave is THE
   user-facing type; flow facility framed designed-not-implemented), surface-lineage.md
   (new facet 9: Flow handle → flow facility), TODO.md:79 (RESOLVED — no adapter needed).
+
+**►► OPEN FOR A FUTURE SESSION (PN, 2026-07-04): the RARE PRE-EXISTING SIM HANG.**
+Missed-wake wedge, ~1/2600 ambient -race checks, reproduced on pre-flow base 300576b
+(NOT flow); full dossier + dumps + VALIDATED repro recipe (~1/300 checks: -race,
+default SelfTimes, Subjob.Add probs 0.3-0.5) in the flow block's "OPEN: RARE SIM
+HANG" item below. Leading suspect: the W2b-i/ii wake-chain rewiring. Nobody is
+actively on it; whoever picks it up starts from the recipe + the
+sim-trace-debugging skill.
+
+**►► CHALLENGE FOR THE PERMITS THREAD (from the flow session, 2026-07-04): does
+Demand really need its gen-stamp?** Principle established while reversing the flow
+instance-pooling decision (see the flow block): ABA/gen machinery is warranted only
+where references outlive ownership BY DESIGN (untracked readers — rdvq inbox/outbox
+hints, proven); it is waste where a conservation discipline tracks every reference
+and recycle happens at a proven-quiescent point (body metas, heldPermits, funnel
+shells, flow instances — all correctly gen-free). Demand's justification is the
+deliberately-racy readers (barrier atomic.Pointer[Demand] loads, in-flight mailbox
+wakes) — legitimate; BUT if demand recycle can be deferred to a tracked-quiescence
+point (FIFO/barrier provably dropped it AND the wake-compensation window closed —
+the counts-before-wake ordering may already be most of that proof), the gen could
+go. Re-derive rather than assume.
 
 **►►► WEIGHTED ACQUISITION — design recorded (2026-07-02); STEP 1 (mechanical weighting) LANDED
 (2026-07-03): counts deltas take w, Cache.Acquire(w)/AcquireWait(ctx,w), Permit.weight,

@@ -6,105 +6,109 @@ package otpsg_test
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/petenewcomb/streampool"
 	"github.com/petenewcomb/streampool/otpsg"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/sdk/trace"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// Example demonstrating how to use the otpsg tracing integration
+// Example_tracing shows the v2 flow-native tracing model: one span whose
+// lifetime IS the flow. Traced starts the span and hands back the FlowOptions
+// that (a) ride the span down every dispatch chain for correlation and (b) end
+// the span exactly once at the flow's true end — after all work, including the
+// async processing task launched from inside a skim, has drained.
 func Example_tracing() {
-	// Configure a simple stdout exporter for demonstration
-	exporter, _ := stdouttrace.New(stdouttrace.WithPrettyPrint())
-	tp := trace.NewTracerProvider(
-		trace.WithSampler(trace.AlwaysSample()),
-		trace.WithBatcher(exporter),
+	// Send span JSON to io.Discard so only the business fmt.Println lines land
+	// on stdout for the Output check below.
+	exporter, _ := stdouttrace.New(
+		stdouttrace.WithWriter(io.Discard),
+		stdouttrace.WithPrettyPrint(),
+	)
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exporter),
 	)
 	otel.SetTracerProvider(tp)
 	defer func() {
 		_ = tp.Shutdown(context.Background())
 	}()
 
-	// Create a root context with a parent span
-	ctx, rootSpan := otel.Tracer("example").Start(context.Background(), "process-request")
-	defer rootSpan.End()
+	// Start the flow span. flow carries both the correlation value and the
+	// end-at-true-end follow-up; span is set active on ctx.
+	ctx, flow := otpsg.Traced(context.Background(), "process-request")
+	span := trace.SpanFromContext(ctx)
 
-	// Create a PSG wave
 	var wave streampool.Wave
 
-	// Define a traced task for data loading
-	loadDataTask := otpsg.TracedTask("load-data", func(ctx context.Context) ([]int, error) {
-		// In a real app, this would load data from a database or file
-		fmt.Println("Loading data...")
-		return []int{1, 2, 3, 4, 5}, nil
-	})
+	body := func(ctx context.Context) error {
+		// Terminal sink for the processed result.
+		resultSkimmer := streampool.NewFnSkimmer(
+			func(ctx context.Context, result int, err error) error {
+				if err != nil {
+					return err
+				}
+				fmt.Println("Final result:", result)
+				return nil
+			}).In(&wave)
 
-	// Define a traced task for data processing
-	processDataTask := otpsg.TracedTask("process-data", func(ctx context.Context) (int, error) {
-		// In a real app, this would do some CPU-intensive processing
-		fmt.Println("Processing data...")
-		return 42, nil
-	})
+		// Skim of the loaded data: launches an async processing task.
+		dataSkimmer := streampool.NewFnSkimmer(
+			func(ctx context.Context, data []int, err error) error {
+				if err != nil {
+					return err
+				}
+				fmt.Println("Handling loaded data:", data)
 
-	// Define a skim function that processes loaded data
-	dataSkim := otpsg.TracedSkim(&wave, "handle-loaded-data",
-		func(ctx context.Context, data []int, err error) error {
-			if err != nil {
-				return err
-			}
+				processTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
+					// Correlate republishes the flow span as active so this
+					// child span parents under it — the async body inherits the
+					// flow rider, not otel's active-span.
+					_, child := otel.Tracer("otpsg").Start(otpsg.Correlate(ctx), "process-data")
+					defer child.End()
 
-			fmt.Println("Handling loaded data:", data)
-
-			// Launch a processing task for the loaded data
-			processSkim := otpsg.TracedSkim(&wave, "handle-processed-data",
-				func(ctx context.Context, result int, err error) error {
-					if err != nil {
-						return err
-					}
-					fmt.Println("Final result:", result)
-					return nil
+					fmt.Println("Processing data...")
+					return resultSkimmer.Submit(ctx, 42)
 				})
+				return processTask.In(&wave).Start(ctx)
+			}).In(&wave)
 
-			return otpsg.Scatter(ctx, &wave, processSkim, processDataTask)
+		// Loader task kicks off the pipeline.
+		loadTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
+			fmt.Println("Loading data...")
+			return dataSkimmer.Submit(ctx, []int{1, 2, 3, 4, 5})
 		})
+		if err := loadTask.In(&wave).Start(ctx); err != nil {
+			return err
+		}
+		return wave.CloseAndSkimAll(ctx)
+	}
 
-	// Start the pipeline by loading data
-	if err := otpsg.Scatter(ctx, &wave, dataSkim, loadDataTask); err != nil {
+	if err := streampool.WithFlow(ctx, body, flow...); err != nil {
 		fmt.Println("Error:", err)
 	}
 
-	// Wait for all tasks to complete
-	if err := wave.CloseAndSkimAll(ctx); err != nil {
-		fmt.Println("Error during skim:", err)
-	}
+	// The follow-up ended the span at the flow's true end — no defer needed.
+	fmt.Println("Span recording after flow:", span.IsRecording())
 
 	// Output:
 	// Loading data...
 	// Handling loaded data: [1 2 3 4 5]
 	// Processing data...
 	// Final result: 42
+	// Span recording after flow: false
 }
 
-// Example demonstrating fully instrumented tasks
+// Example_instrumentedTask shows the metrics+logging op decorators wired onto a
+// plain launcher/skimmer pipeline. Instrumented* adds no tracing — a span would
+// be applied at the flow level via Traced + WithFlow (see Example_tracing).
 func Example_instrumentedTask() {
-	// Set up tracing provider (simplified)
-	exporter, _ := stdouttrace.New(stdouttrace.WithPrettyPrint())
-	tp := trace.NewTracerProvider(
-		trace.WithSampler(trace.AlwaysSample()),
-		trace.WithBatcher(exporter),
-	)
-	otel.SetTracerProvider(tp)
-	defer func() {
-		_ = tp.Shutdown(context.Background())
-	}()
-
-	// Create a PSG wave
 	ctx := context.Background()
 	var wave streampool.Wave
 
-	// Create fully instrumented task and skim
 	task := otpsg.InstrumentedTask("calculate-sum",
 		func(ctx context.Context) (int, error) {
 			sum := 0
@@ -114,19 +118,23 @@ func Example_instrumentedTask() {
 			return sum, nil
 		})
 
-	skimmer := otpsg.InstrumentedSkim(&wave, "handle-sum",
+	skimmer := streampool.NewSkimmer(otpsg.InstrumentedSkim("handle-sum",
 		func(ctx context.Context, sum int, err error) error {
+			if err != nil {
+				return err
+			}
 			fmt.Println("Sum:", sum)
 			return nil
-		})
+		})).In(&wave)
 
-	// Use convenience scatter function
-	err := otpsg.Scatter(ctx, &wave, skimmer, task)
-	if err != nil {
+	runner := streampool.NewTaskLauncher(func(ctx context.Context) error {
+		result, err := task(ctx)
+		return skimmer.SubmitResult(ctx, result, err)
+	})
+
+	if err := runner.In(&wave).Start(ctx); err != nil {
 		fmt.Println("Error:", err)
 	}
-
-	// Wait for all tasks to complete
 	if err := wave.CloseAndSkimAll(ctx); err != nil {
 		fmt.Println("Error during skim:", err)
 	}

@@ -16,6 +16,7 @@ var DefaultConfig = Config{
 	Skimmer:       defaultSkimmerConfig,
 	Funnel:        defaultFunnelConfig,
 	Subjob:        SubjobConfig{MaxDepth: 3},
+	Flow:          FlowConfig{ScopeProb: 0.25, StepsOnlyProb: 0.5},
 }
 
 // Config controls plan generation. The Deterministic flag forces all
@@ -34,6 +35,7 @@ type Config struct {
 	Skimmer       SkimmerConfig
 	Funnel        FunnelConfig
 	Subjob        SubjobConfig
+	Flow          FlowConfig
 }
 
 type PathConfig struct {

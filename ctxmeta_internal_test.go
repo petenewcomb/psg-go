@@ -55,17 +55,22 @@ func TestPermitScopingChains(t *testing.T) {
 	// held past drain reads a recycled (or reused) meta. Identity comparisons
 	// (parent links) are likewise evaluated while both ends are live.
 	var (
-		skimSeen, bodySeen, subBodySeen                                      bool
-		skimCtxType, bodyCtxType, subTopCtxType, subBodyCtxType              contextType
-		skimParentIsTop, bodyParentNil, subTopParentIsBody, subBodyParentNil bool
-		subTopNoHeld                                                         bool
+		skimSeen, bodySeen, subBodySeen                                        bool
+		skimCtxType, bodyCtxType, subTopCtxType, subBodyCtxType                contextType
+		skimParentIsTop, bodyPermitRoot, subTopParentIsBody, subBodyPermitRoot bool
+		subTopNoHeld                                                           bool
 	)
 
 	skimmer := NewFnSkimmer(func(sctx context.Context, _ int, _ error) error {
+		// The handler runs under a PER-ITEM child of the drive's skim meta
+		// (docs/decisions/driver-contexts.md): child → drive skim meta →
+		// top-level meta, all one synchronous extent (no permitRoot between).
 		_, skimMeta := wave.ctxMeta(sctx)
 		skimSeen = true
 		skimCtxType = skimMeta.ctxType
-		skimParentIsTop = skimMeta.parent == topMeta
+		skimParentIsTop = skimMeta.syncParent() != nil &&
+			skimMeta.syncParent().ctxType == skimContext &&
+			skimMeta.syncParent().syncParent() == topMeta
 		return nil
 	})
 
@@ -73,7 +78,7 @@ func TestPermitScopingChains(t *testing.T) {
 		_, bodyMeta := wave.ctxMeta(bodyCtx)
 		bodySeen = true
 		bodyCtxType = bodyMeta.ctxType
-		bodyParentNil = bodyMeta.parent == nil
+		bodyPermitRoot = bodyMeta.permitRoot && bodyMeta.syncParent() == nil
 
 		// Drive a subwave synchronously from inside the body — the
 		// telescoping path the suspend brackets rely on. A zero-value
@@ -94,7 +99,7 @@ func TestPermitScopingChains(t *testing.T) {
 			_, subBodyMeta := subWave.ctxMeta(subBodyCtx)
 			subBodySeen = true
 			subBodyCtxType = subBodyMeta.ctxType
-			subBodyParentNil = subBodyMeta.parent == nil
+			subBodyPermitRoot = subBodyMeta.permitRoot && subBodyMeta.syncParent() == nil
 			return nil
 		})
 		if err := subLauncher.In(&subWave).Start(subCtx); err != nil {
@@ -112,7 +117,7 @@ func TestPermitScopingChains(t *testing.T) {
 
 	require.True(t, bodySeen)
 	assert.Equal(t, taskContext, bodyCtxType)
-	assert.True(t, bodyParentNil, "task worker context must be a fresh permit-root")
+	assert.True(t, bodyPermitRoot, "task worker context must be a fresh permit-root")
 
 	assert.Equal(t, topLevelContext, subTopCtxType)
 	assert.True(t, subTopParentIsBody, "body→subwave derivation must chain parent to the body's meta")
@@ -120,12 +125,13 @@ func TestPermitScopingChains(t *testing.T) {
 
 	require.True(t, subBodySeen)
 	assert.Equal(t, taskContext, subBodyCtxType)
-	assert.True(t, subBodyParentNil,
+	assert.True(t, subBodyPermitRoot,
 		"subwave worker must be fresh-rooted even though the subwave's base ctx carries the parent body's meta")
 
 	require.True(t, skimSeen)
 	assert.Equal(t, skimContext, skimCtxType)
-	assert.True(t, skimParentIsTop, "top-level→skim derivation must chain parent")
+	assert.True(t, skimParentIsTop,
+		"per-item skim meta must chain synchronously through the drive skim meta to the top-level meta")
 }
 
 // TestHeldPermitStampedDuringBodies pins the end-to-end stamp+walk property: a limited
@@ -196,14 +202,14 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	// drain.
 	var funnelSeen bool
 	var funnelCtxType contextType
-	var funnelParentNil bool
+	var funnelPermitRoot bool
 	f := NewFnFunnel(fp, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
 				_, funnelMeta := wave.ctxMeta(fctx)
 				funnelSeen = true
 				funnelCtxType = funnelMeta.ctxType
-				funnelParentNil = funnelMeta.parent == nil
+				funnelPermitRoot = funnelMeta.permitRoot && funnelMeta.syncParent() == nil
 				return time.Time{}, nil
 			},
 			FlushFn: func(context.Context) error { return nil },
@@ -215,6 +221,6 @@ func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 
 	require.True(t, funnelSeen)
 	assert.Equal(t, funnelContext, funnelCtxType)
-	assert.True(t, funnelParentNil,
+	assert.True(t, funnelPermitRoot,
 		"funnel worker context must be a fresh permit-root")
 }

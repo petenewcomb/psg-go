@@ -2,6 +2,35 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► NEXT: MERGE flow-impl INTO combiner (planned 2026-07-10, PN-approved; fresh session).**
+Preconditions CONFIRMED by PN: flow-impl's final gate passed and its session is parked (tree
+clean at 70ebff7 "flow: OriginFlow"). Divergence: 53 commits (flow-impl) vs 33 (combiner)
+since merge-base 300576b. Plan:
+1. **Read first**: flow-impl's WORKING_NOTES (its top banner is STALE — the flow story is in
+   its later sections), docs/decisions/ctxmeta-parent-refcount.md and flow-design.md (both on
+   that branch), and the CP-R7 commit (164ff63, "delete psgwf; flows subsume the
+   workflow-context layer").
+2. **Merge combiner ← flow-impl.** merge-tree dry-run (2026-07-10) says: content conflicts
+   ONLY in internal/sim/run.go (combiner's multi-limiter wiring — activeLimit list,
+   drawLimiterBinding wiring — vs flow-impl's sim changes; keep BOTH capabilities) and
+   otpsg/instrumented.go; psgwf modify/deletes resolve as DELETE per CP-R7 (combiner's psgwf
+   edits were incidental lint/test churn) — but CHECK whether otpsg references psgwf before
+   resolving. ctxmeta.go/wave.go/funnel.go auto-merge textually — DO NOT TRUST THAT:
+   flow-impl's ctxMeta parent-refcount/pin lifecycle and combiner's joint suspend/reclaim
+   brackets + wavestate claim interlock (TryIncrementReference/ClaimZero) occupy the same
+   lifecycle paths; review the merged union of those files by hand before gating.
+3. **Combined gate** (the union of both branches' recipes): vet, lint 0, full -short -race,
+   permits -race, TestBySimulation -race ≥12×100 checks WITH the multi wiring, flow/coalesce
+   -race suites (flow-impl's), the flush-heavy biased recipe (default SelfTimes, raised
+   subjob/flush probs — see the pol_sim1 banner below), and a BenchmarkMultiLimiter +
+   Dispatch/streampool spot-check against the 2026-07-10 numbers (scratchpad may be gone;
+   medians are recorded in the benchmarks banner below).
+4. **Post-merge bookkeeping**: reconcile WORKING_NOTES/TODO interleave (auto-merge produces
+   a mess; keep one coherent narrative); CLOSE the borrowSrcCtx race entry (obs (2) below —
+   the ctxmeta-parent-refcount CP fixes it); delete stale psgwf references (README/docs);
+   CHANGELOG entries for flows + psgwf removal (flow-impl's CHANGELOG edits should carry).
+5. THEN step 4 (consumable pass) starts on the merged base.
+
 **►►► MULTI-LIMITER BENCHMARKS LANDED + BASELINE CLEAN (2026-07-10).** New
 bench/BenchmarkMultiLimiter: differential pairs on the BenchmarkDispatch harness — limits1 vs
 limits2 (two semaphores, both at full capacity D ⇒ identical effective bound ⇒ delta = pure

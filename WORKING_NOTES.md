@@ -2,6 +2,31 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► MULTI-LIMITER BENCHMARKS LANDED + BASELINE CLEAN (2026-07-10).** New
+bench/BenchmarkMultiLimiter: differential pairs on the BenchmarkDispatch harness — limits1 vs
+limits2 (two semaphores, both at full capacity D ⇒ identical effective bound ⇒ delta = pure
+joint-GATE overhead) and limits1-subwave vs limits2-subwave (body drives a one-task subwave
+via CloseAndSkimAll ⇒ delta = joint RECLAIM: per-hold scoping, lend/withdraw, fixpoint).
+Method: pinned clock (min=max=1.6GHz, performance governor), count=6 medians, suspicious
+cells re-confirmed at count=12; cross-commit baseline = 28bc0f4 (pre-fix parent) in a
+worktree running the identical benchmark file (limits1* + Dispatch/streampool only — a
+28bc0f4 limits2-subwave run literally wedges). RESULTS:
+- **Joint gate ≈ free**: tails ±2%, throughput ±1% at every regime/workload; absolute alloc
+  cost ≈ +1 alloc/task (second heldPermit + rest slice — as designed).
+- **Joint reclaim: NO tail signal.** All tail deltas single-digit-% with mixed signs across
+  regimes; the count=6 headline costs (balanced −13.6% tasks/sec; heavy-overload +21/+35%
+  dispatch tails vs baseline) BOTH evaporated at count=12 (+6.7% and +1.2/+6.6% resp., inside
+  spreads). Reclaim adds ~+2-3 allocs/task. The weighted-acquisition.md §"The joint reclaim"
+  revisit trigger (reclaim-latency tails) does NOT fire.
+- **No single-path regression from 408a85b**: Dispatch/streampool flat at every regime
+  (heavy-overload even −3.5% p99-e2e); the wavestate claim interlock, TryIncrementReference,
+  and permits trace branches cost nothing measurable.
+- CAVEAT for future readers: subwave-variant THROUGHPUT is inherently noisy (±30% run-to-run
+  at a pinned clock) because the suspend bracket lends the outer permit across the drive —
+  effective body concurrency is unbounded there by design, so scheduler/GC variance dominates;
+  judge those cells by tails, or bound inner concurrency in a future variant. Raw results in
+  session scratchpad (bench_head_*.txt / bench_base_*.txt / confirm_*.txt).
+
 **►►► MULTI SUSPEND/RECLAIM BUGS ROOT-CAUSED + FIXED (2026-07-09) — FOUR defects. Roots 1-3
 diagnosed from the preserved dumps; root 4 (the persistent deadlock) required biased-repro
 iteration + fmttrace runtime traces + NEW permits-layer instrumentation (kept). NOTE FOR PN:

@@ -106,11 +106,14 @@ proven small.
 Native 128-bit CAS is inline asm the race detector cannot see, so memory ordered
 *through* the word (e.g. a payload a consumer reads under a freshly-upgraded
 reference) draws TSan false positives even though the CPU's `CMPXCHG16B` does
-provide the ordering. The instrumented `atomic.Value` fallback is TSan-visible and
-race-clean. Therefore the fallback must be forced under `-race`. This policy lives
-centrally in the `atomic128-go` fork (a `//go:build race` init calling
-`DisableNative()`), so every consumer inherits it; `PSGNATIVEA128=0` also forces
-it for explicit fallback testing off the race path.
+provide the ordering. The instrumented mutex fallback (a per-object `sync.Mutex`
+guarding the value) is TSan-visible and race-clean. Therefore the fallback must be
+forced under `-race`. This policy lives centrally in the `atomic128-go` fork (a
+`//go:build race` init calling `DisableNative()`), so every consumer inherits it;
+`PSGNATIVEA128=0` also forces it for explicit fallback testing off the race path.
+The mutex fallback is also allocation-free and has a valid zero value (unlike the
+`atomic.Value` fallback it replaced), so a freshly created managed object needs no
+initializing store before its first operation.
 
 ## Validation
 

@@ -31,7 +31,7 @@ type counts struct {
 
 // load returns the current (held, inUse) snapshot.
 func (c *counts) load() (held, inUse uint64) {
-	p := atomic128.LoadUint128(&c.w)
+	p := c.w.Load()
 	return p[0], p[1]
 }
 
@@ -43,12 +43,12 @@ func (c *counts) load() (held, inUse uint64) {
 // cache is quiescent).
 func (c *counts) drain() uint64 {
 	for {
-		p := atomic128.LoadUint128(&c.w)
+		p := c.w.Load()
 		held, inUse := p[0], p[1]
 		if inUse != 0 {
 			panic("permits: drain of a cache with a running body (inUse != 0)")
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{0, 0}) {
+		if c.w.CompareAndSwap(p, [2]uint64{0, 0}) {
 			return held
 		}
 	}
@@ -59,12 +59,12 @@ func (c *counts) drain() uint64 {
 // lock-free step-1 (own cache) / step-2 (ancestor) hit.
 func (c *counts) acquireLocal(w uint64) bool {
 	for {
-		p := atomic128.LoadUint128(&c.w)
+		p := c.w.Load()
 		held, inUse := p[0], p[1]
 		if inUse+w > held {
 			return false
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + w}) {
+		if c.w.CompareAndSwap(p, [2]uint64{held, inUse + w}) {
 			return true
 		}
 	}
@@ -74,8 +74,8 @@ func (c *counts) acquireLocal(w uint64) bool {
 // in at step 4) to held and immediately occupies them (held += w, inUse += w).
 func (c *counts) checkout(w uint64) {
 	for {
-		p := atomic128.LoadUint128(&c.w)
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{p[0] + w, p[1] + w}) {
+		p := c.w.Load()
+		if c.w.CompareAndSwap(p, [2]uint64{p[0] + w, p[1] + w}) {
 			return
 		}
 	}
@@ -88,8 +88,8 @@ func (c *counts) checkout(w uint64) {
 // a partial gather is not hold-and-wait precisely because the hoard stays in held).
 func (c *counts) deposit(w uint64) {
 	for {
-		p := atomic128.LoadUint128(&c.w)
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{p[0] + w, p[1]}) {
+		p := c.w.Load()
+		if c.w.CompareAndSwap(p, [2]uint64{p[0] + w, p[1]}) {
 			return
 		}
 	}
@@ -107,13 +107,13 @@ func (c *counts) deposit(w uint64) {
 // is Decision 1's design, not a window.
 func (c *counts) depositOccupy(n, w uint64) bool {
 	for {
-		p := atomic128.LoadUint128(&c.w)
+		p := c.w.Load()
 		held, inUse := p[0]+n, p[1]
 		if held >= inUse+w {
-			if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + w}) {
+			if c.w.CompareAndSwap(p, [2]uint64{held, inUse + w}) {
 				return true
 			}
-		} else if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse}) {
+		} else if c.w.CompareAndSwap(p, [2]uint64{held, inUse}) {
 			return false
 		}
 	}
@@ -127,12 +127,12 @@ func (c *counts) depositOccupy(n, w uint64) bool {
 // outside an overdraft episode.
 func (c *counts) release(w uint64) (excessReturned uint64) {
 	for {
-		p := atomic128.LoadUint128(&c.w)
+		p := c.w.Load()
 		held, inUse := p[0], p[1]
 		if inUse < w {
 			panic("permits: release underflow (no running body backed by this cache)")
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse - w}) {
+		if c.w.CompareAndSwap(p, [2]uint64{held, inUse - w}) {
 			before := excessOver(held, inUse)
 			after := excessOver(held, inUse-w)
 			return before - after
@@ -159,13 +159,13 @@ func excessOver(held, inUse uint64) uint64 {
 // to acquireLocal (no allowance touched).
 func (c *counts) occupyTaking(w uint64, allowance *atomic.Uint64) bool {
 	for {
-		p := atomic128.LoadUint128(&c.w)
+		p := c.w.Load()
 		held, inUse := p[0], p[1]
 		need := excessOver(held, inUse+w) - excessOver(held, inUse)
 		if need > 0 && !takeAllowance(allowance, need) {
 			return false
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held, inUse + w}) {
+		if c.w.CompareAndSwap(p, [2]uint64{held, inUse + w}) {
 			return true
 		}
 		if need > 0 {
@@ -198,7 +198,7 @@ func takeAllowance(a *atomic.Uint64, n uint64) bool {
 // episode's exempt subtree) has nothing borrowable.
 func (c *counts) stealOutUpTo(w uint64) uint64 {
 	for {
-		p := atomic128.LoadUint128(&c.w)
+		p := c.w.Load()
 		held, inUse := p[0], p[1]
 		if inUse >= held {
 			return 0 // nothing borrowable (inUse > held is overdraft excess, not idle)
@@ -207,7 +207,7 @@ func (c *counts) stealOutUpTo(w uint64) uint64 {
 		if n == 0 {
 			return 0
 		}
-		if atomic128.CompareAndSwapUint128(&c.w, p, [2]uint64{held - n, inUse}) {
+		if c.w.CompareAndSwap(p, [2]uint64{held - n, inUse}) {
 			return n
 		}
 	}

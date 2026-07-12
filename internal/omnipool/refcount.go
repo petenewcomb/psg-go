@@ -77,7 +77,7 @@ type Handle[P RefCounted] struct {
 // minting (so the captured generation is meaningful), but a stale capture is
 // harmless — a later [Handle.Get] simply fails.
 func NewHandle[P RefCounted](obj P) Handle[P] {
-	w := atomic128.LoadUint128(&obj.refCount().w)
+	w := obj.refCount().w.Load()
 	return Handle[P]{p: obj, gen: w[genWord]}
 }
 
@@ -89,7 +89,7 @@ func NewHandle[P RefCounted](obj P) Handle[P] {
 func (h Handle[P]) Get() (obj P, ok bool) {
 	rc := h.p.refCount()
 	for {
-		w := atomic128.LoadUint128(&rc.w)
+		w := rc.w.Load()
 		if w[genWord] != h.gen {
 			// The object has been recycled into a different incarnation (or is
 			// idle in the pool at a bumped generation). Touch nothing.
@@ -99,7 +99,7 @@ func (h Handle[P]) Get() (obj P, ok bool) {
 		// A matching generation guarantees refs >= 1: recycling bumps gen and
 		// zeroes refs in the same CAS, so refs can never be 0 while gen matches.
 		next := [2]uint64{w[refsWord] + 1, w[genWord]}
-		if atomic128.CompareAndSwapUint128(&rc.w, w, next) {
+		if rc.w.CompareAndSwap(w, next) {
 			return h.p, true
 		}
 		// refs changed under us but gen still matched at load; retry.
@@ -118,12 +118,12 @@ func (h Handle[P]) Get() (obj P, ok bool) {
 func AddRef[P RefCounted](obj P) {
 	rc := obj.refCount()
 	for {
-		w := atomic128.LoadUint128(&rc.w)
+		w := rc.w.Load()
 		if w[refsWord] == 0 {
 			panic("omnipool: AddRef on object with no outstanding reference")
 		}
 		next := [2]uint64{w[refsWord] + 1, w[genWord]}
-		if atomic128.CompareAndSwapUint128(&rc.w, w, next) {
+		if rc.w.CompareAndSwap(w, next) {
 			return
 		}
 	}
@@ -139,9 +139,9 @@ func AddRef[P RefCounted](obj P) {
 func (rc *RefCount) activate(fresh bool) {
 	gen := uint64(0)
 	if !fresh {
-		gen = atomic128.LoadUint128(&rc.w)[genWord]
+		gen = rc.w.Load()[genWord]
 	}
-	atomic128.StoreUint128(&rc.w, [2]uint64{1, gen})
+	rc.w.Store([2]uint64{1, gen})
 }
 
 // release drops one reference. On the last one it recycles: a single CAS bumps
@@ -150,19 +150,19 @@ func (rc *RefCount) activate(fresh bool) {
 // call performed the recycle.
 func (rc *RefCount) release() (recycled bool) {
 	for {
-		w := atomic128.LoadUint128(&rc.w)
+		w := rc.w.Load()
 		refs := w[refsWord]
 		if refs == 0 {
 			panic("omnipool: Release of object with no outstanding reference")
 		}
 		if refs == 1 {
 			next := [2]uint64{0, w[genWord] + 1}
-			if atomic128.CompareAndSwapUint128(&rc.w, w, next) {
+			if rc.w.CompareAndSwap(w, next) {
 				return true
 			}
 		} else {
 			next := [2]uint64{refs - 1, w[genWord]}
-			if atomic128.CompareAndSwapUint128(&rc.w, w, next) {
+			if rc.w.CompareAndSwap(w, next) {
 				return false
 			}
 		}

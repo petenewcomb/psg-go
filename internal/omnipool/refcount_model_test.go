@@ -6,7 +6,6 @@ package omnipool
 import (
 	"testing"
 
-	"github.com/petenewcomb/atomic128-go"
 	"github.com/stretchr/testify/assert"
 	"pgregory.net/rapid"
 )
@@ -21,7 +20,7 @@ type mo struct {
 func (m *mo) Reset() { m.payload = 0 }
 
 func word(m *mo) (refs, gen uint64) {
-	w := atomic128.LoadUint128(&m.refCount().w)
+	w := m.refCount().w.Load()
 	return w[refsWord], w[genWord]
 }
 

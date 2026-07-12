@@ -6,7 +6,6 @@ package omnipool
 import (
 	"testing"
 
-	"github.com/petenewcomb/atomic128-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -77,7 +76,7 @@ func TestStraddleRecycleBetweenLoadAndCAS(t *testing.T) {
 	h := NewHandle(obj)
 
 	// The load Handle.Get would perform first: it observes (1, g), gen matches.
-	loaded := atomic128.LoadUint128(&rc.w)
+	loaded := rc.w.Load()
 	require.Equal(t, h.gen, loaded[genWord])
 	require.Equal(t, uint64(1), loaded[refsWord])
 
@@ -85,7 +84,7 @@ func TestStraddleRecycleBetweenLoadAndCAS(t *testing.T) {
 	p.Release(obj) // (1, g) -> (0, g+1)
 
 	// The upgrade's CAS, built from the now-stale load, must fail.
-	staleCAS := atomic128.CompareAndSwapUint128(&rc.w, loaded,
+	staleCAS := rc.w.CompareAndSwap(loaded,
 		[2]uint64{loaded[refsWord] + 1, loaded[genWord]})
 	assert.False(t, staleCAS, "an upgrade CAS straddling a recycle must fail")
 
@@ -94,7 +93,7 @@ func TestStraddleRecycleBetweenLoadAndCAS(t *testing.T) {
 	_, ok := h.Get()
 	assert.False(t, ok)
 
-	w := atomic128.LoadUint128(&rc.w)
+	w := rc.w.Load()
 	assert.Equal(t, uint64(0), w[refsWord])
 	assert.Equal(t, h.gen+1, w[genWord])
 }

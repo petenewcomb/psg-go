@@ -32,13 +32,13 @@ type atomicPointer[T any] struct {
 	a128 atomic128.Uint128
 
 	// ptr is used to ensure that a reference to the node[T] is not lost due to
-	// it being stored in av as a uint64 and therefore opaque to the garbage
-	// collector
+	// it being stored in the a128 word as a uint64 and therefore opaque to the
+	// garbage collector
 	np atomic.Pointer[node[T]]
 }
 
 func (ap *atomicPointer[T]) Store(val pointer[T]) {
-	atomic128.StoreUint128(&ap.a128, asPair(val))
+	ap.a128.Store(asPair(val))
 	ap.np.Store(val.ptr)
 }
 
@@ -47,7 +47,7 @@ func (ap *atomicPointer[T]) Load() pointer[T] {
 		// Load the ptr from np first, so that we can be sure that if it
 		// matches, the uintptr value we retrieve from a128 is still valid
 		ptr := ap.np.Load()
-		pair := atomic128.LoadUint128(&ap.a128)
+		pair := ap.a128.Load()
 
 		//nolint:gosec // unsafe calls have been audited
 		if uintptr(unsafe.Pointer(ptr)) == uintptr(pair[0]) {
@@ -60,7 +60,7 @@ func (ap *atomicPointer[T]) Load() pointer[T] {
 func (ap *atomicPointer[T]) CompareAndSwap(old pointer[T], new pointer[T]) bool {
 	oldPair := asPair(old)
 	newPair := asPair(new)
-	if !atomic128.CompareAndSwapUint128(&ap.a128, oldPair, newPair) {
+	if !ap.a128.CompareAndSwap(oldPair, newPair) {
 		return false
 	}
 	ap.updateNodePtr(old.ptr, newPair, new.ptr)
@@ -73,7 +73,7 @@ func (ap *atomicPointer[T]) updateNodePtr(oldPtr *node[T], newPair [2]uint64, ne
 	for !ap.np.CompareAndSwap(oldPtr, newPtr) {
 		// oldPtr must have been updated, but a128 might not have been
 		oldPtr = ap.np.Load()
-		currentPair := atomic128.LoadUint128(&ap.a128)
+		currentPair := ap.a128.Load()
 		if currentPair != newPair {
 			// a128 has a new value, newPtr no longer needed
 			break

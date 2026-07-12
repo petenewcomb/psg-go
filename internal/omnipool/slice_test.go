@@ -9,7 +9,10 @@ import (
 )
 
 func TestSlicePool(t *testing.T) {
-	pool := ForSlice([]int(nil))
+	// An isolated pool instance, so the empty-pool assertion is deterministic
+	// and not polluted by other tests or by earlier -count iterations sharing
+	// the process-global pool for this element type.
+	pool := &SlicePool[[]int, int]{}
 
 	// Get a slice from empty pool (should be nil)
 	s1 := pool.Get()
@@ -99,6 +102,12 @@ func TestSlicePoolZeroCapacity(t *testing.T) {
 }
 
 func TestSlicePoolPackageFunctions(t *testing.T) {
+	// The package-level functions route through the process-global pool, so
+	// drain any residue an earlier -count iteration left before asserting the
+	// empty-pool behavior.
+	for GetSlice([]byte(nil)) != nil {
+	}
+
 	// Test package-level convenience functions
 	s1 := GetSlice([]byte(nil))
 	if s1 != nil {

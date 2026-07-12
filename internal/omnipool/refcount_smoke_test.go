@@ -4,30 +4,14 @@
 package omnipool_test
 
 import (
-	"os"
-	"strconv"
 	"testing"
 
-	"github.com/petenewcomb/atomic128-go"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 )
 
-// TestMain disables native a128 under -race (its inline asm is invisible to the
-// race detector, producing false positives on memory ordered through the word)
-// and honors PSGNATIVEA128, since this package does not import nbcq (whose init
-// does the same). Once the native-disable policy moves into the atomic128 fork,
-// this stopgap can go away.
-func TestMain(m *testing.M) {
-	if raceEnabled {
-		atomic128.DisableNative()
-	}
-	if s := os.Getenv("PSGNATIVEA128"); s != "" {
-		if v, err := strconv.ParseBool(s); err == nil && !v {
-			atomic128.DisableNative()
-		}
-	}
-	os.Exit(m.Run())
-}
+// The atomic128 fork forces its mutex fallback under the race detector (native
+// asm is TSan-invisible), so -race exercises the fallback with no test setup
+// here; PSGNATIVEA128 native-disable, used off the race path, lives in nbcq.
 
 // widget is a reference-managed pooled type: it embeds RefCount and so satisfies
 // RefCounted (the promoted accessor), even from this external test package.

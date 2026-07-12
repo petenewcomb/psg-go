@@ -969,7 +969,7 @@ func (wk *poolWork) Init(group workq.GroupID, wv *waveImpl) {
 	// this work item keeps the impl alive for as long as it holds its naked *waveImpl.
 	// Minted under the dispatching method's live Get (refs >= 1), so it cannot race a
 	// recycle or increment from zero. Released in Close, beside DecrementWork.
-	wv.GenRefCount().Inc()
+	wv.AddRef()
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -1052,6 +1052,6 @@ func resolveWave(opWave Wave, ctx context.Context) (*waveImpl, bool) {
 	// The ambient wave is a naked pointer, provably live here: the running body that
 	// stamped it holds a work reference on it, so AddRef is under a live reference and
 	// cannot race a recycle. The caller Releases this pin after dispatching.
-	meta.wave.GenRefCount().Inc()
+	meta.wave.AddRef()
 	return meta.wave, true
 }

@@ -69,7 +69,7 @@ func TestRefCountModel(t *testing.T) {
 					t.Skip("no live object")
 				}
 				l := lives[rapid.IntRange(0, len(lives)-1).Draw(t, "live")]
-				l.obj.GenRefCount().Inc()
+				l.obj.RefCount().AddRef()
 				l.refs++
 				refs, gen := word(l.obj)
 				assert.Equal(t, l.refs, refs)

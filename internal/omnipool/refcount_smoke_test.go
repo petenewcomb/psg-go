@@ -35,7 +35,7 @@ func TestRefCountSmoke(t *testing.T) {
 		t.Fatalf("Handle.Get on live object: got (%v,%v), want (%p,true)", got, ok, obj)
 	}
 
-	obj.GenRefCount().Inc() // refs = 3
+	obj.RefCount().AddRef() // refs = 3
 
 	p.Release(obj) // refs = 2
 	p.Release(obj) // refs = 1
@@ -76,5 +76,5 @@ func TestAddRefFromZeroPanics(t *testing.T) {
 	p := omnipool.For[widget]()
 	obj := p.Get()
 	p.Release(obj)          // -> 0, recycle
-	obj.GenRefCount().Inc() // no outstanding reference: panic
+	obj.RefCount().AddRef() // no outstanding reference: panic
 }

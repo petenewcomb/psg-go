@@ -42,15 +42,26 @@ package omnipool
 
 import (
 	"reflect"
-	"sync"
 )
-
-// Global pools for all types
-var pools sync.Map // map[reflect.Type]*Pool[T] (or *ChanPool[T] or *BufferedChanPool[C, E]; type-erased)
 
 // Initer defines the interface for objects that need initialization after creation.
 type Initer interface {
 	Init()
+}
+
+// RefCounted is the single accessor interface a reference-managed type exposes: it returns a
+// [Ref]. It is a PURE accessor — Reset is orthogonal (provided by the object for the reflection
+// [Pool], or by the trait for a [CustomPool]), so it is not bundled here. Only *T — never T —
+// satisfies it (the accessor has a pointer receiver). A foreign type satisfies it by embedding
+// or holding an omnipool counter, never by reimplementing the sealed lifecycle. Whether the
+// object is generation-managed (able to back a [Handle]) is discovered by asserting the returned
+// Ref to *[GenRefCounter], not by a separate accessor.
+type RefCounted interface {
+	RefCount() Ref
+}
+
+type Copier[T any] interface {
+	CopyFrom(T)
 }
 
 // Resetter defines the interface for objects that can reset themselves
@@ -59,38 +70,19 @@ type Resetter interface {
 	Reset()
 }
 
-// Pool is a type-safe wrapper around sync.Pool that handles object creation,
-// initialization, and resetting automatically.
+// Pool is the reflection front-end: a type-safe [basePool] over *T that detects T's
+// capabilities (Initer, Resetter, RefCounted, Copier) by reflection. It adds the value-typed
+// [Pool.Clone] convenience, which the object-typed engine cannot express.
 type Pool[T any] struct {
-	pool           sync.Pool
-	hasReset       bool
-	hasInit        bool
-	hasRefCount    bool // *T is [RefCounted] (a64 [RefCounter])
-	hasGenRefCount bool // *T is [GenRefCounted] (a128 [GenRefCounter], for Handle)
+	basePool[*T]
+	// copier performs Clone's value copy. It is nil exactly for a reference-managed type
+	// without a CopyFrom method — such a type cannot be byte-copied (that would clobber the
+	// counter's generation), so Clone is unsupported and panics.
+	copier copier[T]
 }
 
-// activate arms obj with its owner reference on Get (via whichever counter accessor *T
-// exposes); noop for an unmanaged type.
-func (p *Pool[T]) activate(obj *T, fresh bool) {
-	switch {
-	case p.hasGenRefCount:
-		any(obj).(GenRefCounted).GenRefCount().activate(fresh)
-	case p.hasRefCount:
-		any(obj).(RefCounted).RefCount().activate(fresh)
-	}
-}
-
-// releaseRef drops one reference, reporting whether this was the last (so the caller
-// recycles). Returns false for an unmanaged type (every Release recycles).
-func (p *Pool[T]) releaseRef(obj *T) (recycled bool) {
-	switch {
-	case p.hasGenRefCount:
-		return any(obj).(GenRefCounted).GenRefCount().release()
-	case p.hasRefCount:
-		return any(obj).(RefCounted).RefCount().release()
-	}
-	return true
-}
+// copier copies a value into a freshly-obtained object for [Pool.Clone].
+type copier[T any] func(dst *T, src T)
 
 // For returns a shared pool instance for type T. Multiple calls with the same
 // type will return the same pool instance, enabling efficient sharing across
@@ -100,91 +92,81 @@ func For[T any]() *Pool[T] {
 	if p, ok := pools.Load(typ); ok {
 		return p.(*Pool[T])
 	}
-
-	// Check which interfaces T implements
-	initerType := reflect.TypeFor[Initer]()
-	hasInit := typ.Implements(initerType)
-
-	resetterType := reflect.TypeFor[Resetter]()
-	hasReset := typ.Implements(resetterType)
-
-	// A type exposing a counter accessor (RefCount()/GenRefCount(), from an embedded or
-	// held [RefCounter]/[GenRefCounter]) and implementing Resetter is reference-managed.
-	// One embedding a counter but omitting Reset is simply not [RefCounted]/[GenRefCounted]
-	// and takes the unmanaged path — harmless, since without a handle or Inc its reference
-	// count is never exercised.
-	hasGenRefCount := typ.Implements(reflect.TypeFor[GenRefCounted]())
-	hasRefCount := !hasGenRefCount && typ.Implements(reflect.TypeFor[RefCounted]())
-
 	pool := &Pool[T]{
-		hasReset:       hasReset,
-		hasInit:        hasInit,
-		hasRefCount:    hasRefCount,
-		hasGenRefCount: hasGenRefCount,
+		basePool: basePool[*T]{
+			newObject:      resolveMaker[T](typ),
+			findRefCounter: resolveRefCounterFinder[T](typ),
+			reset:          resolveResetter[T](typ),
+		},
+		copier: resolveCopier[T](typ),
 	}
-
 	actual, _ := pools.LoadOrStore(typ, pool)
 	return actual.(*Pool[T])
 }
 
-// Get retrieves a pointer to an object of type T from the pool. If the pool is empty,
-// creates a new object using new(T) and calls [Initer.Init] if provided by T.
-func (p *Pool[T]) Get() *T {
-	pooled := p.pool.Get()
-	if pooled != nil {
-		obj := pooled.(*T)
-		p.activate(obj, false) // re-arm the recycled object (gen preserved for a Gen type)
-		return obj
-	}
-	obj := new(T)
-	if p.hasInit {
-		any(obj).(Initer).Init()
-	}
-	p.activate(obj, true)
-	return obj
-}
-
-// Clone gets an object from the pool and copies the provided value into it.
-// This is a convenience method for the common pattern of [Get] + assignment.
+// Clone gets an object from the pool and copies value into it — the common Get + assignment
+// pattern. It panics for a reference-managed type without a CopyFrom method, since byte-copying
+// such a type would corrupt its counter.
 func (p *Pool[T]) Clone(value T) *T {
-	if p.hasRefCount || p.hasGenRefCount {
-		// Copying value over the object would overwrite (and copy) the embedded
-		// counter, corrupting its state and violating the non-copy rule.
-		panic("omnipool: Clone is not supported for reference-managed types")
+	if p.copier == nil {
+		panic("omnipool: Clone is not supported for a reference-managed type without CopyFrom")
 	}
 	obj := p.Get()
-	*obj = value
+	p.copier(obj, value)
 	return obj
 }
 
-// Release drops one reference to obj and returns it to the pool. For a
-// reference-managed type (one embedding [RefCounter]) the object is recycled only
-// when the last reference is released; for an ordinary type every Release
-// returns the object immediately. Release is safe to call with a nil pointer,
-// which is a no-op.
-func (p *Pool[T]) Release(obj *T) {
-	if obj == nil {
-		return
-	}
-	if p.hasRefCount || p.hasGenRefCount {
-		if !p.releaseRef(obj) {
-			// Not the last reference; the object stays live.
-			return
+func resolveMaker[T any](typ reflect.Type) maker[*T] {
+	if typ.Implements(reflect.TypeFor[Initer]()) {
+		return func() *T {
+			obj := new(T)
+			any(obj).(Initer).Init()
+			return obj
 		}
-		// Last reference: clear payload field-wise (Resetter is mandatory for managed
-		// types — never a wholesale zero, which would destroy the counter's generation)
-		// and recycle.
-		any(obj).(Resetter).Reset()
-		p.pool.Put(obj)
-		return
 	}
-	if p.hasReset {
-		any(obj).(Resetter).Reset()
-	} else {
-		// Zero the value if no Reset method
+	return func() *T {
+		return new(T)
+	}
+}
+
+func resolveRefCounterFinder[T any](typ reflect.Type) refCounterFinder[*T] {
+	if typ.Implements(reflect.TypeFor[RefCounted]()) {
+		return func(o *T) Ref { return any(o).(RefCounted).RefCount() }
+	}
+	return unmanaged[*T]()
+}
+
+func resolveCopier[T any](typ reflect.Type) copier[T] {
+	if typ.Implements(reflect.TypeFor[Copier[T]]()) {
+		return func(obj *T, value T) {
+			any(obj).(Copier[T]).CopyFrom(value)
+		}
+	}
+	// A reference-managed type must not be byte-copied — it would clobber the counter's
+	// generation — so leave copier nil and let Clone panic with a clear message.
+	if typ.Implements(reflect.TypeFor[RefCounted]()) {
+		return nil
+	}
+	return func(obj *T, value T) {
+		*obj = value
+	}
+}
+
+func resolveResetter[T any](typ reflect.Type) resetter[*T] {
+	if typ.Implements(reflect.TypeFor[Resetter]()) {
+		return func(obj *T) {
+			any(obj).(Resetter).Reset()
+		}
+	}
+	// A reference-managed type must clear field-wise via Reset; without one, do nothing rather
+	// than byte-zero (which would destroy the counter's generation). Real managed types always
+	// implement Resetter — this is a defensive no-op.
+	if typ.Implements(reflect.TypeFor[RefCounted]()) {
+		panic("omnipool: reference-managed type does not provide Reset()")
+	}
+	return func(obj *T) {
 		*obj = *new(T)
 	}
-	p.pool.Put(obj)
 }
 
 // Get is a package-level convenience function that gets a pool and retrieves an object.

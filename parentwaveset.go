@@ -54,7 +54,7 @@ func (s *parentWaveSet) has(h omnipool.Handle[*waveImpl]) bool {
 // holder balances it with [releaseParentWaveSet] at its Reset.
 func retainParentWaveSet(src *parentWaveSet) *parentWaveSet {
 	if src != nil {
-		src.RefCount().Inc() // safe: the sharing meta holds src live, so refs >= 1
+		src.AddRef() // safe: the sharing meta holds src live, so refs >= 1
 	}
 	return src
 }

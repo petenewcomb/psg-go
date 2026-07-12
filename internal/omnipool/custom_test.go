@@ -44,14 +44,14 @@ func TestCustomPoolStruct(t *testing.T) {
 	s1.Slice = append(s1.Slice, "test1", "test2")
 
 	// Put it back
-	pool.Put(s1)
+	pool.Release(s1)
 
 	// Get another - try for up to 10ms to get a pooled object
 	deadline := time.Now().Add(10 * time.Millisecond)
 	var s2 *customStruct
 	for time.Now().Before(deadline) {
 		// Put an object to increase chances
-		pool.Put(&customStruct{Slice: make([]string, 0, 8)})
+		pool.Release(&customStruct{Slice: make([]string, 0, 8)})
 
 		s2 = pool.Get()
 		if s2 != nil {
@@ -105,14 +105,14 @@ func TestCustomPoolChannel(t *testing.T) {
 	ch1 <- 200
 
 	// Put it back
-	pool.Put(ch1)
+	pool.Release(ch1)
 
 	// Get another - try for up to 10ms to get a pooled object
 	deadline := time.Now().Add(10 * time.Millisecond)
 	var ch2 chan int
 	for time.Now().Before(deadline) {
 		// Put a channel to increase chances
-		pool.Put(make(chan int, 5))
+		pool.Release(make(chan int, 5))
 
 		ch2 = pool.Get()
 		if ch2 != nil {
@@ -144,7 +144,7 @@ func TestCustomPoolPackageFunctions(t *testing.T) {
 	s.Value = 99
 	s.Slice = append(s.Slice, "package", "test")
 
-	PutCustom(customStructTrait{}, s)
+	ReleaseCustom(customStructTrait{}, s)
 
 	// Get another to verify reset
 	s2 := GetCustom(customStructTrait{})
@@ -165,7 +165,7 @@ func BenchmarkCustomPool(b *testing.B) {
 			s := pool.Get()
 			s.Value = i
 			s.Slice = append(s.Slice, "benchmark")
-			pool.Put(s)
+			pool.Release(s)
 		}
 	})
 
@@ -176,7 +176,7 @@ func BenchmarkCustomPool(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			ch := pool.Get()
 			ch <- i
-			pool.Put(ch)
+			pool.Release(ch)
 		}
 	})
 }

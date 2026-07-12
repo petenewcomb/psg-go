@@ -2,6 +2,36 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► NEXT (2026-07-12): OMNIPOOL ENGINE UNIFICATION — IMPLEMENTED, GATING (uncommitted).**
+`Pool` and `CustomPool` now share ONE engine, `basePool[O comparable]`, parameterized over the
+OBJECT type `O` (the pointer a consumer holds). It resolves each type's ops ONCE into three
+fields and runs them with no per-call capability checks:
+- `maker[O] func() O` — construct a fresh object (a pool miss only).
+- `lifecycler[O]` — a **STRUCT OF CLOSURES** `{activate, addRef, release func(O)…}`, NOT an
+  interface (the interface form tripped staticcheck `unused` on generic-interface dispatch — 20
+  false positives; closures call the counters directly, so usage is visible). `plainLifecycler[O]()`
+  is the shared unmanaged strategy (activate no-op, addRef panics, release always recycles).
+- `resetter[O] func(O)` — clear payload before Put (field-wise for managed; wholesale-zero for
+  plain; **fail-fast panic for a managed type with no `Reset`**).
+FRONT-ENDS: `Pool[T] = struct{ basePool[*T]; copier }` + the value-typed `Clone` (only the
+reflection pool needs it; the object-typed engine can't express it). `CustomPool[T MakerTrait[P],
+P comparable] = basePool[P]` — a generic type ALIAS, same engine, trait-driven builder.
+TRAITS split à-la-carte: `MakerTrait` (required) + `ResetTrait`/`RefTrait`/`GenRefTrait` (each
+detected once at `ForCustom`). `AddRef` is pool-mediated (drives the counter via the trait's
+accessor), so it works even for a clean type that exposes its counter ONLY via trait; a type
+that exposes the accessor directly may still call `obj.[Gen]RefCount().Inc()`.
+OTHER: `Put` fully retired → `Release` everywhere (`basePool` has only `Release`; migrated
+`tdigest` + omnipool tests, `PutCustom`→`ReleaseCustom`). `[Gen]RefCounter.activate` lost its
+`fresh` bool (uniform load-gen-set-1). `RefCounted`/`GenRefCounted` are now PURE accessors (no
+`Resetter` bundled — Reset is orthogonal). One justified `//nolint` for SA6002 (generic `O`
+into `sync.Pool`; always pointer-like). CONSEQUENCE worth noting: a purely trait-managed clean
+type can be a128-ref-counted but CANNOT back a `Handle` (Handle must be comparable ⇒ no carried
+locator ⇒ it reaches the generation through the object's OWN `GenRefCount()` method).
+STATUS: build ./... + all-module vet + lint(0) + omnipool test/-race + streampool -race-short all
+GREEN; 1000-check `TestBySimulation -race` running. THEN: commit checkpoint. NOT YET DONE: the
+sealed `refCounter`/`genRefCounter` interface layer beneath `lifecycler` (discussed, deferred —
+the closures call the counters directly for now).
+
 **►►► NEXT (2026-07-12): WAVE-REFCOUNT — IMPLEMENTED, GATING.** Full end-state landed in one
 pass (spec: `docs/decisions/wave-refcount.md`). `Wave = struct{ h Handle[*waveImpl] }`,
 `NewWave()` only; `waveImpl` pooled + embeds `RefCount` (`Init` one-time warm queues / `Reset`

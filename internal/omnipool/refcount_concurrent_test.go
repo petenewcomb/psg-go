@@ -31,7 +31,7 @@ func TestRefCountConcurrent(t *testing.T) {
 				// interleaving variety comes from the scheduler, not the count.
 				extra := (i + g) % 4
 				for k := 0; k < extra; k++ {
-					obj.GenRefCount().Inc()
+					obj.RefCount().AddRef()
 				}
 
 				// A same-goroutine upgrade always succeeds (obj is live).

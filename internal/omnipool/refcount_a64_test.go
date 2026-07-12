@@ -24,8 +24,8 @@ func TestA64RefCount_GetAddRefRelease(t *testing.T) {
 	obj.val = 7
 	resetsBefore := obj.resets
 
-	obj.RefCount().Inc() // refs = 2
-	obj.RefCount().Inc() // refs = 3
+	obj.RefCount().AddRef() // refs = 2
+	obj.RefCount().AddRef() // refs = 3
 
 	p.Release(obj) // refs = 2, no recycle
 	p.Release(obj) // refs = 1, no recycle
@@ -65,6 +65,6 @@ func TestA64RefCount_AddRefFromZeroPanics(t *testing.T) {
 	}()
 	p := For[gauge]()
 	obj := p.Get()
-	p.Release(obj)       // -> 0, recycle
-	obj.RefCount().Inc() // no outstanding reference: panic
+	p.Release(obj)          // -> 0, recycle
+	obj.RefCount().AddRef() // no outstanding reference: panic
 }

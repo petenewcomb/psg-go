@@ -25,7 +25,7 @@ func adoptOrMergeDigest(dst **tdigest.TDigest, src *tdigest.TDigest) {
 		*dst = src
 	} else {
 		(*dst).Merge(src)
-		tdigestPool.Put(src)
+		tdigestPool.Release(src)
 	}
 }
 

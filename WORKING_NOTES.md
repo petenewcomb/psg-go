@@ -2,6 +2,31 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► NEXT (2026-07-12): WAVE-REFCOUNT PHASE A — substrate split + `NewWave`.** Design SETTLED
++ committed: `docs/decisions/wave-refcount.md` (read it first — it's the spec). Model recap:
+`Wave` becomes a copyable `struct{ h omnipool.Handle[*waveImpl] }`, `NewWave()`-only (no
+re-arm; Done/Close terminal); `waveImpl` = today's Wave substrate + embedded `RefCount`
+(`Initer` one-time queue Init / `Resetter` per-recycle clear, never re-Init queues); public
+methods `Get`→defer `Release`→impl call, Get-fail ⇒ done; RefCount parallel to the two
+`wavestate` counters (wave's-own ref NewWave→Close + engagement ref on `totalReferences` 0↔1,
+= 2 ops + 2/cycle); strong holders keep **naked `*waveImpl`**, weak holders (`ctxMeta.wave`,
+`parentWaves`) become gen-guarded handles; **wavepermits gate DELETED** (cache forest is
+orthogonal — synchronous resolution + recorded-cache reacquire). Phases A(split)/B(pool+RefCount)/C(gen-guard).
+**PHASE A = mechanical substrate split, semantics-identical, un-pooled** (raw `*waveImpl`, GC'd,
+one impl per Wave). Surface map (already scouted):
+- `Wave`'s 6 EXPORTED methods → become `Wave` wrappers delegating to `waveImpl`: `Skim`,
+  `TrySkim`, `SkimAll`, `TrySkimAll`, `Close`, `CloseAndSkimAll` (wave.go). The other ~20 wave.go
+  methods → `*waveImpl` receivers.
+- 5 op-boundary sites take the wave: `Skimmer.In`/`Launcher.In` (skimmer.go:56, launcher.go:119),
+  `NewResequencer`/`NewRangeResequencer`/`newResequenceFunnel` (resequencer.go:42/87/121).
+- `resolveWave` (wave.go:978) → returns `*waveImpl`. Work-item `.wave` fields → `*waveImpl`.
+  `ctxMeta.wave`/`parentWaves` stay raw `*waveImpl` for Phase A (→ Handle in Phase C).
+- Delete `ensureInit`/`ensureArmed`/`initState` re-arm; `NewWave` does the one-time init eagerly.
+- API change (FINE — unreleased): `var wave Wave` → `NewWave()`. **Rewrite `reuse_test.go` +
+  `alloc_test.go`** — they encode the deleted zero-value/`sync.Pool`-of-Waves reuse model; move
+  them to the `NewWave` pattern (still prove alloc-free, now via the impl pool). ~20 files touch
+  Wave; ALL-OR-NOTHING to green (no mid-checkpoint) — one focused pass, then `-race` + sim gate.
+
 **►►► omnipool.RefCount LANDED (2026-07-11) — generation-guarded reference counting for
 pooled objects, the foundation for the nbcq-reclamation Phase 2 (pooled-impl handle
 migration).** `docs/decisions/omnipool-refcount.md`. Standalone green checkpoint: core

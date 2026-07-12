@@ -375,7 +375,7 @@ func (wk *launcherWork[T]) Free() {
 	var zero T
 	wk.value = zero
 	wk.callerErr = nil
-	wk.pool.Put(wk)
+	wk.pool.Release(wk)
 }
 
 // newTaskErrSink returns an ErrSkimmer whose handler returns the
@@ -456,7 +456,7 @@ func (wk *launcherScatterWork) Free() {
 	trace.Logf(context.Background(), traceRegion, "%v", wk)
 
 	wk.Work.Free()
-	launcherScatterWorkPool.Put(wk)
+	launcherScatterWorkPool.Release(wk)
 }
 
 var launcherScatterWorkPool = omnipool.For[launcherScatterWork]()

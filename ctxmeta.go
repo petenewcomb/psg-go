@@ -195,14 +195,14 @@ func unrefMeta(m *ctxMeta) {
 		parent := m.parent
 		if m.ownsExEnv {
 			if ee, ok := m.executionEnvironment.(*topLevelExEnv); ok {
-				topLevelExEnvPool.Put(ee)
+				topLevelExEnvPool.Release(ee)
 			}
 		}
 		if m.selfCtx != nil {
 			ctxpool.Free(m.selfCtx)
 		}
 		ctxMetaAlloc(-1)
-		bodyMetaPool.Put(m) // Reset zeroes, incl. refs
+		bodyMetaPool.Release(m) // Reset zeroes, incl. refs
 		m = parent
 	}
 }
@@ -320,7 +320,7 @@ func (cm *ctxMeta) TryExecuteNow(
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	executor := executorPool.Get()
-	defer executorPool.Put(executor)
+	defer executorPool.Release(executor)
 	ex := executor.BaseEx()
 
 	if cm.IsTopLevel() {
@@ -365,7 +365,7 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	executor := executorPool.Get()
-	defer executorPool.Put(executor)
+	defer executorPool.Release(executor)
 	ex := executor.BaseEx()
 
 	if cm.ShouldBlock() {

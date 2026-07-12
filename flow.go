@@ -566,7 +566,7 @@ func nodeUnref(n *flowRiderNode) {
 		}
 		next := n.next
 		flowNodeAlloc(-1)
-		flowRiderNodePool.Put(n)
+		flowRiderNodePool.Release(n)
 		n = next
 	}
 }

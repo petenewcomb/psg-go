@@ -573,7 +573,7 @@ func (d *Demand) Reset() {
 
 // Free returns a pooled Demand for reuse.
 func (d *Demand) Free() {
-	demandPool.Put(d)
+	demandPool.Release(d)
 }
 
 // Invalidate withdraws the demand — the caller-side edge for a dropped or cancelled
@@ -1205,7 +1205,7 @@ func (p *Pool) endEpisode(c *Cache) {
 		panic("permits: episode sentinel does not hold the slot at episode end")
 	}
 	p.promoteScan()
-	overdraftPool.Put(od)
+	overdraftPool.Release(od)
 }
 
 // AcquireWait is the blocking acquire — for an executor reacquiring mid-body. It does
@@ -1606,7 +1606,7 @@ func (c *Cache) destroy() {
 	// goroutine still references c. Capture parent/pool first; Put resets c, after which
 	// c must not be touched. The parent cascade uses the captured parent, not c.
 	parent := c.parent
-	cachePool.Put(c)
+	cachePool.Release(c)
 	if parent != nil {
 		parent.ReleaseRef() // the sub-wave's draw on the parent ends
 	}

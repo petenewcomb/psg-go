@@ -183,9 +183,9 @@ func (wk *taskWork) Free() {
 		// no-ops. release() and Put recurse over the whole joint set (head + rest).
 		wk.h.release()
 		rest := wk.h.rest
-		heldPermitPool.Put(wk.h) // Reset nils rest, so capture it first
+		heldPermitPool.Release(wk.h) // Reset nils rest, so capture it first
 		for _, r := range rest {
-			heldPermitPool.Put(r)
+			heldPermitPool.Release(r)
 		}
 		wk.h = nil
 	}
@@ -198,7 +198,7 @@ func (wk *taskWork) Free() {
 		wk.bodyMeta = nil
 	}
 	wk.Close(wave)
-	taskWorkPool.Put(wk)
+	taskWorkPool.Release(wk)
 }
 
 var taskWorkPool = omnipool.For[taskWork]()
@@ -434,7 +434,7 @@ func (wv *Wave) block(
 		defer h.reclaimJoint(ctx, wv)
 	}
 	adder := blockingWorkAdderPool.Get()
-	defer blockingWorkAdderPool.Put(adder)
+	defer blockingWorkAdderPool.Release(adder)
 	adder.wave = wv
 	adder.meta = meta
 	adder.blockDeadline = blockDeadline
@@ -716,7 +716,7 @@ func (wk *skimPostWork) Free() {
 	}
 
 	wk.Close(wk.wave)
-	skimPostWorkPool.Put(wk)
+	skimPostWorkPool.Release(wk)
 }
 
 var skimPostWorkPool = omnipool.For[skimPostWork]()
@@ -894,7 +894,7 @@ func (wk *taskPostWork) Free() {
 	}
 
 	wk.Close(wk.wave)
-	taskPostWorkPool.Put(wk)
+	taskPostWorkPool.Release(wk)
 }
 
 var taskPostWorkPool = omnipool.For[taskPostWork]()

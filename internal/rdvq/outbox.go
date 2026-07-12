@@ -115,7 +115,7 @@ func (q *Queue[T]) obtainOutbox() *outbox[T] {
 // can resurrect it. Put → Reset bumps the generation, inerting any stale
 // emptyOutboxes hint to this incarnation. See docs/rdvq-outbox-reclamation.md.
 func (q *Queue[T]) reclaimOutbox(ob *outbox[T]) {
-	q.outboxPool.Put(ob)
+	q.outboxPool.Release(ob)
 }
 
 // reclaimProbe runs only after a successful emptyOutboxes hint-claim, so a free

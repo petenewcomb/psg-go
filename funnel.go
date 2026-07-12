@@ -349,7 +349,7 @@ func (q *funnelInstanceQueue[T]) sweepFlush() {
 			// Already flushed (a deadline Execute or owner). R2 guarantees the flusher
 			// no longer references it; we hold it exclusively, so recycle now.
 			inst.mu.Unlock()
-			q.instancePool.Put(inst)
+			q.instancePool.Release(inst)
 		case defaultPool.ClaimForFlush(inst):
 			// Won the flush: no due Execute owns it. Enqueue it (its Execute flushes
 			// and self-recycles via detached, since it is no longer cached here).
@@ -521,7 +521,7 @@ func (c *funnelInstance[T]) Run(ee *workerExEnv) {
 	if detached {
 		// The sweep removed this from the cache queue, so no owner will reclaim it;
 		// R2 guarantees we hold it exclusively now. Recycle the spent shell.
-		omnipool.For[funnelInstance[T]]().Put(c)
+		omnipool.For[funnelInstance[T]]().Release(c)
 	}
 }
 
@@ -864,7 +864,7 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 		// the barrier) and left it cached. As the owner, recycle it and keep looking
 		// for a live instance.
 		hbc.mu.Unlock()
-		q.instancePool.Put(hbc)
+		q.instancePool.Release(hbc)
 	}
 	if hbc == nil {
 		hbc = q.instancePool.Get()
@@ -909,7 +909,7 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 		spent := hbc.accumulator == nil
 		hbc.mu.Unlock()
 		if spent {
-			q.instancePool.Put(hbc)
+			q.instancePool.Release(hbc)
 		} else {
 			q.queue.PushBack(hbc)
 		}
@@ -971,7 +971,7 @@ func (wk *funnelWork[T]) Free() {
 		// backstop for work freed without executing (cancellation drain) — a held
 		// permit is given back, a never-acquired handle no-ops. Then recycle.
 		wk.h.release()
-		heldPermitPool.Put(wk.h)
+		heldPermitPool.Release(wk.h)
 		wk.h = nil
 	}
 
@@ -989,7 +989,7 @@ func (wk *funnelWork[T]) Free() {
 	pool := wk.fn.workPool
 	var zero Funnel[T]
 	wk.fn = zero
-	pool.Put(wk)
+	pool.Release(wk)
 }
 
 // funnelPostWork is the producer that hands a funnelWork off to the shared pool's
@@ -1062,7 +1062,7 @@ func (wk *funnelPostWork) Free() {
 	}
 
 	wk.Close(wk.wave)
-	funnelPostWorkPool.Put(wk)
+	funnelPostWorkPool.Release(wk)
 }
 
 var funnelPostWorkPool = omnipool.For[funnelPostWork]()

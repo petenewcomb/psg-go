@@ -220,10 +220,10 @@ func (q *Queue[T]) TryPopFront() (T, bool) {
 
 					// Stash the value pointer away for reuse.
 					value := *valuePointer
-					q.valuePool.Put(valuePointer)
+					q.valuePool.Release(valuePointer)
 
 					// Stash the node away for reuse.
-					q.nodePool.Put(head.ptr)
+					q.nodePool.Release(head.ptr)
 
 					// D20: return TRUE     // Queue was not empty, dequeue succeeded
 					return value, true

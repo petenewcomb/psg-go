@@ -48,7 +48,7 @@ func (w *listenerNotifyWrapper) Reset() {
 
 func (w *listenerNotifyWrapper) notify(m Notification) bool {
 	result := w.listener.notify(w.listeners, m)
-	listenerNotifyWrapperPool.Put(w)
+	listenerNotifyWrapperPool.Release(w)
 	return result
 }
 

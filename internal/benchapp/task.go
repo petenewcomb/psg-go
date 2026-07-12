@@ -55,6 +55,6 @@ func (t *task[T]) execute(ctx context.Context) (TaskResult[T], error) {
 		Duration:     duration,
 		Value:        value,
 	}
-	t.pool.Put(t)
+	t.pool.Release(t)
 	return res, err
 }

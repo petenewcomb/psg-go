@@ -33,7 +33,7 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 	var blockFn BlockFunc
 
 	blockConfirmer := blockConfirmerPool.Get()
-	defer blockConfirmerPool.Put(blockConfirmer)
+	defer blockConfirmerPool.Release(blockConfirmer)
 	blockConfirmer.behavior = behavior
 	blockConfirmer.ex = ex
 

@@ -189,7 +189,7 @@ func (wk *limiterScatterWork) Free() {
 	wk.Work.Free()
 	// wk.h is owned by the taskWork (released and recycled in taskWork.Free); just
 	// drop the reference via the pool's zeroing Put.
-	limiterScatterWorkPool.Put(wk)
+	limiterScatterWorkPool.Release(wk)
 }
 
 var limiterScatterWorkPool = omnipool.For[limiterScatterWork]()

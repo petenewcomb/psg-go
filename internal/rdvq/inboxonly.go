@@ -65,7 +65,7 @@ func (q *inboxOnlyQueue[T, C, CT]) borrowInbox() *inbox[T] {
 // safe. omnipool's Put invokes inbox.Reset (clear the per-op flag, re-arm free at the
 // current generation, keep the channel).
 func (q *inboxOnlyQueue[T, C, CT]) reclaimInbox(ib *inbox[T]) {
-	q.inboxPool.Put(ib)
+	q.inboxPool.Release(ib)
 }
 
 // reapBudget bounds how many leading hints reapStale inspects per call — enough to

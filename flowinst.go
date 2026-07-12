@@ -228,8 +228,8 @@ func (in *flowInstance) unref(inline bool, wave *Wave, carrier *ctxMeta) error {
 		ctx, m := newBorrowedMeta(context.Background(), parent, nil, topLevelContext)
 		m.riders = riders // refs arrive with the chain (released by runFire's releaseBodyContext)
 		err := in.runFire(ctx, true, nil, nil)
-		nodeUnref(in.enclosing)  // release the instance's own enclosing ref (fire done)
-		flowInstancePool.Put(in) // fire complete; count is 0 forever, no reader remains
+		nodeUnref(in.enclosing)      // release the instance's own enclosing ref (fire done)
+		flowInstancePool.Release(in) // fire complete; count is 0 forever, no reader remains
 		return err
 	}
 	// Keep the wave alive across the hop with the CONDITIONAL pin: the triggering
@@ -379,7 +379,7 @@ func newSharedNode() *sharedNode {
 
 func freeSharedNode(s *sharedNode) {
 	flowSharedAlloc(-1)
-	sharedNodePool.Put(s)
+	sharedNodePool.Release(s)
 }
 
 // findRoot walks parent pointers to the component root (no path compression — a
@@ -482,7 +482,7 @@ func (in *flowInstance) coalesceAtZero() (fire bool) {
 	if !done {
 		mu.Unlock()
 		nodeUnref(in.enclosing) // this branch will not fire; drop its enclosing chain
-		flowInstancePool.Put(in)
+		flowInstancePool.Release(in)
 		return false
 	}
 	in.holds = root.holds // every branch's holds, released by this single fire
@@ -610,7 +610,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 	wk.carrierMeta = nil
 	wk.fireRiders = nil
 	wk.fireRidersSet = false
-	flowFireWorkPool.Put(wk)
+	flowFireWorkPool.Release(wk)
 
 	// The fire body ctx is the LAST CARRIER's continuation
 	// (driver-contexts.md, "Fire"): the carrier's tree position (same parent),
@@ -675,8 +675,8 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 			panic(fmt.Sprintf("streampool: unexpected error routing follow-up error: %v", e))
 		}
 	})
-	nodeUnref(inst.enclosing)  // release the instance's own enclosing ref (fire done)
-	flowInstancePool.Put(inst) // fire complete; count is 0 forever, no reader remains
+	nodeUnref(inst.enclosing)      // release the instance's own enclosing ref (fire done)
+	flowInstancePool.Release(inst) // fire complete; count is 0 forever, no reader remains
 	wave.state.DecrementReference()
 }
 

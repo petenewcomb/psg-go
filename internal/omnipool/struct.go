@@ -167,13 +167,6 @@ func (p *Pool[T]) Release(obj *T) {
 	p.pool.Put(obj)
 }
 
-// Put is an alias for [Pool.Release] retained for existing call sites. New code
-// should prefer Release; the two are identical. (Not marked Deprecated to avoid
-// flagging every current caller before the mechanical rename pass.)
-func (p *Pool[T]) Put(obj *T) {
-	p.Release(obj)
-}
-
 // Get is a package-level convenience function that gets a pool and retrieves an object.
 // For better performance, store and reuse a pool returned by [For].
 func Get[T any]() *T {
@@ -188,9 +181,9 @@ func Clone[T any](value T) *T {
 	return pool.Clone(value)
 }
 
-// Put is a package-level convenience function that gets a pool and puts an object.
+// Release is a package-level convenience function that gets a pool and releases an object.
 // For better performance, store and reuse a pool returned by [For].
-func Put[T any](obj *T) {
+func Release[T any](obj *T) {
 	pool := For[T]()
-	pool.Put(obj)
+	pool.Release(obj)
 }

@@ -344,7 +344,7 @@ func (wk *skimWork[T]) Free() {
 
 	wk.DownstreamWork.Close()
 	wk.poolWork.Close(wk.wave)
-	wk.pool.Put(wk)
+	wk.pool.Release(wk)
 }
 
 // submit creates skim work and posts it to the skim queue. The target wave is read

@@ -88,7 +88,7 @@ func (c *Funnel[T]) Flush(ctx context.Context) error {
 		FunnelDurationsSec:      c.funnelDurationsSec,
 	}
 
-	defer c.pool.Put(c)
+	defer c.pool.Release(c)
 	defer c.skimmer.recordFunnelTime(c.creationTime)
 
 	// In the new shape there is no aggregated "Value" return — the

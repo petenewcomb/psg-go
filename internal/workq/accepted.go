@@ -836,7 +836,7 @@ func (c *controller) addToBuffer(work Work, wasPostponed bool) {
 }
 
 func (c *controller) Free() {
-	controllerPool.Put(c)
+	controllerPool.Release(c)
 }
 
 type bufferedWork struct {

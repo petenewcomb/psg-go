@@ -39,7 +39,7 @@ func TestBasicPooling(t *testing.T) {
 	obj1.B = "basic test"
 
 	// Put it back
-	Put(obj1)
+	Release(obj1)
 
 	// Try to verify pooling by attempting to get the same pointer back
 	// Keep trying for up to 10ms to account for sync.Pool behavior
@@ -47,7 +47,7 @@ func TestBasicPooling(t *testing.T) {
 	var gotPooled bool
 	for time.Now().Before(deadline) {
 		// Put the same object back to increase chances
-		Put(obj1)
+		Release(obj1)
 
 		obj2 := Get[simpleStruct]()
 		if obj2 == obj1 {
@@ -56,11 +56,11 @@ func TestBasicPooling(t *testing.T) {
 			if obj2.A != 0 || obj2.B != "" {
 				t.Errorf("Object not properly zeroed: A=%d, B=%q", obj2.A, obj2.B)
 			}
-			Put(obj2) // Put it back for cleanup
+			Release(obj2) // Put it back for cleanup
 			break
 		} else {
 			// Different object, put it back
-			Put(obj2)
+			Release(obj2)
 		}
 	}
 
@@ -75,7 +75,7 @@ func TestResetterInterface(t *testing.T) {
 		obj := Get[resetterStruct]()
 		obj.A = i
 		obj.B = "test" //nolint:goconst // test string
-		Put(obj)       // This should call Reset()
+		Release(obj)   // This should call Reset()
 	}
 
 	// Try to get a pooled object with non-zero reset count
@@ -92,12 +92,12 @@ func TestResetterInterface(t *testing.T) {
 			if obj.A != 0 || obj.B != "" {
 				t.Errorf("Pooled object not properly reset: A=%d, B=%q", obj.A, obj.B)
 			}
-			Put(obj)
+			Release(obj)
 			break
 		}
 
 		// Put it back to try again
-		Put(obj)
+		Release(obj)
 	}
 
 	if !foundPooled {
@@ -146,11 +146,11 @@ func TestMultipleTypes(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		p := Get[PositiveID]()
 		p.Data = "test" //nolint:goconst // test string
-		Put(p)
+		Release(p)
 
 		n := Get[NegativeID]()
 		n.Data = "test" //nolint:goconst // test string
-		Put(n)
+		Release(n)
 	}
 
 	// Now verify we only get appropriate IDs from each pool
@@ -168,7 +168,7 @@ func TestMultipleTypes(t *testing.T) {
 		} else {
 			t.Errorf("Got negative ID %d from PositiveID pool", p.ID)
 		}
-		Put(p)
+		Release(p)
 
 		// Get from NegativeID pool
 		n := Get[NegativeID]()
@@ -180,7 +180,7 @@ func TestMultipleTypes(t *testing.T) {
 		} else {
 			t.Errorf("Got positive ID %d from NegativeID pool", n.ID)
 		}
-		Put(n)
+		Release(n)
 
 		if foundPositivePooled && foundNegativePooled {
 			break
@@ -198,7 +198,7 @@ func TestMultipleTypes(t *testing.T) {
 func TestPutNil(t *testing.T) {
 	// Should not panic
 	var nilPtr *simpleStruct
-	Put(nilPtr)
+	Release(nilPtr)
 }
 
 func BenchmarkGetPut(b *testing.B) {
@@ -208,7 +208,7 @@ func BenchmarkGetPut(b *testing.B) {
 			obj := Get[simpleStruct]()
 			obj.A = i
 			obj.B = "benchmark"
-			Put(obj)
+			Release(obj)
 		}
 	})
 
@@ -218,7 +218,7 @@ func BenchmarkGetPut(b *testing.B) {
 			obj := Get[resetterStruct]()
 			obj.A = i
 			obj.B = "benchmark"
-			Put(obj)
+			Release(obj)
 		}
 	})
 }

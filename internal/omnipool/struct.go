@@ -62,9 +62,10 @@ type Resetter interface {
 // Pool is a type-safe wrapper around sync.Pool that handles object creation,
 // initialization, and resetting automatically.
 type Pool[T any] struct {
-	pool     sync.Pool
-	hasReset bool
-	hasInit  bool
+	pool        sync.Pool
+	hasReset    bool
+	hasInit     bool
+	hasRefCount bool
 }
 
 // For returns a shared pool instance for type T. Multiple calls with the same
@@ -83,9 +84,16 @@ func For[T any]() *Pool[T] {
 	resetterType := reflect.TypeFor[Resetter]()
 	hasReset := typ.Implements(resetterType)
 
+	// A type that embeds RefCount and implements Resetter is reference-managed.
+	// An embedder that omits Reset is simply not RefCounted and takes the
+	// unmanaged path; that is harmless, since without a handle or AddRef its
+	// reference count is never exercised, and using either fails to compile.
+	hasRefCount := typ.Implements(reflect.TypeFor[RefCounted]())
+
 	pool := &Pool[T]{
-		hasReset: hasReset,
-		hasInit:  hasInit,
+		hasReset:    hasReset,
+		hasInit:     hasInit,
+		hasRefCount: hasRefCount,
 	}
 
 	actual, _ := pools.LoadOrStore(typ, pool)
@@ -97,11 +105,20 @@ func For[T any]() *Pool[T] {
 func (p *Pool[T]) Get() *T {
 	pooled := p.pool.Get()
 	if pooled != nil {
-		return pooled.(*T)
+		obj := pooled.(*T)
+		if p.hasRefCount {
+			// Re-arm the recycled object with a single reference, preserving its
+			// generation across the reuse.
+			any(obj).(RefCounted).refCount().activate(false)
+		}
+		return obj
 	}
 	obj := new(T)
 	if p.hasInit {
 		any(obj).(Initer).Init()
+	}
+	if p.hasRefCount {
+		any(obj).(RefCounted).refCount().activate(true)
 	}
 	return obj
 }
@@ -109,15 +126,36 @@ func (p *Pool[T]) Get() *T {
 // Clone gets an object from the pool and copies the provided value into it.
 // This is a convenience method for the common pattern of [Get] + assignment.
 func (p *Pool[T]) Clone(value T) *T {
+	if p.hasRefCount {
+		// Copying value over the object would overwrite (and copy) the embedded
+		// RefCount, corrupting the generation and violating the non-copy rule.
+		panic("omnipool: Clone is not supported for reference-managed types")
+	}
 	obj := p.Get()
 	*obj = value
 	return obj
 }
 
-// Put returns a pointer to an object to the pool after resetting it if the type
-// implements Resetter. Put is safe to call with a nil pointer, which is a no-op.
-func (p *Pool[T]) Put(obj *T) {
+// Release drops one reference to obj and returns it to the pool. For a
+// reference-managed type (one embedding [RefCount]) the object is recycled only
+// when the last reference is released; for an ordinary type every Release
+// returns the object immediately. Release is safe to call with a nil pointer,
+// which is a no-op.
+func (p *Pool[T]) Release(obj *T) {
 	if obj == nil {
+		return
+	}
+	if p.hasRefCount {
+		rc := any(obj).(RefCounted)
+		if !rc.refCount().release() {
+			// Not the last reference; the object stays live.
+			return
+		}
+		// Last reference: clear payload field-wise (Resetter is mandatory for
+		// managed types — never a wholesale zero, which would destroy the
+		// embedded RefCount's generation) and recycle.
+		rc.Reset()
+		p.pool.Put(obj)
 		return
 	}
 	if p.hasReset {
@@ -127,6 +165,13 @@ func (p *Pool[T]) Put(obj *T) {
 		*obj = *new(T)
 	}
 	p.pool.Put(obj)
+}
+
+// Put is an alias for [Pool.Release] retained for existing call sites. New code
+// should prefer Release; the two are identical. (Not marked Deprecated to avoid
+// flagging every current caller before the mechanical rename pass.)
+func (p *Pool[T]) Put(obj *T) {
+	p.Release(obj)
 }
 
 // Get is a package-level convenience function that gets a pool and retrieves an object.

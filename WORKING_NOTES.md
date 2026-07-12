@@ -2,6 +2,25 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► omnipool.RefCount LANDED (2026-07-11) — generation-guarded reference counting for
+pooled objects, the foundation for the nbcq-reclamation Phase 2 (pooled-impl handle
+migration).** `docs/decisions/omnipool-refcount.md`. Standalone green checkpoint: core
+(`internal/omnipool/refcount.go`) + `struct.go` Pool wiring (Get/Release, `RefCounted`
+trait-detected, Put→Release deprecated alias) + model/straddle/concurrency tests. Design
+SUPERSEDES the note's separate-words third-counter form: a packed **atomic128 (gen, refs)**
+word makes recycle a single CAS `(1,G)→(0,G+1)`, so there is **no distinguished retirement,
+no arm flag, no upgrade blips** — the owner's held reference structurally prevents an early
+gen bump. API: `RefCount` (embed) / `RefCounted{Resetter; refCount()}` / `NewHandle` /
+`Handle.Get` (fallible upgrade) / `AddRef` (infallible clone) / `Pool.Get` / `Pool.Release`.
+a128 (not a uint64 bit-split) chosen to keep the primitive general — the wave's count is
+small (cache tree absorbs fan-out; roots-only), but hot permit cache nodes are unbounded at
+scale. **RACE POLICY**: native a128 asm is TSan-invisible, so `-race` must force the
+instrumented fallback; this belongs in the atomic128-go fork (`//go:build race` →
+`DisableNative()`) so every consumer inherits it — `nbcq`'s per-package env init and
+omnipool's `TestMain` stopgap retire once it lands. NEXT: (1) fork race-init + go.work local
+reference; (2) adopt on `waveImpl` (the ~15-field strong/weak sweep + Get-side re-arm),
+demand identity, permit cache nodes.
+
 **►►► flow-impl MERGED INTO combiner (2026-07-11).** 53 flow-impl commits (flow riders,
 FlowKey/FlowTag/follow-ups, ctxMeta parent-refcount CP f193c7f, PinFlow/HoldFlow/OriginFlow,
 CP-R7 psgwf deletion + otpsg v2) joined with combiner's 33 (weighted Layers 1-2, multi

@@ -6,20 +6,26 @@ This document contains working notes and context for development on the `combine
 pooled objects, the foundation for the nbcq-reclamation Phase 2 (pooled-impl handle
 migration).** `docs/decisions/omnipool-refcount.md`. Standalone green checkpoint: core
 (`internal/omnipool/refcount.go`) + `struct.go` Pool wiring (Get/Release, `RefCounted`
-trait-detected, Put→Release deprecated alias) + model/straddle/concurrency tests. Design
-SUPERSEDES the note's separate-words third-counter form: a packed **atomic128 (gen, refs)**
-word makes recycle a single CAS `(1,G)→(0,G+1)`, so there is **no distinguished retirement,
-no arm flag, no upgrade blips** — the owner's held reference structurally prevents an early
-gen bump. API: `RefCount` (embed) / `RefCounted{Resetter; refCount()}` / `NewHandle` /
-`Handle.Get` (fallible upgrade) / `AddRef` (infallible clone) / `Pool.Get` / `Pool.Release`.
-a128 (not a uint64 bit-split) chosen to keep the primitive general — the wave's count is
-small (cache tree absorbs fan-out; roots-only), but hot permit cache nodes are unbounded at
-scale. **RACE POLICY**: native a128 asm is TSan-invisible, so `-race` must force the
-instrumented fallback; this belongs in the atomic128-go fork (`//go:build race` →
-`DisableNative()`) so every consumer inherits it — `nbcq`'s per-package env init and
-omnipool's `TestMain` stopgap retire once it lands. NEXT: (1) fork race-init + go.work local
-reference; (2) adopt on `waveImpl` (the ~15-field strong/weak sweep + Get-side re-arm),
-demand identity, permit cache nodes.
+trait-detected) + model/straddle/concurrency tests. Design SUPERSEDES the note's separate-words
+third-counter form: a packed **atomic128 (gen, refs)** word makes recycle a single CAS
+`(1,G)→(0,G+1)`, so there is **no distinguished retirement, no arm flag, no upgrade blips** —
+the owner's held reference structurally prevents an early gen bump. API: `RefCount` (embed) /
+`RefCounted{Resetter; refCount()}` / `NewHandle` / `Handle.Get` (fallible upgrade) / `AddRef`
+(infallible clone) / `Pool.Get` / `Pool.Release`. a128 (not a uint64 bit-split) keeps the
+primitive general — the wave's count is small (cache tree absorbs fan-out; roots-only), but hot
+permit cache nodes are unbounded at scale.
+**a128 CLEANUPS DONE (2026-07-11):** native a128 asm is TSan-invisible, so `-race` must force
+the mutex fallback. The `../atomic128-go` fork was **RE-BASED onto upstream CAFxX/atomic128**
+(branch `upstream-rebase`) — upstream caught up (BP fix, mutex fallback, AVX/GOAMD64 dispatch,
+tagged) and moved to a **method API** (`u.Load()`); the fork now carries only a thin patch
+(HasNative/DisableNative control + `//go:build race`→DisableNative). psg migrated to the method
+API. Wired via LOCAL `go.work` (gitignored, lists ALL local modules — the pre-commit hook
+iterates each). `PSGNATIVEA128` stays PSG-side in nbcq's init; omnipool's TestMain stopgap
+retired. `Pool.Put`→`Pool.Release` rename completed across the tree. **Couldn't drop the fork:**
+upstream has no runtime fallback-forcing (our order-through-the-word usage needs it under -race);
+clean end state = a tiny upstream PR adding a race fallback, then drop the fork + migrate.
+NEXT: adopt RefCount on `waveImpl` (the ~15-field strong/weak sweep + Get-side re-arm replacing
+`initState`), demand identity, permit cache nodes. (Optional: the upstream race-fallback PR.)
 
 **►►► flow-impl MERGED INTO combiner (2026-07-11).** 53 flow-impl commits (flow riders,
 FlowKey/FlowTag/follow-ups, ctxMeta parent-refcount CP f193c7f, PinFlow/HoldFlow/OriginFlow,

@@ -71,7 +71,7 @@ func TestPinFlowDispatch(t *testing.T) {
 		return nil
 	})))
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var bodySaw atomic.Value
 	release := make(chan struct{})
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
@@ -80,7 +80,7 @@ func TestPinFlowDispatch(t *testing.T) {
 		bodySaw.Store([2]any{v, ok})
 		return nil
 	})
-	chk.NoError(task.In(&wave).Start(pinned))
+	chk.NoError(task.In(wave).Start(pinned))
 
 	// The pin released while the dispatched body still runs: the work's own
 	// carrier refs hold the flow, so the follow-up waits for the body too.
@@ -95,7 +95,7 @@ func TestPinFlowDispatch(t *testing.T) {
 }
 
 // TestPinFlowRequiresExplicitWave: a pin carries no ambient wave — dispatch
-// without op.In(&wave) panics exactly as from a bare top-level ctx.
+// without op.In(wave) panics exactly as from a bare top-level ctx.
 func TestPinFlowRequiresExplicitWave(t *testing.T) {
 	chk := require.New(t)
 	pinned := streampool.PinFlow(context.Background())
@@ -103,7 +103,7 @@ func TestPinFlowRequiresExplicitWave(t *testing.T) {
 
 	task := streampool.NewTaskLauncher(func(context.Context) error { return nil })
 	chk.PanicsWithValue(
-		"op constructed with nil wave dispatched without op.In(&wave) and outside any wave body",
+		"op constructed with nil wave dispatched without op.In(wave) and outside any wave body",
 		func() { _ = task.Start(pinned) })
 }
 
@@ -125,10 +125,10 @@ func TestUnpinFlowValidation(t *testing.T) {
 
 	// Keep the pin meta alive past the unpin: an in-flight task's borrow
 	// chain refs it, so the expired marker stays resolvable.
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	release := make(chan struct{})
 	holder := streampool.NewTaskLauncher(func(context.Context) error { <-release; return nil })
-	chk.NoError(holder.In(&wave).Start(pinned))
+	chk.NoError(holder.In(wave).Start(pinned))
 
 	chk.NoError(streampool.UnpinFlow(pinned))
 	chk.Panics(func() { _ = streampool.UnpinFlow(pinned) }, "double unpin")
@@ -139,7 +139,7 @@ func TestUnpinFlowValidation(t *testing.T) {
 			streampool.NewFlowKey[int]().Value(1))
 	}, "scope over an expired pin")
 	task := streampool.NewTaskLauncher(func(context.Context) error { return nil })
-	chk.Panics(func() { _ = task.In(&wave).Start(pinned) }, "dispatch from an expired pin")
+	chk.Panics(func() { _ = task.In(wave).Start(pinned) }, "dispatch from an expired pin")
 
 	close(release)
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
@@ -206,7 +206,7 @@ func TestPinFlowConcurrentDispatch(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var wave streampool.Wave
+			wave := streampool.NewWave()
 			task := streampool.NewTaskLauncher(func(ctx context.Context) error {
 				if v, ok := key.From(ctx); !ok || v != "shared" {
 					misses.Add(1)
@@ -214,7 +214,7 @@ func TestPinFlowConcurrentDispatch(t *testing.T) {
 				return nil
 			})
 			for j := 0; j < 4; j++ {
-				if err := task.In(&wave).Start(pinned); err != nil {
+				if err := task.In(wave).Start(pinned); err != nil {
 					misses.Add(1)
 				}
 			}

@@ -62,7 +62,7 @@ type Service struct {
 // by the shared Gate, and returns the collected values. The gRPC per-stream
 // goroutine blocks on the drain — fine, because streampool's pool scales.
 func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*AggregateResponse, error) {
-	var sub streampool.Wave
+	sub := streampool.NewWave()
 
 	// The skimmer body runs only on the draining goroutine — this one, via the
 	// Submit loop's help-skim and CloseAndSkimAll below — never on the pool
@@ -88,7 +88,7 @@ func (s *Service) Aggregate(ctx context.Context, in *AggregateRequest) (*Aggrega
 	).WithLimits(s.Gate)
 
 	for _, k := range in.Keys {
-		if err := run.In(&sub).Submit(ctx, k); err != nil {
+		if err := run.In(sub).Submit(ctx, k); err != nil {
 			return nil, err
 		}
 	}

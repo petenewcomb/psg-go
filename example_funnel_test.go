@@ -44,15 +44,15 @@ func ExampleFunnel() {
 
 	// A zero-value Wave is ready to use; it owns no context and drains via
 	// CloseAndSkimAll below.
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	// Limit concurrent tasks to 2.
 	taskLimit := streampool.NewSemaphore(2)
 
-	funnelPool := &wave
+	funnelPool := wave
 
 	// Define a result aggregation function and create a funneld skim/funnel operation
-	skimmer := streampool.NewFnSkimmer(skimFn).In(&wave)
+	skimmer := streampool.NewFnSkimmer(skimFn).In(wave)
 
 	// After Wave 2, the streampool.Accumulator factory captures the downstream
 	// skimmer in its closure and Submits the aggregated map from
@@ -106,7 +106,7 @@ func ExampleFunnel() {
 		{40 * time.Millisecond, "D"}, // will launch at 30ms, complete at 70ms, funnel at 80ms
 		{40 * time.Millisecond, "A"}, // will launch at 50ms, complete at 90ms, funnel at 100ms
 	} {
-		err := newRunner(i+1, spec.delay, spec.result).In(&wave).Start(ctx)
+		err := newRunner(i+1, spec.delay, spec.result).In(wave).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %d (%v -> %q): %v\n", i+1, spec.delay, spec.result, err)
 		}

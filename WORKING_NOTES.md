@@ -2,6 +2,31 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► NEXT (2026-07-12): WAVE-REFCOUNT — IMPLEMENTED, GATING.** Full end-state landed in one
+pass (spec: `docs/decisions/wave-refcount.md`). `Wave = struct{ h Handle[*waveImpl] }`,
+`NewWave()` only; `waveImpl` pooled + embeds `RefCount` (`Init` one-time warm queues / `Reset`
+per-recycle clear). **Refs: owner ref (NewWave Get → Close Release on the winning CAS) +
+PER-HOLDER refs** — each strong holder `AddRef`s at mint (under the dispatching `Get`) /
+`Release`s at completion (paired with the wavestate ref at poolWork.Init/Close, funnelInstance
+Increment/Decrement, flowFireWork). Rejected the collective 0↔1 hook.
+KEY REFINEMENTS (this session, all landed & green on build/vet/lint/-race-short):
+- **`ctxMeta.wave` is a NAKED `*waveImpl`, not a Handle** — every read provably live
+  (synchronous or `syncParent`-bounded; verified no bare-`.parent` walk reads `.wave`).
+- **Only `parentWaves` is gen-guarded** (`map[Handle]struct{}`, membership via `NewHandle(wv)`)
+  — the one cross-lifetime weak holder; its sole job is rejecting upward dispatch/skim
+  (`TestTaskCannotSkimParentJob`). FOLLOW-UP: swap the copied map for a refcounted+pooled
+  `parentWaveSet` cons-list (flowRiderNode idiom; O(1)/dispatch, depth-robust, alloc-free).
+- **omnipool.Handle**: `Is`/`Empty`/`Valid`; constraint `HandleP = interface{comparable;RefCounted}`;
+  no `Peek`; log with `%v`.
+- **Amendments 1 & 2 SUBSUMED** by per-holder refs (Skim holds a Get ref across the park;
+  listeners unpark before recycle) — not implemented; validating via -race sim.
+STATUS: build/vet/lint(0)/-race-short green; `TestBySimulation -race` 100 checks green; 1000-check
+-race batch running. THEN: commit checkpoint → build the refcounted `parentWaveSet` → re-gate.
+FORWARD THREAD (later): collapse per-holder refs → collective, and if so drop per-item
+`totalReferences.Increment` too (structurally parallel).
+
+--- superseded phasing below (kept for context) ---
+
 **►►► NEXT (2026-07-12): WAVE-REFCOUNT PHASE A — substrate split + `NewWave`.** Design SETTLED
 + committed: `docs/decisions/wave-refcount.md` (read it first — it's the spec). Model recap:
 `Wave` becomes a copyable `struct{ h omnipool.Handle[*waveImpl] }`, `NewWave()`-only (no

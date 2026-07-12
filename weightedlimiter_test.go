@@ -24,7 +24,7 @@ import (
 func TestWeightedLauncher_WeightSerializesDispatch(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	wl := streampool.NewWeightedSemaphore(4)
 	var live, peak atomic.Int32
@@ -42,7 +42,7 @@ func TestWeightedLauncher_WeightSerializesDispatch(t *testing.T) {
 			live.Add(-1)
 			return nil
 		},
-	).WithWeightLimits(streampool.NewWeightLimiter(wl, func(int) int { return 3 })).In(&wave)
+	).WithWeightLimits(streampool.NewWeightLimiter(wl, func(int) int { return 3 })).In(wave)
 
 	// Submit blocks under backpressure (a full limiter), so the three weight-3 dispatches
 	// must be launched concurrently for the second/third to queue behind the first. Submit

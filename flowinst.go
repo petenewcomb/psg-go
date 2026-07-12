@@ -192,7 +192,7 @@ func buildFireChain(chain *flowRiderNode, fired *flowInstance) *flowRiderNode {
 // sound. nil when no carrier context exists (work freed without executing on
 // a teardown path) — the fire then falls back to the instance's
 // enclosing-at-registration set.
-func (in *flowInstance) unref(inline bool, wave *Wave, carrier *ctxMeta) error {
+func (in *flowInstance) unref(inline bool, wave *waveImpl, carrier *ctxMeta) error {
 	if in.count.Add(-1) != 0 {
 		return nil
 	}
@@ -243,6 +243,11 @@ func (in *flowInstance) unref(inline bool, wave *Wave, carrier *ctxMeta) error {
 		panic("streampool: flow fire dispatched against a wave already committed to Done " +
 			"(a count→0 site dropped its owner reference before its riders)")
 	}
+	// Paired object-lifetime reference: this async fire holds a naked *waveImpl across
+	// the hop to the executor, so keep the impl alive until Run drops both references.
+	// The successful TryIncrementReference above means the count is nonzero (refs >= 1),
+	// so the AddRef cannot increment from zero.
+	omnipool.AddRef(wave)
 	wk := flowFireWorkPool.Get()
 	wk.Init(workq.NewGroupID())
 	wk.inst = in
@@ -273,7 +278,7 @@ func (in *flowInstance) unref(inline bool, wave *Wave, carrier *ctxMeta) error {
 // outer fires; an inline outer's error joins here (own error first). A panic in fn
 // propagates, like every user body.
 func (in *flowInstance) runFire(
-	bodyCtx context.Context, inline bool, wave *Wave, onErr func(error),
+	bodyCtx context.Context, inline bool, wave *waveImpl, onErr func(error),
 ) (err error) {
 	// A cascaded outer fire's last carrier is THIS fire: pin the fire meta AND
 	// its rider chain nodes across the cascade, which runs after
@@ -517,7 +522,7 @@ func flowRefRiders(r *flowRiderNode) {
 // carrier whose continuation a fire dispatched here runs as; callers pass it
 // while its owner ref is still held (nil only on teardown paths with no
 // context, e.g. work freed without executing).
-func flowUnrefRiders(r *flowRiderNode, wave *Wave, carrier *ctxMeta) {
+func flowUnrefRiders(r *flowRiderNode, wave *waveImpl, carrier *ctxMeta) {
 	for n := r; n != nil; n = n.next {
 		if n.inst != nil {
 			_ = n.inst.unref(false, wave, carrier)
@@ -543,7 +548,7 @@ var flowErrSink = newInternalSkimmer[struct{}](NewErrHandler(func(_ context.Cont
 type flowFireWork struct {
 	workq.WorkItem
 	inst         *flowInstance
-	wave         *Wave
+	wave         *waveImpl
 	borrowSrcCtx context.Context //nolint:containedctx // borrow source for the fire body ctx
 	// borrowSrcMeta is the meta on borrowSrcCtx, resolved and ref-pinned in
 	// Execute (the synchronous safe point) for Run to borrow from — same
@@ -660,7 +665,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 		// chain's refs adopted, a fresh execution stamp, never the carrier's
 		// exEnv.
 		bodyCtx, m = newBorrowedMeta(src, carrier.parent, wave, skimContext)
-		m.parentWaves = carrier.parentWaves
+		m.parentWaves = retainParentWaveSet(carrier.parentWaves)
 		m.riders = fireRiders // refs arrived with the chain
 		unrefMeta(carrier)    // drop the dispatch pin; the sibling holds its own parent ref
 	}
@@ -678,6 +683,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 	nodeUnref(inst.enclosing)      // release the instance's own enclosing ref (fire done)
 	flowInstancePool.Release(inst) // fire complete; count is 0 forever, no reader remains
 	wave.state.DecrementReference()
+	wavePool.Release(wave) // drop the paired object-lifetime reference (may recycle the impl)
 }
 
 // Free is a no-op: the controller calls it right after Execute's successful

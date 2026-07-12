@@ -48,9 +48,9 @@ func TestCtxMetaConservation(t *testing.T) {
 	// mints the owned skim-over-top-level chain, released via the cascade.
 	release := make(chan struct{})
 	task := NewTaskLauncher(func(context.Context) error { <-release; return nil })
-	var wave Wave
+	wave := NewWave()
 	for i := 0; i < 4; i++ {
-		chk.NoError(task.In(&wave).Start(context.Background()))
+		chk.NoError(task.In(wave).Start(context.Background()))
 	}
 	close(release)
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
@@ -59,22 +59,22 @@ func TestCtxMetaConservation(t *testing.T) {
 	// (B) Nested subwave inside a body: the body meta becomes a parent (sync
 	// derivation ref) of the subwave's minted top-level meta.
 	outer := NewTaskLauncher(func(ctx context.Context) error {
-		var sub Wave
+		sub := NewWave()
 		inner := NewTaskLauncher(func(context.Context) error { return nil })
-		if err := inner.In(&sub).Start(ctx); err != nil {
+		if err := inner.In(sub).Start(ctx); err != nil {
 			return err
 		}
 		return sub.CloseAndSkimAll(ctx)
 	})
-	var owave Wave
-	chk.NoError(outer.In(&owave).Start(context.Background()))
+	owave := NewWave()
+	chk.NoError(outer.In(owave).Start(context.Background()))
 	chk.NoError(owave.CloseAndSkimAll(context.Background()))
 	settled("nested subwave")
 
 	// (C) Skimmer submit (top-level mint, synchronous-only use) + skim handler.
-	var swave Wave
+	swave := NewWave()
 	skimmer := NewFnSkimmer(func(context.Context, int, error) error { return nil })
-	chk.NoError(skimmer.In(&swave).Submit(context.Background(), 1))
+	chk.NoError(skimmer.In(swave).Submit(context.Background(), 1))
 	chk.NoError(swave.CloseAndSkimAll(context.Background()))
 	settled("skimmer submit")
 
@@ -83,8 +83,8 @@ func TestCtxMetaConservation(t *testing.T) {
 	// fan-in clone. WithFlow adds scope metas and a tag follow-up fire (async,
 	// via flowFireWork's Execute-stash pin).
 	tag := NewFlowTag()
-	var fwave Wave
-	funnel := NewFnFunnel(&fwave, func() Accumulator[int] {
+	fwave := NewWave()
+	funnel := NewFnFunnel(fwave, func() Accumulator[int] {
 		return NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(context.Context) error { return nil },
@@ -115,9 +115,9 @@ func TestCtxMetaConservation(t *testing.T) {
 		return nil
 	}, pinKey.Value(1), NewFlowTag().FollowUpFn(func(context.Context) error { return nil })))
 	chk.Positive(balance.Load(), "a standing pin holds metas out of the pool — a leaked pin is visible")
-	var pwave Wave
+	pwave := NewWave()
 	ptask := NewTaskLauncher(func(context.Context) error { return nil })
-	chk.NoError(ptask.In(&pwave).Start(pinned))
+	chk.NoError(ptask.In(pwave).Start(pinned))
 	chk.NoError(pwave.CloseAndSkimAll(context.Background()))
 	chk.NoError(UnpinFlow(pinned))
 	settled("pinned flow released")

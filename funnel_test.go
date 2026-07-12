@@ -54,9 +54,9 @@ func newPassthroughTestFunnelFactory[T any](
 func TestNewErrFunnel(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
-	funnelPool := &wave
+	funnelPool := wave
 	// The funnel is unlimited, so its two SubmitErr inputs may be accumulated
 	// concurrently on distinct instances; guard the shared slice accordingly.
 	var seenMu sync.Mutex
@@ -87,15 +87,15 @@ func TestFunnelScatterNilSkimPanic(t *testing.T) {
 func TestFunnelScatterFromTask(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result int, err error) error {
 			chk.NoError(err)
 			return nil
 		},
-	).In(&wave)
-	funnelPool := &wave
+	).In(wave)
+	funnelPool := wave
 	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
@@ -113,14 +113,14 @@ func TestFunnelScatterFromTask(t *testing.T) {
 		)
 		return funnelOp.Submit(ctx, 0)
 	})
-	chk.NoError(outerRunner.In(&wave).Start(ctx))
+	chk.NoError(outerRunner.In(wave).Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 }
 
 func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	var parentWave streampool.Wave
+	parentWave := streampool.NewWave()
 
 	// Variable to track execution flow
 	subJobTaskRan := false
@@ -131,15 +131,15 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 			chk.True(result)
 			return nil
 		},
-	).In(&parentWave)
-	funnelPool := &parentWave
+	).In(parentWave)
+	funnelPool := parentWave
 	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
 	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		// Create a sub-wave inside the task
-		var subWave streampool.Wave
+		subWave := streampool.NewWave()
 
 		// This should succeed - dispatching a task to the sub-wave's pool
 		subSkimmer := streampool.NewFnSkimmer(
@@ -153,7 +153,7 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 			subJobTaskRan = true
 			return subSkimmer.Submit(ctx, true)
 		})
-		chk.NoError(subRunner.In(&subWave).Start(ctx))
+		chk.NoError(subRunner.In(subWave).Start(ctx))
 
 		// Skim all results in the sub-wave
 		chk.NoError(subWave.CloseAndSkimAll(ctx))
@@ -161,7 +161,7 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 		return funnelOp.Submit(ctx, true)
 	})
 
-	chk.NoError(outerRunner.In(&parentWave).Start(ctx))
+	chk.NoError(outerRunner.In(parentWave).Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 
 	// Verify the sub-wave task executed successfully
@@ -171,7 +171,7 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
-	var parentWave streampool.Wave
+	parentWave := streampool.NewWave()
 
 	skimmer := streampool.NewFnSkimmer(
 		func(ctx context.Context, result bool, err error) error {
@@ -179,8 +179,8 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 			chk.True(result)
 			return nil
 		},
-	).In(&parentWave)
-	funnelPool := &parentWave
+	).In(parentWave)
+	funnelPool := parentWave
 	funnelOp := streampool.NewFunnel(
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
@@ -199,6 +199,6 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 		return funnelOp.Submit(ctx, true)
 	})
 
-	chk.NoError(outerRunner.In(&parentWave).Start(ctx))
+	chk.NoError(outerRunner.In(parentWave).Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))
 }

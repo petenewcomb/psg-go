@@ -5,7 +5,6 @@ package streampool_test
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,6 +51,11 @@ func (h allocForwardHandler) Handle(ctx context.Context, v int, err error) error
 // flaking on that noise.)
 func allocsPerOp(t *testing.T, warmup, runs int, fn func()) float64 {
 	t.Helper()
+	// The race detector adds per-allocation bookkeeping, so allocs/op is inflated and
+	// meaningless under -race; these floors are a no-race measurement.
+	if raceEnabled {
+		t.Skip("alloc counts are inflated under -race")
+	}
 	for i := 0; i < warmup; i++ {
 		fn()
 	}
@@ -69,10 +73,10 @@ func allocsPerOp(t *testing.T, warmup, runs int, fn func()) float64 {
 // forwarded result on a single long-lived wave (no per-op wave/op construction).
 func TestAllocsLauncherSkimSteady(t *testing.T) {
 	ctx := context.Background()
-	var w streampool.Wave
+	w := streampool.NewWave()
 	var sum int64
 	collector := streampool.NewSkimmer[int](allocAddHandler{&sum})
-	fetcher := streampool.NewLauncher[int](allocForwardHandler{collector}).In(&w)
+	fetcher := streampool.NewLauncher[int](allocForwardHandler{collector}).In(w)
 
 	op := func() {
 		if err := fetcher.Submit(ctx, 1); err != nil {
@@ -84,7 +88,9 @@ func TestAllocsLauncherSkimSteady(t *testing.T) {
 	}
 	a := allocsPerOp(t, 500, 1000, op)
 	t.Logf("launcher submit+skim: %.2f allocs/op", a)
-	const ceiling = 70 // floor ~53 (min-of-5 is stable for this synchronous path)
+	// floor 0 post wave-refcount (pooled waveImpl + warm ctx/exEnv make the steady dispatch
+	// allocation-free); margin left for occasional worker-spawn spikes on loaded machines.
+	const ceiling = 20
 	if a > ceiling {
 		t.Errorf("launcher submit+skim allocs/op = %.2f, want <= %d", a, ceiling)
 	}
@@ -94,13 +100,13 @@ func TestAllocsLauncherSkimSteady(t *testing.T) {
 // long-lived wave + funnel — exercises the pooled funnelWork and funnelInstance.
 func TestAllocsFunnelSubmitSteady(t *testing.T) {
 	ctx := context.Background()
-	var w streampool.Wave
+	w := streampool.NewWave()
 	var sum int64
 	collector := streampool.NewSkimmer[int](allocAddHandler{&sum})
 	// Pin concurrency to 1: exactly one live accumulator instance exists, so the
 	// per-submit allocation count is deterministic (it depends on how many instances
 	// coexist, which is otherwise scheduling-dependent).
-	funnel := streampool.NewFnFunnel[int](&w, func() streampool.Accumulator[int] {
+	funnel := streampool.NewFnFunnel[int](w, func() streampool.Accumulator[int] {
 		var s int
 		return streampool.FuncAccumulator[int]{
 			AccumulateFn: func(_ context.Context, v int, _ error) (time.Time, error) { s += v; return time.Time{}, nil },
@@ -117,26 +123,26 @@ func TestAllocsFunnelSubmitSteady(t *testing.T) {
 	}
 	a := allocsPerOp(t, 500, 1000, op)
 	t.Logf("funnel submit (accumulate): %.2f allocs/op", a)
-	const ceiling = 110 // COARSE: funnel accumulate is async + bimodal (~40 or ~86); gross regressions only
+	// floor 0 post wave-refcount (pooled instance/work + warm ctx); margin for async spikes.
+	const ceiling = 25
 	if a > ceiling {
 		t.Errorf("funnel submit allocs/op = %.2f, want <= %d", a, ceiling)
 	}
 }
 
-// TestAllocsWaveReuseCycle measures one full reuse cycle of a pooled *Wave with a
-// funnel: dispatch a few inputs, drain, return to the pool. This is the guard that
-// catches a pooling regression in the wave/funnel/instance lifecycle (e.g. instance
-// wrappers not recycled at drain). The ops are recreated each cycle (the realistic
-// pattern), so the count includes the funnel struct + fresh wavestate; the assertion
-// is that it stays CONSTANT across cycles.
-func TestAllocsWaveReuseCycle(t *testing.T) {
+// TestAllocsWavePerCycle measures one full drain cycle of a freshly constructed
+// Wave with a funnel: construct via NewWave, dispatch a few inputs, drain. This is
+// the guard that catches a pooling regression in the wave/funnel/instance lifecycle
+// (e.g. instance wrappers not recycled at drain). A fresh wave and ops are
+// constructed each cycle (the realistic pattern), so the count includes the funnel
+// struct + fresh wavestate; the assertion is that it stays CONSTANT across cycles.
+func TestAllocsWavePerCycle(t *testing.T) {
 	ctx := context.Background()
-	pool := sync.Pool{New: func() any { return new(streampool.Wave) }}
 	var sum int64
 	collector := streampool.NewSkimmer[int](allocAddHandler{&sum})
 
 	cycle := func() {
-		w := pool.Get().(*streampool.Wave)
+		w := streampool.NewWave()
 		funnel := streampool.NewFnFunnel[int](w, func() streampool.Accumulator[int] {
 			var s int
 			return streampool.FuncAccumulator[int]{
@@ -152,12 +158,13 @@ func TestAllocsWaveReuseCycle(t *testing.T) {
 		if err := w.CloseAndSkimAll(ctx); err != nil {
 			t.Fatalf("drain: %v", err)
 		}
-		pool.Put(w)
 	}
 	a := allocsPerOp(t, 200, 500, cycle)
-	t.Logf("wave reuse cycle (funnel, 4 inputs): %.2f allocs/cycle", a)
-	const ceiling = 600 // COARSE: async + bimodal per-run (~261 or ~450); catches gross regressions only
+	t.Logf("wave per cycle (funnel, 4 inputs): %.2f allocs/cycle", a)
+	// floor ~25-26 post wave-refcount: NewWave draws a warm pooled waveImpl each cycle, so a
+	// full construct+funnel+4-submit+drain cycle is ~26 allocs (was ~261-450 un-pooled).
+	const ceiling = 60
 	if a > ceiling {
-		t.Errorf("wave reuse cycle allocs = %.2f, want <= %d", a, ceiling)
+		t.Errorf("wave per cycle allocs = %.2f, want <= %d", a, ceiling)
 	}
 }

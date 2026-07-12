@@ -25,13 +25,13 @@ import (
 // reclaims and completes.
 func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	gate := make(chan struct{})
 	launcher := streampool.NewFnLauncher(func(ctx context.Context, unit int, _ error) error {
 		switch unit {
 		case 1:
-			var subWave streampool.Wave
+			subWave := streampool.NewWave()
 			sub := streampool.NewTaskLauncher(func(ctx context.Context) error {
 				select {
 				case <-gate:
@@ -40,7 +40,7 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 					return ctx.Err()
 				}
 			})
-			if err := sub.In(&subWave).Start(ctx); err != nil {
+			if err := sub.In(subWave).Start(ctx); err != nil {
 				return err
 			}
 			return subWave.CloseAndSkimAll(ctx)
@@ -50,8 +50,8 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 		return nil
 	}).WithLimits(streampool.NewSemaphore(1))
 
-	require.NoError(t, launcher.In(&wave).Submit(ctx, 1))
-	require.NoError(t, launcher.In(&wave).Submit(ctx, 2))
+	require.NoError(t, launcher.In(wave).Submit(ctx, 1))
+	require.NoError(t, launcher.In(wave).Submit(ctx, 2))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 }
 
@@ -61,14 +61,14 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 // go through a funnel or a launched task instead.
 func TestSkimHandlerDrivingSubwavePanics(t *testing.T) {
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	skimmer := streampool.NewFnSkimmer(func(ctx context.Context, _ int, _ error) error {
-		var subWave streampool.Wave
+		subWave := streampool.NewWave()
 		return subWave.CloseAndSkimAll(ctx) // disallowed: gather from a skim handler
 	})
 
-	require.NoError(t, skimmer.In(&wave).Submit(ctx, 1))
+	require.NoError(t, skimmer.In(wave).Submit(ctx, 1))
 	require.Panics(t, func() {
 		_ = wave.CloseAndSkimAll(ctx)
 	})

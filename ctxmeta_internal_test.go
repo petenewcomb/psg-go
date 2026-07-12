@@ -39,13 +39,13 @@ func TestCurrentHeldPermit_Walk(t *testing.T) {
 // pool's base ctx carries a foreign pool's meta.
 func TestPermitScopingChains(t *testing.T) {
 	ctx := context.Background()
-	var wave Wave
+	wave := NewWave()
 
 	// Mint (or fetch) the wave's top-level meta from ctx. A zero-value Wave
 	// self-initializes on this first topLevelCtxMeta call; ctxMeta below then
 	// reads back the meta now stamped on ctx.
-	ctx, _, _ = wave.topLevelCtxMeta(ctx, func(contextType) {})
-	_, topMeta := wave.ctxMeta(ctx)
+	ctx, _, _ = waveImplOf(wave).topLevelCtxMeta(ctx, func(contextType) {})
+	_, topMeta := waveImplOf(wave).ctxMeta(ctx)
 	require.NotNil(t, topMeta)
 	require.Equal(t, topLevelContext, topMeta.ctxType)
 	assert.Nil(t, topMeta.parent, "root wave context has no parent")
@@ -65,7 +65,7 @@ func TestPermitScopingChains(t *testing.T) {
 		// The handler runs under a PER-ITEM child of the drive's skim meta
 		// (docs/decisions/driver-contexts.md): child → drive skim meta →
 		// top-level meta, all one synchronous extent (no permitRoot between).
-		_, skimMeta := wave.ctxMeta(sctx)
+		_, skimMeta := waveImplOf(wave).ctxMeta(sctx)
 		skimSeen = true
 		skimCtxType = skimMeta.ctxType
 		skimParentIsTop = skimMeta.syncParent() != nil &&
@@ -75,7 +75,7 @@ func TestPermitScopingChains(t *testing.T) {
 	})
 
 	launcher := NewTaskLauncher(func(bodyCtx context.Context) error {
-		_, bodyMeta := wave.ctxMeta(bodyCtx)
+		_, bodyMeta := waveImplOf(wave).ctxMeta(bodyCtx)
 		bodySeen = true
 		bodyCtxType = bodyMeta.ctxType
 		bodyPermitRoot = bodyMeta.permitRoot && bodyMeta.syncParent() == nil
@@ -87,8 +87,8 @@ func TestPermitScopingChains(t *testing.T) {
 		// carries the body's meta of a DIFFERENT wave) makes ensureCtxMeta
 		// record the body meta as parent — the body→subwave chaining the
 		// assertions below pin.
-		var subWave Wave
-		subCtx, subTopMeta, _ := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
+		subWave := NewWave()
+		subCtx, subTopMeta, _ := waveImplOf(subWave).topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subTopCtxType = subTopMeta.ctxType
 		subTopParentIsBody = subTopMeta.parent == bodyMeta
 		// The chain a subwave parking point would walk: from the subwave's
@@ -96,13 +96,13 @@ func TestPermitScopingChains(t *testing.T) {
 		// is stamped anywhere on the chain.
 		subTopNoHeld = subTopMeta.currentHeldPermit() == nil
 		subLauncher := NewTaskLauncher(func(subBodyCtx context.Context) error {
-			_, subBodyMeta := subWave.ctxMeta(subBodyCtx)
+			_, subBodyMeta := waveImplOf(subWave).ctxMeta(subBodyCtx)
 			subBodySeen = true
 			subBodyCtxType = subBodyMeta.ctxType
 			subBodyPermitRoot = subBodyMeta.permitRoot && subBodyMeta.syncParent() == nil
 			return nil
 		})
-		if err := subLauncher.In(&subWave).Start(subCtx); err != nil {
+		if err := subLauncher.In(subWave).Start(subCtx); err != nil {
 			return err
 		}
 		if err := subWave.CloseAndSkimAll(subCtx); err != nil {
@@ -112,7 +112,7 @@ func TestPermitScopingChains(t *testing.T) {
 		return skimmer.Submit(bodyCtx, 1)
 	})
 
-	require.NoError(t, launcher.In(&wave).Start(ctx))
+	require.NoError(t, launcher.In(wave).Start(ctx))
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
 	require.True(t, bodySeen)
@@ -140,31 +140,31 @@ func TestPermitScopingChains(t *testing.T) {
 // rely on.
 func TestHeldPermitStampedDuringBodies(t *testing.T) {
 	ctx := context.Background()
-	var wave Wave
+	wave := NewWave()
 
 	var bodyHeld, subwaveSeenHeld *heldPermit
 	limited := NewTaskLauncher(func(bodyCtx context.Context) error {
-		_, bodyMeta := wave.ctxMeta(bodyCtx)
+		_, bodyMeta := waveImplOf(wave).ctxMeta(bodyCtx)
 		bodyHeld = bodyMeta.currentHeldPermit()
 
 		// A zero-value subWave mints its top-level meta on first
 		// dispatch/skim; topLevelCtxMeta is that chokepoint and chains the
 		// derived meta's parent to bodyCtx's (cross-wave) body meta, so the
 		// subwave context finds the body's held handle via the parent walk.
-		var subWave Wave
-		subCtx, subTopMeta, _ := subWave.topLevelCtxMeta(bodyCtx, func(contextType) {})
+		subWave := NewWave()
+		subCtx, subTopMeta, _ := waveImplOf(subWave).topLevelCtxMeta(bodyCtx, func(contextType) {})
 		subwaveSeenHeld = subTopMeta.currentHeldPermit()
 		return subWave.CloseAndSkimAll(subCtx)
 	}).WithLimits(NewSemaphore(1))
-	require.NoError(t, limited.In(&wave).Start(ctx))
+	require.NoError(t, limited.In(wave).Start(ctx))
 
 	var unlimitedHeld = &heldPermit{} // sentinel, overwritten
 	unlimited := NewTaskLauncher(func(bodyCtx context.Context) error {
-		_, bodyMeta := wave.ctxMeta(bodyCtx)
+		_, bodyMeta := waveImplOf(wave).ctxMeta(bodyCtx)
 		unlimitedHeld = bodyMeta.currentHeldPermit()
 		return nil
 	})
-	require.NoError(t, unlimited.In(&wave).Start(ctx))
+	require.NoError(t, unlimited.In(wave).Start(ctx))
 
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 
@@ -175,12 +175,11 @@ func TestHeldPermitStampedDuringBodies(t *testing.T) {
 
 	var funnelHeld *heldPermit
 	ctx2 := context.Background()
-	var wave2 Wave
-	fp := &wave2
-	f := NewFnFunnel(fp, func() Accumulator[int] {
+	wave2 := NewWave()
+	f := NewFnFunnel(wave2, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
-				_, m := wave2.ctxMeta(fctx)
+				_, m := waveImplOf(wave2).ctxMeta(fctx)
 				funnelHeld = m.currentHeldPermit()
 				return time.Time{}, nil
 			},
@@ -194,19 +193,18 @@ func TestHeldPermitStampedDuringBodies(t *testing.T) {
 
 func TestFunnelWorkerContextIsFreshPermitRoot(t *testing.T) {
 	ctx := context.Background()
-	var wave Wave
+	wave := NewWave()
 
-	fp := &wave
 	// The funnel worker meta is pooled (bodyMetaPool) and recycled when the work is
 	// freed, so capture its properties DURING the body, not via a pointer held past
 	// drain.
 	var funnelSeen bool
 	var funnelCtxType contextType
 	var funnelPermitRoot bool
-	f := NewFnFunnel(fp, func() Accumulator[int] {
+	f := NewFnFunnel(wave, func() Accumulator[int] {
 		return FuncAccumulator[int]{
 			AccumulateFn: func(fctx context.Context, _ int, _ error) (time.Time, error) {
-				_, funnelMeta := wave.ctxMeta(fctx)
+				_, funnelMeta := waveImplOf(wave).ctxMeta(fctx)
 				funnelSeen = true
 				funnelCtxType = funnelMeta.ctxType
 				funnelPermitRoot = funnelMeta.permitRoot && funnelMeta.syncParent() == nil

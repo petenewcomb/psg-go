@@ -15,10 +15,10 @@ import (
 // -memprofile analysis of per-dispatch allocations.
 func BenchmarkLauncherSkim(b *testing.B) {
 	ctx := context.Background()
-	var w streampool.Wave
+	w := streampool.NewWave()
 	var sum int64
 	collector := streampool.NewSkimmer[int](allocAddHandler{&sum})
-	fetcher := streampool.NewLauncher[int](allocForwardHandler{collector}).In(&w)
+	fetcher := streampool.NewLauncher[int](allocForwardHandler{collector}).In(w)
 	// warm the pools
 	for i := 0; i < 1000; i++ {
 		_ = fetcher.Submit(ctx, 1)

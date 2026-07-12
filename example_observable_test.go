@@ -29,7 +29,7 @@ func Example_observable() {
 	ctx := context.Background()
 
 	// Create a scatter-gather wave
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	// Define a result aggregation function, which will run in the top-level
 	// goroutine from within calls to Start and SkimAll.
@@ -70,7 +70,7 @@ func Example_observable() {
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		err := newRunner(taskName).In(&wave).Start(ctx)
+		err := newRunner(taskName).In(wave).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}

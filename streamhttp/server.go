@@ -86,7 +86,7 @@ type wsInbound struct {
 // New builds a unified Server. wsApp and grpcSrv may be nil to disable those
 // protocols.
 func New(httpApp HTTPApp, wsApp WSApp, grpcSrv *grpc.Server, opts ...Option) *Server {
-	s := &Server{httpApp: httpApp, wsApp: wsApp, grpcSrv: grpcSrv, wsPath: "/ws"}
+	s := &Server{httpApp: httpApp, wsApp: wsApp, grpcSrv: grpcSrv, wsPath: "/ws", msgs: streampool.NewWave()}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -148,7 +148,7 @@ func (s *Server) initWS(conn *gws.Conn) {
 	if s.orderedFn == nil {
 		return
 	}
-	rw := new(streampool.Wave) // kept alive by the resequencer's internal reference
+	rw := streampool.NewWave() // kept alive by the resequencer's stored handle
 	cs := &wsConnState{}
 	cs.reseq = streampool.NewFnResequencer[wsReply](rw, 0,
 		func(_ context.Context, r wsReply, _ error) error {
@@ -193,7 +193,7 @@ func (e *wsEvents) OnMessage(conn *gws.Conn, msg *gws.Message) {
 			cs.seq++
 		}
 	}
-	if err := e.s.process.In(&e.s.msgs).Submit(context.Background(), in); err != nil {
+	if err := e.s.process.In(e.s.msgs).Submit(context.Background(), in); err != nil {
 		_ = msg.Close()
 	}
 }

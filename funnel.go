@@ -48,7 +48,7 @@ import (
 // guarantees an instance is never touched after its Flush, so the owner may release
 // any factory-level state after the drain returns (see [AccumulatorFactory]).
 type Funnel[T any] struct {
-	wave    *Wave
+	wave    Wave
 	factory AccumulatorFactory[T]
 
 	// limiter caps how many funnel-body executions this Funnel runs concurrently.
@@ -96,14 +96,14 @@ func newFunnelID() funnelID { return funnelID(nextFunnelID.Add(1)) }
 //
 //nolint:contextcheck // background context used only for tracing
 func NewFunnel[T any](
-	wave *Wave,
+	wave Wave,
 	funnelFactory AccumulatorFactory[T],
 ) Funnel[T] {
 	traceRegion := "NewFunnel"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	if wave == nil {
-		panic("wave must be non-nil")
+	if wave.h.Empty() {
+		panic("wave must be a valid NewWave (got the zero Wave)")
 	}
 	if funnelFactory == nil {
 		panic("funnelFactory must be non-nil")
@@ -118,7 +118,7 @@ func NewFunnel[T any](
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), traceRegion, "Funnel(id=%d), wave=%p", c.id, wave)
+		trace.Logf(context.Background(), traceRegion, "Funnel(id=%d), wave=%v", c.id, wave.h)
 	}
 
 	return c
@@ -143,7 +143,7 @@ func (c Funnel[T]) WithLimits(limiters ...Limiter) Funnel[T] {
 // wrapper for `NewFunnel(wave, NewAccumulatorFactory(newAccumulator))`. Chain
 // [Funnel.WithLimits] to bind a limiter.
 func NewFnFunnel[T any](
-	wave *Wave,
+	wave Wave,
 	newAccumulator func() Accumulator[T],
 ) Funnel[T] {
 	return NewFunnel(wave, NewAccumulatorFactory(newAccumulator))
@@ -169,7 +169,7 @@ type ErrFunnel = Funnel[struct{}]
 // state, use [NewFunnel] + [NewAccumulatorFactory] with a
 // [NewErrAccumulator] inside the factory closure.
 func NewErrFunnel(
-	wave *Wave,
+	wave Wave,
 	accumulate func(ctx context.Context, err error) (time.Time, error),
 	flush func(ctx context.Context) error,
 ) ErrFunnel {
@@ -209,13 +209,17 @@ func (c *Funnel[T]) SubmitResult(
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
-	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
+	target, ok := resolveWave(c.wave, ctx)
+	if !ok {
+		return ErrWaveDone // bound wave has drained and recycled
+	}
+	defer wavePool.Release(target)
 	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
-	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// op.In(wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into the funnel's wave, recording the source as
 	// parent). No ctx-type restriction — a value may be submitted to a funnel from
 	// anywhere.
-	ctx, meta, owned := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
 	if owned {
 		// Safe now that the body borrow ref-pins this meta as its parent: the
 		// meta (and its ctxpool child) survives on that ref until the async
@@ -229,7 +233,7 @@ func (c *Funnel[T]) SubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return c.submit(ctx, meta, group, value, err)
+	return c.submit(ctx, target, meta, group, value, err)
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
@@ -265,8 +269,12 @@ func (c *Funnel[T]) TrySubmitResult(
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
 
-	c.wave.ensureArmed() // dispatch entry: re-arm a drained wave
-	ctx, meta, owned := c.wave.topLevelCtxMeta(ctx, func(contextType) {})
+	target, ok := resolveWave(c.wave, ctx)
+	if !ok {
+		return false, ErrWaveDone // bound wave has drained and recycled
+	}
+	defer wavePool.Release(target)
+	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
 	if owned {
 		// Safe now that the body borrow ref-pins this meta as its parent (see
 		// SubmitResult).
@@ -279,31 +287,33 @@ func (c *Funnel[T]) TrySubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return c.trySubmit(ctx, meta, group, value, err, deadline)
+	return c.trySubmit(ctx, target, meta, group, value, err, deadline)
 }
 
 func (c *Funnel[T]) submit(
 	ctx context.Context,
+	wv *waveImpl,
 	meta *ctxMeta,
 	group workq.GroupID,
 	value T,
 	err error,
 ) error {
-	funnelWork := c.newFunnelWork(ctx, group, value, err)
-	postWork := newFunnelPostWork(group, c.wave, funnelWork)
+	funnelWork := c.newFunnelWork(ctx, wv, group, value, err)
+	postWork := newFunnelPostWork(group, wv, funnelWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
 func (c *Funnel[T]) trySubmit(
 	ctx context.Context,
+	wv *waveImpl,
 	meta *ctxMeta,
 	group workq.GroupID,
 	value T,
 	err error,
 	deadline time.Time,
 ) (bool, error) {
-	funnelWork := c.newFunnelWork(ctx, group, value, err)
-	postWork := newFunnelPostWork(group, c.wave, funnelWork)
+	funnelWork := c.newFunnelWork(ctx, wv, group, value, err)
+	postWork := newFunnelPostWork(group, wv, funnelWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()
@@ -380,7 +390,7 @@ type funnelInstance[T any] struct {
 	// wave owns this instance (the per-wave flush barrier, the error sink, ctxMeta).
 	// factory builds the accumulator. Both are copied from the Funnel value at
 	// creation; the instance carries no funnel back-pointer.
-	wave    *Wave
+	wave    *waveImpl
 	factory AccumulatorFactory[T]
 
 	mu            sync.Mutex
@@ -720,10 +730,15 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	// takes its wave reference while this barrier still holds the wave open;
 	// otherwise the wave-rooted fire could IncrementReference a Done wave).
 	// totalReferences cannot transiently reach zero across an emitting flush.
-	// Deferred so a panicking Flush still releases it. (c.wave is read here,
-	// while c.mu is held, so the deferred call captures the state pointer,
-	// not the instance.)
-	defer c.wave.state.DecrementReference()
+	// Deferred so a panicking Flush still releases it. c.wave is captured here,
+	// while c.mu is held, so the deferred call holds the impl pointer, not the
+	// instance. The paired object-lifetime reference (AddRef at allocation) is dropped
+	// right after the wavestate reference — on the last release this recycles the impl,
+	// which is safe because a recycle means refs hit zero (no other holder).
+	defer func(wv *waveImpl) {
+		wv.state.DecrementReference()
+		wavePool.Release(wv)
+	}(c.wave)
 
 	// Tag-union release: registered after the barrier so it runs BEFORE it —
 	// firing the adopted tag follow-ups while the wave is still held. Registered
@@ -769,8 +784,13 @@ type funnelWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
 	// fn is the Funnel value (config), copied at dispatch: wave, factory, limiter, id,
-	// and the cached pools. All copies share identity via fn.id.
-	fn       Funnel[T]
+	// and the cached pools. All copies share identity via fn.id. The wave field of fn is
+	// the weak handle; the resolved substrate is wave below.
+	fn Funnel[T]
+	// wave is the resolved substrate, pinned by this work item's own object-lifetime
+	// reference (poolWork.Init AddRefs it under the dispatch pin), so it stays valid for
+	// the item's whole lifetime — Execute, the instance handoff, and Free.
+	wave     *waveImpl
 	input    T
 	inputErr error
 	// h is the native limiter handle this work's admission runs through; nil for
@@ -794,19 +814,20 @@ type funnelWork[T any] struct {
 }
 
 func (c *Funnel[T]) newFunnelWork(
-	submitCtx context.Context, group workq.GroupID, value T, err error,
+	submitCtx context.Context, wv *waveImpl, group workq.GroupID, value T, err error,
 ) *funnelWork[T] {
 	wk := c.workPool.Get()
-	wk.Init(submitCtx, group, *c, value, err)
+	wk.Init(submitCtx, wv, group, *c, value, err)
 	return wk
 }
 
 //nolint:contextcheck // submitCtx is the borrow source for the body ctx, not a propagated arg
 func (wk *funnelWork[T]) Init(
-	submitCtx context.Context, group workq.GroupID, fn Funnel[T], input T, inputErr error,
+	submitCtx context.Context, wv *waveImpl, group workq.GroupID, fn Funnel[T], input T, inputErr error,
 ) {
-	wk.poolWork.Init(group, fn.wave)
+	wk.poolWork.Init(group, wv)
 	wk.fn = fn
+	wk.wave = wv
 	wk.input = input
 	wk.inputErr = inputErr
 	// Resolve the dispatching meta once, here on the dispatcher's goroutine where
@@ -820,26 +841,26 @@ func (wk *funnelWork[T]) Init(
 	// (the worker's E is stamped at Execute, not known here).
 	if fn.limiter.pool != nil {
 		wk.h = heldPermitPool.Get()
-		wk.h.ownCache = fn.wave.ensureCache(m, fn.limiter.pool)
+		wk.h.ownCache = wv.ensureCache(m, fn.limiter.pool)
 		wk.h.weight = 1 // funnels take a plain weight-1 permit (no weigher)
 	}
 	// Capture the fan-in boundary from the dispatch-time synchronous chain (the
 	// borrowed body meta below is a permitRoot, so the boundary walk could not
 	// see past it). The instance adopts it at the first accumulate.
-	wk.boundary = flowBoundaryAboveWave(m, fn.wave)
-	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, m, fn.wave, funnelContext, wk.h, nil)
+	wk.boundary = flowBoundaryAboveWave(m, wv)
+	wk.bodyCtx, wk.bodyMeta = borrowBodyContext(submitCtx, m, wv, funnelContext, wk.h, nil)
 }
 
 // instanceQueue returns the wave's per-funnel instance cache for this work's funnel,
 // creating it on first use. The map value is the typed *funnelInstanceQueue[T]; the
 // only type erasure is the sync.Map's any boundary.
 func (wk *funnelWork[T]) instanceQueue() *funnelInstanceQueue[T] {
-	if v, ok := wk.fn.wave.funnelInstances.Load(wk.fn.id); ok {
+	if v, ok := wk.wave.funnelInstances.Load(wk.fn.id); ok {
 		return v.(*funnelInstanceQueue[T])
 	}
 	q := &funnelInstanceQueue[T]{instancePool: wk.fn.instancePool}
 	q.queue.Init()
-	actual, _ := wk.fn.wave.funnelInstances.LoadOrStore(wk.fn.id, q)
+	actual, _ := wk.wave.funnelInstances.LoadOrStore(wk.fn.id, q)
 	return actual.(*funnelInstanceQueue[T])
 }
 
@@ -874,8 +895,12 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 		// accumulator is unflushed, regardless of which worker eventually flushes it,
 		// and is what guarantees every outstanding instance is flushed before the wave
 		// drains. Released in flush().
-		wk.fn.wave.state.IncrementReference()
-		hbc.wave = wk.fn.wave
+		wk.wave.state.IncrementReference()
+		// Paired object-lifetime reference for the instance (a strong holder that
+		// outlives this funnelWork): minted under wk's own held reference, released
+		// alongside DecrementReference in flush().
+		omnipool.AddRef(wk.wave)
+		hbc.wave = wk.wave
 		hbc.factory = wk.fn.factory
 		hbc.detached = false
 		// Reset and re-Init the embedded work item: a fresh work ID, the
@@ -926,7 +951,7 @@ func (wk *funnelWork[T]) gate(ctx context.Context, ex workq.Execution) (bool, er
 	if wk.h == nil {
 		return true, nil
 	}
-	return wk.h.acquireJoint(ctx, ex, wk.fn.wave)
+	return wk.h.acquireJoint(ctx, ex, wk.wave)
 }
 
 // releasePermit gives back a permit acquired by gate when the body could not start (the
@@ -982,7 +1007,7 @@ func (wk *funnelWork[T]) Free() {
 		wk.bodyMeta = nil
 	}
 
-	wave := wk.fn.wave
+	wave := wk.wave
 	wk.DownstreamWork.Close()
 	wk.poolWork.Close(wave)
 
@@ -999,11 +1024,11 @@ func (wk *funnelWork[T]) Free() {
 // with the rest of the wave's sources.
 type funnelPostWork struct {
 	poolWork
-	wave *Wave
+	wave *waveImpl
 	work boundFunnelWork
 }
 
-func (wk *funnelPostWork) Init(group workq.GroupID, wave *Wave, work boundFunnelWork) {
+func (wk *funnelPostWork) Init(group workq.GroupID, wave *waveImpl, work boundFunnelWork) {
 	wk.poolWork.Init(group, wave)
 	wk.wave = wave
 	wk.work = work
@@ -1068,7 +1093,7 @@ func (wk *funnelPostWork) Free() {
 var funnelPostWorkPool = omnipool.For[funnelPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func newFunnelPostWork(group workq.GroupID, wave *Wave, bc boundFunnelWork) *funnelPostWork {
+func newFunnelPostWork(group workq.GroupID, wave *waveImpl, bc boundFunnelWork) *funnelPostWork {
 	traceRegion := "newFunnelPostWork"
 
 	wk := funnelPostWorkPool.Get()

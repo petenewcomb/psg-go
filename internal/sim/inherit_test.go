@@ -16,15 +16,15 @@ import (
 // concurrency tracker (split counters would each assert a subset of the
 // joint topology and could miss a violation); fresh entries do not.
 func TestInheritedLimiterAliasing(t *testing.T) {
-	var parentWave streampool.Wave
+	parentWave := streampool.NewWave()
 	parentPlan := &Plan{
 		TaskLimiters:   []Limiter{{ID: 1, Permits: 2, InheritFromParent: -1}},
 		FunnelLimiters: []Limiter{{ID: 2, Permits: 3, InheritFromParent: -1}},
 	}
-	parent := newController(parentPlan, &parentWave, nil)
+	parent := newController(parentPlan, parentWave, nil)
 	parent.ensurePools()
 
-	var childWave streampool.Wave
+	childWave := streampool.NewWave()
 	childPlan := &Plan{
 		TaskLimiters: []Limiter{
 			{ID: 1, Permits: 2, InheritFromParent: 0},
@@ -32,7 +32,7 @@ func TestInheritedLimiterAliasing(t *testing.T) {
 		},
 		FunnelLimiters: []Limiter{{ID: 2, Permits: 3, InheritFromParent: 0}},
 	}
-	child := newController(childPlan, &childWave, parent)
+	child := newController(childPlan, childWave, parent)
 	child.ensurePools()
 
 	// streampool.Limiter shares state by reference; == is identity of the

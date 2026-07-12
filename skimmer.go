@@ -25,7 +25,7 @@ import (
 // can be passed by value to goroutines or stored in structures and
 // used concurrently.
 type Skimmer[T any] struct {
-	wave     *Wave
+	wave     Wave
 	handler  Handler[T]
 	workPool *omnipool.Pool[skimWork[T]]
 }
@@ -53,7 +53,7 @@ func NewSkimmer[T any](
 // In returns a copy of the Skimmer bound to wave, so its dispatches place
 // work in wave instead of the ambient (body-ctx) wave. Use at top level (no
 // ambient wave) or to redirect work into another wave.
-func (g Skimmer[T]) In(wave *Wave) Skimmer[T] {
+func (g Skimmer[T]) In(wave Wave) Skimmer[T] {
 	g.wave = wave
 	return g
 }
@@ -133,10 +133,13 @@ func (g Skimmer[T]) SubmitResult(
 	traceRegion := "Skimmer.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := resolveWave(g.wave, ctx)
-	target.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
+	target, ok := resolveWave(g.wave, ctx)
+	if !ok {
+		return ErrWaveDone // bound wave has drained and recycled
+	}
+	defer wavePool.Release(target)
 	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
-	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// op.In(wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
 	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
@@ -189,10 +192,13 @@ func (g Skimmer[T]) TrySubmitResult(
 	traceRegion := "Skimmer.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target := resolveWave(g.wave, ctx)
-	target.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
+	target, ok := resolveWave(g.wave, ctx)
+	if !ok {
+		return false, ErrWaveDone // bound wave has drained and recycled
+	}
+	defer wavePool.Release(target)
 	// Mint-or-reuse a meta: in-body submits reuse the ambient body meta; a top-level
-	// op.In(&wave).Submit from a bare ctx mints a fresh top-level meta (and a
+	// op.In(wave).Submit from a bare ctx mints a fresh top-level meta (and a
 	// cross-wave submit redirects into target, recording the source as parent). No
 	// ctx-type restriction — a value may be submitted to a skimmer from anywhere.
 	ctx, meta, owned := target.topLevelCtxMeta(ctx, func(contextType) {})
@@ -220,7 +226,7 @@ type boundSkimWork interface {
 type skimWork[T any] struct {
 	poolWork
 	workq.DownstreamWork
-	wave    *Wave
+	wave    *waveImpl
 	pool    *omnipool.Pool[skimWork[T]]
 	handler Handler[T]
 	value   T
@@ -251,7 +257,7 @@ func (wk *skimWork[T]) captureRiders(riders *flowRiderNode) {
 }
 
 // newSkimWork creates a new skim work item with the provided values
-func (g Skimmer[T]) newSkimWork(group workq.GroupID, wv *Wave, value T, err error) *skimWork[T] {
+func (g Skimmer[T]) newSkimWork(group workq.GroupID, wv *waveImpl, value T, err error) *skimWork[T] {
 	wk := g.workPool.Get()
 	wk.Init(g.workPool, group, wv, g.handler, value, err)
 	return wk
@@ -260,7 +266,7 @@ func (g Skimmer[T]) newSkimWork(group workq.GroupID, wv *Wave, value T, err erro
 func (wk *skimWork[T]) Init(
 	pool *omnipool.Pool[skimWork[T]],
 	group workq.GroupID,
-	wv *Wave,
+	wv *waveImpl,
 	handler Handler[T],
 	value T,
 	err error,
@@ -303,7 +309,7 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	meta.ctxType = skimContext
 	meta.parent = driveMeta
 	refMeta(driveMeta)
-	meta.parentWaves = driveMeta.parentWaves
+	meta.parentWaves = retainParentWaveSet(driveMeta.parentWaves)
 	meta.executionEnvironment = driveMeta.executionEnvironment
 	if wk.riders != nil {
 		meta.riders = wk.riders
@@ -356,9 +362,10 @@ func (g Skimmer[T]) submit(
 	value T,
 	err error,
 ) error {
-	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	wv := meta.wave // synchronous dispatch: the meta's wave is pinned by the dispatch
+	skimWork := g.newSkimWork(group, wv, value, err)
 	skimWork.captureRiders(meta.riders)
-	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
+	postWork := wv.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
@@ -371,9 +378,10 @@ func (g Skimmer[T]) trySubmit(
 	err error,
 	deadline time.Time,
 ) (bool, error) {
-	skimWork := g.newSkimWork(group, meta.wave, value, err)
+	wv := meta.wave // synchronous dispatch: the meta's wave is pinned by the dispatch
+	skimWork := g.newSkimWork(group, wv, value, err)
 	skimWork.captureRiders(meta.riders)
-	postWork := meta.wave.newSkimPostWork(group, skimWork, meta.ShouldBlock())
+	postWork := wv.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
 		postWork.Free()

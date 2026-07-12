@@ -116,7 +116,7 @@ func TestHoldFlowDispatch(t *testing.T) {
 		return nil
 	})))
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var bodySaw atomic.Value
 	blocked := make(chan struct{})
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
@@ -125,7 +125,7 @@ func TestHoldFlowDispatch(t *testing.T) {
 		bodySaw.Store([2]any{v, ok})
 		return nil
 	})
-	chk.NoError(task.In(&wave).Start(held))
+	chk.NoError(task.In(wave).Start(held))
 
 	// Release while the dispatched body still runs: the work's own carrier
 	// refs hold the flow, so the follow-up waits for the body too.
@@ -142,7 +142,7 @@ func TestHoldFlowDispatch(t *testing.T) {
 	held2, cancel2 := streampool.HoldFlow(context.Background())
 	defer cancel2(nil)
 	chk.PanicsWithValue(
-		"op constructed with nil wave dispatched without op.In(&wave) and outside any wave body",
+		"op constructed with nil wave dispatched without op.In(wave) and outside any wave body",
 		func() { _ = task.Start(held2) })
 }
 
@@ -162,10 +162,10 @@ func TestHoldFlowPostReleaseDispatch(t *testing.T) {
 	}, key.Value("snap")))
 	cancel(nil)
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error { return nil })
 	chk.NotPanics(func() {
-		if err := task.In(&wave).Start(held); err != nil {
+		if err := task.In(wave).Start(held); err != nil {
 			chk.ErrorIs(err, context.Canceled, "rejection, if any, is the ordinary canceled-ctx error")
 		}
 		//nolint:contextcheck // a fresh top-level drive ctx, by design

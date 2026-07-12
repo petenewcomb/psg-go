@@ -6,7 +6,6 @@ package streampool
 import (
 	"context"
 	"fmt"
-	"maps"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -30,11 +29,17 @@ const (
 )
 
 type ctxMeta struct {
-	// wave is the Wave this meta belongs to: both the dispatch/ownership identity
-	// (validated by Wave.ctxMeta) and the ambient wave a nil-wave op dispatched from
-	// this context resolves to (resolveWave). Always set on a live meta; nil only on
-	// a zero-value meta not derived through a Wave.
-	wave *Wave
+	// wave is the waveImpl this meta belongs to: both the dispatch/ownership identity
+	// (validated by Wave.ctxMeta) and the ambient wave a nil-wave op dispatched from this
+	// context resolves to (resolveWave). It is a NAKED pointer, not a gen-guarded handle,
+	// because every read of it is provably live: the meta's own wave is read only
+	// synchronously on a goroutine whose dispatch/body pins it, or via a syncParent walk
+	// (bounded by permitRoot) that only ever touches stack-pinned ancestors. A meta can
+	// outlive its wave via the refcounted .parent link, but nothing reads .wave across
+	// that link (the wave-bearing walks all use syncParent). nil on a meta not derived
+	// through a Wave. (The genuinely cross-lifetime holder is parentWaves below, which
+	// therefore IS gen-guarded.)
+	wave *waveImpl
 	// parent links to the ctxMeta this one was derived or borrowed from — the
 	// context it descends from along the value chain, for sync derivations
 	// (top-level→skim, body→subwave) AND async borrows (borrowBodyContext,
@@ -72,8 +77,12 @@ type ctxMeta struct {
 	// for the eager heldRequest. A stamped handle holds a permit while the body runs
 	// its own code and is suspended (permit lent) across drive episodes. nil for an
 	// unlimited op.
-	held        *heldPermit
-	parentWaves map[*Wave]struct{}
+	held *heldPermit
+	// parentWaves is the cross-wave ancestry set (see [parentWaveSet]): a refcounted,
+	// pooled, gen-guarded-Handle-keyed set shared by pointer along the dispatch chain,
+	// used only to reject upward dispatch/skim. nil when the body has no cross-wave
+	// ancestry. A reference is held from assignment until this meta's Reset.
+	parentWaves *parentWaveSet
 	ctxType     contextType
 	// riders is the head of the flow rider chain in scope
 	// (docs/decisions/flow-rider-chain.md): a linked chain of one-binding nodes
@@ -135,6 +144,7 @@ func (cm *ctxMeta) Reset() {
 	cm.wave = nil
 	cm.parent = nil
 	cm.held = nil
+	releaseParentWaveSet(cm.parentWaves)
 	cm.parentWaves = nil
 	cm.ctxType = topLevelContext
 	cm.riders = nil
@@ -327,7 +337,9 @@ func (cm *ctxMeta) TryExecuteNow(
 		// Make sure existing work has a chance to run before we add more.
 		wait()
 
-		// Apply backpressure at top level by processing some outstanding work first
+		// Apply backpressure at top level by processing some outstanding work first.
+		// Synchronous on the dispatching goroutine, where this meta's naked wave pointer
+		// is pinned by the dispatch.
 		err := cm.wave.yield(ctx, deadline)
 		if err != nil {
 			return false, err
@@ -381,8 +393,10 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 			// brackets (Wave.block) no-op while the whole set stays
 			// suspended, and reclaim exactly what they re-suspend once
 			// this bracket's own reclaim is in flight (see reclaimJoint).
-			if h := suspendHeldPermit(cm, cm.wave); h != nil {
-				defer h.reclaimJoint(ctx, cm.wave)
+			if wv := cm.wave; wv != nil {
+				if h := suspendHeldPermit(cm, wv); h != nil {
+					defer h.reclaimJoint(ctx, wv)
+				}
 			}
 
 			// Make sure existing work has a chance to run before we add more.
@@ -522,7 +536,7 @@ func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
 // present (a body or driver ctx). The lookup is the unified read seam
 // (metaFromContext, ctxpool-aware); no ctxMetaMap caching, which would alias a reused
 // ctxpool body ctx. (Step toward retiring ctxMetaMap; see meta-context-migration.md.)
-func (wv *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
+func (wv *waveImpl) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.ctxMeta"
 
 	meta, ok := metaFromContext(ctx)
@@ -530,7 +544,9 @@ func (wv *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 		panic("Context not associated with a wave")
 	}
 	if meta.wave != wv {
-		if _, isParentWave := meta.parentWaves[wv]; isParentWave {
+		// Gen-guarded ancestry test: a stale ancestor handle (recycled-and-reused impl)
+		// must not false-match this live wave.
+		if meta.parentWaves.has(omnipool.NewHandle(wv)) {
 			panic("Context belongs to a child wave")
 		}
 		panic("Context belongs to a different wave")
@@ -541,7 +557,7 @@ func (wv *Wave) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	return ctx, meta
 }
 
-func (wv *Wave) ensureCtxMeta(
+func (wv *waveImpl) ensureCtxMeta(
 	ctx context.Context,
 	updateFn func(context.Context, *ctxMeta) context.Context,
 ) (context.Context, *ctxMeta) {
@@ -555,25 +571,25 @@ func (wv *Wave) ensureCtxMeta(
 	}
 
 	ctxType := topLevelContext
-	var parentWaves map[*Wave]struct{}
+	var parentWaves *parentWaveSet
 	var exEnv executionEnvironment
 	if sourceMeta != nil {
 		switch sourceMeta.wave {
 		case wv:
-			parentWaves = sourceMeta.parentWaves
+			parentWaves = retainParentWaveSet(sourceMeta.parentWaves)
 			ctxType = sourceMeta.ctxType
 			exEnv = sourceMeta.executionEnvironment
 		case nil:
 			// A wave-less meta (a top-level WithFlow scope): nothing to join
 			// wave-wise — inherit its (nil) ancestry and derive as top-level.
-			parentWaves = sourceMeta.parentWaves
+			parentWaves = retainParentWaveSet(sourceMeta.parentWaves)
 		default:
-			if _, isParentWave := sourceMeta.parentWaves[wv]; isParentWave {
+			// Cross-wave: gen-guarded ancestry test, then join the source's own wave
+			// into a fresh derived set (derivedParentWaveSet builds it).
+			if sourceMeta.parentWaves.has(omnipool.NewHandle(wv)) {
 				panic("Context belongs to a child wave")
 			}
-			parentWaves = make(map[*Wave]struct{}, len(sourceMeta.parentWaves)+1)
-			maps.Copy(parentWaves, sourceMeta.parentWaves)
-			parentWaves[sourceMeta.wave] = struct{}{}
+			parentWaves = derivedParentWaveSet(sourceMeta.parentWaves, sourceMeta.wave, wv)
 		}
 	}
 
@@ -617,16 +633,10 @@ func (wv *Wave) ensureCtxMeta(
 // not descend from the meta-stamped ctx (the Launcher path roots the body at the
 // original caller ctx) — passes that ctx to [releaseTopLevelContext] once the
 // synchronous dispatch completes, recycling the meta + exEnv + ctxpool child.
-func (wv *Wave) topLevelCtxMeta(
+func (wv *waveImpl) topLevelCtxMeta(
 	ctx context.Context, checkCtxType func(ctxType contextType),
 ) (context.Context, *ctxMeta, bool) {
 	traceRegion := "Wave.topLevelCtxMeta"
-
-	// Lazy-init chokepoint: every dispatch (Launcher via vetStart, Skimmer/Funnel
-	// via their unified submit path) and every skim (via skimCtxMeta) lands here, so
-	// a zero-value Wave is brought up — or re-armed after a prior drain — exactly
-	// once before its substrate is touched.
-	wv.ensureInit()
 
 	// Reuse a same-wave meta already on ctx — a body's own meta (dispatching from
 	// inside a Skim/Accumulate body), or this wave's top-level/skim meta — rather
@@ -678,7 +688,7 @@ func releaseTopLevelContext(ctx context.Context) {
 // bare-ctx skim, the underlying top-level meta too (linked via releaseParent) — so
 // the caller releases the whole chain after the skim drive completes; false when an
 // ambient skim meta was reused.
-func (wv *Wave) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta, bool) {
+func (wv *waveImpl) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta, bool) {
 	traceRegion := "Wave.skimCtxMeta"
 
 	ctx, meta, ownedTop := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {

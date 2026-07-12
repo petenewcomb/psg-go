@@ -13,16 +13,12 @@ import (
 	"github.com/petenewcomb/streampool"
 )
 
-// TestWaveReuseAfterDrain is the motivating case for the reuse re-arm: a *Wave
-// pooled via sync.Pool is driven through many drain cycles (allocation-free
-// sub-waves). Each cycle creates a funnel (so the flusher re-spawns and must be
-// joined on the next re-arm) plus a launcher feeding it, then CloseAndSkimAll, then
-// returns the wave to the pool. Run concurrently under -race, it exercises the
-// re-arm path (Done -> fresh Open), the flusher-join barrier, and per-cycle state
-// reset with no cross-cycle bleed.
-func TestWaveReuseAfterDrain(t *testing.T) {
-	pool := sync.Pool{New: func() any { return new(streampool.Wave) }}
-
+// TestWaveManyDrainCyclesConcurrent drives many independent NewWave drain cycles
+// concurrently. Each cycle constructs a fresh wave via streampool.NewWave, creates
+// a funnel (so the flusher spawns) plus a launcher feeding it, then CloseAndSkimAll.
+// Run concurrently under -race, it exercises many concurrent wave lifecycles and
+// verifies per-cycle state isolation with no cross-cycle bleed.
+func TestWaveManyDrainCyclesConcurrent(t *testing.T) {
 	const (
 		goroutines = 8
 		cycles     = 100
@@ -37,7 +33,7 @@ func TestWaveReuseAfterDrain(t *testing.T) {
 			defer wg.Done()
 			ctx := context.Background()
 			for i := 0; i < cycles; i++ {
-				wave := pool.Get().(*streampool.Wave)
+				wave := streampool.NewWave()
 
 				var cycleSum atomic.Int64
 				collector := streampool.NewSkimmer(streampool.HandlerFunc[int](
@@ -81,8 +77,6 @@ func TestWaveReuseAfterDrain(t *testing.T) {
 					return
 				}
 				grandTotal.Add(cycleSum.Load())
-
-				pool.Put(wave)
 			}
 		}()
 	}
@@ -93,14 +87,15 @@ func TestWaveReuseAfterDrain(t *testing.T) {
 	}
 }
 
-// TestWaveReuseSequential is the minimal reuse case: one zero-value Wave variable
-// driven through several drain cycles in a row (no pool, no concurrency), each
-// re-arming the prior cycle's Done state.
-func TestWaveReuseSequential(t *testing.T) {
+// TestWaveSequentialDrainCycles is the minimal case: several independent NewWave
+// drain cycles run in a row (no concurrency), each a fresh wave constructed via
+// streampool.NewWave with no state carried across cycles.
+func TestWaveSequentialDrainCycles(t *testing.T) {
 	ctx := context.Background()
-	var wave streampool.Wave
 
 	for i := 0; i < 5; i++ {
+		wave := streampool.NewWave()
+
 		var sum atomic.Int64
 		collector := streampool.NewSkimmer(streampool.HandlerFunc[int](
 			func(_ context.Context, v int, _ error) error {
@@ -112,7 +107,7 @@ func TestWaveReuseSequential(t *testing.T) {
 				return collector.Submit(fctx, v)
 			}))
 		for k := 1; k <= 4; k++ {
-			if err := fetcher.In(&wave).Submit(ctx, k); err != nil {
+			if err := fetcher.In(wave).Submit(ctx, k); err != nil {
 				t.Fatalf("cycle %d submit: %v", i, err)
 			}
 		}

@@ -162,7 +162,7 @@ func (h *heldPermit) suspend(target *permits.Cache) bool {
 // lend, a sibling reacquired out of order (a help-block's confirm lands it while this
 // hold was suspended) would be held across a wait for a LOWER rank — the inversion that
 // deadlocks against an admitter parked in the canonical posture.
-func (h *heldPermit) reclaim(ctx context.Context, wv *Wave, above []*heldPermit) {
+func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPermit) {
 	if trace.IsEnabled() {
 		trace.Logf(ctx, "heldPermit.reclaim", "h=%p Pool=%p Demand=%p wv=%p lent=%v suspended=%v",
 			h, h.pool(), &h.demand, wv, h.lent, h.suspendTarget != nil)
@@ -274,7 +274,7 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *Wave, above []*heldPermit)
 // always resuming from the LOWEST marked hold — until no hold is marked. It terminates
 // because each reclaim clears its own mark and a park can mark only ranks above the one
 // being reclaimed.
-func (h *heldPermit) reclaimJoint(ctx context.Context, wv *Wave) {
+func (h *heldPermit) reclaimJoint(ctx context.Context, wv *waveImpl) {
 	needs := func(x *heldPermit) bool { return x.suspendTarget != nil || x.lent }
 	for {
 		if needs(h) {
@@ -330,7 +330,7 @@ func (h *heldPermit) pool() *permits.Pool {
 // no-op rather than resurrecting a forest node on a dead wave. A pin on an idle-but-open
 // wave succeeds and holds the wave open — a parked skim driver must keep lending its
 // permit there, since work dispatched later may need it.
-func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
+func suspendHeldPermit(meta *ctxMeta, wv *waveImpl) *heldPermit {
 	h := meta.currentHeldPermit()
 	if h == nil {
 		return nil
@@ -387,7 +387,7 @@ func suspendHeldPermit(meta *ctxMeta, wv *Wave) *heldPermit {
 //     utilization).
 //
 // Returns whether h holds a permit on return.
-func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermit) (bool, error) {
+func gateAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldPermit) (bool, error) {
 	if h.acquire() {
 		return true, nil
 	}
@@ -422,7 +422,7 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermi
 // held; a miss on any (one-shot or postpone) returns not-held, and the retry re-drives from
 // the top where already-held handles pass through idempotently (gateAcquire's acquire is
 // latched). An overdraft refusal on any is terminal for the whole admission.
-func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *Wave) (bool, error) {
+func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *waveImpl) (bool, error) {
 	held, err := gateAcquire(ctx, ex, wv, h)
 	if err != nil || !held {
 		return held, err
@@ -440,7 +440,7 @@ func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *W
 // acquire each round until it succeeds or ctx is cancelled. This is the eager
 // block-and-help loop retargeted from the per-request notifier onto the permit Pool's
 // waiters, with h.acquire (idempotent) as both the loop guard and the block confirm.
-func blockAcquire(ctx context.Context, ex workq.Execution, wv *Wave, h *heldPermit) error {
+func blockAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldPermit) error {
 	// Per-call confirm state, read by h.confirm (the cached, allocation-free callback).
 	h.blockingCalled = false
 	h.blockingFn = ex.Blocking

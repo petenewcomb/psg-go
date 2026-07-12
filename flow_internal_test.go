@@ -94,10 +94,10 @@ func TestFlowNodeConservation(t *testing.T) {
 	// gap between count→0 and the async fire, then reclaim.
 	release := make(chan struct{})
 	task := NewTaskLauncher(func(context.Context) error { <-release; return nil })
-	var wave Wave
+	wave := NewWave()
 	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
 		for i := 0; i < 4; i++ {
-			if err := task.In(&wave).Start(ctx); err != nil {
+			if err := task.In(wave).Start(ctx); err != nil {
 				return err
 			}
 		}
@@ -110,8 +110,8 @@ func TestFlowNodeConservation(t *testing.T) {
 	// (C) Funnel tag union: two independent scopes' tags fold into one funnel
 	// instance, materialize onto the flush meta, and release with it.
 	tagA, tagB := NewFlowTag(), NewFlowTag()
-	var fwave Wave
-	funnel := NewFnFunnel(&fwave, func() Accumulator[int] {
+	fwave := NewWave()
+	funnel := NewFnFunnel(fwave, func() Accumulator[int] {
 		return NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(context.Context) error { return nil },
@@ -130,8 +130,8 @@ func TestFlowNodeConservation(t *testing.T) {
 	// presence node (no instance) and the anonymous follow-up node must both fold
 	// into the union, materialize at flush, and reclaim.
 	pres := NewFlowTag()
-	var iwave Wave
-	ifunnel := NewFnFunnel(&iwave, func() Accumulator[int] {
+	iwave := NewWave()
+	ifunnel := NewFnFunnel(iwave, func() Accumulator[int] {
 		return NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(context.Context) error { return nil },
@@ -226,8 +226,8 @@ func TestFlowCoalesceConservation(t *testing.T) {
 	// single instance (each submit reuses the live instance): their five separate
 	// definitional instances coalesce into one component, fire once, all reclaimed.
 	fires.Store(0)
-	var w1 Wave
-	f1 := NewFnFunnel(&w1, func() Accumulator[int] {
+	w1 := NewWave()
+	f1 := NewFnFunnel(w1, func() Accumulator[int] {
 		return NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(context.Context) error { return nil })
@@ -253,15 +253,15 @@ func TestFlowCoalesceConservation(t *testing.T) {
 	// concurrency surface: sibling count→0 derefs racing). One flow, so exactly one
 	// fire; still fully reclaimed.
 	fires.Store(0)
-	var wUp, wDown Wave
+	wUp, wDown := NewWave(), NewWave()
 	release := make(chan struct{})
 	task := NewTaskLauncher(func(context.Context) error { <-release; return nil })
-	fc := NewFnFunnel(&wUp, func() Accumulator[int] {
+	fc := NewFnFunnel(wUp, func() Accumulator[int] {
 		return NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(ctx context.Context) error {
 				for k := 0; k < 8; k++ {
-					if err := task.In(&wDown).Start(ctx); err != nil {
+					if err := task.In(wDown).Start(ctx); err != nil {
 						return err
 					}
 				}
@@ -308,8 +308,8 @@ func TestFunnelDriverPin(t *testing.T) {
 	var accMetas []*ctxMeta
 	var accRiders []*flowRiderNode
 
-	var wave Wave
-	f := NewFnFunnel(&wave, func() Accumulator[int] {
+	wave := NewWave()
+	f := NewFnFunnel(wave, func() Accumulator[int] {
 		return NewAccumulator(
 			func(ctx context.Context, _ int, _ error) (time.Time, error) {
 				m, ok := metaFromContext(ctx)
@@ -336,7 +336,7 @@ func TestFunnelDriverPin(t *testing.T) {
 	// Eventually covers the window between the accumulate's return and the
 	// lineage's deferred push-back.
 	inspect := func(assert func(inst *funnelInstance[int])) {
-		v, ok := wave.funnelInstances.Load(f.id)
+		v, ok := waveImplOf(wave).funnelInstances.Load(f.id)
 		chk.True(ok, "instance queue registered")
 		q := v.(*funnelInstanceQueue[int])
 		var inst *funnelInstance[int]

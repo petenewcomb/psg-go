@@ -34,7 +34,7 @@ import "github.com/petenewcomb/streampool/internal/permits"
 // dispatching body's meta, or nil for a fresh top-level dispatch with no enclosing
 // wave), creating the forest chain as needed. The returned cache is wv's own node for
 // Pool p; the body acquires its permit from it.
-func (wv *Wave) ensureCache(m *ctxMeta, p *permits.Pool) *permits.Cache {
+func (wv *waveImpl) ensureCache(m *ctxMeta, p *permits.Pool) *permits.Cache {
 	// A wave-less meta (a top-level WithFlow scope) is transparent for permit
 	// ancestry — resolve through its synchronous chain to the nearest
 	// wave-bearing meta (nil when the scope is truly top-level).
@@ -87,7 +87,7 @@ func ensureCacheChain(m *ctxMeta, p *permits.Pool) *permits.Cache {
 }
 
 // cacheFor returns wv's existing cache for Pool p, if any.
-func (wv *Wave) cacheFor(p *permits.Pool) (*permits.Cache, bool) {
+func (wv *waveImpl) cacheFor(p *permits.Pool) (*permits.Cache, bool) {
 	wv.cachesMu.Lock()
 	defer wv.cachesMu.Unlock()
 	c, ok := wv.caches[p]
@@ -98,7 +98,7 @@ func (wv *Wave) cacheFor(p *permits.Pool) (*permits.Cache, bool) {
 // parent is nil), double-checking under cachesMu so a concurrent creator wins at most
 // once. The new node carries wv's self-ref (NewChild/NewCache start at refs==1),
 // released at wave-Done; a NewChild also adds the descendant edge on parent.
-func (wv *Wave) createCache(p *permits.Pool, parent *permits.Cache) *permits.Cache {
+func (wv *waveImpl) createCache(p *permits.Pool, parent *permits.Cache) *permits.Cache {
 	wv.cachesMu.Lock()
 	defer wv.cachesMu.Unlock()
 	if wv.caches == nil {
@@ -121,8 +121,8 @@ func (wv *Wave) createCache(p *permits.Pool, parent *permits.Cache) *permits.Cac
 // reaches Done (wired as wavestate's onDone hook). A node whose subtree has fully
 // drained is destroyed here (returning its held permits to the Resource); one with live
 // descendant caches survives on their refs until they drain. The map is cleared so a
-// reused/pooled *Wave starts its next cycle with a fresh forest.
-func (wv *Wave) releaseCaches() {
+// reused/pooled *waveImpl starts its next cycle with a fresh forest.
+func (wv *waveImpl) releaseCaches() {
 	wv.cachesMu.Lock()
 	caches := wv.caches
 	wv.caches = nil

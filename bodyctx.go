@@ -5,7 +5,6 @@ package streampool
 
 import (
 	"context"
-	"maps"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/omnipool"
@@ -42,10 +41,14 @@ var bodyMetaPool = omnipool.For[ctxMeta]()
 // call-specific fields (held, exEnv, parentWaves, riders) and eventually
 // releases via releaseBodyContext.
 func newBorrowedMeta(
-	srcCtx context.Context, srcMeta *ctxMeta, wv *Wave, ctxType contextType,
+	srcCtx context.Context, srcMeta *ctxMeta, wv *waveImpl, ctxType contextType,
 ) (context.Context, *ctxMeta) {
 	m := newCtxMeta()
-	m.wave = wv
+	// A wave-less borrow (a WithFlow scope, or a scope-exit fire) passes wv == nil; leave
+	// the zero Handle rather than minting one (NewHandle would deref the nil impl).
+	if wv != nil {
+		m.wave = wv
+	}
 	m.ctxType = ctxType
 	m.parent = srcMeta
 	refMeta(srcMeta)
@@ -74,7 +77,7 @@ func newBorrowedMeta(
 //
 // The caller runs the body under the returned ctx and then calls releaseBodyContext.
 func borrowBodyContext(
-	srcCtx context.Context, srcMeta *ctxMeta, wv *Wave, ctxType contextType,
+	srcCtx context.Context, srcMeta *ctxMeta, wv *waveImpl, ctxType contextType,
 	h *heldPermit, exEnv executionEnvironment,
 ) (context.Context, *ctxMeta) {
 	ctx, m := newBorrowedMeta(srcCtx, srcMeta, wv, ctxType)
@@ -119,7 +122,10 @@ func releaseBodyContext(ctx context.Context) {
 	// flush metas, and the refs.Add below dirties this cache line anyway.
 	m.origin.Store(nil)
 	riders := m.riders
-	wave := m.wave // the wave a fire dispatched by the rider release routes into
+	// The wave a fire dispatched by the rider release routes into. Live here: the
+	// triggering item's own work reference is still held (count→0 is a synchronous safe
+	// point),
+	wave := m.wave
 	// m is the carrier whose release may end a flow: a fire dispatched by this
 	// walk runs as m's continuation. m's owner ref is still held here (dropped
 	// by the unrefMeta below), which is what makes the fire's dispatch pin on
@@ -132,20 +138,13 @@ func releaseBodyContext(ctx context.Context) {
 
 // parentWavesForSource computes the cross-wave ancestry a body bound to wv should
 // carry, derived from the source ctx's meta (mirrors ensureCtxMeta): a top-level
-// source (no meta) carries none; a same-wave source passes its parentWaves through
-// unchanged; a cross-wave source joins its own wave into its parentWaves (the body
-// reaches across a wave boundary). The cross-wave branch allocates a fresh map per
-// call — see docs/decisions/body-context-pool.md on caching this for a hot redirect.
+// source (no meta) carries none; a same-wave or wave-less source SHARES its set (a
+// retained reference); a cross-wave source joins its own wave into a fresh derived set.
+// The returned set carries a reference the borrowing meta owns (released at its Reset).
 // The meta is passed in (rather than looked up) so borrowBodyContext resolves it once.
-func parentWavesForSource(srcMeta *ctxMeta, ok bool, wv *Wave) map[*Wave]struct{} {
-	if !ok || srcMeta.wave == nil || srcMeta.wave == wv {
-		if ok {
-			return srcMeta.parentWaves
-		}
+func parentWavesForSource(srcMeta *ctxMeta, ok bool, wv *waveImpl) *parentWaveSet {
+	if !ok {
 		return nil
 	}
-	pw := make(map[*Wave]struct{}, len(srcMeta.parentWaves)+1)
-	maps.Copy(pw, srcMeta.parentWaves)
-	pw[srcMeta.wave] = struct{}{}
-	return pw
+	return derivedParentWaveSet(srcMeta.parentWaves, srcMeta.wave, wv)
 }

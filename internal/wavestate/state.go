@@ -168,10 +168,12 @@ func (ws *WaveState) DecrementReference() {
 	}
 }
 
-// Close attempts to transition from Open to Closed.
+// Close attempts to transition from Open to Closed, reporting whether THIS call
+// performed the transition (so the caller can run once-only close side effects, e.g.
+// dropping the wave's owner reference).
 //
 //nolint:contextcheck // background context used only for tracing
-func (ws *WaveState) Close() {
+func (ws *WaveState) Close() bool {
 	traceRegion := "WaveState.Close"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "WaveState=%p", ws)
@@ -186,6 +188,7 @@ func (ws *WaveState) Close() {
 			ws.noMoreWork()
 		}
 	}
+	return swapped
 }
 
 // Done returns the channel that will be closed when the wave transitions to Done

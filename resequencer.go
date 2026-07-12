@@ -39,13 +39,13 @@ type Resequencer[T any] struct {
 // the funnel is capped to a single instance with a concurrency-1 limiter;
 // handler is therefore invoked sequentially and needs no internal
 // synchronization.
-func NewResequencer[T any](wave *Wave, start uint64, handler Handler[T]) Resequencer[T] {
+func NewResequencer[T any](wave Wave, start uint64, handler Handler[T]) Resequencer[T] {
 	return Resequencer[T]{funnel: newResequenceFunnel[T](wave, start, handler)}
 }
 
 // NewFnResequencer is [NewResequencer] with a function handler.
 func NewFnResequencer[T any](
-	wave *Wave,
+	wave Wave,
 	start uint64,
 	handle func(ctx context.Context, value T, err error) error,
 ) Resequencer[T] {
@@ -84,13 +84,13 @@ type RangeResequencer[T any] struct {
 // NewRangeResequencer returns a RangeResequencer beginning at start (the first
 // offset it will deliver — usually 0). See [NewResequencer] for the
 // single-instance/limiter semantics, which are identical.
-func NewRangeResequencer[T any](wave *Wave, start uint64, handler Handler[T]) RangeResequencer[T] {
+func NewRangeResequencer[T any](wave Wave, start uint64, handler Handler[T]) RangeResequencer[T] {
 	return RangeResequencer[T]{funnel: newResequenceFunnel[T](wave, start, handler)}
 }
 
 // NewFnRangeResequencer is [NewRangeResequencer] with a function handler.
 func NewFnRangeResequencer[T any](
-	wave *Wave,
+	wave Wave,
 	start uint64,
 	handle func(ctx context.Context, value T, err error) error,
 ) RangeResequencer[T] {
@@ -118,7 +118,7 @@ type rangeItem[T any] struct {
 	value  T
 }
 
-func newResequenceFunnel[T any](wave *Wave, start uint64, handler Handler[T]) Funnel[rangeItem[T]] {
+func newResequenceFunnel[T any](wave Wave, start uint64, handler Handler[T]) Funnel[rangeItem[T]] {
 	return NewFunnel[rangeItem[T]](
 		wave,
 		AccumulatorFactoryFunc[rangeItem[T]](func() Accumulator[rangeItem[T]] {

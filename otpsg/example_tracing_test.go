@@ -42,7 +42,7 @@ func Example_tracing() {
 	ctx, flow := otpsg.Traced(context.Background(), "process-request")
 	span := trace.SpanFromContext(ctx)
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	body := func(ctx context.Context) error {
 		// Terminal sink for the processed result.
@@ -53,7 +53,7 @@ func Example_tracing() {
 				}
 				fmt.Println("Final result:", result)
 				return nil
-			}).In(&wave)
+			}).In(wave)
 
 		// Skim of the loaded data: launches an async processing task.
 		dataSkimmer := streampool.NewFnSkimmer(
@@ -73,15 +73,15 @@ func Example_tracing() {
 					fmt.Println("Processing data...")
 					return resultSkimmer.Submit(ctx, 42)
 				})
-				return processTask.In(&wave).Start(ctx)
-			}).In(&wave)
+				return processTask.In(wave).Start(ctx)
+			}).In(wave)
 
 		// Loader task kicks off the pipeline.
 		loadTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
 			fmt.Println("Loading data...")
 			return dataSkimmer.Submit(ctx, []int{1, 2, 3, 4, 5})
 		})
-		if err := loadTask.In(&wave).Start(ctx); err != nil {
+		if err := loadTask.In(wave).Start(ctx); err != nil {
 			return err
 		}
 		return wave.CloseAndSkimAll(ctx)
@@ -107,7 +107,7 @@ func Example_tracing() {
 // be applied at the flow level via Traced + WithFlow (see Example_tracing).
 func Example_instrumentedTask() {
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	task := otpsg.InstrumentedTask("calculate-sum",
 		func(ctx context.Context) (int, error) {
@@ -125,14 +125,14 @@ func Example_instrumentedTask() {
 			}
 			fmt.Println("Sum:", sum)
 			return nil
-		})).In(&wave)
+		})).In(wave)
 
 	runner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		result, err := task(ctx)
 		return skimmer.SubmitResult(ctx, result, err)
 	})
 
-	if err := runner.In(&wave).Start(ctx); err != nil {
+	if err := runner.In(wave).Start(ctx); err != nil {
 		fmt.Println("Error:", err)
 	}
 	if err := wave.CloseAndSkimAll(ctx); err != nil {

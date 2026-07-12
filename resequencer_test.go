@@ -22,9 +22,9 @@ func TestResequencer(t *testing.T) {
 
 	const n = 200
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var got []int
-	rs := streampool.NewFnResequencer[int](&wave, 0,
+	rs := streampool.NewFnResequencer[int](wave, 0,
 		func(_ context.Context, v int, err error) error {
 			got = append(got, v) // serial: one instance, no lock needed
 			return err
@@ -39,7 +39,7 @@ func TestResequencer(t *testing.T) {
 		}))
 
 	for i := n - 1; i >= 0; i-- { // submit in reverse to stress reordering
-		chk.NoError(src.In(&wave).Submit(ctx, i))
+		chk.NoError(src.In(wave).Submit(ctx, i))
 	}
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 
@@ -69,9 +69,9 @@ func TestRangeResequencer(t *testing.T) {
 		{11, 4, "e"},
 	}
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var got []string
-	rs := streampool.NewFnRangeResequencer[string](&wave, 0,
+	rs := streampool.NewFnRangeResequencer[string](wave, 0,
 		func(_ context.Context, s string, err error) error {
 			got = append(got, s)
 			return err
@@ -85,7 +85,7 @@ func TestRangeResequencer(t *testing.T) {
 		}))
 
 	for _, i := range []int{3, 0, 4, 1, 2} { // submit shuffled
-		chk.NoError(src.In(&wave).Submit(ctx, i))
+		chk.NoError(src.In(wave).Submit(ctx, i))
 	}
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 
@@ -102,9 +102,9 @@ func TestResequencerStartOffset(t *testing.T) {
 	const base = 1000
 	const n = 50
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var got []int
-	rs := streampool.NewFnResequencer[int](&wave, base,
+	rs := streampool.NewFnResequencer[int](wave, base,
 		func(_ context.Context, v int, err error) error {
 			got = append(got, v)
 			return err
@@ -117,7 +117,7 @@ func TestResequencerStartOffset(t *testing.T) {
 		}))
 
 	for k := n - 1; k >= 0; k-- {
-		chk.NoError(src.In(&wave).Submit(ctx, k))
+		chk.NoError(src.In(wave).Submit(ctx, k))
 	}
 	chk.NoError(wave.CloseAndSkimAll(ctx))
 

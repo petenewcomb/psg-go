@@ -23,7 +23,7 @@ func TestOriginFlowTaskBody(t *testing.T) {
 	bodyKey := streampool.NewFlowKey[string]()
 
 	var originSaw, hopTwoSaw atomic.Value
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	inner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		return streampool.WithFlow(ctx, func(ctx context.Context) error {
 			// Hop 1 from inside the body scope: the scope's origin is the
@@ -47,7 +47,7 @@ func TestOriginFlowTaskBody(t *testing.T) {
 	})
 
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		if err := inner.In(&wave).Start(ctx); err != nil {
+		if err := inner.In(wave).Start(ctx); err != nil {
 			return err
 		}
 		return wave.CloseAndSkimAll(ctx)
@@ -70,7 +70,7 @@ func TestOriginFlowSkimHandler(t *testing.T) {
 	itemKey := streampool.NewFlowKey[string]()
 
 	var handlerSaw, originSaw atomic.Value
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	collector := streampool.NewSkimmer(streampool.HandlerFunc[int](
 		func(ctx context.Context, _ int, err error) error {
 			if err != nil {
@@ -99,7 +99,7 @@ func TestOriginFlowSkimHandler(t *testing.T) {
 		}, itemKey.Value("item-v"))
 	})
 
-	chk.NoError(producer.In(&wave).Submit(context.Background(), 0))
+	chk.NoError(producer.In(wave).Submit(context.Background(), 0))
 	err := streampool.WithFlow(context.Background(), wave.CloseAndSkimAll,
 		driveKey.Value("drive"))
 	chk.NoError(err)
@@ -133,8 +133,8 @@ func TestOriginFlowFlush(t *testing.T) {
 			tag := streampool.NewFlowTag()
 
 			var flushCtxSaw, flushOriginSaw atomic.Value
-			var wave streampool.Wave
-			aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+			wave := streampool.NewWave()
+			aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 				return streampool.NewAccumulator(
 					func(ctx context.Context, _ int, err error) (time.Time, error) {
 						if err != nil {
@@ -167,7 +167,7 @@ func TestOriginFlowFlush(t *testing.T) {
 				}, opts...)
 			})
 
-			chk.NoError(producer.In(&wave).Submit(context.Background(), 0))
+			chk.NoError(producer.In(wave).Submit(context.Background(), 0))
 			chk.NoError(wave.CloseAndSkimAll(context.Background()))
 
 			chk.Equal(false, flushCtxSaw.Load(), "the fan-in severs the per-item value from the flush ctx")
@@ -187,11 +187,11 @@ func TestOriginFlowFire(t *testing.T) {
 	// Async fire: the flow's last carrier is a task completing in a drain.
 	var asyncFireOK atomic.Bool
 	asyncFireOK.Store(true)
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	release := make(chan struct{})
 	task := streampool.NewTaskLauncher(func(context.Context) error { <-release; return nil })
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		return task.In(&wave).Start(ctx)
+		return task.In(wave).Start(ctx)
 	}, tag.FollowUpFn(func(ctx context.Context) error {
 		_, ok := streampool.OriginFlow(ctx)
 		asyncFireOK.Store(ok)
@@ -258,7 +258,7 @@ func TestOriginFlowRetention(t *testing.T) {
 	key := streampool.NewFlowKey[string]()
 
 	var pinnedOrigin context.Context
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		origin, ok := streampool.OriginFlow(ctx)
 		if ok {
@@ -267,7 +267,7 @@ func TestOriginFlowRetention(t *testing.T) {
 		return nil
 	})
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		if err := task.In(&wave).Start(ctx); err != nil {
+		if err := task.In(wave).Start(ctx); err != nil {
 			return err
 		}
 		return wave.CloseAndSkimAll(ctx)

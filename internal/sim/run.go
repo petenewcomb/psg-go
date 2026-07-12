@@ -41,11 +41,11 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller)
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", plan)
 
-	// Zero-value Wave: no constructor, owns no ctx; it drains via CloseAndSkimAll
-	// (below in controller.Run). Cancellation rides the drive ctx.
-	var wave streampool.Wave
+	// Fresh Wave; owns no ctx; it drains via CloseAndSkimAll (below in
+	// controller.Run). Cancellation rides the drive ctx.
+	wave := streampool.NewWave()
 
-	c := newController(plan, &wave, parent)
+	c := newController(plan, wave, parent)
 	if plan.CancelTriggerRunnerID >= 0 {
 		// Plan-baked mid-flight cancellation: the designated launcher's body
 		// (see newLauncher) calls c.cancel while holding its permit, with
@@ -57,7 +57,7 @@ func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller)
 
 // newController builds the per-Plan runtime adapter state. parent is the
 // enclosing controller for a Subjob's nested Plan, nil at top level.
-func newController(plan *Plan, wave *streampool.Wave, parent *controller) *controller {
+func newController(plan *Plan, wave streampool.Wave, parent *controller) *controller {
 	return &controller{
 		Plan:                  plan,
 		Wave:                  wave,
@@ -116,7 +116,7 @@ type simValue struct {
 // objects backing the Plan's static vocabulary.
 type controller struct {
 	Plan           *Plan
-	Wave           *streampool.Wave
+	Wave           streampool.Wave
 	TaskLimiters   []streampool.Limiter
 	FunnelLimiters []streampool.Limiter
 	// TaskWeightedLimiters[i] is non-nil iff TaskLimiters[i] is weighted; the
@@ -197,7 +197,7 @@ func (c *controller) runInner(ctx context.Context, t assert.TestingT) error {
 	for i, g := range c.Plan.Skimmers {
 		gp := g
 		idx := i
-		var w *streampool.Wave
+		var w streampool.Wave
 		if i%2 == 0 {
 			w = c.Wave
 		}
@@ -464,7 +464,7 @@ func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave b
 		}
 		return nil
 	})
-	var w *streampool.Wave
+	var w streampool.Wave
 	if bindWave {
 		w = c.Wave
 	}

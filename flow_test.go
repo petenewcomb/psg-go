@@ -24,7 +24,7 @@ func TestFlowValuePropagates(t *testing.T) {
 	chk := require.New(t)
 	requestID := streampool.NewFlowKey[string]()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var sawBody, sawNested, sawSkim atomic.Value
 
 	collector := streampool.NewSkimmer(streampool.HandlerFunc[int](
@@ -54,15 +54,15 @@ func TestFlowValuePropagates(t *testing.T) {
 		v, ok := requestID.From(ctx)
 		sawBody.Store([2]any{v, ok})
 		// Nested work goes to a sub-wave the body owns and drains.
-		var sub streampool.Wave
-		if err := inner.In(&sub).Submit(ctx, 0); err != nil {
+		sub := streampool.NewWave()
+		if err := inner.In(sub).Submit(ctx, 0); err != nil {
 			return err
 		}
 		return sub.CloseAndSkimAll(ctx)
 	})
 
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		if err := outer.In(&wave).Submit(ctx, 0); err != nil {
+		if err := outer.In(wave).Submit(ctx, 0); err != nil {
 			return err
 		}
 		return wave.CloseAndSkimAll(ctx)
@@ -94,7 +94,7 @@ func TestFlowAbsent(t *testing.T) {
 	chk.False(zeroTag.InFlow(context.Background()))
 
 	// A body dispatched outside any scope reads absent.
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var sawOK atomic.Bool
 	sawOK.Store(true)
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
@@ -102,7 +102,7 @@ func TestFlowAbsent(t *testing.T) {
 		sawOK.Store(ok)
 		return nil
 	})
-	chk.NoError(task.In(&wave).Start(context.Background()))
+	chk.NoError(task.In(wave).Start(context.Background()))
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
 	chk.False(sawOK.Load())
 }
@@ -156,7 +156,7 @@ func TestWithFlowInsideBody(t *testing.T) {
 	chk := require.New(t)
 	key := streampool.NewFlowKey[int]()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var saw atomic.Value
 
 	inner := streampool.NewTaskLauncher(func(ctx context.Context) error {
@@ -168,15 +168,15 @@ func TestWithFlowInsideBody(t *testing.T) {
 	outer := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		return streampool.WithFlow(ctx, func(ctx context.Context) error {
 			// Dispatch through the scope meta into a sub-wave the body drains.
-			var sub streampool.Wave
-			if err := inner.In(&sub).Start(ctx); err != nil {
+			sub := streampool.NewWave()
+			if err := inner.In(sub).Start(ctx); err != nil {
 				return err
 			}
 			return sub.CloseAndSkimAll(ctx)
 		}, key.Value(7))
 	})
 
-	chk.NoError(outer.In(&wave).Start(context.Background()))
+	chk.NoError(outer.In(wave).Start(context.Background()))
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
 	chk.Equal([2]any{7, true}, saw.Load())
 }
@@ -202,10 +202,10 @@ func TestFlowFlushSeesEnclosing(t *testing.T) {
 			driverKey := streampool.NewFlowKey[string]()
 			perItem := streampool.NewFlowKey[string]()
 
-			var wave streampool.Wave
+			wave := streampool.NewWave()
 			var accDriver, accItem, flushDriver, flushItem atomic.Value
 
-			aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+			aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 				return streampool.NewAccumulator(
 					func(ctx context.Context, _ int, err error) (time.Time, error) {
 						if err != nil {
@@ -238,7 +238,7 @@ func TestFlowFlushSeesEnclosing(t *testing.T) {
 			})
 
 			err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-				if err := launcher.In(&wave).Start(ctx); err != nil {
+				if err := launcher.In(wave).Start(ctx); err != nil {
 					return err
 				}
 				return wave.CloseAndSkimAll(ctx)
@@ -294,9 +294,9 @@ func TestFollowUpFiresAtScopeExit(t *testing.T) {
 		return nil
 	})
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		if err := task.In(&wave).Start(ctx); err != nil {
+		if err := task.In(wave).Start(ctx); err != nil {
 			return err
 		}
 		if err := wave.CloseAndSkimAll(ctx); err != nil {
@@ -340,9 +340,9 @@ func TestFollowUpFiresAfterAsyncCompletion(t *testing.T) {
 		return nil
 	})
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		return task.In(&wave).Start(ctx)
+		return task.In(wave).Start(ctx)
 	}, tag.FollowUpFn(func(context.Context) error { close(fired); return nil }))
 	chk.NoError(err)
 
@@ -371,7 +371,7 @@ func TestFollowUpFiresOnce(t *testing.T) {
 
 	var fires atomic.Int32
 	release := make(chan struct{})
-	var extWave streampool.Wave
+	extWave := streampool.NewWave()
 
 	extTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		<-release
@@ -384,7 +384,7 @@ func TestFollowUpFiresOnce(t *testing.T) {
 		fires.Add(1)
 		chk.False(tag.InFlow(ctx), "the follow-up's own rider is peeled inside the body")
 		// Dispatch async work — it does not carry the tag, so it cannot re-fire.
-		return extTask.In(&extWave).Start(ctx)
+		return extTask.In(extWave).Start(ctx)
 	}))
 	chk.NoError(err)
 	chk.EqualValues(1, fires.Load(), "fires once, inline at scope exit")
@@ -406,7 +406,7 @@ func TestFollowUpNestedCoupling(t *testing.T) {
 
 	release := make(chan struct{})
 	var extDone atomic.Bool
-	var extWave streampool.Wave
+	extWave := streampool.NewWave()
 	extTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		<-release
 		extDone.Store(true)
@@ -429,7 +429,7 @@ func TestFollowUpNestedCoupling(t *testing.T) {
 			chk.False(inner.InFlow(ctx), "inner's own rider is peeled")
 			// Extend under the enclosing set (outer still present): the extension
 			// references outer, holding it open until it drains.
-			return extTask.In(&extWave).Start(ctx)
+			return extTask.In(extWave).Start(ctx)
 		}),
 	)
 	chk.NoError(err)
@@ -488,8 +488,8 @@ func TestFollowUpErrorCrossesFunnel(t *testing.T) {
 	tag := streampool.NewFlowTag()
 	errFollowUp := errors.New("followup-across-funnel")
 
-	var wave streampool.Wave
-	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+	wave := streampool.NewWave()
+	aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 		return streampool.NewAccumulator(
 			func(_ context.Context, _ int, err error) (time.Time, error) { return time.Time{}, err },
 			func(context.Context) error { return nil },
@@ -547,11 +547,11 @@ func TestFollowUpConcurrentStress(t *testing.T) {
 	for s := 0; s < scopes; s++ {
 		go func() {
 			tag := streampool.NewFlowTag()
-			var wave streampool.Wave
+			wave := streampool.NewWave()
 			task := streampool.NewTaskLauncher(func(ctx context.Context) error { return nil })
 			errs <- streampool.WithFlow(context.Background(), func(ctx context.Context) error {
 				for i := 0; i < items; i++ {
-					if err := task.In(&wave).Start(ctx); err != nil {
+					if err := task.In(wave).Start(ctx); err != nil {
 						return err
 					}
 				}
@@ -599,8 +599,8 @@ func TestFlowTagCrossesFunnel(t *testing.T) {
 				return nil
 			})
 
-			var wave streampool.Wave
-			aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+			wave := streampool.NewWave()
+			aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 				return streampool.NewAccumulator(
 					func(ctx context.Context, _ int, err error) (time.Time, error) {
 						if err != nil {
@@ -665,8 +665,8 @@ func TestFlowTagFunnelUnion(t *testing.T) {
 	var firedA, firedB atomic.Int32
 	var flushSawA, flushSawB atomic.Bool
 
-	var wave streampool.Wave
-	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+	wave := streampool.NewWave()
+	aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 		return streampool.NewAccumulator(
 			func(ctx context.Context, _ int, err error) (time.Time, error) {
 				return time.Time{}, err
@@ -715,14 +715,14 @@ func TestFlowSuppress(t *testing.T) {
 		return nil
 	})
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	err := streampool.WithFlow(context.Background(), func(outerCtx context.Context) error {
 		return streampool.WithFlow(outerCtx, func(inCtx context.Context) error {
 			_, ok := key.From(inCtx)
 			chk.False(ok, "suppressed key reads absent in the scope")
 			chk.False(tag.InFlow(inCtx), "suppressed tag reads absent in the scope")
 			// Long-running work under the suppressed scope takes no refs.
-			return blocked.In(&wave).Start(inCtx)
+			return blocked.In(wave).Start(inCtx)
 		}, key.Suppress(), tag.Suppress())
 	}, key.Value("outer"), tag.FollowUpFn(func(context.Context) error { close(fired); return nil }))
 	chk.NoError(err)
@@ -881,7 +881,7 @@ func TestFlowScopeWithLimiter(t *testing.T) {
 	key := streampool.NewFlowKey[int]()
 	sem := streampool.NewSemaphore(2)
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var saw atomic.Value
 	task := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		v, ok := key.From(ctx)
@@ -890,7 +890,7 @@ func TestFlowScopeWithLimiter(t *testing.T) {
 	}).WithLimits(sem)
 
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		if err := task.In(&wave).Start(ctx); err != nil {
+		if err := task.In(wave).Start(ctx); err != nil {
 			return err
 		}
 		return wave.CloseAndSkimAll(ctx)
@@ -929,8 +929,8 @@ func TestFlowFollowUpAnonymous(t *testing.T) {
 	// and fires once after the aggregate completes.
 	var xfired atomic.Int32
 	var firedBeforeFlush atomic.Bool
-	var wave streampool.Wave
-	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+	wave := streampool.NewWave()
+	aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 		return streampool.NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(context.Context) error { firedBeforeFlush.Store(xfired.Load() > 0); return nil },
@@ -960,12 +960,12 @@ func TestFlowTagInfuse(t *testing.T) {
 	var inScope, downstream atomic.Bool
 	chk.False(tag.InFlow(context.Background()))
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	downTask := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		downstream.Store(tag.InFlow(ctx))
 		return nil
 	})
-	aggregator := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+	aggregator := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 		return streampool.NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(ctx context.Context) error {
@@ -1006,7 +1006,7 @@ func TestFlowSkimContinuation(t *testing.T) {
 	itemKey := streampool.NewFlowKey[string]()
 	itemTag := streampool.NewFlowTag()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var skimSawDriver, skimSawItem atomic.Value
 	var skimRan, followUpSawSkim atomic.Bool
 
@@ -1043,7 +1043,7 @@ func TestFlowSkimContinuation(t *testing.T) {
 	})
 
 	err := streampool.WithFlow(context.Background(), func(ctx context.Context) error {
-		if err := producer.In(&wave).Submit(ctx, 0); err != nil {
+		if err := producer.In(wave).Submit(ctx, 0); err != nil {
 			return err
 		}
 		return wave.CloseAndSkimAll(ctx)
@@ -1071,7 +1071,7 @@ func TestFlowSkimRiderFreeItemIsolation(t *testing.T) {
 	driverKey := streampool.NewFlowKey[string]()
 	itemKey := streampool.NewFlowKey[string]()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	type seen struct {
 		value     int
@@ -1099,7 +1099,7 @@ func TestFlowSkimRiderFreeItemIsolation(t *testing.T) {
 				// captured) while the rider-carrying item is being handled — so
 				// it is skimmed after this one, in this same drive.
 				//nolint:contextcheck // deliberately rider-free: a bare-ctx submit is the regression case
-				return collector.In(&wave).Submit(context.Background(), 2)
+				return collector.In(wave).Submit(context.Background(), 2)
 			}
 			return nil
 		},
@@ -1116,7 +1116,7 @@ func TestFlowSkimRiderFreeItemIsolation(t *testing.T) {
 	})
 
 	// Dispatch outside any flow scope: the producer's body ctx is rider-free.
-	chk.NoError(producer.In(&wave).Submit(context.Background(), 0))
+	chk.NoError(producer.In(wave).Submit(context.Background(), 0))
 
 	// Drive under a scope of its own: the rider-free item must inherit THESE
 	// riders — not the previous item's.
@@ -1160,8 +1160,8 @@ func TestFlowDefinitionalFollowUp(t *testing.T) {
 
 	// Across a funnel fan-in → one fire after the aggregate completes.
 	fires.Store(0)
-	var wave streampool.Wave
-	agg := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+	wave := streampool.NewWave()
+	agg := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 		return streampool.NewAccumulator(
 			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 			func(context.Context) error { return nil })
@@ -1197,8 +1197,8 @@ func TestFlowDefinitionalCoalesce(t *testing.T) {
 		var fires atomic.Int32
 		audit := streampool.NewFlowTag(
 			streampool.FlowFollowUpFn(func(context.Context) error { fires.Add(1); return nil }))
-		var wave streampool.Wave
-		agg := streampool.NewFnFunnel(&wave, func() streampool.Accumulator[int] {
+		wave := streampool.NewWave()
+		agg := streampool.NewFnFunnel(wave, func() streampool.Accumulator[int] {
 			return streampool.NewAccumulator(
 				func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
 				func(context.Context) error { return nil })
@@ -1243,7 +1243,7 @@ func TestFollowUpFiresAsCarrierContinuation(t *testing.T) {
 	key := streampool.NewFlowKey[string]()
 	tag := streampool.NewFlowTag()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var fireSawKey atomic.Value
 	var fireSawTag, fired atomic.Bool
 
@@ -1258,7 +1258,7 @@ func TestFollowUpFiresAsCarrierContinuation(t *testing.T) {
 		// flow: its rider chain is [key=post-reg] → [tag] → …, and it is the
 		// flow's last carrier (the enclosing scope exits while it still runs).
 		return streampool.WithFlow(ctx, func(ctx context.Context) error {
-			return task.In(&wave).Start(ctx)
+			return task.In(wave).Start(ctx)
 		}, key.Value("post-reg"))
 	}, tag.FollowUpFn(func(ctx context.Context) error {
 		v, ok := key.From(ctx)
@@ -1291,7 +1291,7 @@ func TestFollowUpFireShieldedFromCancellation(t *testing.T) {
 	key := streampool.NewFlowKey[string]()
 	tag := streampool.NewFlowTag()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	var fireCtxErr atomic.Value
 	var fireSawKey atomic.Value
 	var fired atomic.Bool
@@ -1305,7 +1305,7 @@ func TestFollowUpFireShieldedFromCancellation(t *testing.T) {
 	cancelable, cancel := context.WithCancel(context.Background())
 	err := streampool.WithFlow(cancelable, func(ctx context.Context) error {
 		return streampool.WithFlow(ctx, func(ctx context.Context) error {
-			return task.In(&wave).Start(ctx)
+			return task.In(wave).Start(ctx)
 		}, key.Value("v"))
 	}, tag.FollowUpFn(func(ctx context.Context) error {
 		fireCtxErr.Store([1]any{ctx.Err()})

@@ -20,7 +20,7 @@ import (
 func TestMultiLimiter_JointAdmissionHoldsBoth(t *testing.T) {
 	chk := require.New(t)
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	a := streampool.NewSemaphore(1)
 	b := streampool.NewSemaphore(1)
@@ -31,9 +31,9 @@ func TestMultiLimiter_JointAdmissionHoldsBoth(t *testing.T) {
 		close(started)
 		<-release
 		return nil
-	}).WithLimits(a, b).In(&wave)
-	onlyA := streampool.NewTaskLauncher(func(context.Context) error { return nil }).WithLimits(a).In(&wave)
-	onlyB := streampool.NewTaskLauncher(func(context.Context) error { return nil }).WithLimits(b).In(&wave)
+	}).WithLimits(a, b).In(wave)
+	onlyA := streampool.NewTaskLauncher(func(context.Context) error { return nil }).WithLimits(a).In(wave)
+	onlyB := streampool.NewTaskLauncher(func(context.Context) error { return nil }).WithLimits(b).In(wave)
 
 	chk.NoError(both.Start(ctx))
 	<-started // the joint body now holds a permit from A and from B

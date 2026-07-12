@@ -36,7 +36,7 @@ import (
 // any), and internal error sink, so they can be passed by value or
 // stored in structures and used concurrently.
 type Launcher[T any] struct {
-	wave    *Wave
+	wave    Wave
 	handler Handler[T]
 	// bindings are the limiters this op acquires from, in canonical global acquisition
 	// order (ascending pool rank); nil ⟹ unlimited. Each carries an optional weigher
@@ -116,7 +116,7 @@ func (r Launcher[T]) WithWeightLimiterSet(s WeightLimiterSet[T]) Launcher[T] {
 // In returns a copy of the Launcher bound to wave, so its dispatches place
 // work in wave instead of the ambient (body-ctx) wave. Use at top level (no
 // ambient wave) or to redirect work into another wave.
-func (r Launcher[T]) In(wave *Wave) Launcher[T] {
+func (r Launcher[T]) In(wave Wave) Launcher[T] {
 	r.wave = wave
 	return r
 }
@@ -245,7 +245,11 @@ func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, er
 func (r Launcher[T]) dispatch(
 	ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool,
 ) (bool, error) {
-	wv := resolveWave(r.wave, ctx)
+	wv, ok := resolveWave(r.wave, ctx)
+	if !ok {
+		return false, ErrWaveDone // bound wave has drained and recycled
+	}
+	defer wavePool.Release(wv)
 	// Borrow the task body from the ORIGINAL (caller) ctx, not the meta-stamped ctx
 	// vetStart returns: the meta-stamped ctx is a fresh ctxpool child each dispatch, so
 	// rooting the body there defeats ctxpool's per-source-ctx reuse (newChildPool +
@@ -282,7 +286,7 @@ func (r Launcher[T]) dispatch(
 
 //nolint:contextcheck // submitCtx is the body-ctx borrow source threaded to newTaskWork, not a propagated arg
 func (r Launcher[T]) newScatterWork(
-	submitCtx context.Context, wv *Wave, group workq.GroupID, deadline time.Time, value T, callerErr error,
+	submitCtx context.Context, wv *waveImpl, group workq.GroupID, deadline time.Time, value T, callerErr error,
 ) *launcherScatterWork {
 	inner := r.newTask(wv, group, value, callerErr)
 	var h *heldPermit
@@ -309,7 +313,7 @@ func (r Launcher[T]) newScatterWork(
 // the binding's Pool (mkdir-p'ing the forest along the dispatching ancestry m, resolved at
 // dispatch where that ancestry is available; the permit is acquired at the gate) and the
 // weight the gate acquires (the weigher applied to value, else 1 for a plain binding).
-func newHold[T any](wv *Wave, m *ctxMeta, b binding[T], value T) *heldPermit {
+func newHold[T any](wv *waveImpl, m *ctxMeta, b binding[T], value T) *heldPermit {
 	h := heldPermitPool.Get()
 	h.ownCache = wv.ensureCache(m, b.pool)
 	h.weight = 1
@@ -319,7 +323,7 @@ func newHold[T any](wv *Wave, m *ctxMeta, b binding[T], value T) *heldPermit {
 	return h
 }
 
-func (r Launcher[T]) newTask(wv *Wave, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
+func (r Launcher[T]) newTask(wv *waveImpl, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
 	wk := r.workPool.Get()
 	wk.pool = r.workPool
 	wk.wave = wv
@@ -333,7 +337,7 @@ func (r Launcher[T]) newTask(wv *Wave, group workq.GroupID, value T, callerErr e
 
 type launcherWork[T any] struct {
 	pool      *omnipool.Pool[launcherWork[T]]
-	wave      *Wave
+	wave      *waveImpl
 	group     workq.GroupID
 	handler   Handler[T]
 	value     T
@@ -396,9 +400,8 @@ func newTaskErrSink() ErrSkimmer {
 // was reused.
 func vetStart(
 	ctx context.Context,
-	wv *Wave,
+	wv *waveImpl,
 ) (context.Context, *ctxMeta, bool) {
-	wv.ensureArmed() // dispatch entry: re-arm a drained wave for a new cycle
 	ctx, meta, owned := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
 		switch ctxType {
 		case topLevelContext, skimContext, funnelContext:
@@ -420,12 +423,12 @@ func vetStart(
 // skimScatterWork's role in the pre-Wave-3 codepath.
 type launcherScatterWork struct {
 	workq.Work
-	wave     *Wave
+	wave     *waveImpl
 	deadline time.Time
 }
 
 func newLauncherScatterWork(
-	wv *Wave,
+	wv *waveImpl,
 	deadline time.Time,
 	targetScatterWork workq.Work,
 ) *launcherScatterWork {

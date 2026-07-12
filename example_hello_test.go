@@ -20,7 +20,7 @@ import (
 //nolint:errcheck,gosec // concise example code for readme
 func Example_hello() {
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	var results []string
 	skimmer := streampool.NewFnSkimmer(
@@ -38,8 +38,8 @@ func Example_hello() {
 		})
 	}
 
-	newRunner("Hello").In(&wave).Start(ctx)
-	newRunner("world!").In(&wave).Start(ctx)
+	newRunner("Hello").In(wave).Start(ctx)
+	newRunner("world!").In(wave).Start(ctx)
 
 	wave.CloseAndSkimAll(ctx)
 	fmt.Println(strings.Join(results, " "))

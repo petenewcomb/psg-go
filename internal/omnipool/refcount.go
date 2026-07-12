@@ -47,10 +47,10 @@ const (
 func (rc *RefCount) refCount() *RefCount { return rc }
 
 // RefCounted is satisfied by pointer types *T whose T embeds [RefCount] and
-// implements [Resetter]. It is the constraint for [Handle], [NewHandle], and
-// [AddRef]; because RefCount's accessor has a pointer receiver, only *T — never
-// T — satisfies it, so the managed handle API is parameterized over the pointer
-// type P.
+// implements [Resetter]. It is the constraint for [AddRef] and, with comparable added,
+// for [Handle] and [NewHandle] via [HandleP]; because RefCount's accessor has a pointer receiver, only
+// *T — never T — satisfies it, so the managed handle API is parameterized over the
+// pointer type P.
 //
 // Resetter is mandatory because a managed object is recycled in place: on the
 // last release its payload must be cleared field-wise (never wholesale, which
@@ -63,20 +63,55 @@ type RefCounted interface {
 	refCount() *RefCount
 }
 
+// HandleP is the type-parameter constraint for [Handle] and [NewHandle]: a [RefCounted]
+// type that is additionally comparable. A managed type is always a pointer (*T), so this
+// is free; requiring it lets a Handle compare by identity ([Handle.Is]) and serve as a
+// map key. comparable is added here rather than to RefCounted itself because RefCounted
+// is also used as an ordinary interface value (the pool's type assertions and reflection),
+// which a comparable-embedding interface — being constraint-only — may not be.
+type HandleP interface {
+	comparable
+	RefCounted
+}
+
 // Handle is a copyable, referenceless ("weak") capture of a reference-managed
 // object: the object pointer plus the generation it was captured at. It outlives
 // the object's recycling; [Handle.Get] reports whether the object it names is
 // still the same incarnation.
-type Handle[P RefCounted] struct {
+type Handle[P HandleP] struct {
 	p   P
 	gen uint64
+}
+
+// Is reports whether the handle names obj — a pointer-identity comparison that does NOT
+// consult the generation. It is the "synchronous / live" identity test: the caller
+// holds obj live (a reference, or an in-flight work item that pins it), so the handle
+// either names that same live incarnation or a different object entirely; the gen guard
+// is harmless and not load-bearing. For a referenceless cross-lifetime test, mint a
+// fresh handle and compare (h == NewHandle(live)) so the generation participates.
+func (h Handle[P]) Is(obj P) bool { return h.p == obj }
+
+// Empty reports whether the handle names no object (the zero Handle) — e.g. a ctxMeta
+// not derived through a wave. It says nothing about liveness of a bound object; use
+// [Handle.Valid] for that.
+func (h Handle[P]) Empty() bool {
+	var zero P
+	return h.p == zero
+}
+
+// Valid reports whether the handle names a bound object that is still the incarnation it
+// was captured against (referenceless: it takes no reference, unlike [Handle.Get]). It
+// is a peek at liveness for a caller that must branch without upgrading.
+func (h Handle[P]) Valid() bool {
+	var zero P
+	return h.p != zero && h.p.refCount().w.Load()[genWord] == h.gen
 }
 
 // NewHandle mints a weak handle to obj at its current generation. It does not
 // change the reference count. The caller should hold a live reference while
 // minting (so the captured generation is meaningful), but a stale capture is
 // harmless — a later [Handle.Get] simply fails.
-func NewHandle[P RefCounted](obj P) Handle[P] {
+func NewHandle[P HandleP](obj P) Handle[P] {
 	w := obj.refCount().w.Load()
 	return Handle[P]{p: obj, gen: w[genWord]}
 }

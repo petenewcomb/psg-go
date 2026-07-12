@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/petenewcomb/streampool/internal/trace"
@@ -21,23 +20,120 @@ import (
 	"github.com/petenewcomb/streampool/internal/workq"
 )
 
-// Wave is the unit that admits, drains, and cancels a batch of scatter-gather
-// work together. It owns the batch lifecycle — wavestate (Open→Done), the
-// admission governor, the skim queue — and dispatches op bodies onto the global
-// worker pool (defaultPool). A zero-value Wave is ready to use (no constructor);
-// it self-inits on first use and owns no context. Bind ops to it with op.In(&wv)
-// at top level, or dispatch from inside a body (the ambient wave). It is reusable
-// after a drain (see [Wave.ensureArmed]).
+// Wave is the unit that admits, drains, and cancels a batch of scatter-gather work
+// together. It is a small, copyable handle to a pooled, reference-managed substrate
+// ([waveImpl]); construct one with [NewWave]. Bind ops to it with op.In(wave) at top
+// level, or dispatch from inside a body (the ambient wave). Done/Close are terminal —
+// there is no re-arm; the next batch is a fresh [NewWave]. Copies share the same
+// underlying wave. It owns NO context — cancellation rides the caller's ctx by
+// ancestry.
+type Wave struct {
+	// h is a weak (referenceless) handle to the substrate: it captures the impl
+	// pointer plus the generation, so a Get after the wave has drained-and-recycled
+	// fails cleanly rather than misidentifying a reused incarnation. The owner
+	// reference (refs=1) lives on the impl from NewWave until Close, keeping the impl
+	// alive across the open-but-idle window.
+	h omnipool.Handle[*waveImpl]
+}
+
+// wavePool is the shared pool of reference-managed wave substrates. Get hands out an
+// impl with a single (owner) reference and a warm, one-time-Init'd substrate; Release
+// recycles it (running Reset) only when the last reference is dropped.
+var wavePool = omnipool.For[waveImpl]()
+
+// NewWave constructs a fresh, open Wave. The pool draw carries the owner reference
+// (refs=1), dropped by [Wave.Close]; the handle captures the impl's current
+// generation for gen-guarded upgrades.
+func NewWave() Wave {
+	return Wave{h: omnipool.NewHandle(wavePool.Get())}
+}
+
+// Skim upgrades to the substrate and skims one result; see [waveImpl.Skim]. A failed
+// upgrade means the wave has drained and recycled, so there is nothing left to skim.
+func (w Wave) Skim(ctx context.Context) error {
+	impl, ok := w.h.Get()
+	if !ok {
+		return ErrWaveDone
+	}
+	defer wavePool.Release(impl)
+	return impl.Skim(ctx)
+}
+
+// TrySkim upgrades to the substrate and skims one result without blocking; see
+// [waveImpl.TrySkim].
+func (w Wave) TrySkim(ctx context.Context) (bool, error) {
+	impl, ok := w.h.Get()
+	if !ok {
+		return false, ErrWaveDone
+	}
+	defer wavePool.Release(impl)
+	return impl.TrySkim(ctx)
+}
+
+// SkimAll upgrades to the substrate and drains it; see [waveImpl.SkimAll].
+func (w Wave) SkimAll(ctx context.Context) error {
+	impl, ok := w.h.Get()
+	if !ok {
+		return nil // already drained and recycled
+	}
+	defer wavePool.Release(impl)
+	return impl.SkimAll(ctx)
+}
+
+// TrySkimAll upgrades to the substrate and drains all immediately-available results;
+// see [waveImpl.TrySkimAll].
+func (w Wave) TrySkimAll(ctx context.Context) error {
+	impl, ok := w.h.Get()
+	if !ok {
+		return ErrWaveDone
+	}
+	defer wavePool.Release(impl)
+	return impl.TrySkimAll(ctx)
+}
+
+// Close closes the wave and drops the owner reference. The drop happens exactly once —
+// only on the goroutine that wins the Open→Closed transition — so the "Close may be
+// called more than once" contract holds and the owner reference is never
+// double-released. See [waveImpl.Close].
+func (w Wave) Close() {
+	impl, ok := w.h.Get()
+	if !ok {
+		return // already closed and recycled
+	}
+	defer wavePool.Release(impl)
+	if impl.Close() {
+		wavePool.Release(impl) // drop the owner reference
+	}
+}
+
+// CloseAndSkimAll closes the wave via [Wave.Close] and then drains it via [Wave.SkimAll],
+// resolving the substrate once.
+func (w Wave) CloseAndSkimAll(ctx context.Context) error {
+	impl, ok := w.h.Get()
+	if !ok {
+		return nil // already drained and recycled
+	}
+	defer wavePool.Release(impl)
+	if impl.Close() {
+		wavePool.Release(impl) // drop the owner reference
+	}
+	return impl.SkimAll(ctx)
+}
+
+// waveImpl is the pooled substrate behind a [Wave]. It owns the batch lifecycle —
+// wavestate (Open→Done), the admission governor, the skim queue — and dispatches op
+// bodies onto the global worker pool (defaultPool). It is reference-managed
+// (embeds [omnipool.RefCount]): framework sub-waves draw a warm impl from the pool and
+// it is recycled only when the last reference drops, deferring reuse past any straggler.
+// [waveImpl.Init] brings up the warm queues once per physical allocation;
+// [waveImpl.Reset] re-opens a recycled impl to a fresh cycle without re-Init'ing them.
+// It owns NO context — cancellation rides the caller's ctx by ancestry.
 //
 //nolint:contextcheck // background context used only for tracing
-type Wave struct {
-	// initialized is set once the substrate (below) has been brought up for the
-	// current cycle; initMu guards (re)initialization. A zero-value Wave is usable:
-	// ensureInit lazily brings up the substrate on first ctx-bearing use and
-	// re-arms it after a drain (see ensureInit). The Wave owns NO context — it is
-	// driver-specific; cancellation rides the caller's ctx by ancestry.
-	initialized atomic.Bool
-	initMu      sync.Mutex
+type waveImpl struct {
+	// RefCount is the object-lifetime counter (packed generation + refs). It MUST NOT
+	// be copied, and Reset MUST NOT touch it — the generation must survive recycling.
+	omnipool.RefCount
 
 	state wavestate.WaveState
 
@@ -84,7 +180,7 @@ type boundTask interface {
 }
 
 //nolint:contextcheck // background context for tracing; submitCtx is the body-ctx borrow source
-func (wv *Wave) newTaskWork(
+func (wv *waveImpl) newTaskWork(
 	submitCtx context.Context, group workq.GroupID, task boundTask, h *heldPermit,
 ) *taskWork {
 	traceRegion := "Wave.newTaskWork"
@@ -127,7 +223,7 @@ type taskWork struct {
 	// wave is the dispatching Wave; stored so Free() satisfies workq.Work (no-arg)
 	// and stamped onto the body ctxMeta so nil-wave op dispatches from the task body
 	// can resolve it.
-	wave *Wave
+	wave *waveImpl
 	// bodyCtx is the body context borrowed at dispatch (borrowBodyContext),
 	// descended from the submit ctx and carrying bodyMeta; the task body runs
 	// under it and Free returns it. bodyMeta is the same meta the ctx carries,
@@ -203,42 +299,12 @@ func (wk *taskWork) Free() {
 
 var taskWorkPool = omnipool.For[taskWork]()
 
-// ensureInit lazily brings up the Wave's lifecycle substrate (state, queues,
-// governor, closure fields) the FIRST time a zero-value Wave is used, so it is
-// usable with no constructor. It is idempotent and does NOT re-arm a drained wave —
-// re-arming is [Wave.ensureArmed], reached only from dispatch entries. This split is
-// essential: a drain (Skim/SkimAll/Close) routes through here too, and a CloseAndSkimAll
-// drives an empty wave to Done during Close() before SkimAll runs — if init re-armed
-// on Done, that skim would reset the wave to Open and block forever instead of
-// observing Done. Skimming a Done wave must return ErrWaveDone, not re-arm.
-//
-// A zero-value Wave's state reads as Open (stageOpen == 0) but with nil channels, so
-// init keys off the explicit initialized flag, not the stage. The common case (an
-// already-initialized wave) is a single atomic load.
-func (wv *Wave) ensureInit() {
-	if wv.initialized.Load() {
-		return
-	}
-	wv.initMu.Lock()
-	defer wv.initMu.Unlock()
-	if wv.initialized.Load() {
-		return
-	}
-	wv.initState()
-	wv.initialized.Store(true)
-}
-
-// initState (re)initializes the substrate to a fresh Open cycle. Caller holds initMu.
-func (wv *Wave) initState() {
-	// Drop any prior cycle's funnel-instance caches so a reused/pooled *Wave does not
-	// accumulate stale per-funnel entries (funnel ids are unique per NewFunnel). By the
-	// time a wave re-arms it has reached Done, so the end-of-work sweep has already
-	// drained every queue and recycled its instances — this is a quiescent map clear.
-	wv.funnelInstances.Range(func(k, _ any) bool {
-		wv.funnelInstances.Delete(k)
-		return true
-	})
-	wv.state.Init(wv.sweepFunnels, wv.releaseCaches)
+// Init brings up the one-time warm substrate, called once per physical allocation by
+// the pool ([omnipool.Initer]). It Inits the nbcq-backed queues and the governor — kept
+// warm across recycles, NEVER re-Init'd (the twin-anchor design forbids the count
+// restart) — plus the cached closure fields and the wavestate callbacks, which are
+// stable because they close over this impl.
+func (wv *waveImpl) Init() {
 	wv.skimQueue.Init()
 	wv.governor.Init()
 	wv.workQueue.Init(nil)
@@ -246,6 +312,22 @@ func (wv *Wave) initState() {
 	wv.blockFn = wv.block
 	wv.tryAddWorkFn = wv.tryAddWork
 	wv.addWorkFn = wv.addWork
+	wv.state.Init(wv.sweepFunnels, wv.releaseCaches)
+}
+
+// Reset re-opens a recycled impl to a fresh Open cycle on the last-reference release
+// ([omnipool.Resetter]). It clears the per-cycle payload and re-opens wavestate
+// (stage→Open, fresh doneChan, counters already drained to zero) WITHOUT re-Init'ing
+// the warm queues and WITHOUT touching the embedded RefCount (whose generation must
+// survive). It runs single-owner — a recycle means refs hit zero — so the map clear and
+// the state re-open are quiescent (no live holder, no concurrent skim). The onDone
+// callback (releaseCaches) has already cleared wv.caches by the time Done was reached.
+func (wv *waveImpl) Reset() {
+	wv.funnelInstances.Range(func(k, _ any) bool {
+		wv.funnelInstances.Delete(k)
+		return true
+	})
+	wv.state.Init(wv.sweepFunnels, wv.releaseCaches)
 }
 
 // sweepFunnels is the wave's enqueue-only end-of-work flush sweep, wired as
@@ -264,7 +346,7 @@ func (wv *Wave) initState() {
 // resurrecting the count from zero cannot stop a Flushing→Done transition already in
 // flight, so a failed pin means the wave's Done is reached or committed — every
 // instance has flushed and there is nothing to sweep.
-func (wv *Wave) sweepFunnels() {
+func (wv *waveImpl) sweepFunnels() {
 	if !wv.state.TryIncrementReference() {
 		return
 	}
@@ -273,31 +355,6 @@ func (wv *Wave) sweepFunnels() {
 		v.(funnelSweep).sweepFlush()
 		return true
 	})
-}
-
-// ensureArmed brings the Wave up for NEW work: it first-time-inits (ensureInit) and,
-// if the wave's prior cycle has drained to Done, re-arms it to a fresh Open cycle. It
-// is called only from dispatch entries (op Start/Submit, funnel Submit) — never from a
-// skim/drain — so that reusing a drained Wave by dispatching into it (e.g. a *Wave
-// pooled via sync.Pool for allocation-free sub-waves) starts a new cycle, while
-// skimming a drained wave still observes Done.
-//
-// A Done stage means every work and funnel-instance reference has drained, so every
-// flush Execute has completed (the barrier drops inside flush) — the wave is quiescent.
-// initState then clears the funnel-instance map and re-Inits the WaveState. Reuse is
-// sequential (a new cycle begins after the prior drain returns); a dispatch racing a
-// concurrent self-drain stays a misuse guarded by panicIfDone.
-func (wv *Wave) ensureArmed() {
-	wv.ensureInit()
-	if !wv.state.IsDone() {
-		return // fast path: live (or freshly inited)
-	}
-	wv.initMu.Lock()
-	defer wv.initMu.Unlock()
-	if !wv.state.IsDone() {
-		return // another dispatch re-armed it
-	}
-	wv.initState()
 }
 
 // Skim processes outstanding task results and then waits for the next
@@ -324,7 +381,7 @@ func (wv *Wave) ensureArmed() {
 //
 // NOTE: If a task result is skimmed, this method will call the task's
 // [Skim] and wait until it returns.
-func (wv *Wave) Skim(ctx context.Context) error {
+func (wv *waveImpl) Skim(ctx context.Context) error {
 	traceRegion := "Wave.Skim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -347,7 +404,7 @@ func (wv *Wave) Skim(ctx context.Context) error {
 	return err
 }
 
-func (wv *Wave) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
+func (wv *waveImpl) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) error {
 	traceRegion := "Wave.tryAddWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
@@ -357,11 +414,11 @@ func (wv *Wave) tryAddWork(ctx context.Context, queueFn workq.QueueWorkFunc) err
 	return nil
 }
 
-func (wv *Wave) trySkim(ctx context.Context) (bool, error) {
+func (wv *waveImpl) trySkim(ctx context.Context) (bool, error) {
 	return wv.workQueue.TryExecuteOne(ctx, wv.tryAddWorkFn)
 }
 
-func (wv *Wave) skim(ctx context.Context) (bool, error) {
+func (wv *waveImpl) skim(ctx context.Context) (bool, error) {
 	return true, wv.workQueue.ExecuteOne(ctx, wv.addWorkFn, nil)
 }
 
@@ -369,7 +426,7 @@ func (wv *Wave) skim(ctx context.Context) (bool, error) {
 // preemptively skim or skim results from completed tasks. This smooths
 // execution and adds backpressure that enables operation with unlimited task
 // pools.
-func (wv *Wave) yield(ctx context.Context, deadline time.Time) error {
+func (wv *waveImpl) yield(ctx context.Context, deadline time.Time) error {
 	traceRegion := "Wave.yield"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -392,7 +449,7 @@ func (wv *Wave) yield(ctx context.Context, deadline time.Time) error {
 
 const errBlockWaitSignaled = cerr.Error("block wait signaled")
 
-func (wv *Wave) shouldBlock(ctx context.Context) workq.BlockFunc {
+func (wv *waveImpl) shouldBlock(ctx context.Context) workq.BlockFunc {
 	// Read the meta directly (not via wv.ctxMeta, which panics on a missing meta).
 	// A dispatch chain (launcherScatterWork governor gate / limiterScatterWork
 	// acquire) that postponed onto the global shared queue is re-run by a global
@@ -406,7 +463,7 @@ func (wv *Wave) shouldBlock(ctx context.Context) workq.BlockFunc {
 	return nil
 }
 
-func (wv *Wave) block(
+func (wv *waveImpl) block(
 	ctx context.Context,
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
@@ -451,7 +508,7 @@ func (wv *Wave) block(
 var blockingWorkAdderPool = omnipool.For[blockingWorkAdder]()
 
 type blockingWorkAdder struct {
-	wave                *Wave
+	wave                *waveImpl
 	meta                *ctxMeta
 	blockDeadline       time.Time
 	blockWaiters        *workq.Waiters
@@ -484,7 +541,7 @@ func (a *blockingWorkAdder) addWork(
 	return workReadyRenotifyFn, err
 }
 
-func (wv *Wave) addWork(
+func (wv *waveImpl) addWork(
 	ctx context.Context,
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
@@ -499,7 +556,7 @@ func (wv *Wave) addWork(
 	return workReadyRenotifyFn, err
 }
 
-func (wv *Wave) addWorkWhileMaybeBlocking(
+func (wv *waveImpl) addWorkWhileMaybeBlocking(
 	ctx context.Context,
 	meta *ctxMeta,
 	queueFn workq.QueueWorkFunc,
@@ -575,7 +632,7 @@ func (wv *Wave) addWorkWhileMaybeBlocking(
 	return workRf, blockRf, err
 }
 
-func (wv *Wave) skimSelect(
+func (wv *waveImpl) skimSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
 	outboxWaitCh <-chan rdvq.Notification,
@@ -614,7 +671,7 @@ func (wv *Wave) skimSelect(
 
 type skimPostWork struct {
 	poolWork
-	wave *Wave
+	wave *waveImpl
 	work boundSkimWork
 	// shouldBlock is captured at dispatch (from the dispatching meta) rather than
 	// re-derived from the run ctx: when this producer postpones onto the global
@@ -624,7 +681,7 @@ type skimPostWork struct {
 	shouldBlock bool
 }
 
-func (wk *skimPostWork) Init(group workq.GroupID, wv *Wave, work boundSkimWork, shouldBlock bool) {
+func (wk *skimPostWork) Init(group workq.GroupID, wv *waveImpl, work boundSkimWork, shouldBlock bool) {
 	wk.poolWork.Init(group, wv)
 	wk.wave = wv
 	wk.work = work
@@ -722,7 +779,7 @@ func (wk *skimPostWork) Free() {
 var skimPostWorkPool = omnipool.For[skimPostWork]()
 
 //nolint:contextcheck // background context used only for tracing
-func (wv *Wave) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
+func (wv *waveImpl) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, shouldBlock bool) *skimPostWork {
 	traceRegion := "Wave.newSkimPostWork"
 
 	wk := skimPostWorkPool.Get()
@@ -749,7 +806,7 @@ func (wv *Wave) newSkimPostWork(group workq.GroupID, skimWork boundSkimWork, sho
 // receive ErrWaveDone.
 //
 // See Skim for additional details.
-func (wv *Wave) TrySkim(ctx context.Context) (bool, error) {
+func (wv *waveImpl) TrySkim(ctx context.Context) (bool, error) {
 	traceRegion := "Wave.TrySkim"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -780,7 +837,7 @@ func (wv *Wave) TrySkim(ctx context.Context) (bool, error) {
 //
 // NOTE: This method will serially call each skimmed task's [Skim] and
 // wait until it returns.
-func (wv *Wave) SkimAll(ctx context.Context) error {
+func (wv *waveImpl) SkimAll(ctx context.Context) error {
 	traceRegion := "Wave.SkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
@@ -821,14 +878,14 @@ func (wv *Wave) SkimAll(ctx context.Context) error {
 //
 // NOTE: If completed tasks are available, this method must still call each
 // task's [Skim] and wait until it finishes processing.
-func (wv *Wave) TrySkimAll(ctx context.Context) error {
+func (wv *waveImpl) TrySkimAll(ctx context.Context) error {
 	traceRegion := "Wave.TrySkimAll"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	return wv.skimAll(ctx, wv.trySkim)
 }
 
-func (wv *Wave) skimAll(ctx context.Context, skimFn func(context.Context) (bool, error)) error {
+func (wv *waveImpl) skimAll(ctx context.Context, skimFn func(context.Context) (bool, error)) error {
 	ctx, _, owned := wv.skimCtxMeta(ctx)
 	if owned {
 		defer releaseTopLevelContext(ctx)
@@ -846,7 +903,7 @@ func (wv *Wave) skimAll(ctx context.Context, skimFn func(context.Context) (bool,
 
 type taskPostWork struct {
 	poolWork
-	wave *Wave
+	wave *waveImpl
 	task *taskWork
 }
 
@@ -903,14 +960,19 @@ type poolWork struct {
 	workq.WorkItem
 }
 
-func (wk *poolWork) Init(group workq.GroupID, wv *Wave) {
+func (wk *poolWork) Init(group workq.GroupID, wv *waveImpl) {
 	wk.WorkItem.Init(group)
 	trace.Logf(context.Background(), "poolWork.Init", "%v", &wk.WorkItem)
 	wv.state.IncrementWork()
+	// Per-holder object-lifetime reference, parallel to the wavestate work reference:
+	// this work item keeps the impl alive for as long as it holds its naked *waveImpl.
+	// Minted under the dispatching method's live Get (refs >= 1), so it cannot race a
+	// recycle or increment from zero. Released in Close, beside DecrementWork.
+	omnipool.AddRef(wv)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (wk *poolWork) Close(wv *Wave) {
+func (wk *poolWork) Close(wv *waveImpl) {
 	if wk.ID() == 0 {
 		// This check and panic is best-effort only as it may also be a race if
 		// Close() is called from multiple goroutines -- which it should not be.
@@ -918,9 +980,14 @@ func (wk *poolWork) Close(wv *Wave) {
 	}
 	trace.Logf(context.Background(), "poolWork.Close", "%v", &wk.WorkItem)
 	wv.state.DecrementWork()
+	// Drop the per-holder object-lifetime reference (paired with Init's AddRef), AFTER
+	// DecrementWork has run any Done transition: on the last reference this recycles the
+	// impl (running Reset), which is safe precisely because refs hit zero means this is
+	// the sole remaining holder.
+	wavePool.Release(wv)
 }
 
-func (wv *Wave) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
+func (wv *waveImpl) newTaskPostWork(group workq.GroupID, deadline time.Time, task *taskWork) workq.Work {
 	wk := taskPostWorkPool.Get()
 	wk.Init(group, wv)
 	wk.wave = wv
@@ -929,7 +996,7 @@ func (wv *Wave) newTaskPostWork(group workq.GroupID, deadline time.Time, task *t
 }
 
 // panicIfDone panics if the wave is in the done state
-func (wv *Wave) panicIfDone() {
+func (wv *waveImpl) panicIfDone() {
 	wv.state.PanicIfDone()
 }
 
@@ -947,41 +1014,43 @@ func (wv *Wave) panicIfDone() {
 //
 // Close may be called from any goroutine and may safely be called more than once.
 //
+// Close transitions the substrate Open→Closed and reports whether THIS call won the
+// transition (the winning caller is the one that drops the owner reference; see
+// [Wave.Close]). Safe to call from any goroutine and more than once — only the winner
+// returns true.
+//
 //nolint:contextcheck // background context used only for tracing
-func (wv *Wave) Close() {
+func (wv *waveImpl) Close() bool {
 	traceRegion := "Wave.Close"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 
-	wv.ensureInit()
-	wv.state.Close()
+	return wv.state.Close()
 }
 
-// CloseAndSkimAll closes the wave via [Wave.Close] and then waits for and
-// skims the results of all in-flight tasks via [Wave.SkimAll].
-func (wv *Wave) CloseAndSkimAll(ctx context.Context) error {
-	traceRegion := "Wave.CloseAndSkimAll"
-	defer trace.StartRegion(ctx, traceRegion).End()
-
-	wv.Close()
-	return wv.SkimAll(ctx)
-}
-
-// resolveWave returns the op's bound wave if non-nil, otherwise the ambient wave
-// attached to ctx (the framework stamps the dispatching wave onto a body's ctx).
-// Panics if neither is set — an op constructed with a nil wave (wave-agnostic) must
-// be dispatched either via op.In(&wave) or from inside a body whose ctx carries an
-// ambient wave.
+// resolveWave upgrades the op's bound wave (if the op was bound with In(wave)), else
+// the ambient wave attached to ctx (the framework stamps the dispatching wave onto a
+// body's ctx), to a PINNED substrate. The returned impl carries an extra reference that
+// the caller MUST drop with wavePool.Release once it has finished dispatching — the pin
+// keeps the impl alive across meta minting and work-item creation (each created holder
+// takes its own reference under this pin, so the AddRef-from-zero panic is unreachable).
 //
-// This is the dispatch-side counterpart to nil-OK construction: op.In(&wave) locks
-// dispatch to that wave; a nil-wave op dispatched in-body defers to the ambient
-// wave, letting one op instance be reused across many waves.
-func resolveWave(opWave *Wave, ctx context.Context) *Wave {
-	if opWave != nil {
-		return opWave
+// ok is false only for a bound wave that has already drained and recycled (a submit to a
+// terminal wave); the caller surfaces that as ErrWaveDone. The ambient path cannot fail:
+// the running body that stamped the ambient wave still holds a work reference on it, so
+// the AddRef is under a live reference. Panics if neither a bound nor an ambient wave is
+// available — a wave-agnostic op must be dispatched via op.In(wave) or from inside a
+// wave body.
+func resolveWave(opWave Wave, ctx context.Context) (*waveImpl, bool) {
+	if !opWave.h.Empty() {
+		return opWave.h.Get()
 	}
 	meta, ok := metaFromContext(ctx)
 	if !ok || meta.wave == nil {
-		panic("op constructed with nil wave dispatched without op.In(&wave) and outside any wave body")
+		panic("op constructed with nil wave dispatched without op.In(wave) and outside any wave body")
 	}
-	return meta.wave
+	// The ambient wave is a naked pointer, provably live here: the running body that
+	// stamped it holds a work reference on it, so AddRef is under a live reference and
+	// cannot race a recycle. The caller Releases this pin after dispatching.
+	omnipool.AddRef(meta.wave)
+	return meta.wave, true
 }

@@ -24,7 +24,7 @@ func ExampleWave_cancellation() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	limit := streampool.NewSemaphore(1)
 
@@ -42,7 +42,7 @@ func ExampleWave_cancellation() {
 		time.Sleep(20 * time.Millisecond)
 		return printResult.Submit(ctx, "first task result")
 	}).WithLimits(limit)
-	if err := firstRunner.In(&wave).Start(ctx); err != nil {
+	if err := firstRunner.In(wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
@@ -54,7 +54,7 @@ func ExampleWave_cancellation() {
 		time.Sleep(100 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
 	}).WithLimits(limit)
-	if err := secondRunner.In(&wave).Start(ctx); err != nil {
+	if err := secondRunner.In(wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
@@ -86,7 +86,7 @@ func ExampleWave_cancellation_task() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	limit := streampool.NewSemaphore(1)
 
@@ -102,7 +102,7 @@ func ExampleWave_cancellation_task() {
 	firstRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
 		return printResult.Submit(ctx, "first task result")
 	}).WithLimits(limit)
-	if err := firstRunner.In(&wave).Start(ctx); err != nil {
+	if err := firstRunner.In(wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch first task: %v\n", err)
 	}
 
@@ -118,7 +118,7 @@ func ExampleWave_cancellation_task() {
 		time.Sleep(10 * time.Millisecond)
 		return printResult.Submit(ctx, "second task result")
 	}).WithLimits(limit)
-	if err := secondRunner.In(&wave).Start(ctx); err != nil {
+	if err := secondRunner.In(wave).Start(ctx); err != nil {
 		fmt.Printf("Failed to launch second task: %v\n", err)
 	}
 
@@ -144,7 +144,7 @@ func ExampleWave_cancellation_task() {
 // under the same key, via [FlowKey.FollowUp], can additionally cancel the scope at
 // the flow's true end for cleanup on the success path.)
 func ExampleWithFlow_perRequestCancellation() {
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 	reqCtx := streampool.NewFlowKey[context.Context]()
 
 	// Collect results and print them sorted, so the example output is stable
@@ -173,7 +173,7 @@ func ExampleWithFlow_perRequestCancellation() {
 					return report.Submit(ctx, id+": completed")
 				}
 			})
-			return task.In(&wave).Start(fctx)
+			return task.In(wave).Start(fctx)
 		}, reqCtx.Value(clientCtx))
 	}
 

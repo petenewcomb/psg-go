@@ -157,11 +157,11 @@ func (s *semaphoreResource) setMaxConcurrency(limit int) {
 // by the taskWork the handle travels with across the queue hand-off.
 type limiterScatterWork struct {
 	workq.Work
-	wave *Wave
+	wave *waveImpl
 	h    *heldPermit
 }
 
-func newLimiterScatterWork(wv *Wave, inner workq.Work, h *heldPermit) *limiterScatterWork {
+func newLimiterScatterWork(wv *waveImpl, inner workq.Work, h *heldPermit) *limiterScatterWork {
 	wk := limiterScatterWorkPool.Get()
 	wk.Work = inner
 	wk.wave = wv

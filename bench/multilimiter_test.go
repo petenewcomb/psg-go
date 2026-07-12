@@ -39,7 +39,7 @@ import (
 type multiLimiterDispatcher struct {
 	wave     streampool.Wave
 	launcher streampool.Launcher[func()]
-	inner    streampool.Launcher[func()] // unbound; In(&sub) per body for subwave variants
+	inner    streampool.Launcher[func()] // unbound; In(sub) per body for subwave variants
 	limiters int
 	subwave  bool
 }
@@ -53,6 +53,7 @@ func (d *multiLimiterDispatcher) name() string {
 }
 
 func (d *multiLimiterDispatcher) start(capacity int) {
+	d.wave = streampool.NewWave()
 	body := func(ctx context.Context, task func(), _ error) error {
 		if !d.subwave {
 			task()
@@ -61,8 +62,8 @@ func (d *multiLimiterDispatcher) start(capacity int) {
 		// Drive the task through a one-shot sub-wave: the dispatch into it and the
 		// CloseAndSkimAll drain both run under the enclosing body's held permit
 		// set, engaging the suspend/reclaim brackets around each park.
-		var sub streampool.Wave
-		if err := d.inner.In(&sub).Submit(ctx, task); err != nil {
+		sub := streampool.NewWave()
+		if err := d.inner.In(sub).Submit(ctx, task); err != nil {
 			return err
 		}
 		return sub.CloseAndSkimAll(ctx)
@@ -72,7 +73,7 @@ func (d *multiLimiterDispatcher) start(capacity int) {
 	for i := range limits {
 		limits[i] = streampool.NewSemaphore(capacity)
 	}
-	d.launcher = launcher.WithLimits(limits...).In(&d.wave)
+	d.launcher = launcher.WithLimits(limits...).In(d.wave)
 	d.inner = streampool.NewFnLauncher(
 		func(_ context.Context, task func(), _ error) error {
 			task()

@@ -435,7 +435,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 		m.wave = src.wave
 		m.parent = src
 		refMeta(src)
-		m.parentWaves = src.parentWaves
+		m.parentWaves = retainParentWaveSet(src.parentWaves)
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
 	}
@@ -709,7 +709,7 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 // dispatch, on the dispatcher's goroutine, with the meta resolved there (m may
 // be nil for a submit from a bare ctx). Returns nil when there is no meta or
 // nothing encloses the wave.
-func flowBoundaryAboveWave(m *ctxMeta, wave *Wave) *flowRiderNode {
+func flowBoundaryAboveWave(m *ctxMeta, wave *waveImpl) *flowRiderNode {
 	if m == nil {
 		return nil
 	}
@@ -829,7 +829,7 @@ func flowFanInContext(ctx context.Context, tags *flowRiderNode) (context.Context
 		m.wave = src.wave
 		m.parent = src // preserve the permit chain; held stays nil on the clone
 		refMeta(src)
-		m.parentWaves = src.parentWaves
+		m.parentWaves = retainParentWaveSet(src.parentWaves)
 		m.ctxType = src.ctxType
 		m.executionEnvironment = src.executionEnvironment
 	}

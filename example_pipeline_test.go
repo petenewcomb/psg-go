@@ -39,7 +39,7 @@ func Example_pipeline() {
 func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error) {
 
 	// Create the scatter-gather wave.
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	// Cap concurrent digesting tasks at the number of cores available
 	// to the program, since they should be CPU-bound.
@@ -94,7 +94,7 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return newReadingRunner(path).In(&wave).Start(ctx)
+		return newReadingRunner(path).In(wave).Start(ctx)
 	})
 	if err != nil {
 		return nil, err

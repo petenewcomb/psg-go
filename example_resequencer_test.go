@@ -22,13 +22,13 @@ import (
 //nolint:errcheck,gosec // concise example code
 func Example_resequencer() {
 	ctx := context.Background()
-	var wave streampool.Wave
+	wave := streampool.NewWave()
 
 	words := []string{"order", "out", "of", "chaos"}
 
 	// The sink: print each word in sequence order. Because the resequencer is a
 	// single serial instance, the handler needs no locking.
-	printer := streampool.NewFnResequencer[string](&wave, 0,
+	printer := streampool.NewFnResequencer[string](wave, 0,
 		func(_ context.Context, word string, _ error) error {
 			fmt.Println(word)
 			return nil
@@ -43,7 +43,7 @@ func Example_resequencer() {
 		}))
 
 	for i := range words {
-		worker.In(&wave).Submit(ctx, i)
+		worker.In(wave).Submit(ctx, i)
 	}
 
 	wave.CloseAndSkimAll(ctx)

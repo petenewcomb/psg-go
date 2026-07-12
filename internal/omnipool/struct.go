@@ -62,10 +62,34 @@ type Resetter interface {
 // Pool is a type-safe wrapper around sync.Pool that handles object creation,
 // initialization, and resetting automatically.
 type Pool[T any] struct {
-	pool        sync.Pool
-	hasReset    bool
-	hasInit     bool
-	hasRefCount bool
+	pool           sync.Pool
+	hasReset       bool
+	hasInit        bool
+	hasRefCount    bool // *T is [RefCounted] (a64 [RefCounter])
+	hasGenRefCount bool // *T is [GenRefCounted] (a128 [GenRefCounter], for Handle)
+}
+
+// activate arms obj with its owner reference on Get (via whichever counter accessor *T
+// exposes); noop for an unmanaged type.
+func (p *Pool[T]) activate(obj *T, fresh bool) {
+	switch {
+	case p.hasGenRefCount:
+		any(obj).(GenRefCounted).GenRefCount().activate(fresh)
+	case p.hasRefCount:
+		any(obj).(RefCounted).RefCount().activate(fresh)
+	}
+}
+
+// releaseRef drops one reference, reporting whether this was the last (so the caller
+// recycles). Returns false for an unmanaged type (every Release recycles).
+func (p *Pool[T]) releaseRef(obj *T) (recycled bool) {
+	switch {
+	case p.hasGenRefCount:
+		return any(obj).(GenRefCounted).GenRefCount().release()
+	case p.hasRefCount:
+		return any(obj).(RefCounted).RefCount().release()
+	}
+	return true
 }
 
 // For returns a shared pool instance for type T. Multiple calls with the same
@@ -84,16 +108,19 @@ func For[T any]() *Pool[T] {
 	resetterType := reflect.TypeFor[Resetter]()
 	hasReset := typ.Implements(resetterType)
 
-	// A type that embeds RefCount and implements Resetter is reference-managed.
-	// An embedder that omits Reset is simply not RefCounted and takes the
-	// unmanaged path; that is harmless, since without a handle or AddRef its
-	// reference count is never exercised, and using either fails to compile.
-	hasRefCount := typ.Implements(reflect.TypeFor[RefCounted]())
+	// A type exposing a counter accessor (RefCount()/GenRefCount(), from an embedded or
+	// held [RefCounter]/[GenRefCounter]) and implementing Resetter is reference-managed.
+	// One embedding a counter but omitting Reset is simply not [RefCounted]/[GenRefCounted]
+	// and takes the unmanaged path — harmless, since without a handle or Inc its reference
+	// count is never exercised.
+	hasGenRefCount := typ.Implements(reflect.TypeFor[GenRefCounted]())
+	hasRefCount := !hasGenRefCount && typ.Implements(reflect.TypeFor[RefCounted]())
 
 	pool := &Pool[T]{
-		hasReset:    hasReset,
-		hasInit:     hasInit,
-		hasRefCount: hasRefCount,
+		hasReset:       hasReset,
+		hasInit:        hasInit,
+		hasRefCount:    hasRefCount,
+		hasGenRefCount: hasGenRefCount,
 	}
 
 	actual, _ := pools.LoadOrStore(typ, pool)
@@ -106,29 +133,23 @@ func (p *Pool[T]) Get() *T {
 	pooled := p.pool.Get()
 	if pooled != nil {
 		obj := pooled.(*T)
-		if p.hasRefCount {
-			// Re-arm the recycled object with a single reference, preserving its
-			// generation across the reuse.
-			any(obj).(RefCounted).refCount().activate(false)
-		}
+		p.activate(obj, false) // re-arm the recycled object (gen preserved for a Gen type)
 		return obj
 	}
 	obj := new(T)
 	if p.hasInit {
 		any(obj).(Initer).Init()
 	}
-	if p.hasRefCount {
-		any(obj).(RefCounted).refCount().activate(true)
-	}
+	p.activate(obj, true)
 	return obj
 }
 
 // Clone gets an object from the pool and copies the provided value into it.
 // This is a convenience method for the common pattern of [Get] + assignment.
 func (p *Pool[T]) Clone(value T) *T {
-	if p.hasRefCount {
+	if p.hasRefCount || p.hasGenRefCount {
 		// Copying value over the object would overwrite (and copy) the embedded
-		// RefCount, corrupting the generation and violating the non-copy rule.
+		// counter, corrupting its state and violating the non-copy rule.
 		panic("omnipool: Clone is not supported for reference-managed types")
 	}
 	obj := p.Get()
@@ -137,7 +158,7 @@ func (p *Pool[T]) Clone(value T) *T {
 }
 
 // Release drops one reference to obj and returns it to the pool. For a
-// reference-managed type (one embedding [RefCount]) the object is recycled only
+// reference-managed type (one embedding [RefCounter]) the object is recycled only
 // when the last reference is released; for an ordinary type every Release
 // returns the object immediately. Release is safe to call with a nil pointer,
 // which is a no-op.
@@ -145,16 +166,15 @@ func (p *Pool[T]) Release(obj *T) {
 	if obj == nil {
 		return
 	}
-	if p.hasRefCount {
-		rc := any(obj).(RefCounted)
-		if !rc.refCount().release() {
+	if p.hasRefCount || p.hasGenRefCount {
+		if !p.releaseRef(obj) {
 			// Not the last reference; the object stays live.
 			return
 		}
-		// Last reference: clear payload field-wise (Resetter is mandatory for
-		// managed types — never a wholesale zero, which would destroy the
-		// embedded RefCount's generation) and recycle.
-		rc.Reset()
+		// Last reference: clear payload field-wise (Resetter is mandatory for managed
+		// types — never a wholesale zero, which would destroy the counter's generation)
+		// and recycle.
+		any(obj).(Resetter).Reset()
 		p.pool.Put(obj)
 		return
 	}

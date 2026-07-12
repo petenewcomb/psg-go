@@ -13,14 +13,14 @@ import (
 // asm is TSan-invisible), so -race exercises the fallback with no test setup
 // here; PSGNATIVEA128 native-disable, used off the race path, lives in nbcq.
 
-// widget is a reference-managed pooled type: it embeds RefCount and so satisfies
-// RefCounted (the promoted accessor), even from this external test package.
+// widget is a generation-guarded pooled type (embeds GenRefCounter), so it can back a
+// [omnipool.Handle] — the a128 path.
 type widget struct {
-	omnipool.RefCount
+	omnipool.GenRefCounter
 	val int
 }
 
-func (w *widget) Reset() { w.val = 0 } // payload-only; must not touch RefCount
+func (w *widget) Reset() { w.val = 0 } // payload-only; must not touch GenRefCounter
 
 func TestRefCountSmoke(t *testing.T) {
 	p := omnipool.For[widget]()
@@ -35,7 +35,7 @@ func TestRefCountSmoke(t *testing.T) {
 		t.Fatalf("Handle.Get on live object: got (%v,%v), want (%p,true)", got, ok, obj)
 	}
 
-	omnipool.AddRef(obj) // refs = 3
+	obj.GenRefCount().Inc() // refs = 3
 
 	p.Release(obj) // refs = 2
 	p.Release(obj) // refs = 1
@@ -70,11 +70,11 @@ func TestRefCountUnderflowPanics(t *testing.T) {
 func TestAddRefFromZeroPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("AddRef from zero: want panic, got none")
+			t.Fatal("Inc from zero: want panic, got none")
 		}
 	}()
 	p := omnipool.For[widget]()
 	obj := p.Get()
-	p.Release(obj)       // -> 0, recycle
-	omnipool.AddRef(obj) // no outstanding reference: panic
+	p.Release(obj)          // -> 0, recycle
+	obj.GenRefCount().Inc() // no outstanding reference: panic
 }

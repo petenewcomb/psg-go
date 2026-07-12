@@ -247,7 +247,7 @@ func (in *flowInstance) unref(inline bool, wave *waveImpl, carrier *ctxMeta) err
 	// the hop to the executor, so keep the impl alive until Run drops both references.
 	// The successful TryIncrementReference above means the count is nonzero (refs >= 1),
 	// so the AddRef cannot increment from zero.
-	omnipool.AddRef(wave)
+	wave.GenRefCount().Inc()
 	wk := flowFireWorkPool.Get()
 	wk.Init(workq.NewGroupID())
 	wk.inst = in

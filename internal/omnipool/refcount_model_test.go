@@ -13,18 +13,18 @@ import (
 // mo is a reference-managed type used by the internal RefCount tests. Its Reset
 // is payload-only and must not touch the embedded RefCount.
 type mo struct {
-	RefCount
+	GenRefCounter
 	payload int
 }
 
 func (m *mo) Reset() { m.payload = 0 }
 
 func word(m *mo) (refs, gen uint64) {
-	w := m.refCount().w.Load()
+	w := m.w.Load()
 	return w[refsWord], w[genWord]
 }
 
-// TestRefCountModel drives random Get/AddRef/Release/NewHandle/Handle.Get
+// TestRefCountModel drives random Get/Inc/Release/NewHandle/Handle.Get
 // sequences against a reference model, asserting the exact (refs, gen) word
 // after every operation and that Handle.Get succeeds exactly when the object it
 // names is still the incarnation the handle was minted against.
@@ -69,7 +69,7 @@ func TestRefCountModel(t *testing.T) {
 					t.Skip("no live object")
 				}
 				l := lives[rapid.IntRange(0, len(lives)-1).Draw(t, "live")]
-				AddRef(l.obj)
+				l.obj.GenRefCount().Inc()
 				l.refs++
 				refs, gen := word(l.obj)
 				assert.Equal(t, l.refs, refs)

@@ -123,17 +123,18 @@ func (w Wave) CloseAndSkimAll(ctx context.Context) error {
 // waveImpl is the pooled substrate behind a [Wave]. It owns the batch lifecycle —
 // wavestate (Open→Done), the admission governor, the skim queue — and dispatches op
 // bodies onto the global worker pool (defaultPool). It is reference-managed
-// (embeds [omnipool.RefCount]): framework sub-waves draw a warm impl from the pool and
-// it is recycled only when the last reference drops, deferring reuse past any straggler.
-// [waveImpl.Init] brings up the warm queues once per physical allocation;
-// [waveImpl.Reset] re-opens a recycled impl to a fresh cycle without re-Init'ing them.
-// It owns NO context — cancellation rides the caller's ctx by ancestry.
+// (embeds [omnipool.GenRefCounter] — the generation-guarded counter, because the user's
+// Wave and cross-lifetime holders capture it as a weak [omnipool.Handle]): framework
+// sub-waves draw a warm impl from the pool and it is recycled only when the last reference
+// drops, deferring reuse past any straggler. [waveImpl.Init] brings up the warm queues once
+// per physical allocation; [waveImpl.Reset] re-opens a recycled impl to a fresh cycle
+// without re-Init'ing them. It owns NO context — cancellation rides the caller's ctx.
 //
 //nolint:contextcheck // background context used only for tracing
 type waveImpl struct {
-	// RefCount is the object-lifetime counter (packed generation + refs). It MUST NOT
+	// GenRefCounter is the object-lifetime counter (packed generation + refs). It MUST NOT
 	// be copied, and Reset MUST NOT touch it — the generation must survive recycling.
-	omnipool.RefCount
+	omnipool.GenRefCounter
 
 	state wavestate.WaveState
 
@@ -968,7 +969,7 @@ func (wk *poolWork) Init(group workq.GroupID, wv *waveImpl) {
 	// this work item keeps the impl alive for as long as it holds its naked *waveImpl.
 	// Minted under the dispatching method's live Get (refs >= 1), so it cannot race a
 	// recycle or increment from zero. Released in Close, beside DecrementWork.
-	omnipool.AddRef(wv)
+	wv.GenRefCount().Inc()
 }
 
 //nolint:contextcheck // background context used only for tracing
@@ -1051,6 +1052,6 @@ func resolveWave(opWave Wave, ctx context.Context) (*waveImpl, bool) {
 	// The ambient wave is a naked pointer, provably live here: the running body that
 	// stamped it holds a work reference on it, so AddRef is under a live reference and
 	// cannot race a recycle. The caller Releases this pin after dispatching.
-	omnipool.AddRef(meta.wave)
+	meta.wave.GenRefCount().Inc()
 	return meta.wave, true
 }

@@ -39,22 +39,45 @@ References are split into **strong** and **weak**:
   referenceless holders. `Handle.Get` is the fallible weak→strong upgrade.
 
 ```go
-type RefCount struct { /* atomic128 (refs, gen) */ }
-type RefCounted interface { Resetter; refCount() *RefCount }   // sealed; embed RefCount
+// TWO counter structs, differing only in whether they carry a generation (2026-07-12):
+type RefCounter struct    { /* atomic.Uint64 refs */ }      // a64 — strong holders only
+type GenRefCounter struct { /* atomic128 (refs, gen) */ }   // a128 — REQUIRED by Handle
 
-func NewHandle[P RefCounted](obj P) Handle[P]        // weak capture, +0
+// A type opts in by EXPOSING its counter through an accessor (embed the struct, which
+// promotes the accessor, or hold it and return &field). Distinct struct/accessor names
+// keep the embedded field from shadowing the promoted accessor:
+func (rc *RefCounter) RefCount() *RefCounter       { return rc }
+func (g *GenRefCounter) GenRefCount() *GenRefCounter { return g }
+
+// The trait interfaces the pool/Handle type-assert (-ed: the method is a noun accessor):
+type RefCounted    interface { Resetter; RefCount() *RefCounter }
+type GenRefCounted interface { Resetter; GenRefCount() *GenRefCounter }   // for Handle
+
+// Only Inc is exported on the counter (reached via the accessor: obj.RefCount().Inc());
+// activate/release (pool) and loadGen/upgrade (Handle) stay UNEXPORTED — a foreign holder
+// can never reimplement the protocol, only delegate to omnipool's counter.
+func (rc *RefCounter) Inc()                          // infallible clone, +1 (a ref must exist)
+
+func NewHandle[P HandleP](obj P) Handle[P]           // weak capture, +0 (HandleP: comparable+GenRefCounted)
 func (h Handle[P]) Get() (obj P, ok bool)            // fallible upgrade, +1 on ok
-func AddRef[P RefCounted](obj P)                      // infallible clone, +1 (a ref must exist)
-
 func (p *Pool[T]) Get() *T                            // first strong ref, +1
-func (p *Pool[T]) Release(obj *T)                     // -1, recycle on last (Put is a deprecated alias)
+func (p *Pool[T]) Release(obj *T)                     // -1, recycle on last
 ```
 
-The constraint sits on the **pointer type** `P` because `RefCount`'s accessor is a
-pointer-receiver method (it holds an atomic that must not be copied), so only
-`*T` — never `T` — satisfies `RefCounted`. `Resetter` is mandatory: a managed
-object is recycled in place, so its payload is cleared field-wise on release and
-never wholesale (which would copy the embedded atomic and destroy the generation).
+**a64 vs a128 (the split).** Only a [Handle] — a weak, referenceless capture — needs the
+generation, and only the generation needs the 128-bit word (so a last-reference recycle can
+bump `gen` and zero `refs` in one CAS). A pooled type with ONLY strong holders (e.g.
+streampool's `parentWaveSet`) can never observe a recycle across a stale reference, so it
+embeds the lighter `RefCount` — a single `atomic.Uint64`, cheaper and (unlike the atomic128
+fork) natively TSan-visible under `-race`. A type needing handles embeds `GenRefCount`. The
+pool drives either uniformly through the sealed `RefCounted` method set; `Handle`'s
+constraint is `GenRefCounted`, so the compiler rejects a handle to an a64 type.
+
+The constraints sit on the **pointer type** `P` because the counters' accessors are
+pointer-receiver methods (they hold an atomic that must not be copied), so only `*T` — never
+`T` — satisfies them. `Resetter` is mandatory: a managed object is recycled in place, so its
+payload is cleared field-wise on release and never wholesale (which would copy the embedded
+atomic and, for GenRefCount, destroy the generation).
 
 ## Why no distinguished retirement
 

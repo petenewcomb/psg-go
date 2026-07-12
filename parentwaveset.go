@@ -12,7 +12,7 @@ import (
 // parentWaveSet is a ctxMeta's cross-wave ancestry set — the waves its body is nested
 // under across goroutine boundaries — used solely to reject upward dispatch/skim (into an
 // ancestor wave from a descendant ctx; see [waveImpl.ctxMeta] / ensureCtxMeta and
-// TestTaskCannotSkimParentJob). It is reference-managed ([omnipool.RefCount]) and pooled,
+// TestTaskCannotSkimParentJob). It is reference-managed ([omnipool.RefCounter]) and pooled,
 // so same-wave derivations SHARE one set by pointer (a cheap AddRef, no copy) and it is
 // recycled only when the last referencing meta drops it. Only a genuine cross-wave hop
 // copies — into a fresh pooled set whose map keeps its backing capacity across recycles
@@ -27,7 +27,7 @@ import (
 // wave" panic. Membership is tested by NewHandle(liveWave); the stored handles are compared
 // by identity+generation, never Get-upgraded.
 type parentWaveSet struct {
-	omnipool.RefCount
+	omnipool.RefCounter
 	m map[omnipool.Handle[*waveImpl]]struct{}
 }
 
@@ -54,7 +54,7 @@ func (s *parentWaveSet) has(h omnipool.Handle[*waveImpl]) bool {
 // holder balances it with [releaseParentWaveSet] at its Reset.
 func retainParentWaveSet(src *parentWaveSet) *parentWaveSet {
 	if src != nil {
-		omnipool.AddRef(src) // safe: the sharing meta holds src live, so refs >= 1
+		src.RefCount().Inc() // safe: the sharing meta holds src live, so refs >= 1
 	}
 	return src
 }

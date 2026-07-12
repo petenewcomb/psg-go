@@ -72,11 +72,10 @@ func TestStraddleRecycleBeforeUpgrade(t *testing.T) {
 func TestStraddleRecycleBetweenLoadAndCAS(t *testing.T) {
 	p := For[mo]()
 	obj := p.Get()
-	rc := obj.refCount()
 	h := NewHandle(obj)
 
 	// The load Handle.Get would perform first: it observes (1, g), gen matches.
-	loaded := rc.w.Load()
+	loaded := obj.w.Load()
 	require.Equal(t, h.gen, loaded[genWord])
 	require.Equal(t, uint64(1), loaded[refsWord])
 
@@ -84,7 +83,7 @@ func TestStraddleRecycleBetweenLoadAndCAS(t *testing.T) {
 	p.Release(obj) // (1, g) -> (0, g+1)
 
 	// The upgrade's CAS, built from the now-stale load, must fail.
-	staleCAS := rc.w.CompareAndSwap(loaded,
+	staleCAS := obj.w.CompareAndSwap(loaded,
 		[2]uint64{loaded[refsWord] + 1, loaded[genWord]})
 	assert.False(t, staleCAS, "an upgrade CAS straddling a recycle must fail")
 
@@ -93,7 +92,7 @@ func TestStraddleRecycleBetweenLoadAndCAS(t *testing.T) {
 	_, ok := h.Get()
 	assert.False(t, ok)
 
-	w := rc.w.Load()
+	w := obj.w.Load()
 	assert.Equal(t, uint64(0), w[refsWord])
 	assert.Equal(t, h.gen+1, w[genWord])
 }

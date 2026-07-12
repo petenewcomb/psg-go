@@ -899,7 +899,7 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 		// Paired object-lifetime reference for the instance (a strong holder that
 		// outlives this funnelWork): minted under wk's own held reference, released
 		// alongside DecrementReference in flush().
-		omnipool.AddRef(wk.wave)
+		wk.wave.GenRefCount().Inc()
 		hbc.wave = wk.wave
 		hbc.factory = wk.fn.factory
 		hbc.detached = false

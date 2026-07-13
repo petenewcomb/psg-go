@@ -17,10 +17,16 @@ var defaultLauncherConfig = LauncherConfig{
 		},
 		ReturnErrorProb: 0.05,
 	},
+	ScatterCount: BiasedIntConfig{Min: 0, Med: 1, Max: 2},
 }
 
 type LauncherConfig struct {
 	Body FuncConfig
+	// ScatterCount is how many terminal fan-out tasks a launcher body dispatches
+	// via StartTask (task-to-task scatter into the same wave). Targets are
+	// Submit-only leaves, so the graph stays acyclic; sharing a task limiter with
+	// the dispatching launcher exercises the self-acquisition shape.
+	ScatterCount BiasedIntConfig
 }
 
 // Launcher represents a simulated stateless dispatch op. Its Body is

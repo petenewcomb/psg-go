@@ -683,13 +683,12 @@ func (c *controller) executeFunc(
 	return c.executeFuncBody(ctx, t, fn, v, true, active)
 }
 
-// executeFuncInTask walks a Func's Steps from a task body. StartTask
-// is skipped because the psg API forbids dispatching new work
-// from a task context.
+// executeFuncInTask walks a Func's Steps from a task body, including StartTask
+// (task-to-task scatter into the ambient wave).
 func (c *controller) executeFuncInTask(
 	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active []activeLimit,
 ) error {
-	return c.executeFuncBody(ctx, t, fn, v, false, active)
+	return c.executeFuncBody(ctx, t, fn, v, true, active)
 }
 
 func (c *controller) executeFuncBody(

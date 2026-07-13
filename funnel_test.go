@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -94,21 +95,21 @@ func TestFunnelScatterFromTask(t *testing.T) {
 		funnelPool,
 		newPassthroughTestFunnelFactory[int](t, skimmer),
 	)
+	var innerRan atomic.Bool
 	innerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
-		chk.Fail("should not get here")
+		innerRan.Store(true)
 		return nil
 	})
 	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
-		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, skim, or funnel context",
-			func() {
-				_ = innerRunner.Start(ctx)
-			},
-		)
+		// Task-to-task scatter into the ambient wave now succeeds.
+		if err := innerRunner.Start(ctx); err != nil {
+			return err
+		}
 		return funnelOp.Submit(ctx, 0)
 	})
 	chk.NoError(outerRunner.In(wave).Start(ctx))
 	chk.NoError(wave.CloseAndSkimAll(ctx))
+	chk.True(innerRan.Load(), "the task-to-task-scattered inner task must run")
 }
 
 func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
@@ -162,7 +163,7 @@ func TestFunnelTaskCanScatterToSubJob(t *testing.T) {
 	chk.True(subJobTaskRan, "The task in the sub-wave should have run")
 }
 
-func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
+func TestFunnelTaskScattersToAmbientWave(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()
 	parentWave := streampool.NewWave()
@@ -179,20 +180,21 @@ func TestFunnelTaskCannotScatterToParentJob(t *testing.T) {
 		funnelPool,
 		newPassthroughTestFunnelFactory[bool](t, skimmer),
 	)
+	var innerRan atomic.Bool
 	innerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
-		chk.Fail("Should not get here - parent task pool task should not run")
+		innerRan.Store(true)
 		return nil
 	})
 	outerRunner := streampool.NewTaskLauncher(func(ctx context.Context) error {
-		chk.PanicsWithValue(
-			"Start called from task context but allowed only by top-level, skim, or funnel context",
-			func() {
-				_ = innerRunner.Start(ctx)
-			},
-		)
+		// The inner runner has no bound wave, so it resolves the ambient wave
+		// (parentWave, the wave this body runs in) — task-to-task scatter, now allowed.
+		if err := innerRunner.Start(ctx); err != nil {
+			return err
+		}
 		return funnelOp.Submit(ctx, true)
 	})
 
 	chk.NoError(outerRunner.In(parentWave).Start(ctx))
 	chk.NoError(parentWave.CloseAndSkimAll(ctx))
+	chk.True(innerRan.Load(), "the task-to-task-scattered inner task must run")
 }

@@ -391,10 +391,12 @@ func newTaskErrSink() ErrSkimmer {
 	}))
 }
 
-// vetStart validates that the given wave and ctx are suitable for
-// dispatching a handler. It checks that the calling ctx is one of
-// the allowed types (top-level, skim, or funnel) and that the wave
-// is not yet done. Panics on misuse.
+// vetStart resolves the meta for dispatching a handler into wv and checks the wave
+// is not yet done. A body may dispatch (Start/Submit) from ANY context, including a
+// task body scattering into its own ambient wave: the permit gate postpones on a
+// miss, so a body dispatching under its own held permit does not deadlock. The
+// separate rules still apply — upward dispatch into an ancestor wave is rejected in
+// [waveImpl.ensureCtxMeta], and a body still cannot Skim a wave it is part of.
 // The bool return is topLevelCtxMeta's owned signal: true when a fresh top-level meta
 // was minted (and so should be released after dispatch), false when an ambient meta
 // was reused.
@@ -402,19 +404,8 @@ func vetStart(
 	ctx context.Context,
 	wv *waveImpl,
 ) (context.Context, *ctxMeta, bool) {
-	ctx, meta, owned := wv.topLevelCtxMeta(ctx, func(ctxType contextType) {
-		switch ctxType {
-		case topLevelContext, skimContext, funnelContext:
-			// These are valid for starting a task
-		default:
-			panic(fmt.Sprintf(
-				"Start called from %v context but allowed only by top-level, skim, or funnel context",
-				ctxType))
-		}
-	})
-
+	ctx, meta, owned := wv.topLevelCtxMeta(ctx, func(contextType) {})
 	wv.panicIfDone()
-
 	return ctx, meta, owned
 }
 

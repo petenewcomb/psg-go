@@ -425,6 +425,22 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 			runner.LimiterIndexes, runner.LimiterWeights = drawLimiterBinding(
 				t, plan.TaskLimiters, taskLimiterCount, fmt.Sprintf("Launcher#%d", id))
 		}
+		// Task-to-task scatter: dispatch terminal fan-out tasks into the same wave
+		// (cycle-free — targets are Submit-only leaves). Sharing a task limiter with
+		// this launcher exercises the self-acquisition shape.
+		if len(plan.Skimmers) > 0 {
+			tsc := config.Launcher.ScatterCount.Draw(t, fmt.Sprintf("Launcher#%d.ScatterCount", id))
+			for s := 0; s < tsc; s++ {
+				targetIdx := rapid.IntRange(0, len(plan.Skimmers)-1).Draw(t,
+					fmt.Sprintf("Launcher#%d.Scatter[%d].TargetSkimmer", id, s))
+				runnerIdx := addFanoutRunner(targetIdx,
+					fmt.Sprintf("TaskScatterRunner.from-Launcher#%d[%d]", id, s))
+				runner.Body.Steps = append(runner.Body.Steps, StartTask{
+					Prob:        probValue(config, 1.0),
+					RunnerIndex: runnerIdx,
+				})
+			}
+		}
 		runner.Body.Steps = append(runner.Body.Steps, Submit{
 			Prob:      probValue(config, 1.0),
 			SinkKind:  pickedSinkKind,

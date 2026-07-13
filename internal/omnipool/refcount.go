@@ -111,6 +111,13 @@ func (rc *RefCounter) release() (recycled bool) {
 	return n == 0
 }
 
+// RefExclusive reports whether this is the only reference (refs == 1) — the strong-side
+// get_mut: a true result means the caller is the sole holder and may safely mutate the object
+// in place rather than copy-on-write. Meaningful only to a caller that knows no other goroutine
+// can concurrently AddRef (it has established sole custody); under concurrent mutation the
+// answer is stale the instant it is read.
+func (rc *RefCounter) RefExclusive() bool { return rc.refs.Load() == 1 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GenRefCounter — the generation-guarded a128 (gen, refs) pair, required by Handle.
 // ─────────────────────────────────────────────────────────────────────────────

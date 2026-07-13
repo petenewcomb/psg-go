@@ -81,18 +81,29 @@ func (p *basePool[O]) NewHandle(obj O) Handle[O] {
 	return Handle[O]{p: obj, grc: grc, gen: grc.loadGen()}
 }
 
-// Release drops one reference to obj and recycles it — reset and returned to the pool — only
-// when that was the last reference. For an unmanaged type every Release recycles it
-// immediately. Release is safe to call with a nil object, which is a no-op.
-func (p *basePool[O]) Release(obj O) {
+// Release drops one reference to obj and recycles it — reset (made ready to reuse via the
+// Resetter) and returned to the pool — only when that was the last reference, reporting
+// whether this call recycled it. For an unmanaged type every Release recycles it immediately
+// (always true). Release is safe to call with a nil object, which is a no-op (false).
+//
+// A true return means obj is GONE: it has been reset and returned to the pool, and a
+// concurrent Get may already have reused it — so after a true return the caller must never
+// read or write obj again. The recycled report exists so a caller unwinding a linked
+// structure can cascade ITERATIVELY: drop one node, and only if it recycled move to the
+// next. That next link (and anything else the caller needs post-Release) MUST be copied out
+// of obj BEFORE the call, since Reset may have cleared it (see the streampool unrefMeta /
+// node-chain walks).
+func (p *basePool[O]) Release(obj O) (recycled bool) {
 	var zero O
 	if obj == zero {
-		return
+		return false
 	}
 	rc := p.findRefCounter(obj)
 	if rc == nil || rc.release() {
 		p.reset(obj)
 		// obj is always a pointer type (*T, or a pointer P), so this never boxes.
 		p.pool.Put(obj) //nolint:staticcheck // SA6002: O is always pointer-like; see basePool doc
+		return true
 	}
+	return false
 }

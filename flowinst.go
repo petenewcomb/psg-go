@@ -637,7 +637,7 @@ func (wk *flowFireWork) Run(ee *workerExEnv) {
 		m.riders = inst.enclosing
 		flowRefRiders(m.riders)
 		nodeRef(m.riders) // the fire meta's carrier ref (released by runFire's releaseBodyContext)
-	case carrier.refs.Load() == 1:
+	case carrier.RefExclusive():
 		// Sole holder is our dispatch pin: the carrier's owner release has
 		// completed and no async children survive — custody has RETURNED, so
 		// ADOPTING and mutating in place satisfies the immutability invariant

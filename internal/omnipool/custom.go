@@ -81,8 +81,8 @@ func GetCustom[T MakerTrait[P], P comparable](trait T) P {
 // ReleaseCustom is a package-level convenience that gets a pool and releases an object.
 // For better performance, store and reuse a pool returned by [ForCustom].
 // The trait parameter is used only for type inference; its value is ignored.
-func ReleaseCustom[T MakerTrait[P], P comparable](trait T, obj P) {
-	ForCustom(trait).Release(obj)
+func ReleaseCustom[T MakerTrait[P], P comparable](trait T, obj P) (recycled bool) {
+	return ForCustom(trait).Release(obj)
 }
 
 // NewCustomHandle mints a weak [Handle] to obj, locating its counter through a [RefTrait] — the

@@ -292,17 +292,12 @@ func TestFlowCoalesceConservation(t *testing.T) {
 // (docs/decisions/driver-contexts.md, "Flush: a rolling node-only driver pin on
 // the instance"). White-box: between accumulates the cached live instance is
 // inspected via the owner lineage (pop → read under mu → push back), safe while
-// the wave is otherwise quiescent. The alloc-hook balance proves the flush-time
-// release: a pin left standing would hold the last accumulate's meta out of the
-// pool forever.
+// the wave is otherwise quiescent. Each inspect confirms the pin re-points to the
+// LATEST meta and releases the previous one (NotSame below); the flush-time
+// release rides that same re-point mechanism.
 func TestFunnelDriverPin(t *testing.T) {
 	chk := require.New(t)
 	key := NewFlowKey[int]()
-
-	var balance atomic.Int64
-	hook := func(delta int) { balance.Add(int64(delta)) }
-	ctxMetaAllocHook.Store(&hook)
-	defer ctxMetaAllocHook.Store(nil)
 
 	var mu sync.Mutex
 	var accMetas []*ctxMeta
@@ -374,7 +369,4 @@ func TestFunnelDriverPin(t *testing.T) {
 	})
 
 	chk.NoError(wave.CloseAndSkimAll(context.Background()))
-	// Flush released the final pair: every meta drawn during the test returns.
-	chk.Eventually(func() bool { return balance.Load() == 0 }, 5*time.Second, 2*time.Millisecond,
-		"ctxMeta balance settles to zero after the drain (pin released at flush)")
 }

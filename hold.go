@@ -147,14 +147,13 @@ func snapshotRiders(chain *flowRiderNode) (live, severed *flowRiderNode) {
 	return buildLive(chain), buildSevered(chain)
 }
 
-// newHoldMeta builds a GC-owned meta for the hold: allocated directly (not
-// from bodyMetaPool, so the conservation hook is untouched) with a permanent
-// +1 ref bias so a derived dispatch meta's parent unref cascade can never
-// recycle it into the pool. Wave-less and permit-rootless like a pin: a hold
+// newHoldMeta builds a meta for the hold: drawn from bodyMetaPool with its owner reference
+// armed (Get sets refs=1) but NEVER released — that permanent owner ref is the bias a derived
+// dispatch meta's parent unref cascade can never drop to zero, so the meta is never recycled
+// and is reclaimed by GC with the hold. Wave-less and permit-rootless like a pin: a hold
 // carries the flow, never the source extent.
 func newHoldMeta(riders *flowRiderNode) *ctxMeta {
-	m := &ctxMeta{}
-	m.refs.Store(1) // permanent bias: GC-owned, never pooled
+	m := bodyMetaPool.Get() // owner ref armed and held for the hold's life; never Released
 	m.ctxType = topLevelContext
 	m.permitRoot = true
 	m.riders = riders

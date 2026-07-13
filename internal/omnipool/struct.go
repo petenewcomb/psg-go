@@ -185,7 +185,7 @@ func Clone[T any](value T) *T {
 
 // Release is a package-level convenience function that gets a pool and releases an object.
 // For better performance, store and reuse a pool returned by [For].
-func Release[T any](obj *T) {
+func Release[T any](obj *T) (recycled bool) {
 	pool := For[T]()
-	pool.Release(obj)
+	return pool.Release(obj)
 }

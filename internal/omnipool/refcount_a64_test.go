@@ -45,6 +45,38 @@ func TestA64RefCount_GetAddRefRelease(t *testing.T) {
 	}
 }
 
+func TestA64RefCount_ReleaseReportsRecycle(t *testing.T) {
+	p := For[gauge]()
+
+	obj := p.Get()          // refs = 1 (owner)
+	obj.RefCount().AddRef() // refs = 2
+
+	if p.Release(obj) { // refs = 1
+		t.Fatal("Release with a reference still held reported recycled=true")
+	}
+	if !p.Release(obj) { // refs = 0 -> recycle
+		t.Fatal("Release of the last reference reported recycled=false")
+	}
+}
+
+func TestA64RefCount_RefExclusive(t *testing.T) {
+	p := For[gauge]()
+
+	obj := p.Get() // refs = 1
+	if !obj.RefExclusive() {
+		t.Fatal("RefExclusive at refs=1: want true (sole holder), got false")
+	}
+	obj.RefCount().AddRef() // refs = 2
+	if obj.RefExclusive() {
+		t.Fatal("RefExclusive at refs=2: want false (a second holder exists), got true")
+	}
+	p.Release(obj) // refs = 1
+	if !obj.RefExclusive() {
+		t.Fatal("RefExclusive after dropping to refs=1: want true, got false")
+	}
+	p.Release(obj) // refs = 0 -> recycle
+}
+
 func TestA64RefCount_TryAddRef(t *testing.T) {
 	p := For[gauge]()
 

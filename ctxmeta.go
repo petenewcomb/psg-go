@@ -57,15 +57,15 @@ type ctxMeta struct {
 	// the goroutine boundary. See docs/limiter-suspend-resume.md,
 	// "Serialization and scoping".
 	parent *ctxMeta
-	// refs counts the holders of this meta: its owner (the dispatch or work
-	// item that created it, dropped via releaseBodyContext /
-	// releaseTopLevelContext), each live child meta (taken at derivation or
-	// borrow, dropped when the child's own release cascades in unrefMeta), and
-	// transient pins across scheduler stash windows (funnelInstance /
-	// flowFireWork Execute→Run). The meta — and the selfCtx ctxpool child that
-	// carries it — recycles only at zero; that is what keeps a stashed borrow
-	// source valid until its async reader is done.
-	refs atomic.Int32
+	// RefCounter counts the holders of this meta (embedded, promoting AddRef/RefCount): its
+	// owner (the dispatch or work item that created it, dropped via releaseBodyContext /
+	// releaseTopLevelContext), each live child meta (taken at derivation or borrow via
+	// refMeta, dropped when the child's own release cascades in unrefMeta), and transient
+	// pins across scheduler stash windows (funnelInstance / flowFireWork Execute→Run). The
+	// meta — and the selfCtx ctxpool child that carries it — recycles only at zero (newCtxMeta
+	// arms the owner ref via the pool's Get); that is what keeps a stashed borrow source valid
+	// until its async reader is done. a64 (no generation): every holder is strong.
+	omnipool.RefCounter
 	// permitRoot marks a meta whose body runs on a fungible worker goroutine
 	// (a borrowBodyContext borrow or a follow-up fire): syncParent — and so
 	// every synchronous-extent walk — stops here. This is the isolation role
@@ -138,13 +138,25 @@ func (cm *ctxMeta) vetNotExpiredPin() {
 	}
 }
 
-// Reset implements omnipool.Resetter (refs is atomic.Int32, whose noCopy would
-// trip vet copylocks under omnipool's plain-copy zero).
+// Reset implements omnipool.Resetter: make the meta ready to reuse. It releases the meta's
+// OWNED resources — the topLevelExEnv it owns, its selfCtx ctxpool child, and its parentWaveSet
+// reference — and clears every field. It must NOT touch the embedded RefCounter (a64: release()
+// left refs at 0; the next pool Get re-arms the owner ref), and it must NOT drop the parent
+// ref: that ref (this meta's hold on its parent) is unwound ITERATIVELY by unrefMeta's loop,
+// not here, so the cascade never recurses through Release.
 func (cm *ctxMeta) Reset() {
+	if cm.ownsExEnv {
+		if ee, ok := cm.executionEnvironment.(*topLevelExEnv); ok {
+			topLevelExEnvPool.Release(ee)
+		}
+	}
+	if cm.selfCtx != nil {
+		ctxpool.Free(cm.selfCtx)
+	}
+	releaseParentWaveSet(cm.parentWaves)
 	cm.wave = nil
 	cm.parent = nil
 	cm.held = nil
-	releaseParentWaveSet(cm.parentWaves)
 	cm.parentWaves = nil
 	cm.ctxType = topLevelContext
 	cm.riders = nil
@@ -154,65 +166,36 @@ func (cm *ctxMeta) Reset() {
 	cm.permitRoot = false
 	cm.origin.Store(nil)
 	cm.pin.Store(pinNone)
-	cm.refs.Store(0)
 }
 
-// ctxMetaAllocHook, when set, receives +1 as a meta is drawn from bodyMetaPool
-// and -1 as one is recycled — the seam the conservation test uses to prove no
-// meta leaks or is double-freed across a drained workload (mirrors
-// flowNodeAllocHook). Production leaves it nil.
-var ctxMetaAllocHook atomic.Pointer[func(int)]
-
-func ctxMetaAlloc(delta int) {
-	if h := ctxMetaAllocHook.Load(); h != nil {
-		(*h)(delta)
-	}
-}
-
-// newCtxMeta draws a meta from the pool with the owner's reference: refs
-// starts at 1, dropped by the owner's release path (releaseBodyContext /
-// releaseTopLevelContext / WithFlow's scope exit). Children add their own via
-// refMeta.
+// newCtxMeta draws a meta from the pool with the owner's reference armed (the pool's Get sets
+// refs=1), dropped by the owner's release path (releaseBodyContext / releaseTopLevelContext /
+// WithFlow's scope exit). Children add their own via refMeta.
 func newCtxMeta() *ctxMeta {
-	m := bodyMetaPool.Get()
-	ctxMetaAlloc(1)
-	m.refs.Store(1)
-	return m
+	return bodyMetaPool.Get()
 }
 
 // refMeta takes one reference on m (nil-safe): a child meta pinning its
 // parent, or a transient stash pin (Execute→Run).
 func refMeta(m *ctxMeta) {
 	if m != nil {
-		m.refs.Add(1)
+		m.AddRef()
 	}
 }
 
-// unrefMeta drops one reference on m and, at zero, recycles it — returning the
-// owned topLevelExEnv, freeing the selfCtx ctxpool child, and returning the
-// meta to its pool — then drops the freed meta's ref on its parent, cascading
-// up. The cascade is what subsumes the old releaseParent owned-chain walk: a
-// still-owned ancestor (a reused ambient meta, or one with other live
-// children) stops the walk above zero naturally.
+// unrefMeta drops one reference on m and, at zero, recycles it — Reset returns its owned
+// topLevelExEnv, frees its selfCtx ctxpool child, and releases its parentWaveSet — then drops
+// the freed meta's ref on its parent, cascading up. The cascade is ITERATIVE: Release reports
+// the recycle, and the loop moves to the parent it copied out BEFORE the call (the recycled
+// meta is off-limits — possibly already reused — once Release returns true). A still-owned
+// ancestor (a reused ambient meta, or one with other live children) stops the walk above zero
+// naturally, subsuming the old releaseParent owned-chain walk.
 func unrefMeta(m *ctxMeta) {
 	for m != nil {
-		if n := m.refs.Add(-1); n != 0 {
-			if n < 0 {
-				panic("streampool: ctxMeta reference count underflow (double release)")
-			}
+		parent := m.parent
+		if !bodyMetaPool.Release(m) {
 			return
 		}
-		parent := m.parent
-		if m.ownsExEnv {
-			if ee, ok := m.executionEnvironment.(*topLevelExEnv); ok {
-				topLevelExEnvPool.Release(ee)
-			}
-		}
-		if m.selfCtx != nil {
-			ctxpool.Free(m.selfCtx)
-		}
-		ctxMetaAlloc(-1)
-		bodyMetaPool.Release(m) // Reset zeroes, incl. refs
 		m = parent
 	}
 }
@@ -724,8 +707,11 @@ func (wv *waveImpl) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta,
 		// owned chain: transfer the dispatch's ownership to the skim meta's
 		// parent ref (taken in ensureCtxMeta) by dropping the mint ref. The
 		// caller's single releaseTopLevelContext then frees both via the
-		// unrefMeta cascade. Cannot reach zero here — the skim meta holds a ref.
-		skimMeta.parent.refs.Add(-1)
+		// unrefMeta cascade. This Release only drops the mint ref: the skim meta's
+		// parent ref keeps the top-level alive, so it must not recycle here.
+		if bodyMetaPool.Release(skimMeta.parent) {
+			panic("streampool: skim-ownership transfer recycled the top-level meta (skim meta's parent ref missing)")
+		}
 	}
 
 	if skimMeta.ctxType != skimContext {

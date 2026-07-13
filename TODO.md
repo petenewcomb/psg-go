@@ -144,12 +144,16 @@ reached the internals. Biggest single naming smell:
   are constant/threshold stubs (`run.go:750-764`). Drop the prose or implement. Effort S. NEW.
 - `docs/decisions/backpressure-and-reentrancy.md:512` documents an `Accepted{deferred,
   upstream}` struct that no longer matches `accepted.go`. Effort S. `[tracked]` line 243.
-- **Label-anchoring pass**: comment labels used without a resolvable doc citation at point
-  of use — "Design B" (~11 uses in workq, defined in no docs/ file), "CP-B1b"
-  (`pool.go:29`), "Phase 2b C2" (`pool.go:14`), "resolution (c)" (~10 uses, permithandle/
-  permits — §Overdraft has no "(c)" enumerand), "Decision 1-4" (permits, defined in
-  weighted-acquisition.md but not cited beside use). Add a cite beside each label or define
-  it in a cited doc. Effort M, risk low. NEW.
+- **Label-anchoring pass** (needs PN — requires knowing what each label denotes; NOT
+  auto-fixed to avoid fabricating citations). Investigated 2026-07-13:
+  - **Genuinely homeless (defined in no doc — write a definition or a labels glossary):**
+    "Design B" (used in workq comments; the one docs hit, limiter-resource-classes.md:215,
+    only *references* "Design B precedent of the queue owning its deadline timer" — never
+    defines it); "resolution (c)" (permithandle/permits, no docs hit); "CP-B1b"
+    (`pool.go:29`, no docs hit).
+  - **Have a home doc but not cited beside the use (mechanical once confirmed):** "CP-F7",
+    "Phase 2b", "Decision 1-4" (weighted-acquisition et al.). Add an inline `(see <doc>)`.
+  Effort M, risk low. NEW.
 
 ## Tier 5 — Test coverage gaps
 

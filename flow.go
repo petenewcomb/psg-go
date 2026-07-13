@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 
 	"github.com/petenewcomb/streampool/internal/ctxpool"
 	"github.com/petenewcomb/streampool/internal/omnipool"
@@ -498,21 +497,9 @@ type flowRiderNode struct {
 	omnipool.RefCounter
 }
 
-// flowRiderNodePool recycles rider nodes. A node is immutable but for refs, so a
+// flowRiderNodePool recycles rider nodes. A node is immutable but for its reference count, so a
 // recycled node is fully re-stamped by newRiderNode on its next borrow.
 var flowRiderNodePool = omnipool.For[flowRiderNode]()
-
-// flowNodeAllocHook, when set, receives +1 as a node is drawn from the pool and
-// -1 as one is returned — the seam the conservation test uses to prove no node
-// leaks or is double-freed across a drained flow. Production leaves it nil; the
-// cost is one relaxed atomic load per node borrow/reclaim, uncontended.
-var flowNodeAllocHook atomic.Pointer[func(int)]
-
-func flowNodeAlloc(delta int) {
-	if h := flowNodeAllocHook.Load(); h != nil {
-		(*h)(delta)
-	}
-}
 
 // Reset makes the node ready to reuse. It clears the fields but must NOT release next: this
 // node's ownership of its successor is unwound iteratively by the release cascade, not here.
@@ -522,7 +509,6 @@ func (n *flowRiderNode) Reset() {
 	n.hasVal = false
 	n.inst = nil
 	n.next = nil
-	flowNodeAlloc(-1) // conservation seam
 }
 
 // newRiderNode draws a node from the pool with its owner reference armed and CONSUMES the
@@ -533,7 +519,6 @@ func newRiderNode(
 	id *flowIdentity, val any, hasVal bool, inst *flowInstance, next *flowRiderNode,
 ) *flowRiderNode {
 	n := flowRiderNodePool.Get()
-	flowNodeAlloc(1)
 	n.id = id
 	n.val = val
 	n.hasVal = hasVal

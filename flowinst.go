@@ -357,7 +357,7 @@ type sharedNode struct {
 }
 
 // sharedNodePool recycles shared nodes; freeSharedNode returns them as components
-// dissolve. flowSharedAllocHook is the conservation seam (mirrors flowNodeAllocHook).
+// dissolve. flowSharedAllocHook is the test conservation seam.
 var sharedNodePool = omnipool.For[sharedNode]()
 
 // Reset is the omnipool recycle hook: drop the slice backing promptly and zero the

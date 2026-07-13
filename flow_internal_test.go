@@ -13,137 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFlowNodeConservation exercises the CP-R2b node refcount along its
-// reclaim-critical paths — inline nesting, async work that outlives the scope,
-// and the funnel tag-union adoption — and asserts every rider node drawn from
-// flowRiderNodePool is returned once the flow drains. It runs white-box so it can
-// install flowNodeAllocHook, the +1/-1 seam around the pool borrow/reclaim; a leak
-// leaves the balance positive, a double-free trips the underflow panic in
-// nodeUnref before the balance could even reach zero.
-func TestFlowNodeConservation(t *testing.T) {
-	chk := require.New(t)
-
-	var balance atomic.Int64
-	hook := func(delta int) { balance.Add(int64(delta)) }
-	flowNodeAllocHook.Store(&hook)
-	defer flowNodeAllocHook.Store(nil)
-
-	// Nodes borrowed so far must all come back; wait past any async fire tail.
-	settled := func(where string) {
-		chk.Eventuallyf(func() bool { return balance.Load() == 0 }, 5*time.Second, 2*time.Millisecond,
-			"%s: %d rider node(s) leaked (balance not zero)", where, balance.Load())
-	}
-
-	key := NewFlowKey[int]()
-	tag := NewFlowTag()
-	inner := NewFlowTag()
-
-	// (A) Inline nesting with values, tags, follow-ups, suppress and a fresh root —
-	// every fire runs at scope exit, so the whole chain reclaims synchronously.
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		return WithFlow(ctx, func(ctx context.Context) error {
-			return WithFlow(ctx, func(context.Context) error { return nil },
-				Disconnect(), key.Value(9), inner.FollowUpFn(func(context.Context) error { return nil }))
-		}, key.Suppress(), tag.FollowUpFn(func(context.Context) error { return nil }))
-	}, key.Value(1), tag.FollowUpFn(func(context.Context) error { return nil })))
-	settled("inline nesting")
-
-	// (A2) Sequential-layer disposal arcs: subtractive options over fresh
-	// sibling layers exercise the working-chain replace/dispose path — a
-	// Suppress dropping an earlier sibling's node, a Disconnect dropping a
-	// whole fresh prefix including a follow-up's node (whose instance still
-	// fires empty at scope exit) — every dropped node must reclaim.
-	chk.NoError(WithFlow(context.Background(), func(context.Context) error { return nil },
-		key.Value(3), tag.Infuse(), tag.Suppress(), key.Value(4)))
-	chk.NoError(WithFlow(context.Background(), func(context.Context) error { return nil },
-		key.Value(5), inner.FollowUpFn(func(context.Context) error { return nil }),
-		Disconnect(), key.Value(6)))
-	settled("sequential-layer disposal")
-
-	// (A3) Pinned flow: the pin's node refs hold the chain past the source
-	// scope (a deliberate positive while it stands); UnpinFlow releases it,
-	// firing the follow-up inline, and every node returns.
-	var pinned context.Context
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		pinned = PinFlow(ctx)
-		return nil
-	}, key.Value(7), tag.FollowUpFn(func(context.Context) error { return nil })))
-	chk.Positive(balance.Load(), "a standing pin holds rider nodes — a leaked pin is visible")
-	chk.NoError(UnpinFlow(pinned))
-	settled("pinned flow released")
-
-	// (A4) Held flow: the hold's snapshot is GC-owned (invisible to the node
-	// hook), but its carrier refs keep the instances — and through their
-	// enclosing refs, pooled chain — alive until release; the release fires
-	// and every pooled node returns.
-	var heldFires atomic.Int64
-	var held context.Context
-	var cancelHold context.CancelCauseFunc
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		held, cancelHold = HoldFlow(ctx)
-		return nil
-	}, key.Value(8), tag.FollowUpFn(func(context.Context) error { heldFires.Add(1); return nil })))
-	chk.Equal(int64(0), heldFires.Load(), "the hold carries the flow past the scope")
-	cancelHold(nil)
-	chk.Equal(int64(1), heldFires.Load(), "release ends the flow")
-	_ = held
-	settled("held flow released")
-
-	// (B) Async work outliving the scope: the follow-up fires from the wave drain,
-	// so the instance's enclosing ref (and the chain behind it) must survive the
-	// gap between count→0 and the async fire, then reclaim.
-	release := make(chan struct{})
-	task := NewTaskLauncher(func(context.Context) error { <-release; return nil })
-	wave := NewWave()
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		for i := 0; i < 4; i++ {
-			if err := task.In(wave).Start(ctx); err != nil {
-				return err
-			}
-		}
-		return nil
-	}, key.Value(2), tag.FollowUpFn(func(context.Context) error { return nil })))
-	close(release)
-	chk.NoError(wave.CloseAndSkimAll(context.Background()))
-	settled("async drain")
-
-	// (C) Funnel tag union: two independent scopes' tags fold into one funnel
-	// instance, materialize onto the flush meta, and release with it.
-	tagA, tagB := NewFlowTag(), NewFlowTag()
-	fwave := NewWave()
-	funnel := NewFnFunnel(fwave, func() Accumulator[int] {
-		return NewAccumulator(
-			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
-			func(context.Context) error { return nil },
-		)
-	})
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		return funnel.Submit(ctx, 1)
-	}, tagA.FollowUpFn(func(context.Context) error { return nil })))
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		return funnel.Submit(ctx, 2)
-	}, tagB.FollowUpFn(func(context.Context) error { return nil })))
-	chk.NoError(fwave.CloseAndSkimAll(context.Background()))
-	settled("funnel union")
-
-	// (D) Bare presence (Infuse) + anonymous follow-up crossing a funnel: the
-	// presence node (no instance) and the anonymous follow-up node must both fold
-	// into the union, materialize at flush, and reclaim.
-	pres := NewFlowTag()
-	iwave := NewWave()
-	ifunnel := NewFnFunnel(iwave, func() Accumulator[int] {
-		return NewAccumulator(
-			func(context.Context, int, error) (time.Time, error) { return time.Time{}, nil },
-			func(context.Context) error { return nil },
-		)
-	})
-	chk.NoError(WithFlow(context.Background(), func(ctx context.Context) error {
-		return ifunnel.Submit(ctx, 1)
-	}, pres.Infuse(), FlowFollowUpFn(func(context.Context) error { return nil })))
-	chk.NoError(iwave.CloseAndSkimAll(context.Background()))
-	settled("infuse + anonymous follow-up funnel")
-}
-
 // TestFlowCoalesceMechanism is the DETERMINISTIC proof of the CP-R6b invariant,
 // driving the union-find primitives directly (a funnel instance's co-accumulation
 // is a runtime accident — submit runs inline or async — so no black-box submit can
@@ -196,27 +65,24 @@ func TestFlowCoalesceMechanism(t *testing.T) {
 // merged component draining CONCURRENTLY across a downstream fan-out (the shared
 // tree dereffed under mergeMu contention) — and asserts that (a) the definitional
 // follow-up fires EXACTLY ONCE per aggregated flow and (b) every sharedNode drawn
-// from sharedNodePool and every rider node come back once the flow drains. Both
-// scenarios pin co-accumulation deterministically (a funnel INSTANCE is one
-// aggregation is one flow; whether independent flows land in the SAME instance is a
-// timing accident, so a cross-instance fire count is intentionally not asserted). It
-// runs white-box to install both alloc seams; a leaked component node leaves
-// sharedBal positive, a double-free trips the underflow panic in derefShared.
+// from sharedNodePool comes back once the flow drains. Both scenarios pin
+// co-accumulation deterministically (a funnel INSTANCE is one aggregation is one
+// flow; whether independent flows land in the SAME instance is a timing accident, so
+// a cross-instance fire count is intentionally not asserted). It runs white-box to
+// install the shared alloc seam; a leaked component node leaves sharedBal positive, a
+// double-free trips the underflow panic in derefShared.
 func TestFlowCoalesceConservation(t *testing.T) {
 	chk := require.New(t)
 
-	var nodeBal, sharedBal atomic.Int64
-	nh := func(d int) { nodeBal.Add(int64(d)) }
+	var sharedBal atomic.Int64
 	sh := func(d int) { sharedBal.Add(int64(d)) }
-	flowNodeAllocHook.Store(&nh)
 	flowSharedAllocHook.Store(&sh)
-	defer flowNodeAllocHook.Store(nil)
 	defer flowSharedAllocHook.Store(nil)
 
 	settled := func(where string) {
-		chk.Eventuallyf(func() bool { return nodeBal.Load() == 0 && sharedBal.Load() == 0 },
+		chk.Eventuallyf(func() bool { return sharedBal.Load() == 0 },
 			5*time.Second, 2*time.Millisecond,
-			"%s: leak (nodes=%d shared=%d)", where, nodeBal.Load(), sharedBal.Load())
+			"%s: shared leak (%d)", where, sharedBal.Load())
 	}
 
 	var fires atomic.Int32

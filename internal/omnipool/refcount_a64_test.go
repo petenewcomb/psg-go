@@ -45,6 +45,26 @@ func TestA64RefCount_GetAddRefRelease(t *testing.T) {
 	}
 }
 
+func TestA64RefCount_TryAddRef(t *testing.T) {
+	p := For[gauge]()
+
+	obj := p.Get() // refs = 1 (live)
+	if !obj.TryAddRef() {
+		t.Fatal("TryAddRef on a live object (refs=1): want true, got false")
+	}
+	// TryAddRef succeeded, so refs = 2: it takes two Releases to recycle.
+	resetsBefore := obj.resets
+	p.Release(obj) // refs = 1, no recycle
+	if obj.resets != resetsBefore {
+		t.Fatalf("recycled after one release: TryAddRef did not increment (resets=%d, want %d)", obj.resets, resetsBefore)
+	}
+	p.Release(obj) // refs = 0 -> recycle
+
+	if obj.TryAddRef() {
+		t.Fatal("TryAddRef on a recycled object (refs=0): want false (no resurrection), got true")
+	}
+}
+
 func TestA64RefCount_ReleaseUnderflowPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

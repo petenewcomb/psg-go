@@ -29,7 +29,7 @@ func TestDestroyRemovesChildExactly(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, pm.Held())
 		pm.Release()
-		require.True(t, sub.ReleaseRef()) // destroy → unlinked from root.children
+		sub.ReleaseRef() // destroy → unlinked from root.children
 	}
 
 	require.Equal(t, 0, root.childrenLen(), "destroyed children must be removed, not accumulated")
@@ -47,7 +47,7 @@ func TestDestroyRemovesRootExactly(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, pm.Held())
 		pm.Release()
-		require.True(t, c.ReleaseRef())
+		c.ReleaseRef()
 	}
 
 	require.Equal(t, 0, tp.rootsLen(), "destroyed roots must be removed, not accumulated")
@@ -67,7 +67,7 @@ func TestDestroyKeepsLiveSibling(t *testing.T) {
 
 	for range 100 {
 		sub := root.NewChild()
-		require.True(t, sub.ReleaseRef())
+		sub.ReleaseRef()
 	}
 
 	require.True(t, root.childrenContains(live), "removing dead siblings must not drop the live child")

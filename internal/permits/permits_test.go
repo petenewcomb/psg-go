@@ -28,7 +28,7 @@ func TestRootUnitLifecycle(t *testing.T) {
 	assert.Equal(t, 1, tp.totalHeld(), "cache-don't-return: release does not give the permit back")
 	tp.check(t)
 
-	require.True(t, c.ReleaseRef(), "the unit's last reference destroys the cache")
+	c.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld(), "destruction returns the permit to the Resource")
 	tp.check(t)
 }
@@ -58,7 +58,7 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	tp.check(t)
 
 	cp.Release()                       // child body completes
-	require.True(t, sub.ReleaseRef())  // sub-wave drains; its cache is destroyed
+	sub.ReleaseRef()                   // sub-wave drains; its cache is destroyed
 	assert.Equal(t, 1, tp.totalHeld()) // parent still holds its cached permit
 	tp.check(t)
 
@@ -67,7 +67,7 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	require.True(t, pp2.Held())
 	require.Same(t, parent, pp2.backing)
 	pp2.Release()
-	require.True(t, parent.ReleaseRef())
+	parent.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }
@@ -107,8 +107,8 @@ func TestParallelChildrenTakeDeltaThenBlock(t *testing.T) {
 	c1.Release()
 	c2.Release()
 	d3.Invalidate() // the miss queued d3, homing it under sub — withdraw before drain
-	require.True(t, sub.ReleaseRef())
-	require.True(t, parent.ReleaseRef())
+	sub.ReleaseRef()
+	parent.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }
@@ -136,8 +136,8 @@ func TestCrossWaveSteal(t *testing.T) {
 	tp.check(t)
 
 	bp.Release()
-	require.True(t, b.ReleaseRef())
-	require.True(t, a.ReleaseRef())
+	b.ReleaseRef()
+	a.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }
@@ -168,9 +168,9 @@ func TestNestedDriveSinglePermitChain(t *testing.T) {
 	tp.check(t)
 
 	gp.Release()
-	require.True(t, grand.ReleaseRef())
-	require.True(t, child.ReleaseRef())
-	require.True(t, parent.ReleaseRef())
+	grand.ReleaseRef()
+	child.ReleaseRef()
+	parent.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }
@@ -203,9 +203,9 @@ func TestWeightedGatherAssemblesFromFragments(t *testing.T) {
 
 	pm.Release()
 	d.Invalidate() // releases the demand's persistent home
-	require.True(t, g.ReleaseRef())
-	require.True(t, v1.ReleaseRef())
-	require.True(t, v2.ReleaseRef())
+	g.ReleaseRef()
+	v1.ReleaseRef()
+	v2.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }
@@ -260,9 +260,9 @@ func TestWeightedGatherMissRetainsHoardUntilInvalidated(t *testing.T) {
 
 	bp.Release()
 	db.Invalidate()
-	require.True(t, b.ReleaseRef())
-	require.True(t, g.ReleaseRef())
-	require.True(t, v.ReleaseRef())
+	b.ReleaseRef()
+	g.ReleaseRef()
+	v.ReleaseRef()
 	assert.Equal(t, 0, tp.totalHeld(), "hoards drain to the Resource like any cached permits")
 	tp.check(t)
 }
@@ -292,7 +292,7 @@ func TestDemandPoolRoundTrip(t *testing.T) {
 		hog.Release()
 		hogD.Free()
 	}
-	require.True(t, c.ReleaseRef())
+	c.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }

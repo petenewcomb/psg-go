@@ -113,7 +113,7 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 	require.Equal(t, int64(0), failed.Load())
 
 	dg.Invalidate()
-	require.True(t, g.ReleaseRef())
+	g.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	tp.check(t)
 }

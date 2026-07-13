@@ -78,7 +78,7 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	}
 	require.Nil(t, tp.head.Load(), "invalidating the last waiter opens the slot")
 	for _, c := range []*Cache{hog, a, b, w1} {
-		require.True(t, c.ReleaseRef())
+		c.ReleaseRef()
 	}
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	tp.check(t)
@@ -115,7 +115,7 @@ func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 	pb.Release()
 	db.Invalidate()
 	for _, c := range []*Cache{v, a, b} {
-		require.True(t, c.ReleaseRef())
+		c.ReleaseRef()
 	}
 	require.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
@@ -151,8 +151,8 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 	pm2.Release()
 	d.Invalidate()
 	dv.Invalidate()
-	require.True(t, g.ReleaseRef())
-	require.True(t, v.ReleaseRef())
+	g.ReleaseRef()
+	v.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 	tp.check(t)
 }

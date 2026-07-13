@@ -178,7 +178,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	// cache — the episode ends with the allowance necessarily home, and the FIRST
 	// arrival (the weight-1 demand, which queued before b under the unified queue)
 	// is promoted to a live head.
-	require.True(t, ch.ReleaseRef())
+	ch.ReleaseRef()
 	d.Invalidate()
 	require.Nil(t, tp.od.Load(), "episode end retired the pooled episode state")
 	require.Same(t, d1, tp.head.Load(), "arrival order: the weight-1 demand promoted first")
@@ -197,7 +197,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	db.Invalidate()
 	d1.Invalidate()
 	for _, c := range []*Cache{v, g, w1, b} {
-		require.True(t, c.ReleaseRef())
+		c.ReleaseRef()
 	}
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	require.Nil(t, tp.head.Load())
@@ -229,8 +229,8 @@ func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
 	require.True(t, pm.Held())
 	pm.Release()
 	d2.Invalidate()
-	require.True(t, g.ReleaseRef())
-	require.True(t, v.ReleaseRef())
+	g.ReleaseRef()
+	v.ReleaseRef()
 	tp.check(t)
 }
 
@@ -247,7 +247,7 @@ func TestOverdraftRefusalThroughAcquireWait(t *testing.T) {
 	require.Nil(t, d.pool.Load())
 	require.Nil(t, d.cache.Load(), "AcquireWait's error path invalidated the demand")
 	require.Nil(t, tp.head.Load())
-	require.True(t, g.ReleaseRef())
+	g.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 }
 
@@ -278,8 +278,8 @@ func TestOverdraftWaitsWhileAnythingRuns(t *testing.T) {
 	pg.Release()
 	d.Invalidate()
 	dh.Invalidate()
-	require.True(t, g.ReleaseRef())
-	require.True(t, hog.ReleaseRef())
+	g.ReleaseRef()
+	hog.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 }
 
@@ -322,7 +322,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 	g2.ResumeDriver()
 
 	for _, c := range []*Cache{v, stranger, g, g2} {
-		require.True(t, c.ReleaseRef())
+		c.ReleaseRef()
 	}
 	require.Equal(t, 0, tp.totalHeld())
 	require.Nil(t, tp.head.Load())
@@ -366,10 +366,10 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 		t.Fatal("the release never reached the claimant parked on episodeNotify")
 	}
 
-	require.True(t, ch.ReleaseRef())
+	ch.ReleaseRef()
 	d.Invalidate()
 	require.Nil(t, tp.head.Load())
-	require.True(t, g.ReleaseRef())
+	g.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 	tp.checkEpisode(t)
 }

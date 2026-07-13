@@ -194,5 +194,5 @@ func TestSemaphoreOverdraftPolicy(t *testing.T) {
 	chk.NoError(err, "over the ceiling: not now too, until step 4 makes episodes safe")
 	chk.False(pm.Held(), "no grant before the exempt subtree is representable")
 	d.Free()
-	chk.True(c.ReleaseRef())
+	c.ReleaseRef()
 }

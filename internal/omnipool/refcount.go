@@ -84,6 +84,25 @@ func (rc *RefCounter) AddRef() {
 	}
 }
 
+// TryAddRef takes an additional strong reference only if the object still has one (refs > 0),
+// reporting success. It is the resurrection-refusing strong pin — the strong-side analog of
+// [Handle.Get]'s weak upgrade, for a caller that holds a live pointer (typically found under an
+// external lock) but must not revive an object whose last reference already dropped: such an
+// object is committed to recycling, so an unconditional AddRef would resurrect it and cause a
+// double-recycle. Unlike AddRef this needs a CAS: the load-then-increment must not straddle a
+// concurrent drop to zero.
+func (rc *RefCounter) TryAddRef() bool {
+	for {
+		n := rc.refs.Load()
+		if n <= 0 {
+			return false // committed to recycle — do not resurrect
+		}
+		if rc.refs.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
 func (rc *RefCounter) release() (recycled bool) {
 	n := rc.refs.Add(-1)
 	if n < 0 {

@@ -383,7 +383,15 @@ type Cache struct {
 	// children is this cache's own sub-wave caches.
 	children cacheList
 
-	refs  atomic.Int64
+	// RefCounter is the cache's object-lifetime reference count (embedded, promoting
+	// AddRef/TryAddRef/RefCount): a live cache refs its parent, each sub-wave (NewChild)
+	// and each suspended driver (SuspendDriver) adds one, and the last drop recycles the
+	// cache through cachePool — running Reset (the former destroy: unlink, return held to
+	// the Resource, end any anchored episode, cascade to the parent). newCache's
+	// cachePool.Get arms it to 1; a stealer weak-upgrades via TryAddRef (refuses a cache
+	// already committed to recycle). a64 (no generation): every holder is strong, and the
+	// alive flag below plus TryAddRef's refs>0 guard cover the resurrection race.
+	omnipool.RefCounter
 	alive atomic.Bool
 
 	// suspendedDrivers counts permit-holders currently suspended for a drive
@@ -393,23 +401,55 @@ type Cache struct {
 	suspendedDrivers atomic.Int64
 }
 
-// Reset clears a Cache for recycling through the Pool's omnipool (Resetter). It nils
-// the pointer fields so a pooled node holds nothing live; counts is already (0,0) from
-// destroy's drain, refs is 0 (destroy ran at refs==0), alive is false, the list links
-// are nil (unlink), and children is empty (refs==0 ⟹ all sub-waves drained) — newCache
-// re-stamps the live fields.
+// Reset is the omnipool recycle hook (Resetter), run by cachePool.Release when the last
+// reference drops (refs==0: the unit's body exited AND all sub-waves drained → quiescent).
+// It IS the former destroy(): unlink the cache from its list, return its held to the
+// Resource, end the standing episode it may anchor, drop its draw on the parent (cascade),
+// then nil the pointer fields. It must NOT touch the embedded RefCounter (release() left
+// refs at 0; the next cachePool.Get re-arms it). children is empty (refs==0 ⟹ all sub-waves
+// drained). Removal is exact under the list lock; counts.drain coordinates the return to the
+// Resource with any concurrent stealOut (a steal that took the cache as a candidate before
+// removal), so conservation holds without a lock on the counter.
 func (c *Cache) Reset() {
+	c.alive.Store(false)
+	if c.suspendedDrivers.Load() != 0 {
+		// Impossible when brackets are balanced: every suspension ref-pins c.
+		panic("permits: recycle with suspended drivers still targeting this cache")
+	}
+	if od := c.pool.od.Load(); od != nil && od.sentinel.cache.Load() == c {
+		// This cache anchored the standing overdraft episode; refs==0 means the owner's
+		// body exited and the exempt subtree fully drained, so the episode ends here —
+		// BEFORE the drain below, so the drain's wake routes post-episode (to the promoted
+		// head's mailbox or the general set).
+		c.pool.endEpisode(c)
+	}
+	c.list().remove(c)
+	if held := c.counts.drain(); held > 0 {
+		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
+		c.pool.resource.Release(int(held))
+		// Returning held permits to the Resource frees that much capacity, which can
+		// satisfy several postponed managers / parked waiters at step 3 — seed the wake
+		// chain (chained iff more than one permit returned; rule 2 walks the satisfiable
+		// consumers from there).
+		c.pool.wake(held > 1)
+	}
+	// Drop the sub-wave's draw on the parent (cascade). Capture parent before nilling; the
+	// cascade's Release may recurse into the parent's own recycle, but touches the captured
+	// parent, never c. This runs before omnipool Puts c back to the pool.
+	parent := c.parent
 	c.pool = nil
 	c.parent = nil
 	c.prev = nil
 	c.next = nil
+	if parent != nil {
+		parent.ReleaseRef() // the sub-wave's draw on the parent ends
+	}
 }
 
 func newCache(p *Pool, parent *Cache) *Cache {
-	c := cachePool.Get()
+	c := cachePool.Get() // omnipool arms the owner reference: refs = 1
 	c.pool = p
 	c.parent = parent
-	c.refs.Store(1)
 	c.alive.Store(true)
 	return c
 }
@@ -470,11 +510,8 @@ func (c *Cache) list() *cacheList {
 // reference on parent (caches outlive units), which also pins parent in the ancestor
 // chain so this cache's acquire up-walk reads it without a lock.
 func (parent *Cache) NewChild() *Cache {
-	if !parent.alive.Load() {
-		panic("permits: NewChild on a destroyed cache")
-	}
 	c := newCache(parent.pool, parent)
-	parent.refs.Add(1) // the sub-wave draws on parent
+	parent.AddRef() // the sub-wave draws on parent; panics if parent is already destroyed
 	parent.children.pushBack(c)
 	return c
 }
@@ -1514,7 +1551,7 @@ func (p *Pool) ChainProbe() {
 //
 //nolint:contextcheck // background context used only for tracing
 func (c *Cache) SuspendDriver() {
-	c.refs.Add(1)
+	c.AddRef()
 	c.suspendedDrivers.Add(1)
 	if n := c.pool.suspended.Add(1); trace.IsEnabled() {
 		trace.Logf(context.Background(), "permits.SuspendDriver", "Pool=%p Cache=%p suspended=%d", c.pool, c, n)
@@ -1543,71 +1580,19 @@ func (c *Cache) ResumeDriver() {
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting
 // success. It is the steal's safe weak-upgrade: a cache whose last reference already
-// dropped is committed to destroy (it may have set alive=false and be blocked on its
+// dropped is committed to recycle (it may have set alive=false and be blocked on its
 // list lock, still linked), so an unconditional refs++ would resurrect it and cause a
-// double-destroy. The CAS refuses that. Used under the list lock, where a pin success
-// then keeps the cache from being destroyed/recycled until the matching ReleaseRef.
+// double-recycle. TryAddRef's CAS refuses that. Used under the list lock, where a pin
+// success then keeps the cache from being recycled until the matching ReleaseRef.
 func (c *Cache) tryPin() bool {
-	for {
-		n := c.refs.Load()
-		if n <= 0 {
-			return false // committed to destroy — do not resurrect
-		}
-		if c.refs.CompareAndSwap(n, n+1) {
-			return true
-		}
-	}
+	return c.TryAddRef()
 }
 
-// ReleaseRef drops one reference on c. The last reference (unit exited AND all
-// sub-waves drained) destroys it. Returns true if this call destroyed the cache.
-func (c *Cache) ReleaseRef() bool {
-	n := c.refs.Add(-1)
-	if n > 0 {
-		return false
-	}
-	if n < 0 {
-		panic("permits: ReleaseRef underflow")
-	}
-	c.destroy()
-	return true
-}
-
-// destroy unlinks the cache from its list, returns its held to the Resource, and ends
-// its draw on the parent (cascade). It runs only at refs==0 (quiescent). Removal is
-// exact under the list lock; counts.drain coordinates the return to the Resource with
-// any concurrent stealOut (a steal that took the cache as a candidate before removal),
-// so conservation holds without a lock on the counter.
-func (c *Cache) destroy() {
-	c.alive.Store(false)
-	if c.suspendedDrivers.Load() != 0 {
-		// Impossible when brackets are balanced: every suspension ref-pins c.
-		panic("permits: destroy with suspended drivers still targeting this cache")
-	}
-	if od := c.pool.od.Load(); od != nil && od.sentinel.cache.Load() == c {
-		// This cache anchored the standing overdraft episode; refs==0 means the
-		// owner's body exited and the exempt subtree fully drained, so the episode
-		// ends here — BEFORE the drain below, so the drain's wake routes
-		// post-episode (to the promoted head's mailbox or the general set).
-		c.pool.endEpisode(c)
-	}
-	c.list().remove(c)
-	if held := c.counts.drain(); held > 0 {
-		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
-		c.pool.resource.Release(int(held))
-		// Returning held permits to the Resource frees that much capacity, which can
-		// satisfy several postponed managers / parked waiters at step 3 — seed the
-		// wake chain (chained iff more than one permit returned; rule 2 walks the
-		// satisfiable consumers from there).
-		c.pool.wake(held > 1)
-	}
-	// Recycle c. Safe now and only now: refs==0 (destroy's precondition) with tryPin
-	// refusing to resurrect, c is unlinked, inUse==0, and no Permit backs it — so no
-	// goroutine still references c. Capture parent/pool first; Put resets c, after which
-	// c must not be touched. The parent cascade uses the captured parent, not c.
-	parent := c.parent
+// ReleaseRef drops one reference on c, recycling it — through cachePool.Release, which runs
+// Reset (the former destroy: unlink, return held to the Resource, cascade) — when this was
+// the last reference (unit exited AND all sub-waves drained). The recycle is self-contained
+// in Reset (the destruction event, at the right moment), so callers need no return: an
+// over-release panics in the counter, and a leak surfaces in the pool's/wave's invariants.
+func (c *Cache) ReleaseRef() {
 	cachePool.Release(c)
-	if parent != nil {
-		parent.ReleaseRef() // the sub-wave's draw on the parent ends
-	}
 }

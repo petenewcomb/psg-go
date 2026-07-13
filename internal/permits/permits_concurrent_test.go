@@ -61,9 +61,9 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 
 	// Drain: exit every child then the root; nothing running, so all held returns.
 	for _, kid := range kids {
-		require.True(t, kid.ReleaseRef())
+		kid.ReleaseRef()
 	}
-	require.True(t, root.ReleaseRef())
+	root.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 }
 
@@ -126,9 +126,9 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 
 	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
 	for _, c := range fixed {
-		require.True(t, c.ReleaseRef())
+		c.ReleaseRef()
 	}
-	require.True(t, root.ReleaseRef())
+	root.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked after churn")
 }
 
@@ -272,7 +272,7 @@ func TestConcurrentOverdraftSuspendChurn(t *testing.T) {
 
 	require.Equal(t, int64(0), wedged.Load(),
 		"a w ≤ capacity waiter must eventually be satisfied (no missed wake / stuck head)")
-	require.True(t, root.ReleaseRef())
+	root.ReleaseRef()
 	require.Nil(t, tp.od.Load(), "no episode stands at quiescence")
 	require.Nil(t, tp.head.Load(), "the head slot is open at quiescence")
 	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
@@ -364,7 +364,7 @@ func TestConcurrentEpisodeClaimants(t *testing.T) {
 		// End the episode: the owner exits, the anchor's subtree has drained, so the
 		// anchor destroys and endEpisode asserts the allowance is fully home.
 		owner.Invalidate()
-		require.True(t, host.ReleaseRef())
+		host.ReleaseRef()
 		require.Nil(t, tp.od.Load(), "the episode ended")
 		require.Nil(t, tp.head.Load(), "the head slot is open")
 		tp.checkEpisode(t)

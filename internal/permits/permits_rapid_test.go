@@ -26,6 +26,28 @@ type modelUnit struct {
 	unitRefHeld bool
 	pm          Permit
 	running     bool
+	// destroyed is set when this unit's cache recycles, via the cacheDestroyHook — the
+	// model's liveness signal now that Cache carries no alive flag. It captures cascade
+	// destroys (a parent recycling when its last child drops) that no single ReleaseRef
+	// call site sees, which is why the model learns liveness from Reset rather than
+	// tracking a refcount of its own.
+	destroyed bool
+}
+
+// installDestroyTracker points cacheDestroyHook at units so Cache.Reset marks the owning
+// unit destroyed as it recycles. Returns the uninstall to defer. A recycled cache pointer may
+// later back a fresh unit, so it skips units already marked (the earlier incarnation).
+func installDestroyTracker(units *[]*modelUnit) func() {
+	hook := func(c *Cache) {
+		for _, u := range *units {
+			if u.cache == c && !u.destroyed {
+				u.destroyed = true
+				return
+			}
+		}
+	}
+	cacheDestroyHook.Store(&hook)
+	return func() { cacheDestroyHook.Store(nil) }
 }
 
 // TestPermitsModel model-checks the permit invariants (permit-core.md "Invariants")
@@ -43,6 +65,7 @@ func TestPermitsModel(t *testing.T) {
 		tp := newTestPool(capacity)
 
 		var units []*modelUnit
+		defer installDestroyTracker(&units)()
 
 		check := func() { tp.check(t) }
 
@@ -73,7 +96,7 @@ func TestPermitsModel(t *testing.T) {
 				if len(units) >= maxCaches {
 					return
 				}
-				parent := pick(t, "child-parent", func(u *modelUnit) bool { return u.cache.alive.Load() })
+				parent := pick(t, "child-parent", func(u *modelUnit) bool { return !u.destroyed })
 				if parent == nil {
 					return
 				}
@@ -84,7 +107,7 @@ func TestPermitsModel(t *testing.T) {
 			},
 			"acquire": func(t *rapid.T) {
 				u := pick(t, "acquire-unit", func(u *modelUnit) bool {
-					return u.unitRefHeld && u.cache.alive.Load() && !u.running
+					return u.unitRefHeld && !u.running
 				})
 				if u == nil {
 					return
@@ -145,7 +168,7 @@ func TestPermitsModel(t *testing.T) {
 			},
 			"exitUnit": func(t *rapid.T) {
 				u := pick(t, "exit-unit", func(u *modelUnit) bool {
-					return u.unitRefHeld && u.cache.alive.Load() && !u.running
+					return u.unitRefHeld && !u.running
 				})
 				if u == nil {
 					return
@@ -204,6 +227,7 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 		tp := newGrantTestPool(capacity)
 
 		var units []*modelUnit
+		defer installDestroyTracker(&units)()
 		running := 0 // count of units whose body currently holds a permit (ΣinUse > 0 ⟺ this > 0)
 
 		check := func() { tp.checkEpisode(t) }
@@ -240,7 +264,7 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 				if len(units) >= maxCaches {
 					return
 				}
-				parent := pick(t, "child-parent", func(u *modelUnit) bool { return u.cache.alive.Load() })
+				parent := pick(t, "child-parent", func(u *modelUnit) bool { return !u.destroyed })
 				if parent == nil {
 					return
 				}
@@ -249,7 +273,7 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 			},
 			"acquire": func(t *rapid.T) {
 				u := pick(t, "acquire-unit", func(u *modelUnit) bool {
-					return u.unitRefHeld && u.cache.alive.Load() && !u.running
+					return u.unitRefHeld && !u.running
 				})
 				if u == nil {
 					return
@@ -319,7 +343,7 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 			},
 			"exitUnit": func(t *rapid.T) {
 				u := pick(t, "exit-unit", func(u *modelUnit) bool {
-					return u.unitRefHeld && u.cache.alive.Load() && !u.running
+					return u.unitRefHeld && !u.running
 				})
 				if u == nil {
 					return

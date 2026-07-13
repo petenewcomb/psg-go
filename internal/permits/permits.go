@@ -154,6 +154,13 @@ func (l *cacheList) moveToBack(c *Cache) {
 // references it (see tryPin / searchList).
 var cachePool = omnipool.For[Cache]()
 
+// cacheDestroyHook, when non-nil, is invoked with each Cache as its Reset recycles it — the
+// seam a test uses to observe destruction at the moment it happens (the cache is still the
+// destroyed incarnation, not yet reissued from the pool), the way the model tracked liveness
+// off the retired alive flag. Production leaves it nil; the cost is one relaxed atomic load
+// per destroy, uncontended.
+var cacheDestroyHook atomic.Pointer[func(*Cache)]
+
 // Pool is the Resource boundary and the root of a forest of caches.
 type Pool struct {
 	resource Resource
@@ -388,11 +395,10 @@ type Cache struct {
 	// and each suspended driver (SuspendDriver) adds one, and the last drop recycles the
 	// cache through cachePool — running Reset (the former destroy: unlink, return held to
 	// the Resource, end any anchored episode, cascade to the parent). newCache's
-	// cachePool.Get arms it to 1; a stealer weak-upgrades via TryAddRef (refuses a cache
-	// already committed to recycle). a64 (no generation): every holder is strong, and the
-	// alive flag below plus TryAddRef's refs>0 guard cover the resurrection race.
+	// cachePool.Get arms it to 1. a64 (no generation): every holder is strong, and the
+	// resurrection race is closed by TryAddRef, whose refs>0 CAS refuses a cache already
+	// committed to recycle (a stealer's weak-upgrade under the list lock).
 	omnipool.RefCounter
-	alive atomic.Bool
 
 	// suspendedDrivers counts permit-holders currently suspended for a drive
 	// episode targeting THIS cache's wave (§Overdraft resolution (c)); each holds a
@@ -411,7 +417,6 @@ type Cache struct {
 // Resource with any concurrent stealOut (a steal that took the cache as a candidate before
 // removal), so conservation holds without a lock on the counter.
 func (c *Cache) Reset() {
-	c.alive.Store(false)
 	if c.suspendedDrivers.Load() != 0 {
 		// Impossible when brackets are balanced: every suspension ref-pins c.
 		panic("permits: recycle with suspended drivers still targeting this cache")
@@ -433,6 +438,9 @@ func (c *Cache) Reset() {
 		// consumers from there).
 		c.pool.wake(held > 1)
 	}
+	if h := cacheDestroyHook.Load(); h != nil {
+		(*h)(c) // test seam: observe the destroy before c returns to the pool
+	}
 	// Drop the sub-wave's draw on the parent (cascade). Capture parent before nilling; the
 	// cascade's Release may recurse into the parent's own recycle, but touches the captured
 	// parent, never c. This runs before omnipool Puts c back to the pool.
@@ -450,7 +458,6 @@ func newCache(p *Pool, parent *Cache) *Cache {
 	c := cachePool.Get() // omnipool arms the owner reference: refs = 1
 	c.pool = p
 	c.parent = parent
-	c.alive.Store(true)
 	return c
 }
 
@@ -686,9 +693,6 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 	}
 	if w < 1 {
 		panic("permits: Acquire weight < 1")
-	}
-	if !c.alive.Load() {
-		panic("permits: Acquire on a destroyed cache")
 	}
 	home := d.cache.Load()
 	if home != nil && home.parent != c {
@@ -1396,28 +1400,27 @@ func (p *Pool) acquireInto(c *Cache, w int) *Cache {
 // form. The returned candidate is a hint; acquireInto's stealOutUpTo CAS is the
 // authority.
 //
-// A non-nil candidate is returned **ref-pinned** (`refs++`), taken under the list lock
-// where the cache is known linked and alive — so it cannot be destroyed (its memory
-// reclaimed) between the search and the caller's stealOut. The caller MUST ReleaseRef
-// it. The victim is cross-subtree (off the acquirer's ancestor chain, so not pinned by
-// the acquirer's refs); without this pin only GC keeps it alive across the take, which
-// is fine for a GC'd cache but not for a pooled one.
+// A non-nil candidate is returned **ref-pinned** (`refs++` via tryPin), taken under the list
+// lock where the cache is still referenced — so it cannot be destroyed (its memory reclaimed)
+// between the search and the caller's stealOut. The caller MUST ReleaseRef it. The victim is
+// cross-subtree (off the acquirer's ancestor chain, so not pinned by the acquirer's refs);
+// without this pin only GC keeps it alive across the take, which is fine for a GC'd cache but
+// not for a pooled one.
+//
+// A cache whose last reference already dropped is committed to recycle — its Reset's locked
+// list remove is blocked on this very lock, so it is still linked here — but tryPin's refs>0
+// CAS refuses it (returns nil for it), and its children are already drained (refs==0 ⟹ empty),
+// so recursing into them is a no-op. No separate liveness flag is needed.
 func searchList(l *cacheList, w uint64, exclude *Cache) *Cache {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for c := l.head; c != nil; c = c.next {
-		if !c.alive.Load() {
-			// Being destroyed: destroy clears alive before its locked remove, which is
-			// blocked on this very lock, so a dying cache is still linked here. Skip it
-			// (its children are already drained).
-			continue
-		}
 		if c != exclude {
 			if h, u := c.counts.load(); h >= u+w {
 				if c.tryPin() {
 					return c // borrowable victim, pinned across the steal; caller ReleaseRefs
 				}
-				continue // raced into destroy after the alive check; skip
+				continue // last reference already dropped (committed to recycle); skip
 			}
 		}
 		if v := searchList(&c.children, w, exclude); v != nil {
@@ -1580,8 +1583,8 @@ func (c *Cache) ResumeDriver() {
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting
 // success. It is the steal's safe weak-upgrade: a cache whose last reference already
-// dropped is committed to recycle (it may have set alive=false and be blocked on its
-// list lock, still linked), so an unconditional refs++ would resurrect it and cause a
+// dropped is committed to recycle (its Reset's locked list remove blocked on this lock, so
+// it is still linked), so an unconditional refs++ would resurrect it and cause a
 // double-recycle. TryAddRef's CAS refuses that. Used under the list lock, where a pin
 // success then keeps the cache from being recycled until the matching ReleaseRef.
 func (c *Cache) tryPin() bool {

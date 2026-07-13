@@ -120,6 +120,8 @@ In PSG-Go benchmark output, **values come BEFORE labels**:
 
 ### 3. Critical Metrics to Compare
 
+Tail latency (p99 and max) is the primary signal; throughput is secondary; p50/median is a curiosity only.
+
 For each workload scenario, examine:
 1. **Tasks/sec** (throughput) at the best static limit
 2. **p99-workflow-latency** at the best static limit

@@ -53,9 +53,9 @@ func NewSkimmer[T any](
 // In returns a copy of the Skimmer bound to wave, so its dispatches place
 // work in wave instead of the ambient (body-ctx) wave. Use at top level (no
 // ambient wave) or to redirect work into another wave.
-func (g Skimmer[T]) In(wave Wave) Skimmer[T] {
-	g.wave = wave
-	return g
+func (s Skimmer[T]) In(wave Wave) Skimmer[T] {
+	s.wave = wave
+	return s
 }
 
 // NewFnSkimmer creates a Skimmer from a closure-based handler for
@@ -101,11 +101,11 @@ func newInternalSkimmer[T any](
 // Submit posts a value to the Skimmer's queue for later dispatch
 // via the bound Wave's Skim / SkimAll. Sugar for
 // SubmitResult(ctx, value, nil).
-func (g Skimmer[T]) Submit(
+func (s Skimmer[T]) Submit(
 	ctx context.Context,
 	value T,
 ) error {
-	return g.SubmitResult(ctx, value, nil)
+	return s.SubmitResult(ctx, value, nil)
 }
 
 // SubmitErr posts an err-only result to the Skimmer's queue. Sugar
@@ -113,19 +113,19 @@ func (g Skimmer[T]) Submit(
 // T = struct{} (the err-sink pattern, typically paired with
 // [ErrHandler]); for other T, the handler receives the
 // type's zero value alongside the err.
-func (g Skimmer[T]) SubmitErr(
+func (s Skimmer[T]) SubmitErr(
 	ctx context.Context,
 	err error,
 ) error {
 	var zero T
-	return g.SubmitResult(ctx, zero, err)
+	return s.SubmitResult(ctx, zero, err)
 }
 
 // SubmitResult posts a (value, err) pair to the Skimmer's queue
 // for later dispatch by the bound Wave's Skim / SkimAll. The pair
 // is forwarded to the skim handler as-is; sinks that genuinely
 // want both halves of a Go result tuple use this form.
-func (g Skimmer[T]) SubmitResult(
+func (s Skimmer[T]) SubmitResult(
 	ctx context.Context,
 	value T,
 	err error,
@@ -133,7 +133,7 @@ func (g Skimmer[T]) SubmitResult(
 	traceRegion := "Skimmer.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target, ok := resolveWave(g.wave, ctx)
+	target, ok := resolveWave(s.wave, ctx)
 	if !ok {
 		return ErrWaveDone // bound wave has drained and recycled
 	}
@@ -157,33 +157,33 @@ func (g Skimmer[T]) SubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return g.submit(ctx, meta, group, value, err)
+	return s.submit(ctx, meta, group, value, err)
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
 // Sugar for TrySubmitResult(ctx, deadline, value, nil).
-func (g Skimmer[T]) TrySubmit(
+func (s Skimmer[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 ) (bool, error) {
-	return g.TrySubmitResult(ctx, deadline, value, nil)
+	return s.TrySubmitResult(ctx, deadline, value, nil)
 }
 
 // TrySubmitErr attempts to SubmitErr without blocking past
 // deadline. Sugar for TrySubmitResult(ctx, deadline, *new(T), err).
-func (g Skimmer[T]) TrySubmitErr(
+func (s Skimmer[T]) TrySubmitErr(
 	ctx context.Context,
 	deadline time.Time,
 	err error,
 ) (bool, error) {
 	var zero T
-	return g.TrySubmitResult(ctx, deadline, zero, err)
+	return s.TrySubmitResult(ctx, deadline, zero, err)
 }
 
 // TrySubmitResult attempts to SubmitResult without blocking past
 // deadline. See [Skimmer.TrySubmit] for return semantics.
-func (g Skimmer[T]) TrySubmitResult(
+func (s Skimmer[T]) TrySubmitResult(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
@@ -192,7 +192,7 @@ func (g Skimmer[T]) TrySubmitResult(
 	traceRegion := "Skimmer.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	target, ok := resolveWave(g.wave, ctx)
+	target, ok := resolveWave(s.wave, ctx)
 	if !ok {
 		return false, ErrWaveDone // bound wave has drained and recycled
 	}
@@ -214,7 +214,7 @@ func (g Skimmer[T]) TrySubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return g.trySubmit(ctx, meta, group, value, err, deadline)
+	return s.trySubmit(ctx, meta, group, value, err, deadline)
 }
 
 // boundSkimWork interface allows type erasure for skimWork instances
@@ -257,9 +257,9 @@ func (wk *skimWork[T]) captureRiders(riders *flowRiderNode) {
 }
 
 // newSkimWork creates a new skim work item with the provided values
-func (g Skimmer[T]) newSkimWork(group workq.GroupID, wv *waveImpl, value T, err error) *skimWork[T] {
-	wk := g.workPool.Get()
-	wk.Init(g.workPool, group, wv, g.handler, value, err)
+func (s Skimmer[T]) newSkimWork(group workq.GroupID, wv *waveImpl, value T, err error) *skimWork[T] {
+	wk := s.workPool.Get()
+	wk.Init(s.workPool, group, wv, s.handler, value, err)
 	return wk
 }
 
@@ -355,7 +355,7 @@ func (wk *skimWork[T]) Free() {
 
 // submit creates skim work and posts it to the skim queue. The target wave is read
 // from meta.wave (the resolved dispatch target the meta was minted for).
-func (g Skimmer[T]) submit(
+func (s Skimmer[T]) submit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
@@ -363,14 +363,14 @@ func (g Skimmer[T]) submit(
 	err error,
 ) error {
 	wv := meta.wave // synchronous dispatch: the meta's wave is pinned by the dispatch
-	skimWork := g.newSkimWork(group, wv, value, err)
+	skimWork := s.newSkimWork(group, wv, value, err)
 	skimWork.captureRiders(meta.riders)
 	postWork := wv.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
 // submit creates skim work and posts it to the skim queue
-func (g Skimmer[T]) trySubmit(
+func (s Skimmer[T]) trySubmit(
 	ctx context.Context,
 	meta *ctxMeta,
 	group workq.GroupID,
@@ -379,7 +379,7 @@ func (g Skimmer[T]) trySubmit(
 	deadline time.Time,
 ) (bool, error) {
 	wv := meta.wave // synchronous dispatch: the meta's wave is pinned by the dispatch
-	skimWork := g.newSkimWork(group, wv, value, err)
+	skimWork := s.newSkimWork(group, wv, value, err)
 	skimWork.captureRiders(meta.riders)
 	postWork := wv.newSkimPostWork(group, skimWork, meta.ShouldBlock())
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)

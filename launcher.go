@@ -76,49 +76,49 @@ func NewLauncher[T any](handler Handler[T]) Launcher[T] {
 // Several limiters (across any mix of the binder methods) AND-compose: every dispatch
 // acquires all of them jointly, in the canonical global acquisition order, deadlock-free.
 // A duplicate limiter panics.
-func (r Launcher[T]) WithLimits(limiters ...Limiter) Launcher[T] {
+func (lc Launcher[T]) WithLimits(limiters ...Limiter) Launcher[T] {
 	for _, l := range limiters {
 		if l.pool != nil { // the zero (unlimited) Limiter gates nothing
-			r.bindings = addBinding(r.bindings, l.pool, nil)
+			lc.bindings = addBinding(lc.bindings, l.pool, nil)
 		}
 	}
-	return r
+	return lc
 }
 
 // WithWeightLimits returns a copy of the Launcher bound to the given [WeightLimiter]
 // bindings, so each dispatch acquires a permit of weight weigh(value) from the weighted
 // limiter. See [Launcher.WithLimits] for the plain case and joint AND-composition.
-func (r Launcher[T]) WithWeightLimits(wls ...WeightLimiter[T]) Launcher[T] {
+func (lc Launcher[T]) WithWeightLimits(wls ...WeightLimiter[T]) Launcher[T] {
 	for _, wl := range wls {
-		r.bindings = addBinding(r.bindings, wl.limiter.weightedPool(), wl.weigh)
+		lc.bindings = addBinding(lc.bindings, wl.limiter.weightedPool(), wl.weigh)
 	}
-	return r
+	return lc
 }
 
 // WithLimiterSet returns a copy of the Launcher bound to every plain limiter in the
 // canonicalized [LimiterSet]. See [Launcher.WithLimits].
-func (r Launcher[T]) WithLimiterSet(s LimiterSet) Launcher[T] {
+func (lc Launcher[T]) WithLimiterSet(s LimiterSet) Launcher[T] {
 	for _, pool := range s.pools {
-		r.bindings = addBinding(r.bindings, pool, nil)
+		lc.bindings = addBinding(lc.bindings, pool, nil)
 	}
-	return r
+	return lc
 }
 
 // WithWeightLimiterSet returns a copy of the Launcher bound to every weighted binding in
 // the canonicalized [WeightLimiterSet]. See [Launcher.WithWeightLimits].
-func (r Launcher[T]) WithWeightLimiterSet(s WeightLimiterSet[T]) Launcher[T] {
+func (lc Launcher[T]) WithWeightLimiterSet(s WeightLimiterSet[T]) Launcher[T] {
 	for _, b := range s.bindings {
-		r.bindings = addBinding(r.bindings, b.pool, b.weigh)
+		lc.bindings = addBinding(lc.bindings, b.pool, b.weigh)
 	}
-	return r
+	return lc
 }
 
 // In returns a copy of the Launcher bound to wave, so its dispatches place
 // work in wave instead of the ambient (body-ctx) wave. Use at top level (no
 // ambient wave) or to redirect work into another wave.
-func (r Launcher[T]) In(wave Wave) Launcher[T] {
-	r.wave = wave
-	return r
+func (lc Launcher[T]) In(wave Wave) Launcher[T] {
+	lc.wave = wave
+	return lc
 }
 
 // NewFnLauncher creates a Launcher from a closure-based handler.
@@ -175,8 +175,8 @@ func NewErrLauncher(handle func(ctx context.Context, err error) error) ErrLaunch
 // Skim or Accumulate body instead. Submit attempts to detect this
 // and panics, but the detection works only when the ctx passed to
 // Submit descends from the ctx passed to Handle.
-func (r Launcher[T]) Submit(ctx context.Context, value T) error {
-	return r.SubmitResult(ctx, value, nil)
+func (lc Launcher[T]) Submit(ctx context.Context, value T) error {
+	return lc.SubmitResult(ctx, value, nil)
 }
 
 // SubmitErr dispatches Handle(ctx, *new(T), err) on the bound
@@ -184,9 +184,9 @@ func (r Launcher[T]) Submit(ctx context.Context, value T) error {
 // Meaningful primarily when T = struct{} (the err-sink pattern,
 // typically paired with [ErrHandler]); for other T, the
 // handler receives the type's zero value alongside the err.
-func (r Launcher[T]) SubmitErr(ctx context.Context, err error) error {
+func (lc Launcher[T]) SubmitErr(ctx context.Context, err error) error {
 	var zero T
-	return r.SubmitResult(ctx, zero, err)
+	return lc.SubmitResult(ctx, zero, err)
 }
 
 // SubmitResult dispatches Handle(ctx, value, err) on the bound
@@ -194,24 +194,24 @@ func (r Launcher[T]) SubmitErr(ctx context.Context, err error) error {
 // handler as-is; sinks that genuinely want both halves of a Go
 // result tuple use this form. See [Launcher.Submit] for backpressure
 // and ctx behavior.
-func (r Launcher[T]) SubmitResult(ctx context.Context, value T, err error) error {
+func (lc Launcher[T]) SubmitResult(ctx context.Context, value T, err error) error {
 	traceRegion := "Launcher.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	_, derr := r.dispatch(ctx, Forever, value, err, false)
+	_, derr := lc.dispatch(ctx, Forever, value, err, false)
 	return derr
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
 // Sugar for TrySubmitResult(ctx, deadline, value, nil).
-func (r Launcher[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error) {
-	return r.TrySubmitResult(ctx, deadline, value, nil)
+func (lc Launcher[T]) TrySubmit(ctx context.Context, deadline time.Time, value T) (bool, error) {
+	return lc.TrySubmitResult(ctx, deadline, value, nil)
 }
 
 // TrySubmitErr attempts to SubmitErr without blocking past deadline.
 // Sugar for TrySubmitResult(ctx, deadline, *new(T), err).
-func (r Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error) {
+func (lc Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err error) (bool, error) {
 	var zero T
-	return r.TrySubmitResult(ctx, deadline, zero, err)
+	return lc.TrySubmitResult(ctx, deadline, zero, err)
 }
 
 // TrySubmitResult attempts to SubmitResult without blocking past
@@ -219,33 +219,33 @@ func (r Launcher[T]) TrySubmitErr(ctx context.Context, deadline time.Time, err e
 // [Limiter] held the dispatch back and the deadline expired before
 // a permit became available, or (false, non-nil) for any other
 // failure.
-func (r Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, value T, err error) (bool, error) {
+func (lc Launcher[T]) TrySubmitResult(ctx context.Context, deadline time.Time, value T, err error) (bool, error) {
 	traceRegion := "Launcher.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	return r.dispatch(ctx, deadline, value, err, true)
+	return lc.dispatch(ctx, deadline, value, err, true)
 }
 
 // Start is sugar for Submit(ctx, *new(T)). Meaningful primarily
 // when T's zero value is conventional (T = struct{} with a [Task]
 // handler is the common case); for other T, Start dispatches with
 // the type's zero value.
-func (r Launcher[T]) Start(ctx context.Context) error {
+func (lc Launcher[T]) Start(ctx context.Context) error {
 	var zero T
-	return r.Submit(ctx, zero)
+	return lc.Submit(ctx, zero)
 }
 
 // TryStart is sugar for TrySubmit(ctx, deadline, *new(T)). See
 // [Launcher.Start] and [Launcher.TrySubmit].
-func (r Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error) {
+func (lc Launcher[T]) TryStart(ctx context.Context, deadline time.Time) (bool, error) {
 	var zero T
-	return r.TrySubmit(ctx, deadline, zero)
+	return lc.TrySubmit(ctx, deadline, zero)
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (r Launcher[T]) dispatch(
+func (lc Launcher[T]) dispatch(
 	ctx context.Context, deadline time.Time, value T, callerErr error, isTry bool,
 ) (bool, error) {
-	wv, ok := resolveWave(r.wave, ctx)
+	wv, ok := resolveWave(lc.wave, ctx)
 	if !ok {
 		return false, ErrWaveDone // bound wave has drained and recycled
 	}
@@ -272,7 +272,7 @@ func (r Launcher[T]) dispatch(
 		group = workq.NewGroupID()
 	}
 
-	work := r.newScatterWork(srcCtx, wv, group, deadline, value, callerErr)
+	work := lc.newScatterWork(srcCtx, wv, group, deadline, value, callerErr)
 	if isTry {
 		ok, err := meta.TryExecuteNow(ctx, deadline, work)
 		if !ok {
@@ -285,18 +285,18 @@ func (r Launcher[T]) dispatch(
 }
 
 //nolint:contextcheck // submitCtx is the body-ctx borrow source threaded to newTaskWork, not a propagated arg
-func (r Launcher[T]) newScatterWork(
+func (lc Launcher[T]) newScatterWork(
 	submitCtx context.Context, wv *waveImpl, group workq.GroupID, deadline time.Time, value T, callerErr error,
 ) *launcherScatterWork {
-	inner := r.newTask(wv, group, value, callerErr)
+	inner := lc.newTask(wv, group, value, callerErr)
 	var h *heldPermit
-	if len(r.bindings) > 0 {
+	if len(lc.bindings) > 0 {
 		// Build one per-limiter hold per binding, in canonical global acquisition order
 		// (r.bindings is already sorted by pool rank): the lowest-rank binding is the head
 		// handle, the higher-rank ones its rest, acquired jointly in that order at the gate.
 		m, _ := metaFromContext(submitCtx)
-		h = newHold(wv, m, r.bindings[0], value)
-		for _, b := range r.bindings[1:] {
+		h = newHold(wv, m, lc.bindings[0], value)
+		for _, b := range lc.bindings[1:] {
 			h.rest = append(h.rest, newHold(wv, m, b, value))
 		}
 	}
@@ -323,15 +323,15 @@ func newHold[T any](wv *waveImpl, m *ctxMeta, b binding[T], value T) *heldPermit
 	return h
 }
 
-func (r Launcher[T]) newTask(wv *waveImpl, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
-	wk := r.workPool.Get()
-	wk.pool = r.workPool
+func (lc Launcher[T]) newTask(wv *waveImpl, group workq.GroupID, value T, callerErr error) *launcherWork[T] {
+	wk := lc.workPool.Get()
+	wk.pool = lc.workPool
 	wk.wave = wv
 	wk.group = group
-	wk.handler = r.handler
+	wk.handler = lc.handler
 	wk.value = value
 	wk.callerErr = callerErr
-	wk.errSink = r.errSink
+	wk.errSink = lc.errSink
 	return wk
 }
 

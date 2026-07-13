@@ -128,14 +128,14 @@ func NewFunnel[T any](
 // single limiter is supported in this release; binding more panics. Funnels take a
 // weight-1 permit per body execution — a funnel body runs over an accumulated instance,
 // not a single value, so there is no per-value weigher (use a plain [NewSemaphore]).
-func (c Funnel[T]) WithLimits(limiters ...Limiter) Funnel[T] {
+func (f Funnel[T]) WithLimits(limiters ...Limiter) Funnel[T] {
 	for _, l := range limiters {
-		if c.limiter.pool != nil {
+		if f.limiter.pool != nil {
 			panic("multi-Limiter composition is not yet implemented (Wave 4 follow-up)")
 		}
-		c.limiter = l
+		f.limiter = l
 	}
-	return c
+	return f
 }
 
 // NewFnFunnel binds a closure-based factory function to a Funnel. Convenience
@@ -177,38 +177,38 @@ func NewErrFunnel(
 
 // Submit posts a value to the Funnel. Sugar for
 // SubmitResult(ctx, value, nil).
-func (c *Funnel[T]) Submit(
+func (f *Funnel[T]) Submit(
 	ctx context.Context,
 	value T,
 ) error {
-	return c.SubmitResult(ctx, value, nil)
+	return f.SubmitResult(ctx, value, nil)
 }
 
 // SubmitErr posts an err-only result to the Funnel. Sugar for
 // SubmitResult(ctx, *new(T), err). Meaningful primarily when
 // T = struct{}; for other T, the Accumulator receives the type's
 // zero value alongside the err.
-func (c *Funnel[T]) SubmitErr(
+func (f *Funnel[T]) SubmitErr(
 	ctx context.Context,
 	err error,
 ) error {
 	var zero T
-	return c.SubmitResult(ctx, zero, err)
+	return f.SubmitResult(ctx, zero, err)
 }
 
 // SubmitResult posts a (value, err) pair to the Funnel. The pair
 // is forwarded to the Accumulator as-is; sinks that genuinely want
 // both halves of a Go result tuple use this form.
-func (c *Funnel[T]) SubmitResult(
+func (f *Funnel[T]) SubmitResult(
 	ctx context.Context,
 	value T,
 	err error,
 ) error {
 	traceRegion := "Funnel.SubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
+	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", f.id)
 
-	target, ok := resolveWave(c.wave, ctx)
+	target, ok := resolveWave(f.wave, ctx)
 	if !ok {
 		return ErrWaveDone // bound wave has drained and recycled
 	}
@@ -232,33 +232,33 @@ func (c *Funnel[T]) SubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return c.submit(ctx, target, meta, group, value, err)
+	return f.submit(ctx, target, meta, group, value, err)
 }
 
 // TrySubmit attempts to Submit without blocking past deadline.
 // Sugar for TrySubmitResult(ctx, deadline, value, nil).
-func (c *Funnel[T]) TrySubmit(
+func (f *Funnel[T]) TrySubmit(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
 ) (bool, error) {
-	return c.TrySubmitResult(ctx, deadline, value, nil)
+	return f.TrySubmitResult(ctx, deadline, value, nil)
 }
 
 // TrySubmitErr attempts to SubmitErr without blocking past
 // deadline. Sugar for TrySubmitResult(ctx, deadline, *new(T), err).
-func (c *Funnel[T]) TrySubmitErr(
+func (f *Funnel[T]) TrySubmitErr(
 	ctx context.Context,
 	deadline time.Time,
 	err error,
 ) (bool, error) {
 	var zero T
-	return c.TrySubmitResult(ctx, deadline, zero, err)
+	return f.TrySubmitResult(ctx, deadline, zero, err)
 }
 
 // TrySubmitResult attempts to SubmitResult without blocking past
 // deadline. See [Funnel.TrySubmit] for return semantics.
-func (c *Funnel[T]) TrySubmitResult(
+func (f *Funnel[T]) TrySubmitResult(
 	ctx context.Context,
 	deadline time.Time,
 	value T,
@@ -266,9 +266,9 @@ func (c *Funnel[T]) TrySubmitResult(
 ) (bool, error) {
 	traceRegion := "Funnel.TrySubmitResult"
 	defer trace.StartRegion(ctx, traceRegion).End()
-	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", c.id)
+	trace.Logf(ctx, traceRegion, "Funnel(id=%d)", f.id)
 
-	target, ok := resolveWave(c.wave, ctx)
+	target, ok := resolveWave(f.wave, ctx)
 	if !ok {
 		return false, ErrWaveDone // bound wave has drained and recycled
 	}
@@ -286,10 +286,10 @@ func (c *Funnel[T]) TrySubmitResult(
 		group = workq.NewGroupID()
 	}
 
-	return c.trySubmit(ctx, target, meta, group, value, err, deadline)
+	return f.trySubmit(ctx, target, meta, group, value, err, deadline)
 }
 
-func (c *Funnel[T]) submit(
+func (f *Funnel[T]) submit(
 	ctx context.Context,
 	wv *waveImpl,
 	meta *ctxMeta,
@@ -297,12 +297,12 @@ func (c *Funnel[T]) submit(
 	value T,
 	err error,
 ) error {
-	funnelWork := c.newFunnelWork(ctx, wv, group, value, err)
+	funnelWork := f.newFunnelWork(ctx, wv, group, value, err)
 	postWork := newFunnelPostWork(group, wv, funnelWork)
 	return meta.ExecuteNowOrQueue(ctx, postWork)
 }
 
-func (c *Funnel[T]) trySubmit(
+func (f *Funnel[T]) trySubmit(
 	ctx context.Context,
 	wv *waveImpl,
 	meta *ctxMeta,
@@ -311,7 +311,7 @@ func (c *Funnel[T]) trySubmit(
 	err error,
 	deadline time.Time,
 ) (bool, error) {
-	funnelWork := c.newFunnelWork(ctx, wv, group, value, err)
+	funnelWork := f.newFunnelWork(ctx, wv, group, value, err)
 	postWork := newFunnelPostWork(group, wv, funnelWork)
 	ok, err := meta.TryExecuteNow(ctx, deadline, postWork)
 	if !ok {
@@ -471,16 +471,16 @@ type funnelInstance[T any] struct {
 // executor (Run owns the flush, the barrier drop, and any recycle). The controller's
 // subsequent Free is a no-op, and after Starting the controller drops its buffer slot, so
 // nothing on the scheduler side touches the instance once it is handed off.
-func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
+func (fi *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	// Stash the borrow source for Run — ctx plus its meta, pinned here at the
 	// synchronous safe point; see the fields and Run for the write/read and
 	// pin-lifetime rules. A path that does NOT hand off (postpone, PushBack
 	// error) drops the pin again: the retry's Execute re-pins.
 	srcMeta, _ := metaFromContext(ctx)
 	refMeta(srcMeta)
-	c.borrowSrcCtx = ctx
-	c.borrowSrcMeta = srcMeta
-	if bodyExecutor.TryPushBack(c) {
+	fi.borrowSrcCtx = ctx
+	fi.borrowSrcMeta = srcMeta
+	if bodyExecutor.TryPushBack(fi) {
 		ex.Starting()
 		return nil
 	}
@@ -488,7 +488,7 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 		unrefMeta(srcMeta)
 		return nil // postpone; retried (and blocked) when the scheduler worker parks
 	}
-	err := bodyExecutor.PushBack(ctx, c)
+	err := bodyExecutor.PushBack(ctx, fi)
 	if err == nil {
 		ex.Starting()
 	} else {
@@ -507,30 +507,30 @@ func (c *funnelInstance[T]) Execute(ctx context.Context, ex workq.Execution) err
 // an owner reuse-pop may recycle a non-detached shell the instant c.mu is released.
 //
 //nolint:contextcheck // src is the borrow source for the flush body ctx, not a propagated arg
-func (c *funnelInstance[T]) Run(ee *workerExEnv) {
-	src := c.borrowSrcCtx
-	srcMeta := c.borrowSrcMeta
-	c.borrowSrcCtx = nil
-	c.borrowSrcMeta = nil
+func (fi *funnelInstance[T]) Run(ee *workerExEnv) {
+	src := fi.borrowSrcCtx
+	srcMeta := fi.borrowSrcMeta
+	fi.borrowSrcCtx = nil
+	fi.borrowSrcMeta = nil
 	// Borrow from the PINNED meta — never re-read it from src, whose ctxpool
 	// child's value the driver may free and re-stamp concurrently. Riders are
 	// deliberately NOT captured from it: the pin covers the meta's lifetime,
 	// not the driver's rider chain (reading that needs the driver-link rider
 	// pin, a documented follow-up), and the flush fan-in severs path riders
 	// before any user code runs anyway.
-	bodyCtx, m := newBorrowedMeta(src, srcMeta, c.wave, funnelContext)
+	bodyCtx, m := newBorrowedMeta(src, srcMeta, fi.wave, funnelContext)
 	m.executionEnvironment = ee
-	m.parentWaves = parentWavesForSource(srcMeta, srcMeta != nil, c.wave)
+	m.parentWaves = parentWavesForSource(srcMeta, srcMeta != nil, fi.wave)
 	unrefMeta(srcMeta) // the borrow holds its own parent ref now; drop the Execute pin
 	defer releaseBodyContext(bodyCtx)
-	c.mu.Lock()
-	c.flush(bodyCtx, true)
-	detached := c.detached
-	c.mu.Unlock()
+	fi.mu.Lock()
+	fi.flush(bodyCtx, true)
+	detached := fi.detached
+	fi.mu.Unlock()
 	if detached {
 		// The sweep removed this from the cache queue, so no owner will reclaim it;
 		// R2 guarantees we hold it exclusively now. Recycle the spent shell.
-		omnipool.For[funnelInstance[T]]().Release(c)
+		omnipool.For[funnelInstance[T]]().Release(fi)
 	}
 }
 
@@ -539,9 +539,9 @@ func (c *funnelInstance[T]) Run(ee *workerExEnv) {
 // on the executor, not here. The controller calls Free on the scheduler side right after
 // Execute's successful handoff, possibly concurrently with Run; Free must therefore not
 // read any instance field (it would race Run and any owner reuse-pop).
-func (c *funnelInstance[T]) Free() {}
+func (fi *funnelInstance[T]) Free() {}
 
-func (c *funnelInstance[T]) allocate(
+func (fi *funnelInstance[T]) allocate(
 	ctx context.Context,
 	newAccumulator AccumulatorFactory[T],
 ) {
@@ -551,18 +551,18 @@ func (c *funnelInstance[T]) allocate(
 	panicked := true
 	defer func() {
 		if panicked {
-			c.emitErr(ctx, ErrFunnelFactoryPanicked)
+			fi.emitErr(ctx, ErrFunnelFactoryPanicked)
 		}
 	}()
-	c.accumulator = newAccumulator.NewAccumulator()
+	fi.accumulator = newAccumulator.NewAccumulator()
 	panicked = false
-	if c.accumulator == nil {
-		c.emitErr(ctx, ErrFunnelFactoryReturnedNil)
-		c.accumulator = &errAccumulator[T]{err: ErrFunnelFactoryReturnedNil}
+	if fi.accumulator == nil {
+		fi.emitErr(ctx, ErrFunnelFactoryReturnedNil)
+		fi.accumulator = &errAccumulator[T]{err: ErrFunnelFactoryReturnedNil}
 	}
 
 	if trace.IsEnabled() {
-		trace.Logf(ctx, traceRegion, "Funnel returning new accumulator=%v", c.accumulator)
+		trace.Logf(ctx, traceRegion, "Funnel returning new accumulator=%v", fi.accumulator)
 	}
 }
 
@@ -570,22 +570,22 @@ func (c *funnelInstance[T]) allocate(
 // errSink's handler returns the error to the caller of Wave.SkimAll. Successful
 // results are not surfaced this way — the Accumulator body is expected to Submit
 // those to user-owned downstream sinks directly.
-func (c *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
+func (fi *funnelInstance[T]) emitErr(ctx context.Context, accErr error) {
 	traceRegion := "funnelInstance.emitErr"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	if accErr == nil {
 		return
 	}
-	ctx, meta := c.wave.ctxMeta(ctx)
+	ctx, meta := fi.wave.ctxMeta(ctx)
 	err := funnelErrSink.submit(
-		ctx, meta, c.earliestGroup, struct{}{}, accErr)
+		ctx, meta, fi.earliestGroup, struct{}{}, accErr)
 	if err != nil && ctx.Err() == nil {
 		panic(fmt.Sprintf("unexpected non-cancelation error: %v", err))
 	}
 }
 
-func (c *funnelInstance[T]) accumulate(
+func (fi *funnelInstance[T]) accumulate(
 	ctx context.Context,
 	input T,
 	inputErr error,
@@ -600,7 +600,7 @@ func (c *funnelInstance[T]) accumulate(
 	// completes; per-item values above the boundary sever. Runs under c.mu (the
 	// only accumulate path). The boundary and enclosing tail were established at
 	// the first accumulate (Funnel).
-	c.flowTags = collectFlowTags(c.flowTags, ctx, c.boundary)
+	fi.flowTags = collectFlowTags(fi.flowTags, ctx, fi.boundary)
 
 	// Re-point the rolling driver pin at this accumulate (see the field docs):
 	// a synchronous safe point — the body meta and its rider head are provably
@@ -609,26 +609,26 @@ func (c *funnelInstance[T]) accumulate(
 	if m, ok := metaFromContext(ctx); ok {
 		refMeta(m)
 		nodeRef(m.riders)
-		unrefMeta(c.driverMeta)
-		nodeUnref(c.driverRiders)
-		c.driverMeta = m
-		c.driverRiders = m.riders
+		unrefMeta(fi.driverMeta)
+		nodeUnref(fi.driverRiders)
+		fi.driverMeta = m
+		fi.driverRiders = m.riders
 	}
 
 	didNotPanic := false
 	defer func() {
 		if !didNotPanic {
 			// Just in case the panic is otherwise suppressed
-			c.emitErr(ctx, ErrFunnelPanicked)
+			fi.emitErr(ctx, ErrFunnelPanicked)
 		}
 	}()
 
-	trace.Logf(ctx, traceRegion, "calling Accumulate on accumulator=%v", c.accumulator)
-	newFlushDeadline, err := c.accumulator.Accumulate(ctx, input, inputErr)
+	trace.Logf(ctx, traceRegion, "calling Accumulate on accumulator=%v", fi.accumulator)
+	newFlushDeadline, err := fi.accumulator.Accumulate(ctx, input, inputErr)
 	didNotPanic = true
 
 	if err != nil {
-		c.emitErr(ctx, err)
+		fi.emitErr(ctx, err)
 	}
 
 	switch {
@@ -642,19 +642,19 @@ func (c *funnelInstance[T]) accumulate(
 		// scheduled entry and grants the flush; if it returns false the instance was
 		// already drained, so its pending Execute will flush the data just accumulated
 		// and we leave the accumulator live (rule R1).
-		if defaultPool.ClaimForFlush(c) {
+		if defaultPool.ClaimForFlush(fi) {
 			// ownMeta false: the inline flush runs on the TRIGGERING accumulate's
 			// own (published) ctx, which must not be stamped; with no fan-in
 			// clone, OriginFlow inside such a flush resolves the accumulate's
 			// parent — the reader is already AT the last accumulate's position.
-			c.flush(ctx, false)
+			fi.flush(ctx, false)
 		}
 	default:
 		// Future deadline: (re)schedule on the shared pool's queue, where a worker
 		// runs the flush when due. Reschedule re-adds (or updates) the entry unless the
 		// instance was already drained, in which case it returns false and we leave it
 		// to the pending Execute (rule R1).
-		defaultPool.Reschedule(c, newFlushDeadline)
+		defaultPool.Reschedule(fi, newFlushDeadline)
 	}
 }
 
@@ -665,15 +665,15 @@ func (c *funnelInstance[T]) accumulate(
 // ownMeta reports that ctx's meta is this flush's own single-custody borrow
 // (the executor path), stampable with the origin link; the fan-in clone below
 // is always stampable regardless.
-func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
+func (fi *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	traceRegion := "funnelInstance.flush"
 
-	accumulator := c.accumulator
+	accumulator := fi.accumulator
 	if accumulator == nil {
 		// already flushed, ignore
 		return false
 	}
-	c.accumulator = nil
+	fi.accumulator = nil
 
 	// Release the rolling driver pin (the last accumulate's meta + rider head)
 	// once the flush body has run — deferred so a panicking Flush still
@@ -681,10 +681,10 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	// the release only returns pooled objects, it fires nothing and touches no
 	// wave state. Runs under c.mu like every pin mutation.
 	defer func() {
-		unrefMeta(c.driverMeta)
-		nodeUnref(c.driverRiders)
-		c.driverMeta = nil
-		c.driverRiders = nil
+		unrefMeta(fi.driverMeta)
+		nodeUnref(fi.driverRiders)
+		fi.driverMeta = nil
+		fi.driverRiders = nil
 	}()
 
 	// Flow fan-in (docs/decisions/flow-design.md): path-scoped riders SEVER —
@@ -699,9 +699,9 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	// and its dispatches complete within this call).
 	//nolint:contextcheck // flushCtx holds the adopted fan-in ctx to defer its release after the barrier
 	var flushCtx context.Context
-	if fc, adopted := flowFanInContext(ctx, c.flowTags); adopted {
-		c.flowTags = nil
-		c.boundary = nil
+	if fc, adopted := flowFanInContext(ctx, fi.flowTags); adopted {
+		fi.flowTags = nil
+		fi.boundary = nil
 		flushCtx = fc
 		ctx = fc
 		ownMeta = true
@@ -717,7 +717,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	// there is already at the last accumulate's position).
 	if ownMeta {
 		if m, ok := metaFromContext(ctx); ok {
-			m.origin.Store(c.driverMeta)
+			m.origin.Store(fi.driverMeta)
 		}
 	}
 
@@ -737,7 +737,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	defer func(wv *waveImpl) {
 		wv.state.DecrementReference()
 		wavePool.Release(wv)
-	}(c.wave)
+	}(fi.wave)
 
 	// Tag-union release: registered after the barrier so it runs BEFORE it —
 	// firing the adopted tag follow-ups while the wave is still held. Registered
@@ -751,7 +751,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	defer func() {
 		if panicked {
 			// Just in case the panic is otherwise suppressed
-			c.emitErr(ctx, ErrFunnelFlushPanicked)
+			fi.emitErr(ctx, ErrFunnelFlushPanicked)
 		}
 	}()
 
@@ -759,7 +759,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 	err := accumulator.Flush(ctx)
 	panicked = false
 	if err != nil {
-		c.emitErr(ctx, err)
+		fi.emitErr(ctx, err)
 	}
 	return true
 }
@@ -812,11 +812,11 @@ type funnelWork[T any] struct {
 	boundary *flowRiderNode
 }
 
-func (c *Funnel[T]) newFunnelWork(
+func (f *Funnel[T]) newFunnelWork(
 	submitCtx context.Context, wv *waveImpl, group workq.GroupID, value T, err error,
 ) *funnelWork[T] {
-	wk := c.workPool.Get()
-	wk.Init(submitCtx, wv, group, *c, value, err)
+	wk := f.workPool.Get()
+	wk.Init(submitCtx, wv, group, *f, value, err)
 	return wk
 }
 
@@ -1109,10 +1109,10 @@ type errAccumulator[T any] struct {
 	err error
 }
 
-func (c errAccumulator[T]) Accumulate(ctx context.Context, value T, err error) (time.Time, error) {
-	return time.Now(), c.err
+func (a errAccumulator[T]) Accumulate(ctx context.Context, value T, err error) (time.Time, error) {
+	return time.Now(), a.err
 }
 
-func (c errAccumulator[T]) Flush(ctx context.Context) error {
-	return c.err
+func (a errAccumulator[T]) Flush(ctx context.Context) error {
+	return a.err
 }

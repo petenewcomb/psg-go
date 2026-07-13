@@ -2,6 +2,37 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► OMNIPOOL ADOPTION SWEEP — LANDED (2026-07-13).** Every hand-rolled refcount now rides
+`omnipool.RefCounter`. Commits: `eaf4d47` (permits.Cache + TryAddRef), `540f6e7` (Cache.alive
+removed — the refcount carries liveness; the rapid model learns destruction from a Reset-fired
+hook), `c2950b0` (ctxMeta), `5cf07b0` (flowRiderNode), `ffddb42` (flow conservation hook
+retired). The sweep is COMPLETE — Cache, ctxMeta, flowRiderNode migrated; `Demand` stays raw by
+design (not refcounted — its generation and lifecycle are orthogonal).
+- **omnipool gained three general primitives:** `RefCounter.TryAddRef() bool` (resurrection-
+  refusing strong pin, refs>0 CAS — the steal's weak-upgrade / permits.Cache.tryPin);
+  `Release(obj) (recycled bool)` (surfaces the last-drop so a consumer unwinds a linked chain
+  ITERATIVELY — copy `next` out BEFORE Release, follow the bool); `RefCounter.RefExclusive() bool`
+  (get_mut — sole-holder ⇒ mutate in place, used by the flow-fire COW).
+- **Resetter contract = "make the object ready to reuse."** Owned-resource teardown may live in
+  Reset or post-Release; the link a consumer unwinds iteratively stays OUT of Reset (so the
+  cascade never recurses through Release). ctxMeta already minted at refs=1 ⇒ mapped straight.
+- **flowRiderNode was 0-published; redesigned as an OWNERSHIP/MOVE model** — `newRiderNode`
+  CONSUMES its `next` (moves the caller's ref in); sharing a tail = `nodeRef` (AddRef) first.
+  The move collapsed the publish-nodeRef ceremony (a carrier owns the returned ref; `prepend` is
+  one line; `replace` is Release+assign).
+- **Two non-obvious sites made idiomatic:** the skim-ownership TRANSFER is a plain `Release` that
+  ASSERTS it doesn't recycle; the fire COW uniqueness check is `RefExclusive()`.
+- **Conservation hooks are a testing-privates smell → retired once the counter is audited:**
+  `ctxMetaAllocHook` and `flowNodeAllocHook` GONE (double-free now caught by the counter's
+  underflow panic; the conservation tests deleted). `flowSharedAllocHook` KEPT — its shared/
+  coalescing nodes (`sharedNodePool`) are still hand-rolled, so `TestFlowCoalesceConservation`
+  keeps its shared-balance half.
+- **`DEVELOPMENT.md` (uncommitted, PN's edit): comment guidelines tightened** — no change-
+  narration, no past-state comparisons, no points-of-use in code comments. FOLLOW-UP: scrub the
+  already-committed session comments (Cache/ctxMeta/omnipool) against this.
+- GATE: build ./... + all-module vet + lint(0) + full `-race` across the root module (all 11
+  packages) + 1000-check `TestBySimulation -race` — green.
+
 **►►► OMNIPOOL ENGINE UNIFICATION — LANDED (2026-07-12, commit `bb2c6ff`).** Full gate green
 (build ./... + all-module vet + lint(0) + omnipool -race + streampool -race-short + 1000-check
 `TestBySimulation -race`). The design is IN THE CODE + commit message; recap of the end-state:

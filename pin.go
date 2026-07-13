@@ -29,7 +29,7 @@ import (
 // any work dispatched from the pin), so a leaked pin holds its follow-ups
 // open forever — treat it like any unclosed resource. What it deliberately
 // does NOT carry is the source extent: no ambient wave (dispatch from a pin
-// requires op.In(&wave) and behaves as an ordinary top-level submission,
+// requires op.In(wave) and behaves as an ordinary top-level submission,
 // under the ordinary caveats about submitting to and skimming a wave from
 // multiple goroutines), no limiter permit, no executor state, and no
 // cancellation or deadline — the pinned ctx roots at [context.Background].

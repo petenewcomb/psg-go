@@ -41,15 +41,14 @@ type Wave struct {
 // recycles it (running Reset) only when the last reference is dropped.
 var wavePool = omnipool.For[waveImpl]()
 
-// NewWave constructs a fresh, open Wave. The pool draw carries the owner reference
-// (refs=1), dropped by [Wave.Close]; the handle captures the impl's current
-// generation for gen-guarded upgrades.
+// NewWave constructs a fresh, open Wave, ready for ops to dispatch into. Release it by
+// draining ([Wave.SkimAll] / [Wave.CloseAndSkimAll]) or by [Wave.Close].
 func NewWave() Wave {
 	return Wave{h: omnipool.NewHandle(wavePool.Get())}
 }
 
-// Skim upgrades to the substrate and skims one result; see [waveImpl.Skim]. A failed
-// upgrade means the wave has drained and recycled, so there is nothing left to skim.
+// Skim skims one result. A wave that has already drained has nothing left to skim, so
+// Skim returns [ErrWaveDone].
 func (w Wave) Skim(ctx context.Context) error {
 	impl, ok := w.h.Get()
 	if !ok {
@@ -59,8 +58,7 @@ func (w Wave) Skim(ctx context.Context) error {
 	return impl.Skim(ctx)
 }
 
-// TrySkim upgrades to the substrate and skims one result without blocking; see
-// [waveImpl.TrySkim].
+// TrySkim skims one immediately-available result without blocking.
 func (w Wave) TrySkim(ctx context.Context) (bool, error) {
 	impl, ok := w.h.Get()
 	if !ok {
@@ -70,7 +68,7 @@ func (w Wave) TrySkim(ctx context.Context) (bool, error) {
 	return impl.TrySkim(ctx)
 }
 
-// SkimAll upgrades to the substrate and drains it; see [waveImpl.SkimAll].
+// SkimAll drains the wave, skimming results until it completes.
 func (w Wave) SkimAll(ctx context.Context) error {
 	impl, ok := w.h.Get()
 	if !ok {
@@ -80,8 +78,7 @@ func (w Wave) SkimAll(ctx context.Context) error {
 	return impl.SkimAll(ctx)
 }
 
-// TrySkimAll upgrades to the substrate and drains all immediately-available results;
-// see [waveImpl.TrySkimAll].
+// TrySkimAll skims all immediately-available results without blocking.
 func (w Wave) TrySkimAll(ctx context.Context) error {
 	impl, ok := w.h.Get()
 	if !ok {
@@ -94,7 +91,7 @@ func (w Wave) TrySkimAll(ctx context.Context) error {
 // Close closes the wave and drops the owner reference. The drop happens exactly once —
 // only on the goroutine that wins the Open→Closed transition — so the "Close may be
 // called more than once" contract holds and the owner reference is never
-// double-released. See [waveImpl.Close].
+// double-released.
 func (w Wave) Close() {
 	impl, ok := w.h.Get()
 	if !ok {

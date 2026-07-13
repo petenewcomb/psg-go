@@ -12,9 +12,7 @@
 // contracts are independent of its shape.
 //
 // Plan generators produce the full expressive range
-// (multi-sink Submit, multi-StartTask bodies, zero-output paths). A
-// Deterministic Config mode forces all Probs to 1.0 and SelfTime
-// distributions to fixed for exact-bound assertions; probabilistic mode
-// relaxes assertions to Max-only bounds in exchange for richer
-// race-exposure surface.
+// (multi-sink Submit, multi-StartTask bodies, zero-output paths). Generation
+// emits only Prob=1.0 and the runtime draws SelfTime durations at their median,
+// so invocation-count and path-duration bounds are exact.
 package sim

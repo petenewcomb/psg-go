@@ -1,5 +1,201 @@
 # TODO
 
+---
+
+# Phase 3 cleanup audit (2026-07-13) — CURRENT
+
+Compiled from a four-dimension smell audit (naming, public-API consistency, test
+structure/coverage, design/vestigial/doc-gaps) run after the DEVELOPMENT.md guideline
+tightening + repo-wide comment sweep (commits `5c545be`, `cc43813`). Effort S/M/L; risk
+low/med/high. Items tagged `[tracked]` restate/supersede an item in the historical
+sections below. Everything below this block predates the combiner reshape and is
+partially stale — treat as historical reference.
+
+## Sequencing (decided 2026-07-13, w/ PN)
+
+Order: **Tier 3 → Tier 4 → Tier 5 → D3 → Tier 6**, then (later) **D2, Tier 1, Tier 2**.
+D1 is DECIDED (below) and folds into Tier 4. Tier 2 is deferred and reframed — see its note.
+
+## Decisions
+
+- **D1 — Reconcile the wave-agnostic / zero-value-Wave model with the shipped surface.**
+  **[DECIDED 2026-07-13: the shipped code IS the intended target — `NewWave()` is required
+  (a zero-value `Wave{}` has a nil handle and every method short-circuits to `ErrWaveDone`),
+  `In` is by-value (`op.In(w)`), and the two-op-category split (Launcher/Skimmer
+  wave-agnostic; Funnel/Resequencer wave-bound at construction) is intended. Fix the DOCS,
+  not the code. Folded into Tier 4.]**
+  `doc.go:9-36` (and `pin.go:32`, `hold.go:26`, `wavepermits.go:49`) advertise the
+  `docs/plan/zero-value-wave.md` target — "zero-value Wave, no constructor, bind with
+  `op.In(&w)`, no `NewWave`" — which that plan marks **LANDED 2026-06-23**. The code
+  diverges: `type Wave struct{}` with `func NewWave() Wave` (`wave.go:47`) still present
+  and used everywhere, and `In(wave Wave)` is **by value** (`launcher.go:119`,
+  `skimmer.go:56`), so the `op.In(&w)` examples do not compile. Separately, the "ops
+  carry no wave at construction / wave-agnostic op" claim (`doc.go:25,32`) holds only for
+  Launcher/Skimmer — Funnel, Resequencer, RangeResequencer bind their wave at
+  construction and have no `In()`. **Decide:** re-land the zero-value/pointer-`In` target
+  and make all ops wave-agnostic, OR reconcile docs to the shipped `NewWave()` / value-`In`
+  / two-op-categories reality. Gates most of Tier 6 and the doc reconciliation. Effort L,
+  risk med. NEW.
+
+- **D2 — [DEFERRED 2026-07-13: dig in later, after Tiers 3-6.] Extract the internal packages the internal-tests are signaling** (the
+  DEVELOPMENT.md "complex internals → extract a capability" principle). The 7 in-package
+  test files sort as: `internal/wavestate/inflight_internal_test.go` = trivial black-box
+  flip (all methods already exported); `limiterset_internal_test.go` = small
+  `export_test.go` shim; the rest are extraction candidates — `limiter` +
+  `weightedlimiter` reach a shared hidden layer (the `semaphoreResource` /
+  `weightedSemaphoreResource` permit adapters + `Overdraft` + raw `maxConcurrency`) that
+  wants to become a **permits-backed semaphore package**, leaving `streampool.Limiter` a
+  thin typed front; `bodyctx` + `ctxmeta` reach a **context / permit-scope subsystem**;
+  `flow` reaches a **coalescing union-find with refcounted shared nodes**. Two audits
+  reached the extraction conclusion independently. **Decide:** which extractions to do and
+  in what order (limiter-family is the cleanest first). Effort L, risk med. `[tracked]`
+  (WORKING_NOTES phase-3 backlog item 1).
+
+- **D3 — [SEQUENCED 2026-07-13: after Tier 5, before Tier 6.] Funnel multi-limiter policy.** `Funnel.WithLimits` panics on more than one
+  limiter (`funnel.go:131`, "Only a single limiter is supported") while `Launcher.WithLimits`
+  AND-composes N deadlock-free; a funnel body takes weight-1 permits so joint composition
+  is mechanically identical. **Decide:** unify (Funnel AND-composes like Launcher, add
+  `Funnel.WithLimiterSet`) or keep single and document why. Effort M, risk med. NEW /
+  partially `[tracked]` (§5 per-op combiner limits).
+
+## Tier 1 — Pool/workq consolidation (highest leverage; already the branch's next major piece)
+
+One pass retires the most findings. Confirmed scope from the audit:
+- `taskPostWork.Execute` (`wave.go:910`) and `funnelPostWork.Execute` (`funnel.go:1036`)
+  are now near-identical (differ only by the funnel permit gate + Waiting/releasePermit);
+  `skimPostWork.Execute` (`wave.go:691`) is a third variant; none use
+  `workq.ExecuteOrWait`. Extract a shared executor-handoff helper. Effort M, risk med.
+  `[tracked]` (§Implementation improvements, lines 153/170).
+- Vestigial params fall out here: `boundTask.Execute` passes `group` that the sole
+  implementor discards (`launcher.go:353` `_ = group`, and it already stores `wk.group`);
+  `newTaskPostWork` accepts a `deadline` it never stores (`wave.go:990`). Effort S each.
+  (deadline `[tracked]` line 151.)
+- File-org sprawl this pass can resolve: `wave.go` (~1056 lines: Wave API + waveImpl +
+  taskWork + skim/taskPostWork + poolWork), `funnel.go` (~1118), `ctxmeta.go` (712, mixes
+  ctxMeta with an unrelated `executionEnvironment` family → `exenv.go`). Effort M.
+  `[tracked]` line 160.
+- Fold in the low-risk correctness items: `ctx.Err()` → `context.Cause(ctx)` at
+  `wave.go:667`, `workq/accepted.go:314,330,358`, `rdvq/waiters.go:31`, `rdvq/queue.go:102`,
+  `rdvq/handoff.go:140` `[tracked]` line 172; `wavestate/inflight.go` `atomic.Int64` →
+  `Int32` `[tracked]` line 182.
+
+## Tier 2 — Dead-code disposition pass (deferred to run with D2 / Tier 1)
+
+**REFRAMED 2026-07-13 (PN): "currently dead" does NOT mean "drop."** Each item below needs a
+per-case verdict — some are genuinely deletable gut-to-no-op leftovers, but others may be
+reserved API to WIRE UP, or a signal that a caller is missing. Do NOT bulk-delete; triage
+each. Deferred to run alongside D2 / the Tier 1 consolidation (which will clarify what's
+truly orphaned vs pending-integration). Candidates to triage (verify with a deadcode pass):
+- `internal/ttrk` — entire package, zero importers. Effort S. NEW.
+- `internal/execpool/executor.go:85-86` — `Acquire`/`Release` one-line delegators, zero
+  callers. Effort S. NEW.
+- `internal/trace/trace.go:89,116,159,168` — `Log`/`LongLogf`/`NewTask`/`Task.End`, no
+  callers outside the package (code uses StartRegion/Logf). Effort S. NEW (decide: delete
+  vs reserved API).
+- `internal/omnipool/struct.go:181` — free `Clone`, unreachable. Effort S. NEW.
+- `funnel_legacy_bench_test.go` — does not compile even under its `psg_wave3_legacy_bench`
+  tag (`streampool.Task[T]` no longer exists). Port to current API or delete file+tag.
+  Effort S. `[tracked]` (lines 140-147). NB the tag name itself is retired terminology.
+- `internal/sim/run.go:585-586,612,643`, `plan.go:361` — dead ignored locals/params.
+  Effort S, low value (test infra). NEW.
+
+## Tier 3 — Finish the op-trio rename (internal terminology retirement)
+
+The public rename (Gather/Combiner/TaskRunner → Skim/Funnel/Launcher; job → wave) never
+reached the internals. Biggest single naming smell:
+- **Receiver letters re-encode the retired names**: every Skimmer method uses `g` (Gather),
+  every Funnel `c` (Combiner), every Launcher `r` (Runner) — root + `internal/benchapp` +
+  `internal/sim`. Rename to `s`/`f`/`l`. Effort M, risk low. NEW.
+- **"Scatter" is the internal verb for the public "Submit/dispatch"** and splits the
+  decorator family: `launcherScatterWork`/`limiterScatterWork`/`newScatterWork`
+  (`launcher.go:288,423`, `limiter.go:157`) vs the sibling `*PostWork` (funnel/skim/task).
+  Unify on `*PostWork`. Effort M, risk med. NEW.
+- **Accumulator adapter family is incoherent**: `FuncAccumulator*` prefix (`accumulator.go:38,97,150,190`)
+  fights the codebase-wide `*Func` suffix (HandlerFunc/TaskFunc/...); `AccumulatorFactoryFunc`
+  vs `FuncAccumulatorFactory` are two names for one idea 7 lines apart. Effort M, risk med. NEW.
+- **"Task" half-retired body noun breaks trio symmetry**: `ErrTaskPanicked` (vs
+  `ErrFunnelPanicked`, `errs.go:8`); enum `taskContext` (vs `skimContext`/`funnelContext`,
+  `ctxmeta.go:26`); launcher pipeline mixes `newTask`→`launcherWork`→`taskPostWork`. Effort
+  S-M, risk med. NEW.
+- Comment/trace leftovers: "gather"=Skim in `ctxmeta.go:210-222` comments; `funnelEngine`
+  (removed) in `accumulator.go:61` and public godoc; mislabeled trace region
+  `"funnelInstance.funnel"` inside `accumulate` (`funnel.go:594`); `funnelWork.Funnel(ctx)`
+  method reads as verb-as-noun. Effort S. NEW.
+- Opaque locals/fields: `hbc`→`inst` (`funnel.go:870`), `protoBB`→`blockBehavior`
+  (`wave.go:150`), `fn Funnel[T]`→`funnel` (`funnel.go:785`), `poolWork`→`baseWork`
+  (`wave.go:959`, "pool" is loaded). Effort S. NEW.
+- **Decide fold-in of the already-tracked renames**: `ErrJobDone`→`ErrWaveDone` (line 114),
+  `permits`→`pforest` (line 119), `Free`→`Recycle` + Recycler interface (lines 166-167).
+  These are the same "finish the rename" theme — do them in this pass or keep separate?
+- `internal/sim` is a self-contained pre-rename vocabulary island (subjob/StartTask/scatter).
+  Effort L. `[tracked]` (lines 41-43, 156 sim rationalization).
+
+## Tier 4 — Doc reconciliation + label anchoring
+
+- Reconcile `doc.go` + `pin.go`/`hold.go`/`wavepermits.go` to the shipped API (blocked on
+  D1): the `op.In(&w)` examples don't compile; "there is no constructor" contradicts
+  `NewWave`. Effort M once D1 is decided. NEW (generic reconcile `[tracked]` line 245).
+- Public godoc leaks internal vocabulary/mechanics: `waveImpl` doc-links on Wave methods,
+  refcount/generation language on `NewWave`, "funnelEngine drain" on Accumulator,
+  phantom `[Funnel.Start]`/"Start or TryStart" references on Funnel (`funnel.go:21,29` —
+  methods that don't exist). Effort S. NEW / `[tracked]` line 245.
+- `internal/sim/doc.go:16` advertises a "probabilistic mode" (per-invocation draws, Max
+  bounds) that the runtime doesn't implement — `drawDuration`/`rollProb`/`shouldReturnError`
+  are constant/threshold stubs (`run.go:750-764`). Drop the prose or implement. Effort S. NEW.
+- `docs/decisions/backpressure-and-reentrancy.md:512` documents an `Accepted{deferred,
+  upstream}` struct that no longer matches `accepted.go`. Effort S. `[tracked]` line 243.
+- **Label-anchoring pass**: comment labels used without a resolvable doc citation at point
+  of use — "Design B" (~11 uses in workq, defined in no docs/ file), "CP-B1b"
+  (`pool.go:29`), "Phase 2b C2" (`pool.go:14`), "resolution (c)" (~10 uses, permithandle/
+  permits — §Overdraft has no "(c)" enumerand), "Decision 1-4" (permits, defined in
+  weighted-acquisition.md but not cited beside use). Add a cite beside each label or define
+  it in a cited doc. Effort M, risk low. NEW.
+
+## Tier 5 — Test coverage gaps
+
+- `AccumulatorFactory.Close` firing at funnel refcount zero — **no test** (an orphaned
+  comment describing one was deleted from funnel_test.go). Easiest win. Effort S.
+  `[tracked]` (WORKING_NOTES backlog).
+- Goroutine-leak harness — no `goleak` (or NumGoroutine-delta) anywhere; add to TestMain for
+  root + key internal pkgs, gate drain/cancel/shutdown. Effort M. `[tracked]` line 206.
+- Wave-level scale-to-zero — only the executor pool is covered
+  (`internal/execpool/pool_test.go:102`); no Wave/global-worker/funnel-pool test. Effort M.
+  `[tracked]` line 204.
+- Panic-through-framework — no test drives a user panic through dispatch; assert it
+  propagates verbatim, accounting stays sound, and a user-body `recover()` leaves the wave
+  usable. Effort M. `[tracked]` line 207.
+- Shutdown-sequence / resource-cleanup asserts (pins/permits/contexts released) after cancel
+  and after normal drain. Effort M. `[tracked]` line 209.
+- Optional: a `limit ∈ {1,2,3}` deadlock sweep over a fan-out/nested-drain shape as an
+  explicit unit test (today only the sim exercises this systematically). Effort S. NEW.
+- Test-hygiene: sleep-based synchronization in `limiter_internal_test.go:98,154` (replace
+  with an observable parked-count signal); the ~11k-line skipped golden fixture in
+  `internal/sim/plan_test.go` (regenerate against current Plan vocab or assert structural
+  properties instead). Effort S/M. NEW (fixture `[tracked]` sim rationalization).
+
+## Tier 6 — API completeness (mostly gated on D1/D3)
+
+- Complete the Fn/Err/Task constructor matrix + void-T aliases: it is complete only for
+  Launcher — no `NewTaskSkimmer`/`NewTaskFunnel`, no `Err*`/`Try*`/`SubmitErr` on
+  Resequencer/RangeResequencer (which expose only Submit + SubmitResult). Consider a
+  table-driven/generated per-op surface. Effort M, risk low. NEW.
+- Weighted-limiter surface: a paused (ceiling-0) `NewWeightedSemaphore` is constructible but
+  has no exported raise; `SetMaxConcurrency` is a panicking free function keyed to plain
+  Semaphore only. Give WeightedLimiter a symmetric adjuster; prefer a typed handle over the
+  panicking free function. Effort M. `[tracked]` (WORKING_NOTES step-4 typed Semaphore handle).
+- Thread-safety contracts: the task-context dispatch-prohibition caveat lives only on
+  `Launcher.Submit` (add to Skimmer/Funnel Submit or state "safe here"); `Wave` has no
+  type-level thread-safety statement though every op does. Effort S. NEW / `[tracked]` line 135.
+- Funnel receiver shape: `*Funnel[T]` pointer receivers on Submit/TrySubmit (no field
+  mutation forces it) vs value receivers on Launcher/Skimmer — imposes addressability on
+  callers. Convert to value. Effort S, risk low. NEW.
+- `Forever` docstring (`forever.go:8`) lists TrySubmitResult twice and names only TryStart;
+  generalize to "all Try* methods". Effort S. NEW.
+- Label `streamgrpc`/`streamhttp` as example packages so their app-shaped surface isn't read
+  as a canonical wrapper API. Effort S. NEW.
+
+---
+
 ## Pre-existing nested-drain `-race` hang (~1/120) — needs the dispatch/execution split (2026-06-24)
 
 `TestBySimulation -race` wedges intermittently (~1 in 120 runs at default config) in a

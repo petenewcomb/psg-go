@@ -41,8 +41,8 @@ func TestPermitScopingChains(t *testing.T) {
 	ctx := context.Background()
 	wave := NewWave()
 
-	// Mint (or fetch) the wave's top-level meta from ctx. A zero-value Wave
-	// self-initializes on this first topLevelCtxMeta call; ctxMeta below then
+	// Mint (or fetch) the wave's top-level meta from ctx: topLevelCtxMeta stamps
+	// the top-level meta on this first call; ctxMeta below then
 	// reads back the meta now stamped on ctx.
 	ctx, _, _ = waveImplOf(wave).topLevelCtxMeta(ctx, func(contextType) {})
 	_, topMeta := waveImplOf(wave).ctxMeta(ctx)

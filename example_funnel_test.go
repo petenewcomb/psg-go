@@ -42,7 +42,7 @@ func ExampleFunnel() {
 
 	ctx := context.Background()
 
-	// A zero-value Wave is ready to use; it owns no context and drains via
+	// NewWave returns a fresh, open Wave; it owns no context and drains via
 	// CloseAndSkimAll below.
 	wave := streampool.NewWave()
 

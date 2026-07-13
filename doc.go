@@ -10,11 +10,10 @@
 //
 // Three types compose:
 //
-//   - [Wave] — a batch of work you await. A zero-value Wave (var w streampool.Wave)
-//     is ready to use; there is no constructor and the Wave owns no context.
-//     Drain it with [Wave.Skim], [Wave.SkimAll], or [Wave.CloseAndSkimAll], which
-//     return [ErrWaveDone] once the wave is complete. A sub-wave is just a
-//     zero-value Wave first used inside a body.
+//   - [Wave] — a batch of work you await. Construct one with [NewWave]; it owns no
+//     context. Drain it with [Wave.Skim], [Wave.SkimAll], or [Wave.CloseAndSkimAll],
+//     which return [ErrWaveDone] once the wave is complete. A sub-wave is just a
+//     [NewWave] first used inside a body.
 //   - Flow — an optional, refcounted, context-borne handle for one logical unit
 //     of work that may cross wave boundaries (trace context, audit metadata,
 //     cleanup hooks). Most programs never construct one.
@@ -22,18 +21,21 @@
 //     used implicitly and sized automatically. You do not construct or tune it;
 //     per-op concurrency is expressed with Limiters (see [Launcher.WithLimits]).
 //
-// Work is performed by wave-agnostic ops, defined once and reusable:
-// [NewLauncher] (stateless dispatch), [NewFunnel] (stateful aggregation), and
-// [NewSkimmer] (terminal sink). A body routes values by calling Submit on a
-// downstream op; there is no separate wiring step.
+// Work is performed by ops, defined once and reusable. Dispatch ops — [NewLauncher]
+// (stateless dispatch) and [NewSkimmer] (terminal sink) — are wave-agnostic:
+// constructed without a wave and bound to one later. Aggregation ops — [NewFunnel]
+// (stateful aggregation) and [NewResequencer] (ordered aggregation) — bind their
+// wave at construction. A body routes values by calling Submit on a downstream op;
+// there is no separate wiring step.
 //
 // # Routing
 //
-// Ops carry no wave at construction. Inside a body, op.Submit(ctx, v) targets the
-// body's ambient (framework-supplied) wave. At top level — or to redirect into a
-// different wave — bind a wave with op.In(&w), e.g. launcher.In(&w).Submit(ctx, v).
-// Routing is handle-level and never alters the ctx, so a Flow (and trace context)
-// rides along across a redirect.
+// A wave-agnostic dispatch op carries no wave until it is used. Inside a body,
+// op.Submit(ctx, v) targets the body's ambient (framework-supplied) wave. At top
+// level — or to redirect into a different wave — bind a wave with op.In(w), e.g.
+// launcher.In(w).Submit(ctx, v). An aggregation op is already bound to the wave it
+// was constructed with. Routing is handle-level and never alters the ctx, so a Flow
+// (and trace context) rides along across a redirect.
 //
 // # Context and cancellation
 //

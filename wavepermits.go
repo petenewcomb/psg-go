@@ -46,7 +46,7 @@ func (wv *waveImpl) ensureCache(m *ctxMeta, p *permits.Pool) *permits.Cache {
 	if m != nil && m.wave == wv {
 		return ensureCacheChain(m, p)
 	}
-	// Cross-wave dispatch (op.In(&wv) drives wv as a sub-wave): wv's forest parent is
+	// Cross-wave dispatch (op.In(wv) drives wv as a sub-wave): wv's forest parent is
 	// the dispatching wave's cache.
 	if c, ok := wv.cacheFor(p); ok {
 		return c

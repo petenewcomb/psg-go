@@ -23,7 +23,7 @@ import (
 // While held, the flow stays open (the hold is a carrier: follow-ups wait for
 // the release and for any work dispatched through held), values and tag
 // presence read normally, and dispatch through held works as an ordinary
-// top-level submission into an explicitly named wave (op.In(&wave) — a hold
+// top-level submission into an explicitly named wave (op.In(wave) — a hold
 // carries no ambient wave), under the ordinary multi-goroutine caveats.
 //
 // cancel is named for what it visibly does — it cancels held — and canceling

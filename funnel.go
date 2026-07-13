@@ -18,7 +18,7 @@ import (
 )
 
 // Funnel represents a stateful aggregation operation. Inputs flow in through
-// [Funnel.Submit] (or via [Funnel.Start] for value-producing tasks); the
+// [Funnel.Submit]; the
 // user-supplied [Accumulator] processes them inside a funnel-body worker on the
 // shared pool. Downstream emission is the Accumulator body's responsibility — it
 // calls Submit on whatever downstream sinks it has captured. There is no
@@ -26,7 +26,7 @@ import (
 // SkimAll path.
 //
 // Thread-safety and copying: a Funnel value is designed to be copied. While a
-// single Funnel value does not support concurrent calls to Start or TryStart,
+// single Funnel value does not support concurrent calls to Submit or TrySubmit,
 // copies of a Funnel can be used concurrently. All copies share the same funnel
 // identity (a unique id) and route work to the same Accumulator instances, which
 // are owned by the wave (keyed by that id) — so a Funnel is a plain value holding

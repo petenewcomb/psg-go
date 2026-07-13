@@ -16,6 +16,31 @@ partially stale — treat as historical reference.
 Order: **Tier 3 → Tier 4 → Tier 5 → D3 → Tier 6**, then (later) **D2, Tier 1, Tier 2**.
 D1 is DECIDED (below) and folds into Tier 4. Tier 2 is deferred and reframed — see its note.
 
+### Progress (2026-07-13)
+- **Tier 4 doc reconciliation (incl. D1): DONE** (commit `53103a6`) — doc.go/pin/hold/
+  wavepermits/wave/funnel/accumulator/sim godoc moved to the shipped surface. Label-anchoring
+  sub-item: filed (needs PN — homeless labels, see below). Design-doc (.md) reconciliation
+  deferred to the tracked post-consolidation pass.
+- **Tier 3 op-receiver rename: DONE** (commit `f5cd6a3`) — g/c/r → s/f/lc (+ funnelInstance
+  `fi`, errAccumulator `a`), via gopls.
+- **Tier 3 trace-region label fix: DONE** — `funnelInstance.funnel` → `.accumulate`.
+- **Tier 3 "Task noun" rename: BLOCKED on D4 (below)** — attempted taskContext→launcherContext
+  and ErrTaskPanicked→ErrLauncherPanicked, then REVERTED: `taskContext`'s stringer feeds a
+  user-facing panic message ("Start called from task context…", task.go:38), and "Task" is
+  LIVE public vocabulary — so this is a UX/vocabulary decision, not a mechanical rename.
+- **Remaining Tier 3 (needs naming targets confirmed before mass-rename):** "Scatter"→PostWork;
+  the Accumulator Func-naming (exported, exact target names); opaque locals (hbc/protoBB/fn/
+  poolWork); D4. **Tier 5 (tests): not started.**
+
+- **D4 — "Task noun" internal vocabulary.** `Task`/`TaskLauncher`/`TaskFunc`/`NewTask*` are
+  live, deliberate PUBLIC API, so "task" is NOT a retired name like Gather/Combiner/Runner.
+  But internally `taskContext`, `ErrTaskPanicked`, `taskWork`, `taskPostWork`, `boundTask`
+  mix "task" with "launcher". `taskContext.String()` and `ErrTaskPanicked` surface in
+  user-facing panic/error text ("task context", "task panicked"). **Decide:** keep "task" as
+  the internal body-noun (it aligns with the public Task concept), or align internals to
+  "launcher" (changes the two user-facing strings, needs the sibling-symmetry with
+  skim/funnelContext). PN's call — affects user-visible wording. Effort M, risk med. NEW.
+
 ## Decisions
 
 - **D1 — Reconcile the wave-agnostic / zero-value-Wave model with the shipped surface.**

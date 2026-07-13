@@ -14,8 +14,8 @@ import (
 	"github.com/petenewcomb/streampool/internal/workq"
 )
 
-// heldPermit is the native limiter handle a body carries through one admission — the
-// permit-core replacement for the eager request handle. It pairs the body's own wave
+// heldPermit is the native limiter handle a body carries through one admission. It
+// pairs the body's own wave
 // cache for the op's Limiter (ownCache = C_W^L, the reacquire target whose up-walk
 // inherits an ancestor's idle permit, then free Resource, then steal) with the Permit
 // currently occupying a slot.
@@ -24,7 +24,7 @@ import (
 // nested-bracket re-entrancy no-op falls out with no separate state enum: suspend lends
 // only a held permit; a second suspend on an already-lent handle reports false.
 //
-// Externally serialized exactly like the eager request: created at dispatch, acquired
+// Externally serialized: created at dispatch, acquired
 // at the gate, suspended/reclaimed at framework park points on the body's goroutine,
 // released at completion — never touched concurrently. Every cross-goroutine hand-off
 // (dispatch → gate → body) carries a happens-before edge through the queue the handle
@@ -152,7 +152,7 @@ func (h *heldPermit) suspend(target *permits.Cache) bool {
 // (ErrWaveDone) the reclaim becomes vacuously plain — keep waiting on the Pool without
 // help, since abandoning would let the body resume UNPERMITTED while a sibling holds the
 // slot. On cancellation it leaves the handle un-acquired (the completion release no-ops).
-// Void so it defers cleanly. Mirrors the eager reclaimRequest.
+// Void so it defers cleanly.
 //
 // above holds the joint set's HIGHER-rank siblings (nil for a single-limiter handle).
 // Before every park, any of them still held is LENT — plainly released, marked for the
@@ -306,8 +306,7 @@ func (h *heldPermit) pool() *permits.Pool {
 // no enclosing body holds a permit, or it is already suspended by an enclosing episode
 // (re-entrancy — the reclaim belongs to that episode). The suspension is counted on
 // wv's cache for the handle's limiter (mkdir-p'd through ensureCache when absent), the
-// drive-target attribution the overdraft stranger check reads (resolution (c)). The
-// native replacement for suspendForEpisode.
+// drive-target attribution the overdraft stranger check reads (resolution (c)).
 //
 // A reference on wv is held across the ensureCache+SuspendDriver setup — the same guard
 // sweepFunnels uses (see Wave.sweepFunnels). Unlike every other ensureCache caller, which
@@ -374,8 +373,8 @@ func suspendHeldPermit(meta *ctxMeta, wv *waveImpl) *heldPermit {
 	return h
 }
 
-// gateAcquire drives h to held under the dispatch context's discipline — the native
-// replacement for acquireOrWait. It mirrors the three admission modes:
+// gateAcquire drives h to held under the dispatch context's discipline. It
+// implements the three admission modes:
 //
 //   - one-shot (ex not blocking/postponing): a single non-blocking acquire.
 //   - manager postpone (queued, non-top-level): register for the Pool's permit-free
@@ -437,9 +436,8 @@ func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *w
 
 // blockAcquire is the top-level blocking acquire: wait on the Pool's waiters (a freed
 // permit wakes one) while wv.block help-drains the driver's own wave, retrying the
-// acquire each round until it succeeds or ctx is cancelled. This is the eager
-// block-and-help loop retargeted from the per-request notifier onto the permit Pool's
-// waiters, with h.acquire (idempotent) as both the loop guard and the block confirm.
+// acquire each round until it succeeds or ctx is cancelled. h.acquire (idempotent)
+// is both the loop guard and the block confirm.
 func blockAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldPermit) error {
 	// Per-call confirm state, read by h.confirm (the cached, allocation-free callback).
 	h.blockingCalled = false

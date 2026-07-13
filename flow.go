@@ -574,8 +574,7 @@ func rebuild(head, stop *flowRiderNode, keep func(*flowRiderNode) bool) *flowRid
 
 // buildFlowRiders derives a fresh chain head by folding the options over the
 // inherited chain LEFT TO RIGHT — an option list is sugar for nested scopes,
-// one layer per option, the first option outermost (PN, 2026-07-10; replaces
-// the earlier order-independent build). Additive options (Value, FollowUp,
+// one layer per option, the first option outermost. Additive options (Value, FollowUp,
 // Infuse) prepend a node, so a later option under the same identity shadows an
 // earlier one exactly as an inner scope shadows an outer (nearest-wins walk).
 // Subtractive options act on the chain AS BUILT SO FAR: Suppress filters its

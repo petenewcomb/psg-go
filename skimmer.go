@@ -290,10 +290,10 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	// The handler runs under a PER-ITEM child meta of the drive meta
 	// (docs/decisions/driver-contexts.md, "Skim handlers get a per-item child
 	// context") rather than overriding the drive meta's riders in place — the
-	// drive meta is ref'd-lifetime immutable, and the override was a live
-	// misdelivery bug (never restored, so a rider-free item skimmed after a
-	// rider-carrying one read the previous item's — possibly already recycled —
-	// chain instead of the drive's).
+	// drive meta is ref'd-lifetime immutable, and an in-place override would
+	// misdeliver: a rider-free item skimmed after a rider-carrying one would
+	// read the previous item's — possibly already recycled — chain instead of
+	// the drive's.
 	//
 	// parent = the drive meta, a SYNCHRONOUS derivation, not a permitRoot: the
 	// handler runs on the drive goroutine, so vetNotNestedInSkim and the permit

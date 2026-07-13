@@ -23,12 +23,9 @@ type SelfTime struct {
 
 var _ Step = SelfTime{}
 
-// Duration returns the median (Med) duration — the value the v1
+// Duration returns the median (Med) duration — the value the
 // runtime uses for SelfTime sleeps. Path-budget accounting and
-// MaxPathDuration assertions are pinned to this value. When the
-// runtime gains per-invocation Dist draws (probabilistic mode), this
-// should switch to Min and the path-duration assertion will need to
-// allow per-invocation undershoot.
+// MaxPathDuration assertions are pinned to this value.
 func (st SelfTime) Duration() time.Duration {
 	return st.Dist.Med
 }

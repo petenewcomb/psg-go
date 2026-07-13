@@ -27,7 +27,7 @@ type modelUnit struct {
 	pm          Permit
 	running     bool
 	// destroyed is set when this unit's cache recycles, via the cacheDestroyHook — the
-	// model's liveness signal now that Cache carries no alive flag. It captures cascade
+	// model's liveness signal. It captures cascade
 	// destroys (a parent recycling when its last child drops) that no single ReleaseRef
 	// call site sees, which is why the model learns liveness from Reset rather than
 	// tracking a refcount of its own.

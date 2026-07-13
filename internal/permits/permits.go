@@ -14,7 +14,7 @@ import (
 	"github.com/petenewcomb/streampool/internal/trace"
 )
 
-// Concurrency model (Phase 2a-ii, hybrid: lock-free hot path, locked forest)
+// Concurrency model (hybrid: lock-free hot path, locked forest)
 //
 // The hot acquire path is lock-free; the forest structure is guarded by per-list
 // mutexes. The two are independently synchronized and meet only through the atomic
@@ -156,9 +156,8 @@ var cachePool = omnipool.For[Cache]()
 
 // cacheDestroyHook, when non-nil, is invoked with each Cache as its Reset recycles it — the
 // seam a test uses to observe destruction at the moment it happens (the cache is still the
-// destroyed incarnation, not yet reissued from the pool), the way the model tracked liveness
-// off the retired alive flag. Production leaves it nil; the cost is one relaxed atomic load
-// per destroy, uncontended.
+// destroyed incarnation, not yet reissued from the pool). Production leaves it nil; the
+// cost is one relaxed atomic load per destroy, uncontended.
 var cacheDestroyHook atomic.Pointer[func(*Cache)]
 
 // Pool is the Resource boundary and the root of a forest of caches.
@@ -166,8 +165,8 @@ type Pool struct {
 	resource Resource
 	roots    cacheList
 
-	// The always-on demand FIFO (weighted-acquisition.md "Queue unification",
-	// superseding Decision 2's representation and Decision 3). EVERY acquire that
+	// The always-on demand FIFO (weighted-acquisition.md "Queue
+	// unification"). EVERY acquire that
 	// cannot be satisfied immediately enqueues, whatever its weight; a satisfied
 	// acquire never touches the queue. While a head stands (head non-nil), every
 	// acquisition arm is gated — including the step-1/2 up-walk, else local
@@ -181,10 +180,10 @@ type Pool struct {
 	// Interior removal is lazy — nbcq cannot unlink — so each entry carries the
 	// demand's generation at enqueue time, Invalidate retires entries by bumping
 	// the generation, and the promotion scan skips stale entries (Decision 4's
-	// ABA discipline, now load-bearing).
+	// ABA discipline).
 	queue nbcq.Queue[demandEntry]
 
-	// head is the sticky head slot (the field formerly named barrier): the
+	// head is the sticky head slot: the
 	// current head demand, held OUTSIDE the queue (nbcq cannot peek without
 	// popping). nil ⇔ nobody waits ⇔ the ordinary lock-free machinery, verbatim
 	// (the empty-slot fast path — a BARE LOAD, no CAS on the hot path); non-nil ⇒
@@ -257,8 +256,8 @@ type Pool struct {
 	// order, a joint acquirer blocked at one limiter holds only limiters ordered
 	// before it — every wait-for edge points strictly up the order, so no cycle can
 	// close (weighted-acquisition.md §"Multi-limiter: the FIFO under joint
-	// admission"). Consumable-sorts-last is a step-4 refinement; all limiters are
-	// holdable today, so creation order — a stable total order — suffices.
+	// admission"). All limiters are holdable, so creation order — a stable
+	// total order — suffices.
 	rank uint64
 }
 
@@ -358,11 +357,10 @@ func NewPool(r Resource) *Pool {
 // from. Callers that constructed the Resource use it to reach Resource-specific controls
 // (e.g. a semaphore's dynamic capacity), type-asserting back to the concrete type.
 //
-// The round-trip-and-assert is a known smell (PN review, 2026-07-04): the sole caller
-// (SetMaxConcurrency) had the concrete pointer at construction. The fix is a typed
-// handle kept by the constructor — naturally a distinct Semaphore surface carrying the
-// method — folded into weighted-acquisition step 4's surface work, which retires this
-// accessor.
+// TODO(weighted-acquisition step 4): retire this round-trip-and-assert in favor of a
+// typed handle kept by the constructor — naturally a distinct Semaphore surface
+// carrying the method — since callers needing Resource-specific controls had the
+// concrete pointer at construction.
 func (p *Pool) Resource() Resource {
 	return p.resource
 }
@@ -393,7 +391,7 @@ type Cache struct {
 	// RefCounter is the cache's object-lifetime reference count (embedded, promoting
 	// AddRef/TryAddRef/RefCount): a live cache refs its parent, each sub-wave (NewChild)
 	// and each suspended driver (SuspendDriver) adds one, and the last drop recycles the
-	// cache through cachePool — running Reset (the former destroy: unlink, return held to
+	// cache through cachePool — running Reset (unlink, return held to
 	// the Resource, end any anchored episode, cascade to the parent). newCache's
 	// cachePool.Get arms it to 1. a64 (no generation): every holder is strong, and the
 	// resurrection race is closed by TryAddRef, whose refs>0 CAS refuses a cache already
@@ -409,9 +407,9 @@ type Cache struct {
 
 // Reset is the omnipool recycle hook (Resetter), run by cachePool.Release when the last
 // reference drops (refs==0: the unit's body exited AND all sub-waves drained → quiescent).
-// It IS the former destroy(): unlink the cache from its list, return its held to the
-// Resource, end the standing episode it may anchor, drop its draw on the parent (cascade),
-// then nil the pointer fields. It must NOT touch the embedded RefCounter (release() left
+// It unlinks the cache from its list, returns its held to the
+// Resource, ends the standing episode it may anchor, drops its draw on the parent (cascade),
+// then nils the pointer fields. It must NOT touch the embedded RefCounter (release() left
 // refs at 0; the next cachePool.Get re-arms it). children is empty (refs==0 ⟹ all sub-waves
 // drained). Removal is exact under the list lock; counts.drain coordinates the return to the
 // Resource with any concurrent stealOut (a steal that took the cache as a candidate before
@@ -538,8 +536,7 @@ func (c *Cache) touch() {
 // fresh one per retry (re-presentation is idempotent: one FIFO entry). Obtain one
 // from [NewDemand] (pooled; return it with [Demand.Free]) or embed one in a pooled
 // host whose own Init calls [Demand.Init] — the zero value is NOT ready (Init sets
-// up the mailbox once per object; the omnipool Initer convention replaces the old
-// lazy mailboxReady flag). A Demand's operations (Acquire retries, Invalidate) are
+// up the mailbox once per object). A Demand's operations (Acquire retries, Invalidate) are
 // externally serialized — one goroutine at a time, like the handle that carries it;
 // what other goroutines observe is published through the queue push, the head
 // slot, and the demand's atomics.
@@ -1260,10 +1257,7 @@ func (p *Pool) endEpisode(c *Cache) {
 // Chain discipline: a success on a CHAINED wake (weighted release / multi-permit
 // drain — capacity that may satisfy more waiters) owes the chain one fresh probe
 // (rule 2); a failed re-acquire after any wake is the chain's terminal probe — the
-// capacity is genuinely gone, so the wake simply drops (rule 3; this is the
-// pre-existing discard, now load-bearing by design). (The non-blocking Acquire stays
-// the manager's admit path, which postpones on a miss; that postpone hook lands with
-// the manager/executor split.)
+// capacity is genuinely gone, so the wake simply drops (rule 3).
 func (c *Cache) AcquireWait(ctx context.Context, d *Demand, w int) (Permit, error) {
 	p := c.pool
 	var m rdvq.Notification
@@ -1343,11 +1337,10 @@ func (p *Pool) standingEpisode(c *Cache, d *Demand) *overdraft {
 // (weighted-acquisition.md Decision 1). The hoard stays borrowable the entire time,
 // and a miss returns with it in place — anyone may take it meanwhile, and the retry
 // finds what remains at step 1; cache-don't-return is the rollback. The Resource arm
-// is all-or-nothing at the current shortfall until the TryAcquireUpTo capability
-// lands (sequencing step 3), so free capacity smaller than the shortfall stays
-// unharvested. NOTE: concurrent w ≥ 2 gatherers can contest each other's hoards
-// (freelance gathering) until head-only gathering lands with the demand-FIFO
-// barrier checkpoint; sequential correctness and conservation are complete here.
+// is all-or-nothing at the current shortfall, so free capacity smaller than the
+// shortfall stays unharvested. NOTE: concurrent w ≥ 2 gatherers can contest each
+// other's hoards (freelance gathering); sequential correctness and conservation
+// are complete here.
 func (p *Pool) acquireInto(c *Cache, w int) *Cache {
 	//nolint:gosec // G115: w >= 1, validated by Acquire (the only caller)
 	uw := uint64(w)
@@ -1489,8 +1482,8 @@ func (pm Permit) Release() {
 // weighted release, a multi-permit drain): each productive consumer then owes the
 // chain one fresh probe (ChainProbe / Notification.ProbeOrigin), so consumers admit
 // one by one until the first miss — the serialized wake chain
-// (limiter-resource-classes.md Decision 3) in place of the broadcast WakeAll this
-// package used to carry, which herded N consumers to satisfy k.
+// (limiter-resource-classes.md Decision 3); a broadcast here would herd N
+// consumers to satisfy k.
 //
 // While the barrier is armed, EVERY capacity event routes to the head's own mailbox
 // instead — the one consumer that can act (everyone else is gated), so wake-one is
@@ -1592,7 +1585,7 @@ func (c *Cache) tryPin() bool {
 }
 
 // ReleaseRef drops one reference on c, recycling it — through cachePool.Release, which runs
-// Reset (the former destroy: unlink, return held to the Resource, cascade) — when this was
+// Reset (unlink, return held to the Resource, cascade) — when this was
 // the last reference (unit exited AND all sub-waves drained). The recycle is self-contained
 // in Reset (the destruction event, at the right moment), so callers need no return: an
 // over-release panics in the counter, and a leak surfaces in the pool's/wave's invariants.

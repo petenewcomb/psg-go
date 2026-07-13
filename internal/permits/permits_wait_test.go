@@ -54,7 +54,7 @@ func TestAcquireWaitLiveness(t *testing.T) {
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 }
 
-// The weighted-release under-notify regression (found in the W2b wake dig): ONE
+// The weighted-release under-notify regression: ONE
 // release of weight w frees w permits at once, and plain wake-one would admit a
 // single waiter and strand the rest over borrowable capacity — no further wake would
 // ever come. The chained wake walks them all: each admitted waiter probes once

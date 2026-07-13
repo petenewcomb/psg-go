@@ -230,11 +230,9 @@ func (q *Queue[T]) TryPushBack(value T, bufferedFn BufferedFunc) bool {
 
 // Listeners returns the queue-level "an outbox freed" listener set. A
 // producer that could not push (TryPushBack refused) subscribes here and is
-// re-driven when a receiver drains an outbox, freeing a buffered slot. This
-// replaces the former per-outbox listeners: with destination-owned outboxes
-// there is no per-sender outbox to wait on, only the pool as a whole. (The
-// name was ListenersFor(s *Sender) when listeners were per-sender-outbox; the
-// destination-owned pool removed the parameter.)
+// re-driven when a receiver drains an outbox, freeing a buffered slot. With
+// destination-owned outboxes
+// there is no per-sender outbox to wait on, only the pool as a whole.
 func (q *Queue[T]) Listeners() *Listeners {
 	return &q.outboxFreed
 }

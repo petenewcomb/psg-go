@@ -1,11 +1,8 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-// Package permits is the isolated, model-checked sketch of the hierarchical permit
-// cache specified in docs/permit-core.md. It exists to be model-checked under
-// pgregory.net/rapid before any cutover — it is NOT yet wired into the live limiter
-// (limiter.go's eager directRequest/suspendForEpisode/reclaimRequest remain
-// load-bearing until the dispatch/execution split lands).
+// Package permits implements the hierarchical permit cache specified in
+// docs/permit-core.md, model-checked under pgregory.net/rapid.
 //
 // # The three types, and why they split
 //
@@ -26,13 +23,14 @@
 // while a Cache caches them. That genuine behavioral difference is the type
 // boundary (permit-core.md "Permits as a hierarchical cache").
 //
-// # What this models, and what it does not
+// # What the model check covers, and what it does not
 //
 // A SEQUENTIAL reference model of the permit ALGORITHM. The design's deadlock-
 // freedom is a structural property ("a parked holder's permit is idle, hence
 // borrowable") that a state machine modeling park/resume/complete as explicit
-// transitions verifies without real goroutines. The eventual concurrent impl's
-// locking is a separate, later concern; the algorithm is what is validated here.
+// transitions verifies without real goroutines. The concurrent locking is
+// exercised separately (the race-detector simulation gate); the algorithm is
+// what the model validates.
 //
 // # The held/inUse accounting (made explicit)
 //

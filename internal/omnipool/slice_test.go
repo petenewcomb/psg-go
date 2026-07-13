@@ -14,13 +14,11 @@ func TestSlicePool(t *testing.T) {
 	// the process-global pool for this element type.
 	pool := &SlicePool[[]int, int]{}
 
-	// Get a slice from empty pool (should be nil)
 	s1 := pool.Get()
 	if s1 != nil {
 		t.Errorf("Expected nil slice from empty pool, got %v", s1)
 	}
 
-	// Create a slice with capacity and put it in pool
 	original := make([]int, 2, 8)
 	original[0] = 42
 	original[1] = 24
@@ -31,11 +29,9 @@ func TestSlicePool(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Millisecond)
 	var s2 []int
 	for time.Now().Before(deadline) {
-		// Put a slice with known capacity
 		testSlice := make([]int, 0, 8)
 		pool.Put(testSlice)
 
-		// Try to get it back
 		s2 = pool.Get()
 		if s2 != nil {
 			if len(s2) != 0 {
@@ -52,13 +48,11 @@ func TestSlicePool(t *testing.T) {
 		t.Fatal("sync.Pool failed to return any pooled objects after 10ms of attempts")
 	}
 
-	// Use the slice
 	s2 = append(s2, 100, 200)
 	if len(s2) != 2 || s2[0] != 100 || s2[1] != 200 {
 		t.Errorf("Slice contents wrong: %v", s2)
 	}
 
-	// Put it back
 	pool.Put(s2)
 
 	// Get again - should be reset but preserve capacity
@@ -108,18 +102,15 @@ func TestSlicePoolPackageFunctions(t *testing.T) {
 	for GetSlice([]byte(nil)) != nil {
 	}
 
-	// Test package-level convenience functions
 	s1 := GetSlice([]byte(nil))
 	if s1 != nil {
 		t.Errorf("Expected nil slice from empty pool, got %v", s1)
 	}
 
-	// Create and put a slice
 	original := make([]byte, 1, 4)
 	original[0] = 0xFF
 	PutSlice(original)
 
-	// Get it back - try for up to 10ms
 	deadline := time.Now().Add(10 * time.Millisecond)
 	var s2 []byte
 	for time.Now().Before(deadline) {
@@ -148,7 +139,6 @@ func BenchmarkSlicePool(b *testing.B) {
 	pool := ForSlice([]int(nil))
 
 	b.Run("get_put", func(b *testing.B) {
-		// Pre-populate with some slices
 		for i := 0; i < 10; i++ {
 			s := make([]int, 0, 16)
 			pool.Put(s)

@@ -18,17 +18,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// Run executes the given Plan against the current psg API via an
-// adapter that translates the new vocabulary's static structure to
-// today's Pool/TaskPool/FunnelPool/Skimmer/Funnel shapes. Real
-// data routing uses Submit/TrySubmit; the current API's funnel-
-// output-type slot is satisfied by a singleton dummy struct{}
-// Skimmer.
-//
-// v1 supports only the linear-chain plans the minimal generator
-// produces (one Submit per body, no multi-sink, no probabilistic
-// Steps beyond the basic ReturnErrorProb support, no Subjob).
-// Enrichment lands in follow-up commits.
+// Run executes the given Plan against the psg API via an adapter that
+// translates the Plan's static structure onto Wave/Launcher/Skimmer/Funnel
+// shapes. Real data routing uses Submit/TrySubmit.
 func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
 	return run(ctx, t, plan, nil)
 }
@@ -357,12 +349,9 @@ func (c *controller) ensurePools() {
 			c.funnelLimiterTrackers[i] = &limiterTracker{}
 		}
 	})
-	// The funnel engine is now an internal per-job detail behind NewFunnel(wave);
-	// no FunnelPool to construct here anymore.
 }
 
-// executeStep dispatches a Step. Currently handles StartTask, Submit
-// (synthesized at top level — uncommon), and Subjob (deferred to v2).
+// executeStep dispatches a top-level Step.
 func (c *controller) executeStep(ctx context.Context, t assert.TestingT, step Step) {
 	chk := assert.New(t)
 	switch s := step.(type) {
@@ -387,9 +376,8 @@ func (c *controller) executeStep(ctx context.Context, t assert.TestingT, step St
 }
 
 // runSubjob executes a Subjob step by spinning up a fresh streampool.Wave and
-// recursing into Run with the nested Plan. This exercises cross-Pool
-// boundary code (a key race-coverage objective) and matches old sim
-// semantics where Subjobs ran on their own Pool.
+// recursing into Run with the nested Plan. This exercises cross-wave
+// boundary code (a key race-coverage objective).
 func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob) {
 	if s.Plan == nil {
 		return
@@ -544,8 +532,8 @@ func (c *controller) submitFresh(ctx context.Context, t assert.TestingT, s Submi
 	c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
 }
 
-// submitTo routes a value into a Plan-level sink. With Wave 3's task-
-// context-safe Submit, this is a thin wrapper around the op's Submit.
+// submitTo routes a value into a Plan-level sink — a thin wrapper around
+// the op's Submit.
 // Retry on ExpectedHandlerError covers the case where Submit yields
 // for backpressure and a previously-queued sink handler returns an
 // injected error.
@@ -588,7 +576,7 @@ func (c *controller) submitTo(
 // newSkimmerHandler builds the handler function for a Plan Skimmer —
 // walks its Handle Func, accounting invocations. Upstream errors
 // (valErr) are NOT propagated back; the streampool.Handler returns either nil or
-// its own injected ExpectedHandlerError. Matches old sim behavior:
+// its own injected ExpectedHandlerError:
 // errors flow alongside values into the handler for it to act on, but
 // the handler doesn't re-propagate them — that would short-circuit
 // the framework's drain and cause subsequent queued work to be lost.
@@ -618,7 +606,6 @@ func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) s
 // newFunnelFactory builds the funnel factory that the framework
 // invokes per-instance. Accumulate and Flush bodies are walked from
 // inside AccumulateFn/FlushFn; downstream Submits go through submitTo.
-// FlushFn returns just error after Wave 2 — no output type.
 func (c *controller) newFunnelFactory(
 	t assert.TestingT, cmb *Funnel, idx int,
 ) streampool.AccumulatorFactory[*simValue] {
@@ -697,8 +684,8 @@ func (c *controller) executeFunc(
 }
 
 // executeFuncInTask walks a Func's Steps from a task body. StartTask
-// is skipped because the current psg API forbids dispatching new work
-// from a task context (post-Wave-5 will relax this).
+// is skipped because the psg API forbids dispatching new work
+// from a task context.
 func (c *controller) executeFuncInTask(
 	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active []activeLimit,
 ) error {
@@ -743,9 +730,7 @@ func (c *controller) executeFuncBody(
 			// which the framework suspends the body's permit. Dropping
 			// before the actual suspend and restoring after the reclaim
 			// completes means both edges skew toward under-counting,
-			// keeping the `observed ≤ permits` assertion sound (and
-			// making this change safe to land before the suspend
-			// brackets do).
+			// keeping the `observed ≤ permits` assertion sound.
 			for _, a := range active {
 				a.tracker.exit(a.weight)
 			}
@@ -761,23 +746,20 @@ func (c *controller) executeFuncBody(
 }
 
 // drawDuration picks a duration from a SelfTime distribution at
-// runtime. In v1 we always use the Med value for simplicity; richer
-// per-invocation drawing lands with the probabilistic-mode work.
+// runtime; it always uses the Med value.
 func (c *controller) drawDuration(d BiasedDurationConfig) time.Duration {
 	return d.Med
 }
 
-// rollProb returns true with probability p. v1 generator only emits
-// Prob=1.0 so this short-circuits; probabilistic-mode work will
-// replace with a real RNG.
+// rollProb returns true with probability p. The generator emits only
+// Prob=1.0, so a threshold check suffices (no RNG).
 func (c *controller) rollProb(p float64) bool {
 	return p >= 1.0
 }
 
 // shouldReturnError reports whether this Func invocation should
-// surface an error. v1 generator forces ReturnErrorProb to 0 or 1
-// (Deterministic-style) so this short-circuits; probabilistic-mode
-// work will replace with a real RNG.
+// surface an error. The generator forces ReturnErrorProb to 0 or 1,
+// so a threshold check suffices (no RNG).
 func (c *controller) shouldReturnError(fn *Func) bool {
 	return fn.ReturnErrorProb >= 1.0
 }

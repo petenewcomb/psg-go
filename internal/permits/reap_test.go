@@ -11,8 +11,7 @@ import (
 
 // destroy removes a cache from its list exactly (the intrusive DLL supports interior
 // removal), so a long-lived parent that churns children does not accumulate dead
-// entries — the list returns to empty once the children are drained. (The lock-free
-// nbcq port could not remove interior nodes and needed lazy reaping; the DLL does not.)
+// entries — the list returns to empty once the children are drained.
 func TestDestroyRemovesChildExactly(t *testing.T) {
 	const iters = 1000
 	tp := newTestPool(8)

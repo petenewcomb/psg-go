@@ -163,8 +163,8 @@ type waveImpl struct {
 
 	// funnelInstances holds this wave's per-funnel accumulator-instance caches, keyed
 	// by funnel id (funnelID → *funnelInstanceQueue[T], stored as the funnelSweep
-	// interface for the heterogeneous-T sweep). It replaces the per-funnel engine:
-	// funnels are plain values, and the wave owns their live instances. The end-of-work
+	// interface for the heterogeneous-T sweep). Funnels are plain values, and the
+	// wave owns their live instances. The end-of-work
 	// sweep (sweepFunnels, wired as wavestate's onFlushing callback) ranges this map.
 	// Body contexts are not per-wave: task/funnel bodies borrow them from ctxpool keyed
 	// on the submit ctx (see bodyctx.go), so the wave owns no context — cancellation
@@ -341,8 +341,7 @@ func (wv *waveImpl) Reset() {
 // The reference bracket holds the wave open across the ranging: a deadline-driven
 // Execute that drained before this sweep (and which the per-instance sweep skips via
 // ClaimForFlush==false) could otherwise drop the last barrier mid-sweep, drive the wave
-// to Done, and let a concurrent re-arm clear the map under us. This is the analogue of
-// the old joinFlusher-before-rearm barrier. The pin is the conditional
+// to Done, and let a concurrent re-arm clear the map under us. The pin is the conditional
 // TryIncrementReference for the same reason as suspendHeldPermit's: an increment
 // resurrecting the count from zero cannot stop a Flushing→Done transition already in
 // flight, so a failed pin means the wave's Done is reached or committed — every

@@ -847,11 +847,9 @@ func TestFlowAllocFloors(t *testing.T) {
 	scope := allocsPerOp(t, 100, 1000, func() {
 		_ = streampool.WithFlow(ctx, body, opt)
 	})
-	// Chain representation with CP-R2 pooling (docs/decisions/flow-rider-chain.md):
-	// the scope meta, its ctxpool child, and the refcounted rider node are all
-	// pooled, so a value-registering scope allocates nothing warm. Lowered 6 → 4
-	// (chain removed the flat snapshot/slice pair) → 1 (R2a pooled meta + ctxpool)
-	// → 0 (R2b pooled the node). A hard floor now, like the degenerate case.
+	// The scope meta, its ctxpool child, and the refcounted rider node are all
+	// pooled (docs/decisions/flow-rider-chain.md), so a value-registering scope
+	// allocates nothing warm. A hard floor, like the degenerate case.
 	const scopeCeiling = 0
 	if scope > scopeCeiling {
 		t.Errorf("value-registering WithFlow allocates %v/op; ceiling %d", scope, scopeCeiling)
@@ -875,7 +873,7 @@ func TestFlowAllocFloors(t *testing.T) {
 // TestFlowScopeWithLimiter: a limiter-bound dispatch from inside a top-level
 // WithFlow scope — the wave-less scope meta must be transparent to the permit
 // cache-ancestry walk (regression: ensureCache/ensureCacheChain panicked on a
-// nil wave; found by the sim's flow oracle on its first run).
+// nil wave).
 func TestFlowScopeWithLimiter(t *testing.T) {
 	chk := require.New(t)
 	key := streampool.NewFlowKey[int]()
@@ -1059,11 +1057,8 @@ func TestFlowSkimContinuation(t *testing.T) {
 // TestFlowSkimRiderFreeItemIsolation: within one skim drive, a RIDER-FREE item
 // processed after a rider-carrying one must not see the previous item's flow
 // values — it runs under the drive's own riders (docs/decisions/
-// driver-contexts.md, "Skim handlers get a per-item child context"). Pins the
-// misdelivery in the pre-child-meta in-place rider override, which fired only
-// for rider-carrying items and was never restored: the rider-free item then
-// read the previous item's (by that point recycled) chain instead of the
-// drive's. The rider-carrying→rider-free order is structural here: the
+// driver-contexts.md, "Skim handlers get a per-item child context"). The
+// rider-carrying→rider-free order is structural here: the
 // rider-carrying item's own handler submits the rider-free item, so it is
 // necessarily handled later in the same drive.
 func TestFlowSkimRiderFreeItemIsolation(t *testing.T) {

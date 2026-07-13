@@ -30,8 +30,7 @@ type Func struct {
 }
 
 // ReturnsError reports whether this body is configured to ever return
-// an error. Used by assertion-bound calculations and for routing in
-// Deterministic mode.
+// an error.
 func (f *Func) ReturnsError() bool {
 	return f.ReturnErrorProb > 0
 }

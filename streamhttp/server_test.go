@@ -30,7 +30,7 @@ import (
 )
 
 // TestUnifiedFrontEnd proves one net/http server serves HTTP/1.1, HTTP/2,
-// WebSocket, and gRPC on a single TLS listener — the fasthttp-free edge — with
+// WebSocket, and gRPC on a single TLS listener, with
 // streampool fan-out in the WS and gRPC paths.
 func TestUnifiedFrontEnd(t *testing.T) {
 	// gRPC service that fans out via streampool under a shared limiter.
@@ -74,8 +74,8 @@ func TestUnifiedFrontEnd(t *testing.T) {
 	checkGRPC(t, addr)
 }
 
-// TestWSOrderedSubset is the Resequencer's edge showcase (replacing the retired
-// HTTP/1.1 pipelining example) and shows ordering applies to only a SUBSET of a
+// TestWSOrderedSubset is the Resequencer's edge showcase
+// and shows ordering applies to only a SUBSET of a
 // connection's messages. Messages prefixed "o" are ordered; "u" are not. "o0" is
 // the slowest, so without resequencing its reply would arrive last — yet the "o"
 // replies come back in order, while the fast "u" replies are NOT blocked behind

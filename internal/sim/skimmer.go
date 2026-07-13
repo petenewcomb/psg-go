@@ -36,9 +36,8 @@ type SkimmerConfig struct {
 }
 
 // Skimmer represents a simulated terminal-sink op. The Handle body is
-// invoked when the Pool's drain pulls a value from this Skimmer's
-// queue. v1 does not bind Skimmers to Limiters (the post-Wave-4 API
-// will support it).
+// invoked when the wave's drain pulls a value from this Skimmer's
+// queue. Skimmers do not bind to Limiters.
 type Skimmer struct {
 	ID           int
 	Depth        int

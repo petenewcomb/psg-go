@@ -19,8 +19,7 @@ func (d *Demand) queued() bool { return d.pool.Load() != nil }
 
 // Sticky head + strict arrival order: capacity freed while a head stands goes to
 // the HEAD, not to whichever queued demand retries first — and weight-1 traffic
-// joins the same queue in arrival order (Queue unification: every weight queues;
-// weight-1's old exclusion is gone).
+// joins the same queue in arrival order (Queue unification: every weight queues).
 func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	tp := newTestPool(2)
 	hog := tp.NewCache()
@@ -159,7 +158,7 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 
 // Over-subscribed weighted contention under -race: mixed weights far beyond
 // capacity churn enqueueing, promotion scans, sticky-head gathering, and the
-// mailbox wake path — with weight-1 demands now queueing alongside the weighted
+// mailbox wake path — with weight-1 demands queueing alongside the weighted
 // ones (Queue unification). A conservation hole surfaces as a ctx-deadline error
 // (or a hang under the harness timeout), not silent unfairness.
 func TestConcurrentWeightedOverSubscribed(t *testing.T) {

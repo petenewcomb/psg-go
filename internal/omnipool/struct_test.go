@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Test types
 type simpleStruct struct {
 	A int
 	B string
@@ -18,7 +17,7 @@ type simpleStruct struct {
 type resetterStruct struct {
 	A          int
 	B          string
-	resetCount int // tracks how many times this object has been reset
+	resetCount int
 }
 
 func (r *resetterStruct) Reset() {
@@ -28,17 +27,14 @@ func (r *resetterStruct) Reset() {
 }
 
 func TestBasicPooling(t *testing.T) {
-	// Get an object
 	obj1 := Get[simpleStruct]()
 	if obj1 == nil {
 		t.Fatal("Get() returned nil")
 	}
 
-	// Modify it
 	obj1.A = 42
 	obj1.B = "basic test"
 
-	// Put it back
 	Release(obj1)
 
 	// Try to verify pooling by attempting to get the same pointer back
@@ -59,7 +55,6 @@ func TestBasicPooling(t *testing.T) {
 			Release(obj2) // Put it back for cleanup
 			break
 		} else {
-			// Different object, put it back
 			Release(obj2)
 		}
 	}
@@ -70,7 +65,6 @@ func TestBasicPooling(t *testing.T) {
 }
 
 func TestResetterInterface(t *testing.T) {
-	// Put some objects in the pool
 	for i := 0; i < 10; i++ {
 		obj := Get[resetterStruct]()
 		obj.A = i
@@ -88,7 +82,6 @@ func TestResetterInterface(t *testing.T) {
 		// If resetCount > 0, this object was pooled and reset at least once
 		if obj.resetCount > 0 {
 			foundPooled = true
-			// Verify fields were reset
 			if obj.A != 0 || obj.B != "" {
 				t.Errorf("Pooled object not properly reset: A=%d, B=%q", obj.A, obj.B)
 			}
@@ -96,7 +89,6 @@ func TestResetterInterface(t *testing.T) {
 			break
 		}
 
-		// Put it back to try again
 		Release(obj)
 	}
 
@@ -142,7 +134,6 @@ func TestMultipleTypes(t *testing.T) {
 	positiveCounter.Store(0)
 	negativeCounter.Store(0)
 
-	// Create and put back some objects to populate pools
 	for i := 0; i < 10; i++ {
 		p := Get[PositiveID]()
 		p.Data = "test" //nolint:goconst // test string
@@ -158,10 +149,8 @@ func TestMultipleTypes(t *testing.T) {
 	var foundPositivePooled, foundNegativePooled bool
 
 	for time.Now().Before(deadline) {
-		// Get from PositiveID pool
 		p := Get[PositiveID]()
 		if p.ID > 0 {
-			// Correct - positive ID from positive pool
 			if p.ID <= 10 {
 				foundPositivePooled = true // This is a reused object
 			}
@@ -170,10 +159,8 @@ func TestMultipleTypes(t *testing.T) {
 		}
 		Release(p)
 
-		// Get from NegativeID pool
 		n := Get[NegativeID]()
 		if n.ID < 0 {
-			// Correct - negative ID from negative pool
 			if n.ID >= -10 {
 				foundNegativePooled = true // This is a reused object
 			}

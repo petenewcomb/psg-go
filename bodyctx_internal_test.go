@@ -47,7 +47,7 @@ func TestBorrowBodyContext_StampsMeta(t *testing.T) {
 
 // The parent link is refcounted: a borrowed body pins its source meta (and so the
 // source's ctxpool child) until the body's release, even after the source's own
-// owner released it — the borrowSrcCtx use-after-free fix.
+// owner released it.
 func TestBorrowBodyContext_ParentPinnedAcrossSourceRelease(t *testing.T) {
 	srcCtx, srcMeta := borrowBodyContext(context.Background(), nil, newTestWaveImpl(), taskContext, nil, &topLevelExEnv{})
 	bodyCtx, m := borrowBodyContext(srcCtx, srcMeta, newTestWaveImpl(), funnelContext, nil, &topLevelExEnv{})

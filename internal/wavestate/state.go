@@ -37,7 +37,7 @@ type WaveState struct {
 
 	// onFlushing, if non-nil, is invoked synchronously each time the wave enters (or
 	// re-enters) the Flushing stage with references still outstanding — the signal to
-	// force pending funnel flushes. It replaces the former rotated flush channel: the
+	// force pending funnel flushes. The
 	// wave wires it to an enqueue-only sweep that pushes flush work to the global pool.
 	// It must not block or run user code (it runs inside the work-completion path).
 	onFlushing func()
@@ -241,7 +241,7 @@ func (ws *WaveState) noMoreWork() {
 
 	// Signal the flush sweep for the flushing state. The wave's callback is an
 	// enqueue-only sweep (push pending funnel flushes to the global pool); it fires on
-	// each Flushing entry/re-entry, mirroring the former flush-channel rotation.
+	// each Flushing entry/re-entry.
 	if currentStage == stageFlushing && ws.onFlushing != nil {
 		ws.onFlushing()
 	}

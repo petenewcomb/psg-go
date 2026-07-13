@@ -50,7 +50,7 @@ func TestParkedParentLendsToSubwave(t *testing.T) {
 	pp.Release() // parent parks to drive a sub-wave: inUse=0, borrowable=1
 	sub := tp.newChild(parent)
 
-	cp, err := sub.Acquire(dc, 1) // the old livelock — now a step-2 ancestor inherit
+	cp, err := sub.Acquire(dc, 1) // step-2 ancestor inherit
 	require.NoError(t, err)
 	require.True(t, cp.Held(), "child must inherit the parked parent's idle permit, not deadlock")
 	require.Same(t, parent, cp.backing, "the child is backed by the parent's permit, unmoved")

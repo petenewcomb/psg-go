@@ -155,7 +155,7 @@ func TestQueue_AbandonedReceivers(t *testing.T) {
 	// Give time for all receivers to register and abandon
 	time.Sleep(50 * time.Millisecond)
 
-	// Send a value - it should go to sharedChan since all receivers are abandoned
+	// Send a value — all receivers are abandoned, so no direct rendezvous is possible
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -573,11 +573,11 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	err = q.PushBack(ctx, 200, nil)
 	assert.NoError(t, err)
 
-	// Test Tier 3: Shared channel when outbox is full
+	// Test Tier 3: Blocking send when the outbox is full
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// This should block on shared channel since outbox is full
+		// This should block until a receiver drains, since the outbox is full
 		err := q.PushBack(ctx, 300, nil)
 		assert.NoError(t, err)
 	}()
@@ -586,7 +586,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Start receiver to unblock the sender - need two PopFront calls:
-	// one for the outboxed item (200) and one for the shared channel item (300)
+	// one for the outboxed item (200) and one for the blocked send (300)
 	go func() {
 
 		// First PopFront should get the outboxed item
@@ -594,7 +594,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 		assert.NoError(t, err)
 		received <- val
 
-		// Second PopFront should get the shared channel item
+		// Second PopFront should get the blocked sender's item
 		val, err = q.PopFront(ctx)
 		assert.NoError(t, err)
 		received <- val
@@ -608,7 +608,7 @@ func TestQueue_ThreeTierDelivery(t *testing.T) {
 		t.Fatal("Outbox delivery failed")
 	}
 
-	// Should receive the shared channel item second
+	// Should receive the blocked sender's item second
 	select {
 	case val := <-received:
 		assert.Equal(t, 300, val)

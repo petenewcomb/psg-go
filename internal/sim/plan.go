@@ -11,10 +11,9 @@ import (
 	"pgregory.net/rapid"
 )
 
-// Plan is the static description of one Wave-equivalent unit of work
-// in the destination streampool API. The runtime adapter executes a
-// Plan against the current psg API; as reshape waves land, only the
-// adapter changes.
+// Plan is the static description of one Wave-equivalent unit of work.
+// The runtime adapter executes a Plan against the psg API; only the
+// adapter touches that API.
 //
 // The generator produces a layered DAG:
 //
@@ -46,11 +45,10 @@ type Plan struct {
 	Skimmers        []*Skimmer
 	SubjobCount     int
 	SubjobTaskCount int
-	// Sink-invocation bounds computed at plan time. In Deterministic
-	// mode and the current v1 generator (all Probs = 1.0),
-	// MinSkimmerInvocations[i] == MaxSkimmerInvocations[i]. When
-	// probabilistic-mode generation lands, Min may drop to 0 for
-	// non-unit probabilities.
+	// Sink-invocation bounds computed at plan time. With all Probs = 1.0
+	// (Deterministic mode, and what the generator emits),
+	// MinSkimmerInvocations[i] == MaxSkimmerInvocations[i]; a non-unit
+	// probability may drop Min to 0.
 	MinSkimmerInvocations []int
 	MaxSkimmerInvocations []int
 	// Flow marks a plan wrapped in a streampool.WithFlow scope with a value key
@@ -506,8 +504,6 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 }
 
 // probValue returns 1.0 in Deterministic mode, else the given prob.
-// v1 generator emits only Prob=1.0; this hook is here so a future
-// probabilistic generator can flow Prob values through here.
 func probValue(config *Config, p float64) float64 {
 	if config.Deterministic {
 		return 1.0
@@ -518,8 +514,7 @@ func probValue(config *Config, p float64) float64 {
 // newFunc constructs a Func with a SelfTime step (always present) and
 // optional Subjob step (probabilistically). ReturnErrorProb is resolved
 // to a deterministic 0 or 1 at plan-construction time via a Bernoulli
-// draw against funcConfig.ReturnErrorProb — matches the old sim's
-// ReturnError bool semantics. Submits and StartTasks are appended by
+// draw against funcConfig.ReturnErrorProb. Submits and StartTasks are appended by
 // the caller based on path-construction context.
 // allowSubjob is false for skimmer Handle bodies: a skim handler cannot
 // drive a subwave (it would monopolize the sole serial skim driver and

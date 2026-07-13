@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSuspendDuringSubwaveAllowsSibling pins the limiter suspend/resume
-// fix end to end (docs/limiter-suspend-resume.md): a permit gates active
-// computation, not blocked-waiting, so a body parked driving a subwave
+// TestSuspendDuringSubwaveAllowsSibling verifies end to end that a permit
+// gates active computation, not blocked-waiting
+// (docs/limiter-suspend-resume.md): a body parked driving a subwave
 // relinquishes its slot and a sibling unit of the same op can run.
 //
-// The construction makes the old livelock deterministic: unit 1 holds the
+// The construction makes the failure mode deterministic: unit 1 holds the
 // only permit and drives a subwave whose task blocks until unit 2 — which
 // needs that same permit — closes a channel. Without suspension this
 // deadlocks (unit 1 holds the slot forever, unit 2 never runs); with the

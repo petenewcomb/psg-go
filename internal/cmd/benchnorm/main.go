@@ -115,7 +115,6 @@ func normalizeResult(r *benchfmt.Result) (*benchfmt.Result, error) {
 		return r, nil
 	}
 
-	// Create a new result with normalized values
 	normalized := &benchfmt.Result{
 		Config: r.Config,
 		Name:   r.Name,
@@ -123,7 +122,6 @@ func normalizeResult(r *benchfmt.Result) (*benchfmt.Result, error) {
 		Values: make([]benchfmt.Value, 0, len(r.Values)),
 	}
 
-	// Normalize all metrics
 	for _, v := range r.Values {
 		newValue := v
 

@@ -100,9 +100,8 @@ func (c *counts) deposit(w uint64) {
 // reporting whether it occupied. The single CAS is load-bearing for liveness, not
 // just economy: a take that completes the weight must never sit borrowable in a
 // window between deposit and occupy, or a racing acquirer can lift it and two
-// weight-1 acquirers can bounce one permit between their caches forever (the old
-// stealOut→checkout pair kept the permit hidden mid-transfer; this preserves that
-// no-exposure property exactly when the gather is completing). A take that does NOT
+// weight-1 acquirers can bounce one permit between their caches forever (the
+// completing permit stays hidden mid-transfer). A take that does NOT
 // complete the weight deposits borrowable-only — the partial hoard's contestability
 // is Decision 1's design, not a window.
 func (c *counts) depositOccupy(n, w uint64) bool {

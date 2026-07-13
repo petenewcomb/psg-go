@@ -37,21 +37,3 @@ func addToDigest(dst **tdigest.TDigest, x, w float64) {
 	}
 	t.Add(x, w)
 }
-
-/*
-var centroidListPool = omnipool.ForSlice(tdigest.CentroidList(nil))
-
-func newCentroidList(c ...tdigest.Centroid) tdigest.CentroidList {
-	cl := centroidListPool.Get()
-	cl = append(cl, c...)
-	return cl
-}
-func copyCentroidList(t *tdigest.TDigest) tdigest.CentroidList {
-	cl := centroidListPool.Get()
-	cl = t.Centroids(cl)
-	return cl
-}
-func poolCentroidList(cl tdigest.CentroidList) {
-	centroidListPool.Put(cl)
-}
-*/

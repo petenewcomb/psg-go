@@ -88,8 +88,8 @@ func TestAllocsLauncherSkimSteady(t *testing.T) {
 	}
 	a := allocsPerOp(t, 500, 1000, op)
 	t.Logf("launcher submit+skim: %.2f allocs/op", a)
-	// floor 0 post wave-refcount (pooled waveImpl + warm ctx/exEnv make the steady dispatch
-	// allocation-free); margin left for occasional worker-spawn spikes on loaded machines.
+	// floor 0: pooled waveImpl + warm ctx/exEnv make the steady dispatch allocation-free;
+	// margin left for occasional worker-spawn spikes on loaded machines.
 	const ceiling = 20
 	if a > ceiling {
 		t.Errorf("launcher submit+skim allocs/op = %.2f, want <= %d", a, ceiling)
@@ -123,7 +123,7 @@ func TestAllocsFunnelSubmitSteady(t *testing.T) {
 	}
 	a := allocsPerOp(t, 500, 1000, op)
 	t.Logf("funnel submit (accumulate): %.2f allocs/op", a)
-	// floor 0 post wave-refcount (pooled instance/work + warm ctx); margin for async spikes.
+	// floor 0 (pooled instance/work + warm ctx); margin for async spikes.
 	const ceiling = 25
 	if a > ceiling {
 		t.Errorf("funnel submit allocs/op = %.2f, want <= %d", a, ceiling)
@@ -161,8 +161,8 @@ func TestAllocsWavePerCycle(t *testing.T) {
 	}
 	a := allocsPerOp(t, 200, 500, cycle)
 	t.Logf("wave per cycle (funnel, 4 inputs): %.2f allocs/cycle", a)
-	// floor ~25-26 post wave-refcount: NewWave draws a warm pooled waveImpl each cycle, so a
-	// full construct+funnel+4-submit+drain cycle is ~26 allocs (was ~261-450 un-pooled).
+	// floor ~25-26: NewWave draws a warm pooled waveImpl each cycle, so a full
+	// construct+funnel+4-submit+drain cycle is ~26 allocs.
 	const ceiling = 60
 	if a > ceiling {
 		t.Errorf("wave per cycle allocs = %.2f, want <= %d", a, ceiling)

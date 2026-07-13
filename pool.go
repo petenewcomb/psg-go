@@ -19,7 +19,7 @@ import (
 //     fresh/postponed priority engine plus scheduled flushes; NESTED admission is dropped to
 //     its intake Handoff (see [workerExEnv.ExecuteNowOrQueue]) whose block-as-demand spawns
 //     workers by COUNTER (bounded, not per-call), while top-level admission runs inline on
-//     the per-wave workQueue. (On execpool — "worker.Pool is obsolete", now retired here.)
+//     the per-wave workQueue.
 //   - bodyExecutor — the EXECUTOR: a demand-spawned pool of workers that run the blocking
 //     user bodies (task, funnel-accumulate, funnel-flush) handed to them over an unbuffered
 //     rendezvous. It MAY block — that is its job — so a blocking body never pins a scheduler.
@@ -45,8 +45,6 @@ var bodyExecutor = execpool.NewExecutor(func() *workerExEnv { return &workerExEn
 // their values) until each parent ctx is GC'd via AfterFunc. Clearing reclaims
 // them eagerly. ctxpool.Clear swaps in a fresh map, so a Wave dispatched after
 // Wait returns (the pool is reusable) simply repopulates clean.
-//
-// (Under the planned package rename this becomes streampool.Wait.)
 func Wait() {
 	// Reap the executor first (it runs bodies, which the scheduler feeds), then the
 	// scheduler. Both join only their idle workers — neither cancels in-flight work — so
@@ -61,8 +59,7 @@ func Wait() {
 // queue stacks) that task and funnel bodies run against. It is deliberately
 // wave-agnostic — per-execution context (wave, cancellation) rides the
 // work item, which the worker runs under its borrowed body context,
-// stamping this exEnv in. taskExEnv + cpWorker collapse into this as the task and
-// funnel engines are cut over onto the shared pool. Lock/Unlock are no-ops: the
+// stamping this exEnv in. Lock/Unlock are no-ops: the
 // exEnv is per-goroutine and runs one body at a time.
 type workerExEnv struct {
 	integrationExEnv

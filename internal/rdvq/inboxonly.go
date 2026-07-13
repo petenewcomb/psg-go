@@ -185,8 +185,8 @@ func basicInboxOnlyPopSelect[T any](ctx context.Context, ib *inbox[T], processFn
 // received a value on ib.channel(); processOrphanFn receives a value a sender
 // delivered just as the receiver gave up (the abandon-loses-to-a-claim race).
 //
-// The generation-stamped state machine (see inbox.go / docs/rdvq-inbox-reclamation.md)
-// replaces the old zero-value channel marker: register publishes a hint
+// Under the generation-stamped state machine (see inbox.go /
+// docs/rdvq-inbox-reclamation.md), register publishes a hint
 // unconditionally (duplicate/stale hints are inert by state/generation), a sender
 // delivers only by winning claimDeliver, and abandon bumps the generation so a sender
 // that observed the now-disowned registration can never deliver into it.

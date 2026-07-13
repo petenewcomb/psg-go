@@ -18,7 +18,7 @@ import (
 // goroutines hammer balanced acquire/release on their own caches. Every acquire
 // contends for the same scarce capacity through three concurrent paths at once —
 // inheritance (the shared root's idle base, a lock-free up-walk), a fresh delta (the
-// Resource's atomic counter), and a cross-child steal (the lock-free nbcq walk vs
+// Resource's atomic counter), and a cross-child steal (the steal walk vs
 // other children's releases). Run under -race; balance means inUse returns to zero,
 // and the drain must leak nothing.
 func TestConcurrentInheritDeltaSteal(t *testing.T) {
@@ -136,10 +136,8 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 // every demand is always satisfiable (Σ peak concurrent weight ≤ capacity), so the
 // pre-barrier fairness gaps cannot starve anyone: this exercises the gather's
 // deposit / stealOutUpTo / occupy CAS interleavings under -race without asserting a
-// fairness the design doesn't have yet. Over-subscribed weighted contention — where
-// freelance gatherers can legitimately starve or contest each other's hoards — gets
-// its liveness stress only once head-only gathering lands with the demand-FIFO
-// barrier (weighted-acquisition.md, step-2 barrier checkpoint).
+// fairness the gather does not provide (freelance gatherers may contest each
+// other's hoards).
 func TestConcurrentWeightedGatherSatisfiable(t *testing.T) {
 	const capacity, workers, iters = 8, 4, 3000
 	tp := newTestPool(capacity) // weights 1,2,1,2 → peak demand 6 ≤ 8

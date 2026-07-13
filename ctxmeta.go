@@ -42,16 +42,15 @@ type ctxMeta struct {
 	wave *waveImpl
 	// parent links to the ctxMeta this one was derived or borrowed from — the
 	// context it descends from along the value chain, for sync derivations
-	// (top-level→skim, body→subwave) AND async borrows (borrowBodyContext,
-	// which used to sever the link). The link is refcounted (refs): a child
-	// holds its parent alive until the child itself releases, so a
-	// borrowed-from context outlives every body borrowed from it even when the
-	// borrower runs async — the borrowSrcCtx use-after-free fix
+	// (top-level→skim, body→subwave) AND async borrows (borrowBodyContext).
+	// The link is refcounted (refs): a child holds its parent alive until the
+	// child itself releases, so a borrowed-from context outlives every body
+	// borrowed from it even when the borrower runs async
 	// (docs/decisions/ctxmeta-parent-refcount.md). The chain is therefore
 	// walkable across async boundaries; walks that must stay within one
 	// synchronous extent (permit inheritance, the skim-nesting vet, the flow
 	// fan-in boundary, permit-forest construction) step via syncParent, which
-	// stops at a permitRoot — the isolation the old severing provided: the
+	// stops at a permitRoot: the
 	// pool's base ctx may carry a foreign wave's meta, and inheriting e.g. a
 	// permit link there would let a worker find its dispatcher's permit across
 	// the goroutine boundary. See docs/limiter-suspend-resume.md,
@@ -68,13 +67,11 @@ type ctxMeta struct {
 	omnipool.RefCounter
 	// permitRoot marks a meta whose body runs on a fungible worker goroutine
 	// (a borrowBodyContext borrow or a follow-up fire): syncParent — and so
-	// every synchronous-extent walk — stops here. This is the isolation role
-	// the nil-parent-at-borrow severing used to play, split out now that
-	// parent stays linked for lifetime (and, later, driver-link tracing).
+	// every synchronous-extent walk — stops here.
 	permitRoot bool
-	// held is the native limiter handle (heldPermit) stamped at body entry and found
-	// via currentHeldPermit at framework parking points — the permit-core replacement
-	// for the eager heldRequest. A stamped handle holds a permit while the body runs
+	// held is the native limiter handle (heldPermit) stamped at body entry and
+	// found via currentHeldPermit at framework parking points. A stamped handle
+	// holds a permit while the body runs
 	// its own code and is suspended (permit lent) across drive episodes. nil for an
 	// unlimited op.
 	held *heldPermit
@@ -203,9 +200,6 @@ func unrefMeta(m *ctxMeta) {
 // syncParent returns parent when it belongs to the same synchronous extent,
 // and nil at an async boundary (a permitRoot meta runs on a fungible worker
 // goroutine; what lies above it is its dispatcher's stack, not this one's).
-// Reproduces the reach of the old severed-parent chain for the walks that must
-// not cross goroutines; the full refcounted parent link remains for lifetime
-// (and future driver-link tracing).
 func (cm *ctxMeta) syncParent() *ctxMeta {
 	if cm.permitRoot {
 		return nil
@@ -477,11 +471,9 @@ type topLevelExEnv struct {
 	workQueue *workq.Accepted
 }
 
-// topLevelExEnvPool recycles the per-top-level-dispatch execution environments. A
-// fresh one was allocated on every top-level Submit (and never reused); pooling it —
-// together with the meta and ctxpool child freed in [releaseTopLevelContext] —
-// removes that per-dispatch allocation. Get/Put are paired by topLevelCtxMeta
-// (owned) and releaseTopLevelContext.
+// topLevelExEnvPool recycles the per-top-level-dispatch execution environments,
+// keeping the steady top-level Submit path allocation-free. Get/Put are paired
+// by topLevelCtxMeta (owned) and releaseTopLevelContext.
 var topLevelExEnvPool = omnipool.For[topLevelExEnv]()
 
 // Reset implements omnipool.Resetter. It clears the reusable fields but deliberately
@@ -518,7 +510,7 @@ func metaFromContext(ctx context.Context) (*ctxMeta, bool) {
 // ownership. It never creates a meta — callers use it where one must already be
 // present (a body or driver ctx). The lookup is the unified read seam
 // (metaFromContext, ctxpool-aware); no ctxMetaMap caching, which would alias a reused
-// ctxpool body ctx. (Step toward retiring ctxMetaMap; see meta-context-migration.md.)
+// ctxpool body ctx.
 func (wv *waveImpl) ctxMeta(ctx context.Context) (context.Context, *ctxMeta) {
 	traceRegion := "Wave.ctxMeta"
 
@@ -594,7 +586,7 @@ func (wv *waveImpl) ensureCtxMeta(
 
 	// Stamp the derived meta onto a ctxpool child of ctx. The child descends from
 	// the submit/drive ctx, so cancellation rides that ancestry — the Wave owns no
-	// ctx (no AfterFunc(j.ctx) linkage; that was the wave-owned-ctx model we drop).
+	// ctx.
 	ctx = ctxpool.WithValue(ctx, meta)
 	// Record the child so unrefMeta can free it at refs==0. ownsExEnv defaults
 	// false here and is set by the caller that knows the derivation shape
@@ -686,8 +678,7 @@ func (wv *waveImpl) skimCtxMeta(ctx context.Context) (context.Context, *ctxMeta,
 	}
 
 	// ensureCtxMeta mints a fresh ctxpool child for the skim meta, so it has a
-	// distinct identity from the top-level meta automatically — the old
-	// skimCtxMetaMap identity-fork is no longer needed. The skim meta reuses the
+	// distinct identity from the top-level meta. The skim meta reuses the
 	// top-level meta's exEnv (ownsExEnv stays false).
 	ctx, skimMeta := wv.ensureCtxMeta(ctx,
 		func(ctx context.Context, meta *ctxMeta) context.Context {

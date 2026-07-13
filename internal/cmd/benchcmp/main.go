@@ -182,14 +182,12 @@ func parseConfig(workload, duration, flushPeriod string) (Config, error) {
 
 	config.Workload = workload
 
-	// Parse duration
 	dur, err := time.ParseDuration(duration)
 	if err != nil {
 		return config, fmt.Errorf("invalid duration: %s", duration)
 	}
 	config.Duration = dur
 
-	// Parse flush period
 	flush, err := time.ParseDuration(flushPeriod)
 	if err != nil {
 		return config, fmt.Errorf("invalid flushPeriod: %s", flushPeriod)
@@ -392,7 +390,6 @@ func printBestLimitedFunnelConcurrencyComparison(baseline, current map[Config]ma
 		pair := pairs[config]
 		baseline, current := pair[0], pair[1]
 
-		// Build row
 		row := table.Row{
 			config,
 			fmt.Sprintf("%5d", baseline.FunnelLimit),
@@ -434,7 +431,6 @@ func printUnlimitedFunnelConcurrencyComparison(baseline, current map[Config]map[
 		pair := pairs[config]
 		baseline, current := pair[0], pair[1]
 
-		// Build row
 		row := table.Row{config}
 		row = appendPerformanceChanges(row, config, baseline, current, current)
 		t.AppendRow(row)
@@ -469,7 +465,6 @@ func printBestLimitedVsUnlimitedFunnelConcurrencyComparison(current map[Config]m
 		bestLimited := pairs[config][0]
 		unlimited := current[config][-1]
 
-		// Build row
 		row := table.Row{config}
 		row = appendPerformanceChanges(row, config, bestLimited, unlimited, nil)
 		t.AppendRow(row)

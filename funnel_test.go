@@ -43,14 +43,8 @@ func newPassthroughTestFunnelFactory[T any](
 	}
 }
 
-// Verifies that AccumulatorFactory.Close fires when the bound
-// Funnel's refcount hits zero (Funnel.Close on the last reference).
-// Note: this test exercises the unused-factory case (no Submits).
-// When Submits create funnelInstances, the factory remains
-// referenced until those instances are fully flushed and freed —
-// see funnelOp.unref() for the refcount details.
-// NewErrFunnel convenience constructor — exercises the
-// err-aggregating funnel shape end-to-end.
+// Exercises the NewErrFunnel convenience constructor — the err-aggregating
+// funnel shape — end-to-end.
 func TestNewErrFunnel(t *testing.T) {
 	chk := assert.New(t)
 	ctx := context.Background()

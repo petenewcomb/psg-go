@@ -11,9 +11,8 @@ import (
 	"github.com/petenewcomb/streampool/internal/nbcq"
 )
 
-// noop is the default fallback for a Notification with no explicit conservation action.
-// It preserves the old NoopRenotify's role: a never-nil terminal so Forward/Empty need
-// no nil check on the fallback.
+// noop is the default fallback for a Notification with no explicit conservation
+// action: a never-nil terminal so Forward/Empty need no nil check on the fallback.
 func noop() {}
 
 // Listeners manages a queue of notification functions waiting to be signaled.
@@ -47,8 +46,8 @@ func (c *Listeners) add(notifyFn NotifyFunc) {
 // Notify delivers a wake to one waiting listener, running fallback if no listener takes
 // it (total conservation). A nil fallback defaults to noop. The listener receives a
 // waiter-style (terminal) Notification: a standalone Listeners has no enclosing Notifier
-// to re-circulate through, matching the old bare Listeners.Notify that passed the raw
-// renotify. See [Notifier.Notify] for the re-circulating listener-style delivery.
+// to re-circulate through. See [Notifier.Notify] for the re-circulating listener-style
+// delivery.
 func (c *Listeners) Notify(fallback func()) {
 	if fallback == nil {
 		fallback = noop

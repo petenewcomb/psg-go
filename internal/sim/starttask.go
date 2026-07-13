@@ -13,8 +13,7 @@ import (
 // RunnerIndex into Plan.Launchers. Prob is the probability of firing
 // per body invocation; in Deterministic mode it is 1.0.
 //
-// StartTask is the new vocabulary's replacement for the old Scatter
-// step. It also corresponds to the new-API Launcher.Start(ctx, arg)
+// StartTask corresponds to the Launcher.Start(ctx, arg)
 // call. To prevent cycles, the generator only emits StartTask steps
 // pointing to Launchers whose Depth is strictly greater than the
 // containing body's owning op's Depth.

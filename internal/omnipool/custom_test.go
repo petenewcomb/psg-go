@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// Test struct pooling with custom pool
 type customStruct struct {
 	Value int
 	Slice []string
@@ -18,19 +17,18 @@ type customStructTrait struct{}
 
 func (customStructTrait) Make() *customStruct {
 	return &customStruct{
-		Slice: make([]string, 0, 8), // Pre-allocate capacity
+		Slice: make([]string, 0, 8),
 	}
 }
 
 func (customStructTrait) Reset(cs *customStruct) {
 	cs.Value = 0
-	cs.Slice = cs.Slice[:0] // Keep capacity
+	cs.Slice = cs.Slice[:0]
 }
 
 func TestCustomPoolStruct(t *testing.T) {
 	pool := ForCustom(customStructTrait{})
 
-	// Get a struct
 	s1 := pool.Get()
 	if s1 == nil {
 		t.Fatal("Expected non-nil struct")
@@ -39,11 +37,9 @@ func TestCustomPoolStruct(t *testing.T) {
 		t.Errorf("Expected slice capacity 8, got %d", cap(s1.Slice))
 	}
 
-	// Modify it
 	s1.Value = 42
 	s1.Slice = append(s1.Slice, "test1", "test2")
 
-	// Put it back
 	pool.Release(s1)
 
 	// Get another - try for up to 10ms to get a pooled object
@@ -74,7 +70,6 @@ func TestCustomPoolStruct(t *testing.T) {
 	}
 }
 
-// Test channel pooling with custom pool
 type customChanTrait struct{}
 
 func (customChanTrait) Make() chan int {
@@ -82,7 +77,6 @@ func (customChanTrait) Make() chan int {
 }
 
 func (customChanTrait) Reset(ch chan int) {
-	// Drain the channel
 	for len(ch) > 0 {
 		<-ch
 	}
@@ -91,7 +85,6 @@ func (customChanTrait) Reset(ch chan int) {
 func TestCustomPoolChannel(t *testing.T) {
 	pool := ForCustom(customChanTrait{})
 
-	// Get a channel
 	ch1 := pool.Get()
 	if ch1 == nil {
 		t.Fatal("Expected non-nil channel")
@@ -100,11 +93,9 @@ func TestCustomPoolChannel(t *testing.T) {
 		t.Errorf("Expected channel capacity 5, got %d", cap(ch1))
 	}
 
-	// Use the channel
 	ch1 <- 100
 	ch1 <- 200
 
-	// Put it back
 	pool.Release(ch1)
 
 	// Get another - try for up to 10ms to get a pooled object
@@ -132,7 +123,6 @@ func TestCustomPoolChannel(t *testing.T) {
 }
 
 func TestCustomPoolPackageFunctions(t *testing.T) {
-	// Test package-level convenience functions
 	s := GetCustom(customStructTrait{})
 	if s == nil {
 		t.Fatal("GetCustom returned nil")

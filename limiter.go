@@ -83,10 +83,9 @@ func NewSemaphore(n int) Limiter {
 	return Limiter{pool: p}
 }
 
-// semaphoreResource is the in-flight-counter-backed concurrency [permits.Resource].
-// Mirrors the pre-Wave-4 TaskPool semantics: maxConcurrency==-1 means unlimited; ==0
-// blocks everything; >0 caps to that many concurrent permits. Pure accounting — wakeups
-// belong to the owning permits.Pool.
+// semaphoreResource is the in-flight-counter-backed concurrency [permits.Resource]:
+// maxConcurrency==-1 means unlimited; ==0 blocks everything; >0 caps to that many
+// concurrent permits. Pure accounting — wakeups belong to the owning permits.Pool.
 type semaphoreResource struct {
 	maxConcurrency    atomic.Int32
 	inFlight          wavestate.InFlightCounter
@@ -118,10 +117,10 @@ func (s *semaphoreResource) Release(n int) {
 }
 
 // Overdraft implements permits.OverdraftResource: the pool has PROVEN the head
-// demand infeasible at current capacity with zero permits in use anywhere. For now,
-// for every weight, the answer is "not now" (granted=false, err=nil) — the head
+// demand infeasible at current capacity with zero permits in use anywhere. For
+// every weight, the answer is "not now" (granted=false, err=nil) — the head
 // keeps waiting, re-driven by a release or a SetMaxConcurrency raise; there is no
-// commitment, and this could be revisited as a refuse or grant once weights exist.
+// commitment.
 //
 // Why not grant yet: an overdraft episode exempts the grantee's causal subtree from
 // the head-of-line gate, but that subtree is not representable until

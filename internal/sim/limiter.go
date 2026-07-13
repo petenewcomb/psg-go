@@ -11,12 +11,12 @@ import (
 var defaultLimiterConfig = LimiterConfig{
 	Count:   BiasedIntConfig{Min: 1, Med: 3, Max: 10},
 	Permits: BiasedIntConfig{Min: 1, Med: 3, Max: 10},
-	// Cross-subjob limiter sharing. Safe to enable now that skim handlers
-	// can no longer drive subwaves (see docs/limiter-suspend-resume.md): the
-	// deadlock it used to expose required a skim handler monopolizing its
-	// wave's sole serial driver while parked in a sub-gather; with that
+	// Cross-subjob limiter sharing. Safe because skim handlers cannot
+	// drive subwaves (see docs/limiter-suspend-resume.md): sharing
+	// deadlocks only when a skim handler monopolizes its wave's sole
+	// serial driver while parked in a sub-gather; with that
 	// pattern disallowed (subwork goes through funnels/tasks, which are
-	// demand-driven), the committed suspend/reclaim brackets suffice.
+	// demand-driven), the suspend/reclaim brackets suffice.
 	Inherit: BiasedBoolConfig{Probability: 0.25},
 	// Weighted is the probability that a TASK limiter is weight-capable
 	// (streampool.NewWeightedSemaphore): its bound launchers dispatch with a
@@ -27,11 +27,10 @@ var defaultLimiterConfig = LimiterConfig{
 }
 
 // LimiterConfig controls generation of a kind of Limiter (task-bound or
-// funnel-bound). Limiters are semaphore-only in v1 — a Limiter has a
-// fixed permit count drawn from Permits, and the generator never shares
+// funnel-bound). Limiters are semaphores — a Limiter has a
+// fixed permit count drawn from Permits — and the generator never shares
 // a Limiter across op kinds (a TaskLimiter binds only to Launchers; a
-// FunnelLimiter binds only to Funnels). Both restrictions lift
-// post-Wave-4.
+// FunnelLimiter binds only to Funnels).
 type LimiterConfig struct {
 	Count   BiasedIntConfig
 	Permits BiasedIntConfig

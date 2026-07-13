@@ -66,8 +66,8 @@ func (c *fanOutFunnel[T]) Accumulate(ctx context.Context,
 }
 
 func (c *fanOutFunnel[T]) Flush(ctx context.Context) error {
-	// Wave 2: no aggregated output to emit. Per-call subtasks are
-	// already scattered from Accumulate; nothing to do on Flush.
+	// No aggregated output to emit: per-call subtasks are
+	// already scattered from Accumulate, so Flush has nothing to do.
 	return nil
 }
 

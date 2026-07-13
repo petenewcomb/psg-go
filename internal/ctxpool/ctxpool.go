@@ -119,8 +119,8 @@ func withValue[T any](cp *childPool, v T) context.Context {
 	return c.ctx
 }
 
-// entry stores a cached value along with the context that contains it
-// and the cleanup function to cancel the AfterFunc.
+// child pairs a cached value with the context that carries it and the pool
+// it recycles through.
 type child struct {
 	pool  *childPool
 	ctx   context.Context //nolint:containedctx // context stamped with the value

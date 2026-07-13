@@ -7,8 +7,8 @@ package rdvq
 type ProcessValueFunc[T any] = func(value T)
 
 // Notification is the value-struct wake handed to a consumer (a listener's NotifyFunc
-// or a parked waiter). It replaces the bare RenotifyFunc: a value type cannot be
-// forgotten-and-leaked the way a pooled renotify wrapper could, so conservation becomes
+// or a parked waiter). A value type cannot be
+// forgotten-and-leaked the way a pooled wrapper could, so conservation is
 // total by construction.
 //
 // The zero value is the "no wake" sentinel ([Notification.Received] reports false): a

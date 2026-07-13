@@ -38,9 +38,9 @@ func (s *semaphore) TryAcquire(n int) bool {
 func (s *semaphore) Release(n int) { s.inFlight.Add(-int64(n)) }
 
 // waitingResource wraps the semaphore with an Overdraft that always answers "not
-// now" (granted=false, err=nil — never grant, never refuse): the pre-overdraft
-// blocking semantics preserved exactly, so every W2b-era test built on newTestPool
-// keeps its meaning (a proven-infeasible head parks instead of over-committing, and
+// now" (granted=false, err=nil — never grant, never refuse), so every test built
+// on newTestPool keeps plain blocking semantics (a proven-infeasible head parks
+// instead of over-committing, and
 // the blocked-legitimacy oracles stay valid). Granting (a bare semaphore — the
 // non-implementing default) and refusing resources live in overdraft_test.go.
 type waitingResource struct{ *semaphore }

@@ -2,6 +2,59 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► DEVELOPMENT.md TIGHTENING + CODEBASE COMMENT SWEEP — DONE (2026-07-13, uncommitted).**
+DEVELOPMENT.md: comment/testing/design-guideline edits plus additions — naming conventions
+stated by their reasons (prose call sites, no qualifier/type suffixes, project-wide metaphor
+and family-identifier consistency, complete terminology retirement), the concurrency commit
+gate (large `TestBySimulation -race` batch green BEFORE commit, generous `-timeout`), the
+pattern-reuse rule (use/extend codified patterns before duplicating; codify used-but-uncodified
+ones), tail latency as a design principle, and a "Refactoring & API Evolution" subsection
+(end-state APIs first, no compat layers; gut-to-vestigial then strip; checkpoint at green).
+BENCHMARKING.md now states the signal priority explicitly (p99/max primary, throughput
+secondary, p50 curiosity).
+
+Comment sweep applied across every package per the new rules (~150 findings from a 5-agent
+catalog pass, individually reviewed): change-narration ("replaces the old X", "was inside Y",
+wave/phase-era labels), past-state comparisons, point-of-use forward references, and code-echo
+comments removed; past-bug-as-rationale comments converted to present-tense hazard statements
+keeping their decision-doc citations. Stale FACTS fixed along the way: `internal/permits/doc.go`
+claimed the package was "NOT yet wired into the live limiter" (it is the live permit core);
+`flowinst.go` claimed instances are GC-owned (flowInstancePool exists); `sim` claimed v1
+restrictions that no longer hold (Subjob is handled; multi-limiter binding is real);
+`rdvq/queue_test.go` referenced the removed "shared channel" tier;
+`rdvq/inboxpool_proto_test.go` described the landed reclamation protocol as a future fix.
+GATE: gofmt clean, `go vet ./...` green, `go test -short ./...` green (comment-only change).
+
+**Phase 3 backlog — smells surfaced by the sweep (next major work item):**
+1. Black-box testing policy vs the 7 `*_internal_test.go` files (root: bodyctx, ctxmeta, flow,
+   limiter, limiterset, weightedlimiter; internal/wavestate/inflight). Verdict each: migrate to
+   `_test` package + `export_test.go`, or extract the capability into its own internal package
+   (the limiter family smells like the latter). Only internal/permits uses export_test.go today.
+2. `AccumulatorFactory.Close` firing at funnel refcount zero has NO test (an orphaned comment
+   describing such a test was removed from funnel_test.go).
+3. Wave-named-"pool"/retired-terminology identifiers: `funnelPool := wave` in maxholdtime_test.go
+   / example_funnel_test.go / funnel_test.go; sim vocabulary still job/Subjob-based; decide
+   rename scope. Also "funneld" typo in example_funnel_test.go.
+4. funnel_legacy_bench_test.go does not compile under its `psg_wave3_legacy_bench` tag
+   (streampool.Task[T] is gone) — port or delete; the tag name itself is retired terminology.
+5. Design-doc shorthand labels in comments (Design B, Phase 2b C2, CP-B1b/CP-F7, Wrinkle 1,
+   resolution (c), Decision N, step-N): decide an anchoring convention — keep only where a
+   docs/ citation makes them resolvable.
+6. Future-work items moved OUT of comments; ensure tracked: TryAcquireUpTo (weighted-acquisition
+   step 3); step-4 surface work (typed Semaphore handle replacing Pool.Resource round-trip — now
+   a TODO in permits.go; consumable-sorts-last rank refinement; weighted overdraft grant/refuse
+   policy — the "why not grant yet" rationale stays in limiter.go); head-only gathering +
+   demand-FIFO barrier for freelance-gather contention; manager/executor split postpone hook;
+   ctxMetaMap retirement (meta-context-migration.md); task-context StartTask relaxation
+   (post-Wave-5); sim probabilistic mode (doc.go advertises it; the runtime is Med/threshold-only
+   — doc-vs-impl gap); the package rename (streampool.Wait).
+7. Misc: internal/omnipool/struct.go doc says "Put()" but the API is Release; workq/work.go TODO
+   references ReadyFn (apparently renamed AddToListeners); sim plan_test.go's 11k-line expected
+   string is stale (file has TODO); otpsg logging.go wrappers never read a logger from context
+   (misleading comment deleted — decide whether they should); benchapp app.go infertypeargs lint
+   hints (lines 54, 91); `.claude/worktrees/nbcq-stack` is a stale worktree copy that pollutes
+   repo-wide greps.
+
 **►►► OMNIPOOL ADOPTION SWEEP — LANDED (2026-07-13).** Every hand-rolled refcount now rides
 `omnipool.RefCounter`. Commits: `eaf4d47` (permits.Cache + TryAddRef), `540f6e7` (Cache.alive
 removed — the refcount carries liveness; the rapid model learns destruction from a Reset-fired

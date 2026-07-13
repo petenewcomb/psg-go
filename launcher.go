@@ -419,8 +419,7 @@ func vetStart(
 }
 
 // launcherScatterWork wraps the target's inner scatter work with
-// the owning Wave's backpressure (protoBB). Mirrors
-// skimScatterWork's role in the pre-Wave-3 codepath.
+// the owning Wave's backpressure (protoBB).
 type launcherScatterWork struct {
 	workq.Work
 	wave     *waveImpl

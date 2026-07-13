@@ -52,8 +52,7 @@ type Funnel[T any] struct {
 	factory AccumulatorFactory[T]
 
 	// limiter caps how many funnel-body executions this Funnel runs concurrently.
-	// The zero Limiter (impl == nil) means unlimited. Acquired in funnelWork.Execute
-	// and released when Execute completes.
+	// The zero Limiter (impl == nil) means unlimited.
 	limiter Limiter
 
 	// id uniquely identifies this Funnel so its accumulator instances are keyed in the
@@ -381,10 +380,10 @@ type funnelInstance[T any] struct {
 	// the controller can read ID()/Group() without holding c.mu (it sorts
 	// buffered work by group then ID). Group is the instance's flush group
 	// — distinct from earliestGroup below, which tracks the lowest input
-	// group seen. Free is overridden (see below); the scheduled-queue
+	// group seen. Free is overridden; the scheduled-queue
 	// position is owned entirely by delayq (mutated only under its mutex),
 	// so this type never hooks position changes — which is what keeps
-	// delayq's mutex from ever waiting on c.mu (the deadlock fix).
+	// delayq's mutex from ever waiting on c.mu.
 	workq.ScheduledWorkItem
 
 	// wave owns this instance (the per-wave flush barrier, the error sink, ctxMeta).
@@ -768,7 +767,7 @@ func (c *funnelInstance[T]) flush(ctx context.Context, ownMeta bool) bool {
 // boundFunnelWork is the type-erased funnel body as seen by funnelPostWork (the
 // scheduler-side admission decorator) and the executor. It is NOT a workq.Work: the body is
 // PushBack'd to the executor (Run), not Executed through the priority controller. gate /
-// releasePermit are the hoisted limiter permit (was inside funnelWork.Execute); Waiting is
+// releasePermit manage the limiter permit on the scheduler side; Waiting is
 // the governor downstream-pressure registration (from the embedded DownstreamWork); Free is
 // the post-work's cleanup of an un-handed-off body.
 type boundFunnelWork interface {
@@ -942,9 +941,9 @@ func (wk *funnelWork[T]) Funnel(ctx context.Context) {
 	hbc.accumulate(ctx, wk.input, wk.inputErr)
 }
 
-// gate acquires the funnel's limiter permit, mirroring limiterScatterWork for tasks. It is
-// the permit gate HOISTED out of the old funnelWork.Execute onto the scheduler side
-// (funnelPostWork.Execute), so the body that crosses to the executor is permit-free. Returns
+// gate acquires the funnel's limiter permit, mirroring limiterScatterWork for tasks. It
+// runs on the scheduler side (funnelPostWork.Execute), so the body that crosses to the
+// executor is permit-free. Returns
 // (true, nil) for an unlimited funnel. The held permit scopes the body run and is released
 // at body end (Free) or, if the body never starts, by releasePermit (retry re-acquires).
 func (wk *funnelWork[T]) gate(ctx context.Context, ex workq.Execution) (bool, error) {
@@ -1039,8 +1038,8 @@ func (wk *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "%v", wk)
 
-	// Permit gate, HOISTED from the old funnelWork.Execute (Wrinkle 1) so the body crosses
-	// to the executor permit-free — mirrors limiterScatterWork for tasks. Miss → postpone.
+	// Permit gate on the scheduler side, so the body crosses to the executor
+	// permit-free — mirrors limiterScatterWork for tasks. Miss → postpone.
 	held, err := wk.work.gate(ctx, ex)
 	if err != nil || !held {
 		return err
@@ -1048,7 +1047,7 @@ func (wk *funnelPostWork) Execute(ctx context.Context, ex workq.Execution) error
 
 	// Hand the admitted body to the EXECUTOR (mirrors taskPostWork). Try a non-blocking
 	// direct handoff first; if no executor waits, register the funnel's downstream governor
-	// pressure (the old Post onWait) before blocking so upstream sources back off, then
+	// pressure before blocking so upstream sources back off, then
 	// block-as-demand brings an executor up. The blocking PushBack runs only on a scheduler
 	// worker or a top-level/skim producer — never an executor body goroutine — so it cannot
 	// wedge waiting for an executor. On any non-start, give the permit back (retry

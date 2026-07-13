@@ -4,13 +4,12 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-// This file holds the Wave-2-era benchmark suite for the funnel.
-// Wave 3 reshaped streampool.Task / Skimmer / Funnel enough that the benchmark
-// requires a deliberate redesign (see docs/plan/REFACTOR_PLAN.md: funnel-
-// benchmark requirements session). To keep Wave 3 focused, the entire
-// benchmark is gated behind the `psg_wave3_legacy_bench` build tag and
-// is NOT compiled by default. Restore by either porting it to the new
-// API or removing the build tag.
+// This benchmark suite predates the current streampool.Task / Skimmer /
+// Funnel API and requires a deliberate redesign before it can return to
+// service (see docs/plan/REFACTOR_PLAN.md: funnel-benchmark requirements
+// session). It is gated behind the `psg_wave3_legacy_bench` build tag and is
+// NOT compiled by default. Restore by either porting it to the current API
+// or removing the build tag.
 
 package streampool_test
 
@@ -125,7 +124,7 @@ type benchmarkFunnel struct {
 		cumulativeNominalDuration time.Duration) streampool.Task[benchmarkTaskResult]
 	idealFunnelsPerSkim int
 
-	// Downstream sink captured for Submit-on-Flush (Wave 2 reshape).
+	// Downstream sink captured for Submit-on-Flush.
 	skimmer streampool.Skimmer[benchmarkFunneldResult]
 	job     *streampool.Wave
 

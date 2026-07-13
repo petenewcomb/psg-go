@@ -3,10 +3,8 @@
 
 // Package streamhttp is a prototype of the net/http-unified edge: one standard
 // http.Server serves HTTP/1.1, HTTP/2 (automatic ALPN), WebSocket (gws), and
-// gRPC — on a single TLS listener, all able to fan work out to streampool. It
-// replaces the fasthttp + x/net/http2 + separate-WS-front-end arrangement with
-// the standard library, trading fasthttp's per-request alloc win (irrelevant to
-// streampool-shaped handlers) for one front-end and standard request contexts.
+// gRPC — on a single TLS listener, all able to fan work out to streampool,
+// with one front-end and standard request contexts.
 package streamhttp
 
 import (
@@ -41,8 +39,7 @@ type Option func(*Server)
 // [streampool.Resequencer]; every other message's reply is written as soon as it
 // finishes. Ordered and unordered replies thus coexist on one socket — and only
 // the ordered subset consumes sequence numbers, so the resequencer always sees a
-// gap-free run. This is the scatter-process-gather-in-order the retired HTTP/1.1
-// pipelining example showed, now selectable per message on a live transport.
+// gap-free run.
 func WithOrderedWS(ordered func(op gws.Opcode, payload []byte) bool) Option {
 	return func(s *Server) { s.orderedFn = ordered }
 }

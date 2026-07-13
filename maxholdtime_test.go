@@ -31,7 +31,7 @@ func TestMaxHoldTimeBasic(t *testing.T) {
 		return nil
 	}).In(wave)
 
-	funnelPool := wave // NOTE: WithMaxConcurrency(1) dropped (no-op now); serialization must move to a limiter
+	funnelPool := wave
 
 	funnelOp := streampool.NewFunnel(funnelPool, streampool.NewAccumulatorFactory(func() streampool.Accumulator[int] {
 		return streampool.FuncAccumulator[int]{

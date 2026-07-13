@@ -7,14 +7,11 @@
 // Skimmers) tied together by explicit Submit and StartTask steps inside
 // their function bodies. Plans are constructed via property-based
 // generators against a Config, then executed by a runtime adapter that
-// translates the new Plan vocabulary onto the current psg API.
+// translates the Plan vocabulary onto the psg API; only the adapter layer
+// touches that API, so Plan generators, Step definitions, and assertion
+// contracts are independent of its shape.
 //
-// The Plan vocabulary anchors to the destination streampool API even
-// while the runtime adapter sits on top of the pre-reshape psg API. As
-// reshape waves land, only the adapter layer changes; Plan generators,
-// Step definitions, and assertion contracts stay stable.
-//
-// New Plan generators produce the full destination-API expressive range
+// Plan generators produce the full expressive range
 // (multi-sink Submit, multi-StartTask bodies, zero-output paths). A
 // Deterministic Config mode forces all Probs to 1.0 and SelfTime
 // distributions to fixed for exact-bound assertions; probabilistic mode

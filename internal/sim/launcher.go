@@ -26,7 +26,7 @@ type LauncherConfig struct {
 // Launcher represents a simulated stateless dispatch op. Its Body is
 // invoked once per Start dispatch; the body may execute SelfTime,
 // Subjob, StartTask, and Submit steps. Each Launcher binds to zero
-// or one TaskLimiter for v1 (multi-limiter binding lifts post-Wave-4).
+// or more TaskLimiters.
 type Launcher struct {
 	ID             int
 	Depth          int   // higher than any Launcher this body may StartTask, prevents cycles

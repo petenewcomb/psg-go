@@ -54,9 +54,9 @@ func ExampleFunnel() {
 	// Define a result aggregation function and create a funneld skim/funnel operation
 	skimmer := streampool.NewFnSkimmer(skimFn).In(wave)
 
-	// After Wave 2, the streampool.Accumulator factory captures the downstream
-	// skimmer in its closure and Submits the aggregated map from
-	// inside FlushFn — there is no framework-routed output type.
+	// The streampool.Accumulator factory captures the downstream skimmer in its
+	// closure and Submits the aggregated map from inside FlushFn — there is no
+	// framework-routed output type.
 	newAccumulator := streampool.NewAccumulatorFactory(func() streampool.Accumulator[string] {
 		var counts map[string]int
 

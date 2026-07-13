@@ -37,9 +37,6 @@ import (
 // body. The fire carries the ENCLOSING chain (enclosing), so its extensions hold
 // the outer instances — which is why an outer cannot reach zero (cannot fire)
 // until this instance's fire and everything it spawned have drained (LIFO nesting).
-//
-// Instances are currently GC-owned; pooling arrives with a later allocation
-// pass (a firing is cold — once per flow end — so the alloc is off the hot path).
 type flowInstance struct {
 	// fn is the type-erased user follow-up (FlowKey/FlowTag.FollowUp wrap the
 	// typed handler into this shape). It receives the bundle value (val below)

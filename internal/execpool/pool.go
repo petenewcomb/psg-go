@@ -204,8 +204,7 @@ func (p *Pool[W]) maybeSpawn() {
 // canonical case: a batch promoted to fresh, or a flush coming due after the pool scaled
 // to zero, needs a worker even though no Post registered demand. An over-nudge is
 // self-correcting — the spawned worker establishes, drains whatever is ready, and idles
-// out if there is nothing — so there is no counter to drift. (This is the execpool analog
-// of the obsolete worker.Pool's fire-and-forget TrySpawn.)
+// out if there is nothing — so there is no counter to drift.
 func (p *Pool[W]) Nudge() {
 	if p.spawning.IncrementIfUnder(spawnConcurrencyLimit) {
 		p.spawnWorker()

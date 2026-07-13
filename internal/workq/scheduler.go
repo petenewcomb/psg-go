@@ -7,7 +7,7 @@ package workq
 // Scheduler is the admission half of the dispatch/execution split (Phase 2b C2).
 // It is a demand-spawned pool (execpool.Pool) of workers that admit work — never
 // run user bodies — so a scheduler is always promptly available to take new work
-// (the always-live-dispatcher invariant). It REPLACES the obsolete worker.Pool.
+// (the always-live-dispatcher invariant).
 //
 // Intake is an unbuffered rdvq.Handoff (`incoming`): producers PushBack admission
 // work, scheduler workers PopFront it. The Handoff's block-as-demand IS the pool's
@@ -109,7 +109,7 @@ func (s *Scheduler) Post(ctx context.Context, w Work) error {
 // drain that work — otherwise a flush coming due after the pool has scaled to zero
 // would never run. This Accepted-internal demand is fire-and-forget (not
 // counter-balanced like the incoming Handoff's Post demand), so it routes to
-// [execpool.Pool.Nudge] — the direct analog of the obsolete worker.Pool's TrySpawn.
+// [execpool.Pool.Nudge].
 func (s *Scheduler) ensureWorker() { s.pool.Nudge() }
 
 // ── Scheduled / timed work (flush deadlines) ─────────────────────────────────
@@ -155,8 +155,7 @@ type schedulerWorker struct {
 // Wait drives one ExecuteOne: it finds and executes a single admission item (fresh →
 // postponed → pulled from incoming), composing execpool's idle channel for
 // scale-to-zero. It returns true to continue the loop (an item was admitted) and false
-// to stop (idle scale-to-zero, pool teardown, or ctx cancel) — matching the obsolete
-// worker.Pool.driveQueue's "return on any error".
+// to stop (idle scale-to-zero, pool teardown, or ctx cancel).
 func (w *schedulerWorker) Wait(workerCtx context.Context, idle <-chan time.Time) bool {
 	w.idleCh = idle
 	err := w.sched.accepted.ExecuteOne(workerCtx, w.pullFn, nil)
@@ -219,8 +218,8 @@ func (w *schedulerWorker) pull(
 	return w.renotify, w.selErr
 }
 
-// selectWork is the scheduler's canonical park select. It mirrors the obsolete
-// workq.Worker.selectWork minus the outbox case (incoming is an outbox-free Handoff) and the
+// selectWork is the scheduler's canonical park select. It has no outbox case
+// (incoming is an outbox-free Handoff) and no
 // deadline case (Design B's queue-owned timer wakes via workWaitCh instead).
 func (w *schedulerWorker) selectWork(
 	ctx context.Context,

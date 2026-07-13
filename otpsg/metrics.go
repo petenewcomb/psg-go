@@ -21,21 +21,16 @@ func MetricsTask[T any](
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
-		// Create metrics
 		taskCounter, _ := meter.Int64Counter(metricName + ".count")
 		taskDuration, _ := meter.Float64Histogram(metricName + ".duration")
 
-		// Track execution
 		taskCounter.Add(ctx, 1)
 
-		// Execute task
 		result, err := taskFn(ctx)
 
-		// Record duration
 		duration := time.Since(startTime).Seconds()
 		taskDuration.Record(ctx, duration)
 
-		// Record error if any
 		if err != nil {
 			errorCounter, _ := meter.Int64Counter(metricName + ".errors")
 			errorCounter.Add(ctx, 1)
@@ -55,21 +50,16 @@ func MetricsSkim[T any](
 		startTime := time.Now()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
-		// Create metrics
 		skimCounter, _ := meter.Int64Counter(metricName + ".count")
 		skimDuration, _ := meter.Float64Histogram(metricName + ".duration")
 
-		// Track execution
 		skimCounter.Add(ctx, 1)
 
-		// Execute skim
 		skimErr := skimFn(ctx, result, err)
 
-		// Record duration
 		duration := time.Since(startTime).Seconds()
 		skimDuration.Record(ctx, duration)
 
-		// Record error if any
 		if skimErr != nil {
 			errorCounter, _ := meter.Int64Counter(metricName + ".errors")
 			errorCounter.Add(ctx, 1)
@@ -90,12 +80,10 @@ func MetricsFunnel[T any](
 		innerFunnel := funnelFactory.NewAccumulator()
 		meter := otel.GetMeterProvider().Meter("otpsg")
 
-		// Create metrics for funnel operations
 		funnelCounter, _ := meter.Int64Counter(funnelMetricName + ".count")
 		funnelDuration, _ := meter.Float64Histogram(funnelMetricName + ".duration")
 		funnelErrorCounter, _ := meter.Int64Counter(funnelMetricName + ".errors")
 
-		// Create metrics for flush operations
 		flushCounter, _ := meter.Int64Counter(flushMetricName + ".count")
 		flushDuration, _ := meter.Float64Histogram(flushMetricName + ".duration")
 		flushErrorCounter, _ := meter.Int64Counter(flushMetricName + ".errors")
@@ -104,25 +92,20 @@ func MetricsFunnel[T any](
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
 				startTime := time.Now()
 
-				// Track execution
 				funnelCounter.Add(ctx, 1)
 
-				// Execute funnel with error tracking
 				var flushTime time.Time
 				var err error
 				didPanic := true
 				defer func() {
-					// Record duration
 					duration := time.Since(startTime).Seconds()
 					funnelDuration.Record(ctx, duration)
 
-					// Record error or panic
 					if didPanic || inputErr != nil || err != nil {
 						funnelErrorCounter.Add(ctx, 1)
 					}
 				}()
 
-				// Execute original funnel
 				flushTime, err = innerFunnel.Accumulate(ctx, input, inputErr)
 				didPanic = false
 				return flushTime, err
@@ -130,13 +113,10 @@ func MetricsFunnel[T any](
 			FlushFn: func(ctx context.Context) error {
 				startTime := time.Now()
 
-				// Track execution
 				flushCounter.Add(ctx, 1)
 
-				// Execute flush
 				err := innerFunnel.Flush(ctx)
 
-				// Record duration and errors
 				duration := time.Since(startTime).Seconds()
 				flushDuration.Record(ctx, duration)
 				if err != nil {

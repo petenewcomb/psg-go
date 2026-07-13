@@ -58,8 +58,8 @@ type Accepted struct {
 	unmetDemandFn func()
 
 	// schedTimer is the single, queue-owned timer that honors scheduled-work deadlines
-	// (Design B). It replaces per-worker deadline timers + idle-exit suppression: workers
-	// now scale fully to zero, and this timer — re-armed from [Accepted.armScheduledTimer]
+	// (Design B): workers carry no deadline timers of their own and scale fully to
+	// zero, while this timer — re-armed from [Accepted.armScheduledTimer]
 	// whenever the earliest deadline changes — fires at the earliest deadline to wake a
 	// parked worker (or spawn one via unmetDemandFn) so the now-due item is drained. nil
 	// until first armed; only the scheduler ever schedules work, so per-wave workQueues
@@ -242,8 +242,8 @@ func (q *Accepted) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
 // called for each work item accepted. Returns the Notification the wait
 // observed, or the zero value.
 //
-// Scheduled-work deadlines are no longer threaded through here: the queue-owned
-// timer (Design B, [Accepted.armScheduledTimer]) wakes a parked worker or spawns
+// Scheduled-work deadlines are handled by the queue-owned
+// timer (Design B, [Accepted.armScheduledTimer]), which wakes a parked worker or spawns
 // one when a deadline comes due, so a blocking AddWorkFunc need not watch one.
 type AddWorkFunc func(
 	ctx context.Context,
@@ -595,7 +595,7 @@ func (c *controller) WaitForNew(ctx context.Context) error {
 
 	// Scheduled-work deadlines are honored by the queue-owned timer (Design B,
 	// [Accepted.armScheduledTimer]): it wakes a parked worker or spawns one when a deadline
-	// comes due, so the park no longer arms a per-worker timer. deadlineCh stays nil.
+	// comes due, so the park arms no timer of its own.
 	var err error
 	c.notification, err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)
 	if err == nil {

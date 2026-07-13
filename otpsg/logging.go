@@ -19,21 +19,17 @@ func LoggedTask[T any](
 	taskFn func(ctx context.Context) (T, error),
 ) func(ctx context.Context) (T, error) {
 	return func(ctx context.Context) (T, error) {
-		// Get logger from context or use a default
 		// This implementation uses zap, but could be adapted for any logger
 		logger := zap.L()
 
-		// Log start of operation
 		logger.Debug("Starting task",
 			zap.String("operation", operationName),
 			zap.String("component", "otpsg"))
 
-		// Time the operation
 		startTime := time.Now()
 		result, err := taskFn(ctx)
 		duration := time.Since(startTime)
 
-		// Log completion with appropriate level based on success/failure
 		if err != nil {
 			logger.Error("Task failed",
 				zap.String("operation", operationName),
@@ -59,21 +55,17 @@ func LoggedSkim[T any](
 	skimFn func(ctx context.Context, result T, err error) error,
 ) streampool.HandlerFunc[T] {
 	return func(ctx context.Context, result T, err error) error {
-		// Get logger from context or use a default
 		logger := zap.L()
 
-		// Log starting skim operation
 		logger.Debug("Processing skim",
 			zap.String("operation", operationName),
 			zap.String("component", "otpsg"),
 			zap.Bool("input_has_error", err != nil))
 
-		// Time the operation
 		startTime := time.Now()
 		skimErr := skimFn(ctx, result, err)
 		duration := time.Since(startTime)
 
-		// Log completion with appropriate level based on success/failure
 		if skimErr != nil {
 			logger.Error("Skim failed",
 				zap.String("operation", operationName),
@@ -103,21 +95,17 @@ func LoggedFunnel[T any](
 
 		return streampool.FuncAccumulator[T]{
 			AccumulateFn: func(ctx context.Context, input T, inputErr error) (time.Time, error) {
-				// Get logger from context or use a default
 				logger := zap.L()
 
-				// Log starting funnel operation
 				logger.Debug("Combining input",
 					zap.String("operation", funnelOpName),
 					zap.String("component", "otpsg"),
 					zap.Bool("input_has_error", inputErr != nil))
 
-				// Time the operation
 				startTime := time.Now()
 				flushTime, err := innerFunnel.Accumulate(ctx, input, inputErr)
 				duration := time.Since(startTime)
 
-				// Log completion
 				logger.Debug("Funnel completed",
 					zap.String("operation", funnelOpName),
 					zap.String("component", "otpsg"),
@@ -127,20 +115,16 @@ func LoggedFunnel[T any](
 				return flushTime, err
 			},
 			FlushFn: func(ctx context.Context) error {
-				// Get logger from context or use a default
 				logger := zap.L()
 
-				// Log starting flush operation
 				logger.Debug("Flushing funnel",
 					zap.String("operation", flushOpName),
 					zap.String("component", "otpsg"))
 
-				// Time the operation
 				startTime := time.Now()
 				err := innerFunnel.Flush(ctx)
 				duration := time.Since(startTime)
 
-				// Log completion
 				logger.Debug("Flush completed",
 					zap.String("operation", flushOpName),
 					zap.String("component", "otpsg"),

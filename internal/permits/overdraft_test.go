@@ -15,7 +15,7 @@ import (
 )
 
 // Overdraft-path tests (weighted-acquisition.md §Overdraft). The shared newTestPool
-// carries a standing-promise Overdraft precisely so the W2b-era tests keep their
+// carries a standing-promise Overdraft so tests built on it keep plain
 // blocking semantics; the pools here exercise the grant (a bare semaphore — the
 // non-implementing default) and refuse behaviors, plus the episode machinery those
 // unlock: the standing sentinel, allowance claims, extensions, the infeasibility

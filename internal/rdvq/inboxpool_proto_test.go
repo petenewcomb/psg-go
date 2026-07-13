@@ -3,18 +3,12 @@
 
 package rdvq
 
-// Prototype for race-safe inbox RECLAMATION on the receiver-owned inbox pool.
-// Today an ABANDONED inbox (a receiver registered it but took its value from
-// elsewhere) is left on the hint collection with a zero-value channel marker and
-// dropped to GC — so the inbox pool never recycles it and a borrow allocates per
-// abandoning wait. The receiver still OWNS an abandoned inbox (Queue re-passes it
-// across retries), so a sender cannot reclaim it (the reverted naive fix hung
-// saturation_test).
-//
-// The fix (see docs/rdvq-inbox-reclamation.md): a generation-stamped 3-state inbox
-// (free / waiting / delivering) in one atomic word, the receiver the SOLE reclaimer
-// (on the clean AND abandon path; senders only deliver-or-skip), and ONE generation
-// bump on abandon. CRUCIALLY, the hint a receiver publishes carries the generation it
+// Standalone model check of the race-safe inbox RECLAMATION protocol
+// (docs/rdvq-inbox-reclamation.md, implemented by inbox.go): a generation-stamped
+// 3-state inbox (free / waiting / delivering) in one atomic word, the receiver the
+// SOLE reclaimer on the clean AND abandon path (a receiver still OWNS an abandoned
+// inbox — the Queue re-passes it across retries — so senders only deliver-or-skip),
+// and ONE generation bump on abandon. CRUCIALLY, the hint a receiver publishes carries the generation it
 // was minted at, and a sender claims at THAT captured generation — not the inbox's
 // current one. That is what makes a SHARED inbox pool safe: an inbox abandoned in one
 // queue (generation bumped) and reused in ANOTHER via the shared pool leaves a stale

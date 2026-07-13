@@ -22,8 +22,7 @@ import (
 //     the wave + call-specific fields, and hands it to ctxpool as the child's value;
 //     release returns it.
 //
-// This replaces the per-wave execShell (which rooted body ctxs at a wave-owned waveCtx
-// for force-abort). Cancellation is now pure source-ctx ancestry — no waveCtx.
+// Cancellation is pure source-ctx ancestry; the wave owns no context.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // bodyMetaPool reuses *ctxMeta values independently of the child contexts that carry

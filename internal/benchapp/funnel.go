@@ -91,9 +91,9 @@ func (c *Funnel[T]) Flush(ctx context.Context) error {
 	defer c.pool.Release(c)
 	defer c.skimmer.recordFunnelTime(c.creationTime)
 
-	// In the new shape there is no aggregated "Value" return — the
+	// There is no aggregated "Value" return — the
 	// wrapped accumulator's Flush is responsible for routing data
-	// downstream itself. We still call the fallback to record stats
+	// downstream itself. The fallback is called only to record stats
 	// from this benchapp wrapper.
 	c.fallbackFn(res)
 	return err

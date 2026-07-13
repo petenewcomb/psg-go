@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Example_tracing shows the v2 flow-native tracing model: one span whose
+// Example_tracing shows the flow-native tracing model: one span whose
 // lifetime IS the flow. Traced starts the span and hands back the FlowOptions
 // that (a) ride the span down every dispatch chain for correlation and (b) end
 // the span exactly once at the flow's true end — after all work, including the

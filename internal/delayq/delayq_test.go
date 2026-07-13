@@ -341,9 +341,8 @@ func TestDrainReturnsInDeadlineOrder(t *testing.T) {
 
 	ready, _ := q.Drain(at(100), nil)
 	gotMs := make([]int64, len(ready))
-	// We dropped Deadline() from Item, so derive expected ordering by
-	// reading the scheduled deadlines back from the test input order.
-	// Drained order should be ascending by deadline.
+	// Item exposes no deadline accessor, so derive expected ordering from
+	// the test input order. Drained order should be ascending by deadline.
 	idToDeadline := map[int]int64{}
 	for i, ms := range deadlines {
 		idToDeadline[i] = ms

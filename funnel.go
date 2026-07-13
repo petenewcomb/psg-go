@@ -591,7 +591,7 @@ func (fi *funnelInstance[T]) accumulate(
 	inputErr error,
 ) {
 
-	traceRegion := "funnelInstance.funnel"
+	traceRegion := "funnelInstance.accumulate"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
 	// Fan-in transfer, collect side: fold this item's per-item DAG-scoped riders

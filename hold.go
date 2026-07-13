@@ -118,18 +118,21 @@ func HoldFlow(ctx context.Context) (held context.Context, cancel context.CancelC
 	return h, cancel
 }
 
-// snapshotRiders builds the hold's two GC-owned copies of chain: the live
-// copy (instance pointers carried) and the severed, value-only copy. Both are
-// permanently ref-biased so they can never enter the node pool. One carrier
-// ref is taken per instance-bearing node, mirroring flowRefRiders.
+// snapshotRiders builds the hold's two copies of chain: the live copy (instance pointers
+// carried) and the severed, value-only copy. Each node is drawn from the pool with its owner
+// reference armed and NEVER released — that permanent owner ref is the bias a body borrow's
+// nodeRef/nodeUnref cycle can never drop to zero, so a snapshot node never recycles and is
+// reclaimed by GC with the hold. Each node OWNS its next (consumed from the recursive build).
+// One carrier ref is taken per instance-bearing node, mirroring flowRefRiders.
 func snapshotRiders(chain *flowRiderNode) (live, severed *flowRiderNode) {
 	var buildLive func(n *flowRiderNode) *flowRiderNode
 	buildLive = func(n *flowRiderNode) *flowRiderNode {
 		if n == nil {
 			return nil
 		}
-		c := &flowRiderNode{id: n.id, val: n.val, hasVal: n.hasVal, inst: n.inst, next: buildLive(n.next)}
-		c.refs.Store(1) // permanent bias: GC-owned, never pooled
+		c := flowRiderNodePool.Get() // owner ref armed and held for the hold's life; never Released
+		c.id, c.val, c.hasVal, c.inst = n.id, n.val, n.hasVal, n.inst
+		c.next = buildLive(n.next) // consume the rebuilt tail
 		if c.inst != nil {
 			c.inst.ref() // the hold's carrier ref
 		}
@@ -140,8 +143,9 @@ func snapshotRiders(chain *flowRiderNode) (live, severed *flowRiderNode) {
 		if n == nil {
 			return nil
 		}
-		c := &flowRiderNode{id: n.id, val: n.val, hasVal: n.hasVal, next: buildSevered(n.next)}
-		c.refs.Store(1) // permanent bias: GC-owned, never pooled
+		c := flowRiderNodePool.Get() // owner ref armed and held for the hold's life; never Released
+		c.id, c.val, c.hasVal = n.id, n.val, n.hasVal
+		c.next = buildSevered(n.next) // consume the rebuilt tail
 		return c
 	}
 	return buildLive(chain), buildSevered(chain)

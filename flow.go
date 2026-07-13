@@ -429,8 +429,7 @@ func WithFlow(ctx context.Context, body func(context.Context) error, opts ...Flo
 	// follow-up fires below, which root their own metas and never read the
 	// scope ctx.
 	m := newCtxMeta()
-	m.riders = riders
-	nodeRef(riders) // the scope meta's carrier ref on the chain head
+	m.riders = riders // the scope meta OWNS the returned chain (buildFlowRiders transfers it)
 	if src != nil {
 		m.wave = src.wave
 		m.parent = src
@@ -490,14 +489,13 @@ type flowRiderNode struct {
 	hasVal bool           // distinguishes a value binding from a follow-up-only node
 	inst   *flowInstance  // the follow-up instance, when this binding registered one
 	next   *flowRiderNode // the enclosing chain (toward the root); nil at a flow root
-	// refs counts the holders of THIS node: its child nodes' downlinks, the carrier
-	// metas whose head is this node, and a follow-up instance's ref on its enclosing
-	// head (docs/decisions/flow-rider-chain.md). At zero the node returns to the
-	// pool and drops its own downlink ref on next, cascading. Distinct from
-	// flowInstance.count, which drives firing: a deep node sees only ONE downlink per
-	// child scope regardless of that scope's carrier count, so node.refs cannot
-	// detect an instance's quiescence.
-	refs atomic.Int64
+	// RefCounter counts the holders of THIS node (embedded, promoting AddRef/RefCount): a node
+	// OWNS its next, a carrier or meta whose head is this node owns it, and a follow-up instance
+	// sharing its enclosing head takes an AddRef. At zero the node recycles, releasing the ref it
+	// owned on next and cascading. Distinct from flowInstance.count, which drives firing: a deep
+	// node sees only ONE owner per child scope regardless of that scope's carrier count, so node
+	// refs cannot detect an instance's quiescence. a64 (no generation): every holder is strong.
+	omnipool.RefCounter
 }
 
 // flowRiderNodePool recycles rider nodes. A node is immutable but for refs, so a
@@ -516,21 +514,21 @@ func flowNodeAlloc(delta int) {
 	}
 }
 
-// Reset is the omnipool recycle hook (refs is atomic.Int64, whose noCopy would
-// trip vet copylocks under omnipool's plain-copy zero).
+// Reset makes the node ready to reuse. It clears the fields but must NOT release next: this
+// node's ownership of its successor is unwound iteratively by the release cascade, not here.
 func (n *flowRiderNode) Reset() {
 	n.id = nil
 	n.val = nil
 	n.hasVal = false
 	n.inst = nil
 	n.next = nil
-	n.refs.Store(0)
+	flowNodeAlloc(-1) // conservation seam
 }
 
-// newRiderNode draws a node from the pool, stamps its binding, links it onto
-// next, and takes next's downlink ref (released when this node reclaims). The
-// returned node has refs == 0; the caller publishes it by taking the first ref —
-// a child's downlink (a later newRiderNode) or a carrier's nodeRef.
+// newRiderNode draws a node from the pool with its owner reference armed and CONSUMES the
+// caller's reference to next, moving it into n.next: the node now owns its tail, and no
+// separate reference is taken. To point at a next the caller does not exclusively own (a shared
+// tail), nodeRef it first and pass the clone. The returned node is a single owning reference.
 func newRiderNode(
 	id *flowIdentity, val any, hasVal bool, inst *flowInstance, next *flowRiderNode,
 ) *flowRiderNode {
@@ -540,33 +538,27 @@ func newRiderNode(
 	n.val = val
 	n.hasVal = hasVal
 	n.inst = inst
-	n.next = next
-	nodeRef(next) // downlink ref
+	n.next = next // consumes the caller's reference to next
 	return n
 }
 
-// nodeRef takes one reference on n (nil-safe).
+// nodeRef takes an ADDITIONAL reference on n to share it with another owner (nil-safe). The
+// node must already be owned (refs >= 1), so this clones a live reference (AddRef).
 func nodeRef(n *flowRiderNode) {
 	if n != nil {
-		n.refs.Add(1)
+		n.AddRef()
 	}
 }
 
-// nodeUnref releases one reference on n; the release that reaches zero reclaims n
-// to the pool and cascades the drop down its next chain (each reclaimed node drops
-// the downlink ref it held on its successor).
+// nodeUnref releases one reference on n; the release that recycles n cascades the drop down its
+// next chain (each recycled node releases the ref it OWNED on its successor). Iterative: next is
+// copied out before Release, since a recycled node is off-limits (possibly already reused).
 func nodeUnref(n *flowRiderNode) {
 	for n != nil {
-		r := n.refs.Add(-1)
-		if r > 0 {
+		next := n.next
+		if !flowRiderNodePool.Release(n) {
 			return
 		}
-		if r < 0 {
-			panic("streampool: flow rider node refs underflow (double release)")
-		}
-		next := n.next
-		flowNodeAlloc(-1)
-		flowRiderNodePool.Release(n)
 		n = next
 	}
 }
@@ -584,7 +576,10 @@ func rebuild(head, stop *flowRiderNode, keep func(*flowRiderNode) bool) *flowRid
 			kept = append(kept, n)
 		}
 	}
+	// The kept prefix will OWN a reference on the shared stop tail (or the returned stop itself
+	// when nothing is kept), so take one; each newRiderNode then consumes the running out.
 	out := stop
+	nodeRef(out)
 	for i := len(kept) - 1; i >= 0; i-- {
 		k := kept[i]
 		out = newRiderNode(k.id, k.val, k.hasVal, k.inst, out)
@@ -623,20 +618,21 @@ func buildFlowRiders(ambient *flowRiderNode, opts []FlowOption) (*flowRiderNode,
 		}
 	}
 
+	// head starts as the (shared) ambient chain; take an owning reference on it so the built
+	// chain is a single owning reference the scope meta receives. Prepends CONSUME head (moving
+	// it into the new node's next); replace disposes it.
 	head := ambient
+	nodeRef(head)
 	var created []*flowInstance
 
-	// replace swaps the working chain for a rebuilt (or empty) one, disposing
-	// of the previous structure: the transient ref covers a refs-0 fresh top,
-	// and the reclaim cascade stops at the first node someone else still holds
-	// — an ambient carrier\'s ref, or an earlier follow-up\'s enclosing pin
-	// (whose snapshot legitimately outlives the swap, freed at its fire).
-	// Net zero on a purely inherited chain.
+	// replace swaps the working chain for a rebuilt (or empty) one, disposing of the previous
+	// structure: dropping head's owner reference recycles the nodes it exclusively holds, and
+	// the cascade stops at the first node someone else still holds — an ambient carrier's ref,
+	// or an earlier follow-up's enclosing pin (whose snapshot legitimately outlives the swap,
+	// freed at its fire). nh is a fresh owning reference.
 	replace := func(nh *flowRiderNode) {
-		old := head
+		nodeUnref(head)
 		head = nh
-		nodeRef(old)
-		nodeUnref(old)
 	}
 
 	// mint creates a follow-up instance layered on the chain so far: enclosing
@@ -750,10 +746,9 @@ func collectFlowTags(union *flowRiderNode, ctx context.Context, stop *flowRiderN
 	// the old head to the new one (the old head survives via the new node's
 	// downlink). The whole union is adopted by the flush meta at flowFanInContext.
 	prepend := func(id *flowIdentity, inst *flowInstance) {
-		newHead := newRiderNode(id, nil, false, inst, union)
-		nodeRef(newHead)
-		nodeUnref(union)
-		union = newHead
+		// Consume the funnel's carrier ref on union into the new head's next; the returned
+		// owning reference becomes the funnel's new carrier ref on the union head.
+		union = newRiderNode(id, nil, false, inst, union)
 	}
 	for n := m.riders; n != nil && n != stop; n = n.next {
 		if n.id.kind != flowTagIdent {

@@ -154,12 +154,14 @@ func buildFireChain(chain *flowRiderNode, fired *flowInstance) *flowRiderNode {
 		suffix = target.next
 	}
 	flowRefRiders(suffix) // covered: the walker's suffix refs are still held here
-	// Rebuild above target: peel every matching node, value-only copies for the
-	// rest (recursion depth = chain length, short by construction); each copy
-	// takes its own downlink ref via newRiderNode.
+	// Rebuild above target: peel every matching node, value-only copies for the rest (recursion
+	// depth = chain length, short by construction). Each copy CONSUMES its rebuilt next, and the
+	// base case takes one owning reference on the shared suffix tail, so the result is a single
+	// owning reference.
 	var rebuild func(n *flowRiderNode) *flowRiderNode
 	rebuild = func(n *flowRiderNode) *flowRiderNode {
 		if n == target {
+			nodeRef(suffix) // the rebuilt chain owns a reference on the shared suffix
 			return suffix
 		}
 		if matches(n) {
@@ -167,9 +169,7 @@ func buildFireChain(chain *flowRiderNode, fired *flowInstance) *flowRiderNode {
 		}
 		return newRiderNode(n.id, n.val, n.hasVal, nil, rebuild(n.next))
 	}
-	head := rebuild(chain)
-	nodeRef(head) // the fire meta's node ref (released by releaseBodyContext)
-	return head
+	return rebuild(chain)
 }
 
 // unref releases one carrier; the release that reaches zero fires the follow-up

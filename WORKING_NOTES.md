@@ -34,14 +34,37 @@ with PN:
   suspend fires EAGERLY at drive-entry (`suspendHeldPermit` atop `ctxMeta.ExecuteNowOrQueue`/`wv.block`);
   the I3 rework moves it to fire lazily at the first skim-execution/park. (Suspend is correct only for a
   resource freed while parked — see the non-suspending-limiter note below.)
+- **(I4) Nothing ever BLOCKS on a Demand or a Governor** — those expose only **Listeners** (notify),
+  never Waiters. The ONLY primitives a goroutine ever blocks directly on are: `ctx.Done()`, a **local
+  wait channel** signaled by one or more Listeners, or an **`rdvq.Handoff` inbox**. This is the
+  *mechanism* that enforces I1 structurally (not by convention): the only blockable things are a Handoff
+  inbox (spawn-bounded) and a Listener-fed local channel (a Listener fires only on a framework event),
+  so no wait is ever gated on user-held capacity. It is also the root fix for strand 2 (below): today
+  `permits.Demand.mailbox` is a **Notifier** (Listeners AND Waiters), so a block-and-help parks on the
+  demand's Waiters and the pool serves ONE head at a time (`p.head`/`promoteScan`, waking only the
+  head) — under nesting the outer demand is the head while its owner is parked on the inner, so a freed
+  permit wakes the wrong (unconsumable) head and strands the inner. Make Demand **Listeners-only**:
+  release NOTIFIES the registered Listeners (each signals its owner's local wait channel and re-checks
+  `acquire`), no single head to strand behind. Same for `Governor`. Block-and-help becomes a local wait
+  channel registered as a Listener on the demand (permit-free) + the governor (backpressure), selected
+  with the skim-queue inbox — never a demand park.
+  - **`Cache.ListenersFor` bug (PN, 2026-07-14):** it picks a DIFFERENT listeners set by MODE
+    (`d.mailbox.Listeners` vs a standing episode's `od.claimants.Listeners`, permits.go:477), but the
+    mode is POINT-IN-TIME and can change over a blocking episode — so a blocker can end up registered on
+    the wrong set. **Fix:** blockers always register on the corresponding **Demand's** listeners only;
+    route the NOTIFICATION by the mode **at notification time**, not the registration.
 
 **The two deadlock strands (skim-handler-drives-subwave, `vetNotNestedInSkim` removed) map onto these:**
 - **Strand 3** — scheduler workers wedge in `skimPostWork.Execute`'s bare-block `BasicPushSelect`
   (`wave.go:739`) = **I1 + I2** violation. Root: `ShouldBlock()` is true for `taskContext`
   (`ctxmeta.go:266`), routing a task-body result-post to the blocking branch instead of postpone.
-- **Strand 2** — a block-and-help chain whose driver is a limiter-free skim handler; `currentHeldPermit`
-  is nil the whole way down = **I3** violation (the parked ancestor's permit is never suspended /
-  borrowable across the handler).
+- **Strand 2** — TRACE-CONFIRMED (2026-07-14) as an **I4** violation, NOT the suspend/`currentHeldPermit`
+  issue first guessed. Nested block-and-help by limiter-free drain bodies registers demands on the
+  permit pool's **single-head FIFO**; the driver is serially parked on the INNER demand's Waiters while
+  the OUTER demand is the head; a freed permit (`net inUse=0`) wakes the outer head, whose owner is
+  parked deeper, and is lost — the inner (where the goroutine waits) is never promoted. Fix = **I4**
+  (Demand Listeners-only, block-and-help on a local Listener-fed channel). Fix A (strand 3) is
+  necessary but independent; strand 2 needs the I4 rework.
 Both must be fixed to remove the guard — the hang is their *conjunction* (fix A alone: 63%→33%).
 
 **Corollary (PN): `*PostWork` is unnecessary under I1.** The three types
@@ -59,9 +82,29 @@ post-that-might-block carried as a re-drivable scheduler `Work`. They dissolve a
    result-post's block-and-help through `addWorkWhileMaybeBlocking`/`skimSelect` (the push is the
    confirm, composing new-skim-work drain) and DELETE the bare-block `BasicPushSelect` branch. (c)
    assess dissolving the type into the scheduler's native postpone.
-2. **I3 — lazy suspend rework** (strand 2): suspend the held permit at the first skim-execution/park
-   (not eagerly at drive-entry), reacquire only at episode end, help-skim until reacquire. Then remove
-   `vetNotNestedInSkim`. (Grounding via reproduce+trace on HEAD in progress.)
+2. **Strand-2 fix = the I4 rework (Demand/Governor Listeners-only; block-and-help never parks on a
+   demand).** TRACE-CONFIRMED 2026-07-14 (~47% on HEAD): a head-of-line deadlock in the permit pool's
+   **single-head FIFO** under nested block-and-help (details in the I4 invariant above). A first
+   guess-and-fail this session (postpone onto the driver's own workQueue; then route to the scheduler)
+   is REJECTED — PN: top-level dispatch is **driver-local, scheduler untouched until the work is
+   ready**. **The rework map:**
+   - **A. `permits` core.** Strip the Waiters half from `Demand.mailbox` (→ Listeners-only). `Release`/
+     `wake` NOTIFY the demand's registered Listeners instead of a single `p.head`'s mailbox. Reassess
+     whether `p.head`/`promoteScan`/the queue survive at all — likely only for weighted ORDERING, if
+     kept. `Cache.ListenersFor` stops choosing by mode: blockers always register on the Demand's own
+     Listeners; the standing-episode routing moves to NOTIFICATION time (the release decides which
+     demands to notify by the mode then). *Gate: `internal/permits` rapid + `-race`.*
+   - **B. `Governor`** → Listeners-only, same treatment (backpressure clears via a Listener notify).
+   - **C. Block-and-help** (`blockAcquire`/`wv.block` → the new form). A **local wait channel**
+     registered as a Listener on the demand (permit-free) and the governor (backpressure), selected with
+     the **skim-queue inbox** (I2: composes new skim work) and `ctx.Done`. Re-check `acquire`/governor
+     on any wake; no `WaitersFor`, no demand park, no FIFO head. Only blockables = ctx.Done / this
+     Listener-fed channel / the Handoff inbox (I4).
+   - **D. Top-level dispatch** stays inline on the driver: governor + `acquire` (block-and-help via C),
+     then the ready body → `bodyExecutor.PushBack` straight to the executor. **Scheduler is never
+     touched by top-level** (only nested submits go through it).
+   - Then remove `vetNotNestedInSkim` and gate guard-removed at 0 hangs. **Lazy-suspend (I3) is
+     ORTHOGONAL** — separate correctness item, not the strand-2 fix.
 3. **Handoff `*PostWork` simplification** (CP1-CP3 pull-intercept) — task / funnel / flow-fire.
 
 **⚠️ OPEN — verify + document (skimmer seriality under block-and-help).** THE CONTRACT (PN): a wave's

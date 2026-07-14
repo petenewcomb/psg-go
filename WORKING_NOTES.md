@@ -19,6 +19,12 @@ with PN:
   scheduler, which "not user code" left ambiguous — that's the executor's job.)
 - **(I2) A user-code submit** either succeeds immediately (possibly POSTPONED — queued non-blocking for
   re-drive) or BLOCK-AND-HELPS (blocks while draining its own wave). It must never JUST-BLOCK.
+  Block-and-help is mechanically a **single park whose selectFn composes every relevant wake source —
+  and NEW SKIM WORK is always one of them**, regardless of what else the session awaits (a permit, a
+  skim-queue slot, …). The composition lives in `skimSelect` (via `addWorkWhileMaybeBlocking`,
+  wave.go:556) and is already how a permit block-and-help (`wv.block`) responds to skim work. A block
+  that composes no skim-work is not block-and-help — it is a forbidden just-block (the anomaly:
+  `skimPostWork`'s `BasicPushSelect`, wave.go:739).
 - **(I3) A permit held by user code is SUSPENDED** (released to its cache → borrowable) for the entire
   duration of any block-and-help.
 
@@ -41,12 +47,32 @@ post-that-might-block carried as a re-drivable scheduler `Work`. They dissolve a
   branch is the I1/I2 DEADLOCK FIX.
 
 **Sequenced removal (in progress, start = skimPostWork):**
-1. **skimPostWork blocking removal (the fix).** (a) fix A — `ShouldBlock` → top-level-only, so nested
-   posts POSTPONE [validated standalone]; (b) fold the top-level block into the `yield` block-and-help
-   loop and delete the bare-block `BasicPushSelect` branch; (c) assess dissolving the type into the
-   scheduler's native postpone.
+1. **skimPostWork blocking removal (the fix).** (a) ✅ DONE (`91f0dda`) — fix A: `ShouldBlock` →
+   top-level-only, nested posts POSTPONE [1000-check `-race` green, 379s]. (b) route the top-level
+   result-post's block-and-help through `addWorkWhileMaybeBlocking`/`skimSelect` (the push is the
+   confirm, composing new-skim-work drain) and DELETE the bare-block `BasicPushSelect` branch. (c)
+   assess dissolving the type into the scheduler's native postpone.
 2. **I3 — suspend across the limiter-free skim handler** (strand 2). Then remove `vetNotNestedInSkim`.
 3. **Handoff `*PostWork` simplification** (CP1-CP3 pull-intercept) — task / funnel / flow-fire.
+
+**⚠️ OPEN — verify + document (skimmer seriality under block-and-help).** THE CONTRACT (PN): a wave's
+skim handlers run **serially provided the user calls that wave's top-level `Submit` and `Skim*` methods
+serially**. If the user calls them concurrently (a wave explicitly shared across goroutines), handlers may
+run concurrently — the user's own choice, and handlers must then be concurrency-safe. Simple rule:
+**skimmer concurrency mirrors exactly the user's concurrency of top-level-`Submit`/`Skim*` calls; the
+framework adds none.** User-applicable definition of the operative term: **a ctx is "top-level relative
+to wave W" iff it is NOT internal to W** (not a ctx W minted for its own bodies/handlers). The user's
+whole test is thus local — *did this call pass a context from inside W, or an outside/independent one?*
+Outside ⇒ top-level ⇒ block-and-help + this serial contract; inside ⇒ nested ⇒ postpone. (Confirm this
+matches the code's `IsTopLevel`/`ShouldBlock` determination when documenting.)
+- **Verify:** the framework never runs a wave's skim handler off a *drive goroutine* (one the user called
+  top-level-`Submit`/`Skim*` on). Block-and-help skims INLINE on the caller's goroutine (adds none);
+  scheduler/executor never run handlers; fix A's postpone re-drives the *result-post* (push into
+  `skimQueue`), NOT the handler. Confirm no path violates this.
+- **Document:** the mirror rule + the surprise that a plain top-level `Submit` may run *pending* handlers
+  inline (block-and-help) — always on the caller's goroutine, so it never breaks a seriality the user did
+  not create. NOT specific to 1b: the **permit** block-and-help already skims (`wv.block`→`skimSelect`),
+  so this covers every top-level block-and-help site.
 
 ---
 

@@ -2,6 +2,54 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► DISPATCH/EXECUTION SPLIT — INVARIANTS SETTLED (2026-07-14). Design-review outcome; supersedes the checkpoint's next-steps below.**
+
+The split is BUILT AND WIRED, not an open architecture question: `defaultPool` is an admission-only
+`workq.Scheduler` (its `Work` phase is a no-op, `scheduler.go:167`) and user bodies run on a separate
+`bodyExecutor` (`execpool`); C1/B/C2a/C2b **and the C2c cutover** have landed. What remains is INVARIANT
+COMPLETION — closing the scheduler-side waits that still block on user code. Three invariants, settled
+with PN:
+
+- **(I1) Every scheduler-goroutine wait must be bounded by the framework** — it terminates even if no
+  user code ever makes progress. Executor block-as-demand qualifies (bounded by *unconditional spawn*;
+  this DEPENDS on executors staying uncapped / nesting-bounded — capping them would make the handoff
+  user-code-bounded and break I1). Scheduler-side drain waits and blocking permit acquires do NOT
+  qualify and are forbidden on the scheduler. (This is the operative form of "never wait on user code";
+  it names the liveness property directly, so it also forbids a *blocking* permit `AcquireWait` on the
+  scheduler, which "not user code" left ambiguous — that's the executor's job.)
+- **(I2) A user-code submit** either succeeds immediately (possibly POSTPONED — queued non-blocking for
+  re-drive) or BLOCK-AND-HELPS (blocks while draining its own wave). It must never JUST-BLOCK.
+- **(I3) A permit held by user code is SUSPENDED** (released to its cache → borrowable) for the entire
+  duration of any block-and-help.
+
+**The two deadlock strands (skim-handler-drives-subwave, `vetNotNestedInSkim` removed) map onto these:**
+- **Strand 3** — scheduler workers wedge in `skimPostWork.Execute`'s bare-block `BasicPushSelect`
+  (`wave.go:739`) = **I1 + I2** violation. Root: `ShouldBlock()` is true for `taskContext`
+  (`ctxmeta.go:266`), routing a task-body result-post to the blocking branch instead of postpone.
+- **Strand 2** — a block-and-help chain whose driver is a limiter-free skim handler; `currentHeldPermit`
+  is nil the whole way down = **I3** violation (the parked ancestor's permit is never suspended /
+  borrowable across the handler).
+Both must be fixed to remove the guard — the hang is their *conjunction* (fix A alone: 63%→33%).
+
+**Corollary (PN): `*PostWork` is unnecessary under I1.** The three types
+(`skimPostWork`/`taskPostWork`/`funnelPostWork`, + the flow-fire post) are the pre-split shape of a
+post-that-might-block carried as a re-drivable scheduler `Work`. They dissolve along two seams:
+- `taskPostWork`/`funnelPostWork`/flow-fire → the scheduler's terminal handoff (CP1-CP3 pull →
+  `PushBack`, not yet landed). Already I1-safe (TryPushBack-first, block only on spawn) — a pure
+  SIMPLIFICATION, not a fix.
+- `skimPostWork` → postpone (nested) or block-and-help via `yield` (top-level). Removing its bare-block
+  branch is the I1/I2 DEADLOCK FIX.
+
+**Sequenced removal (in progress, start = skimPostWork):**
+1. **skimPostWork blocking removal (the fix).** (a) fix A — `ShouldBlock` → top-level-only, so nested
+   posts POSTPONE [validated standalone]; (b) fold the top-level block into the `yield` block-and-help
+   loop and delete the bare-block `BasicPushSelect` branch; (c) assess dissolving the type into the
+   scheduler's native postpone.
+2. **I3 — suspend across the limiter-free skim handler** (strand 2). Then remove `vetNotNestedInSkim`.
+3. **Handoff `*PostWork` simplification** (CP1-CP3 pull-intercept) — task / funnel / flow-fire.
+
+---
+
 **►►► SKIM-HANDLER-DRIVES-SUBWAVE DEADLOCK — DIAGNOSED, CHECKPOINT (2026-07-13). Resume in a fresh session.**
 
 Investigated whether `vetNotNestedInSkim` (the guard forbidding a skim handler from driving a

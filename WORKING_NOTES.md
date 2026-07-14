@@ -25,8 +25,15 @@ with PN:
   wave.go:556) and is already how a permit block-and-help (`wv.block`) responds to skim work. A block
   that composes no skim-work is not block-and-help — it is a forbidden just-block (the anomaly:
   `skimPostWork`'s `BasicPushSelect`, wave.go:739).
-- **(I3) A permit held by user code is SUSPENDED** (released to its cache → borrowable) for the entire
-  duration of any block-and-help.
+- **(I3) A permit held by user code is SUSPENDED LAZILY.** A body holds its permit while running its
+  OWN code and suspends (releases to its cache → borrowable) only when it stops running own code — at
+  the first skim-handler execution or ANY park. **Sub-wave drive and block-and-help are the SAME thing**
+  (a park that helps by skimming), so there is ONE uniform suspend trigger: *any park*. A no-op drive
+  (immediate post, nothing to skim, no park) never suspends. Reacquire is ONE coarse bracket at episode
+  end (control returns to own code), and it keeps HELPING (skimming) until it actually reacquires. TODAY
+  suspend fires EAGERLY at drive-entry (`suspendHeldPermit` atop `ctxMeta.ExecuteNowOrQueue`/`wv.block`);
+  the I3 rework moves it to fire lazily at the first skim-execution/park. (Suspend is correct only for a
+  resource freed while parked — see the non-suspending-limiter note below.)
 
 **The two deadlock strands (skim-handler-drives-subwave, `vetNotNestedInSkim` removed) map onto these:**
 - **Strand 3** — scheduler workers wedge in `skimPostWork.Execute`'s bare-block `BasicPushSelect`
@@ -52,7 +59,9 @@ post-that-might-block carried as a re-drivable scheduler `Work`. They dissolve a
    result-post's block-and-help through `addWorkWhileMaybeBlocking`/`skimSelect` (the push is the
    confirm, composing new-skim-work drain) and DELETE the bare-block `BasicPushSelect` branch. (c)
    assess dissolving the type into the scheduler's native postpone.
-2. **I3 — suspend across the limiter-free skim handler** (strand 2). Then remove `vetNotNestedInSkim`.
+2. **I3 — lazy suspend rework** (strand 2): suspend the held permit at the first skim-execution/park
+   (not eagerly at drive-entry), reacquire only at episode end, help-skim until reacquire. Then remove
+   `vetNotNestedInSkim`. (Grounding via reproduce+trace on HEAD in progress.)
 3. **Handoff `*PostWork` simplification** (CP1-CP3 pull-intercept) — task / funnel / flow-fire.
 
 **⚠️ OPEN — verify + document (skimmer seriality under block-and-help).** THE CONTRACT (PN): a wave's
@@ -65,6 +74,16 @@ to wave W" iff it is NOT internal to W** (not a ctx W minted for its own bodies/
 whole test is thus local — *did this call pass a context from inside W, or an outside/independent one?*
 Outside ⇒ top-level ⇒ block-and-help + this serial contract; inside ⇒ nested ⇒ postpone. (Confirm this
 matches the code's `IsTopLevel`/`ShouldBlock` determination when documenting.)
+
+**FOR LATER — non-suspending limiter class (PN).** Suspend-on-park (I3) is correct only for a resource
+FREED while its holder is parked — CPU: a parked goroutine consumes none, so lending the permit is
+sound. A limiter over a resource that REMAINS in use while parked — **memory, a pooled connection** —
+must NOT suspend: the bytes / the connection are still held by the parked body, so lending its permit
+would overcommit the real resource. Need a **non-suspending limiter class** (holder keeps its permit
+through parks; no lend/borrow, no inheritance from it). Check whether the `permits`/limiter surface
+already distinguishes suspendable vs. not; if not, add it. Interacts with deadlock-freedom: a
+non-suspending permit is NOT borrowable-while-parked, so its liveness must come from the holder actually
+completing, not from a steal — confirm that still holds.
 - **Verify:** the framework never runs a wave's skim handler off a *drive goroutine* (one the user called
   top-level-`Submit`/`Skim*` on). Block-and-help skims INLINE on the caller's goroutine (adds none);
   scheduler/executor never run handlers; fix A's postpone re-drives the *result-post* (push into

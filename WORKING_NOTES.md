@@ -2,6 +2,72 @@
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► SKIM-HANDLER-DRIVES-SUBWAVE DEADLOCK — DIAGNOSED, CHECKPOINT (2026-07-13). Resume in a fresh session.**
+
+Investigated whether `vetNotNestedInSkim` (the guard forbidding a skim handler from driving a
+sub-wave) is removable now that task-to-task scatter landed (commit `4519665`). Removing it
+DEADLOCKS. Full diagnosis below; the experiment is saved as `.claude/skim-subwave-deadlock-experiment.patch`
+(untracked, gitignored) and the tree was reverted to `4519665` (clean) so this session's throwaway
+instrumentation/biased-config doesn't linger.
+
+**Resume:** `git apply .claude/skim-subwave-deadlock-experiment.patch` re-applies the guard removal + candidate
+fixes + trace instrumentation + biased sim config. Then loop the hang test:
+`for i in $(seq 1 30); do timeout 15 go test -run TestBySimulation -count=1 -rapid.checks=1 -timeout 12s . 2>&1 | grep -q "test timed out" && echo HANG; done`
+
+**Repro (in the patch's `simulation_test.go` bias + `plan.go`):** force every skim handler to drive a
+subjob (`Skimmer.Handle.Subjob.Add=1.0`) with skim-handler subjobs enabled in the generator
+(`plan.go`: skim `newFunc(..., allowSubjob=true)`), one shared 1-permit task limiter, zero SelfTime,
+small counts. Hang rate at baseline (guard removed, no fix): **~63%**.
+
+**Deadlock mechanism (PROVEN via runtime `-trace` + `internal/cmd/fmttrace`):** a three-way cycle —
+1. Permit-holding task bodies park in `defaultPool.Post` (in-body `Submit` → `workerExEnv.ExecuteNowOrQueue`
+   → `Scheduler.Post`), holding their permit, waiting for a scheduler worker.
+2. `Post` can't complete — no scheduler worker is live.
+3. Scheduler workers are backpressure-blocked INSIDE `skimPostWork.Execute` (`rdvq.BasicPushSelect`,
+   `internal/rdvq/queue.go:96`) pushing skim results into a full skim queue — violating the
+   always-live-dispatcher invariant. `block-as-demand` spawns a cascade of replacement workers, all
+   backpressure-block (spawn tree observed: g20→g21→g34,g35→g23,g50,g51→g66→g67).
+4. The skim queue can't drain because draining runs skim handlers that drive subwaves needing the
+   permits held in (1).
+Second strand: block-and-help acquire chains (`blockAcquire` → `wv.block`) where the DRIVER is a skim
+handler (holds no permit), so `suspendHeldPermit`'s lend never fires — `currentHeldPermit(meta)` is nil
+on the whole drive chain (chain-dump instrumentation showed every meta `held=false`, `permitRoot=false`;
+`headGather` logs show `anyInUse=true suspended=0` forever).
+
+**Two partial fixes tried (both in the patch):**
+- **(A) `ctxMeta.ShouldBlock()` → top-level only (drop `taskContext`).** Rationale: a task body's
+  in-body skim-post is downstream routing of already-bounded in-flight work, not new entry — it should
+  postpone like skim/funnel bodies already do (they return false in `ShouldBlock`). taskContext is no
+  longer special. Result: **halved the hang rate (63%→~33%).** Correct on its own; keep it.
+- **(B) `gateAcquire` postpone-only (removed block-and-help).** Result: **0% hangs**, BUT every run
+  PANICS — `ex.AddToListeners` for a top-level admission is a panic guard (set in
+  `ctxMeta.ExecuteNowOrQueue`) because top-level dispatch work runs INLINE, not as a re-invocable queued
+  item. WRONG — it threw out the block-and-help *driving* that admission needs.
+
+**Corrected direction (PN):** postpone *permit acquisition*, NOT admission. Admission must KEEP
+block-and-helping (the driver must keep draining the wave); only the permit-needing work postpones
+(register on the permit cache waiters, re-drive when a permit frees) — don't park the goroutine on that
+specific permit's wake. The real obstacle: **top-level admission work runs inline and can't postpone**
+(the panic guard encodes "top-level blocks, never postpones"). So the fix = make top-level admission
+RE-DRIVABLE = the **dispatch/execution split** (TODO.md's named next major piece; also what the
+pre-existing ~1/120 nested-drain `-race` hang needs). Once admission is postpone-capable,
+`vetNotNestedInSkim` becomes removable — the guard was compensating for block-and-help all along.
+
+**Next steps (fresh session):**
+1. Rework `blockAcquire`/`wv.block`: help-drain, then postpone the permit-work on the cache waiters
+   (keep helping; don't park on the permit) — WITHOUT removing the help.
+2. Make top-level admission re-drivable: replace the `ex.AddToListeners` panic guard in
+   `ctxMeta.ExecuteNowOrQueue` with a real registration + re-drive of the postponed top-level work.
+3. Re-run the biased hang loop → expect 0 hangs, no panic, clean assertions. Then full `-race`
+   `TestBySimulation` gate with `vetNotNestedInSkim` removed.
+4. Land fix (A) (`ShouldBlock` top-level-only) regardless — it's a correct, standalone improvement.
+
+**Follow-up (PN):** audit how much `ctxType` still matters beyond top-level-or-not. Across the codebase
+only `topLevelContext` (3 sites) and `skimContext` (3 sites) are ever explicitly compared; `taskContext`
+and `funnelContext` never are. Likely collapses toward {top-level, skim, other}.
+
+---
+
 **►►► DEVELOPMENT.md TIGHTENING + CODEBASE COMMENT SWEEP — DONE (2026-07-13, uncommitted).**
 DEVELOPMENT.md: comment/testing/design-guideline edits plus additions — naming conventions
 stated by their reasons (prose call sites, no qualifier/type suffixes, project-wide metaphor

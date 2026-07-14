@@ -701,52 +701,39 @@ func (wk *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 			return wk.wave.skimQueue.TryPushBack(wk.work, nil)
 		}
 
-		for {
-			if tryPost() {
-				return true, nil
-			}
+		if tryPost() {
+			return true, nil
+		}
 
-			if !ex.ShouldBlockOrPostpone() {
-				return false, nil
-			}
+		if !ex.ShouldBlockOrPostpone() {
+			return false, nil
+		}
 
-			if !wk.shouldBlock {
-				// We expect to be queued and called again, so listen and don't block
-				ex.AddToListeners(wk.wave.skimQueue.Listeners())
-
-				// Check again after registering for notification, but return
-				// and expect to be called again if needed
-				posted := tryPost()
-				if !posted {
-					waiting()
-				}
-				trace.Logf(ctx, traceRegion, "meta.QueueFunc() != nil, posted=%v", posted)
-				return posted, nil
-			}
-
-			// Use blocking post
-			posted := true
-			var err error
-			wk.wave.skimQueue.PushBackFunc(wk.work, nil, func(outboxCh chan<- workq.Work) bool {
-				posted = false
-
-				// Slow path, really going to block now
-				ex.Blocking()
-
+		if !wk.shouldBlock {
+			// Nested/queued: postpone. Register for a skim-queue slot and re-check;
+			// a scheduler worker re-drives this post when a slot frees.
+			ex.AddToListeners(wk.wave.skimQueue.Listeners())
+			posted := tryPost()
+			if !posted {
 				waiting()
+			}
+			trace.Logf(ctx, traceRegion, "postponed, posted=%v", posted)
+			return posted, nil
+		}
 
-				var sent bool
-				sent, err = rdvq.BasicPushSelect[workq.Work](ctx, outboxCh, wk.work)
-				if sent {
-					posted = true
-				}
-				return sent
-			})
-			trace.Logf(ctx, traceRegion, "meta.ShouldBlock(), posted=%v, err=%v", posted, err)
-			if posted || err != nil {
-				return posted, err
+		// Top-level backpressure: block-and-help. wv.block parks on skimSelect —
+		// which composes new skim work as a wake source — so this help-drains the
+		// wave (freeing skim-queue room) while retrying the push, and never
+		// just-blocks the driver on a full queue.
+		ex.Blocking()
+		for !tryPost() {
+			waiting()
+			if _, err := wk.wave.block(ctx, time.Time{}, nil, nil); err != nil {
+				trace.Logf(ctx, traceRegion, "block-and-help ended, err=%v", err)
+				return false, err
 			}
 		}
+		return true, nil
 	}()
 
 	if posted {

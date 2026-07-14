@@ -262,12 +262,12 @@ func (cm *ctxMeta) IsTopLevel() bool {
 }
 
 func (cm *ctxMeta) ShouldBlock() bool {
-	switch cm.ctxType {
-	case topLevelContext, taskContext:
-		return true
-	default:
-		return false
-	}
+	// Only top-level work — the entry point into the wave — blocks for backpressure.
+	// A body's in-flight downstream routing (task, skim, or funnel context alike)
+	// postpones instead: it is already-admitted work, so blocking it would pin its
+	// permit without bounding entry, which the Governor and the top-level block-and-help
+	// gate already handle.
+	return cm.ctxType == topLevelContext
 }
 
 func (cm *ctxMeta) Lock() {

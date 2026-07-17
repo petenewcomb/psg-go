@@ -57,10 +57,16 @@ propagates until exactly one of three things happens:
   taken by a racing acquirer, or the worker's postponed items wait on something
   else). The worker forwards the token — it re-enters the propagation domain and continues to
   the next registered listener or parked waiter.
-- **A provably-safe drop.** Delivery found no registered listener and no parked
-  waiter anywhere in the domain. This is legal precisely because of principle 1:
-  any worker that registers later will re-attempt everything after registering,
-  and the capacity is already visible.
+- **The terminal fallback.** Delivery found no registered listener and no parked
+  waiter anywhere in the domain, so the token's fallback action runs. On a
+  spawn-capable pool (scheduler, executor) the fallback is the demand-spawn
+  signal — postponed work may remain with no worker to try it, and no worker
+  would otherwise arrive, so the chain ends by *creating* the worker it could
+  not find. Only where no postponed work can be left unattended is the fallback
+  a true drop — a user-goroutine domain, where admission is governed and the
+  work waits for the user's return. Either way this is legal because of
+  principle 1: any worker that arrives later re-attempts everything after
+  registering, and the capacity is already visible.
 
 Propagation visits **listeners first, then waiters** — listeners represent
 in-process postponed work, waiters represent goroutines with nothing else to do —
@@ -68,7 +74,8 @@ and each notification domain is a `Notifier` (a `Listeners` set plus a `Waiters`
 set) scoped to the resource that mints into it: one per permit pool, one per
 governor, one per buffered queue's free-position events.
 
-Two registration kinds, deliberately asymmetric:
+Two registration kinds — different in what a delivery does, alike in that
+neither may end a token:
 
 - **Listeners are one-shot proxies and their deliveries re-circulate.** A queue
   with postponed work registers its single listener with the resource's notifier;
@@ -77,19 +84,43 @@ Two registration kinds, deliberately asymmetric:
   re-registers it, and the token that consumed it is still alive. If the woken
   worker cannot use the token, the forward re-enters the *resource's* notifier and
   the walk continues.
-- **Waiters are direct claimants and their failed re-checks are terminal.** A
-  goroutine parked in the resource's own waiter set re-checks the resource when
-  woken (its park confirm). If the re-check fails, the capacity is genuinely gone
-  — some acquirer took it — so the token is surplus and dies there. This is the
-  chain's only intentional sink besides productive consumption.
+- **Waiters re-check and, on failure, forward like everyone else.** A goroutine
+  parked in the resource's own waiter set re-checks the resource when woken (its
+  park confirm); a failed re-check tells it nothing it may act on — under
+  arrival-order reservation, capacity can sit free yet be held for a demand
+  ahead of it — so it forwards the token onward.
 
-Without that asymmetry, a surplus token could circulate forever, each hop waking a
-worker whose retry fails and who re-registers before forwarding. With it — plus
-the facts that a queue's listener object registers at most once per notifier
-(`Listener` tracks the sets it is in) and that listener sets deliver in FIFO order
-(a re-registration goes to the back, so a token never redelivers immediately to
-the worker that just forwarded it) — every token either finds a claimant or
-exhausts a finite set and terminates.
+A token ends in exactly one way besides productive consumption: **exhaustion of
+the domain** — the walk finds no registration left to offer it to, and the
+terminal fallback runs. The sets-empty test belongs entirely to the notifier; no
+resource semantics (headship, eligibility, gating) participate in it. But
+sets-empty alone does not license a drop: if postponed work remains with nobody
+to try it, the fallback must produce a worker — which is exactly what the
+demand-spawn fallback does on spawn-capable pools. A genuine drop is the
+fallback only where unattended postponed work is impossible or deliberately
+waits (user-goroutine domains under the governor). Exhaustion-with-drop is then
+the nobody-parked proof in general form: everyone parked was offered the token
+and failed, and anyone not parked is running and will attempt everything on its
+own before parking — including the claimant the capacity is reserved for.
+Termination is reachable, not just legal, because offers pop one-shot
+registrations and a woken party **forwards before it re-registers** (in the
+baseline this ordering is the forward at the top of the retry loop): a bouncing
+token strictly shrinks the set it can still visit and reaches the fallback the
+moment the sets empty.
+
+One correction to the baseline code is folded in here: its notifier attached
+the re-circulating forward only to listener deliveries — a waiter's forward ran
+the mint's fallback, a no-op for permit releases, making waiters terminal
+sinks. That was a latent conservation bug, not a design choice: it contradicts
+the principle as documented even then ("notifications must keep flowing until
+someone can act or there is genuinely nothing left to wake"), nothing in the
+code defends it, and it leaks even with weight-1 permits once waits compose —
+a waiter's failed re-check of *its* condition proves nothing about the
+different condition of the registrant beside it that the fungible token could
+have satisfied. It hid because the leak needs that coincidence; arrival-order
+reservation would have promoted it from rare to systematic. Under the current
+model, waiter deliveries re-circulate like listener deliveries, and only
+exhaustion ends a token.
 
 ## Fungibility, and why this is just counting
 
@@ -102,23 +133,24 @@ therefore a counting invariant, not a routing one:
 > consumed.
 
 Each enabling event mints; each productive start spends one token and one
-enablement; forwards preserve the count; drops happen only when the count
-argument shows the token surplus (terminal waiter re-check failed, or nobody
-parked). Nothing needs to know *which* capacity a token stands for.
+enablement; forwards preserve the count; a token dies only on domain exhaustion,
+where the count argument shows it surplus. Nothing needs to know *which*
+capacity a token stands for.
 
 FIFO admission order (the permit pool holds freed capacity for the demand first
 in line) is not in tension with this — it is complementary. Reservation
 guarantees that when the token finally reaches the one worker that can retry the
 head demand's work, that wake is productive: bystanders were gated off the
 reserved capacity, so it cannot have been raced away. Conservation guarantees
-that worker is eventually reached. Reservation makes the terminal hop
+that worker is eventually reached. Reservation makes the final hop
 deterministic; conservation makes reaching it inevitable.
 
 ## The invariants
 
-These five rules are the whole contract. Every one of them was implicitly true at
-the baseline; every deadlock in this model's history has been a violation of one
-of them introduced by later work.
+These five rules are the whole contract. The baseline honored them implicitly —
+with one latent exception: rule 4 was violated by its waiter-terminal shortcut,
+a rarely-triggered conservation leak this model fixes. Every deadlock in this
+model's history has been a violation of one of these rules.
 
 1. **Mint after visibility.** A token is minted only after the capacity it
    announces is observable (the release lands, *then* the notify). Otherwise a
@@ -136,11 +168,15 @@ of them introduced by later work.
    distributed obligation: it binds every park site, every select composition,
    every controller loop that saves a notification across an iteration.
 
-4. **Terminal waiters, re-circulating listeners.** A direct claimant's failed
-   re-check ends the token; a proxy (listener) delivery that fails to start work
-   forwards it. Collapsing the two in either direction breaks the model: all-
-   terminal loses tokens while claimants exist elsewhere; all-re-circulating spins
-   surplus tokens forever.
+4. **Death only by exhaustion, into the terminal fallback.** No delivery
+   outcome ends a token — a failed re-check proves nothing under arrival-order
+   reservation. A token ends only when the walk finds no listener or waiter left
+   to offer it to, a test that belongs to the notifier alone — and what runs
+   then is the token's fallback: the demand-spawn signal wherever postponed work
+   could otherwise be left with no worker to try it, a true drop only where it
+   cannot. Reachability of exhaustion rests on one-shot registrations plus
+   forward-before-re-register; safety rests on invariant 2 plus the spawn
+   fallback.
 
 5. **Re-probe for multi-unit events.** An event that frees more than one unit — a
    weighted permit release, a concurrency-limit raise — can satisfy several
@@ -195,9 +231,9 @@ structural; addressing as the *mechanism* is rejected below.
 ## Verification
 
 Planned, not yet built: **token accounting in the simulator**. The sim's
-instrumented builds count mints, productive consumptions, and drops annotated
-with their justification (terminal re-check vs nobody-parked proof), and assert
-balance at quiescence. No production mechanism — observability only. The
+instrumented builds count mints, productive consumptions, and exhaustion deaths
+(each carrying its emptied-domain proof), and assert balance at quiescence. No
+production mechanism — observability only. The
 recurring failure mode this catches is the silent one: a migration that changes a
 wake's delivery style and turns a forward into a no-op, which today surfaces only
 as a rare hang under the simulator's adversarial schedules.

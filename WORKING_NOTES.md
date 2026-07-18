@@ -1,6 +1,234 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► SUPERSEDED (2026-07-17): the settled design and sequencing now live in
+`docs/plan/conservation-rework.md`, governed by `docs/notification-conservation.md`
+with vocabulary in `docs/glossary.md`. The "SETTLED DESIGN — THE BUILD SPEC" below
+(2026-07-15) is REJECTED in its wake-side entirety (addressed delivery via
+persistent per-demand targets + suspension routing) and survives only where the
+plan names pieces (the internal/dll mutex FIFO). The uncommitted tree still holds
+partially-wrong work-in-progress from the rejected spec; rework it per the plan,
+seam by seam, with PN walk-through before each lands. Reference baseline worktree:
+`.claude/worktrees/baseline` @ 6b4750c.**
+
 This document contains working notes and context for development on the `combiner` branch.
+
+**►►► SETTLED DESIGN — THE BUILD SPEC (2026-07-15 design review with PN; supersedes every
+mechanism note below; the tree does NOT yet reflect this).** Every invention from the 07-14
+session is deleted or replaced by PN-specified structure. Principles recorded first, then the spec.
+
+**Principles (PN, verbatim-adjacent):** (P1) Skim is exactly where backpressure belongs — a
+skimmer submission returns to a USER goroutine; only the user scales user goroutines; a funnel is
+tantamount to a scalable, scheduler-controlled, autoscaling skimmer set. (P2) A wave queue cannot
+spawn consumers, so liveness cannot be guaranteed as for schedulers — hence the actionability
+invariant (S4). (P3) If nobody is blocking on a wave, nobody awaits its results — no notification
+obligation, period. (P4) wake() is fire-and-forget incremental broadcast; conservation lives in
+the targets, composed at registration. (P5) The cursor is just a cache — never load-bearing.
+(P6) Queue-management needs only demand-side signals mutated by the owner/designated actor.
+(P7) The sim SHOULD exercise all possible paths, including ones unlikely in real applications —
+correctness under sim-generated extremes (handler errors, deep nesting) is the requirement, not
+a reason to narrow the generator. (P8) Errors bubbled through Submit or Skim are a SHORT-CIRCUIT
+akin to panic but without undefined behavior — ALWAYS SAFE TO RECOVER FROM. Every bubble path
+must therefore restore full consistency on the way out (demands invalidated — the (iv) rule is
+an instance — permits released or reclaimable, work freed, refcounts balanced), so the caller
+can catch the error and continue using the wave/pool freely. Build-time: audit every bubble
+path against this; add explicit bubble-then-reuse tests (error out of Submit/Skim, then keep
+driving the same wave/pool and assert consistency).
+
+**S1 — `internal/dll`:** generic intrusive doubly-linked list in the `internal/heap` style
+(embeddable `Links[T]`, small `Item[T]` interface, `List[T]` PushBack/Remove/Front/Next;
+zero-value ready; caller-guarded). Later candidate (separate pass): migrate `cacheList`.
+
+**S2 — permits queue = one mutex + intrusive lists.** Demand embeds links; registered ⇔ linked;
+invalidation/retirement = IMMEDIATE UNLINK. Deleted outright: demandEntry, the nbcq demand queue,
+promoting marker, headGen, passToken/nextScanToken, displaceSuspendedHead, all Gosched spins,
+retireHead's displaced branch, headOverdraft's lost-CAS unwind, install re-validation, the
+weigh-once panic (changed weight ⇒ new registration; gen bumps at EVERY registration end — now
+hygiene only; whether gen survives at all = later keep-or-gut review). The pool mutex guards both
+lists, the cursor cache, the wake walk, enqueue/retire/invalidate, armed-mode mutation. Lock-free:
+cursor nil-check (gate armed?) + the exemption evaluation. Episode claimants = a second intrusive
+list on od (same embedded links; membership exclusive with the FIFO); episode sentinel = a
+front-linked never-suspended entry. Suspended-in-place demands KEEP their list position (pass-over
+is a positional no-op).
+
+**S3 — exemption memo:** Cache gains {exemptEpoch, exempt} (BOTH cached — non-exempt caches
+re-test across registrations under a long episode); Pool gains atomic anchorEpoch. Install
+publishes the new head/anchor THEN bumps the epoch; lock-free readers do the epoch/anchor/epoch
+double-read. The walk early-stops at any current-epoch stamp and stamps visited nodes with the
+result; NewChild copies the parent's stamp verbatim; nothing is ever cleared. strangerSuspended
+stays walk-based (rare, mutable inputs).
+
+**S4 — wake model + actionability invariant (the (iii) resolution):** The demand mailbox
+(rdvq.Notifier) is DELETED. A registration carries ONE persistent notify target: a scheduler
+queue's listener (audience or SPAWN — I1's bounded-by-spawn applied to re-drives; never misses),
+a wave queue's listener, or a goroutine-local park (plain waits: AcquireWait, reclaim's
+ErrWaveDone fallback). Bare pollers: nil target (capacity stays reserved — pinned barrier
+semantics preserved). Targets are references, not consumable registrations — t4's
+consumed-listener dead head is unconstructible. wake() under the mutex: walk from the front,
+skip suspended, fire the FIRST active demand's target, fire-and-forget, nil fallback (exhaustion
+= every actor was offered; nothing left to do). No decline handling — every ACTIVE target is
+deliverable BY INVARIANT: wave-queue postponed demands are SUSPENDED except while a submit/skim
+is actually blocking in that wave's AddWork (P2/P3). Maintenance is controller-owned: the
+pre-park listen-retry sweep re-presents each postponed work (gateAcquire-top Resume = the
+activation); postponement-without-parking suspends (one flag store at the single postpone door);
+mid-cycle staleness is compensated by the cycling driver's own retries. The gather-right
+(effective head) keys off the same skip rule — capacity and headship flow past audience-less
+wave demands (PN-blessed fairness grant; the honest meaning of P1); position is kept in place.
+Deleted with the mailbox: Waiters.Deliver, the workq bridge (listener.Notify=waiters.Deliver,
+eee5322 — restore total queue-side conservation), the delivery walk over mailbox entries, and
+the blocker demand-park channel (blockWaitCh through skimSelect) — a block-and-helper IS the
+wave's AddWork audience and its confirm re-presents on any wake.
+
+**S5 — work-side lifecycle (Option 1):** ExecuteNowOrQueue's miss goes to the queue's INCOMING
+(the Scheduler's Post handoff; the wave's Pending intake — exact wave mapping to verify at
+build), never directly to postponed; fresh is written only by a controller reading incoming.
+Postponement is scheduler-only and atomic with target registration: requeueBuffer is THE door,
+always preceded by a listen-capable test (invariant: nothing postponed-and-unregistered across a
+park — cycling drivers are the actionability between parks). FIFO registration happens at
+scheduler ACCEPTANCE, not at the inline try (the inline try is registration-free — pool-mutex
+contention is thereby limited to scheduler/driver goroutines). Skim-context nested admissions
+STAY on wave queues (P1 — backpressure by design).
+
+**S6 — (iv) RESOLVED (PN ruling):** errors that bubble through a block or help-and-block MUST
+Invalidate any held demand (the whole joint set) — immediate unlink, hoard drained at
+abandonment, idempotent with Reset. The bubble path is for UNEXPECTED errors only; expected
+errors (helped HANDLER errors, application-level) are dealt with in the flow proper — so
+blockAcquire's abort-on-helped-error AND reclaim's swallow are both corrected: help-execution
+routes handler errors into the wave's own error contract (exact routing verified against the
+Skim/drive error semantics at build), and the block paths return only unexpected errors, always
+with the Invalidate. gateAcquire's one-shot-miss suspend is GONE (Option 1: inline try never
+registers); the postpone-branch suspend is subsumed by S4's postpone-without-park rule; the
+gateAcquire-top Resume survives as S4's activation-at-presentation.
+
+**S7 — (vii) RESOLVED (final review item, presented without objection):** the blockAndHelp
+bracket survives as the owner-side half of S4 — suspend exactly while help work executes
+(including ExecuteOne's run-buffered-work-before-parking path), resume in the confirm on the way
+into every park; parked = the wave's AddWork audience = active. DELETED: the block channel
+(blockWaitCh) and its skimSelect composition, the nested block WaitFunc layer, orphan handling,
+and the permit-case deadline threading — the park is solely the wave queue's waiters and the
+confirm's re-present converts any queue wake into a gather. blockAndHelp reduces to:
+loop { present; if held return; suspend; ExecuteOne (help); resume-in-confirm → park }.
+suspendHeldPermit/reclaimJoint (permit lending) untouched. THE GOVERNOR IS UNCHANGED: its
+blocked submitters park in borrowed local inboxes on its own waiters (audience = the blockers
+themselves; no manager case), already the S4 target shape; it keeps the deadline-timer path
+through `block`.
+
+**Suggested build order (checkpoint at green after each):** (1) internal/dll (+ unit tests);
+(2) permits core rewrite on it (S2/S3/S4 pool side) gated by permits rapid+-race — note the
+permits suspension tests and TestBarrierFIFOOrderAndGating need updating to the new positional/
+reservation semantics FIRST or alongside; (3) workq lifecycle (S5: incoming rerouting,
+requeueBuffer door, target registration; delete Deliver + bridge) gated by workq tests; (4) wave
+plumbing reduction (S7) + permithandle rewiring + the (iv) bubble-Invalidate rule; (5)
+bubble-then-reuse tests (P8); (6) gates: unbiased checks=100 loop (the fast repro), then the
+1000-check -race batch, then full suites + lint. CURRENT TREE STATE: the 07-14 slim
+recomposition (see the SESSION END-STATE banner below — permits/wave/permithandle deltas +
+guard removal + new tests); the build REPLACES those permits/wave/permithandle deltas and keeps
+the guard removal + test scaffolding.
+
+**Still open (tracked, not blocking):** blockAndHelp bracket shape (expect major
+simplification: no block channel; entry-suspend vs the S4 invariant); the Governor's treatment
+(adjacent to vii); the gen keep-or-gut review; the wave-incoming mapping verification; a workq
+audit against PN's intent (drift accumulated from my earlier sessions: eee5322, 1f27117,
+7d078e1); test updates against the new positional/reservation semantics.
+
+**►►► SESSION END-STATE (2026-07-14 late): slim composition + three more fixes; ONE parked wedge
+remains (fast repro).** After the recomposition below, iterating on the unbiased repro
+(rapid.checks=100 no -race, full config, ~every run) found and fixed IN ORDER:
+1. **Manager-postpone demands SUSPEND** (gateAcquire postpone branch): the re-drive listener is a
+   capacity→re-drive bridge, not a guaranteed consumer (its deliver DECLINES when no driver is
+   parked, consuming the one-shot registration) — so the demand stays suspended until a re-drive
+   presents it (gateAcquire-top Resume).
+2. **Suspend() is FLAG-ONLY — the eager self-displacement was a CPU livelock engine**
+   (user≈real 10m31s/10m01s: every block-and-help ENTRY suspend displaced the just-promoted head,
+   promoting+notifying the peer admission, whose entry-suspend handed it straight back — perpetual
+   handoff, each waking the other). Diagnostic technique: `time` one run; user≈real ⇒ spin,
+   user≪real ⇒ parked.
+3. **wake() displaces a head ONLY if its owner declared it suspended** (≤2 sightings, then the
+   all-suspended drop-compensated class) — the poller-safe form of the earlier-rejected wake walk:
+   pollers are never flagged, so TestBarrierFIFOOrderAndGating semantics hold (suite green).
+REMAINING: a PARKED wedge (user≪real), ~every checks=100 run: 7 blockAcquire admissions parked-armed
++ 7 nested CloseAndSkimAll drivers + 1 top driver (r7.log dump; earlier t6 tail showed heads cycling
+with `headGather wait: anyInUse=true suspended=0` — a permit held by something that neither runs nor
+lends is the prime suspect; possibly the same holder class strand-2's original diagnosis flagged,
+now reachable at scale). NEXT SESSION: trace r7-style with PSGTRACEINTERNALS=permits, find the
+inUse holder (pair-tally acquire-vs-release per backing cache), and check whether a nested driver's
+help-domain-exhausted plain reclaim (ErrWaveDone fallback) holds inUse somewhere invisible.
+
+**►►► SLIM RECOMPOSITION (2026-07-14, PN course-correction — supersedes the delivery-layer parts
+below).** PN: the new rdvq surface (WaitChannel, Listeners.Add/Deliver/NotifyChained/TryNotify) was
+never discussed and should not have been needed — "we already had the tools." Correct: ALL of it is
+deleted; rdvq and workq are byte-identical to HEAD. The demand mailbox stays a full `rdvq.Notifier`
+and blockers park exactly as before (WaitersFor → the owner's per-park BORROWED INBOX — which IS
+the I4 "local wait channel": the wake is addressed to the demand, the block is on the owner's own
+channel, and the SUSPENSION RULES guarantee the owner is parked right there whenever the demand is
+active). Converting mailboxes to bare Listeners had also changed every wake from listener-style to
+terminal-style, silently no-op'ing every `m.Forward()` renotify-conservation in the block/reclaim/
+workq loops — the likely root of the unbiased -race hangs. What remains of the rework is exactly
+the DISCUSSED machinery: demand suspension (pass-over, displacement, headGen), the blockAndHelp
+suspend-at-entry/resume-in-confirm bracket, one-shot-miss + walk-away suspends, the ListenersFor/
+WaitersFor mode-fix (always the demand's own halves; episode routing at notification time via the
+claim-records walk, notify-all), and the guard removal. NOTE for a later cleanup pass (PN):
+`Waiters.Deliver` + the `Listener.Notify = waiters.Deliver` bridge in workq are ALSO an earlier
+session's invention (HEAD-committed, load-bearing in the scheduler listener) — PN doubts they
+should be needed; revisit separately.
+
+**►►► I4 REWORK + GUARD REMOVAL — IMPLEMENTED, GATING (2026-07-14, uncommitted).** The full strand-2
+rework below is IN THE TREE: permits core (Listeners-only Demand + demand suspension + pass-over/
+displacement FIFO), Governor Listeners-only, block-and-help on rdvq.WaitChannel with the
+suspend-at-entry/resume-in-confirm bracket, the postponed-manager listenerless-demand suspension, and
+`vetNotNestedInSkim` DELETED (skim handlers may drive subwaves; sim generator keeps skim-subjob
+coverage permanently; `TestSkimHandlerDrivingSubwavePanics` → `TestSkimHandlerDrivesSubwave`).
+Biased strand-2 repro: **0/60 hangs** (was 63% baseline, 33% fix-A-only). Gates green so far: permits
+rapid 2000-checks -race, rdvq -race, lint 0. (See the settled blocks below for the design; two
+trace-confirmed refinements are recorded inline.)
+
+**STATUS (2026-07-14 end of session): NOT COMMIT-READY — the dead-head mode is reachable through
+ORDINARY nested admissions, not just skim-handler subwaves.** Attribution at rapid.checks=100
+(no -race): HEAD 0/10; rework with skim-subjob generation ON 10/10; with it OFF 0/10 — which
+looked like confinement to the new nesting, BUT the 1000-check -race batch STILL wedges with the
+toggle OFF (48 goroutines: blockAcquires + reclaims + SkimAll drivers + FUNNEL bodies driving
+subwaves — pre-existing nested-drive shapes). The no-race 0/10 was timing luck. The skim-subjob
+toggle is back ON (fastest repro: ~10/10 at checks=100 no -race). The rework INTRODUCED this
+regression relative to HEAD (HEAD-era 1000-check -race gates were green). NEXT SESSION: close the
+dead-head family — start from the consumed-by-decline diagnosis below; the reverted redrive-proxy
+attempt is the closest candidate but ITS failure mode was never root-caused (it still hung 10/10
+and once broke the permits suite — possibly the flaky churn test); alternatively take the
+workq-layer contract question to PN (what guarantees a postponed admission's re-drive when its
+wave has no parked driver — arguably the terminal-handoff/step-3 *PostWork dissolution domain).
+
+**Diagnosis record of the two traced shapes:** Trace-confirmed shape #1 (t3_hang, livelocked pool
+0xc001de0f20):
+an admission demand ORPHANED-ACTIVE — its owner aborted blockAcquire on an error surfaced by HELPED
+work (`return err` after blockAndHelp; blockAndHelp's exit defer had just Resumed the demand), the
+work was never freed (trapped behind the wedge it caused), and the orphan got promoted to a live head
+that ate every capacity wake while four live demands churned Suspend/Resume behind it forever.
+Fix landed: **walk-away suspension** — blockAcquire's error return and reclaim's cancel returns
+Suspend the registration (symmetric with the one-shot-miss rule: no parked owner + no planted
+listener ⇒ not actionable), so pass-over/displacement route wakes past it until Free→Invalidate
+retracts it. Note for later, PN: blockAcquire aborting the ADMISSION on a helped handler's error
+(pre-existing semantics) looks questionable — reclaim deliberately tolerates the same errors and
+keeps helping.
+**Shape #2 — TRACE-CONFIRMED (t4) and FIXED: the consumed-by-decline re-drive listener.** A
+postponed manager's re-drive listener acts by Deliver-ing to a parked driver of the work's wave;
+with NO driver parked at that instant the Deliver DECLINES — and the decline CONSUMES the
+registration (Listeners pop-on-offer), leaving the demand active-listenerless. t4's dead head:
+five try-mode re-drives (Resume/Suspend pairs), a sixth took the postpone branch (listener
+planted, stays active), the PROMOTION NOTIFY itself burned that listener on a decline, then four
+capacity wakes died on the empty set with live demands churning behind. Fix: postpone paths
+register through **`Demand.RedriveListeners()`** — a per-demand redrive proxy (`rdvq.Listeners`)
+plus a pooled, gen-stamped forwarder on the demand's listeners: a wake either schedules the
+re-drive through the proxy (forwarder re-arms) or, on decline, SUSPENDS the demand (disarm →
+self-displace hands the head on) so the pool routes capacity around it until the next
+listen-capable re-drive re-arms and resumes it. ORDERING MATTERS (first cut hung 100%): the
+listener must land in the proxy BEFORE the forwarder arms (`RedriveTarget()` then
+`ArmRedrive()`) — arming first let a racing promotion notify fire the forwarder against an
+empty proxy, suspending the demand and stranding the fresh listener in an unwatched set.
+**REJECTED en route: wake-side walk** (mark-suspend + displace any head whose notify finds no
+taker, deliver to the successor). It fixes the same class but REDEFINES the FIFO contract —
+a consumer that re-presents by POLLING with no listener registered (the permits rapid model;
+Decision-4 re-presentation is the caller's protocol, listeners optional) would lose its headship
+to any wake that catches it between polls: TestBarrierFIFOOrderAndGating's "freed capacity must
+NOT satisfy the non-head" fails. Owner-side/registration-side marking (the three suspension rules
+above) covers production flows without touching poller semantics.
 
 **►►► DISPATCH/EXECUTION SPLIT — INVARIANTS SETTLED (2026-07-14). Design-review outcome; supersedes the checkpoint's next-steps below.**
 
@@ -94,6 +322,72 @@ post-that-might-block carried as a re-drivable scheduler `Work`. They dissolve a
      kept. `Cache.ListenersFor` stops choosing by mode: blockers always register on the Demand's own
      Listeners; the standing-episode routing moves to NOTIFICATION time (the release decides which
      demands to notify by the mode then). *Gate: `internal/permits` rapid + `-race`.*
+   - **✅ SETTLED (PN, 2026-07-14): DEMAND SUSPENSION — the FIFO remains, only the head acquires, and a
+     demand is ACTIONABLE only while its owner blocks on it.** A registered demand must always have an
+     actionable wake target: a goroutine parked on it, or a re-drivable postponed work item (the
+     manager-postpone path needs no suspension — its listener always acts by re-queueing the work). A
+     goroutine that leaves its park to run a help item is neither, so it SUSPENDS its demand for the
+     help episode. Mechanics (all Demand-local + existing queue machinery):
+     - **Suspend/resume is one Demand-local flag.** Set when the owner leaves the park to help; cleared
+       on return (re-arm is Demand-local — in the common case the demand is still head and the owner's
+       confirm re-presents straight into headGather). Suspended demands STAY IN QUEUE and keep their
+       position; position is lost only if their turn arrives while they are away — the fair outcome.
+     - **Lazy pass-over at pop time.** promoteScan pops a suspended entry → re-enqueue at the back
+       (same gen — still registered) and continue scanning. nbcq needs no peek/push-front. If nothing
+       actionable remains, the suspended demand installs as (suspended) HEAD and the scan stops — head
+       nil keeps meaning "queue empty" (rejected alternative: open slot with a non-empty queue —
+       surprising invariant break + dequeue/recheck/re-enqueue churn on every recheck).
+     - **Displacement guarantee: nothing actionable ever comes to rest behind a suspended head.**
+       Enqueue-side: after PushBack, an arrival that finds a suspended head displaces it (CAS to
+       promoting, re-queue it, scan promotes the arrival). Suspend-side: suspending while standing
+       head with a non-empty queue self-displaces. Implementation refinements (2026-07-14, landed):
+       (i) both demanding paths — enqueue (fresh arrival) AND queuedAcquire (re-present: a resumed
+       demand, a manager re-drive) — wait out a mid-flight scan (Gosched on the transient promoting
+       marker; a terminating scan may install a suspended head after the demand's last look) and
+       then displace any suspended head left standing; (ii) a displacer re-enqueues the displaced
+       head under its INSTALL-time generation (`Pool.headGen`, written under the promoting marker) —
+       re-reading d.gen would resurrect a concurrently-Invalidated demand as a live-looking entry;
+       (iii) a suspended head may stand with other SUSPENDED entries queued behind it — harmless
+       (nothing behind it can act either), and each of those displaces it whenever it resumes and
+       re-presents.
+     - **Wakes to a suspended-but-alone head are conserved**, not lost: the durable demand Listener
+       signals the owner's per-goroutine BUFFERED channel; the owner's confirm consumes it on return
+       from the help item (register-then-confirm covers the rest). Deadlock-free because alone ⇒
+       nobody waits behind it.
+     - **Delivery (I4).** The owner's ONE per-goroutine local wait channel registers as a durable
+       Listener on the demand at registration (unlike today's per-park Waiters inbox, reclaimed on
+       WaitFunc return — waiters.go:89, the trace-confirmed drop) and composes into every park select.
+     - **DEAD as a result:** "re-present all standing demands on any wake" and "lend latches made
+       mid-park" — a confirm only ever latches the CURRENT frame's demand and the goroutine
+       immediately unparks, so no permit is ever latched for a parked frame. I3 stays fully orthogonal.
+     Strand-2 replay: Do suspends when G leaves to help → the handler's subwave drive enqueues Di →
+     scan passes over Do, promotes Di → G is parked right there → freed permit wakes Di → gathers,
+     proceeds, unwinds → outer loop resumes Do (Demand-local) and re-presents. Liveness: every
+     registered-and-armed demand's wake target acts; every permit held by running code is released by
+     it; every permit held across a park is lent by the (orthogonal) suspend machinery.
+     - **TRACE-CONFIRMED implementation refinement (2026-07-14): suspend at blockAndHelp ENTRY, resume
+       in the block CONFIRM.** First cut suspended only when the park's select chose help work — but
+       ExecuteOne's controller executes already-queued help work BEFORE ever parking (no select), so
+       the head went helping while still marked active: a nested admission enqueued behind a
+       non-suspended head (no displacement), and both release wakes walked the head's EMPTY listener
+       set (owner never armed) and dropped — the strand-2 wedge one layer down. Inverted bracket:
+       Suspend for the whole blockAndHelp call (the owner is by definition not parked on the demand
+       anywhere inside it); Resume exactly where it becomes a consumer again — inside the block
+       confirm (post-registration, pre-park) and at exit; the select-chooses-work path re-suspends.
+       Cost: a head entering block-and-help with others queued self-displaces (order churn, bounded by
+       the first real park); optimization candidate later, correctness first.
+     - **TRACE-CONFIRMED refinement 2 (2026-07-14): a postponed manager's demand is suspended until
+       its re-drive listener is planted.** A nested dispatch's INITIAL attempt is a one-shot try (ex
+       cannot AddToListeners); the miss registers the demand in the FIFO with NO wake target — the
+       listener is planted only when a listen-capable pass re-runs the work (a parking driver's
+       shouldStillWait sweep over its buffer). The wedge: the postponed work sat in a PAUSED
+       controller's buffer (its goroutine ran a skim handler that nested into its own block) while the
+       listenerless demand held the HEADSHIP — head-addressed capacity wakes died on the empty set
+       with live demands parked behind. Fix: gateAcquire's one-shot branch Suspends the demand
+       (not actionable = exactly the settled definition); the postpone branch Resumes right after
+       AddToListeners. Pass-over/displacement then routes wakes past it, and the parking driver's
+       listen-capable sweep resumes it into a fair turn. (The buffered-work capture itself is a
+       narrower workq concern now made benign; no controller surgery needed.)
    - **B. `Governor`** → Listeners-only, same treatment (backpressure clears via a Listener notify).
    - **C. Block-and-help** (`blockAcquire`/`wv.block` → the new form). A **local wait channel**
      registered as a Listener on the demand (permit-free) and the governor (backpressure), selected with
@@ -104,7 +398,8 @@ post-that-might-block carried as a re-drivable scheduler `Work`. They dissolve a
      then the ready body → `bodyExecutor.PushBack` straight to the executor. **Scheduler is never
      touched by top-level** (only nested submits go through it).
    - Then remove `vetNotNestedInSkim` and gate guard-removed at 0 hangs. **Lazy-suspend (I3) is
-     ORTHOGONAL** — separate correctness item, not the strand-2 fix.
+     ORTHOGONAL** — separate correctness item, not the strand-2 fix (demand suspension means no
+     permit is ever latched for a parked frame; see the SETTLED block above).
 3. **Handoff `*PostWork` simplification** (CP1-CP3 pull-intercept) — task / funnel / flow-fire.
 
 **⚠️ OPEN — verify + document (skimmer seriality under block-and-help).** THE CONTRACT (PN): a wave's

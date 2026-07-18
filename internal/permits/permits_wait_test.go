@@ -13,19 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// AcquireWait must never block permanently while progress is possible. Far more
-// contenders than capacity each run AcquireWait+Release in a loop; the permits bounce
-// between them by steal, and every parked waiter must be woken by a release and
-// eventually succeed. A liveness bug surfaces as a ctx-deadline error from
-// AcquireWait, not a hung test. Run under -race.
-func TestAcquireWaitLiveness(t *testing.T) {
+// A blocking acquire must never park permanently while progress is possible. Far
+// more contenders than capacity each run the blocking-acquire protocol + Release
+// in a loop; the permits bounce between them by steal, and every parked waiter
+// must be woken by a release and eventually succeed. A liveness bug surfaces as a
+// ctx-deadline error, not a hung test. Run under -race.
+func TestBlockingAcquireLiveness(t *testing.T) {
 	const capacity, contenders, iters = 2, 8, 1000
 	tp := newTestPool(capacity)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var failed atomic.Int64 // AcquireWait that returned an error (a hang)
+	var failed atomic.Int64 // blocking acquires that returned an error (a hang)
 	var done atomic.Int64   // successful acquire/release round-trips
 	var wg sync.WaitGroup
 	for range contenders {
@@ -37,7 +37,7 @@ func TestAcquireWaitLiveness(t *testing.T) {
 			d := NewDemand()
 			defer d.Invalidate() // release the home a mid-loop miss created
 			for range iters {
-				pm, err := c.AcquireWait(ctx, d, 1)
+				pm, err := acquireWait(ctx, c, d, 1)
 				if err != nil {
 					failed.Add(1)
 					return
@@ -49,19 +49,19 @@ func TestAcquireWaitLiveness(t *testing.T) {
 	}
 	wg.Wait()
 
-	require.Equal(t, int64(0), failed.Load(), "no AcquireWait blocked permanently")
+	require.Equal(t, int64(0), failed.Load(), "no blocking acquire parked permanently")
 	require.Equal(t, int64(contenders*iters), done.Load(), "every contender completed all rounds")
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 }
 
-// The weighted-release under-notify regression: ONE
-// release of weight w frees w permits at once, and plain wake-one would admit a
-// single waiter and strand the rest over borrowable capacity — no further wake would
-// ever come. The chained wake walks them all: each admitted waiter probes once
-// (rule 2), the first miss terminates the chain (rule 3). The admitted waiters HOLD
-// their permits until everyone is in, so the weighted release is the only wake
-// source — a dropped chain fails this test deterministically.
-func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
+// The weighted-release under-notify regression: ONE release of weight w frees w
+// permits at once, and a single wake with no follow-through would admit one waiter
+// and strand the rest over borrowable capacity — no further wake would ever come.
+// The re-probe carries it (conservation rule 5): each satisfied head's retirement
+// mints a fresh token for its successor. The admitted waiters HOLD their permits
+// until everyone is in, so the weighted release is the only mint source — a
+// broken re-probe fails this test deterministically.
+func TestWeightedReleaseReprobeAdmitsAllSatisfiable(t *testing.T) {
 	const capacity, waiters = 3, 3
 	tp := newTestPool(capacity)
 
@@ -86,7 +86,7 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 			defer c.ReleaseRef()
 			d := NewDemand()
 			defer d.Invalidate()
-			pmw, err := c.AcquireWait(ctx, d, 1)
+			pmw, err := acquireWait(ctx, c, d, 1)
 			if err != nil {
 				failed.Add(1)
 				return
@@ -118,9 +118,9 @@ func TestWeightedReleaseChainAdmitsAllSatisfiable(t *testing.T) {
 	tp.check(t)
 }
 
-// A cancelled context unblocks a parked AcquireWait promptly with the ctx error,
-// rather than wedging it.
-func TestAcquireWaitCancel(t *testing.T) {
+// A cancelled context unblocks a parked blocking acquire promptly with the ctx
+// error, rather than wedging it.
+func TestBlockingAcquireCancel(t *testing.T) {
 	tp := newTestPool(1)
 	hog := tp.NewCache()
 	dh := NewDemand()
@@ -133,7 +133,7 @@ func TestAcquireWaitCancel(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := waiter.AcquireWait(ctx, dw, 1)
+		_, err := acquireWait(ctx, waiter, dw, 1)
 		errCh <- err
 	}()
 
@@ -145,6 +145,6 @@ func TestAcquireWaitCancel(t *testing.T) {
 	case err := <-errCh:
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(5 * time.Second):
-		t.Fatal("AcquireWait did not return after context cancellation")
+		t.Fatal("the blocking acquire did not return after context cancellation")
 	}
 }

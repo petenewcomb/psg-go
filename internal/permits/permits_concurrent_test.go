@@ -42,7 +42,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 		go func(c *Cache) {
 			defer wg.Done()
 			d := NewDemand()
-			defer d.Invalidate() // a final miss leaves the demand queued (unified queue)
+			defer d.Invalidate() // release the home a mid-loop miss may have created
 			for range iters {
 				if pm, _ := c.Acquire(d, 1); pm.Held() {
 					if h, u := pm.backing.counts.load(); u > h {
@@ -50,7 +50,7 @@ func TestConcurrentInheritDeltaSteal(t *testing.T) {
 					}
 					pm.Release()
 				}
-				// On a miss the demand queued; the next attempt re-presents it.
+				// A miss registers nothing; the next attempt is a fresh try.
 			}
 		}(kid)
 	}
@@ -94,7 +94,7 @@ func TestConcurrentChurnVsSteal(t *testing.T) {
 		go func(c *Cache) {
 			defer wg.Done()
 			d := NewDemand()
-			defer d.Invalidate() // a final miss leaves the demand queued
+			defer d.Invalidate()
 			for range 10000 {
 				if pm, _ := c.Acquire(d, 1); pm.Held() {
 					pm.Release()
@@ -155,7 +155,7 @@ func TestConcurrentWeightedGatherSatisfiable(t *testing.T) {
 			defer c.ReleaseRef()
 			d := NewDemand()
 			for range iters {
-				pm, err := c.AcquireWait(ctx, d, w)
+				pm, err := acquireWait(ctx, c, d, w)
 				if err != nil {
 					failed.Add(1)
 					return
@@ -188,7 +188,7 @@ func TestConcurrentWeightedGatherSatisfiable(t *testing.T) {
 //     overdraft episode opportunistically when the pool goes quiescent, completes
 //     it fast (release + invalidate → anchor destroy → endEpisode), or withdraws
 //     and retries. Heavy promoteScan / episode-transition churn.
-//   - suspender: SuspendDriver/ResumeDriver brackets on a dedicated off-chain cache
+//   - suspender: Suspend/Resume brackets on a dedicated off-chain cache
 //     — a stranger to every episode, so its suspensions gate grants and its resumes
 //     nudge the waiting head; exercises the suspension counters and stranger check
 //     concurrently with grants.
@@ -217,11 +217,10 @@ func TestConcurrentOverdraftSuspendChurn(t *testing.T) {
 				base := tp.newChild(root)
 				defer base.ReleaseRef()
 				var d Demand
-				d.Init()
 				defer d.Invalidate()
 				for i := range iters {
 					w := 1 + i%capacity // 1..capacity
-					pm, err := base.AcquireWait(ctx, &d, w)
+					pm, err := acquireWait(ctx, base, &d, w)
 					if err != nil {
 						wedged.Add(1)
 						return
@@ -232,7 +231,6 @@ func TestConcurrentOverdraftSuspendChurn(t *testing.T) {
 				base := tp.newChild(root)
 				defer base.ReleaseRef()
 				var d Demand
-				d.Init()
 				defer d.Invalidate()
 				for range iters {
 					pm, err := base.Acquire(&d, capacity+1)
@@ -242,18 +240,17 @@ func TestConcurrentOverdraftSuspendChurn(t *testing.T) {
 					if pm.Held() {
 						pm.Release()
 					}
-					d.Invalidate() // complete the episode (or withdraw a queued/head demand)
+					d.Invalidate() // complete the episode (or withdraw a registered demand)
 				}
 			case 2: // suspender — stranger suspensions racing grants
 				susp := tp.NewCache()
 				defer susp.ReleaseRef()
 				for range iters {
-					susp.SuspendDriver()
-					susp.ResumeDriver()
+					susp.Suspend()
+					susp.Resume()
 				}
 			case 3: // churner — forest mutation vs steal/promote
 				var d Demand
-				d.Init()
 				defer d.Invalidate()
 				for range iters {
 					child := tp.newChild(root)
@@ -272,7 +269,7 @@ func TestConcurrentOverdraftSuspendChurn(t *testing.T) {
 		"a w ≤ capacity waiter must eventually be satisfied (no missed wake / stuck head)")
 	root.ReleaseRef()
 	require.Nil(t, tp.od.Load(), "no episode stands at quiescence")
-	require.Nil(t, tp.head.Load(), "the head slot is open at quiescence")
+	require.Nil(t, tp.head(), "no head stands at quiescence")
 	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	require.Equal(t, int64(0), tp.sem.inFlight.Load(), "the Resource is fully released")
@@ -298,7 +295,6 @@ func TestConcurrentEpisodeClaimants(t *testing.T) {
 		// Form the episode while quiescent: gather `capacity`, overdraft `2`.
 		host := tp.NewCache()
 		var owner Demand
-		owner.Init()
 		pm, err := host.Acquire(&owner, capacity+2)
 		require.NoError(t, err)
 		require.True(t, pm.Held(), "a quiescent w>capacity acquire grants an episode")
@@ -315,7 +311,6 @@ func TestConcurrentEpisodeClaimants(t *testing.T) {
 				child := anchor.NewChild()
 				defer child.ReleaseRef()
 				var d Demand
-				d.Init()
 				defer d.Invalidate()
 				for i := range inner {
 					w := 1 + i%(capacity+2)
@@ -353,8 +348,8 @@ func TestConcurrentEpisodeClaimants(t *testing.T) {
 			s := tp.NewCache()
 			defer s.ReleaseRef()
 			for range inner * 2 {
-				s.SuspendDriver()
-				s.ResumeDriver()
+				s.Suspend()
+				s.Resume()
 			}
 		}()
 		wg.Wait()
@@ -364,7 +359,7 @@ func TestConcurrentEpisodeClaimants(t *testing.T) {
 		owner.Invalidate()
 		host.ReleaseRef()
 		require.Nil(t, tp.od.Load(), "the episode ended")
-		require.Nil(t, tp.head.Load(), "the head slot is open")
+		require.Nil(t, tp.head(), "no head stands")
 		tp.checkEpisode(t)
 		require.Equal(t, 0, tp.totalHeld(), "no permit leaked across the round")
 	}

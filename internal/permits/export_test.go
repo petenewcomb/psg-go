@@ -4,9 +4,11 @@
 package permits
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 
+	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -139,6 +141,52 @@ func (c *Cache) childrenContains(target *Cache) bool {
 		}
 	}
 	return false
+}
+
+// head returns the demand at the front of the fifo (nil when empty) — the
+// holder of the gather right and the barrier anchor's owner.
+func (p *Pool) head() *Demand {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fifo.Front()
+}
+
+// acquireWait is the tests' blocking acquire: the production park protocol —
+// Acquire, and on a miss park in the pool's waiter set with the confirm
+// re-running Acquire (register-then-confirm), forwarding any wake it could not
+// use — without the help composition production blockers add. Cancellation
+// invalidates d.
+func acquireWait(ctx context.Context, c *Cache, d *Demand, w int) (Permit, error) {
+	var m rdvq.Notification
+	for {
+		pm, err := c.Acquire(d, w)
+		if err != nil {
+			d.Invalidate()
+			return Permit{}, err
+		}
+		if pm.Held() {
+			return pm, nil // a received wake was productive — not forwarded
+		}
+		if m.Received() {
+			m.Forward() // could not use the last wake; conserve it
+		}
+		var waitErr error
+		m, waitErr = c.Pool().Notifier().Waiters.Wait(ctx, func() bool {
+			pm, err = c.Acquire(d, w)
+			return err == nil && !pm.Held() // park only while there is still nothing
+		})
+		if pm.Held() {
+			return pm, nil
+		}
+		if err != nil {
+			d.Invalidate()
+			return Permit{}, err
+		}
+		if waitErr != nil {
+			d.Invalidate()
+			return Permit{}, waitErr
+		}
+	}
 }
 
 // testPool wraps a Pool for the oracles.

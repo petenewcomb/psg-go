@@ -8,22 +8,34 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/petenewcomb/streampool/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/dll"
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/petenewcomb/streampool/internal/trace"
 )
 
-// Concurrency model (hybrid: lock-free hot path, locked forest)
+// Concurrency model (hybrid: lock-free hot path, one pool mutex for the queue)
 //
-// The hot acquire path is lock-free; the forest structure is guarded by per-list
-// mutexes. The two are independently synchronized and meet only through the atomic
-// counter.
+// The hot acquire path is lock-free; the demand queue is guarded by one Pool
+// mutex; the forest structure is guarded by per-list mutexes; wakeups ride the
+// Pool's notifier (its own lock-free machinery). The four are independently
+// synchronized and meet only through atomics.
 //
 //   - Per-cache (held, inUse) is the atomic128 counter (counts.go). Acquire steps 1–2
 //     (own cache, then the ancestor chain) are a lock-free gated CAS up-walk; ancestors
 //     are pinned by refcounts (a live cache refs its parent), so the walk reads parent
 //     pointers without a lock. Step 3 is the Resource's own atomic. Release is one CAS.
+//   - The Pool's mutex guards the demand FIFO and the anchor install. A demand is
+//     registered iff it is linked; registration, retirement, and invalidation are
+//     immediate link/unlink operations under the mutex. Lock-free readers see only
+//     the published anchor (the barrier gate), a pure cache: a stale read is
+//     compensated by register-then-confirm, never load-bearing.
+//   - Readiness notification is the Pool's rdvq.Notifier — the pool's notification
+//     domain per docs/notification-conservation.md. Capacity events (release, drain,
+//     raise, a satisfied demand's re-probe) mint into it; postponed admissions
+//     register their queue's listener with it; blockers park in its waiter set. The
+//     Pool routes nothing: tokens walk the domain, unproductive wakes forward, and
+//     only exhaustion ends one.
 //   - Each cache's children, and the Pool's roots, are an intrusive doubly-linked
 //     cacheList guarded by a per-list mutex. A cache's prev/next links are guarded by
 //     the mutex of the list that contains it (its parent's children, or the roots).
@@ -39,6 +51,7 @@ import (
 //     level's lock while scanning and descends holding the parent's lock too — nested,
 //     but ALWAYS root→leaf, and it is the only operation that holds two list locks at
 //     once, so no lock-order cycle can form (every other op takes a single list lock).
+//     No path holds a cacheList lock while taking the Pool mutex or vice versa.
 //   - destroy runs only at refs==0 (unit exited AND all sub-waves drained → quiescent).
 //     It unlinks the cache from its list (exact removal under the list lock), CAS-drains
 //     held back to the Resource (counts.drain, coordinating with a concurrent stealOut
@@ -71,12 +84,13 @@ type Resource interface {
 //	                         must ensure a wake eventually re-drives the head (a
 //	                         release, a SetMaxConcurrency raise, later a NotifyAt
 //	                         timer), or the head wedges.
-//	err != nil             — refuse: the head retires (the promotion scan runs) and
-//	                         the caller fails the unit with err (the resource's own
-//	                         reason; the caller then invalidates the demand)
+//	err != nil             — refuse: the head retires (the successor is offered the
+//	                         turn) and the caller fails the unit with err (the
+//	                         resource's own reason; the caller then invalidates the
+//	                         demand)
 //
 // Overdraft must not call back into the Pool. It is serialized structurally: the
-// initial grant runs only on the standing head (the slot admits one), and episode
+// initial grant runs only on the standing head (headship admits one), and episode
 // extensions run under the episode object's own lock. A Resource that does not
 // implement the capability defaults to GRANT: at the proven-infeasible point the unit
 // is satisfiable only by overdraft, and a briefly exceeded concurrency cap beats a
@@ -165,87 +179,60 @@ type Pool struct {
 	resource Resource
 	roots    cacheList
 
-	// The always-on demand FIFO (weighted-acquisition.md "Queue
-	// unification"). EVERY acquire that
-	// cannot be satisfied immediately enqueues, whatever its weight; a satisfied
-	// acquire never touches the queue. While a head stands (head non-nil), every
-	// acquisition arm is gated — including the step-1/2 up-walk, else local
-	// recirculation would starve the head invisibly — unless the acquirer is
-	// exempt (its chain passes through the head's body cache, or it is the
-	// episode owner resuming into its own home). Strict arrival order for every
-	// weight: each waiter's wait is bounded by the finite queue ahead of it.
-	//
-	// queue holds the SUCCESSORS only (nbcq: lock-free concurrent producers; the
-	// consumer side is made logically single by the promoting marker below).
-	// Interior removal is lazy — nbcq cannot unlink — so each entry carries the
-	// demand's generation at enqueue time, Invalidate retires entries by bumping
-	// the generation, and the promotion scan skips stale entries (Decision 4's
-	// ABA discipline).
-	queue nbcq.Queue[demandEntry]
+	// mu guards the demand FIFO and the anchor install. Registration,
+	// retirement, and invalidation are immediate link/unlink under it. Nothing
+	// under mu blocks, calls user code, mints notifications, or takes a
+	// cacheList lock.
+	mu sync.Mutex
 
-	// head is the sticky head slot: the
-	// current head demand, held OUTSIDE the queue (nbcq cannot peek without
-	// popping). nil ⇔ nobody waits ⇔ the ordinary lock-free machinery, verbatim
-	// (the empty-slot fast path — a BARE LOAD, no CAS on the hot path); non-nil ⇒
-	// gate. It is also the exemption anchor and the wake router: armed capacity
-	// events go to the head's own mailbox — the single consumer that can act — or
-	// to a standing episode's claimants when the sentinel holds the slot.
-	//
-	// Slot transitions are CAS, and only at cold points: install (enqueue-side
-	// promote when the slot is empty), retirement (satisfaction / invalidation /
-	// refusal / episode end: one CAS directly to the promoting marker, then the
-	// scan installs the successor — no empty window while waiters exist, which is
-	// what bounds sniping to the empty-queue transition race, itself no fairness
-	// violation: it can only order demands that arrived within the same race
-	// window, where arrival order is undefined). Publish ordering makes the
-	// lock-free reads safe: the head's cache and mailbox are written before the
-	// Store that publishes it. Transient read races are benign: a stale nil leaks
-	// one ordinary acquire (not the systematic recirculation bypass the gate
-	// exists to close); a stale head in wake() drops the wake into an empty
-	// mailbox, which is compensated — the release decremented counts BEFORE the
-	// stale load, the successor is installed AFTER that, and its park-time
-	// confirm re-reads counts fresh, so the freed capacity is seen without the
-	// wake.
-	head atomic.Pointer[Demand]
+	// fifo is the always-on demand queue (weighted-acquisition.md "Queue
+	// unification") in strict arrival order, every weight: every acquire that
+	// cannot be satisfied immediately registers here, and only the front
+	// demand (the head) acquires — gathering into its own body cache while
+	// freed capacity is held for it. A standing overdraft episode front-links
+	// its sentinel here, keeping the barrier armed until the episode ends.
+	fifo dll.List[*Demand]
 
-	// promoting is the reserved marker demand that holds the slot during a
-	// promotion scan — the exclusive right to pop (two concurrent scans would
-	// each strand a popped demand). Never enqueued, never satisfied. Readers see
-	// an armed, non-exempt head (its nil cache fails every exemption test), and
-	// wake() drops events addressed to it — the same compensated class as the
-	// stale-head empty-mailbox drop.
-	promoting Demand
+	// anchor publishes the head demand's body cache — the barrier. nil ⇔
+	// nobody waits ⇔ the ordinary lock-free machinery, verbatim. Non-nil ⇒
+	// every acquisition arm is gated unless the acquirer is exempt (its chain
+	// passes through the anchor, or it is the episode owner resuming into its
+	// own home). Written under mu (refreshAnchor); read lock-free. It is a
+	// pure cache, never load-bearing: a stale nil leaks one ordinary acquire
+	// (not a systematic bypass), and a stale non-nil over-gates one acquire
+	// into a registration whose confirm re-reads fresh.
+	anchor atomic.Pointer[Cache]
+
+	// notifier is the Pool's notification domain (docs/notification-
+	// conservation.md): capacity events mint into it, postponed admissions
+	// register their queue's listener with it, blockers park in its waiter
+	// set. Reach it through [Pool.Notifier].
+	notifier rdvq.Notifier
 
 	// overdraftPolicy is the Resource's own Overdraft when it implements
 	// [OverdraftResource], else nil — the capability-discovery nil-field test of
 	// limiter-resource-classes.md; nil defaults to GRANT (see the interface doc).
 	// Resolved once at NewPool; consulted only by overdraft evaluations (the
-	// head's — serialized by the slot — and extensions, under od.mu).
+	// head's — serialized by headship — and extensions, under od.mu).
 	overdraftPolicy OverdraftResource
 
 	// od is the standing overdraft episode, or nil. Demand-allocated: a Pool
-	// carries no episode state (and pays no notifier setup) until a head's
-	// overdraft is granted; the object returns to a process-wide pool at episode
-	// end. Written only by the party holding the head slot (the granting head
-	// installs it before swapping the sentinel in; endEpisode clears it while the
-	// sentinel still holds the slot), and loaded lock-free by wake routing,
-	// release's excess return, and claimant parks. Those lock-free reads are safe
-	// structurally: every such reader lives inside the episode subtree, whose
-	// cache refs pin the anchor, and episode end IS the anchor's destroy — so a
-	// live reader implies a standing (un-recycled) episode. Slot readers that can
-	// be stale across an end (wake routing) identify sentinels by the immutable
-	// Demand.sentinel flag and re-load od rather than dereferencing through the
-	// stale pointer.
+	// carries no episode state until a head's overdraft is granted; the object
+	// returns to a process-wide pool at episode end. Installed and cleared under
+	// mu (episode transitions are mutex-serialized); loaded lock-free by
+	// release's excess return and the exempt-claimant arms, whose stale reads
+	// are compensated structurally: every such reader lives inside the episode
+	// subtree, whose cache refs pin the anchor, and episode end IS the anchor's
+	// destroy — so a live reader implies a standing (un-recycled) episode.
 	od atomic.Pointer[overdraft]
 
 	// suspended counts permit-holders that have lent their permit back for the
-	// duration of a drive episode (SuspendDriver/ResumeDriver), pool-wide; each
-	// suspension also counts on the drive-target cache's suspendedDrivers.
-	// Maintained whether or not an episode stands (suspension is drive
-	// attribution, not episode state). Equality of the pool total with the sum
-	// along an evaluator's own chain is the exact no-stranger test (§Overdraft
-	// resolution (c)): a suspension targeting a chain cache is a drive the
-	// evaluator runs causally inside — its resume follows the evaluator's
+	// duration of a sub-wave drain ([Cache.Suspend]/[Cache.Resume]), pool-wide;
+	// each suspension also counts on the drain-target cache. Maintained whether
+	// or not an episode stands. Equality of the pool total with the sum along
+	// an evaluator's own chain is the exact no-stranger test (§Overdraft
+	// resolution (c)): a suspension targeting a chain cache belongs to a drain
+	// the evaluator runs causally inside — its resume follows the evaluator's
 	// completion and can never observe the over-commitment — while any other
 	// suspension is a stranger whose resume races it.
 	suspended atomic.Int64
@@ -267,13 +254,14 @@ var nextPoolRank atomic.Uint64
 // Rank returns this Pool's position in the canonical global acquisition order.
 func (p *Pool) Rank() uint64 { return p.rank }
 
-// demandEntry is one queue slot: the demand plus its generation at enqueue time.
-// A popped entry whose generation no longer matches was invalidated while queued
-// (lazy interior removal) and is skipped; the captured generation also guards the
-// pointer against demand recycling (a recycled demand carries a fresh generation).
-type demandEntry struct {
-	d   *Demand
-	gen uint64
+// Notifier returns the Pool's notification domain. Postponing admissions
+// register their queue's listener with its Listeners; blocking acquirers park in
+// its Waiters (register-then-confirm, re-running Acquire in the confirm);
+// pool-external capacity events (a limiter's ceiling raise) mint into it with
+// Notify. Consumers honor the conservation contract: forward a wake they cannot
+// use (docs/notification-conservation.md).
+func (p *Pool) Notifier() *rdvq.Notifier {
+	return &p.notifier
 }
 
 // overdraft is ONE standing episode's state (weighted-acquisition.md §Overdraft),
@@ -281,8 +269,8 @@ type demandEntry struct {
 // Pool.od for the guard and the structural-pin lifetime argument).
 type overdraft struct {
 	// mu serializes episode EXTENSIONS against each other (the initial grant
-	// needs no lock: the head slot makes the gathering head the sole evaluator,
-	// and the object is unpublished while it is initialized) and guards total.
+	// needs no lock: headship makes the gathering head the sole evaluator, and
+	// the object is unpublished while it is initialized) and guards total.
 	// The user Overdraft call runs under it — it must not call back into the
 	// Pool. Episode-cold by definition.
 	mu sync.Mutex
@@ -299,38 +287,26 @@ type overdraft struct {
 	// move held, and the grant is never in held.
 	allowance atomic.Uint64
 
-	// sentinel is the standing-head Demand: installed at fifo[0] (and published
-	// as the barrier) at grant, so the barrier stays armed — arrivals keep
-	// queueing behind it and no successor gathers — until the episode body
-	// cache's destroy (refs==0: body exited, all sub-waves drained, every
-	// suspension resumed) retires it. sentinel.cache is the head's body cache —
-	// the exemption anchor — written before the publishing slot CAS. Its mailbox
-	// stays uninitialized: wake routing branches on the sentinel flag before
-	// ever touching a mailbox.
+	// sentinel is the standing-head Demand: front-linked into the Pool's fifo
+	// (and published as the anchor) at grant, so the barrier stays armed —
+	// arrivals keep queueing behind it and no successor gathers — until the
+	// episode body cache's destroy (refs==0: body exited, all sub-waves
+	// drained, every suspension resumed) retires it. sentinel.cache is the
+	// head's body cache — the exemption anchor. Exempt claimants under the
+	// episode need no tracking: capacity events walk the Pool's notification
+	// domain like any other, and a claimant's retry is simply the acquire that
+	// succeeds.
 	sentinel Demand
-
-	// claimants is where exempt claimants park while the episode stands: the
-	// satisfied standing head consumes no mailbox wakes, so armed capacity events
-	// route here instead — the actionable consumers are the episode's own
-	// subtree. Everyone else keeps their usual targets (registered demands their
-	// mailboxes, gated weight-1 the general set, woken when the episode's end
-	// disarms or promotes). No exempt claimant can still be parked here at
-	// episode end: a parked claimant's cache holds refs that keep the episode
-	// cache from destroying.
-	claimants rdvq.Notifier
 }
 
 // Init implements omnipool.Initer: one-time setup when the pool creates a fresh
-// object. The claimants notifier outlives every recycle (rdvq's generation
-// discipline), and the sentinel flag is immutable — what lets stale barrier
-// readers classify the demand without dereferencing recycled episode state.
+// object. The sentinel flag is immutable.
 func (od *overdraft) Init() {
-	od.claimants.Init()
 	od.sentinel.sentinel = true
 }
 
 // Reset implements omnipool.Resetter: a retired episode carries nothing forward —
-// endEpisode already asserted the allowance home and detached the sentinel.
+// endEpisode already asserted the allowance home and unlinked the sentinel.
 func (od *overdraft) Reset() {
 	od.total = 0
 	od.allowance.Store(0)
@@ -349,7 +325,7 @@ func NewPool(r Resource) *Pool {
 	if odr, ok := r.(OverdraftResource); ok {
 		p.overdraftPolicy = odr
 	}
-	p.queue.Init()
+	p.notifier.Init()
 	return p
 }
 
@@ -390,7 +366,7 @@ type Cache struct {
 
 	// RefCounter is the cache's object-lifetime reference count (embedded, promoting
 	// AddRef/TryAddRef/RefCount): a live cache refs its parent, each sub-wave (NewChild)
-	// and each suspended driver (SuspendDriver) adds one, and the last drop recycles the
+	// and each suspension ([Cache.Suspend]) adds one, and the last drop recycles the
 	// cache through cachePool — running Reset (unlink, return held to
 	// the Resource, end any anchored episode, cascade to the parent). newCache's
 	// cachePool.Get arms it to 1. a64 (no generation): every holder is strong, and the
@@ -398,11 +374,11 @@ type Cache struct {
 	// committed to recycle (a stealer's weak-upgrade under the list lock).
 	omnipool.RefCounter
 
-	// suspendedDrivers counts permit-holders currently suspended for a drive
-	// episode targeting THIS cache's wave (§Overdraft resolution (c)); each holds a
-	// ref on this cache for the suspension's duration, so a nonzero count pins the
-	// cache (and, transitively, an episode whose subtree it is in).
-	suspendedDrivers atomic.Int64
+	// suspended counts permit-holders currently suspended into a drain of THIS
+	// cache's wave (§Overdraft resolution (c)); each holds a ref on this cache
+	// for the suspension's duration, so a nonzero count pins the cache (and,
+	// transitively, an episode whose subtree it is in).
+	suspended atomic.Int64
 }
 
 // Reset is the omnipool recycle hook (Resetter), run by cachePool.Release when the last
@@ -415,26 +391,24 @@ type Cache struct {
 // Resource with any concurrent stealOut (a steal that took the cache as a candidate before
 // removal), so conservation holds without a lock on the counter.
 func (c *Cache) Reset() {
-	if c.suspendedDrivers.Load() != 0 {
+	if c.suspended.Load() != 0 {
 		// Impossible when brackets are balanced: every suspension ref-pins c.
-		panic("permits: recycle with suspended drivers still targeting this cache")
+		panic("permits: recycle with suspensions still targeting this cache")
 	}
 	if od := c.pool.od.Load(); od != nil && od.sentinel.cache.Load() == c {
 		// This cache anchored the standing overdraft episode; refs==0 means the owner's
 		// body exited and the exempt subtree fully drained, so the episode ends here —
-		// BEFORE the drain below, so the drain's wake routes post-episode (to the promoted
-		// head's mailbox or the general set).
+		// BEFORE the drain below, so the drain's token finds the post-episode barrier.
 		c.pool.endEpisode(c)
 	}
 	c.list().remove(c)
 	if held := c.counts.drain(); held > 0 {
 		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
 		c.pool.resource.Release(int(held))
-		// Returning held permits to the Resource frees that much capacity, which can
-		// satisfy several postponed managers / parked waiters at step 3 — seed the wake
-		// chain (chained iff more than one permit returned; rule 2 walks the satisfiable
-		// consumers from there).
-		c.pool.wake(held > 1)
+		// Returning held permits to the Resource frees that much capacity: mint.
+		// Multi-unit capacity needs no herd — a productive consumer re-probes
+		// (conservation rule 5).
+		c.pool.notifier.Notify(nil)
 	}
 	if h := cacheDestroyHook.Load(); h != nil {
 		(*h)(c) // test seam: observe the destroy before c returns to the pool
@@ -459,46 +433,7 @@ func newCache(p *Pool, parent *Cache) *Cache {
 	return c
 }
 
-// ListenersFor returns the listener set a postponed manager registers its retry
-// with after a missed Acquire from c under demand d: the demand's own mailbox once
-// queued (its promotion — and, as head, every armed capacity event — is addressed
-// there), or the standing episode's claimants for an exempt claimant. There is no
-// general set: under the unified queue a miss either enqueued the demand or was an
-// episode claim, so the wait target is always demand- or episode-specific. The
-// caller re-checks Acquire after registering (register-then-confirm), which also
-// covers the transient third case (an episode retired between the miss and this
-// resolution: the re-check re-runs the gate and enqueues).
-//
-// Listeners and Waiters are exposed (per demand) — and the notifiers themselves are
-// not — deliberately: they are the REGISTER/PARK side only. Every notify entry must
-// route through the Pool (wake / ChainProbe / promotion), which is what steers armed
-// capacity events to the head or a standing episode's claimants; a raw notifier
-// would let callers inject wakes that bypass that routing.
-func (c *Cache) ListenersFor(d *Demand) *rdvq.Listeners {
-	if d.pool.Load() != nil {
-		return &d.mailbox.Listeners
-	}
-	if od := c.pool.standingEpisode(c, d); od != nil {
-		return &od.claimants.Listeners
-	}
-	return &d.mailbox.Listeners
-}
-
-// WaitersFor returns the park target for a blocking caller after a missed Acquire
-// from c under demand d — the waiter-half twin of ListenersFor (same resolution,
-// same register-then-confirm coverage of the transient case).
-func (c *Cache) WaitersFor(d *Demand) *rdvq.Waiters {
-	if d.pool.Load() != nil {
-		return &d.mailbox.Waiters
-	}
-	if od := c.pool.standingEpisode(c, d); od != nil {
-		return &od.claimants.Waiters
-	}
-	return &d.mailbox.Waiters
-}
-
-// Pool returns the Pool c draws permits from — the boundary that owns the manager
-// listener set (Listeners) and the executor waiters a body parks on.
+// Pool returns the Pool c draws permits from.
 func (c *Cache) Pool() *Pool {
 	return c.pool
 }
@@ -531,27 +466,29 @@ func (c *Cache) touch() {
 
 // Demand is the caller-held identity of one acquisition demand — the conservation
 // token of weighted-acquisition.md Decision 4: a registered demand is satisfied or
-// explicitly invalidated, never dropped, and the CALLER holds the identity so a
-// postponed manager's retries re-present the SAME demand rather than registering a
-// fresh one per retry (re-presentation is idempotent: one FIFO entry). Obtain one
-// from [NewDemand] (pooled; return it with [Demand.Free]) or embed one in a pooled
-// host whose own Init calls [Demand.Init] — the zero value is NOT ready (Init sets
-// up the mailbox once per object). A Demand's operations (Acquire retries, Invalidate) are
-// externally serialized — one goroutine at a time, like the handle that carries it;
-// what other goroutines observe is published through the queue push, the head
-// slot, and the demand's atomics.
+// explicitly invalidated, never dropped, and the CALLER holds the identity so
+// retries re-present the SAME demand rather than registering a fresh one per retry
+// (re-presentation is idempotent: one FIFO entry). Obtain one from [NewDemand]
+// (pooled; return it with [Demand.Free]) or embed one in a pooled host — the zero
+// value is ready. A Demand's operations (Acquire retries, Invalidate) are
+// externally serialized — one goroutine at a time, like the handle that carries
+// it; what other goroutines observe is published through the Pool mutex and the
+// demand's atomics.
 type Demand struct {
-	// gen guards pooled/recycled identities against ABA once external references to
-	// the identity exist (the captured-generation discipline of
-	// rdvq-inbox-reclamation.md): Invalidate bumps it, retiring every outstanding
-	// reference.
+	// Links is the demand's membership in the Pool's fifo. Registered ⇔
+	// linked. Guarded by the Pool's mu.
+	dll.Links[*Demand]
+
+	// gen retires outstanding captured references to this pooled identity
+	// across registrations (the captured-generation discipline): it bumps at
+	// every registration end. Registration and retirement are immediate
+	// link/unlink, so nothing inside the Pool depends on it — it is hygiene
+	// for external holders of recycled identities.
 	gen atomic.Uint64
 
-	// pool is non-nil exactly while the demand is queued (or holds the head
-	// slot) in that Pool — published atomically so Invalidate can find the
-	// registration and re-presentations can route. The fields below are
-	// caller-serialized; queue-side readers see them through the entry push /
-	// slot publication.
+	// pool is non-nil exactly while the demand is registered in that Pool —
+	// published atomically so Invalidate can find the registration and
+	// re-presentations can route.
 	pool atomic.Pointer[Pool]
 
 	// cache is the demand's body cache (C_B^L): created lazily at first
@@ -559,31 +496,18 @@ type Demand struct {
 	// gather hoards and where every registered acquisition lands (the Permit backs
 	// from it). It PERSISTS across satisfied episodes — a resume reacquire hits its
 	// hoard as a step-0 own-home occupy — and is destroyed by Invalidate. Atomic
-	// because barrier readers reach it lock-free through a possibly-stale head
-	// pointer (the exemption anchor) while the owner satisfies or invalidates; a
-	// stale VALUE stays benign (a leaked or over-gated acquire re-drives), but the
-	// access itself must be coherent.
+	// because barrier readers reach it lock-free through the published anchor
+	// while the owner satisfies or invalidates; a stale VALUE stays benign (a
+	// leaked or over-gated acquire re-drives), but the access itself must be
+	// coherent.
 	cache atomic.Pointer[Cache]
-
-	// mailbox is the registered demand's own wake target: while registered, the
-	// demand parks HERE, never on the Pool's general set — an armed capacity event
-	// (release/drain/raise) is deliverable only to the head, and promotion only to
-	// the successor, so both are single-consumer wakes with a known address. That
-	// addressing is what dissolves both the broadcast (herd) and the wake-one
-	// conservation hole (a waiter-style Forward is terminal, so a bystander taking
-	// the one wake would drop it and strand the head). Initialized once per object
-	// by Demand.Init — before any registration can publish the demand, so wake()'s
-	// lock-free barrier read always sees a ready mailbox.
-	mailbox rdvq.Notifier
 
 	// w is the registered weight (0 when not registered) — stamped at
 	// registration; retries must re-present it unchanged (weigh-once).
 	w uint64
 
 	// sentinel marks a pool-owned episode sentinel (immutable once set by
-	// overdraft.Init): barrier readers that may hold a stale head pointer across
-	// an episode end classify it by this flag alone, never dereferencing further
-	// into possibly-recycled episode state.
+	// overdraft.Init).
 	sentinel bool
 }
 
@@ -591,18 +515,10 @@ type Demand struct {
 // object is zero), so references retired by Invalidate stay retired across reuse.
 var demandPool = omnipool.For[Demand]()
 
-// NewDemand returns a pooled, initialized Demand. Return it with [Demand.Free] once
+// NewDemand returns a pooled Demand. Return it with [Demand.Free] once
 // invalidated (or let Free invalidate it).
 func NewDemand() *Demand {
 	return demandPool.Get()
-}
-
-// Init implements [omnipool.Initer]: one-time setup when the pool creates a fresh
-// object — the mailbox outlives every recycle (rdvq's generation discipline retires
-// stale references; Invalidate bumps gen). A host that embeds a Demand by value
-// (e.g. streampool's pooled permit handle) calls this from its own Init instead.
-func (d *Demand) Init() {
-	d.mailbox.Init()
 }
 
 // Reset implements [omnipool.Resetter]: recycling withdraws the identity —
@@ -617,46 +533,65 @@ func (d *Demand) Free() {
 	demandPool.Release(d)
 }
 
-// Invalidate withdraws the demand — the caller-side edge for a dropped or cancelled
-// postpone, wave teardown, or a demand deadline. Idempotent, and safe on a demand
-// that was never queued. Invalidating the standing HEAD hands the slot to the
-// promotion scan; a queued non-head entry is retired lazily by the generation bump
-// (the scan skips it). The demand's body cache is released: its partial hoard
-// needs no give-back protocol (Decision 1) — the destroy path drains it to the
-// Resource like any cached permits, and the freed capacity is counts-visible to
-// the next head's gather.
-// Must not be called while a Permit backed by the demand's body cache is still held
-// (release first — the handle lifecycle already sequences this; destroy's inUse
-// panic is the tripwire).
+// Invalidate withdraws the demand — the caller-side edge for a dropped or
+// cancelled postpone, wave teardown, a demand deadline, or the
+// withdraw-before-going-deep discipline (no goroutine may park while a demand
+// only it can attend stands registered). Idempotent, and safe on a demand that
+// was never registered. The registration is unlinked immediately; if the demand
+// was the head, the successor is offered the turn (one minted token). The
+// demand's body cache is released: its partial hoard needs no give-back protocol
+// (Decision 1) — the destroy path drains it to the Resource like any cached
+// permits, and the freed capacity is counts-visible to the next head's gather.
+// Must not be called while a Permit backed by the demand's body cache is still
+// held (release first — the handle lifecycle already sequences this; destroy's
+// inUse panic is the tripwire).
 func (d *Demand) Invalidate() {
-	d.gen.Add(1) // retires any queue entry (lazy removal) and every outstanding reference
+	d.gen.Add(1) // retires every outstanding captured reference
 	if p := d.pool.Load(); p != nil {
-		if p.head.Load() == d && p.head.CompareAndSwap(d, &p.promoting) {
-			// We were the standing head: hand the slot to the scan. The CAS can
-			// lose only to a promotion scan's post-install reclaim of this very
-			// demand (it re-checked our generation bump) — whichever party wins
-			// owns the continued scan.
-			p.promoteScan()
+		p.mu.Lock()
+		wasHead := p.fifo.Front() == d
+		p.fifo.Remove(d)
+		d.deregister()
+		p.refreshAnchor()
+		p.mu.Unlock()
+		if wasHead {
+			// The turn moved: offer it. The successor's retry re-reads counts
+			// fresh; a surplus token exhausts harmlessly.
+			p.notifier.Notify(nil)
 		}
-		// A queued (non-head) entry is removed lazily: the generation bump above
-		// retired it, and the promotion scan skips it on pop.
-		d.w = 0
-		d.pool.Store(nil)
 	}
 	if c := d.cache.Load(); c != nil {
 		d.cache.Store(nil)
-		c.ReleaseRef()
+		c.ReleaseRef() // outside mu: the drop may recycle c (Reset ends episodes, mints)
 	}
+}
+
+// deregister clears the registration-scoped fields; the Pool mutex must be held
+// and d must already be unlinked.
+func (d *Demand) deregister() {
+	d.gen.Add(1) // hygiene: every registration end retires captured references
+	d.w = 0
+	d.pool.Store(nil)
 }
 
 // Registered reports whether d currently stands in a Pool's demand queue — from its
 // registering miss until satisfaction retires it or Invalidate withdraws it. A
 // registration is an admission slot (ultimately the pool's FIFO headship), which makes
-// it a held resource for deadlock-ordering purposes: a joint reclaim must not park on
-// a lower-rank pool while one of its higher-rank demands stands registered (see the
-// streampool reclaim lend rule).
+// it a held resource for deadlock-ordering purposes: a goroutine must not park while a
+// demand only it can attend stands registered (the withdraw-before-going-deep
+// discipline; see also the streampool reclaim lend rule).
 func (d *Demand) Registered() bool {
 	return d.pool.Load() != nil
+}
+
+// refreshAnchor re-derives the barrier from the front of the fifo and publishes
+// the head demand's body cache (nil when the queue is empty). mu must be held.
+func (p *Pool) refreshAnchor() {
+	var a *Cache
+	if hd := p.fifo.Front(); hd != nil {
+		a = hd.cache.Load()
+	}
+	p.anchor.Store(a)
 }
 
 // Acquire makes w permits available for a body in c to run and returns a Permit
@@ -666,21 +601,26 @@ func (d *Demand) Registered() bool {
 // rather than retry. d is the caller-held demand identity (see [Demand]).
 //
 // The unified demand queue (weighted-acquisition.md "Queue unification") shapes
-// the flow. With the head slot EMPTY, this is the ordinary lock-free machinery —
-// one load, then the locality-ordered arms. While a head STANDS, every
+// the flow. With the queue EMPTY, this is the ordinary lock-free machinery —
+// one anchor load, then the locality-ordered arms. While a head STANDS, every
 // acquisition arm — including the step-1/2 up-walk, so local recirculation
 // cannot bypass the head invisibly — is gated unless the acquire is exempt (its
 // chain passes through the head's body cache, or it is the episode owner
 // resuming into its own home), and every gated or missed acquire of EVERY weight
-// enqueues, waiting in strict arrival order. A queued demand acquires only
+// registers, waiting in strict arrival order. A registered demand acquires only
 // through its own body cache: as head it gathers into it — multi-source assembly
 // whose partial hoard stays borrowable throughout (Decision 1; a blocked
 // weighted acquire is not hold-and-wait) — and as a non-head it waits for its
-// promotion. An uncontended slow-path acquire still satisfies within one call:
-// enqueue → instant head → gather → retire → promote.
+// turn. An uncontended slow-path acquire still satisfies within one call:
+// register → instant head → gather → retire.
 //
-// Under a STANDING overdraft episode (the head slot held by the episode
-// sentinel), an exempt claimant that misses every ordinary arm never queues —
+// A miss leaves the demand registered; the caller retries by re-presenting the
+// same demand — from a queue worker's retry sweep (its queue's listener
+// registered with [Pool.Notifier]), a park confirm, or its own next attempt —
+// and withdraws it with [Demand.Invalidate] when it stops attending.
+//
+// Under a STANDING overdraft episode (the barrier anchored by the episode
+// sentinel), an exempt claimant that misses every ordinary arm never registers —
 // waiting behind its own episode would deadlock its drain — and instead claims
 // from the episode allowance, extending the episode (a further serialized
 // overdraft evaluation) when the remaining allowance cannot cover it.
@@ -698,25 +638,21 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 	uw := uint64(w)
 	p := c.pool
 
-	// A queued demand waits its turn; only the head acquires (through its own
-	// body cache).
-	if d.pool.Load() != nil {
-		return p.queuedAcquire(d, uw)
+	// A registered demand waits its turn; only the head acquires (through its
+	// own body cache).
+	if reg := d.pool.Load(); reg != nil {
+		if reg != p {
+			panic("permits: demand registered in a different Pool")
+		}
+		return p.registeredAcquire(d, uw)
 	}
 
-	// The fast-path gate: a BARE LOAD of the head slot, nothing stronger. nil ⇒
-	// nobody waits ⇒ the ordinary lock-free machinery below, verbatim. Non-nil ⇒
-	// gated unless exempt (the promoting marker's nil cache fails every
-	// exemption test, gating everyone for the scan's brief window).
-	hd := p.head.Load()
-	var anchor *Cache
-	if hd != nil {
-		anchor = hd.cache.Load()
-		if !exemptFromBarrier(c, home, anchor) {
-			return p.enqueue(c, d, uw) // every weight joins the FIFO behind the head
-		}
+	// The fast-path gate: a BARE LOAD of the anchor, nothing stronger. nil ⇒
+	// nobody waits ⇒ the ordinary lock-free machinery below, verbatim.
+	anchor := p.anchor.Load()
+	if anchor != nil && !exemptFromBarrier(c, home, anchor) {
+		return p.enqueue(c, d, uw) // every weight joins the FIFO behind the head
 	}
-	episodeStanding := hd != nil && hd.sentinel
 
 	// Step 0: the demand's persistent body-cache home from a prior satisfied
 	// episode — the resume-reacquire hit, and where any leftover hoard lives.
@@ -744,12 +680,14 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 	// overdraft without refunding the allowance — the Σ excess + allowance == total
 	// leak the grant-mode episode model surfaced. (A non-sentinel head's own gather
 	// runs through headGather.acquireInto, not this path, so it still steals.)
-	if episodeStanding && anchor != nil {
-		if p.resource.TryAcquire(w) {
-			c.counts.checkout(uw)
-			return Permit{backing: c, weight: uw}, nil
+	if od := p.od.Load(); od != nil {
+		if oa := od.sentinel.cache.Load(); oa != nil && exemptFromBarrier(c, home, oa) {
+			if p.resource.TryAcquire(w) {
+				c.counts.checkout(uw)
+				return Permit{backing: c, weight: uw}, nil
+			}
+			return p.claimOrExtend(claimStartFor(c, home, oa), oa, uw)
 		}
-		return p.claimOrExtend(claimStartFor(c, home, anchor), anchor, uw)
 	}
 	if w == 1 {
 		// Steps 3–4: free Resource, then steal (the w=1 "gather" degenerates to a
@@ -773,7 +711,7 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 // chainPassesThrough reports whether b is on c's ancestor chain (c itself
 // included) — the barrier exemption test: an acquire may proceed while armed iff
 // its chain passes through the head's body cache. Lock-free: parents are immutable
-// and pinned by refcounts. Cost is armed-only.
+// and pinned by refcounts. Cost is armed-only, bounded by the acquirer's depth.
 func chainPassesThrough(c, b *Cache) bool {
 	if b == nil {
 		return false
@@ -791,7 +729,8 @@ func chainPassesThrough(c, b *Cache) bool {
 // anchor (the head's body cache): its chain passes through the anchor (resolution
 // (b) — exactly the causal subtree; siblings, ancestors, and arrivals stay gated),
 // or the home IS the anchor (the satisfied episode owner resuming — its acquiring
-// cache is the home's parent, so the chain test alone would miss it).
+// cache is the home's parent, so the chain test alone would miss it). Pointer
+// comparisons only: a stale anchor value must never be dereferenced.
 func exemptFromBarrier(c, home, anchor *Cache) bool {
 	return chainPassesThrough(c, anchor) || (home != nil && home == anchor)
 }
@@ -840,27 +779,23 @@ func claimNeed(c *Cache, w uint64) uint64 {
 	return excessOver(held, inUse+w) - excessOver(held, inUse)
 }
 
-// enqueue registers d (weight uw, homed under c) at the back of the demand FIFO
-// and helps establish a head if the slot is empty — the enqueuer-side half of the
-// promotion protocol, closing the race with a retiring head that drained the queue
-// before this entry landed. The body cache is created lazily on first registration
-// and reused across the demand's episodes; the demand's fields are caller-serialized
-// and published by the PushBack (and, for the head, by the slot Store), so wake()'s
-// lock-free reads always see a ready mailbox.
+// enqueue registers d (weight uw, homed under c) at the back of the demand FIFO.
+// The body cache is created lazily on first registration and reused across the
+// demand's episodes; the demand's fields are caller-serialized and published by
+// the linked insertion under the Pool mutex.
 //
-// When the help installs d ITSELF as the head, an inline gather satisfies an
-// uncontended acquire in one call — but ONLY for w ≥ 2. The w ≥ 2 fast path does
-// not gather (Acquire tried a whole-grant TryAcquire and stopped), so this is its
-// FIRST gather. A w = 1 acquire, by contrast, reached enqueue only after its
-// fast-path acquireInto (the w=1 steal) JUST failed over the same forest with no
+// When d lands as the instant head, an inline gather satisfies an uncontended
+// acquire in one call — but ONLY for w ≥ 2. The w ≥ 2 fast path does not gather
+// (Acquire tried a whole-grant TryAcquire and stopped), so this is its FIRST
+// gather. A w = 1 acquire, by contrast, reached enqueue only after its fast-path
+// acquireInto (the w=1 steal) JUST failed over the same forest with no
 // intervening change, and its body cache is a fresh empty child that adds no
-// borrowable — so an inline re-gather would redundantly re-walk to the same miss.
-// Skip it: return the miss and let the caller's register-then-confirm recheck
-// (AcquireWait's confirm, or the manager postpone's re-acquire) drive the single
-// as-head gather, which also catches any capacity freed during the transition. A
-// gated w = 1 can never be the instant head (a head already stands), so this only
-// affects the not-gated instant-head case, where the prior fast-path gather is
-// guaranteed to have run.
+// borrowable — so an inline re-gather would redundantly re-walk to the same
+// miss. Skip it: return the miss and let the caller's register-then-confirm
+// recheck drive the single as-head gather, which also catches any capacity
+// freed during the registration. A gated w = 1 can never be the instant head (a
+// head already stands), so this only affects the not-gated instant-head case,
+// where the prior fast-path gather is guaranteed to have run.
 //
 //nolint:contextcheck // background context used only for tracing
 func (p *Pool) enqueue(c *Cache, d *Demand, uw uint64) (Permit, error) {
@@ -872,108 +807,62 @@ func (p *Pool) enqueue(c *Cache, d *Demand, uw uint64) (Permit, error) {
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), "permits.enqueue", "Pool=%p Demand=%p w=%d cache=%p", p, d, uw, c)
 	}
-	p.queue.PushBack(demandEntry{d: d, gen: d.gen.Load()})
-	if p.head.Load() == nil && p.head.CompareAndSwap(nil, &p.promoting) {
-		p.promoteScan()
-	}
-	if uw >= 2 && p.head.Load() == d {
+	p.mu.Lock()
+	p.fifo.PushBack(d)
+	isHead := p.fifo.Front() == d
+	p.refreshAnchor()
+	p.mu.Unlock()
+	if isHead && uw >= 2 {
 		return p.headGather(d, uw)
 	}
 	return Permit{}, nil
 }
 
-// promoteScan pops the next live entry into the head slot and wakes it; the
-// caller must hold the slot as the promoting marker (the exclusive right to pop —
-// two concurrent scans would each strand a popped demand). Gen-stale entries
-// (invalidated while queued — lazy interior removal) are skipped; the captured
-// generation also guards against demand recycling. A demand invalidated BETWEEN
-// validation and install is reclaimed by the post-install re-check: its
-// Invalidate may race us to the slot, and whichever party wins the marker swap
-// owns the continued scan.
-//
-//nolint:contextcheck // background context used only for tracing
-func (p *Pool) promoteScan() {
-	for {
-		e, ok := p.queue.TryPopFront()
-		if !ok {
-			// Queue drained: open the slot (the fast path reopens). A concurrent
-			// enqueue may have landed behind our empty pop and lost its own
-			// promote CAS to our marker — re-close that gap before returning.
-			p.head.Store(nil)
-			if p.queue.Empty() {
-				return
-			}
-			if !p.head.CompareAndSwap(nil, &p.promoting) {
-				return // someone else holds the slot now; theirs to scan
-			}
-			continue
-		}
-		if e.d.gen.Load() != e.gen {
-			continue // invalidated while queued — skip the stale entry
-		}
-		p.head.Store(e.d) // marker → head: publishes cache+mailbox written at enqueue
-		if e.d.gen.Load() != e.gen {
-			// Invalidated during the install. Reclaim the slot unless the racing
-			// Invalidate already did (exactly one of us wins the swap and scans on).
-			if p.head.CompareAndSwap(e.d, &p.promoting) {
-				continue
-			}
-			return
-		}
-		if trace.IsEnabled() {
-			trace.Logf(context.Background(), "permits.promoteScan", "Pool=%p promoted Demand=%p w=%d", p, e.d, e.d.w)
-		}
-		e.d.mailbox.Notify(nil) // promotion wake: a parked waiter or a postponed listener
-		return
-	}
-}
-
-// queuedAcquire is a re-presentation of an already-queued demand (a postpone
-// retry, a mailbox wake, or a promotion wake): the head gathers, everyone else
-// keeps waiting.
-func (p *Pool) queuedAcquire(d *Demand, uw uint64) (Permit, error) {
+// registeredAcquire is a re-presentation of an already-registered demand (a
+// retry from a queue worker's sweep, a park confirm, a capacity wake): the head
+// gathers, everyone else keeps waiting.
+func (p *Pool) registeredAcquire(d *Demand, uw uint64) (Permit, error) {
 	if d.w != uw {
-		panic("permits: re-presented demand with a different weight (queued weight is stamped)")
+		panic("permits: re-presented demand with a different weight (registered weight is stamped)")
 	}
-	if p.head.Load() != d {
-		return Permit{}, nil
+	p.mu.Lock()
+	isHead := p.fifo.Front() == d
+	p.mu.Unlock()
+	if !isHead {
+		return Permit{}, nil // a head stands ahead; wait in arrival order
 	}
 	return p.headGather(d, uw)
 }
 
 // headGather drives the head demand's assembly into its body cache and, on
-// success, retires the demand: one CAS hands the slot to the promoting marker and
-// the scan installs and wakes the successor — no empty-slot window while waiters
-// remain, and the promotion cascade replaces the old chained-wake walk (each
-// satisfied head promotes the next, whose confirm re-reads counts). An exhausted
-// gather runs the overdraft evaluation instead of returning a bare miss.
+// success, retires the registration. An exhausted gather runs the overdraft
+// evaluation instead of returning a bare miss.
 //
 //nolint:contextcheck // background context used only for tracing
 func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
-	home := d.cache.Load() // queued ⇒ non-nil, stable until this call retires it
+	home := d.cache.Load() // registered ⇒ non-nil, stable until this call retires it
 	for {
 		//nolint:gosec // G115: uw came from Acquire's int w, validated >= 1
 		if p.acquireInto(home, int(uw)) != nil {
-			p.retireHead(d)
+			p.retire(d)
 			return Permit{backing: home, weight: uw}, nil
 		}
 		// Gather exhausted THIS pass: the steal walk found nothing and the
 		// Resource refused the shortfall. The hoard stays; a wait outcome
-		// re-drives via wakes. Before consulting overdraft policy, re-establish
-		// the §Overdraft proof premises AT ONE POINT IN TIME: the gather and the
-		// walk below are separate snapshots, and a release landing between them
-		// leaves takable capacity the gather never saw — granting then would
-		// over-commit past capacity that is right there (and, until step 4 wires
-		// the exempt-subtree redirect, strand the pool in an episode whose
-		// claimants cannot exist). anyInUse ⇒ wait (those releases re-drive the
-		// head); borrowable anywhere else ⇒ the exhaustion premise broke —
-		// re-gather, which takes it (everyone else is gated, so nothing bounces).
-		// Only a truly dry forest reaches the policy, which is what makes the
-		// evaluation uniform across weights (PN): a weight-1 head gets here only
-		// at literally zero capacity, and whether that means "paused, wait for
-		// the raise" or "grant past it" is the RESOURCE's policy call, not a
-		// weight rule (streampool's semaphore says "not now" while paused,
-		// preserving limit-0-blocks; a non-implementing resource grants).
+		// retries on capacity wakes. Before consulting overdraft policy,
+		// re-establish the §Overdraft proof premises AT ONE POINT IN TIME: the
+		// gather and the walk below are separate snapshots, and a release
+		// landing between them leaves takable capacity the gather never saw —
+		// granting then would over-commit past capacity that is right there.
+		// anyInUse ⇒ wait (those releases re-drive the head); borrowable
+		// anywhere else ⇒ the exhaustion premise broke — re-gather, which takes
+		// it (everyone else is gated, so nothing bounces). Only a truly dry
+		// forest reaches the policy, which is what makes the evaluation uniform
+		// across weights (PN): a weight-1 head gets here only at literally zero
+		// capacity, and whether that means "paused, wait for the raise" or
+		// "grant past it" is the RESOURCE's policy call, not a weight rule
+		// (streampool's semaphore says "not now" while paused, preserving
+		// limit-0-blocks; a non-implementing resource grants).
 		anyInUse, anyBorrowable := p.walkCounts(home)
 		if anyInUse || p.strangerSuspended(home) {
 			if trace.IsEnabled() {
@@ -998,7 +887,7 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 		//nolint:gosec // G115: need ≤ uw, which came from the int w
 		if p.resource.TryAcquire(int(need)) {
 			if home.counts.depositOccupy(need, uw) {
-				p.retireHead(d)
+				p.retire(d)
 				return Permit{backing: home, weight: uw}, nil
 			}
 			continue // hoard shrank underneath; the grant stays as hoard — re-gather
@@ -1007,71 +896,70 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 	}
 }
 
-// retireHead ends d's headship — satisfaction, refusal, or invalidation-by-owner —
-// swapping the slot to the promoting marker (exclusive: only the owner transitions
-// a non-nil slot, so this CAS cannot lose) and scanning the successor in. The
-// demand's registration clears; its body cache persists as its home until
-// Invalidate.
+// retire ends d's registration on satisfaction: immediate unlink, and one token
+// minted so the new head's worker is offered the turn — the promotion cascade,
+// and the re-probe of conservation rule 5 (each satisfied head re-mints, so a
+// multi-unit capacity event admits claimants one by one until the first miss
+// exhausts). The demand's body cache persists as its home until Invalidate.
 //
 //nolint:contextcheck // background context used only for tracing
-func (p *Pool) retireHead(d *Demand) {
-	if !p.head.CompareAndSwap(d, &p.promoting) {
-		panic("permits: retiring head does not hold the slot")
-	}
+func (p *Pool) retire(d *Demand) {
 	if trace.IsEnabled() {
-		trace.Logf(context.Background(), "permits.retireHead", "Pool=%p Demand=%p", p, d)
+		trace.Logf(context.Background(), "permits.retire", "Pool=%p Demand=%p", p, d)
 	}
-	d.w = 0
-	d.pool.Store(nil)
-	p.promoteScan()
+	p.mu.Lock()
+	p.fifo.Remove(d)
+	d.deregister()
+	p.refreshAnchor()
+	p.mu.Unlock()
+	p.notifier.Notify(nil)
 }
 
 // headOverdraft runs when the head's gather has exhausted the forest and the
 // Resource: the infeasibility proof is evaluated and, on a grant, the standing
-// episode is installed — a pooled overdraft object whose sentinel takes the head
-// slot, so the gate stays closed (arrivals keep queueing, no successor gathers:
-// seriality across the head's park gaps) until the episode body cache's destroy
-// retires it. On refusal the demand retires (the queue progresses without waiting
-// for the caller's Invalidate) and the unit fails with the resource's error. A
-// wait outcome is a plain miss: the head parks on its mailbox, re-driven by armed
-// capacity events and suspension-end nudges. The evaluation needs no lock: the
-// head slot makes the gathering head the sole evaluator (an episode's extensions
-// cannot overlap it — the sentinel would hold the slot instead of a gathering
-// head), and the od object is unpublished while it is initialized.
+// episode is installed — a pooled overdraft object whose sentinel front-links
+// into the fifo, so the barrier stays armed (arrivals keep queueing, no
+// successor gathers: seriality across the head's park gaps) until the episode
+// body cache's destroy retires it. On refusal the demand retires (the queue
+// progresses without waiting for the caller's Invalidate) and the unit fails
+// with the resource's error. A wait outcome is a plain miss: the head retries
+// on capacity wakes. The evaluation needs no lock: headship makes the gathering
+// head the sole evaluator (an episode's extensions cannot overlap it — the
+// sentinel would hold the headship instead), and the od object is unpublished
+// while it is initialized.
 func (p *Pool) headOverdraft(d *Demand, uw uint64) (Permit, error) {
 	home := d.cache.Load()
 	held, inUse := home.counts.load()
 	ask := excessOver(held, inUse+uw) - excessOver(held, inUse)
 	if ask == 0 {
-		// The hoard became coverable between the gather's miss and here; a wake is
+		// The hoard became coverable between the gather's miss and here; a token is
 		// already owed for whatever freed it — miss and let the retry gather.
 		return Permit{}, nil
 	}
 	granted, err := p.evaluateOverdraft(home, ask)
 	if err != nil {
-		p.retireHead(d)
+		p.retire(d)
 		return Permit{}, err
 	}
 	if !granted {
 		return Permit{}, nil // wait (running work, a stranger, or a resource "not now")
 	}
-	// Install the standing episode: od publishes BEFORE its sentinel takes the
-	// slot (wake routing loads od through the sentinel flag, never through the
-	// possibly-stale head pointer), with the anchor cache written before both;
-	// the demand itself retires, its body cache persisting as its home and as
-	// the episode anchor.
+	// Install the standing episode: the sentinel front-links (and the anchor
+	// re-derives to it) in the same critical section that retires the granted
+	// head, so the barrier never opens in between.
 	od := overdraftPool.Get()
 	od.total = ask
 	od.allowance.Store(ask)
 	od.sentinel.cache.Store(home)
+	p.mu.Lock()
 	p.od.Store(od)
-	if !p.head.CompareAndSwap(d, &od.sentinel) {
-		panic("permits: overdraft-granted head does not hold the slot")
-	}
-	d.w = 0
-	d.pool.Store(nil)
+	p.fifo.Remove(d)
+	d.deregister()
+	p.fifo.PushFront(&od.sentinel)
+	p.refreshAnchor()
+	p.mu.Unlock()
 	// Claim the head's own occupation from the fresh allowance. Nothing can shrink
-	// the hoard or the allowance in the gap: the gate is still closed and the
+	// the hoard or the allowance in the gap: the barrier is still armed and the
 	// episode subtree is empty (the head body has not run yet), so there are no
 	// exempt claimants and no gatherers.
 	if !home.counts.occupyTaking(uw, &od.allowance) {
@@ -1085,21 +973,23 @@ func (p *Pool) headOverdraft(d *Demand, uw uint64) (Permit, error) {
 // allowance (occupyTaking on the best chain cache — inUse pushed past held,
 // "allowance fungibility"), and when lent capacity plus the remaining allowance
 // cannot cover it, run the serialized episode EXTENSION — the same evaluation as
-// the initial grant, for the shortfall only, added to the outstanding aggregate and
-// cleared at the original episode's end. A wait outcome returns a miss (the
-// claimant parks on episodeNotify; releases, racing extensions, and suspension-end
-// nudges re-drive it); a refusal returns the resource-authored error — the unit's
-// distinct failure, no wedge: the episode completes without it.
+// the initial grant, for the shortfall only, added to the outstanding aggregate
+// and cleared at the original episode's end. A wait outcome is a plain miss —
+// the claimant's retry rides its queue's listener or its park like any other
+// waiter in the Pool's notification domain (no claimant tracking: a token walks
+// the domain and the claimant's retry is simply the acquire that succeeds). A
+// refusal returns the resource-authored error — the unit's distinct failure, no
+// wedge: the episode completes without it.
 //
 // The episode cannot end (nor its pooled state recycle) mid-claim: a live exempt
 // claimant's cache chain ref-pins the episode cache, and episode end IS that
 // cache's destroy — so the episode outlives every claimant that can reach this
-// path. The od identity re-check under od.mu is a belt for the benign stale-hd
-// read in Acquire.
+// path. The od identity re-check under od.mu is a belt for the benign stale
+// reads in Acquire.
 func (p *Pool) claimOrExtend(start, anchor *Cache, w uint64) (Permit, error) {
 	od := p.od.Load()
 	if od == nil {
-		return Permit{}, nil // stale hd: the episode already ended — re-drive fresh
+		return Permit{}, nil // stale read: the episode already ended — retry fresh
 	}
 	for {
 		c := bestClaimCache(start, anchor, w)
@@ -1108,7 +998,7 @@ func (p *Pool) claimOrExtend(start, anchor *Cache, w uint64) (Permit, error) {
 		}
 		od.mu.Lock()
 		if p.od.Load() != od {
-			// Stale-hd belt (a pinned claimant can never see this): the episode
+			// Stale belt (a pinned claimant can never see this): the episode
 			// ended — miss, and the retry re-runs the gate fresh.
 			od.mu.Unlock()
 			return Permit{}, nil
@@ -1127,7 +1017,7 @@ func (p *Pool) claimOrExtend(start, anchor *Cache, w uint64) (Permit, error) {
 		}
 		if !granted {
 			od.mu.Unlock()
-			return Permit{}, nil // wait: park on the episode's claimants set
+			return Permit{}, nil // wait: capacity events walk the pool's domain
 		}
 		od.total += ask
 		od.allowance.Add(ask)
@@ -1138,16 +1028,17 @@ func (p *Pool) claimOrExtend(start, anchor *Cache, w uint64) (Permit, error) {
 }
 
 // evaluateOverdraft is the overdraft evaluation — serialized structurally: the
-// initial grant runs only on the head (the slot admits one), extensions run under
-// od.mu, and the two can never overlap (an episode's sentinel occupies the slot a
-// gathering head would need). The free-and-exact infeasibility proof: while the
-// gate is closed only releases move the world, so zero inUse anywhere on top of
-// the caller's already-exhausted gather (or refused TryAcquire) dynamically
-// proves nothing inside the system can satisfy the shortfall — guarded by the
-// ancestor-exempt trigger: a suspended holder off the evaluator's own driver
-// chain is a stranger whose resume races the over-commitment, so the evaluator
-// waits for the suspension to end instead (ResumeDriver nudges it). Only a passed
-// proof consults the Resource's policy, which must not call back into the Pool.
+// initial grant runs only on the head (headship admits one), extensions run
+// under od.mu, and the two can never overlap (an episode's sentinel holds the
+// headship a gathering head would need). The free-and-exact infeasibility
+// proof: while the gate is closed only releases move the world, so zero inUse
+// anywhere on top of the caller's already-exhausted gather (or refused
+// TryAcquire) dynamically proves nothing inside the system can satisfy the
+// shortfall — guarded by the ancestor-exempt trigger: a suspended holder off
+// the evaluator's own chain is a stranger whose resume races the
+// over-commitment, so the evaluator waits for the suspension to end instead
+// ([Cache.Resume] nudges it). Only a passed proof consults the Resource's
+// policy, which must not call back into the Pool.
 func (p *Pool) evaluateOverdraft(anchor *Cache, ask uint64) (bool, error) {
 	if p.anyInUse() {
 		return false, nil // something still runs; its releases can move the world
@@ -1204,33 +1095,33 @@ func walkCountsList(l *cacheList, exclude *Cache) (anyInUse, anyBorrowable bool)
 }
 
 // strangerSuspended reports whether any suspended permit-holder is off the
-// evaluator's own driver chain: exact equality of the pool-wide suspension count
-// with the sum along the chain (anchor → root) — resolution (c). Suspensions
-// targeting chain caches are drives the evaluator runs causally inside (their
-// resume follows its completion); anything else is a stranger whose resume races
-// the over-commitment. A transient mismatch (a suspend or resume mid-bracket)
-// reads as a stranger — conservative, and self-healing: every armed resume nudges.
+// evaluator's own chain: exact equality of the pool-wide suspension count with
+// the sum along the chain (anchor → root) — resolution (c). Suspensions
+// targeting chain caches belong to drains the evaluator runs causally inside
+// (their resume follows its completion); anything else is a stranger whose
+// resume races the over-commitment. A transient mismatch (a suspend or resume
+// mid-bracket) reads as a stranger — conservative, and self-healing: every
+// resume nudges the pool.
 func (p *Pool) strangerSuspended(anchor *Cache) bool {
 	var sum int64
 	for a := anchor; a != nil; a = a.parent {
-		sum += a.suspendedDrivers.Load()
+		sum += a.suspended.Load()
 	}
 	return p.suspended.Load() != sum
 }
 
 // endEpisode retires a standing overdraft episode; it runs from the episode body
 // cache's destroy — refs==0: the owner's body exited (Invalidate dropped the
-// demand's ref), all sub-waves drained, every suspension into the subtree resumed.
-// Every claimed excess has therefore returned (excess lives only inside the
-// subtree, and a drained subtree has zero inUse), which the allowance-home check
-// asserts; then the sentinel retires from the head slot — the promotion scan
-// installs and wakes the next queued demand, or opens the fast path — and the
-// episode object returns to its pool (safe: no claimant can still be parked on
-// it, by the same structural pin that gates this call).
+// demand's ref), all sub-waves drained, every suspension into the subtree
+// resumed. Every claimed excess has therefore returned (excess lives only inside
+// the subtree, and a drained subtree has zero inUse), which the allowance-home
+// check asserts. The sentinel unlinks — one token offers the turn to the next
+// queued demand, or the barrier disarms — and the episode object returns to its
+// pool.
 func (p *Pool) endEpisode(c *Cache) {
 	od := p.od.Load()
-	if od == nil || od.sentinel.cache.Load() != c || p.head.Load() != &od.sentinel {
-		panic("permits: episode end without the standing sentinel in the head slot")
+	if od == nil || od.sentinel.cache.Load() != c {
+		panic("permits: episode end without a standing episode anchored here")
 	}
 	od.mu.Lock()
 	if got := od.allowance.Load(); got != od.total {
@@ -1238,95 +1129,13 @@ func (p *Pool) endEpisode(c *Cache) {
 		panic("permits: allowance not fully home at episode end")
 	}
 	od.mu.Unlock()
+	p.mu.Lock()
+	p.fifo.Remove(&od.sentinel)
 	p.od.Store(nil)
-	if !p.head.CompareAndSwap(&od.sentinel, &p.promoting) {
-		panic("permits: episode sentinel does not hold the slot at episode end")
-	}
-	p.promoteScan()
+	p.refreshAnchor()
+	p.mu.Unlock()
 	overdraftPool.Release(od)
-}
-
-// AcquireWait is the blocking acquire — for an executor reacquiring mid-body. It does
-// the non-blocking Acquire and, on a miss, parks on the Pool's waiters until a permit
-// frees (Release or destroy wakes it), re-searching each time, until it succeeds or
-// ctx is cancelled. Cancellation invalidates d (the demand is withdrawn, not
-// dropped). The confirm callback re-runs Acquire AFTER registering as a waiter, so a
-// permit freed between the miss and the park is taken immediately rather than lost —
-// and if it succeeds there, that is the one acquisition (no double-take).
-//
-// Chain discipline: a success on a CHAINED wake (weighted release / multi-permit
-// drain — capacity that may satisfy more waiters) owes the chain one fresh probe
-// (rule 2); a failed re-acquire after any wake is the chain's terminal probe — the
-// capacity is genuinely gone, so the wake simply drops (rule 3).
-func (c *Cache) AcquireWait(ctx context.Context, d *Demand, w int) (Permit, error) {
-	p := c.pool
-	var m rdvq.Notification
-	for {
-		pm, err := c.Acquire(d, w)
-		if err != nil {
-			d.Invalidate() // an overdraft refusal fails the unit; the demand retires
-			return Permit{}, err
-		}
-		if pm.Held() {
-			if m.Chained() {
-				p.ChainProbe() // rule 2: pay the chain forward
-			}
-			return pm, nil
-		}
-		confirm := func() bool {
-			pm, err = c.Acquire(d, w)
-			return err == nil && !pm.Held() // park only while there is still nothing
-		}
-		// Park target follows registration state: a registered demand parks on its
-		// OWN mailbox (armed capacity events and its promotion are addressed there;
-		// it must not compete for — or worse, consume — general-set wakes it cannot
-		// use); an exempt claimant under a standing episode parks on episodeNotify
-		// (where armed capacity events route while the satisfied head stands); any
-		// other unregistered demand parks on the Pool's general set. The state can
-		// change across a park (registration happens inside Acquire; episodes end),
-		// so re-evaluate every iteration.
-		var waitErr error
-		if d.pool.Load() != nil {
-			m, waitErr = d.mailbox.Wait(ctx, confirm)
-		} else if od := p.standingEpisode(c, d); od != nil {
-			m, waitErr = od.claimants.Wait(ctx, confirm)
-		} else {
-			// Transient: an episode retired between the miss and here. The next
-			// Acquire re-runs the gate and enqueues (or claims afresh) — loop
-			// without parking; there is no general set to park on.
-			continue
-		}
-		if pm.Held() {
-			if m.Chained() {
-				p.ChainProbe() // rule 2, confirm-path success
-			}
-			return pm, nil
-		}
-		if err != nil {
-			d.Invalidate() // confirm-path overdraft refusal
-			return Permit{}, err
-		}
-		if waitErr != nil {
-			d.Invalidate()
-			return Permit{}, waitErr
-		}
-		// Woken by a freed permit; loop and retry (a top-of-loop miss is rule 3).
-	}
-}
-
-// standingEpisode returns the standing episode an unregistered claimant should
-// park on (its claimants set — where armed capacity events route, and only the
-// episode's exempt subtree can act on them), or nil to use the general set.
-// Structural liveness note: a claimant parked there cannot outlive the episode —
-// its cache's refs keep the episode cache from destroying — so the claimants set
-// never strands a waiter across an episode end, and the returned object cannot be
-// recycled while the claimant exists.
-func (p *Pool) standingEpisode(c *Cache, d *Demand) *overdraft {
-	hd := p.head.Load()
-	if hd == nil || !hd.sentinel || !exemptFromBarrier(c, d.cache.Load(), hd.cache.Load()) {
-		return nil
-	}
-	return p.od.Load()
+	p.notifier.Notify(nil)
 }
 
 // acquireInto runs steps 3–4 for c, landing w permits in c's own counts. Returns c
@@ -1430,20 +1239,20 @@ type Permit struct {
 	weight  uint64
 }
 
-// Held reports whether this Permit currently occupies a slot (a non-zero Permit). A
-// zero Permit (Held false) is the not-yet-acquired / suspended state — callers use it
-// to distinguish a lent-out permit from a held one without reaching into the backing.
+// Held reports whether this Permit currently occupies a permit (a non-zero Permit).
+// A zero Permit (Held false) is the not-yet-acquired / suspended state — callers use
+// it to distinguish a lent-out permit from a held one without reaching into the
+// backing.
 func (pm Permit) Held() bool {
 	return pm.backing != nil
 }
 
 // Release ends the run segment the Permit backed; the permits stay cached in held
-// (cache-don't-return), now borrowable — and may satisfy a parked AcquireWait or a
-// postponed manager, so it wakes one consumer. Every release wakes (not just a
-// borrowable 0→ crossing): a multi-held cache freeing its second idle permit is no
-// crossing, yet a second waiter could take it. A WEIGHTED release seeds a chained
-// wake — its w freed permits may satisfy several waiters, and plain wake-one would
-// strand all but the first over borrowable capacity.
+// (cache-don't-return), now borrowable — one token mints into the Pool's
+// notification domain (mint after visibility: the counts move first). A weighted
+// release needs no herd and no chain: the head its token admits re-probes on
+// retirement (conservation rule 5), so satisfiable claimants admit one by one
+// until the first miss exhausts.
 //
 //nolint:contextcheck // background context used only for tracing
 func (pm Permit) Release() {
@@ -1454,7 +1263,7 @@ func (pm Permit) Release() {
 		trace.Logf(context.Background(), "permits.Release", "Pool=%p backing=%p w=%d", pm.backing.pool, pm.backing, pm.weight)
 	}
 	if excess := pm.backing.counts.release(pm.weight); excess > 0 {
-		// Overdraft excess goes home to the allowance BEFORE the wake, so a woken
+		// Overdraft excess goes home to the allowance BEFORE the mint, so a woken
 		// exempt claimant's retry finds it claimable. The episode necessarily
 		// stands (excess exists only inside its subtree, whose refs pin the
 		// anchor); a nil od here is a bracketing bug.
@@ -1464,114 +1273,45 @@ func (pm Permit) Release() {
 		}
 		od.allowance.Add(excess)
 	}
-	pm.backing.pool.wake(pm.weight > 1)
+	pm.backing.pool.notifier.Notify(nil)
 }
 
-// wake routes one freed permit to a single waiting consumer — a postponed manager
-// (listeners) first, since it represents in-process admission, else a parked executor
-// (waiters). The consumer receives a [rdvq.Notification] whose Forward re-delivers the
-// wake to the next consumer (Notifier.Notify's total conservation) rather than
-// swallowing it: without that, a stale postpone listener (one whose work already
-// re-checked and ran, leaving its idempotent shared controller listener registered)
-// would consume the wake and report it delivered, and a genuinely-waiting executor
-// would never be notified — a borrowable permit idle forever (the residual ~1/120
-// -race TestBySimulation hang). Notify is cheap when both sets are empty, so the
-// uncontended release is unaffected.
-//
-// chained marks a wake for capacity that may satisfy MORE than one consumer (a
-// weighted release, a multi-permit drain): each productive consumer then owes the
-// chain one fresh probe (ChainProbe / Notification.ProbeOrigin), so consumers admit
-// one by one until the first miss — the serialized wake chain
-// (limiter-resource-classes.md Decision 3); a broadcast here would herd N
-// consumers to satisfy k.
-//
-// While the barrier is armed, EVERY capacity event routes to the head's own mailbox
-// instead — the one consumer that can act (everyone else is gated), so wake-one is
-// exact there and the chained bit is moot (the head always re-gathers against
-// counts). A wake dropped into a stale head's empty mailbox during a barrier
-// transition is compensated by the successor's park-time confirm re-reading counts
-// (see the barrier field's comment).
+// Suspend records that a permit-holder has lent its permit back for the duration
+// of a drain targeting this cache's wave (§Overdraft resolution (c)). The
+// suspension counters are what let an overdraft evaluation tell an exempt
+// ancestor — a suspended holder on the evaluator's own chain, whose resume is
+// causally after the evaluator's completion — from a stranger whose resume races
+// the over-commitment. Call it BEFORE releasing the permit, on the holder's
+// goroutine, bracketed with [Cache.Resume]; the cache is ref-pinned for the
+// suspension's duration so the counter's home outlives the drain. The cache is
+// alive by construction: the holder runs within the target wave's still-open
+// scope.
 //
 //nolint:contextcheck // background context used only for tracing
-func (p *Pool) wake(chained bool) {
-	hd := p.head.Load()
-	if trace.IsEnabled() {
-		trace.Logf(context.Background(), "permits.wake", "Pool=%p head=%p chained=%v", p, hd, chained)
-	}
-	if hd == nil || hd == &p.promoting {
-		// Nobody waits (or a promotion scan is mid-flight — the installed head's
-		// park-time confirm re-reads counts, the standard compensation). The
-		// freed capacity sits borrowable for the fast path.
-		return
-	}
-	if hd.sentinel {
-		// Standing episode: the satisfied head consumes no wakes; the actionable
-		// consumers are the episode's exempt claimants, and a multi-permit event
-		// may satisfy several of them, so the chained bit rides through. od is
-		// re-loaded rather than reached through hd (a stale sentinel could point
-		// into recycled episode state); a nil od means the episode ended under
-		// us — drop, the same compensated class as a stale head's empty mailbox.
-		od := p.od.Load()
-		if od == nil {
-			return
-		}
-		if chained {
-			od.claimants.NotifyChained(nil)
-			return
-		}
-		od.claimants.Notify(nil)
-		return
-	}
-	hd.mailbox.Notify(nil)
-}
-
-// ChainProbe emits one fresh chained wake. It is both the SEED for a pool-external
-// multi-permit capacity event (a SetMaxConcurrency raise announcing unknown headroom)
-// and the LINK a productive consumer of a chained wake owes when its wake was
-// waiter-style (no origin recorded — the streampool gate loops call this on the Pool
-// they already hold; listener-style consumers use Notification.ProbeOrigin instead).
-// While the barrier is armed it routes to the head like every capacity event.
-func (p *Pool) ChainProbe() {
-	p.wake(true)
-}
-
-// SuspendDriver records that a permit-holder has lent its permit back for the
-// duration of a drive episode targeting this cache's wave (§Overdraft resolution
-// (c)). The suspension counters are what let an overdraft evaluation tell an exempt
-// ancestor — a suspended holder on the evaluator's own driver chain, whose resume
-// is causally after the evaluator's completion — from a stranger whose resume races
-// the over-commitment. Call it BEFORE releasing the permit, on the driving
-// goroutine, bracketed with [Cache.ResumeDriver]; the cache is ref-pinned for the
-// suspension's duration so the counter's home outlives the drive. The cache is
-// alive by construction: the driver runs within the target wave's still-open scope.
-//
-//nolint:contextcheck // background context used only for tracing
-func (c *Cache) SuspendDriver() {
+func (c *Cache) Suspend() {
 	c.AddRef()
-	c.suspendedDrivers.Add(1)
+	c.suspended.Add(1)
 	if n := c.pool.suspended.Add(1); trace.IsEnabled() {
-		trace.Logf(context.Background(), "permits.SuspendDriver", "Pool=%p Cache=%p suspended=%d", c.pool, c, n)
+		trace.Logf(context.Background(), "permits.Cache.Suspend", "Pool=%p Cache=%p suspended=%d", c.pool, c, n)
 	}
 }
 
-// ResumeDriver ends a SuspendDriver bracket. Call it BEFORE the reacquire: the
-// resuming holder stops being a suspension and becomes a visible (gated, parked)
-// demand, which is the design's chosen fairness point — a standing evaluation
-// waiting out this suspension may then be granted, rather than waiting for the
-// holder's full release (which the barrier gates, and so would wedge). An armed
-// pool is nudged so a parked evaluator re-evaluates its stranger check.
+// Resume ends a [Cache.Suspend] bracket. Call it BEFORE the reacquire: the
+// resuming holder stops being a suspension and becomes a visible (gated,
+// waiting) demand, which is the design's chosen fairness point — a standing
+// evaluation waiting out this suspension may then be granted, rather than
+// waiting for the holder's full release (which the barrier gates, and so would
+// wedge). One token mints so a waiting evaluator re-runs its stranger check.
 //
 //nolint:contextcheck // background context used only for tracing
-func (c *Cache) ResumeDriver() {
+func (c *Cache) Resume() {
 	p := c.pool
 	if n := p.suspended.Add(-1); trace.IsEnabled() {
-		trace.Logf(context.Background(), "permits.ResumeDriver", "Pool=%p Cache=%p suspended=%d", p, c, n)
+		trace.Logf(context.Background(), "permits.Cache.Resume", "Pool=%p Cache=%p suspended=%d", p, c, n)
 	}
-	c.suspendedDrivers.Add(-1)
+	c.suspended.Add(-1)
 	c.ReleaseRef() // may destroy c — nothing below touches it
-	if p.head.Load() != nil {
-		p.wake(true)
-	}
+	p.notifier.Notify(nil)
 }
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting

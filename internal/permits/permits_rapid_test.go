@@ -88,7 +88,6 @@ func TestPermitsModel(t *testing.T) {
 					return
 				}
 				u := &modelUnit{cache: tp.NewCache(), unitRefHeld: true}
-				u.demand.Init()
 				units = append(units, u)
 				check()
 			},
@@ -101,7 +100,6 @@ func TestPermitsModel(t *testing.T) {
 					return
 				}
 				u := &modelUnit{cache: tp.newChild(parent.cache), unitRefHeld: true}
-				u.demand.Init()
 				units = append(units, u)
 				check()
 			},
@@ -126,17 +124,16 @@ func TestPermitsModel(t *testing.T) {
 				if pm.Held() {
 					u.pm = pm
 					u.running = true
-				} else if hd := tp.head.Load(); hd == &u.demand {
+				} else if hd := tp.head(); hd == &u.demand {
 					// The head's own gather exhausted: legitimate ONLY when the
 					// gather could not assemble w — borrowable everywhere plus
 					// free Resource capacity falls short. (A miss always leaves
-					// SOME head standing under the unified queue: the missing
-					// demand enqueued and the promote scan installed one.)
+					// SOME head standing under the unified queue.)
 					require.Less(t, tp.borrowableTotal()+tp.free(), w,
 						"Acquire blocked while gatherable capacity covered w")
 				} else {
 					require.NotNil(t, hd,
-						"a miss must leave a head standing (the demand queued)")
+						"a miss must leave a head standing (the demand registered)")
 					// Gated behind another head — legitimate unconditionally
 					// (fairness over utilization, Decision 2).
 				}
@@ -194,7 +191,7 @@ func TestPermitsModel(t *testing.T) {
 		for _, u := range units {
 			u.demand.Invalidate()
 		}
-		require.Nil(t, tp.head.Load(), "an emptied queue must open the head slot")
+		require.Nil(t, tp.head(), "an emptied queue leaves no head standing")
 		for _, u := range units {
 			if u.unitRefHeld {
 				u.unitRefHeld = false
@@ -247,7 +244,6 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 
 		newUnit := func(c *Cache) *modelUnit {
 			u := &modelUnit{cache: c, unitRefHeld: true}
-			u.demand.Init()
 			units = append(units, u)
 			return u
 		}
@@ -287,7 +283,7 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 				// A fully quiescent pool (no standing head/episode, nothing running)
 				// must satisfy any acquire: gather covers w ≤ capacity, and overdraft
 				// grants w > capacity (the proof passes — zero inUse, no stranger).
-				quiescent := tp.head.Load() == nil && running == 0
+				quiescent := tp.head() == nil && running == 0
 				pm, err := u.cache.Acquire(&u.demand, w)
 				require.NoError(t, err, "a granting resource never refuses")
 				if pm.Held() {
@@ -376,7 +372,7 @@ func TestOverdraftEpisodeModel(t *testing.T) {
 			}
 		}
 		require.Nil(t, tp.od.Load(), "every episode ended")
-		require.Nil(t, tp.head.Load(), "an emptied queue opens the head slot")
+		require.Nil(t, tp.head(), "an emptied queue leaves no head standing")
 		require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
 		require.Equal(t, 0, tp.totalHeld(), "every permit returns to the Resource after a full drain")
 		require.Equal(t, int64(0), tp.sem.inFlight.Load(), "the Resource is fully released")

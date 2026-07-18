@@ -13,12 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// queued reports whether the demand currently occupies the queue or the head
-// slot, for assertions.
+// queued reports whether the demand currently stands registered, for assertions.
 func (d *Demand) queued() bool { return d.pool.Load() != nil }
 
-// Sticky head + strict arrival order: capacity freed while a head stands goes to
-// the HEAD, not to whichever queued demand retries first — and weight-1 traffic
+// Head + strict arrival order: capacity freed while a head stands goes to the
+// HEAD, not to whichever registered demand retries first — and weight-1 traffic
 // joins the same queue in arrival order (Queue unification: every weight queues).
 func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	tp := newTestPool(2)
@@ -27,7 +26,7 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	hp, err := hog.Acquire(dh, 2)
 	require.NoError(t, err)
 	require.True(t, hp.Held(), "w=2 whole-grant on a free Resource, no registration")
-	require.Nil(t, tp.head.Load(), "a satisfied fast path never queues")
+	require.Nil(t, tp.head(), "a satisfied fast path never registers")
 	require.False(t, dh.queued())
 
 	a := tp.NewCache()
@@ -36,11 +35,11 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	db := NewDemand()
 	pa0, err := a.Acquire(da, 2)
 	require.NoError(t, err)
-	require.False(t, pa0.Held(), "everything is in use; a queues and takes the head slot")
-	require.Same(t, da, tp.head.Load(), "a is the head")
+	require.False(t, pa0.Held(), "everything is in use; a registers and takes the headship")
+	require.Same(t, da, tp.head(), "a is the head")
 	pb0, err := b.Acquire(db, 2)
 	require.NoError(t, err)
-	require.False(t, pb0.Held(), "b queues behind a")
+	require.False(t, pb0.Held(), "b registers behind a")
 	require.True(t, db.queued())
 
 	w1 := tp.NewCache()
@@ -57,15 +56,15 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	require.False(t, pb1.Held(), "freed capacity must NOT satisfy the non-head, even on its retry")
 	pa, err := a.Acquire(da, 2)
 	require.NoError(t, err)
-	require.True(t, pa.Held(), "the sticky head takes the freed capacity")
+	require.True(t, pa.Held(), "the standing head takes the freed capacity")
 	require.Same(t, da.cache.Load(), pa.backing)
-	require.Same(t, db, tp.head.Load(), "arrival-order succession promoted b")
+	require.Same(t, db, tp.head(), "arrival-order succession promoted b")
 
 	pa.Release() // a parks: its 2 go borrowable in a's home
 	pb, err := b.Acquire(db, 2)
 	require.NoError(t, err)
 	require.True(t, pb.Held(), "the promoted head gathers from the parked predecessor's hoard")
-	require.Same(t, d1, tp.head.Load(), "the weight-1 demand is next in arrival order")
+	require.Same(t, d1, tp.head(), "the weight-1 demand is next in arrival order")
 
 	p1, err := w1.Acquire(d1, 1)
 	require.NoError(t, err)
@@ -75,7 +74,7 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	for _, d := range []*Demand{dh, da, db, d1} {
 		d.Invalidate()
 	}
-	require.Nil(t, tp.head.Load(), "invalidating the last waiter opens the slot")
+	require.Nil(t, tp.head(), "invalidating the last waiter empties the queue")
 	for _, c := range []*Cache{hog, a, b, w1} {
 		c.ReleaseRef()
 	}
@@ -83,8 +82,9 @@ func TestBarrierFIFOOrderAndGating(t *testing.T) {
 	tp.check(t)
 }
 
-// Invalidating the head hands the slot to the next queued demand and drains
-// the head's partial hoard back to the Resource, where the successor can gather it.
+// Invalidating the head hands the effective headship to the next registered demand
+// and drains the head's partial hoard back to the Resource, where the successor can
+// gather it.
 func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 	tp := newTestPool(3)
 	tp.tb = t
@@ -101,10 +101,10 @@ func TestBarrierHeadInvalidationPromotesSuccessor(t *testing.T) {
 	db := NewDemand()
 	pb0, err := b.Acquire(db, 3)
 	require.NoError(t, err)
-	require.False(t, pb0.Held(), "b queues behind the armed head")
+	require.False(t, pb0.Held(), "b registers behind the armed head")
 
 	da.Invalidate()
-	require.Same(t, db, tp.head.Load(), "b promoted")
+	require.Same(t, db, tp.head(), "b promoted")
 
 	pb, err := b.Acquire(db, 3)
 	require.NoError(t, err)
@@ -136,7 +136,7 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 	d := NewDemand()
 	pm, err := g.Acquire(d, 3)
 	require.NoError(t, err)
-	require.True(t, pm.Held(), "3 = steal 1 + grant 2")
+	require.True(t, pm.Held(), "3 = steal 1 + grant 2 (register → instant head → gather)")
 	home := pm.backing
 	require.Same(t, d.cache.Load(), home)
 
@@ -144,8 +144,8 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 	pm2, err := g.Acquire(d, 3)
 	require.NoError(t, err)
 	require.True(t, pm2.Held(), "resume reacquire")
-	require.Same(t, home, pm2.backing, "step-0 own-home hit — stable backing, no re-queueing")
-	require.Nil(t, tp.head.Load(), "no queueing on the home hit")
+	require.Same(t, home, pm2.backing, "step-0 own-home hit — stable backing, no re-registration")
+	require.Nil(t, tp.head(), "no registration on the home hit")
 
 	pm2.Release()
 	d.Invalidate()
@@ -157,8 +157,8 @@ func TestDemandHomePersistsAcrossEpisodes(t *testing.T) {
 }
 
 // Over-subscribed weighted contention under -race: mixed weights far beyond
-// capacity churn enqueueing, promotion scans, sticky-head gathering, and the
-// mailbox wake path — with weight-1 demands queueing alongside the weighted
+// capacity churn registration, headship succession, gathering, and the pool's
+// notification domain — with weight-1 demands queueing alongside the weighted
 // ones (Queue unification). A conservation hole surfaces as a ctx-deadline error
 // (or a hang under the harness timeout), not silent unfairness.
 func TestConcurrentWeightedOverSubscribed(t *testing.T) {
@@ -179,7 +179,7 @@ func TestConcurrentWeightedOverSubscribed(t *testing.T) {
 			d := NewDemand()
 			defer d.Invalidate()
 			for range iters {
-				pm, err := c.AcquireWait(ctx, d, w)
+				pm, err := acquireWait(ctx, c, d, w)
 				if err != nil {
 					failed.Add(1)
 					return
@@ -194,5 +194,5 @@ func TestConcurrentWeightedOverSubscribed(t *testing.T) {
 		"every weighted contender must eventually be satisfied (FIFO no-starvation)")
 	require.NoError(t, checkInvariants(tp.sem, tp.snapshot()))
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
-	require.Nil(t, tp.head.Load(), "quiescence opens the slot")
+	require.Nil(t, tp.head(), "quiescence empties the queue")
 }

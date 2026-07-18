@@ -120,7 +120,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	require.True(t, pm.Held(), "w=5 on capacity 3: gather 3, overdraft 2")
 	require.Same(t, d.cache.Load(), pm.backing)
 	require.Equal(t, []int{2}, res.asks, "the ask is the post-gather shortfall")
-	require.Same(t, tp.standingSentinel(), tp.head.Load(), "the sentinel stands: gate closed")
+	require.Same(t, tp.standingSentinel(), tp.head(), "the sentinel stands: gate closed")
 	require.Same(t, d.cache.Load(), tp.episodeAnchor())
 	require.Equal(t, uint64(0), tp.allowanceRemaining(), "the head's occupy claimed the whole grant")
 	require.Equal(t, uint64(2), excessOverCache(d.cache.Load()), "inUse runs past held by the grant")
@@ -181,13 +181,13 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 	ch.ReleaseRef()
 	d.Invalidate()
 	require.Nil(t, tp.od.Load(), "episode end retired the pooled episode state")
-	require.Same(t, d1, tp.head.Load(), "arrival order: the weight-1 demand promoted first")
+	require.Same(t, d1, tp.head(), "arrival order: the weight-1 demand promoted first")
 	tp.checkEpisode(t)
 
 	p1b, err := w1.Acquire(d1, 1)
 	require.NoError(t, err)
 	require.True(t, p1b.Held(), "the weight-1 head gathers from the drained capacity")
-	require.Same(t, db, tp.head.Load(), "then b is promoted in turn")
+	require.Same(t, db, tp.head(), "then b is promoted in turn")
 
 	pb2, err := b.Acquire(db, 2)
 	require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestOverdraftGrantStandingEpisode(t *testing.T) {
 		c.ReleaseRef()
 	}
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
-	require.Nil(t, tp.head.Load())
+	require.Nil(t, tp.head())
 	tp.checkEpisode(t)
 }
 
@@ -217,8 +217,8 @@ func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
 	d := NewDemand()
 	_, err := g.Acquire(d, 4)
 	require.ErrorIs(t, err, refuseErr, "the refusal error is the resource's own")
-	require.Nil(t, tp.head.Load(), "the refused sole head opened the slot")
-	require.Nil(t, d.pool.Load(), "the refused demand was dequeued")
+	require.Nil(t, tp.head(), "the refused sole head was retired")
+	require.Nil(t, d.pool.Load(), "the refused demand was deregistered")
 	d.Invalidate() // the caller's error path releases the home (and its hoard)
 	require.Equal(t, 0, tp.totalHeld(), "the drained hoard returned to the Resource")
 
@@ -234,19 +234,20 @@ func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
 	tp.check(t)
 }
 
-// AcquireWait surfaces a refusal as its error and invalidates the demand itself.
-func TestOverdraftRefusalThroughAcquireWait(t *testing.T) {
+// The blocking-acquire protocol surfaces a refusal as its error and invalidates
+// the demand.
+func TestOverdraftRefusalThroughBlockingAcquire(t *testing.T) {
 	refuseErr := errors.New("refused")
 	sem := &semaphore{capacity: 2}
 	tp := &testPool{Pool: NewPool(refuseResource{sem, refuseErr}), sem: sem}
 
 	g := tp.NewCache()
 	d := NewDemand()
-	_, err := g.AcquireWait(context.Background(), d, 3)
+	_, err := acquireWait(context.Background(), g, d, 3)
 	require.ErrorIs(t, err, refuseErr)
 	require.Nil(t, d.pool.Load())
-	require.Nil(t, d.cache.Load(), "AcquireWait's error path invalidated the demand")
-	require.Nil(t, tp.head.Load())
+	require.Nil(t, d.cache.Load(), "the error path invalidated the demand")
+	require.Nil(t, tp.head())
 	g.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 }
@@ -267,7 +268,7 @@ func TestOverdraftWaitsWhileAnythingRuns(t *testing.T) {
 	pg, err := g.Acquire(d, 4)
 	require.NoError(t, err)
 	require.False(t, pg.Held(), "no grant while a release could still change the answer")
-	require.Same(t, d, tp.head.Load(), "the head stands, waiting")
+	require.Same(t, d, tp.head(), "the head stands, waiting")
 
 	ph.Release() // the last runner parks; now the proof can pass
 	pg, err = g.Acquire(d, 4)
@@ -293,7 +294,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 	v := makeIdle(tp, 2)
 
 	stranger := tp.NewCache() // an unrelated wave's cache: off the head's chain
-	stranger.SuspendDriver()
+	stranger.Suspend()
 
 	g := tp.NewCache()
 	d := NewDemand()
@@ -301,7 +302,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, pg.Held(), "a stranger's suspension blocks the grant")
 
-	stranger.ResumeDriver() // ends the suspension (and nudges the armed pool)
+	stranger.Resume() // ends the suspension (and nudges the armed pool)
 	pg, err = g.Acquire(d, 3)
 	require.NoError(t, err)
 	require.True(t, pg.Held(), "with the stranger visible again, the grant proceeds")
@@ -311,7 +312,7 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 
 	// On-chain suspension: a driver parked INTO the registering cache's own wave.
 	g2 := tp.NewCache()
-	g2.SuspendDriver() // the demand registers under g2 → g2 is on the head's chain
+	g2.Suspend() // the demand registers under g2 → g2 is on the head's chain
 	d2 := NewDemand()
 	pg2, err := g2.Acquire(d2, 3)
 	require.NoError(t, err)
@@ -319,16 +320,17 @@ func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
 	tp.checkEpisode(t)
 	pg2.Release()
 	d2.Invalidate()
-	g2.ResumeDriver()
+	g2.Resume()
 
 	for _, c := range []*Cache{v, stranger, g, g2} {
 		c.ReleaseRef()
 	}
 	require.Equal(t, 0, tp.totalHeld())
-	require.Nil(t, tp.head.Load())
+	require.Nil(t, tp.head())
 }
 
-// A parked exempt claimant is woken by a release routed through episodeNotify: while
+// A parked exempt claimant is woken by a release routed through the sentinel's
+// claimant fan-out: while
 // the episode stands, freed capacity must reach the subtree's waiters (the satisfied
 // head consumes no wakes, and everyone else is gated).
 func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
@@ -338,10 +340,10 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 	pm, err := g.Acquire(d, 2) // infeasible on capacity 1 → grant → episode
 	require.NoError(t, err)
 	require.True(t, pm.Held())
-	require.Same(t, tp.standingSentinel(), tp.head.Load())
+	require.Same(t, tp.standingSentinel(), tp.head())
 
-	// A descendant needs weight the busy episode cannot spare: it parks on
-	// episodeNotify (exempt, unregistered).
+	// A descendant needs weight the busy episode cannot spare: AcquireWait
+	// registers it as a claimant and parks.
 	ch := d.cache.Load().NewChild()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -349,7 +351,7 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 	go func() {
 		dch := NewDemand()
 		defer dch.Invalidate()
-		pch, err := ch.AcquireWait(ctx, dch, 1)
+		pch, err := acquireWait(ctx, ch, dch, 1)
 		if err == nil {
 			pch.Release()
 		}
@@ -363,12 +365,12 @@ func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
 	case err := <-got:
 		require.NoError(t, err, "the parked exempt claimant must be woken by the release")
 	case <-time.After(20 * time.Second):
-		t.Fatal("the release never reached the claimant parked on episodeNotify")
+		t.Fatal("the release never reached the parked claimant")
 	}
 
 	ch.ReleaseRef()
 	d.Invalidate()
-	require.Nil(t, tp.head.Load())
+	require.Nil(t, tp.head())
 	g.ReleaseRef()
 	require.Equal(t, 0, tp.totalHeld())
 	tp.checkEpisode(t)
@@ -396,7 +398,7 @@ func TestConcurrentOverdraftEpisodes(t *testing.T) {
 			defer c.ReleaseRef()
 			for range iters {
 				d := NewDemand()
-				pm, err := c.AcquireWait(ctx, d, capacity+1)
+				pm, err := acquireWait(ctx, c, d, capacity+1)
 				if err != nil {
 					failed.Add(1)
 					return
@@ -409,7 +411,7 @@ func TestConcurrentOverdraftEpisodes(t *testing.T) {
 	wg.Wait()
 
 	require.Equal(t, int64(0), failed.Load(), "every over-capacity demand must complete via its episode")
-	require.Nil(t, tp.head.Load(), "quiescence opens the slot")
+	require.Nil(t, tp.head(), "no head stands at quiescence")
 	require.Nil(t, tp.od.Load(), "quiescence retires the episode state")
 	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
 	tp.checkEpisode(t)

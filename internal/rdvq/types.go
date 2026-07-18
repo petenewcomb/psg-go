@@ -22,13 +22,16 @@ type ProcessValueFunc[T any] = func(value T)
 //     fallback (and where the notification was stored, zero the field so a later pass
 //     does not Forward it). There is no explicit "consume" call: a value receiver could
 //     not record one anyway, so it would enforce nothing.
-//   - could not use it — [Notification.Forward] re-offers it. A listener-style
-//     notification (n set) re-circulates through the Notifier so another listener or
-//     waiter can use the still-live reserved resource; a waiter-style notification
-//     (n nil) runs the fallback terminally.
+//   - could not use it — [Notification.Forward] re-offers it. A notification with an
+//     origin Notifier (n set — every delivery from a [Notifier], listener and waiter
+//     alike) re-circulates through it so another registrant can use the still-live
+//     resource; a bare notification (n nil — a standalone [Waiters] or
+//     [NewNotification], whose one set is its whole domain) runs the fallback, which
+//     for it IS exhaustion.
 type Notification struct {
-	// n, when set, is the Notifier a listener-style Forward re-circulates through; nil
-	// marks a waiter-style notification whose Forward is terminal (runs fallback).
+	// n, when set, is the origin Notifier a Forward re-circulates through; nil marks a
+	// notification from a domain with no Notifier above it (a standalone Waiters,
+	// NewNotification), whose Forward runs the fallback — exhaustion, not a shortcut.
 	n *Notifier
 	// fallback is the terminal conservation action — never nil once delivered (noop by
 	// default). It is what a Forward ultimately runs when re-circulation finds no taker.
@@ -62,11 +65,11 @@ func NewNotification(fallback func()) Notification {
 // it received but could not use; the sentinel is nothing to forward.
 func (m Notification) Received() bool { return m.fallback != nil }
 
-// Forward re-offers a wake the consumer could not use. A listener-style notification
-// re-circulates through the Notifier (another listener or waiter may hold or want the
-// still-live reserved resource); a waiter-style notification runs the fallback
-// terminally, because a woken waiter that cannot use the wake means the resource is
-// already gone and re-offering would cascade wasteful wakeups.
+// Forward re-offers a wake the consumer could not use. A notification with an origin
+// Notifier re-circulates through it — under arrival-order reservation a failed
+// re-check proves nothing about the other registrants, so the walk must continue; one
+// with no origin runs its fallback, its single registration set having been the
+// entire domain.
 func (m Notification) Forward() {
 	if m.n != nil {
 		m.n.Notify(m.fallback)
@@ -82,9 +85,9 @@ func (m Notification) Chained() bool { return m.chained }
 
 // ProbeOrigin pays a productive consumer's chain debt at the wake's origin Notifier:
 // one fresh chained wake, so the next satisfiable consumer admits and the first miss
-// ends the chain. A no-op for an unchained wake (no debt) or a waiter-style one (no
-// origin recorded — those consumers emit their probe at the pool-level notifier they
-// already know). Safe to call unconditionally after productive use.
+// ends the chain. A no-op for an unchained wake (no debt) or one with no origin
+// recorded (those consumers emit their probe at the pool-level notifier they already
+// know). Safe to call unconditionally after productive use.
 func (m Notification) ProbeOrigin() {
 	if m.chained && m.n != nil {
 		m.n.NotifyChained(nil)

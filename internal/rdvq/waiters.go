@@ -120,8 +120,9 @@ func (w *Waiters) Wait(ctx context.Context, confirmFn func() bool) (Notification
 }
 
 // Notify delivers a wake to one waiting goroutine, running fallback if no waiter takes it
-// (total conservation). A nil fallback defaults to noop. The waiter receives a
-// waiter-style (terminal) Notification: a Forward it cannot use runs fallback.
+// (total conservation). A nil fallback defaults to noop. A standalone Waiters is its own
+// whole notification domain, so the delivered Notification carries no origin: a Forward
+// it cannot be used for runs fallback — exhaustion of the one set there is.
 func (w *Waiters) Notify(fallback func()) {
 	if fallback == nil {
 		fallback = noop

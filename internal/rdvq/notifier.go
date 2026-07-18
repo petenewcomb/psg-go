@@ -36,9 +36,10 @@ func (n *Notifier) Init() {
 // the wake, fallback runs synchronously — so callers need no `if !Notify {fallback()}`
 // guard. A nil fallback defaults to noop.
 //
-// Listeners receive a listener-style Notification (a Forward they cannot use
-// re-circulates through this Notifier); waiters receive a waiter-style Notification (a
-// Forward runs fallback terminally). See [Notification].
+// Every delivered Notification carries this Notifier as its origin: a Forward by a
+// consumer that could not use the wake re-circulates through the whole domain —
+// listeners that registered since the walk began included — and the fallback runs
+// only at exhaustion, when no registration is left to offer it to. See [Notification].
 //
 //nolint:contextcheck // background context used only for tracing
 func (n *Notifier) Notify(fallback func()) {
@@ -52,7 +53,7 @@ func (n *Notifier) Notify(fallback func()) {
 	if n.Listeners.deliver(Notification{n: n, fallback: fallback}) {
 		return
 	}
-	if n.Waiters.deliver(Notification{fallback: fallback}) {
+	if n.Waiters.deliver(Notification{n: n, fallback: fallback}) {
 		return
 	}
 	fallback()
@@ -78,7 +79,7 @@ func (n *Notifier) NotifyChained(fallback func()) {
 	if n.Listeners.deliver(Notification{n: n, fallback: fallback, chained: true}) {
 		return
 	}
-	if n.Waiters.deliver(Notification{fallback: fallback, chained: true}) {
+	if n.Waiters.deliver(Notification{n: n, fallback: fallback, chained: true}) {
 		return
 	}
 	fallback()

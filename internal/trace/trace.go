@@ -1,15 +1,11 @@
-// Copyright (c) Peter Newcomb. All rights reserved.
-// Licensed under the MIT License.
-
-// Package trace provides a thin wrapper around runtime/trace with conditional
-// tracing controlled by a global atomic pointer and configurable prefixes for
-// region types and log categories. Trace instrumentation that uses this wrapper
-// can be enabled or disabled via [SetPrefix], which takes its default from the
-// environment variable PSGTRACEINTERNALS. If unset or set to the value "-"
-// (U+002D hyphen-minus), tracing will be disabled by default. If set to any
-// other value, tracing will be enabled using the value as the region type and
-// log category prefix. If the value begins with "+" (U+002B plus sign), the
-// leading "+" will be stripped and the remainder used as the prefix.
+// Package trace wraps runtime/trace with an on/off switch and a region-type
+// filter, both controlled by the environment variable PSGTRACEINTERNALS. If
+// unset or set to the value "-" (U+002D hyphen-minus), tracing is disabled. If
+// set to the empty string, every region and log category is traced. Any other
+// value is a comma-separated list of name prefixes, and only regions and
+// categories matching one of them are traced (e.g.
+// "permits,heldPermit,rdvq.Notifier"). If the value begins with "+" (U+002B
+// plus sign), the leading "+" is stripped and the remainder used as the list.
 package trace
 
 import (
@@ -22,30 +18,62 @@ import (
 	"unicode/utf8"
 )
 
-var (
-	// prefix stores the current prefix string. When nil, tracing is disabled.
-	// When non-nil, tracing is enabled and the string value is used as prefix.
-	prefix atomic.Pointer[string]
-)
+// filterList is the parsed enablement state: nil disables tracing entirely; a
+// pointer to an empty slice traces everything; a pointer to a non-empty slice
+// traces only names matching one of its prefixes.
+var filterList atomic.Pointer[[]string]
 
 func init() {
-	if envPrefix, ok := os.LookupEnv("PSGTRACEINTERNALS"); ok && envPrefix != "-" {
-		if envPrefix != "" && envPrefix[0] == '+' {
-			envPrefix = envPrefix[1:]
+	if env, ok := os.LookupEnv("PSGTRACEINTERNALS"); ok && env != "-" {
+		if env != "" && env[0] == '+' {
+			env = env[1:]
 		}
-		SetPrefix(&envPrefix)
+		SetFilter(&env)
 	}
 }
 
-// SetPrefix sets the global prefix for region types and log categories.
-// Setting a non-nil prefix enables tracing.
-func SetPrefix(p *string) {
-	prefix.Store(p)
+// SetFilter sets the global filter from a comma-separated prefix list ("" =
+// trace everything). Setting a non-nil filter enables tracing; nil disables it.
+func SetFilter(spec *string) {
+	if spec == nil {
+		filterList.Store(nil)
+		return
+	}
+	var prefixes []string
+	for p := range strings.SplitSeq(*spec, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			prefixes = append(prefixes, p)
+		}
+	}
+	if prefixes == nil {
+		prefixes = []string{}
+	}
+	filterList.Store(&prefixes)
 }
 
-// IsEnabled returns whether tracing is currently enabled.
+// IsEnabled returns whether tracing is currently enabled at all. A name may
+// still be excluded by the filter; call sites use IsEnabled only to skip
+// argument construction on the fully-disabled fast path.
 func IsEnabled() bool {
-	return prefix.Load() != nil
+	return filterList.Load() != nil
+}
+
+// enabledFor reports whether the given region type or log category passes the
+// filter.
+func enabledFor(name string) bool {
+	prefixes := filterList.Load()
+	if prefixes == nil {
+		return false
+	}
+	if len(*prefixes) == 0 {
+		return true
+	}
+	for _, p := range *prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 type Region struct {
@@ -61,60 +89,50 @@ func (r Region) End() {
 	r.r.End()
 }
 
-// StartRegion starts a new trace region if tracing is enabled.
-// The regionType is automatically prefixed with the global prefix.
+// StartRegion starts a new trace region if tracing is enabled for regionType.
 func StartRegion(ctx context.Context, regionType string) Region {
-	p := prefix.Load()
-	if p == nil {
+	if !enabledFor(regionType) {
 		return noopRegion
 	}
-	prefixedType := *p + regionType
-	return Region{r: trace.StartRegion(ctx, prefixedType)}
+	return Region{r: trace.StartRegion(ctx, regionType)}
 }
 
-// WithRegion executes fn within a trace region if tracing is enabled.
-// The regionType is automatically prefixed with the global prefix.
+// WithRegion executes fn within a trace region if tracing is enabled for
+// regionType.
 func WithRegion(ctx context.Context, regionType string, fn func()) {
-	p := prefix.Load()
-	if p == nil {
+	if !enabledFor(regionType) {
 		fn()
 		return
 	}
-	prefixedType := *p + regionType
-	trace.WithRegion(ctx, prefixedType, fn)
+	trace.WithRegion(ctx, regionType, fn)
 }
 
-// Log adds a log event to the trace if tracing is enabled.
-// The category is automatically prefixed with the global prefix.
+// Log adds a log event to the trace if tracing is enabled for category.
 func Log(ctx context.Context, category, message string) {
-	p := prefix.Load()
-	if p == nil {
+	if !enabledFor(category) {
 		return
 	}
-	prefixedCategory := *p + category
-	trace.Log(ctx, prefixedCategory, message)
+	trace.Log(ctx, category, message)
 }
 
-// Logf adds a formatted log event to the trace if tracing is enabled.
-// The category is automatically prefixed with the global prefix.
+// Logf adds a formatted log event to the trace if tracing is enabled for
+// category.
 func Logf(ctx context.Context, category, format string, args ...any) {
-	p := prefix.Load()
-	if p == nil {
+	if !enabledFor(category) {
 		return
 	}
-	prefixedCategory := *p + category
-	trace.Logf(ctx, prefixedCategory, format, args...)
+	trace.Logf(ctx, category, format, args...)
 }
 
-// LongLogf adds one or more log events to the trace if tracing is enabled,
-// breaking the message up as needed to avoid truncation due to per-event size
-// limit. The category is automatically prefixed with the global prefix.
+// LongLogf adds one or more log events to the trace if tracing is enabled for
+// category, breaking the message up as needed to avoid truncation due to
+// per-event size limit.
 // See [MaxEventTrailerDataSize], defined to be 1<<10
 // [MaxEventTrailerDataSize]: https://cs.opensource.google/go/go/+/master:src/internal/trace/tracev2/events.go;drc=6c3b5a2798c83d583cb37dba9f39c47300d19f1f;l=588
 //
 //nolint:lll // long url
 func LongLogf(ctx context.Context, category, header, continuationHeader, trailer, format string, args ...any) {
-	if !trace.IsEnabled() {
+	if !trace.IsEnabled() || !enabledFor(category) {
 		return
 	}
 
@@ -163,14 +181,11 @@ func (t Task) End() {
 	t.t.End()
 }
 
-// NewTask creates a new task if tracing is enabled.
-// The taskType is automatically prefixed with the global prefix.
+// NewTask creates a new task if tracing is enabled for taskType.
 func NewTask(ctx context.Context, taskType string) (context.Context, Task) {
-	p := prefix.Load()
-	if p == nil {
+	if !enabledFor(taskType) {
 		return ctx, noopTask
 	}
-	prefixedType := *p + taskType
-	tCtx, t := trace.NewTask(ctx, prefixedType)
+	tCtx, t := trace.NewTask(ctx, taskType)
 	return tCtx, Task{t: t}
 }

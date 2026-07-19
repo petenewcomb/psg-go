@@ -296,7 +296,7 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 	// the drive's.
 	//
 	// parent = the drive meta, a SYNCHRONOUS derivation, not a permitRoot: the
-	// handler runs on the drive goroutine, so vetNotNestedInSkim and the permit
+	// handler runs on the drive goroutine, so the permit
 	// walk must see through to the drive. riders = the item's chain (the CP-F7
 	// nearest-wins continuation, now structural), or the drive's own for a
 	// rider-free item — per item, correctly. No rider refs are taken here: the
@@ -326,6 +326,14 @@ func (wk *skimWork[T]) Execute(ctx context.Context, ex workq.Execution) error {
 
 	meta.PushGroup(wk.Group())
 	defer meta.PopGroup()
+
+	if ex.Queue != nil {
+		// Install the driving controller's fresh queue for the handler's
+		// duration: a nested dispatch made inside the handler lands its missed
+		// sub-work there (ctxMeta.ExecuteNowOrQueue's nested branch).
+		meta.PushQueueFunc(ex.Queue)
+		defer meta.PopQueueFunc()
+	}
 
 	return wk.handler.Handle(ctx, wk.value, wk.err)
 }

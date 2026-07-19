@@ -207,34 +207,6 @@ func (cm *ctxMeta) syncParent() *ctxMeta {
 	return cm.parent
 }
 
-// vetNotNestedInSkim panics if a blocking gather (Skim/SkimAll, hence
-// CloseAndSkimAll) is being driven from inside a skim handler — i.e. an
-// enclosing context on this goroutine is a skim context. Driving a
-// subwave from a skim handler monopolizes the wave's sole serial skim
-// driver while the handler is parked in the gather, which deadlocks
-// under shared limiters / nested subwaves (see
-// docs/limiter-suspend-resume.md, "Intake vs drain"). The fix is to keep
-// skimming serial and drive subwork elsewhere:
-// populate a [Funnel] from the handler (the map-reduce primitive), or
-// launch a task that drives the subwave. Tasks and funnels are
-// demand-driven, so they never monopolize a sole driver.
-//
-// Walks the synchronous parent chain (excluding the gather's own skim
-// context), stopping at the async boundary via syncParent — a task body
-// launched FROM a skim handler is the documented remedy and must not see the
-// handler's stack; a follow-up fire meta (skimContext, permitRoot) is itself
-// still checked, so bodies nested under a fire are redirected like any skim
-// continuation. Funnel/task/top-level enclosing contexts are fine — only an
-// enclosing *skim* handler is disallowed.
-func (cm *ctxMeta) vetNotNestedInSkim() {
-	for m := cm.syncParent(); m != nil; m = m.syncParent() {
-		if m.ctxType == skimContext {
-			panic("psg: cannot drive a subwave (Skim/SkimAll/CloseAndSkimAll) from a skim handler; " +
-				"populate a Funnel from the handler, or launch a task to drive the subwave")
-		}
-	}
-}
-
 // currentHeldPermit returns the limiter handle held by the body this context is
 // synchronously nested under, walking syncParent links and stopping at the first
 // stamped handle. The starting meta's own held is visible even when it is itself
@@ -282,20 +254,11 @@ func (cm *ctxMeta) Unlock() {
 	}
 }
 
-var waitMu sync.Mutex
-
-// Wait for the scheduler to be mostly idle
+// wait yields once before a top-level dispatch adds more work, giving existing
+// work a chance to run. A single Gosched is the essential part; the rest of the
+// backpressure story (governor, block-and-help) bounds entry.
 func wait() {
-	for {
-		waitMu.Lock()
-		start := time.Now()
-		runtime.Gosched()
-		elapsed := time.Since(start)
-		waitMu.Unlock()
-		if elapsed < 100*time.Microsecond {
-			break
-		}
-	}
+	runtime.Gosched()
 }
 
 func (cm *ctxMeta) TryExecuteNow(
@@ -326,12 +289,12 @@ func (cm *ctxMeta) TryExecuteNow(
 	// Deadline interpretation (as currently implemented):
 	//   - past time → fail-fast (no attempt)
 	//   - other     → attempt once
-	// The "attempt once" semantic is enforced by ex.AddToListeners
-	// being nil — the blocking layer treats nil AddToListeners as
+	// The "attempt once" semantic is enforced by ex.CanListen being
+	// false — the blocking layer treats a non-listen-capable pass as
 	// "don't block." Forever and future deadlines do not currently
 	// install genuine bounded-wait blocking at this level; that is
 	// deferred Thread C work (see WORKING_NOTES). Naively enabling
-	// AddToListeners here causes hangs because the timer/listener
+	// listen capability here causes hangs because the timer/listener
 	// plumbing through taskPostWork isn't fully wired (known open
 	// issue: "Deadline propagation in taskPostWork").
 	if !deadline.IsZero() && !isForever(deadline) && !time.Now().Before(deadline) {
@@ -357,41 +320,55 @@ func (cm *ctxMeta) ExecuteNowOrQueue(
 	defer executorPool.Release(executor)
 	ex := executor.BaseEx()
 
-	if cm.ShouldBlock() {
-		if cm.IsTopLevel() {
-			// Suspend-class episode: the WHOLE blocking dispatch — the
-			// backpressure yield, any governor/limiter block-and-help
-			// waits, and the inner post — is one episode for an
-			// enclosing body's held limiter permit (a subwave dispatch
-			// runs on the body's goroutine). The reclaim must come
-			// after the inner post: on self-acquisition (the dispatched
-			// op shares the holder's limiter), reclaiming any earlier
-			// waits on a task that hasn't been queued yet. Interior
-			// brackets (Wave.block) no-op while the whole set stays
-			// suspended, and reclaim exactly what they re-suspend once
-			// this bracket's own reclaim is in flight (see reclaimJoint).
-			if wv := cm.wave; wv != nil {
-				if h := suspendHeldPermit(cm, wv); h != nil {
-					defer h.reclaimJoint(ctx, wv)
-				}
-			}
-
-			// Make sure existing work has a chance to run before we add more.
-			wait()
-
-			// Apply backpressure at top level by processing some outstanding work first
-			err := cm.wave.yield(ctx, time.Time{})
-			if err != nil {
+	if !cm.ShouldBlock() {
+		if queueFn := cm.QueueFunc(); queueFn != nil {
+			// A nested dispatch inside a driven body (a skim handler): one
+			// registration-free inline try, and a miss lands on the driving
+			// controller's fresh queue — retried by the driver's own cycle,
+			// registered by its listen-capable pre-park sweep.
+			err := work.Execute(ctx, ex)
+			if err != nil || ex.Started() {
 				work.Free()
 				return err
 			}
+			queueFn(work)
+			return nil
 		}
+		// Not under a driving controller: the execution environment routes to
+		// its own intake (a worker's environment posts to the scheduler).
+		return cm.executionEnvironment.ExecuteNowOrQueue(ctx, ex, work)
+	}
 
-		// Signal the work that it should block by making AddToListeners non-nil
-		ex.AddToListeners = func(*workq.Listeners) {
-			panic("unexpected call to ctxMeta.TryExecuteOrQueue's ex.AddToListeners")
+	// Top-level: the dispatch blocks to started-or-error.
+	// Suspend-class episode: the WHOLE blocking dispatch — the
+	// backpressure yield, any governor/limiter block-and-help
+	// waits, and the inner post — is one episode for an
+	// enclosing body's held limiter permit (a subwave dispatch
+	// runs on the body's goroutine). The reclaim must come
+	// after the inner post: on self-acquisition (the dispatched
+	// op shares the holder's limiter), reclaiming any earlier
+	// waits on a task that hasn't been queued yet. Interior
+	// brackets (Wave.block) no-op while the whole set stays
+	// suspended, and reclaim exactly what they re-suspend once
+	// this bracket's own reclaim is in flight (see reclaimJoint).
+	if wv := cm.wave; wv != nil {
+		if h := suspendHeldPermit(cm, wv); h != nil {
+			defer h.reclaimJoint(ctx, wv)
 		}
 	}
+
+	// Make sure existing work has a chance to run before we add more.
+	wait()
+
+	// Apply backpressure at top level by processing some outstanding work first
+	err := cm.wave.yield(ctx, time.Time{})
+	if err != nil {
+		work.Free()
+		return err
+	}
+
+	// Signal the work that it may block.
+	ex.CanListen = true
 
 	return cm.executionEnvironment.ExecuteNowOrQueue(ctx, ex, work)
 }

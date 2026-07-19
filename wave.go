@@ -389,9 +389,6 @@ func (wv *waveImpl) Skim(ctx context.Context) error {
 		// the synchronous skim; handler-launched async work resolves its own nearest meta.
 		defer releaseTopLevelContext(ctx)
 	}
-	// A blocking gather from inside a skim handler would monopolize the
-	// sole serial skim driver and deadlock; redirect to a funnel/task.
-	meta.vetNotNestedInSkim()
 	// Suspend-class episode: a body driving this skim lends its limiter permit for the
 	// duration (a sub-wave inherits it; deadlock-free) and reacquires on return.
 	if h := suspendHeldPermit(meta, wv); h != nil {
@@ -460,13 +457,45 @@ func (wv *waveImpl) shouldBlock(ctx context.Context) workq.BlockFunc {
 	return nil
 }
 
+// block is the [workq.BlockFunc]-shaped block-and-help (no withdraw bracket — the
+// governor/backpressure blocks; no permit demand is standing). It parks in the
+// governor's waiter set, composing the registered wait channel into the
+// block-and-help select.
 func (wv *waveImpl) block(
 	ctx context.Context,
 	blockDeadline time.Time,
 	blockWaiters *workq.Waiters,
 	confirmBlockWaitFn func() bool,
-) (workq.Notification, error) {
-	traceRegion := "Wave.block"
+) error {
+	var err error
+	blockWaiters.WaitFunc(confirmBlockWaitFn, func(waitCh <-chan struct{}) bool {
+		var woken bool
+		woken, err = wv.blockAndHelp(ctx, blockDeadline, waitCh, nil, confirmBlockWaitFn)
+		return woken
+	})
+	return err
+}
+
+// blockAndHelp waits on blockWaiters while help-executing this wave's work.
+// withdrawFn, when non-nil, is the caller's withdraw-before-going-deep bracket
+// (docs/plan/conservation-rework.md seam 5): it fires exactly once, just before
+// the first help item this call executes — a helped item is where the goroutine
+// can go deep, so the caller's standing demands must not keep their
+// reservations past that point. A call that only parks, sees the block signal,
+// or errors out never fires it, and the caller's next acquire re-registers
+// after the call returns.
+// blockWaitCh is the caller's registered wait channel — a permit gate's
+// prepared [rdvq.Waiter] (armed as its demand's attendant) or a governor
+// park's waiter registration. The caller settles that registration when this
+// returns, using the returned blockWoken.
+func (wv *waveImpl) blockAndHelp(
+	ctx context.Context,
+	blockDeadline time.Time,
+	blockWaitCh <-chan struct{},
+	withdrawFn func(),
+	confirmBlockWaitFn func() bool,
+) (blockWoken bool, err error) {
+	traceRegion := "Wave.blockAndHelp"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
 	ctx, meta, owned := wv.skimCtxMeta(ctx)
@@ -492,25 +521,25 @@ func (wv *waveImpl) block(
 	adder.wave = wv
 	adder.meta = meta
 	adder.blockDeadline = blockDeadline
-	adder.blockWaiters = blockWaiters
+	adder.blockWaitCh = blockWaitCh
 	adder.confirmBlockWaitFn = confirmBlockWaitFn
 
-	err := wv.workQueue.ExecuteOne(ctx, adder.addWorkFn, nil)
+	err = wv.workQueue.ExecuteOne(ctx, adder.addWorkFn, withdrawFn)
 	if errors.Is(err, errBlockWaitSignaled) {
 		err = nil
 	}
-	return adder.blockWaitRenotifyFn, err
+	return adder.blockWoken, err
 }
 
 var blockingWorkAdderPool = omnipool.For[blockingWorkAdder]()
 
 type blockingWorkAdder struct {
-	wave                *waveImpl
-	meta                *ctxMeta
-	blockDeadline       time.Time
-	blockWaiters        *workq.Waiters
-	confirmBlockWaitFn  func() bool
-	blockWaitRenotifyFn workq.Notification
+	wave               *waveImpl
+	meta               *ctxMeta
+	blockDeadline      time.Time
+	blockWaitCh        <-chan struct{}
+	confirmBlockWaitFn func() bool
+	blockWoken         bool
 
 	addWorkFn workq.AddWorkFunc
 }
@@ -530,12 +559,12 @@ func (a *blockingWorkAdder) addWork(
 	queueFn workq.QueueWorkFunc,
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
-) (workq.Notification, error) {
-	var workReadyRenotifyFn workq.Notification
+) error {
 	var err error
-	workReadyRenotifyFn, a.blockWaitRenotifyFn, err = a.wave.addWorkWhileMaybeBlocking(
-		ctx, a.meta, queueFn, workWaiters, confirmWorkWaitFn, a.blockDeadline, a.blockWaiters, a.confirmBlockWaitFn)
-	return workReadyRenotifyFn, err
+	a.blockWoken, err = a.wave.addWorkWhileMaybeBlocking(
+		ctx, a.meta, queueFn, workWaiters, confirmWorkWaitFn, a.blockDeadline, a.blockWaitCh,
+		a.confirmBlockWaitFn)
+	return err
 }
 
 func (wv *waveImpl) addWork(
@@ -543,14 +572,14 @@ func (wv *waveImpl) addWork(
 	queueFn workq.QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-) (workq.Notification, error) {
+) error {
 	traceRegion := "Wave.addWork"
 	defer trace.StartRegion(ctx, traceRegion).End()
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
 	ctx, meta := wv.ctxMeta(ctx)
-	workReadyRenotifyFn, _, err := wv.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
+	_, err := wv.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
 		confirmWaitFn, time.Time{}, nil, nil)
-	return workReadyRenotifyFn, err
+	return err
 }
 
 func (wv *waveImpl) addWorkWhileMaybeBlocking(
@@ -560,63 +589,57 @@ func (wv *waveImpl) addWorkWhileMaybeBlocking(
 	workWaiters *rdvq.Waiters,
 	confirmWorkWaitFn func() bool,
 	blockDeadline time.Time,
-	blockWaiters *workq.Waiters,
+	blockWaitCh <-chan struct{},
 	confirmBlockWaitFn func() bool,
-) (workReadyRenotifyFn, blockWaitRenotifyFn workq.Notification, err error) {
+) (blockWoken bool, err error) {
 	meta.PushQueueFunc(queueFn)
 	defer meta.PopQueueFunc()
 
-	var workRf, blockRf rdvq.Notification
 	if workWaiters == nil {
 		err = wv.tryAddWork(ctx, queueFn)
 	} else {
 		work, ok := wv.skimQueue.PopFrontFunc(
-			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan rdvq.Notification) rdvq.PopSelectResult[workq.Work] {
+			func(inboxCh <-chan workq.Work, outboxWaitCh <-chan struct{}) rdvq.PopSelectResult[workq.Work] {
 				// Declared per invocation: skimSelect (which is the only thing
 				// that populates this) is skipped on any iteration where the
 				// block confirm short-circuits — i.e. once the permit is
 				// acquired/reclaimed. A value hoisted across iterations would
 				// retain a stale outbox-ready result, keeping PopFrontFunc's
-				// loop from ever reaching its no-wake (!m.Received()) exit.
+				// loop from ever reaching its no-wake exit.
 				var psResult rdvq.PopSelectResult[workq.Work]
-				workRf = workWaiters.WaitFunc(
+				workWaiters.WaitFunc(
 					confirmWorkWaitFn,
-					func(workWaitCh <-chan rdvq.Notification) rdvq.Notification {
-						var innerWorkRf rdvq.Notification
-						if blockWaiters == nil {
-							psResult, innerWorkRf, _, err = wv.skimSelect(
+					func(workWaitCh <-chan struct{}) bool {
+						var workWoken bool
+						switch {
+						case blockWaitCh == nil:
+							psResult, workWoken, err = wv.skimSelect(
 								ctx, inboxCh, outboxWaitCh, workWaitCh, nil, nil,
 							)
-						} else {
-							blockRf = blockWaiters.WaitFunc(
-								func() bool {
-									shouldWait := confirmBlockWaitFn()
-									if !shouldWait {
-										err = errBlockWaitSignaled
-									}
-									return shouldWait
-								},
-								func(blockWaitCh <-chan rdvq.Notification) rdvq.Notification {
-									var blockTimerCh <-chan time.Time
-									// Zero or Forever deadline: no timer (block until ctx
-									// cancel or notification). Non-zero, non-Forever: set
-									// up a timer; if it fires we'll return up through
-									// errBlockWaitSignaled.
-									if !blockDeadline.IsZero() && !isForever(blockDeadline) {
-										blockTimer := timerp.Get()
-										defer timerp.Put(blockTimer)
-										timerp.Reset(blockTimer, max(0, time.Until(blockDeadline)))
-										blockTimerCh = blockTimer.C
-									}
-									var innerBlockRf rdvq.Notification
-									psResult, innerWorkRf, innerBlockRf, err = wv.skimSelect(
-										ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh,
-									)
-									return innerBlockRf
-								},
+						case !confirmBlockWaitFn():
+							// Re-check before every park (the caller's wait
+							// registration precedes this call): the block
+							// condition resolved while helping.
+							err = errBlockWaitSignaled
+						default:
+							var blockTimerCh <-chan time.Time
+							// Zero or Forever deadline: no timer (block until ctx
+							// cancel or wake). Non-zero, non-Forever: set up a
+							// timer; if it fires we'll return up through
+							// errBlockWaitSignaled.
+							if !blockDeadline.IsZero() && !isForever(blockDeadline) {
+								blockTimer := timerp.Get()
+								defer timerp.Put(blockTimer)
+								timerp.Reset(blockTimer, max(0, time.Until(blockDeadline)))
+								blockTimerCh = blockTimer.C
+							}
+							var bw bool
+							psResult, workWoken, bw, err = wv.skimSelectBlocking(
+								ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh,
 							)
+							blockWoken = blockWoken || bw
 						}
-						return innerWorkRf
+						return workWoken
 					},
 				)
 				return psResult
@@ -626,17 +649,29 @@ func (wv *waveImpl) addWorkWhileMaybeBlocking(
 			queueFn(work)
 		}
 	}
-	return workRf, blockRf, err
+	return blockWoken, err
 }
 
 func (wv *waveImpl) skimSelect(
 	ctx context.Context,
 	inboxCh <-chan workq.Work,
-	outboxWaitCh <-chan rdvq.Notification,
-	workWaitCh <-chan rdvq.Notification,
+	outboxWaitCh <-chan struct{},
+	workWaitCh <-chan struct{},
 	blockTimerCh <-chan time.Time,
-	blockWaitCh <-chan rdvq.Notification,
-) (psResult rdvq.PopSelectResult[workq.Work], workRf, blockRf rdvq.Notification, err error) {
+	blockWaitCh <-chan struct{},
+) (psResult rdvq.PopSelectResult[workq.Work], workWoken bool, err error) {
+	psResult, workWoken, _, err = wv.skimSelectBlocking(ctx, inboxCh, outboxWaitCh, workWaitCh, blockTimerCh, blockWaitCh)
+	return
+}
+
+func (wv *waveImpl) skimSelectBlocking(
+	ctx context.Context,
+	inboxCh <-chan workq.Work,
+	outboxWaitCh <-chan struct{},
+	workWaitCh <-chan struct{},
+	blockTimerCh <-chan time.Time,
+	blockWaitCh <-chan struct{},
+) (psResult rdvq.PopSelectResult[workq.Work], workWoken, blockWoken bool, err error) {
 	traceRegion := "Wave.skimSelect"
 	trace.Logf(ctx, traceRegion,
 		"entering select: inboxCh=%p, outboxWaitCh=%p, workWaitCh=%p, blockWaitCh=%p",
@@ -645,16 +680,18 @@ func (wv *waveImpl) skimSelect(
 	case work := <-inboxCh:
 		trace.Logf(ctx, traceRegion, "received work from inboxCh=%p", inboxCh)
 		psResult.InboxEmptied(work)
-	case rf := <-outboxWaitCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from outboxWaitCh=%p", outboxWaitCh)
-		psResult.OutboxReady(rf)
-	case workRf = <-workWaitCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from workWaitCh=%p", workWaitCh)
+	case <-outboxWaitCh:
+		trace.Logf(ctx, traceRegion, "received wake from outboxWaitCh=%p", outboxWaitCh)
+		psResult.OutboxReady()
+	case <-workWaitCh:
+		trace.Logf(ctx, traceRegion, "received wake from workWaitCh=%p", workWaitCh)
+		workWoken = true
 	case <-blockTimerCh:
 		trace.Logf(ctx, traceRegion, "received block deadline timer signal")
 		err = errBlockWaitSignaled
-	case blockRf = <-blockWaitCh:
-		trace.Logf(ctx, traceRegion, "received renotifyFn from blockWaitCh=%p", blockWaitCh)
+	case <-blockWaitCh:
+		trace.Logf(ctx, traceRegion, "received wake from blockWaitCh=%p", blockWaitCh)
+		blockWoken = true
 		err = errBlockWaitSignaled
 	case <-wv.state.Done():
 		trace.Logf(ctx, traceRegion, "received wave done signal")
@@ -712,7 +749,7 @@ func (wk *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 		if !wk.shouldBlock {
 			// Nested/queued: postpone. Register for a skim-queue slot and re-check;
 			// a scheduler worker re-drives this post when a slot frees.
-			ex.AddToListeners(wk.wave.skimQueue.Listeners())
+			ex.Listener.AddTo(wk.wave.skimQueue.Listeners())
 			posted := tryPost()
 			if !posted {
 				waiting()
@@ -728,7 +765,7 @@ func (wk *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 		ex.Blocking()
 		for !tryPost() {
 			waiting()
-			if _, err := wk.wave.block(ctx, time.Time{}, nil, nil); err != nil {
+			if _, err := wk.wave.blockAndHelp(ctx, time.Time{}, nil, nil, nil); err != nil {
 				trace.Logf(ctx, traceRegion, "block-and-help ended, err=%v", err)
 				return false, err
 			}
@@ -833,9 +870,6 @@ func (wv *waveImpl) SkimAll(ctx context.Context) error {
 	if owned {
 		defer releaseTopLevelContext(ctx)
 	}
-	// A blocking gather from inside a skim handler would monopolize the
-	// sole serial skim driver and deadlock; redirect to a funnel/task.
-	meta.vetNotNestedInSkim()
 	if h := suspendHeldPermit(meta, wv); h != nil {
 		defer h.reclaimJoint(ctx, wv)
 	}

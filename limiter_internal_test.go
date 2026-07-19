@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/petenewcomb/streampool/internal/permits"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,6 +74,43 @@ func TestSemaphoreResource_Unlimited(t *testing.T) {
 	c.ReleaseRef()
 }
 
+// blockingAcquire is the tests' blocking acquire against a Limiter's pool: the
+// production park protocol — Acquire, and on a miss prepare a Waiter, arm it as
+// the demand's attendant, and re-check before blocking.
+func blockingAcquire(ctx context.Context, c *permits.Cache, d *permits.Demand, w int) (permits.Permit, error) {
+	var waiter rdvq.Waiter
+	waiter.Init()
+	for {
+		pm, err := c.Acquire(d, w)
+		if err != nil {
+			d.Invalidate()
+			return permits.Permit{}, err
+		}
+		if pm.Held() {
+			return pm, nil
+		}
+		ch := waiter.Prepare()
+		d.SetAttendant(&waiter)
+		pm, err = c.Acquire(d, w)
+		if err != nil || pm.Held() {
+			waiter.Finish(false)
+			if err != nil {
+				d.Invalidate()
+				return permits.Permit{}, err
+			}
+			return pm, nil
+		}
+		select {
+		case <-ch:
+			waiter.Finish(true)
+		case <-ctx.Done():
+			waiter.Finish(false)
+			d.Invalidate()
+			return permits.Permit{}, ctx.Err()
+		}
+	}
+}
+
 func TestSetMaxConcurrency_RaiseWakesParkedWaiter(t *testing.T) {
 	chk := require.New(t)
 	l := NewSemaphore(0) // start blocked
@@ -83,7 +121,7 @@ func TestSetMaxConcurrency_RaiseWakesParkedWaiter(t *testing.T) {
 	go func() {
 		// Parks on the Pool until SetMaxConcurrency raises the ceiling and wakes it.
 		d := permits.NewDemand()
-		p, err := c.AcquireWait(context.Background(), d, 1)
+		p, err := blockingAcquire(context.Background(), c, d, 1)
 		acqErr = err
 		if err == nil {
 			p.Release()
@@ -91,7 +129,7 @@ func TestSetMaxConcurrency_RaiseWakesParkedWaiter(t *testing.T) {
 		close(acquired) // the close happens-before the main goroutine's read of acqErr
 	}()
 
-	// Let the goroutine reach AcquireWait's park before raising.
+	// Let the goroutine reach the park before raising.
 	select {
 	case <-acquired:
 		t.Fatal("acquired before capacity was raised")
@@ -114,13 +152,12 @@ func TestSetMaxConcurrency_PanicsOnUnlimitedLimiter(t *testing.T) {
 		"SetMaxConcurrency on the zero (unlimited) Limiter must panic")
 }
 
-// A capacity raise frees MULTIPLE slots at once with nothing stealable anywhere —
-// the multi-permit event class. The raise seeds the wake chain (one chained wake;
-// each admitted waiter probes the next), so every newly satisfiable parked waiter
-// admits; the replaced broadcast is gone and wake-one alone would strand all but
-// the first. Waiters hold their permits until everyone is in, so the raise is the
-// only wake source.
-func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
+// A capacity raise frees MULTIPLE units at once with nothing stealable anywhere —
+// the multi-unit event class. The raise mints one token; each satisfied head's
+// retirement re-probes (conservation rule 5), so every newly satisfiable parked
+// waiter admits one by one. Waiters hold their permits until everyone is in, so
+// the raise is the only mint source.
+func TestSetMaxConcurrency_RaiseReprobeAdmitsAllParkedWaiters(t *testing.T) {
 	chk := require.New(t)
 	const raised = 3
 	l := NewSemaphore(0) // start fully blocked; nothing checked out, nothing stealable
@@ -139,7 +176,7 @@ func TestSetMaxConcurrency_RaiseChainAdmitsAllParkedWaiters(t *testing.T) {
 			defer wg.Done()
 			d := permits.NewDemand()
 			defer d.Invalidate() // after the release below — a held permit may back from the demand's home
-			p, err := c.AcquireWait(ctx, d, 1)
+			p, err := blockingAcquire(ctx, c, d, 1)
 			if err != nil {
 				errs <- err
 				return

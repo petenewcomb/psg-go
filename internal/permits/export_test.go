@@ -152,12 +152,12 @@ func (p *Pool) head() *Demand {
 }
 
 // acquireWait is the tests' blocking acquire: the production park protocol —
-// Acquire, and on a miss park in the pool's waiter set with the confirm
-// re-running Acquire (register-then-confirm), forwarding any wake it could not
-// use — without the help composition production blockers add. Cancellation
-// invalidates d.
+// Acquire, and on a miss prepare a Waiter, arm it as the demand's attendant,
+// and re-check before blocking (the standard race-closing order) — without the
+// help composition production blockers add. Cancellation invalidates d.
 func acquireWait(ctx context.Context, c *Cache, d *Demand, w int) (Permit, error) {
-	var m rdvq.Notification
+	var waiter rdvq.Waiter
+	waiter.Init()
 	for {
 		pm, err := c.Acquire(d, w)
 		if err != nil {
@@ -165,26 +165,26 @@ func acquireWait(ctx context.Context, c *Cache, d *Demand, w int) (Permit, error
 			return Permit{}, err
 		}
 		if pm.Held() {
-			return pm, nil // a received wake was productive — not forwarded
-		}
-		if m.Received() {
-			m.Forward() // could not use the last wake; conserve it
-		}
-		var waitErr error
-		m, waitErr = c.Pool().Notifier().Waiters.Wait(ctx, func() bool {
-			pm, err = c.Acquire(d, w)
-			return err == nil && !pm.Held() // park only while there is still nothing
-		})
-		if pm.Held() {
 			return pm, nil
 		}
-		if err != nil {
-			d.Invalidate()
-			return Permit{}, err
+		ch := waiter.Prepare()
+		d.SetAttendant(&waiter)
+		pm, err = c.Acquire(d, w)
+		if err != nil || pm.Held() {
+			waiter.Finish(false)
+			if err != nil {
+				d.Invalidate()
+				return Permit{}, err
+			}
+			return pm, nil
 		}
-		if waitErr != nil {
+		select {
+		case <-ch:
+			waiter.Finish(true)
+		case <-ctx.Done():
+			waiter.Finish(false)
 			d.Invalidate()
-			return Permit{}, waitErr
+			return Permit{}, ctx.Err()
 		}
 	}
 }

@@ -11,20 +11,28 @@ import (
 	"github.com/petenewcomb/streampool/internal/trace"
 )
 
-// Listener provides a reusable notification subscription that can be added to
-// multiple Listeners instances. It tracks which Listeners it has been added to
-// and ensures it's only added once per Listeners instance.
+// Listener is a reusable wake relay owned by a single entity (typically a work
+// queue, whose relay wakes one of its parked workers). It can be planted in
+// multiple Listeners sets — each planting is one-shot, popped by the set's next
+// walk — and it can be fired directly via [Listener.Notify] by a notifier that
+// holds it (e.g. as a demand's attendant).
 //
-// The mutex protects against concurrent calls to the internal notify method,
-// which can occur when multiple Listeners instances fire notifications from
-// different goroutines. The Listener itself is typically owned by a single entity.
+// The mutex protects the planted-set bookkeeping against concurrent walks
+// firing from different goroutines.
 type Listener struct {
-	// Notify is the function called when this listener is signaled.
-	Notify NotifyFunc
+	fn func()
 
 	mu      sync.Mutex
 	addedTo map[*Listeners]struct{}
 }
+
+// NewListener returns a Listener that runs fn when fired.
+func NewListener(fn func()) *Listener {
+	return &Listener{fn: fn}
+}
+
+// Notify fires the listener's relay directly.
+func (m *Listener) Notify() { m.fn() }
 
 // listenerNotifyWrapper wraps the parameters needed to call Listener.notify,
 // avoiding the allocation of a closure in Listener.AddTo. The wrapper is pooled
@@ -33,7 +41,7 @@ type listenerNotifyWrapper struct {
 	listener  *Listener
 	listeners *Listeners
 
-	notifyFn NotifyFunc // avoid reallocating closure
+	notifyFn func() // avoid reallocating closure
 }
 
 func (w *listenerNotifyWrapper) Init() {
@@ -46,17 +54,16 @@ func (w *listenerNotifyWrapper) Reset() {
 	}
 }
 
-func (w *listenerNotifyWrapper) notify(m Notification) bool {
-	result := w.listener.notify(w.listeners, m)
+func (w *listenerNotifyWrapper) notify() {
+	w.listener.notify(w.listeners)
 	listenerNotifyWrapperPool.Release(w)
-	return result
 }
 
 var listenerNotifyWrapperPool = omnipool.For[listenerNotifyWrapper]()
 
-// AddTo subscribes this listener to the given Listeners instance.
-// If already subscribed, this is a no-op. The listener will be called
-// when the Listeners instance receives a notification.
+// AddTo plants this listener in the given Listeners set. If already planted
+// there, this is a no-op. The planting is one-shot: the set's next walk pops
+// and fires it, after which the owner re-plants on its next retry.
 //
 //nolint:contextcheck // background context used only for tracing
 func (m *Listener) AddTo(listeners *Listeners) {
@@ -83,15 +90,15 @@ func (m *Listener) AddTo(listeners *Listeners) {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (m *Listener) notify(listeners *Listeners, notification Notification) bool {
+func (m *Listener) notify(listeners *Listeners) {
 	traceRegion := "rdvq.Listener.notify"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Listener=%p, listeners=%p", m, listeners)
 
 	m.mu.Lock()
 	delete(m.addedTo, listeners)
-	notifyFn := m.Notify
+	fn := m.fn
 	m.mu.Unlock()
 
-	return notifyFn(notification)
+	fn()
 }

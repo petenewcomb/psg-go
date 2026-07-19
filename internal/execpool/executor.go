@@ -54,16 +54,16 @@ func (x *Executor[E]) PushBack(ctx context.Context, task Task[E]) error {
 	}()
 
 	var err error
-	delivered := x.handoff.PushBackFunc(task, func(waitCh <-chan rdvq.Notification) rdvq.Notification {
+	delivered := x.handoff.PushBackFunc(task, func(waitCh <-chan struct{}) bool {
 		// selectFn runs only when no executor was waiting — i.e. the producer is about to
 		// park. Register unmet demand once (on the first park) so the pool spawns toward it.
 		if !registered {
 			registered = true
 			x.pool.RegisterUnmetDemand()
 		}
-		var m rdvq.Notification
-		m, err = rdvq.BasicWaitSelect(ctx, waitCh)
-		return m
+		var received bool
+		received, err = rdvq.BasicWaitSelect(ctx, waitCh)
+		return received
 	})
 	if delivered {
 		return nil

@@ -25,13 +25,14 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	go func() {
 		close(waiterStarted) // Signal that waiter is created
 
-		rf := waiters.WaitFunc(
+		received := waiters.WaitFunc(
 			func() bool { return true },
-			func(waitCh <-chan rdvq.Notification) rdvq.Notification {
-				return <-waitCh
+			func(waitCh <-chan struct{}) bool {
+				<-waitCh
+				return true
 			},
 		)
-		notified <- rf.Received()
+		notified <- received
 	}()
 
 	// Wait for waiter to be created and start waiting
@@ -57,9 +58,9 @@ func TestWaiters_VerificationFunction(t *testing.T) {
 	selectCalled := false
 	waiters.WaitFunc(
 		func() bool { return false },
-		func(<-chan rdvq.Notification) rdvq.Notification {
+		func(<-chan struct{}) bool {
 			selectCalled = true
-			return rdvq.Notification{}
+			return false
 		},
 	)
 
@@ -81,18 +82,19 @@ func TestWaiters_VerificationPreventsRace(t *testing.T) {
 	go func() {
 		close(waiterStarted)
 
-		rf := waiters.WaitFunc(
+		received := waiters.WaitFunc(
 			func() bool {
 				mu.Lock()
 				defer mu.Unlock()
 				return !workReady // Continue waiting only if no work ready
 			},
-			func(waitCh <-chan rdvq.Notification) rdvq.Notification {
+			func(waitCh <-chan struct{}) bool {
 				// When verification succeeds, this should be called and block
-				return <-waitCh
+				<-waitCh
+				return true
 			},
 		)
-		waitResult <- rf.Received()
+		waitResult <- received
 	}()
 
 	// Wait for waiter to start
@@ -122,9 +124,9 @@ func TestWaiters_VerificationPreventsFalseWait(t *testing.T) {
 		func() bool {
 			return !workReady // Should return false (don't wait)
 		},
-		func(<-chan rdvq.Notification) rdvq.Notification {
+		func(<-chan struct{}) bool {
 			selectCalled = true
-			return rdvq.Notification{}
+			return false
 		},
 	)
 
@@ -144,18 +146,18 @@ func TestWaiters_MultipleWaiters(t *testing.T) {
 		waiterID := i
 
 		go func(id int) {
-			rf := waiters.WaitFunc(
+			received := waiters.WaitFunc(
 				func() bool { return true },
-				func(waitCh <-chan rdvq.Notification) rdvq.Notification {
+				func(waitCh <-chan struct{}) bool {
 					select {
-					case rf := <-waitCh:
-						return rf
+					case <-waitCh:
+						return true
 					case <-time.After(200 * time.Millisecond):
-						return rdvq.Notification{}
+						return false
 					}
 				},
 			)
-			if rf.Received() {
+			if received {
 				notifications <- id
 			} else {
 				notifications <- -1 // Indicate timeout/abort
@@ -198,18 +200,18 @@ func TestWaiters_NotifyAll(t *testing.T) {
 	// Start multiple waiters
 	for i := 0; i < numWaiters; i++ {
 		go func() {
-			rf := waiters.WaitFunc(
+			received := waiters.WaitFunc(
 				func() bool { return true },
-				func(waitCh <-chan rdvq.Notification) rdvq.Notification {
+				func(waitCh <-chan struct{}) bool {
 					select {
-					case rf := <-waitCh:
-						return rf
+					case <-waitCh:
+						return true
 					case <-time.After(200 * time.Millisecond):
-						return rdvq.Notification{}
+						return false
 					}
 				},
 			)
-			notifications <- rf.Received()
+			notifications <- received
 		}()
 	}
 
@@ -238,9 +240,9 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	go func() {
 		waiters.WaitFunc(
 			func() bool { return true },
-			func(<-chan rdvq.Notification) rdvq.Notification {
+			func(<-chan struct{}) bool {
 				// Abandon immediately - don't wait on channel
-				return rdvq.Notification{}
+				return false
 			},
 		)
 	}()
@@ -253,18 +255,18 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 
 	notified := make(chan bool, 1)
 	go func() {
-		rf := waiters.WaitFunc(
+		received := waiters.WaitFunc(
 			func() bool { return true },
-			func(waitCh <-chan rdvq.Notification) rdvq.Notification {
+			func(waitCh <-chan struct{}) bool {
 				select {
-				case rf := <-waitCh:
-					return rf
+				case <-waitCh:
+					return true
 				case <-time.After(50 * time.Millisecond):
-					return rdvq.Notification{}
+					return false
 				}
 			},
 		)
-		notified <- rf.Received()
+		notified <- received
 	}()
 
 	// Give new waiter time to process orphaned notification

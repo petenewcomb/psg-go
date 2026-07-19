@@ -203,11 +203,13 @@ type Pool struct {
 	// into a registration whose confirm re-reads fresh.
 	anchor atomic.Pointer[Cache]
 
-	// notifier is the Pool's notification domain (docs/notification-
-	// conservation.md): capacity events mint into it, postponed admissions
-	// register their queue's listener with it, blockers park in its waiter
-	// set. Reach it through [Pool.Notifier].
-	notifier rdvq.Notifier
+	// fallback is the Pool's fallback-mode interest set (docs/notification-
+	// conservation.md): queues holding postponed pool-gated work whose demand
+	// was withdrawn plant their listener here, and a capacity event with no
+	// standing head walks it. Registered demands are never reached through it —
+	// head-directed delivery goes through the head's attendant. Reach it
+	// through [Pool.Fallback].
+	fallback rdvq.Listeners
 
 	// overdraftPolicy is the Resource's own Overdraft when it implements
 	// [OverdraftResource], else nil — the capability-discovery nil-field test of
@@ -254,14 +256,56 @@ var nextPoolRank atomic.Uint64
 // Rank returns this Pool's position in the canonical global acquisition order.
 func (p *Pool) Rank() uint64 { return p.rank }
 
-// Notifier returns the Pool's notification domain. Postponing admissions
-// register their queue's listener with its Listeners; blocking acquirers park in
-// its Waiters (register-then-confirm, re-running Acquire in the confirm);
-// pool-external capacity events (a limiter's ceiling raise) mint into it with
-// Notify. Consumers honor the conservation contract: forward a wake they cannot
-// use (docs/notification-conservation.md).
-func (p *Pool) Notifier() *rdvq.Notifier {
-	return &p.notifier
+// Fallback returns the Pool's fallback-mode interest set. A queue postponing a
+// pool-gated work without a registration (an unattended miss withdrew the
+// demand) plants its listener here — before its final re-attempt, per the
+// standard race-closing order — so a capacity event arriving while no head
+// stands can wake one of its workers.
+func (p *Pool) Fallback() *rdvq.Listeners {
+	return &p.fallback
+}
+
+// Attendant is a registered demand's wake target: a [rdvq.Waiter] when the
+// demand's owner parks (a blocking submit), or the [rdvq.Listener] of the queue
+// holding the demand's postponed work (a listen-capable postpone). Head-directed
+// delivery fires exactly the head's attendant (docs/notification-conservation.md).
+type Attendant interface{ Notify() }
+
+// notifyCapacity delivers a capacity event by mode. With a standing (non-
+// sentinel) head, delivery beyond the head's attendant is provably futile under
+// arrival-order reservation, so exactly that attendant is fired — one-shot: the
+// slot clears on fire and the owner re-arms it each park cycle; a nil slot means
+// the owner is running and attempt-on-arrival covers it. With no head, the
+// fallback walk fires every planted queue-interest listener. With neither,
+// silence: nobody anywhere is waiting, and later claimants see the capacity
+// directly (mint-after-visibility). Callers invoke it AFTER making capacity
+// visible. Head retirement and head withdrawal call it too — the cascade rule,
+// which is how a multi-unit event admits claimants one per delivery.
+//
+//nolint:contextcheck // background context used only for tracing
+func (p *Pool) notifyCapacity() {
+	p.mu.Lock()
+	head := p.fifo.Front()
+	for head != nil && head.sentinel {
+		head = p.fifo.Next(head)
+	}
+	if head != nil {
+		a := head.attendant
+		head.attendant = nil
+		p.mu.Unlock()
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), "permits.notifyCapacity", "Pool=%p head=%p attended=%v", p, head, a != nil)
+		}
+		if a != nil {
+			a.Notify()
+		}
+		return
+	}
+	p.mu.Unlock()
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), "permits.notifyCapacity", "Pool=%p fallback walk", p)
+	}
+	p.fallback.NotifyAll()
 }
 
 // overdraft is ONE standing episode's state (weighted-acquisition.md §Overdraft),
@@ -325,7 +369,7 @@ func NewPool(r Resource) *Pool {
 	if odr, ok := r.(OverdraftResource); ok {
 		p.overdraftPolicy = odr
 	}
-	p.notifier.Init()
+	p.fallback.Init()
 	return p
 }
 
@@ -405,10 +449,10 @@ func (c *Cache) Reset() {
 	if held := c.counts.drain(); held > 0 {
 		//nolint:gosec // G115: held is a permit count bounded by the Resource's capacity
 		c.pool.resource.Release(int(held))
-		// Returning held permits to the Resource frees that much capacity: mint.
-		// Multi-unit capacity needs no herd — a productive consumer re-probes
-		// (conservation rule 5).
-		c.pool.notifier.Notify(nil)
+		// Returning held permits to the Resource frees that much capacity: a
+		// capacity event. Multi-unit capacity needs no herd — the cascade rule
+		// admits claimants one per delivery.
+		c.pool.notifyCapacity()
 	}
 	if h := cacheDestroyHook.Load(); h != nil {
 		(*h)(c) // test seam: observe the destroy before c returns to the pool
@@ -506,6 +550,17 @@ type Demand struct {
 	// registration; retries must re-present it unchanged (weigh-once).
 	w uint64
 
+	// attendant is the demand's wake target — nil while the owner is running
+	// (unattended-but-cycling). A property of the demand, not the registration:
+	// it survives invalidate/re-register cycles (a sibling reclaim's lend rule
+	// can withdraw a registration mid-park; the confirm's re-acquire re-registers
+	// and the standing attendant must still be heard). Written by the owner
+	// before its final pre-park re-check, cleared by delivery on fire; a stale
+	// stash costs one generation-guarded spurious wake. Published under the
+	// registering Pool's mu by enqueue; while unregistered only the owner
+	// touches it.
+	attendant Attendant
+
 	// sentinel marks a pool-owned episode sentinel (immutable once set by
 	// overdraft.Init).
 	sentinel bool
@@ -545,6 +600,8 @@ func (d *Demand) Free() {
 // Must not be called while a Permit backed by the demand's body cache is still
 // held (release first — the handle lifecycle already sequences this; destroy's
 // inUse panic is the tripwire).
+//
+//nolint:contextcheck // background context used only for tracing
 func (d *Demand) Invalidate() {
 	d.gen.Add(1) // retires every outstanding captured reference
 	if p := d.pool.Load(); p != nil {
@@ -554,10 +611,14 @@ func (d *Demand) Invalidate() {
 		d.deregister()
 		p.refreshAnchor()
 		p.mu.Unlock()
+		if trace.IsEnabled() {
+			trace.Logf(context.Background(), "permits.invalidate", "Pool=%p Demand=%p wasHead=%v", p, d, wasHead)
+		}
 		if wasHead {
-			// The turn moved: offer it. The successor's retry re-reads counts
-			// fresh; a surplus token exhausts harmlessly.
-			p.notifier.Notify(nil)
+			// Head withdrawal is a capacity event (the cascade rule): the
+			// successor's attendant is woken, or the fallback walk runs if the
+			// queue drained empty.
+			p.notifyCapacity()
 		}
 	}
 	if c := d.cache.Load(); c != nil {
@@ -572,6 +633,24 @@ func (d *Demand) deregister() {
 	d.gen.Add(1) // hygiene: every registration end retires captured references
 	d.w = 0
 	d.pool.Store(nil)
+}
+
+// SetAttendant records the demand's wake target for head-directed delivery.
+// The owner calls it before the final re-check that precedes parking (the
+// standard race-closing order): a capacity event landing between the failed
+// attempt and this write is caught by that re-check, and one landing after it
+// fires the attendant. Valid on an unregistered demand too — a registration
+// created by the subsequent re-check (or by a re-register after a mid-park
+// withdrawal) carries the standing attendant with it.
+func (d *Demand) SetAttendant(a Attendant) {
+	if p := d.pool.Load(); p != nil {
+		p.mu.Lock()
+		d.attendant = a
+		p.mu.Unlock()
+		return
+	}
+	// Unregistered: unreachable by deliverers (not in any fifo), owner-serialized.
+	d.attendant = a
 }
 
 // Registered reports whether d currently stands in a Pool's demand queue — from its
@@ -616,7 +695,7 @@ func (p *Pool) refreshAnchor() {
 //
 // A miss leaves the demand registered; the caller retries by re-presenting the
 // same demand — from a queue worker's retry sweep (its queue's listener
-// registered with [Pool.Notifier]), a park confirm, or its own next attempt —
+// its attendant's wake path), a park confirm, or its own next attempt —
 // and withdraws it with [Demand.Invalidate] when it stops attending.
 //
 // Under a STANDING overdraft episode (the barrier anchored by the episode
@@ -897,10 +976,10 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 }
 
 // retire ends d's registration on satisfaction: immediate unlink, and one token
-// minted so the new head's worker is offered the turn — the promotion cascade,
-// and the re-probe of conservation rule 5 (each satisfied head re-mints, so a
-// multi-unit capacity event admits claimants one by one until the first miss
-// exhausts). The demand's body cache persists as its home until Invalidate.
+// delivered so the new head's attendant is offered the turn — the promotion
+// cascade rule, by which a multi-unit capacity event admits claimants one per
+// delivery until the first miss. The demand's body cache persists as its home
+// until Invalidate.
 //
 //nolint:contextcheck // background context used only for tracing
 func (p *Pool) retire(d *Demand) {
@@ -912,7 +991,7 @@ func (p *Pool) retire(d *Demand) {
 	d.deregister()
 	p.refreshAnchor()
 	p.mu.Unlock()
-	p.notifier.Notify(nil)
+	p.notifyCapacity()
 }
 
 // headOverdraft runs when the head's gather has exhausted the forest and the
@@ -1135,7 +1214,7 @@ func (p *Pool) endEpisode(c *Cache) {
 	p.refreshAnchor()
 	p.mu.Unlock()
 	overdraftPool.Release(od)
-	p.notifier.Notify(nil)
+	p.notifyCapacity()
 }
 
 // acquireInto runs steps 3–4 for c, landing w permits in c's own counts. Returns c
@@ -1273,7 +1352,7 @@ func (pm Permit) Release() {
 		}
 		od.allowance.Add(excess)
 	}
-	pm.backing.pool.notifier.Notify(nil)
+	pm.backing.pool.notifyCapacity()
 }
 
 // Suspend records that a permit-holder has lent its permit back for the duration
@@ -1311,7 +1390,7 @@ func (c *Cache) Resume() {
 	}
 	c.suspended.Add(-1)
 	c.ReleaseRef() // may destroy c — nothing below touches it
-	p.notifier.Notify(nil)
+	p.notifyCapacity()
 }
 
 // tryPin adds a reference only if the cache is still referenced (refs > 0), reporting
@@ -1331,4 +1410,11 @@ func (c *Cache) tryPin() bool {
 // over-release panics in the counter, and a leak surfaces in the pool's/wave's invariants.
 func (c *Cache) ReleaseRef() {
 	cachePool.Release(c)
+}
+
+// NotifyCapacity delivers an externally minted capacity event — a Resource
+// whose capacity grew without any permit release (a concurrency-limit raise).
+// Delivery is mode-directed like every capacity event.
+func (p *Pool) NotifyCapacity() {
+	p.notifyCapacity()
 }

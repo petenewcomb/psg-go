@@ -217,7 +217,7 @@ func newPlan(t *rapid.T, config *Config, nextIDs *idCounters, parentPlan *Plan) 
 			ID:    id,
 			Depth: depth,
 			Handle: newFunc(t, plan, config, &config.Skimmer.Handle, nextIDs,
-				fmt.Sprintf("Skimmer#%d.Handle", id), false), // skimmers can't drive subwaves
+				fmt.Sprintf("Skimmer#%d.Handle", id), true), // skim handlers may drive subwaves
 		}
 	}
 	// Sort Skimmers by depth ascending — needed so cascade-target

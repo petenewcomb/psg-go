@@ -10,6 +10,7 @@ import (
 
 	"github.com/petenewcomb/streampool/internal/omnipool"
 	"github.com/petenewcomb/streampool/internal/permits"
+	"github.com/petenewcomb/streampool/internal/rdvq"
 	"github.com/petenewcomb/streampool/internal/trace"
 	"github.com/petenewcomb/streampool/internal/workq"
 )
@@ -66,7 +67,11 @@ type heldPermit struct {
 	// does not allocate a fresh closure per call). It reads the per-call confirm state
 	// below; blockAcquire is single-flighted per handle (one handle per dispatch), so
 	// that state needs no synchronization.
-	confirmFn      func() bool
+	confirmFn func() bool
+
+	// withdrawFn is the handle's bound withdraw-before-going-deep callback
+	// (cached/preserved like confirmFn); see [heldPermit.withdraw].
+	withdrawFn     func()
 	blockingFn     func() // ex.Blocking for the in-flight blockAcquire (nil if none)
 	blockingCalled bool   // whether blockingFn has fired this blockAcquire
 
@@ -91,6 +96,15 @@ type heldPermit struct {
 	// Cleared by the hold's own reclaim.
 	lent bool
 }
+
+// waiterPool recycles the park points blocking acquires and reclaims borrow —
+// one per park frame, NOT per handle: a reclaim's help can re-enter a reclaim
+// of the same handle (the inner bracket's lend rule lends a mid-park-reacquired
+// hold away again), and each frame needs its own wait in flight. The armed
+// attendant always points at the innermost frame's waiter; a stale wake into a
+// recycled waiter is a spurious confirm for its next borrower, harmless by the
+// generation protocol.
+var waiterPool = omnipool.For[rdvq.Waiter]()
 
 // acquire performs the non-blocking admission acquire through ownCache: own cache, then
 // the ancestor up-walk (inherit in place), then the free Resource, then a forest steal.
@@ -123,9 +137,9 @@ func (h *heldPermit) acquire() bool {
 }
 
 // suspend lends the held permit back to its backing cache for the duration of a park
-// episode (a drive call), reporting whether there was one to lend. False is the
+// episode (a sub-wave drain), reporting whether there was one to lend. False is the
 // re-entrancy no-op: an enclosing episode already suspended this handle, so the reclaim
-// belongs to that episode. target is the drive-target wave's cache for this handle's
+// belongs to that episode. target is the drained wave's cache for this handle's
 // limiter: the suspension counts there BEFORE the permit frees, so no overdraft
 // evaluation can observe the lent capacity without the suspension that produced it.
 //
@@ -137,7 +151,7 @@ func (h *heldPermit) suspend(target *permits.Cache) bool {
 	if trace.IsEnabled() {
 		trace.Logf(context.Background(), "heldPermit.suspend", "h=%p Pool=%p target=%p", h, h.pool(), target)
 	}
-	target.SuspendDriver()
+	target.Suspend()
 	h.suspendTarget = target
 	h.permit.Release()
 	h.permit = permits.Permit{}
@@ -172,12 +186,13 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 	// overdraft evaluation waiting on this suspension proceed (resolution (c)).
 	if t := h.suspendTarget; t != nil {
 		h.suspendTarget = nil
-		t.ResumeDriver()
+		t.Resume()
 	}
 	h.lent = false
 	confirmFn := func() bool { return h.acquireErr == nil && !h.acquire() } // block only while still un-acquired
 	helping := true
-	var m workq.Notification
+	waiter := waiterPool.Get()
+	defer waiterPool.Release(waiter)
 	for !h.acquire() {
 		if h.acquireErr != nil {
 			// Overdraft refusal mid-reclaim: terminal — no wake follows a refusal,
@@ -186,10 +201,6 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 			// (see acquireErr); revisit error surfacing with the step-4 weighted
 			// surface.
 			return
-		}
-		if m.Received() {
-			// Couldn't use the wake productively; pass it along (renotify conservation).
-			m.Forward()
 		}
 		// The lend rule (see the doc comment): never park holding a rank above the
 		// one being waited on — where "holding" covers BOTH a permit and a standing
@@ -222,13 +233,19 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 				y.demand.Invalidate()
 			}
 		}
-		var err error
 		if helping {
-			m, err = wv.block(ctx, time.Time{}, h.ownCache.WaitersFor(&h.demand), confirmFn)
+			ch := waiter.Prepare()
+			h.demand.SetAttendant(waiter)
+			woken, err := wv.blockAndHelp(ctx, time.Time{}, ch, h.withdraw(), confirmFn)
+			waiter.Finish(woken)
 			switch {
 			case err == nil:
 			case ctx.Err() != nil:
-				return // canceled: leave un-acquired; completion release no-ops
+				// Canceled: leave un-acquired (the completion release no-ops) and
+				// withdraw the walked-away registration — the owner has stopped
+				// attending it, so its reservation must not stand.
+				h.demand.Invalidate()
+				return
 			case errors.Is(err, ErrWaveDone):
 				helping = false // help domain exhausted — fall back to a plain park
 			default:
@@ -236,20 +253,24 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 				// the reclaim must not abandon the permit; keep helping.
 			}
 		} else {
-			m, err = h.ownCache.WaitersFor(&h.demand).Wait(ctx, confirmFn)
-			if err != nil {
-				return // canceled: leave un-acquired, as above
+			ch := waiter.Prepare()
+			h.demand.SetAttendant(waiter)
+			if !confirmFn() {
+				waiter.Finish(false)
+				continue
+			}
+			select {
+			case <-ch:
+				waiter.Finish(true)
+			case <-ctx.Done():
+				waiter.Finish(false)
+				h.demand.Invalidate() // canceled: walked away, as above
+				return
 			}
 		}
 	}
-	// Acquired: the last wake (if any) was used productively — drop it (do not
-	// Forward). A CHAINED wake additionally owes the chain one probe (rule 2): its
-	// multi-permit capacity may satisfy more waiters behind us.
 	if trace.IsEnabled() {
 		trace.Logf(ctx, "heldPermit.reclaim", "h=%p Pool=%p reacquired", h, h.pool())
-	}
-	if m.Chained() {
-		h.pool().ChainProbe()
 	}
 }
 
@@ -376,14 +397,18 @@ func suspendHeldPermit(meta *ctxMeta, wv *waveImpl) *heldPermit {
 // gateAcquire drives h to held under the dispatch context's discipline. It
 // implements the three admission modes:
 //
-//   - one-shot (ex not blocking/postponing): a single non-blocking acquire.
-//   - manager postpone (queued, non-top-level): register for the Pool's permit-free
-//     wake and recheck — the work is re-invoked on a freed permit, and the recheck
-//     closes the lost-wakeup window between the miss and the registration.
-//   - top-level: block-and-help — wait on the Pool's waiters (woken by any freed permit)
-//     while help-draining the driver's own wave, so a permit-holder blocked posting a
-//     result keeps making progress (the correctness reason help is required, not just
-//     utilization).
+//   - one-shot (ex not blocking/postponing): a single non-blocking acquire —
+//     a nested dispatch's inline attempt. A miss leaves the demand registered
+//     in the pool's arrival-order queue; the work's own queue retries it.
+//   - manager postpone (queued, non-top-level): register the work's queue as
+//     a listener with the pool's notification domain, then recheck
+//     (register-then-confirm closes the lost-wakeup window). A freed permit's
+//     token then reaches a worker of the queue holding this work, whose retry
+//     sweep re-runs it — or spawns one, on a spawn-capable queue.
+//   - top-level: block-and-help — park in the pool's waiter set composed with
+//     the wave's own queue, help-executing wave work while waiting, so a
+//     permit-holder blocked posting a result keeps making progress (the
+//     correctness reason help is required, not just utilization).
 //
 // Returns whether h holds a permit on return.
 func gateAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldPermit) (bool, error) {
@@ -397,15 +422,39 @@ func gateAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldP
 		return false, h.acquireErr // overdraft refusal: the unit fails, no retry
 	}
 	if !ex.ShouldBlockOrPostpone() {
+		// One-shot: nothing attends the registration the miss left behind, and
+		// this worker may go deep before any retry sweep. A demand may stand
+		// only while attended, so withdraw it; the next listen-capable or
+		// blocking attempt re-registers. Under a controller (ex.Listener set),
+		// plant the queue's interest with the pool's fallback set and re-attempt
+		// once (plant-then-recheck), so a capacity event arriving with no
+		// standing head wakes a worker to retry this queue's postponed work. An
+		// inline nested try (no Listener) leaves the work fresh on the actively
+		// driving queue — the driver itself is the attendance.
+		h.demand.Invalidate()
+		if ex.Listener != nil {
+			ex.Listener.AddTo(h.pool().Fallback())
+			if h.acquire() {
+				return true, nil
+			}
+			h.demand.Invalidate()
+			if h.acquireErr != nil {
+				return false, h.acquireErr
+			}
+		}
 		return false, nil
 	}
 	if wv.shouldBlock(ctx) == nil {
-		// Non-top-level: postpone. Register for the demand's own wake — its
-		// promotion, or the head-addressed capacity events once it is the head
-		// (there is no general set under the unified queue) — then recheck, which
-		// also covers a registration racing the wake.
-		ex.AddToListeners(h.ownCache.ListenersFor(&h.demand))
-		return h.acquire(), h.acquireErr
+		// Non-top-level: postpone. Arm the driving queue's relay as the
+		// registered demand's attendant, then recheck (arm-then-confirm closes
+		// the lost-wakeup window). A freed permit's head-directed delivery
+		// wakes one worker of the queue holding this work, whose retry sweep
+		// re-runs it.
+		h.demand.SetAttendant(ex.Listener)
+		if h.acquire() {
+			return true, nil
+		}
+		return false, h.acquireErr
 	}
 	// Top-level: block-and-help.
 	if err := blockAcquire(ctx, ex, wv, h); err != nil {
@@ -434,10 +483,12 @@ func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *w
 	return true, nil
 }
 
-// blockAcquire is the top-level blocking acquire: wait on the Pool's waiters (a freed
-// permit wakes one) while wv.block help-drains the driver's own wave, retrying the
-// acquire each round until it succeeds or ctx is cancelled. h.acquire (idempotent)
-// is both the loop guard and the block confirm.
+// blockAcquire is the top-level blocking acquire: prepare the handle's waiter,
+// arm it as the registered demand's attendant (head-directed delivery fires it
+// when capacity frees), and park via wv.blockAndHelp — help-executing the
+// caller's own wave, retrying the acquire each round until it succeeds or ctx
+// is cancelled. h.acquire (idempotent) is both the loop guard and the block
+// confirm, re-run before every inner park.
 func blockAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldPermit) error {
 	// Per-call confirm state, read by h.confirm (the cached, allocation-free callback).
 	h.blockingCalled = false
@@ -446,28 +497,43 @@ func blockAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *held
 		h.confirmFn = h.confirm
 	}
 	defer func() { h.blockingFn = nil }() // don't pin the Execution past the call
-	var m workq.Notification
+	waiter := waiterPool.Get()
+	defer waiterPool.Release(waiter)
 	for !h.acquire() {
 		if h.acquireErr != nil {
 			return h.acquireErr // overdraft refusal: terminal, don't park
 		}
-		if m.Received() {
-			// Couldn't use the wake productively; pass it along (renotify conservation).
-			m.Forward()
-		}
-		var err error
-		m, err = wv.block(ctx, time.Time{}, h.ownCache.WaitersFor(&h.demand), h.confirmFn)
+		ch := waiter.Prepare()
+		h.demand.SetAttendant(waiter)
+		woken, err := wv.blockAndHelp(ctx, time.Time{}, ch, h.withdraw(), h.confirmFn)
+		waiter.Finish(woken)
 		if err != nil {
+			// Walking away (cancellation, wave done, a helped handler's error
+			// surfacing through the help): the owner stops attending, so the
+			// registration is withdrawn — its reservation must not outlive its
+			// only attendant. A later retry re-registers.
+			h.demand.Invalidate()
 			return err
 		}
 	}
-	// Acquired: the last wake (if any) was used productively — drop it (do not
-	// Forward). A CHAINED wake (weighted release / multi-permit drain) additionally
-	// owes the chain one probe: its capacity may satisfy more waiters behind us.
-	if m.Chained() {
-		h.pool().ChainProbe()
-	}
 	return nil
+}
+
+// withdrawDemands invalidates every registered demand of the joint set — the
+// withdraw-before-going-deep discipline: a queue position reserves capacity
+// just like a permit, so a goroutine must not park while a demand only it can
+// attend stands registered. The owning loop's next acquire re-registers,
+// losing only queue position (and any gathered hoard, drained by the
+// withdrawal).
+func (h *heldPermit) withdrawDemands() {
+	if h.demand.Registered() {
+		h.demand.Invalidate()
+	}
+	for _, r := range h.rest {
+		if r.demand.Registered() {
+			r.demand.Invalidate()
+		}
+	}
 }
 
 // release returns the held permit, if any, to its backing cache (now borrowable, waking
@@ -521,11 +587,15 @@ func (h *heldPermit) confirm() bool {
 	return true // proceed to block
 }
 
-// Init implements omnipool.Initer: one-time setup when the handle pool creates a
-// fresh object — the embedded demand's mailbox outlives every recycle (Reset retires
-// identities by generation, never by reallocation).
-func (h *heldPermit) Init() {
-	h.demand.Init()
+// withdraw returns the handle's cached withdraw-before-going-deep callback for
+// [waveImpl.blockAndHelp]: it fires just before the first help item a wait
+// executes, invalidating every registered demand of the joint set (the next
+// acquire re-registers).
+func (h *heldPermit) withdraw() func() {
+	if h.withdrawFn == nil {
+		h.withdrawFn = h.withdrawDemands
+	}
+	return h.withdrawFn
 }
 
 var heldPermitPool = omnipool.For[heldPermit]()

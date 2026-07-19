@@ -85,7 +85,7 @@ func (s *Scheduler) Post(ctx context.Context, w Work) error {
 	}()
 
 	var err error
-	delivered := s.incoming.PushBackFunc(w, func(waitCh <-chan rdvq.Notification) rdvq.Notification {
+	delivered := s.incoming.PushBackFunc(w, func(waitCh <-chan struct{}) bool {
 		// selectFn runs only when no scheduler was waiting — i.e. the producer is
 		// about to park. Register unmet demand once (on the first park) so the pool
 		// spawns toward it.
@@ -93,9 +93,9 @@ func (s *Scheduler) Post(ctx context.Context, w Work) error {
 			registered = true
 			s.pool.RegisterUnmetDemand()
 		}
-		var m rdvq.Notification
-		m, err = rdvq.BasicWaitSelect(ctx, waitCh)
-		return m
+		var received bool
+		received, err = rdvq.BasicWaitSelect(ctx, waitCh)
+		return received
 	})
 	if delivered {
 		return nil
@@ -146,10 +146,10 @@ type schedulerWorker struct {
 	pullFn AddWorkFunc
 
 	// per-Wait scratch (set in Wait, read in pull/selectWork):
-	idleCh   <-chan time.Time
-	renotify Notification
-	exit     bool  // idle/stop fired: stop this worker
-	selErr   error // ctx cancel surfaced from the select
+	idleCh <-chan time.Time
+	woken  bool  // workWaitCh fired: fresh/postponed work may be ready
+	exit   bool  // idle/stop fired: stop this worker
+	selErr error // ctx cancel surfaced from the select
 }
 
 // Wait drives one ExecuteOne: it finds and executes a single admission item (fresh →
@@ -181,13 +181,13 @@ func (w *schedulerWorker) pull(
 	queueFn QueueWorkFunc,
 	waiters *rdvq.Waiters,
 	confirmWaitFn func() bool,
-) (Notification, error) {
+) error {
 	if waiters == nil {
 		// Unbuffered Handoff: nothing to probe without blocking.
-		return Notification{}, nil
+		return nil
 	}
 
-	w.renotify, w.selErr, w.exit = Notification{}, nil, false
+	w.woken, w.selErr, w.exit = false, nil, false
 
 	// Design B: workers idle-exit (scale to zero) freely; scheduled-flush deadlines are
 	// honored by the queue-owned timer ([Accepted.armScheduledTimer]), which spawns a worker
@@ -196,7 +196,7 @@ func (w *schedulerWorker) pull(
 
 	var newWork Work
 	waiters.WaitFunc(confirmWaitFn,
-		func(workWaitCh <-chan Notification) Notification {
+		func(workWaitCh <-chan struct{}) bool {
 			work, ok := w.sched.incoming.PopFrontFunc(
 				func(inboxCh <-chan Work) (Work, bool) {
 					return w.selectWork(ctx, inboxCh, workWaitCh, idleCh)
@@ -205,7 +205,7 @@ func (w *schedulerWorker) pull(
 			if ok {
 				newWork = work
 			}
-			return w.renotify
+			return w.woken
 		},
 	)
 	if newWork != nil {
@@ -215,7 +215,7 @@ func (w *schedulerWorker) pull(
 		// idle scale-to-zero or pool teardown: tell ExecuteOne to stop.
 		w.selErr = ErrEndOfWork
 	}
-	return w.renotify, w.selErr
+	return w.selErr
 }
 
 // selectWork is the scheduler's canonical park select. It has no outbox case
@@ -224,14 +224,15 @@ func (w *schedulerWorker) pull(
 func (w *schedulerWorker) selectWork(
 	ctx context.Context,
 	inboxCh <-chan Work,
-	workWaitCh <-chan Notification,
+	workWaitCh <-chan struct{},
 	idleCh <-chan time.Time,
 ) (Work, bool) {
 	select {
 	case work := <-inboxCh:
 		return work, true
-	case w.renotify = <-workWaitCh:
-		// notified that fresh/postponed work may be ready; return to re-probe
+	case <-workWaitCh:
+		// woken: fresh/postponed work may be ready; return to re-probe
+		w.woken = true
 		return nil, false
 	case <-idleCh:
 		w.exit = true // idle scale-to-zero

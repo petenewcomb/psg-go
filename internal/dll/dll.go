@@ -52,6 +52,11 @@ func (l *List[T]) Next(item T) T {
 	return item.ListLinks().next
 }
 
+// Owns reports whether item is currently linked into this list.
+func (l *List[T]) Owns(item T) bool {
+	return item.ListLinks().list == any(l)
+}
+
 // PushBack links item at the back of the list. It panics if item is
 // already in any list.
 func (l *List[T]) PushBack(item T) {

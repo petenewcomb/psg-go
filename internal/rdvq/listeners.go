@@ -11,15 +11,14 @@ import (
 	"github.com/petenewcomb/streampool/internal/nbcq"
 )
 
-// noop is the default fallback for a Notification with no explicit conservation
-// action: a never-nil terminal so Forward/Empty need no nil check on the fallback.
+// noop is the default fallback for wake operations with no explicit fallback
+// action: a never-nil terminal so callers need no nil check.
 func noop() {}
 
-// Listeners manages a queue of notification functions waiting to be signaled.
-// It provides a subscription mechanism for goroutines to register for notifications
-// when work becomes available.
+// Listeners manages a queue of one-shot wake relays. It provides a planting
+// mechanism for queues to register interest in a domain's capacity events.
 type Listeners struct {
-	q nbcq.Queue[NotifyFunc]
+	q nbcq.Queue[func()]
 }
 
 // Init initializes the Listeners for use. Must be called before any other operations.
@@ -32,7 +31,7 @@ func (c *Listeners) Init() {
 }
 
 //nolint:contextcheck // background context used only for tracing
-func (c *Listeners) add(notifyFn NotifyFunc) {
+func (c *Listeners) add(notifyFn func()) {
 	traceRegion := "rdvq.Listeners.add"
 	defer trace.StartRegion(context.Background(), traceRegion).End()
 	trace.Logf(context.Background(), traceRegion, "Listeners=%p", c)
@@ -43,44 +42,9 @@ func (c *Listeners) add(notifyFn NotifyFunc) {
 	c.q.PushBack(notifyFn)
 }
 
-// Notify delivers a wake to one waiting listener, running fallback if no listener takes
-// it (total conservation). A nil fallback defaults to noop. The listener receives a
-// waiter-style (terminal) Notification: a standalone Listeners has no enclosing Notifier
-// to re-circulate through. See [Notifier.Notify] for the re-circulating listener-style
-// delivery.
-func (c *Listeners) Notify(fallback func()) {
-	if fallback == nil {
-		fallback = noop
-	}
-	if !c.deliver(Notification{fallback: fallback}) {
-		fallback()
-	}
-}
-
-// deliver offers m to waiting listeners in FIFO order, returning true once one takes it
-// (its NotifyFunc returned true) and false if none did. Listeners that decline
-// synchronously (return false) are dropped and the next is tried.
-//
-//nolint:contextcheck // background context used only for tracing
-func (c *Listeners) deliver(m Notification) bool {
-	traceRegion := "rdvq.Listeners.deliver"
-	defer trace.StartRegion(context.Background(), traceRegion).End()
-	trace.Logf(context.Background(), traceRegion, "Listeners=%p", c)
-
-	for {
-		notifyFn, ok := c.q.TryPopFront()
-		if !ok {
-			return false
-		}
-
-		if notifyFn(m) {
-			return true
-		}
-	}
-}
-
-// NotifyAll signals all waiting listeners.
-// This is typically used during shutdown or when conditions change globally.
+// NotifyAll pops and fires every planted relay. Delivery is unconditional —
+// no relay's outcome narrows the walk (docs/notification-conservation.md);
+// each popped planting is one-shot and its owner re-plants on its next retry.
 //
 //nolint:contextcheck // background context used only for tracing
 func (c *Listeners) NotifyAll() {
@@ -93,14 +57,6 @@ func (c *Listeners) NotifyAll() {
 		if !ok {
 			break
 		}
-		notifyFn(Notification{fallback: noop})
-	}
-}
-
-// Reset prepares the Listeners for reuse.
-// Panics if called when there are still pending listeners.
-func (c *Listeners) Reset() {
-	if _, ok := c.q.TryPopFront(); ok {
-		panic("resetting non-empty Listeners")
+		notifyFn()
 	}
 }

@@ -17,7 +17,7 @@ type Waiters = rdvq.Waiters
 type Notifier = rdvq.Notifier
 
 type BlockFunc func(ctx context.Context, deadline time.Time, waiters *Waiters,
-	confirmWaitFn func() bool) (Notification, error)
+	confirmWaitFn func() bool) error
 
 type WaitBehavior struct {
 	BlockBehavior
@@ -29,7 +29,6 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 	traceRegion := "workq.ExecuteOrWait"
 	defer trace.StartRegion(ctx, traceRegion).End()
 
-	var m Notification
 	var blockFn BlockFunc
 
 	blockConfirmer := blockConfirmerPool.Get()
@@ -39,42 +38,33 @@ func ExecuteOrWait(ctx context.Context, ex Execution, deadline time.Time, notifi
 
 	for behavior.ShouldWait() {
 
-		if m.Received() {
-			// Can't productively use the notification received, so pass it along.
-			m.Forward()
-		}
-
 		if !ex.ShouldBlockOrPostpone() {
 			return nil
 		}
 
 		blockFn = behavior.ShouldBlock(ctx)
 		if blockFn == nil {
-			ex.AddToListeners(&notifier.Listeners)
+			ex.Listener.AddTo(&notifier.Listeners)
 
-			// Recheck condition in case it changed before the subscription
-			// was registered and could receive the notification.
+			// Recheck condition in case it changed before the planting could
+			// receive a wake.
 			if !behavior.ShouldWait() {
 				break
 			}
 
 			// Return now without executing the wrapped work function and
-			// expect to be called again later (e.g., after notification via
-			// the subscription)
+			// expect to be called again later (e.g., after a wake via the
+			// planted relay)
 			return nil
 		}
 
 		// Blocking path
-		var err error
-		m, err = blockFn(ctx, deadline, &notifier.Waiters, blockConfirmer.confirmFn)
-		if err != nil {
+		if err := blockFn(ctx, deadline, &notifier.Waiters, blockConfirmer.confirmFn); err != nil {
 			trace.Logf(ctx, traceRegion, "returning error from blockFn: %v", err)
 			return err
 		}
 	}
 
-	// Exiting the loop means ShouldWait is now false — the last wake (if any) let us
-	// find work, so it was productively used: drop it (do not Forward).
 	return workFn(ctx, ex)
 }
 

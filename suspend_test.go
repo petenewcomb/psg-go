@@ -55,21 +55,40 @@ func TestSuspendDuringSubwaveAllowsSibling(t *testing.T) {
 	require.NoError(t, wave.CloseAndSkimAll(ctx))
 }
 
-// TestSkimHandlerDrivingSubwavePanics pins the Finding 10 constraint: a
-// skim handler may not drive a subwave (it would monopolize the wave's
-// sole serial skim driver and deadlock). Subwork from a skim handler must
-// go through a funnel or a launched task instead.
-func TestSkimHandlerDrivingSubwavePanics(t *testing.T) {
+// TestSkimHandlerDrivesSubwave verifies that a skim handler may drive a subwave
+// of its own: the blocking gather help-drains while its admission demand stays
+// FIFO-registered, suspending whenever the handler's goroutine is off helping so
+// capacity wakes route past it to a consumer that can act (the demand-suspension
+// model — see internal/permits). Real subwork with a shared limiter exercises the
+// nested block-and-help path end to end.
+func TestSkimHandlerDrivesSubwave(t *testing.T) {
 	ctx := context.Background()
 	wave := streampool.NewWave()
+	limiter := streampool.NewSemaphore(1)
 
+	var subResults int
 	skimmer := streampool.NewFnSkimmer(func(ctx context.Context, _ int, _ error) error {
 		subWave := streampool.NewWave()
-		return subWave.CloseAndSkimAll(ctx) // disallowed: gather from a skim handler
+		sub := streampool.NewTaskLauncher(func(ctx context.Context) error {
+			return nil
+		}).WithLimits(limiter)
+		if err := sub.In(subWave).Start(ctx); err != nil {
+			return err
+		}
+		if err := subWave.CloseAndSkimAll(ctx); err != nil {
+			return err
+		}
+		subResults++
+		return nil
 	})
 
-	require.NoError(t, skimmer.In(wave).Submit(ctx, 1))
-	require.Panics(t, func() {
-		_ = wave.CloseAndSkimAll(ctx)
-	})
+	launcher := streampool.NewFnLauncher(func(ctx context.Context, unit int, _ error) error {
+		return nil
+	}).WithLimits(limiter)
+
+	require.NoError(t, launcher.In(wave).Submit(ctx, 1))
+	require.NoError(t, launcher.In(wave).Submit(ctx, 2))
+	require.NoError(t, skimmer.In(wave).Submit(ctx, 3))
+	require.NoError(t, wave.CloseAndSkimAll(ctx))
+	require.Positive(t, subResults, "the skim handler drove its subwave to completion")
 }

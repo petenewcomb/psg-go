@@ -115,8 +115,9 @@ func (g *Governor) decrementDownstream() {
 	case newValue%2 == 0:
 		// This clause releases backpressure gradually rather than only all at
 		// once, smoothing out governed work execution and thus reducing
-		// resource demand spikes. This in turn reduces resource allocation and
-		// increases utilization.
-		g.upstream.Notify(nil)
+		// resource demand spikes. Delivery of each partial-clearing event is
+		// still full (unreserved-resource rule); the gradualness bounds how
+		// often the events fire, not their fan-out.
+		g.upstream.NotifyAll()
 	}
 }

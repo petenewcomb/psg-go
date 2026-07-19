@@ -61,10 +61,9 @@ func NewWeightedSemaphore(n int) WeightedLimiter {
 	r := &weightedSemaphoreResource{}
 	r.maxConcurrency.Store(int32(n))
 	p := permits.NewPool(r)
-	// A capacity raise frees weight at the Resource without any cache returning a permit,
-	// a multi-permit event of unknown usable size — seed the Pool's wake chain (see
-	// NewSemaphore).
-	r.capacityChangedFn = p.ChainProbe
+	// A capacity raise frees weight at the Resource without any cache returning a
+	// permit: a capacity event (see NewSemaphore).
+	r.capacityChangedFn = p.NotifyCapacity
 	return &weightedSemaphore{pool: p}
 }
 

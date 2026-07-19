@@ -12,6 +12,182 @@ seam by seam, with PN walk-through before each lands. Reference baseline worktre
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► HANG DIAGNOSIS 5 (2026-07-19, trace_v8/h_32, proven): SELF-SUSPENSION GATHER WAIT.
+g116: nested dispatch bracket suspends the enclosing body's hold (heldPermit.suspend
+h=0xa4380 → Cache.Suspend target=562150, pool 360ec30, t=3090.97 — the 7th suspend, no
+matching Resume) → goes deep → the new admission (h=0x012540) becomes HEAD of the SAME
+pool and its headGather waits "anyInUse=true suspended=1" — the suspended=1 IS g116's
+own suspension, resumable only when this dispatch completes; the anyInUse permit's
+holder is also parked (cross-wave). The gather's wait-on-suspensions assumes the
+resumer is a third party; when the waiter's own chain owns the suspension the wait is
+a self-cycle. The governor was EXONERATED (both counts 0, ledgers clean; the parked
+frames' governor gates all passed). This is resolution-(c)/stranger-check territory
+(weighted-acquisition.md): the suspended-ancestor discrimination exists in the
+overdraft evaluation but the plain headGather wait branch doesn't consult it — and
+overdraft only engages at zero-in-use. Candidates (NOT chosen): (i) gather's wait test
+excludes suspensions owned by the waiting demand's own chain (needs chain attribution
+on the suspension counter — suspendTarget carries the cache; ancestry via cache
+chain?); (ii) engage the stranger evaluation from the wait branch, not only overdraft;
+(iii) re-examine whether the deep admission should be exempt-classed through the
+suspended hold's body cache (the barrier-exemption chain). LOOK AT BASELINE reclaim/
+AcquireWait + weighted-acquisition resolution (c) before designing. Trace/dump:
+scratchpad/trace_v8.out (+h116.txt, susp8.txt extracts), h_32.log.**
+
+**►►► wait() SIMPLIFIED (2026-07-19, PN-directed): the waitMu+Gosched-loop idle throttle
+in ctxmeta.go was a self-sustaining livelock under load (trace_v7/g_11: holder runnable
+in the loop, 7 queued on the mutex, spinners keeping each other's Gosched slow); PN:
+single Gosched is essential, loop+mutex ditched. Rate after: 5/100 — residual family
+isolated: QUIET governor-gate wedge (w7_98: ONE goroutine, nested handler submit parked
+at a subwave's own governor via ExecuteOrWait→blockAndHelp, rest idle — downstream
+count stands while the parked helper is its only clearer; suspect leaked DownstreamWork
+registration or lost clearing delivery). trace_v8 capture loop running with
+workq.DownstreamWork/Governor regions added to the filter.**
+
+**►►► RATE AFTER ATTENDANT FIX: 1/60 hangs (was 11/40), 0 panics. Residual wedge shape
+(scratchpad/r_56.log, 38 goroutines): several goroutines parked in the GOVERNOR block
+path (workq.ExecuteOrWait → wv.block → blockAndHelp on launcher dispatch), one reclaim
+parked; permit machinery not obviously implicated. NEXT: capture with the filter
+extended to workq.Governor (+ existing set), analyze the governor's
+downstream-count/NotifyAll delivery under the new model (decrementDownstream: zero →
+Listeners+Waiters NotifyAll? — check Notifier vs upstream wiring; partial release now
+NotifyAll too). Then task 5 gates (sim checks=100 loop, 1000-check -race, lint) and
+task 6 rename sweep.**
+
+**►►► POST-REWORK FIXES (2026-07-19, trace_v6): (1) Waiter.Prepare-reentrancy panic —
+reclaim's help re-enters reclaim of the SAME handle (inner bracket's lend rule lends a
+mid-park-reacquired hold away, fixpoint re-selects it); fixed by borrow-per-park
+waiterPool (baseline shape) replacing the per-handle waiter; heldPermit.Init deleted;
+rdvq.Waiter gained no-op Reset (keep chan+gen across recycle). (2) Traced wedge: a
+sibling reclaim's lend rule invalidated the head demand mid-park; the owner's next
+park iteration ran SetAttendant while UNREGISTERED (no-op by then-design), then the
+confirm's acquire re-registered — head standing with attendant nil forever, three
+capacity events delivered to nobody (notifyCapacity logs head=..attended=false), pool
+all-free, silence. Fix: attendant is a property of the DEMAND not the registration —
+SetAttendant stores unconditionally (unregistered demands are deliverer-unreachable,
+owner-serialized), deregister no longer clears it; stale stash = one gen-guarded
+spurious wake. Also: permits.invalidate now trace-logged (Pool/Demand/wasHead).
+Suites green; hang-rate loop pending. Note also observed: heavy enqueue/miss/invalidate
+churn from non-listening sweeps re-attempting non-head postponed works (livelock-ish
+cost, self-terminating in the trace; candidate later optimization: skip re-attempt when
+not head and capacity unchanged).**
+
+**►►► MODE-DIRECTED REWORK BUILT (2026-07-19, uncommitted): all four seams landed.
+rdvq: Waiter restored (Prepare/Finish/Notify, gen-guarded, signal-only); Notification
+type deleted; NotifyAll is the only delivery op; NewListener(fn)+Notify(); Waiters
+payloadless (WaitFunc→bool, Notify(fallback)=relay, wakeOne unexported); Queue/Handoff
+on struct{} wakes; outboxFreed→NotifyAll. permits: Demand.attendant (+SetAttendant,
+cleared by deregister/delivery), Pool.fallback Listeners (+Fallback()), notifyCapacity
+(head-attendant / fallback-walk / silence; skips sentinels; fire-after-unlock) at all
+mint sites + exported NotifyCapacity for limiter raises. workq: retryNotify deleted →
+q.listener=NewListener(relay: waiters.Notify(unmetDemandFn)); controller sheds
+notification/ProbeOrigin/requeue-forward; Execution{Listener,CanListen} replaces
+AddToListeners; AddWorkFunc/BlockFunc return error only. root: heldPermit.waiter
+(Init-allocated); blockAcquire/reclaim park via Prepare→SetAttendant→blockAndHelp→
+Finish(woken); blockAndHelp takes blockWaitCh; skimSelect payloadless (+skimSelectBlocking
+variant); gateAcquire postpone arm = SetAttendant+recheck, one-shot arm = Invalidate+
+plant-interest(ex.Listener→Fallback)+recheck; ctxMeta top-level ex.CanListen=true;
+limiter/weightedlimiter capacityChangedFn=p.NotifyCapacity. ALL package suites green.
+SIM GATE FAILING: (a) intermittent panic "rdvq: Waiter.Prepare while a wait is already
+in flight" — suspect reentrancy of one handle's waiter through the help path
+(reclaim/reclaimJoint inside blockAndHelp while the outer park's Prepare stands);
+(b) TestBySimulation hangs remain — not yet re-traced under the new model. NEXT: chase
+(a) via panic stack (loop go test -run TestBySimulation until panic, read goroutine
+trace), then re-run hang-rate loop, then trace_v6 with PSGTRACEINTERNALS filter
+permits,heldPermit,gateAcquire,rdvq.,workq.controller.**
+
+**►►► MODEL REVISED (2026-07-19): docs/notification-conservation.md now specifies
+"Notification Propagation" — mode-directed delivery superseding token conservation.
+Reserved resources (permit pools): standing head → wake the head's attendant only
+(per-demand attendant slot, read under pool mutex); no head + capacity free → fallback
+notifier walk (queue-interest listeners for unregistered postponed gated work); no
+head + no listeners → silence. Cascade: every head retire/withdraw is a capacity event
+(wake successor's attendant; to-empty fires fallback). Unreserved resources
+(queue-space, governor): relay every listener (one wake per queue), wake ALL waiters —
+never gated by consumption. Load-bearing invariants: attendance (no deaf head; from
+diagnosis 1) and no-exempt-parking (episode claimants never park in the pool domain —
+matches permits.Acquire's documented contract). Token machinery (consume-or-forward,
+saved notifications, ProbeOrigin, retryNotify) all dissolves in the coming rework.
+The three diagnoses below are the evidence trail.**
+
+**►►► HANG DIAGNOSIS 3 (2026-07-19, post-probe trace `trace_v5.out`, filtered tracing, proven).**
+The probe fix holds where it applies, but `Accepted.retryNotify`'s spawn arm (seam 3)
+**claims consumption on spawn and drops the token**: `waiters.Deliver` fails (no parked
+queue worker) → `unmetDemandFn()` spawns → returns true → the walk stops and m is never
+saved anywhere. The spawned worker sweeps without a notification: if its sweep starts
+nothing postponed (traced case: the only gated work is non-head → miss → invalidate →
+re-postpone), there is no forward and no probe — the token is gone. Proven: pool
+955b540's last release at t=207.848ms walked Listeners (consumed, no Waiters walk),
+zero walks on that notifier for the remaining 785ms, while the pool's HEAD demand's
+owner (g25, a blocking submit gate) sat parked in the pool's own Waiters the whole
+time — reachable only by the Waiters arm the spawn-consumption preempted. Model
+violation: consumption = a postponed item STARTS (doc), and demand-spawn is the
+TERMINAL FALLBACK at exhaustion — not a mid-walk consumption arm; "liveness rests on
+workers arriving, never on a notification" means spawn is worker-supply, orthogonal to
+the token. Candidate fixes: (a) spawn as side effect, return false so the walk
+continues (token reaches pool waiters on the same walk; redundant spawn harmless);
+(b) hand m to the spawned worker as its saved notification (consume-on-start /
+forward-after-sweep; more plumbing). Also: `PSGTRACEINTERNALS` is now a real
+comma-separated prefix filter (internal/trace rewritten — it previously PREPENDED the
+value to region names and never filtered, which is why full tracing masked the bug);
+`permits.Demand.Invalidate` still has no trace log (standing-set computations from
+traces remain polluted — add `permits.invalidate` logging next capture).
+
+**►►► HANG DIAGNOSIS 2 (2026-07-18, post-invalidate-fix trace `trace_v2.out`, proven).**
+The attendance fix (one-shot miss → Invalidate; postponed-first sweep) landed and works —
+every standing demand in the new trace traces to an attended parked gate. The hang
+persists (9/60, unchanged) for a deeper reason: **cross-resource token consumption
+strands a pool whose head waiter is parked.** Proven chain: pool b40's LAST release
+mints a token; the Listeners-first walk hands it to a wave queue's listener, waking a
+parked wave worker, which saves it as `c.notification`; that worker's sweep starts a
+postponed POST work (postponed for queue space, not permits); `starting()` consumes the
+saved notification on ANY postponed start (`ProbeOrigin` is a no-op for unchained
+wakes). Pool b40 is left with free capacity, a standing head demand whose owner (a
+block-and-help submitter) is parked in the pool's own Waiters, and zero circulating
+tokens — no b40 Notify ever fires again; a second submitter queues behind; mid-sequence
+attended holds wedge three more pools. The model conflict: the consumption rule "a
+postponed item starts" plus fungibility assumes the wrong-resource event's OWN token
+still circulates and can reach the stranded pool's waiters; but queues mix items
+postponed for different resources and there is no queue→pool return edge (only
+pool→queue listeners). Candidates for PN: (i) universal probe-on-consumption —
+generalize rule 5's chain debt so EVERY productive consumption pays the origin one
+probe (self-limiting: exhausts when origin has no capacity or claimant; bounded by real
+starts); (ii) origin-matched consumption (tag postpone reasons; only consume matching
+tokens — new plumbing); (iii) recover the baseline's intended tool (renotify-wrapped
+listener wakes re-entered the origin walk; consumption-on-any-postponed-start looks
+inherited, so the conflation may be a baseline latent bug masked by the old suspend
+machinery). Baseline walk order (Listeners before Waiters) is unchanged — order is not
+the divergence.
+
+**►►► HANG DIAGNOSIS (2026-07-18, quiet-wedge trace `trace_quiet.out`, proven event-by-event).**
+The seam-3/4 tree deadlocks via an *unattended head registration*. Mechanism: a skim
+handler running on goroutine G does an in-body submit; `ctxMeta.ExecuteNowOrQueue`'s
+inline one-shot try misses the permit gate, which **auto-registers the demand** in the
+pool fifo (seam-2 behavior) and queues the work fresh on the handler's wave W1. G's own
+pump then re-runs the work with `blockOrListen=false` (opportunistic non-listening pass):
+the demand is now *head*, gathers, sees `anyInUse=true`, waits — and because the pass is
+non-listening, `gateAcquire` returns at `ShouldBlockOrPostpone()==false` **without
+registering any listener**. The work goes to W1's postponed queue. G then goes deep:
+the same handler submits into subwave W2 and parks in `blockAcquire` (block-and-help on
+W2) behind the *same pool* — third in fifo behind its own two frozen demands. Both
+subsequent permit releases mint tokens that walk the pool's notifier and find
+**listeners empty, waiters empty** → die at domain exhaustion (legal per conservation —
+the model held; every token is accounted). Head demand stands registered with capacity
+free; its work is frozen in W1's postponed queue; W1's only worker is G's up-stack
+suspended pump frame; G's park sweeps only W2's queue. Mid-sequence joint holds on
+lower-rank pools (held by the parked gate, by design) wedge everything else queued
+there (29 standing demands on one pool). The item-5 withdraw bracket cannot cover this:
+the offending registration was *created inside* the deep region and belongs to a
+different work's handle, not the parking gate's joint set. **Design gap, not an
+implementation slip:** auto-register-on-miss creates fifo registrations whose attendance
+is not backed by any listener/waiter/cycling worker once the sole worker goes deep.
+Candidates (NOT chosen — PN to decide): (a) attendance-backed registration — a one-shot
+miss that leaves no listener must `Invalidate` the demand before returning (re-register
+at the next listen-capable/blocking attempt; costs strict arrival-order fairness);
+(b) generalize the withdraw bracket to reach demands of postponed works in queues the
+parking goroutine solely attends (needs a work→demand hook, i.e. a WithdrawableWork
+mechanism); (c) require a closing listening pass over a queue before its worker goes
+deep (handler-entry bracket rather than park bracket).
+
 **►►► SETTLED DESIGN — THE BUILD SPEC (2026-07-15 design review with PN; supersedes every
 mechanism note below; the tree does NOT yet reflect this).** Every invention from the 07-14
 session is deleted or replaced by PN-specified structure. Principles recorded first, then the spec.

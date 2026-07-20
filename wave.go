@@ -460,7 +460,8 @@ func (wv *waveImpl) shouldBlock(ctx context.Context) workq.BlockFunc {
 // block is the [workq.BlockFunc]-shaped block-and-help (no withdraw bracket — the
 // governor/backpressure blocks; no permit demand is standing). It parks in the
 // governor's waiter set, composing the registered wait channel into the
-// block-and-help select.
+// block-and-help select; the WaitFunc confirm is the one-shot register-recheck,
+// and the caller's loop re-tests its condition after every wake.
 func (wv *waveImpl) block(
 	ctx context.Context,
 	blockDeadline time.Time,
@@ -470,7 +471,7 @@ func (wv *waveImpl) block(
 	var err error
 	blockWaiters.WaitFunc(confirmBlockWaitFn, func(waitCh <-chan struct{}) bool {
 		var woken bool
-		woken, err = wv.blockAndHelp(ctx, blockDeadline, waitCh, nil, confirmBlockWaitFn)
+		woken, err = wv.blockAndHelp(ctx, blockDeadline, waitCh, nil)
 		return woken
 	})
 	return err
@@ -493,7 +494,6 @@ func (wv *waveImpl) blockAndHelp(
 	blockDeadline time.Time,
 	blockWaitCh <-chan struct{},
 	withdrawFn func(),
-	confirmBlockWaitFn func() bool,
 ) (blockWoken bool, err error) {
 	traceRegion := "Wave.blockAndHelp"
 	defer trace.StartRegion(ctx, traceRegion).End()
@@ -522,7 +522,6 @@ func (wv *waveImpl) blockAndHelp(
 	adder.meta = meta
 	adder.blockDeadline = blockDeadline
 	adder.blockWaitCh = blockWaitCh
-	adder.confirmBlockWaitFn = confirmBlockWaitFn
 
 	err = wv.workQueue.ExecuteOne(ctx, adder.addWorkFn, withdrawFn)
 	if errors.Is(err, errBlockWaitSignaled) {
@@ -534,12 +533,11 @@ func (wv *waveImpl) blockAndHelp(
 var blockingWorkAdderPool = omnipool.For[blockingWorkAdder]()
 
 type blockingWorkAdder struct {
-	wave               *waveImpl
-	meta               *ctxMeta
-	blockDeadline      time.Time
-	blockWaitCh        <-chan struct{}
-	confirmBlockWaitFn func() bool
-	blockWoken         bool
+	wave          *waveImpl
+	meta          *ctxMeta
+	blockDeadline time.Time
+	blockWaitCh   <-chan struct{}
+	blockWoken    bool
 
 	addWorkFn workq.AddWorkFunc
 }
@@ -562,8 +560,7 @@ func (a *blockingWorkAdder) addWork(
 ) error {
 	var err error
 	a.blockWoken, err = a.wave.addWorkWhileMaybeBlocking(
-		ctx, a.meta, queueFn, workWaiters, confirmWorkWaitFn, a.blockDeadline, a.blockWaitCh,
-		a.confirmBlockWaitFn)
+		ctx, a.meta, queueFn, workWaiters, confirmWorkWaitFn, a.blockDeadline, a.blockWaitCh)
 	return err
 }
 
@@ -578,7 +575,7 @@ func (wv *waveImpl) addWork(
 	trace.Logf(ctx, traceRegion, "Wave=%p", wv)
 	ctx, meta := wv.ctxMeta(ctx)
 	_, err := wv.addWorkWhileMaybeBlocking(ctx, meta, queueFn, waiters,
-		confirmWaitFn, time.Time{}, nil, nil)
+		confirmWaitFn, time.Time{}, nil)
 	return err
 }
 
@@ -590,7 +587,6 @@ func (wv *waveImpl) addWorkWhileMaybeBlocking(
 	confirmWorkWaitFn func() bool,
 	blockDeadline time.Time,
 	blockWaitCh <-chan struct{},
-	confirmBlockWaitFn func() bool,
 ) (blockWoken bool, err error) {
 	meta.PushQueueFunc(queueFn)
 	defer meta.PopQueueFunc()
@@ -611,17 +607,11 @@ func (wv *waveImpl) addWorkWhileMaybeBlocking(
 					confirmWorkWaitFn,
 					func(workWaitCh <-chan struct{}) bool {
 						var workWoken bool
-						switch {
-						case blockWaitCh == nil:
+						if blockWaitCh == nil {
 							psResult, workWoken, err = wv.skimSelect(
 								ctx, inboxCh, outboxWaitCh, workWaitCh, nil, nil,
 							)
-						case !confirmBlockWaitFn():
-							// Re-check before every park (the caller's wait
-							// registration precedes this call): the block
-							// condition resolved while helping.
-							err = errBlockWaitSignaled
-						default:
+						} else {
 							var blockTimerCh <-chan time.Time
 							// Zero or Forever deadline: no timer (block until ctx
 							// cancel or wake). Non-zero, non-Forever: set up a
@@ -765,7 +755,7 @@ func (wk *skimPostWork) Execute(ctx context.Context, ex workq.Execution) error {
 		ex.Blocking()
 		for !tryPost() {
 			waiting()
-			if _, err := wk.wave.blockAndHelp(ctx, time.Time{}, nil, nil, nil); err != nil {
+			if _, err := wk.wave.blockAndHelp(ctx, time.Time{}, nil, nil); err != nil {
 				trace.Logf(ctx, traceRegion, "block-and-help ended, err=%v", err)
 				return false, err
 			}

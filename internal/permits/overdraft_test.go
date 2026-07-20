@@ -423,20 +423,17 @@ func excessOverCache(c *Cache) uint64 {
 	return excessOver(h, u)
 }
 
-// The self-suspension gather wait (WORKING_NOTES diagnosis 5, traced 2026-07-19,
-// trace_v8). A driver's hold is suspended for a drive episode — capacity lent to
-// the episode's own subtree — a stranger takes the freed permit and keeps
-// running, and the episode's deep admission then gathers against anyInUse=1
-// suspended=1, where the suspension is the waiter's OWN chain: its resume runs
-// only after this very admission completes. Waiting on the running stranger
-// assumes its release can move the world; in the traced wedge the stranger's
-// progress depended on the parked chain, closing a deadlock the pool cannot
-// see. The lent capacity is what vouches for the deep admission — it must be
-// admitted without waiting on running strangers.
+// The eager-confirm-latch scenario's permits-level semantics (WORKING_NOTES
+// diagnosis 5): a driver's hold is suspended for a drive episode, a stranger
+// takes the freed permit and keeps running, and the episode's deep admission
+// gathers against anyInUse=1 suspended=1. The own-chain suspension does not
+// block it (strangerSuspended discriminates), but a running stranger does —
+// its release can move the world — so the head WAITS, and is admitted by its
+// next re-presentation once the stranger releases. (The wedge this scenario
+// once produced came from a mid-help confirm latching the "stranger" permit on
+// the waiter's own stack, where no release could ever come — fixed in the gate
+// loops, not here.)
 func TestDeepAcquireUnderOwnSuspension(t *testing.T) {
-	t.Skip("wedge-state construction for the eager-confirm-latch bug (WORKING_NOTES " +
-		"diagnosis 5); its final assertion encodes the rejected overdraft-entitlement " +
-		"reading — reshape with the agreed lazy-reacquire fix")
 	tp := newGrantTestPool(1)
 
 	owner := tp.NewCache()
@@ -464,16 +461,23 @@ func TestDeepAcquireUnderOwnSuspension(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, pStranger.Held())
 
-	// The episode's own deep admission, through the drive target's subtree.
+	// The episode's own deep admission, through the drive target's subtree:
+	// the own-chain suspension does not block it, the running stranger does.
 	dDeep := NewDemand()
 	pDeep, err := target.Acquire(dDeep, 1)
 	require.NoError(t, err)
-	require.True(t, pDeep.Held(),
-		"deep admission waited on a running stranger while its own chain's suspension vouched for it")
+	require.False(t, pDeep.Held(), "a running stranger's release can move the world: wait")
+	require.Same(t, dDeep, tp.head())
+
+	// The stranger's body returns; the freed capacity admits the head on its
+	// next re-presentation.
+	pStranger.Release()
+	pDeep, err = target.Acquire(dDeep, 1)
+	require.NoError(t, err)
+	require.True(t, pDeep.Held(), "the stranger released: the head's re-presentation takes the permit")
 
 	pDeep.Release()
 	dDeep.Invalidate()
-	pStranger.Release()
 	dStranger.Invalidate()
 	dOwner.Invalidate()
 	target.Resume()

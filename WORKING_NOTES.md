@@ -12,6 +12,46 @@ seam by seam, with PN walk-through before each lands. Reference baseline worktre
 
 This document contains working notes and context for development on the `combiner` branch.
 
+**►►► LAZY-REACQUIRE FIX LANDED (2026-07-20): blockAcquire and reclaim now arm once and
+recheck ONCE per park episode (Prepare → SetAttendant → single h.acquire recheck →
+blockAndHelp with NO confirm → Finish(woken)); ex.Blocking fires once explicitly
+before the first park; blockAndHelp/addWorkWhileMaybeBlocking lost confirmBlockWaitFn
+and the errBlockWaitSignaled-on-confirm arm; h.confirm/confirmFn/blockingFn/
+blockingCalled machinery deleted; governor path unchanged (Waiters.WaitFunc's confirm
+is the one-shot register-recheck). Both repro tests reshaped into pins of the DECIDED
+semantics and un-skipped: TestSubwaveTaskAdmittedAfterSiblingReleases (black-box: the
+subwave task waits for the running sibling, admitted on its release; the lend's
+own-chain suspension does not block; the old raw-channel-dependency variant was an
+invalid program) and TestDeepAcquireUnderOwnSuspension (white-box: wait-then-proceed).
+Hang rate: 5/100 → 1/100. All suites green.
+
+THE REMAINING 1% IS TWO DISTINCT RESIDUALS (both next-cycle):
+(1) QUIET WEDGE — scratchpad/x8_54.log: 24 goroutines all parked; one five-deep nested
+chain (drain → skim handler → submit+yield → handler → handler → submit) parked at a
+blockAcquire; genuine deadlock, mechanism UNKNOWN, no trace captured yet. Hunt with
+the standard filtered capture (filter: permits,heldPermit,gateAcquire,rdvq.Notifier,
+rdvq.Listener,rdvq.Waiters,workq.controller,workq.Governor); note captures may instead
+land on residual (2) — check goroutine states first (quiet = all select; churn = several
+runnable + huge trace).
+(2) CHURN TIMEOUT — scratchpad/trace_v9.out (967MB, tail extract tail9.txt): NOT a
+deadlock; real progress (802 starts per 200k-line window) drowning in fallback-walk
+amplification: 1458/1502 notifyCapacity events were FALLBACK WALKS (no standing head),
+each walking every interested queue's listener; each woken worker re-attempts EVERY
+postponed gated work non-listening (enqueue → miss → invalidate; the same demands
+cycle 40–96× per window; 880 headGather waits, all anyInUse=true suspended=0 —
+legitimate); each start mints more events → more walks. Overhead ∝ events × interested
+queues × postponed works swamps the 20s timeout. Design conversation needed on
+damping: coalescing fallback walks (a pending/armed bit per pool so concurrent events
+collapse), bounding the per-wake re-attempt sweep, and/or less trigger-happy interest
+planting (currently re-planted per one-shot miss). This is the invalidate-churn cost
+noted earlier, promoted to a real failure mode.
+
+GATE SEQUENCING: the large -race batch (race-confirm rule) CANNOT pass until both
+residuals fall (~1% hang/timeout per check compounds over a multi-hundred-check run);
+it is the immediate gate after they do, before task-5 sign-off and the task-6
+pump/drain rename sweep. The pre-commit hook's own sim run is one roulette spin per
+commit until then — retry on a wedged hook.**
+
 **►►► DIAGNOSIS 5 RESOLVED IN DESIGN (2026-07-20, walked with PN; fix agreed, NOT yet
 built): THE EAGER CONFIRM LATCH. The corrected anatomy (superseding the self-suspension
 reading below, whose gather-side candidates are all REJECTED): the entire trace_v8

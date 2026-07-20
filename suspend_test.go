@@ -94,25 +94,18 @@ func TestSkimHandlerDrivesSubwave(t *testing.T) {
 	require.Positive(t, subResults, "the skim handler drove its subwave to completion")
 }
 
-// TestSubwaveTaskAdmittedWhileSiblingRuns is the black-box reproduction of the
-// self-suspension gather wait (WORKING_NOTES diagnosis 5, traced 2026-07-19): a
-// body drives a subwave whose task shares its limiter, so the drive bracket
-// lends the body's permit to the episode — and a sibling unit, registered and
-// waiting, takes the freed permit and keeps running. The subwave task's
-// admission then finds the pool fully in use with one suspension outstanding:
-// the suspension is its own chain's lend, resumable only after the subwave
-// completes. If the admission waits on the running sibling, and the sibling's
-// progress depends on the subwave task (here directly; in the traced sim wedge
-// through the framework's own skim obligations), the wait is a deadlock. The
-// lend is what vouches for the subwave task: it must be admitted.
-//
-// Ordering is reliable rather than strictly deterministic: one sleep covers
-// the sibling's synchronous gate registration, and the pool's arrival-order
-// barrier does the rest (the subwave task's fresh demand cannot bypass the
-// sibling's standing head).
-func TestSubwaveTaskAdmittedWhileSiblingRuns(t *testing.T) {
-	t.Skip("reproduces the eager-confirm-latch wedge (WORKING_NOTES diagnosis 5); " +
-		"un-skip and reshape with the agreed lazy-reacquire fix")
+// TestSubwaveTaskAdmittedAfterSiblingReleases pins the decided semantics of
+// the eager-confirm-latch scenario (WORKING_NOTES diagnosis 5): a body drives a
+// subwave whose task shares its limiter, the drive bracket lends the body's
+// permit, and a sibling unit — registered first — takes the freed permit and
+// runs. The subwave task's admission waits for the running sibling (a runner's
+// release can move the world) and is admitted when the sibling's body returns;
+// the lend's own-chain suspension does not block it (strangerSuspended), and
+// nothing may latch a permit mid-help while the drive waits. Ordering is
+// reliable rather than strictly deterministic: one sleep covers the sibling's
+// synchronous gate registration; the pool's arrival-order barrier does the
+// rest.
+func TestSubwaveTaskAdmittedAfterSiblingReleases(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	wave := streampool.NewWave()
@@ -120,7 +113,6 @@ func TestSubwaveTaskAdmittedWhileSiblingRuns(t *testing.T) {
 
 	unit1Holding := make(chan struct{})
 	unit2Submitted := make(chan struct{})
-	subTaskRan := make(chan struct{})
 
 	launcher := streampool.NewFnLauncher(func(ctx context.Context, unit int, _ error) error {
 		switch unit {
@@ -137,7 +129,6 @@ func TestSubwaveTaskAdmittedWhileSiblingRuns(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 			subWave := streampool.NewWave()
 			sub := streampool.NewTaskLauncher(func(ctx context.Context) error {
-				close(subTaskRan)
 				return nil
 			}).WithLimits(limiter)
 			if err := sub.In(subWave).Start(ctx); err != nil {
@@ -145,13 +136,8 @@ func TestSubwaveTaskAdmittedWhileSiblingRuns(t *testing.T) {
 			}
 			return subWave.CloseAndSkimAll(ctx)
 		case 2:
-			// The running sibling: holds the permit until the subwave task —
-			// which needs the same permit — has run.
-			select {
-			case <-subTaskRan:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+			// The sibling runs and returns promptly; its release is what
+			// admits the subwave task.
 		}
 		return nil
 	}).WithLimits(limiter)
@@ -178,7 +164,6 @@ func TestSubwaveTaskAdmittedWhileSiblingRuns(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
 		cancel()
-		t.Fatal("wedged: the subwave task's admission waited on the running sibling " +
-			"while its own chain's suspension vouched for it")
+		t.Fatal("wedged: the subwave task was never admitted after the sibling released")
 	}
 }

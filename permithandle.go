@@ -62,18 +62,9 @@ type heldPermit struct {
 	// pointer, it always acts on the handle's current permit.
 	releaseFn func()
 
-	// confirmFn is the handle's bound confirm method value, reused as blockAcquire's
-	// block-confirm callback (cached/preserved like releaseFn, so a blocking dispatch
-	// does not allocate a fresh closure per call). It reads the per-call confirm state
-	// below; blockAcquire is single-flighted per handle (one handle per dispatch), so
-	// that state needs no synchronization.
-	confirmFn func() bool
-
 	// withdrawFn is the handle's bound withdraw-before-going-deep callback
-	// (cached/preserved like confirmFn); see [heldPermit.withdraw].
-	withdrawFn     func()
-	blockingFn     func() // ex.Blocking for the in-flight blockAcquire (nil if none)
-	blockingCalled bool   // whether blockingFn has fired this blockAcquire
+	// (cached/preserved like releaseFn); see [heldPermit.withdraw].
+	withdrawFn func()
 
 	// acquireErr latches an overdraft-refusal error surfaced by Acquire — terminal
 	// for this dispatch (the unit fails with the resource's own reason; retrying a
@@ -189,7 +180,6 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 		t.Resume()
 	}
 	h.lent = false
-	confirmFn := func() bool { return h.acquireErr == nil && !h.acquire() } // block only while still un-acquired
 	helping := true
 	waiter := waiterPool.Get()
 	defer waiterPool.Release(waiter)
@@ -236,7 +226,18 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 		if helping {
 			ch := waiter.Prepare()
 			h.demand.SetAttendant(waiter)
-			woken, err := wv.blockAndHelp(ctx, time.Time{}, ch, h.withdraw(), confirmFn)
+			// The one recheck per arming: a capacity event landing between the
+			// loop guard's miss and the arming fired no attendant, but its
+			// capacity is already visible — take it instead of parking. Any
+			// later event fires the armed waiter, whose wake buffers across
+			// help and unwinds the next select; no further recheck may run
+			// while help is in flight (the eager confirm latch, WORKING_NOTES
+			// diagnosis 5).
+			if h.acquire() || h.acquireErr != nil {
+				waiter.Finish(false)
+				continue
+			}
+			woken, err := wv.blockAndHelp(ctx, time.Time{}, ch, h.withdraw())
 			waiter.Finish(woken)
 			switch {
 			case err == nil:
@@ -255,7 +256,7 @@ func (h *heldPermit) reclaim(ctx context.Context, wv *waveImpl, above []*heldPer
 		} else {
 			ch := waiter.Prepare()
 			h.demand.SetAttendant(waiter)
-			if !confirmFn() {
+			if h.acquire() || h.acquireErr != nil {
 				waiter.Finish(false)
 				continue
 			}
@@ -485,27 +486,36 @@ func (h *heldPermit) acquireJoint(ctx context.Context, ex workq.Execution, wv *w
 
 // blockAcquire is the top-level blocking acquire: prepare the handle's waiter,
 // arm it as the registered demand's attendant (head-directed delivery fires it
-// when capacity frees), and park via wv.blockAndHelp — help-executing the
-// caller's own wave, retrying the acquire each round until it succeeds or ctx
-// is cancelled. h.acquire (idempotent) is both the loop guard and the block
-// confirm, re-run before every inner park.
+// when capacity frees), recheck ONCE, and park via wv.blockAndHelp —
+// help-executing the caller's own wave until the waiter fires, then retrying
+// from the loop guard. The guard's acquire runs only with no help in flight
+// (lazy reacquire); the single post-arm recheck closes the miss→arm window,
+// and a wake landing mid-help buffers in the waiter's channel until the next
+// select. No recheck runs while help is in flight — an eager mid-help acquire
+// latches a permit no lend bracket can see (WORKING_NOTES diagnosis 5).
 func blockAcquire(ctx context.Context, ex workq.Execution, wv *waveImpl, h *heldPermit) error {
-	// Per-call confirm state, read by h.confirm (the cached, allocation-free callback).
-	h.blockingCalled = false
-	h.blockingFn = ex.Blocking
-	if h.confirmFn == nil {
-		h.confirmFn = h.confirm
-	}
-	defer func() { h.blockingFn = nil }() // don't pin the Execution past the call
+	blockingFired := false
 	waiter := waiterPool.Get()
 	defer waiterPool.Release(waiter)
 	for !h.acquire() {
 		if h.acquireErr != nil {
 			return h.acquireErr // overdraft refusal: terminal, don't park
 		}
+		if !blockingFired {
+			blockingFired = true
+			ex.Blocking() // about to actually block: release held resources once
+		}
 		ch := waiter.Prepare()
 		h.demand.SetAttendant(waiter)
-		woken, err := wv.blockAndHelp(ctx, time.Time{}, ch, h.withdraw(), h.confirmFn)
+		if h.acquire() {
+			waiter.Finish(false)
+			return nil
+		}
+		if h.acquireErr != nil {
+			waiter.Finish(false)
+			return h.acquireErr
+		}
+		woken, err := wv.blockAndHelp(ctx, time.Time{}, ch, h.withdraw())
 		waiter.Finish(woken)
 		if err != nil {
 			// Walking away (cancellation, wave done, a helped handler's error
@@ -550,7 +560,7 @@ func (h *heldPermit) release() {
 }
 
 // Reset implements omnipool.Resetter for the handle pool. A recycled handle must hold
-// no permit (release ran) and no cache reference. The bound releaseFn/confirmFn are
+// no permit (release ran) and no cache reference. The bound releaseFn/withdrawFn are
 // preserved — they capture only the (stable) pooled pointer, so they stay valid across
 // reuse and need not be re-bound (re-allocated) each cycle. The demand persists too:
 // Invalidate retires the episode's identity (any reference a FIFO still holds goes
@@ -560,31 +570,10 @@ func (h *heldPermit) Reset() {
 	h.demand.Invalidate()
 	h.ownCache = nil
 	h.permit = permits.Permit{}
-	h.blockingFn = nil
-	h.blockingCalled = false
 	h.acquireErr = nil
 	h.suspendTarget = nil // reclaim always brackets; nil'd here as recycling hygiene
 	h.lent = false
 	h.rest = nil // the rest holds are recycled separately by their owner (taskWork.Free)
-}
-
-// confirm is blockAcquire's block-confirm: abort the wait if the permit is now held,
-// otherwise fire ex.Blocking once (on the first real park) and proceed to block. Reads
-// the per-call state set by blockAcquire. Cached as confirmFn so it costs no allocation.
-func (h *heldPermit) confirm() bool {
-	if h.acquire() {
-		return false // acquired — abort the wait
-	}
-	if h.acquireErr != nil {
-		return false // refusal is terminal — abort the wait; the loop surfaces it
-	}
-	if !h.blockingCalled {
-		h.blockingCalled = true
-		if h.blockingFn != nil {
-			h.blockingFn()
-		}
-	}
-	return true // proceed to block
 }
 
 // withdraw returns the handle's cached withdraw-before-going-deep callback for

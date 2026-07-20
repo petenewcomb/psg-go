@@ -12,25 +12,69 @@ seam by seam, with PN walk-through before each lands. Reference baseline worktre
 
 This document contains working notes and context for development on the `combiner` branch.
 
-**►►► HANG DIAGNOSIS 5 (2026-07-19, trace_v8/h_32, proven): SELF-SUSPENSION GATHER WAIT.
+**►►► DIAGNOSIS 5 RESOLVED IN DESIGN (2026-07-20, walked with PN; fix agreed, NOT yet
+built): THE EAGER CONFIRM LATCH. The corrected anatomy (superseding the self-suspension
+reading below, whose gather-side candidates are all REJECTED): the entire trace_v8
+wedge lives on ONE goroutine (g116), four nested frames: task body B1 → B1's nested
+submit gate (h=52a2a0) parked in block-and-help → a help-executed skim handler B2 →
+B2's nested submit gate (h=012540), the wedged head. The middle gate's confirm
+(h.confirm = h.acquire, latched) ACQUIRED mid-help (t=3094) — a permit held by a gate
+whose help item was still in flight, invisible to every lend bracket — and that hold
+is the anyInUse the deep head waits on. One-goroutine self-deadlock. headGather is
+INNOCENT: strangerSuspended (permits.go:1184) already does the own-chain suspension
+discrimination correctly; the anyInUse arm was waiting on a permit that should not
+have existed. The violated rule is the ALREADY-AGREED item-5 lazy-reacquire semantics
+("withdraw on first block or help; re-acquire only when exiting").
+
+Supporting facts established en route: (a) a permit is in use from admission until the
+BODY RETURNS — completedFn = h.release fires at body completion (wave.go:197/:262);
+the release in taskWork.Free is an idempotent backstop; completed-but-unskimmed
+results hold nothing (earlier notes claiming otherwise are wrong). (b) The framework's
+liveness guarantee is conditional on bodies parking only in framework-mediated waits
+(which all lend); a body parked on a raw channel while holding a permit is an invalid
+program — the first black-box repro leaned on this and its must-complete assertion
+encoded an unagreed overdraft entitlement. (c) The register-then-recheck requirement
+for a blocking gate is exactly ONE recheck per attendant arming (closing the miss→arm
+window); the per-inner-park confirm was an artifact of the old borrow-an-inbox-per-
+park protocol — the caller-owned Waiter's cap-1 channel buffers a mid-help wake, so
+inner parks need no recheck. (d) The loop-guard h.acquire() in blockAcquire is
+COMPLIANT lazy-reacquire (runs only with no help in flight). (e) Invalidate needs NO
+change: Demand ops are owner-serialized; the lend rule's "third-party" victim is an
+outer frame of the SAME stack, mid-ExecuteOne (not parked in a select); when help
+unwinds, its loop guard re-acquires and re-registers.
+
+THE AGREED FIX (next session builds): blockAcquire — fire ex.Blocking once explicitly,
+then per iteration Prepare → SetAttendant → ONE recheck (h.acquire; on hit
+Finish(false) and exit) → blockAndHelp(ch, withdrawFn) with NO confirm → Finish(woken);
+reclaim — same shape in both branches, confirmFn closure deleted; blockAndHelp/
+addWorkWhileMaybeBlocking — confirmBlockWaitFn leaves the signatures, the
+errBlockWaitSignaled-on-confirm arm deleted (blockWaitCh rides the select alone);
+governor path UNCHANGED (Waiters.WaitFunc's own confirm is already the correct
+one-shot register-recheck; every clearing event is NotifyAll); h.confirm/confirmFn/
+blockingCalled machinery deleted. Then re-point the two repro tests at the real
+obligation — a block-and-help gate must not hold a permit while a help item is in
+flight — un-skip them, re-run the hang loop (expect 0), then task-5 gates and task-6
+rename sweep.
+
+TESTS (committed SKIPPED until the fix lands): TestSubwaveTaskAdmittedWhileSiblingRuns
+(suspend_test.go, black-box, 5/5 repro via one ordering sleep + the FIFO barrier;
+program uses a raw-channel park so it will be reshaped per (b) — post-fix it completes
+because the middle gate no longer latches) and TestDeepAcquireUnderOwnSuspension
+(internal/permits/overdraft_test.go, white-box wedge-state construction; its final
+held-assertion encodes the rejected overdraft-entitlement reading and will be
+reshaped). Trace/dump evidence: scratchpad/trace_v8.out (+h116.txt, susp8.txt,
+pool8.txt extracts), h_32.log.**
+
+**►►► HANG DIAGNOSIS 5 — ORIGINAL (2026-07-19, trace_v8/h_32; anatomy corrected above,
+kept for the evidence trail).
 g116: nested dispatch bracket suspends the enclosing body's hold (heldPermit.suspend
 h=0xa4380 → Cache.Suspend target=562150, pool 360ec30, t=3090.97 — the 7th suspend, no
 matching Resume) → goes deep → the new admission (h=0x012540) becomes HEAD of the SAME
-pool and its headGather waits "anyInUse=true suspended=1" — the suspended=1 IS g116's
-own suspension, resumable only when this dispatch completes; the anyInUse permit's
-holder is also parked (cross-wave). The gather's wait-on-suspensions assumes the
-resumer is a third party; when the waiter's own chain owns the suspension the wait is
-a self-cycle. The governor was EXONERATED (both counts 0, ledgers clean; the parked
-frames' governor gates all passed). This is resolution-(c)/stranger-check territory
-(weighted-acquisition.md): the suspended-ancestor discrimination exists in the
-overdraft evaluation but the plain headGather wait branch doesn't consult it — and
-overdraft only engages at zero-in-use. Candidates (NOT chosen): (i) gather's wait test
-excludes suspensions owned by the waiting demand's own chain (needs chain attribution
-on the suspension counter — suspendTarget carries the cache; ancestry via cache
-chain?); (ii) engage the stranger evaluation from the wait branch, not only overdraft;
-(iii) re-examine whether the deep admission should be exempt-classed through the
-suspended hold's body cache (the barrier-exemption chain). LOOK AT BASELINE reclaim/
-AcquireWait + weighted-acquisition resolution (c) before designing. Trace/dump:
+pool and its headGather waits "anyInUse=true suspended=1". The governor was EXONERATED
+(both counts 0, ledgers clean). The gather-side fix candidates once listed here are
+all rejected: strangerSuspended already discriminates own-chain suspensions, and the
+anyInUse wait is correct — the offending in-use permit was the middle gate's eager
+confirm latch (see the resolution entry above). Trace/dump:
 scratchpad/trace_v8.out (+h116.txt, susp8.txt extracts), h_32.log.**
 
 **►►► wait() SIMPLIFIED (2026-07-19, PN-directed): the waitMu+Gosched-loop idle throttle

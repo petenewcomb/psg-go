@@ -422,3 +422,64 @@ func excessOverCache(c *Cache) uint64 {
 	h, u := c.counts.load()
 	return excessOver(h, u)
 }
+
+// The self-suspension gather wait (WORKING_NOTES diagnosis 5, traced 2026-07-19,
+// trace_v8). A driver's hold is suspended for a drive episode — capacity lent to
+// the episode's own subtree — a stranger takes the freed permit and keeps
+// running, and the episode's deep admission then gathers against anyInUse=1
+// suspended=1, where the suspension is the waiter's OWN chain: its resume runs
+// only after this very admission completes. Waiting on the running stranger
+// assumes its release can move the world; in the traced wedge the stranger's
+// progress depended on the parked chain, closing a deadlock the pool cannot
+// see. The lent capacity is what vouches for the deep admission — it must be
+// admitted without waiting on running strangers.
+func TestDeepAcquireUnderOwnSuspension(t *testing.T) {
+	t.Skip("wedge-state construction for the eager-confirm-latch bug (WORKING_NOTES " +
+		"diagnosis 5); its final assertion encodes the rejected overdraft-entitlement " +
+		"reading — reshape with the agreed lazy-reacquire fix")
+	tp := newGrantTestPool(1)
+
+	owner := tp.NewCache()
+	dOwner := NewDemand()
+	pOwner, err := owner.Acquire(dOwner, 1)
+	require.NoError(t, err)
+	require.True(t, pOwner.Held()) // the enclosing body's hold
+
+	// A stranger's demand arrives and waits its turn behind the full pool.
+	stranger := tp.NewCache()
+	dStranger := NewDemand()
+	pStranger, err := stranger.Acquire(dStranger, 1)
+	require.NoError(t, err)
+	require.False(t, pStranger.Held())
+	require.Same(t, dStranger, tp.head())
+
+	// The drive-episode bracket: the hold is lent to the episode targeting the
+	// driven wave's cache, and the permit frees.
+	target := tp.NewCache()
+	target.Suspend()
+	pOwner.Release()
+
+	// The stranger takes the freed permit and keeps running.
+	pStranger, err = stranger.Acquire(dStranger, 1)
+	require.NoError(t, err)
+	require.True(t, pStranger.Held())
+
+	// The episode's own deep admission, through the drive target's subtree.
+	dDeep := NewDemand()
+	pDeep, err := target.Acquire(dDeep, 1)
+	require.NoError(t, err)
+	require.True(t, pDeep.Held(),
+		"deep admission waited on a running stranger while its own chain's suspension vouched for it")
+
+	pDeep.Release()
+	dDeep.Invalidate()
+	pStranger.Release()
+	dStranger.Invalidate()
+	dOwner.Invalidate()
+	target.Resume()
+	for _, c := range []*Cache{owner, stranger, target} {
+		c.ReleaseRef()
+	}
+	require.Equal(t, 0, tp.totalHeld())
+	require.Nil(t, tp.head())
+}

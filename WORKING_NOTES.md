@@ -1,5 +1,70 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► ITEM 4 RESOLVED: FOREIGN-PUMP CREDIT SCOPE + REVOCABLE LOANS (2026-07-22
+late, worked with PN; extends the RESERVATION MECHANICS block below; NOT built).
+
+FALLBACK INTEREST DIES (verified): gateAcquire's one-shot arm
+(permithandle.go:437) is the ONLY planter in the tree. Under acquire-as-reserved
+postponed demands stay registered (queue relay attendant, item-6 latch makes
+that durable), so the FIFO is nonempty whenever anyone waits — head-directed
+delivery always has a target, fallback mode has no clientele. Pool.Fallback, the
+notifyCapacity fallback walk, and the CanListen withdraw discipline are all
+deletable; the enqueue→miss→invalidate churn (residual-2 substrate) dies with
+them. blockAndHelp's suspend/reclaim bracket (wave.go:516) is replaced by
+park-as-reserved per the ratified model; blockAcquire's walk-away Invalidate
+survives (genuine abandonment, item-5 territory).
+
+CROSS-WAVE DISPATCH TRACE (the coverage question, verified): a body-of-A submit
+into wave B is a TOP-LEVEL-TYPED blocking dispatch — ensureCtxMeta's cross-wave
+branch leaves ctxType=topLevelContext (ctxmeta.go:525), ShouldBlock is exactly
+that test (ctxmeta.go:233). Its park episode pumps B broadly: backpressure
+yield executes B's outstanding work, the gate's blockAcquire parks in B's
+block-and-help, the post's backpressure likewise. Dependency at park = "B
+drains at all" — arbitrary stranger works admitting — NOT just the submitted
+work. The old suspend bracket already encodes this scope: it lends onto B's
+cache via the B-rooted meta (wave.go:388). CONSEQUENCE: the two-parent-cache
+(DAG) proposal — credit scoped to the submitted work only — is REFUTED as too
+tight (wedges on the queue-space wait) and is shelved; the forest stays a tree.
+SETTLED: a holder parking to pump a wave OUTSIDE its own subtree parks its
+units reserved AT THE PUMPED WAVE'S CACHE (credit scope = B's subtree,
+exactly where the old bracket pointed), reclaimed home at unwind with
+settlement. Sub-wave pumps keep the local own-cache park (attribution
+dissolution intact). The submitted work itself needs nothing special — its
+admission cache is B-homed already (launcher.go:318).
+
+REVOCABLE LOANS (the passed-on-sub-wave hole, settled): nothing ties a
+sub-wave's drain to its creating body's return (handles are refcounted values),
+so credit-backed RESERVATIONS of never-started borrowers can sit in an undriven
+wave — a claiming lender would wait on NON-running borrowers, conditional on
+foreign drive (the exposure limiter.go:180's deleted release used to prevent).
+RULE: a loan is REVOCABLE until its borrower starts, LOCKED from claim to
+completion. A claiming lender recalls loans backing not-yet-started borrowers'
+reservations under p.mu: units move home; the borrower's demand stays
+registered and attended and re-reserves on its next drive (ordinary dry-pool
+wait — it loses only backing that was never its own). Restores
+settlement-waits-on-running-bodies-only UNCONDITIONALLY.
+
+OWNERSHIP vs POSITION (the conceptual close, PN's diagnosis): waves never owned
+permits — old held-idle was pool-wide stealable (searchList takes from any
+cache), the head's hoard deliberately contestable (Decision 1), suspend lent to
+anyone; the only tenure was a running body's inUse. Caches were
+locality/amortization placement. The reservation model introduces ownership for
+the FIRST time, and it belongs to HOLDERS (parked bodies, registered demands),
+never waves. Position is a separate concept: the CREDIT SCOPE (own cache for
+nested parks, pumped wave's cache for foreign parks). "Parked at B's cache"
+makes B the lending scope, not the owner — the claim reaches through and pulls
+units home; recall takes nothing the borrower ever owned. Rename direction for
+Cache: an accounting POSITION node in the causality forest (stealing-era name
+dies with stealing).
+
+STILL OPEN from item 4: the HEADSHIP variant of the foreign-pump wedge (a
+registered demand at P's head while its goroutine is deep in foreign help — no
+unit to re-attribute; plausibly the withdraw bracket survives narrowly for
+this case alone). Then item 5 (Free/teardown settlement) and item 6 (queue
+token buffer). Next conversation topic per PN: severability/collapsability of
+cache chains once permit-holding bodies exit but caches live on through
+downstream flows.**
+
 **►►► SUPERSEDED (2026-07-17): the settled design and sequencing now live in
 `docs/plan/conservation-rework.md`, governed by `docs/notification-conservation.md`
 with vocabulary in `docs/glossary.md`. The "SETTLED DESIGN — THE BUILD SPEC" below

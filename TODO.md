@@ -473,5 +473,5 @@ Findings from an adversarial read on 2026-06-06. NB: no concrete bug was proven 
 
 ## Art projects
 
-- Compose a poem of some kind (haiku? limerick? doesn't have to be a specific form) that weaves the purpose and metaphor of the library together to produce a pleasing and memorable feeling of elegant and optimal control of complex, high-volume, and low-latency application flows.
+- Compose a poem of some kind (haiku? limerick? doesn't have to be a specific form) that weaves the purpose and metaphor of the library together to produce a pleasing and memorable feeling of elegant and optimal control of complex, high-volume, and low-latency application flows.  Example image that comes to mind: waves of work launched through a permit forest, creating flows of data that funnel down to the results skimmed from their tops.
 - Design brand assets: a logo, perhaps a mascot, a theme that fits the metaphor and ideally gets usefully woven through examples, tutorials, and presentations.

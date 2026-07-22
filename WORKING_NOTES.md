@@ -26,13 +26,11 @@ invalid program) and TestDeepAcquireUnderOwnSuspension (white-box: wait-then-pro
 Hang rate: 5/100 → 1/100. All suites green.
 
 THE REMAINING 1% IS TWO DISTINCT RESIDUALS (both next-cycle):
-(1) QUIET WEDGE — scratchpad/x8_54.log: 24 goroutines all parked; one five-deep nested
-chain (drain → skim handler → submit+yield → handler → handler → submit) parked at a
-blockAcquire; genuine deadlock, mechanism UNKNOWN, no trace captured yet. Hunt with
-the standard filtered capture (filter: permits,heldPermit,gateAcquire,rdvq.Notifier,
-rdvq.Listener,rdvq.Waiters,workq.controller,workq.Governor); note captures may instead
-land on residual (2) — check goroutine states first (quiet = all select; churn = several
-runnable + huge trace).
+(1) QUIET WEDGE — DIAGNOSED (2026-07-20 evening, hang diagnosis 6 below): lost
+actionability for a postponed half-admitted gated work on a per-wave workQueue. Same
+fallback-walk/one-shot-interest machinery as residual (2) — ONE design conversation
+covers both. Evidence: session scratchpad (0eea52d6…) q_12.log + trace_quiet.out
+(7.5MB, filtered capture, rendered tq.txt).
 (2) CHURN TIMEOUT — scratchpad/trace_v9.out (967MB, tail extract tail9.txt): NOT a
 deadlock; real progress (802 starts per 200k-line window) drowning in fallback-walk
 amplification: 1458/1502 notifyCapacity events were FALLBACK WALKS (no standing head),
@@ -51,6 +49,161 @@ residuals fall (~1% hang/timeout per check compounds over a multi-hundred-check 
 it is the immediate gate after they do, before task-5 sign-off and the task-6
 pump/drain rename sweep. The pre-commit hook's own sim run is one roulette spin per
 commit until then — retry on a wedged hook.**
+
+**►►► RESERVED-CAPACITY / CREDIT MODEL — RATIFIED DESIGN DIRECTION (2026-07-22,
+worked turn-by-turn with PN; supersedes the 07-21 suspend-on-postpone proposal in
+full; NOT built, spec not yet written). Fix for diagnosis 6 and foundation rework
+of the permit lifecycle.
+
+LIFECYCLE (the settled state machine):
+  acquire (per rank, canonical order) → RESERVED — capacity is the holder's;
+    never freely stealable; creditable ONLY down-chain (see credit rule).
+  claim/commit (NEW pre-Starting gate) → settlement — waits (attended) or fails
+    while non-stranger loans are outstanding; BARRIER: once claiming, no new
+    loans against this source (else start starvation).
+  Starting (existing ex.Starting hook, accepted.go:707) → IN-USE.
+  completion → release.
+Acquire-as-reserved everywhere: a postponed work needs NO transition (stays
+reserved — the limiter.go:180 release is DELETED, not replaced); an on-stack
+admission's below-prefix is reserved from birth (softens the churn trace's
+anyInUse=true head-wait population); a STARTED body that parks to pump another
+wave transitions in-use→reserved attributed to the pumped wave (PN: "more
+faithful to the model overall") — suspend/release + reclaim/re-acquire machinery
+(incl. reclaim's park-and-help and the sibling lend rule) is REPLACED by
+reserve/credit/settle.
+
+CREDIT RULE (PN's overdraft-source framing): reserved (held-idle) units are an
+overdraft SOURCE. A non-stranger head — same chain test as strangerSuspended
+(permits.go:1176), applied at the same dry-forest escalation point
+(permits.go:946), NOT in the hot gather path — that exhausts normal gather may
+run on credit backed by those units. Fully backed: borrowers are down-chain of
+the source's attribution, so concurrent USE never exceeds capacity while HELD
+accounting does. Strangers wait on reserved units exactly as on running holds
+(fairness: lend exactly as far as liveness requires, no further — PN). Loans
+repay by borrower completion; the claim gate's settlement wait is on RUNNING
+BODIES ONLY (conditional-liveness-safe; repayments are the re-drive events).
+
+ATTRIBUTION (decision C — DISSOLVED ENTIRELY, 2026-07-22 late, PN): reservations
+live at the HOLDER'S OWN CACHE (ownCache = C_W^L — the body's admission cache,
+parent of any sub-wave caches it creates); in-use→reserved is a LOCAL counter
+move. Wave-level (sub-wave) caches are always PURE — they never carry
+reservation state. Attribution is the FOREST TOPOLOGY, not a stamp: the credit
+test is "reserved units at an ancestor of my anchor" (chain-walk, same shape as
+strangerSuspended, against per-cache reserved counts). DELETED with this:
+suspendTarget field, ensureCache-on-pumped-wave resolution, the
+TryIncrementReference pin bracket, all ex-carried attribution plumbing. A body
+pumping any sub-wave lends to its WHOLE subtree (all descendants pass through
+its cache — causally fine, settlement covers running borrowers). A postponed
+work's reserved units sit at its own wave's cache, creditable to that wave's
+nested subtree (the diagnosis-6 geometry). Scheduler-queue postpones: spawn
+guarantees retry; their reserved units are not needed as a credit source.
+
+WHY IT'S RIGHT (the conversation's arc): PN pushed "why can't work hold permits
+until started?" — answer: it CAN, iff held-idle units are creditable down-chain.
+Progress-monotone (no re-gather races, no heavy-demand starvation, below-ranks
+never surrendered); hot gather path stays identity-blind; deadlock breaks at the
+same edge diagnosis 6 identified (blocked non-strangers overdraw past parked
+holds instead of waiting on them); liveness proof: every claim waits only on
+running borrowers, every borrower repays by completion, reserved units never
+leave their owner. NEW CAPABILITY unlocked (PN): wave-granularity admission —
+"wait to start a wave until enough capacity is RESERVED to run it to
+completion" is meaningful because reserved capacity is theft-proof for the run
+(only credibly lent down-chain, home by settlement). Principled resolution of
+the skim-subwave capacity problem.
+
+DECISION LEDGER: A (release-vs-suspend at :180) — dissolved by
+acquire-as-reserved. C — resolved trivially above. B (2026-07-22 — DISSOLVED,
+after two retractions): homing is ALREADY own-wave by construction, verified at
+every birth site: top-level dispatch stamps exEnv.workQueue = &wv.workQueue for
+the TARGET wave (ctxmeta.go:609); same-wave meta reuse requires m.wave == wv
+(ctxmeta.go:599); cross-wave dispatches get a fresh target-stamped env
+(ctxmeta.go:596-598 comment); the nested-inline queueFn path (ctxmeta.go:324)
+therefore only ever fires same-wave; the scheduler intake (ctxmeta.go:339) is
+the one deliberate exception and is spawn-safe. RETRACTED with it: the
+"foreign-at-birth" claim AND the teardown hole (a wave's queues hold only own
+gated work; own work pins own refs; Done-with-strays is unconstructible;
+Reset's warm-queue preservation is sound). Diagnosis 6 reconciled: W1 sat on
+its OWN wave's queue; the churning sweepers were schedulerWorkers on the
+scheduler queue (two queues — resolves the FIFO puzzle with no migration and
+no foreign homing); the failure was pump capture + token destruction, never
+homing. Nothing to build for B beyond (optional) a Done-implies-queues-empty
+assertion as executable documentation.
+SEQUENCING (2026-07-22 late, agreed with PN):
+(1) RESERVATION MODEL FIRST — the reserved/credit/claim lifecycle above, with
+reservations as local per-cache counts (wave caches pure). Includes the
+QUEUE-LEVEL TOKEN BUFFER as the wake primitive for pump-driven queues ONLY
+(queues with unmetDemandFn==nil, wave.go:308): rule is "Notify never destroys a
+token" — rendezvous, else spawn (scheduler queues, already conserving), else
+latch. Spawn-capable queues never latch.
+(2) DIRECTED DELIVERY SECOND, own design phase (PN's insight, NOT an
+optimization — it abolishes the churn substrate): caches deliver released
+units STRAIGHT INTO waiting demands' reservations (hoard mechanism made
+universal, pushed into the release path); a wake fires ONLY when a full
+multi-limiter reservation becomes satisfied. Dissolves all three churn
+mechanisms (futile non-listening re-attempts, invalidate cycling, fallback
+walks — a woken work's retry cannot miss; only the claim gate remains). KEY
+OPEN QUESTION for that phase: the joint-satisfaction wake across pools —
+eager all-rank registration (reopens FIFO-position ordering questions) vs
+rank-by-rank advance with wake at the last rank.
+(3) NO INTERIM DAMPING BAND-AIDS — coalescing bits, sweep bounds, planting
+heuristics are all rejected as patches on a delivery model slated for
+replacement.
+WAVE-GRANULARITY RESERVATION is EMERGENT, not built: the body that
+creates/pumps/drains a wave IS the reservation holder (its handle, its cache);
+at most a documented idiom (acquire a weighted permit before opening the wave).
+Mechanics deliberately not yet designed: loan ledger representation, claim-gate
+plumbing in acquireJoint, reserved-units visibility in walkCounts/steal,
+commit-miss attendance wiring, Free/teardown settlement.**
+
+**►►► HANG DIAGNOSIS 6 — THE QUIET WEDGE (2026-07-20 evening, trace_quiet/q_12; fix NOT
+designed — design conversation with PN pending). Captured on invocation 12 of the
+filtered loop (13 goroutines, all select — the small cousin of x8_54). Anatomy:
+
+THE STUCK WORK, NOT THE STUCK STACK, IS THE CULPRIT. Work W1 (work=0x86582c0, on wave
+0x8678608's workQueue) is a joint gated admission that got HALFWAY: at t=139.31ms a
+retry sweep (G=101 helping) acquired its rank-1 pool A=0x8cd60d0 hold (h=0x865a480,
+w=4 — the only weight outstanding on A at wedge time; every other weight class
+balances), then MISSED rank-2 pool B=0x8cd61a0 (demand w=3), planted the queue's
+one-shot fallback-interest listener (0x8711bc0) on B, and went back to the postponed
+queue. Mid-admission holds stay inUse by design (not lendable, suspended=0 is
+CORRECT), so pool A's standing w=3 heads wait on anyInUse=true forever once W1 stops
+being retried.
+
+HOW W1'S ACTIONABILITY DIED (t=139.72ms, all four legs):
+(a) a SIBLING's retry miss on B invalidated its head and ran the fallback walk
+    (NotifyAll over B's interested listeners) — capacity had NOT freed; the walk was
+    triggered by churn, not by anything W1 could use;
+(b) the walk consumed W1's queue's one-shot listener → Accepted.relay →
+    Waiters.Notify(unmetDemandFn) on the wave workQueue's waiter set (0x8678a10);
+(c) NO waiter was parked (every driver was mid-churn) and unmetDemandFn is NIL for
+    per-wave workQueues (no spawn) → Notify's fallback = noop → TOKEN DROPPED.
+    t=139.724225 is the LAST EVENT EVER on that waiter set (silence for 19.8s);
+(d) re-planting interest happens only inside a retry miss, and no retry ever comes:
+    every potential driver of wave 0x8678608 subsequently descended into deeper
+    nested-subjob waits (g101's five-deep chain, finally parked at t=145.6ms in
+    blockAcquire→blockAndHelp on pool A — a VICTIM queued behind W1's w=4, not the
+    holder), and the top-level (g21, CloseAndSkimAll on wave 0x82be608) likewise.
+    B meanwhile drained to FULLY FREE by t=141.25ms. Nobody left to sweep, no
+    interest planted, no wake owed: quiet wedge.
+
+CONSERVATION READING: this is a delivery-narrowing violation of the mode-directed
+model — a consumed fallback-interest token relayed into an empty waiter set on a
+spawn-incapable queue is destroyed, taking the postponed work's ONLY readiness signal
+with it. The churn residual (2) below is the same machinery's cost side (walks
+triggered per sibling miss consume/replant interest at high frequency); this is its
+correctness side (one consume with no re-plant loses the last token). The design
+conversation on damping must also close the actionability hole: a postponed gated
+work on a driver-driven queue must either keep a standing registered demand with an
+attendant, or the interest/token must be conserved (not noop-dropped) until a party
+that can retry it exists. Rate: this capture was 1 quiet wedge in 12 checks; the
+earlier x8 loop saw ~1/100 for both residuals combined.
+
+Evidence (session scratchpad 0eea52d6…): q_12.log (dump), trace_quiet.out (7.5MB),
+tq.txt (rendered), hunt_quiet.sh (the classify-and-stop capture loop; churn hangs
+auto-skip). Key correlators: W1 work=0x17f4e86582c0, hold h=0x17f4e865a480 w=4 on
+A=0x17f4e8cd60d0, B-demand 0x17f4e865a578, listener 0x17f4e8711bc0, queue waiters
+0x17f4e8678a10, consuming walk G=114 t=139.713–139.725ms, W1's last postpone push
+G=101 t=139.7218ms, g101 final park t=145.58ms, trace ends t=1147ms.**
 
 **►►► DIAGNOSIS 5 RESOLVED IN DESIGN (2026-07-20, walked with PN; fix agreed, NOT yet
 built): THE EAGER CONFIRM LATCH. The corrected anatomy (superseding the self-suspension

@@ -50,6 +50,95 @@ it is the immediate gate after they do, before task-5 sign-off and the task-6
 pump/drain rename sweep. The pre-commit hook's own sim run is one roulette spin per
 commit until then — retry on a wedged hook.**
 
+**►►► RESERVATION MECHANICS — SETTLED (2026-07-22, worked turn-by-turn with PN;
+supersedes the "mechanics deliberately not yet designed" list at the end of the
+ratified-direction block below; NOT built). Design record for the ledger, the
+counter representation, and the claim gate.
+
+LEDGER (agenda item 1). Permits are fungible; a released unit flows by RECLAIM
+PRIORITY, not provenance: (1) overdraft excess home, (2) the ROOT-MOST lender on
+the releaser's own chain, (3) pool free capacity. (Phase-2 directed delivery will
+split tier 3 into waiting-demand reservations then the free pot.) Node state
+collapses to: parent pointer, refcount, (reserved, lent), and a root-lender hint
+(validated anchor-style — follow, check, re-walk if stale). NO child lists, NO
+steal — searchList/stealOutUpTo/tryPin/touch/walkCounts all die; cache-don't-
+return is RETIRED (locality amortized the acquire walk; with pool-first draw
+there is no walk to amortize — and release always hit the pool mutex via
+notifyCapacity anyway, so the forest never saved the release side). Root-first
+repayment shrinks the credit episode's scope soonest; it can leave an inner
+lender transiently uncovered (lent>0, no borrower below), which is NOT stranding:
+any bypassing release parked its margin at an ancestor, and normalization
+reclaims it. Normalization is EMERGENT, not an operation: any chain walk's
+unwind (borrow, repayment, claim retry) shifts inner debt up to ancestor margin
+where both exist (L.lent−=w, U.lent+=w — debt reassignment, never a fresh grant,
+else phantom debt leaks into teardown). Shift target must have margin; a
+claiming node is not a valid shift target. Conservation identity: checked-out ==
+Σ node.reserved + pool.inUse; lent is a RECEIVABLE (held accounting may exceed
+physical capacity; concurrent USE never does).
+
+REPRESENTATION + CONCURRENCY (item 2). Store the DISJOINT quantities, not
+total-and-part: per-node atomic uint64 `reserved` (unlent units at home — the
+claim gate is one gated CAS `reserved ≥ w`, never reads lent) and a PLAIN
+mutex-guarded `lent` (written only under p.mu). atomic128 is GONE from permits;
+total entitlement = reserved+lent, exact under mu only. Per-node inUse is gone —
+pool-level atomics: inUse, loans-outstanding, waiting-claimants; overdraft
+becomes pool-level arithmetic (per-node excessOver/excess-return machinery
+dies); pool+node suspended counters DELETED (suspend/resume subsumed by
+park-as-reserved). Regime boundary: happy path (no limits hit) is atomics only —
+reserve = TryAcquire + reserved+=w; claim = inUse+=w DEBIT-FIRST then gated CAS,
+refund on miss (never-invisible: a mid-claim unit over-counts, so overdraft
+evaluation errs toward waiting); park = reserved+=w THEN inUse−=w; release =
+inUse−=w + Resource.Release, LOCK-FREE when the atomic guards all read clear
+(anchor==nil, loans-outstanding==0, no od) — the register-then-confirm
+compensation on the anchor (permits.go:198-204) closes the racing-registrant
+window, capacity lands before the guard loads. EVERYTHING multi-word runs under
+p.mu: registration, grants, shifts, repayment walks, overdraft evaluation, claim
+waits — walkers never race walkers; node words stay CAS even under the lock
+(they contend with hot-path claims). Hot contention = two shared words per pool
+(inUse + the Resource's free count); wave-granularity reservation is the natural
+amortizer (a wave holding a standing reservation cycles tasks touching only
+inUse — park back into reserved at completion).
+
+CLAIM GATE (item 3). The claim runs ON THE WORKER GOROUTINE, in taskWork.run,
+immediately before wk.task.Execute — NOT at dispatch/handoff. Verified basis:
+ex.Starting is a dispatch-side commit signal with NO happens-before to the body
+(taskPostWork/skimPostWork/funnelInstance all transfer THEN fire Starting;
+"pre-Starting gate" in the ratified block is literally load-bearing); the
+executor handoff is an unbuffered rendezvous (execpool/executor.go — no queue to
+sit in), so IN-USE ⇒ RUNNING is exact and settlement waits on genuinely running
+bodies only; launcherWork is the SOLE boundTask implementer and the only
+permit-carrying body (flush unlimited, skim handlers permit-free, bodies never
+inline) ⇒ single insertion point. A blocked claim parks on a DIRECT WAITER
+under p.mu with a bodyCtx.Done() arm — no queue-relay attendance, no help loop
+(the claimant hasn't started its body, pumps nothing; all-workers-blocked is
+unconstructible: blocked claim ⇒ outstanding loans ⇒ borrowers RUNNING on other
+workers). Abort rides the existing freed-without-executing path (taskWork.Free's
+idempotent backstop + poolWork.Close accounting); execpool's cap bounds spawn
+burst, not total workers, so blocked claimants displace nothing; completedFn =
+h.release fires BEFORE errSink posting (launcher.go defer order), so settlement
+never waits behind result machinery. CREDIT FREEZE IS SCOPED, not pool-wide
+(pool-wide rejected: freezes strangers' branches liveness doesn't require): a
+blocking claim increments a plain per-node `claimants` count self→root under mu;
+nonzero claimants refuses FRESH loans only (normalization/rescue shifts still
+run — the earmark is FOR them); borrowers below the claimant find their whole
+chain frozen and register (item-1's down-chain freeze, emergent); sibling
+branches keep branch-local credit. Delivery: any walk landing margin or
+repayment at a claimants>0 node wakes ONE waiting claimant whose chain passes
+through it (scan of the pool's claimant dll under mu; direct waiters, cap-1
+buffers — one delivery per event, no interception, conservation trivial).
+Claiming state = the per-node count + one pool atomic total (the release guard)
++ the claimant dll.
+
+REMAINING (next sessions): (4-residue) reserve-side attendance — gate postpones
+keep demands registered with the queue relay as attendant, largely as today
+(permithandle.go:448-458); VERIFY in code that nothing plants fallback interest
+anymore (Pool.Fallback + the fallback walk should be deletable — postponed
+demands never withdraw, parked bodies stay attended) and settle the fate of
+blockAcquire's withdraw-on-park + blockAndHelp's withdraw plumbing. (5)
+Free/teardown settlement + claim-failure paths. (6) queue-level token buffer for
+pump-driven queues (rule: Notify never destroys a token). Then the phase-2
+directed-delivery design conversation.**
+
 **►►► RESERVED-CAPACITY / CREDIT MODEL — RATIFIED DESIGN DIRECTION (2026-07-22,
 worked turn-by-turn with PN; supersedes the 07-21 suspend-on-postpone proposal in
 full; NOT built, spec not yet written). Fix for diagnosis 6 and foundation rework
@@ -151,9 +240,10 @@ replacement.
 WAVE-GRANULARITY RESERVATION is EMERGENT, not built: the body that
 creates/pumps/drains a wave IS the reservation holder (its handle, its cache);
 at most a documented idiom (acquire a weighted permit before opening the wave).
-Mechanics deliberately not yet designed: loan ledger representation, claim-gate
-plumbing in acquireJoint, reserved-units visibility in walkCounts/steal,
-commit-miss attendance wiring, Free/teardown settlement.**
+Mechanics deliberately not yet designed at ratification: loan ledger
+representation, claim-gate plumbing, reserved-units visibility, commit-miss
+attendance wiring, Free/teardown settlement — the first three now settled in the
+RESERVATION MECHANICS block above; teardown settlement still open.**
 
 **►►► HANG DIAGNOSIS 6 — THE QUIET WEDGE (2026-07-20 evening, trace_quiet/q_12; fix NOT
 designed — design conversation with PN pending). Captured on invocation 12 of the

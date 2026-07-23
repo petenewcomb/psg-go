@@ -1,5 +1,51 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► FOREST RESTRUCTURED: BODY-1:1 NODES + WAVE-ATTACHED PUMP EPISODES
+(2026-07-22 latest, PN-driven; AMENDS the two blocks below and the ratified
+block's attribution language; NOT built).
+
+THE INSIGHT (PN): bodies hold permits, never waves — and the forest should say
+so. Today's nodes are per-(wave,pool), mkdir-p'd along dispatch ancestry
+(launcher.go:313-318 → ensureCache), CONFLATING all sibling bodies of a wave
+into one node. That conflation did exactly one job: shared-drain credit (a
+pumping body's parked units reaching sibling-submitted works of the pumped
+wave). That job moves to PUMP EPISODES, and the wave-level node dies.
+
+THE SHAPE:
+- Forest = BODY-1:1 nodes only, chained by SUBMISSION ancestry (who dispatched
+  whom — true causality). A pending admission's reservation homes at its own
+  lazily-created pooled node. Node per in-flight admission (cost accepted).
+- A body that parks PUMPING a wave (nested drain and cross-wave submit alike —
+  the distinction was an artifact of wave-positioned nodes) opens an EPISODE
+  ATTACHED TO THE PUMPED WAVE OBJECT: a loan of its idle units, discoverable by
+  the wave's works through their OWN WAVE IDENTITY (one hop, no ancestry walk),
+  recallable until borrowers start, settled at unwind by the ordinary claim.
+  The creditor's park frame holds the episode pointer (recall/claim is
+  claimant-directed; no forest edge, no DAG). Episodes die with the park.
+- Credit discovery, exhaustive: (a) margin on my body-ancestry chain, (b)
+  episodes on my own wave. PINNED INVARIANT (verification obligation before
+  build): every wait liveness requires lending across is a SUBMISSION EDGE or a
+  PUMP EPISODE. (Wait inventory checked: flush is permit-free; governor/
+  scheduler waits are not permit-relevant. Needs its own pass.)
+- Repayment priority: own-wave episode receivables first (retire the widest
+  claim soonest), then chain lenders root-first, then pool. Exit-settlement
+  (receivable abandonment) unchanged.
+- INERTNESS becomes per-body and PROMPT: body exited ∧ reserved==0 ∧ lent==0 ∧
+  claimants==0 (exit-settlement zeroes lent; claimants transient). Walk-time
+  union-find-style splice under p.mu collapses dead-interior/live-leaf chains;
+  legal because ALL chain consumers are now mutex-gated (parent pointers were
+  immutable only for the old lock-free up-walk).
+
+SUPERSEDED BY THIS BLOCK: item-4 block's "park at the pumped wave's cache"
+(generalized into episodes; no wave positioning), its wave-done inertness
+criterion (now per-body), the ratified block's "ownCache = C_W^L" attribution
+language (now the body's own node), and item-1's chain vocabulary where it
+means wave-chains (now body-chains; ledger rules otherwise intact).
+STILL OPEN: headship variant of the deep-help wedge; item 5 teardown
+settlement (exit-settlement + splice largely define it); item 6 queue token
+buffer; the pinned-invariant verification pass; severability/collapse spec
+details (lock-free-reader tolerance of splices).**
+
 **►►► ITEM 4 RESOLVED: FOREIGN-PUMP CREDIT SCOPE + REVOCABLE LOANS (2026-07-22
 late, worked with PN; extends the RESERVATION MECHANICS block below; NOT built).
 

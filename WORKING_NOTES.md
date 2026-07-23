@@ -1,5 +1,142 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► PINNED-INVARIANT VERIFICATION PASS (2026-07-23, in progress with PN).
+Verifying: every wait whose liveness requires lending across is a SUBMISSION
+EDGE or a PUMP EPISODE. Method: full park inventory (every production select/
+blocking wrapper; sim/bench excluded), split by whether the parker holds permit
+units (only holders can be required lenders). Permit-free parks verified
+lending-irrelevant: scheduler/executor block-as-demand producer parks
+(scheduler.go:88, executor.go:57 — spawn-guaranteed, cap bounds burst not
+total, execpool/pool.go:287), worker idle parks (idle-exit consumers),
+teardown joins (item-5 territory), timers. rdvq blocking conveniences have no
+production callers beyond the two block-as-demand producers.
+
+ITEM 1 SETTLED — EXECUTOR-HANDOFF WINDOW (PN agreed 2026-07-23): moving the
+claim gate to the worker goroutine creates a NEW window the old model didn't
+have: during a blocking bodyExecutor.PushBack (task wave.go:941, funnel
+funnel.go:1065) the admission's full weight sits RESERVED (old model: inUse
+from dispatch-side acquire, counts.go acquireLocal — tenure, untouchable).
+DECIDED: reserved-at-leaf-unreachable is the design's answer — no pending-claim
+ledger state, no mechanism. The node is a leaf (body never ran ⇒ no submission
+descendants ⇒ no margin readers) and the PushBack park pumps nothing (no
+episode), so both credit channels are structurally absent; invariant holds
+vacuously. Deliberate lending would be wrong anyway: a loan collides with the
+imminent worker-side claim, and no wait's liveness can require it (handoff
+resolves by spawn regardless).
+
+ITEM 2 SETTLED — BACKPRESSURE/GOVERNOR PARK (PN agreed 2026-07-23): gate order
+VERIFIED — governor wraps limiter (launcher.go:305-309 launcherScatterWork(
+limiterScatterWork(taskPostWork)); gate at launcher.go:440), so the parked
+dispatch's own admission holds NO permits; the only holdings at stake are the
+enclosing body's (subwave-top-level dispatch), today lent by the blockAndHelp
+suspend bracket (wave.go:516). NEW MAPPING: enclosing body's holds
+park-as-reserved + episode on the pumped wave; margin to submission
+descendants. LIVENESS: this wait's liveness CAN require lending — downstream
+drain = skim works (permit-free, unconditional) + FUNNEL bodies (permit-gated,
+funnel.go:1043); a funnel is wave-bound so its work discovers the parker's
+episode by own-wave identity (one hop), and the funnel input may have been
+submitted by a body other than the parker — the strongest single justification
+for episodes covering sibling-submitted work. Non-lender case (plain user
+goroutine, no holds): ordinary completion, no edge needed. Invariant holds
+NON-vacuously via the episode.
+
+ITEM 3 SETTLED — BLOCKING SKIM-FROM-BODY (PN agreed 2026-07-23): both drain
+entries carry the suspend bracket — Skim per-skim (wave.go:394), SkimAll/
+CloseAndSkimAll once per drain (wave.go:863); try-variants and yield never
+park (trySkim = TryExecuteOne). The park is NOT blockAndHelp — skim drives
+ExecuteOne → the composed select (wave.go:669) with no block channel, pumping
+B between waits; the two suspend-bracket sites are siblings. NEW MAPPING: the
+canonical nested drain — holds park-as-reserved at the body's node + episode
+on B; own-submitted works reachable by chain margin (episode redundant),
+sibling-submitted works of a shared B by episode only; works of SUB-WAVES of B
+outside both channels = where the deferred wedge actually lives (a drain of B
+transitively waits on B's whole subtree). Liveness NON-vacuous (the
+skim-subwave/diagnosis-6 home geometry). Fairness note: old suspend lent
+pool-wide (searchList); chain+episode is exactly "as far as liveness
+requires, no further."
+
+ITEM 4 SETTLED — BLOCKACQUIRE PARK (PN agreed 2026-07-23): the parked
+goroutine holds THREE classes with three different OLD treatments — enclosing
+body's holds (suspend bracket wave.go:516: lend pool-wide), joint below-prefix
+(permithandle.go:467-473: keep inUse, up-order acyclicity), current rank's
+partial hoard (counts.go:84-89, permits.go:691 Decision 1: held-idle,
+pool-wide contestable). DECIDED: uniform episode-lendability — all three park
+as reserved (admission's units at its leaf, enclosing body's at its node),
+episode on the pumped wave is the admission-units' ONLY channel (leaf has no
+descendants). Below-prefix lending is liveness-REQUIRED, not optional: a
+backpressure (governor) edge in the cycle isn't an up-order edge, so the old
+keep-in-use discipline doesn't exclude cycles once the rank-k holder is
+governor-parked needing the wave's drain needing rank j held by the parker.
+Retires keep-in-use AND Decision-1 contestability. Cross-limiter safety:
+loans repay by completion; an up-order-blocking borrower parks-as-reserved in
+turn, inductively. Withdraw-bracket fate (h.withdraw, permithandle.go:518)
+stays on the item-4 residue list, not forced by this.
+
+ITEM 5 — POSTPONED GATED ADMISSION: GAP FOUND, RESOLUTION DIRECTED (PN
+2026-07-23). THE GAP (the pass's real catch): a postponed admission under
+acquire-as-reserved holds below-prefix + partial hoard reserved at its LEAF —
+no park ⇒ no episode, no descendants ⇒ no margin readers — but unlike the
+executor-handoff window its progress is CONDITIONAL on capacity, so it can sit
+inside a cycle. Constructed three-party wedge: W1 (work of wv, postponed,
+holds all of pool j, needs k) / B2 (body of wv, holds k, parked draining
+sub-wave S → episode on S) / w2 (work of S, needs j). No covering edge under
+body-1:1. The ratified (wave-cache) model covered it TWICE (w2 borrowed j at
+C_wv via wave-ancestry chain; W1 borrowed k at C_wv as own-anchor) — the
+restructure's "conflation did exactly one job" premise UNDERCOUNTED: the wave
+node also gave never-parked postponed reservations mutual visibility with the
+wave family, a job episodes cannot inherit (episodes attach to parks).
+Diagnosis 6 itself was actionability-only (pool B was free by t=141ms; durable
+attendance suffices for that trace) — the credit gap is beyond-d6.
+
+RESOLUTION DIRECTED (option 1, PN): REGISTRATION-ATTACHED LENDING — a
+postponed admission's standing reservation is discoverable like an episode,
+attached to its wave, keyed by the registered demand (not a park frame);
+recall on the retry's claim rides the revocable-loan machinery (unstarted
+borrowers recalled, demand re-reserves on next drive). Rejected: wave-level
+position for pending admissions (walks back the restructure);
+unconstructibility (none — the shape is ordinary). Credit-discovery channels
+are now THREE: chain margin, pump episodes, registration attachments. Reach:
+item 6.
+
+ITEM 6 SETTLED — NESTED-SUBTREE REACH FOR BOTH ATTACHMENT KINDS (PN agreed
+2026-07-23): an attachment (episode or registration) on wave V is discoverable
+by V's NESTED SUBTREE — every work whose submission chain passes through a
+body of V, own-wave works as hop zero. Mechanics: during the ordinary margin
+walk, each hop also checks the hop body's HOME WAVE's attachments — one extra
+lookup per hop, no second walk, no new forest edges. RECONCILIATION (why this
+is a revert, not a change): item-4 (07-22) settled foreign-pump credit scope
+as B's SUBTREE; the restructure's "one hop, no ancestry walk" phrasing
+silently narrowed it while moving credit from wave-cache (nesting-chained ⇒
+subtree reach automatic) to wave-object attachment — an unremarked side
+effect, no rationale recorded, and this session's items 3+5 initially
+followed the narrowed text. The three-party wedge (item 5) proves one-hop
+reach is a LIVENESS BUG, not a fairness tuning choice. One-hop survives only
+as the hop-zero fast path. Restructure block amended in place accordingly.
+Strangers (outside the subtree) still wait as on running holds. The deferred
+deep-help/headship wedge conversation INHERITS this reach as settled.
+
+ITEMS 7+8 SETTLED (PN agreed 2026-07-23): CLAIM GATE — as designed
+(reservation-mechanics item 3): direct waiter under p.mu, liveness =
+completion of RUNNING borrowers only (blocked claim ⇒ outstanding loans ⇒
+borrowers running on other workers; unstartable-borrower loans recalled as
+revocable), so it never requires lending; nothing in the inventory
+contradicted it. RECLAIM PARKS (permithandle.go:240, :263) — the suspend/
+reclaim bracket is deleted outright by park-as-reserved; no new-design
+counterpart to verify.
+
+PASS CONCLUDED 2026-07-23. Verdict: the pinned invariant HOLDS over the full
+park inventory under the AMENDED rule (three channels, nested-subtree reach)
+— it FAILED as originally phrased (item 5's three-party wedge against one-hop
+reach). Findings ledger: item 1 executor-handoff window (vacuous — reserved-
+at-leaf-unreachable, no mechanism); item 2 governor park (non-vacuous via
+episode; funnel bodies are the permit-gated downstream); item 3 nested-drain
+park (episode home case; sub-wave residual → wedge); item 4 blockAcquire
+(uniform episode-lendability; keep-in-use and Decision-1 contestability
+retired); item 5 postponed admission (THE GAP — registration-attached lending
+directed); item 6 nested-subtree reach (restructure amended in place); items
+7+8 above. Still open after the pass: headship wedge (inherits item 6),
+teardown settlement, queue token buffer, severability/splice details.**
+
 **►►► FOREST RESTRUCTURED: BODY-1:1 NODES + WAVE-ATTACHED PUMP EPISODES
 (2026-07-22 latest, PN-driven; AMENDS the two blocks below and the ratified
 block's attribution language; NOT built).
@@ -18,15 +155,24 @@ THE SHAPE:
 - A body that parks PUMPING a wave (nested drain and cross-wave submit alike —
   the distinction was an artifact of wave-positioned nodes) opens an EPISODE
   ATTACHED TO THE PUMPED WAVE OBJECT: a loan of its idle units, discoverable by
-  the wave's works through their OWN WAVE IDENTITY (one hop, no ancestry walk),
+  the pumped wave's NESTED SUBTREE [reach AMENDED 2026-07-23, verification-pass
+  item 6: the original "own wave identity (one hop, no ancestry walk)" wording
+  silently narrowed item-4's settled credit scope (= B's subtree) and is
+  REVOKED; own-wave discovery survives as the hop-zero fast path],
   recallable until borrowers start, settled at unwind by the ordinary claim.
   The creditor's park frame holds the episode pointer (recall/claim is
   claimant-directed; no forest edge, no DAG). Episodes die with the park.
-- Credit discovery, exhaustive: (a) margin on my body-ancestry chain, (b)
-  episodes on my own wave. PINNED INVARIANT (verification obligation before
-  build): every wait liveness requires lending across is a SUBMISSION EDGE or a
-  PUMP EPISODE. (Wait inventory checked: flush is permit-free; governor/
-  scheduler waits are not permit-relevant. Needs its own pass.)
+- A POSTPONED gated admission's standing reservation is a REGISTRATION
+  ATTACHMENT on its wave [ADDED 2026-07-23, verification-pass item 5]: same
+  discoverability as an episode, keyed by the registered demand instead of a
+  park frame; recall on the retry's claim rides the revocable-loan rules.
+- Credit discovery, exhaustive [AMENDED 2026-07-23, items 5+6]: (a) margin on
+  my body-ancestry chain, (b) episodes and registration attachments on each
+  chain ancestor's home wave, own wave = hop zero (one extra lookup per hop of
+  the same walk). PINNED INVARIANT: every wait whose liveness requires lending
+  across is a SUBMISSION EDGE, a PUMP EPISODE, or a REGISTRATION ATTACHMENT
+  within nested-subtree reach. (Verification pass run 2026-07-23 — full park
+  inventory and per-park findings in the top block.)
 - Repayment priority: own-wave episode receivables first (retire the widest
   claim soonest), then chain lenders root-first, then pool. Exit-settlement
   (receivable abandonment) unchanged.
@@ -41,10 +187,12 @@ SUPERSEDED BY THIS BLOCK: item-4 block's "park at the pumped wave's cache"
 criterion (now per-body), the ratified block's "ownCache = C_W^L" attribution
 language (now the body's own node), and item-1's chain vocabulary where it
 means wave-chains (now body-chains; ledger rules otherwise intact).
-STILL OPEN: headship variant of the deep-help wedge; item 5 teardown
-settlement (exit-settlement + splice largely define it); item 6 queue token
-buffer; the pinned-invariant verification pass; severability/collapse spec
-details (lock-free-reader tolerance of splices).**
+STILL OPEN: headship variant of the deep-help wedge (inherits nested-subtree
+reach as settled, verification-pass item 6); item 5 teardown settlement
+(exit-settlement + splice largely define it); item 6 queue token buffer;
+severability/collapse spec details (lock-free-reader tolerance of splices).
+The pinned-invariant verification pass RAN 2026-07-23 (top block): one gap
+found and resolved (registration-attached lending, nested-subtree reach).**
 
 **►►► ITEM 4 RESOLVED: FOREIGN-PUMP CREDIT SCOPE + REVOCABLE LOANS (2026-07-22
 late, worked with PN; extends the RESERVATION MECHANICS block below; NOT built).

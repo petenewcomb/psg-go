@@ -1,5 +1,223 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► TEARDOWN SETTLEMENT — CONCLUDED (agenda item 5 of the reservation
+design; 2026-07-23, all seven items settled with PN). AGENDA: (1) walk-away
+of un-admitted work; (2) Free-without-executing; (3) claim-failure paths; (4)
+exit-settlement proper; (5) node inertness + splice; (6) wave teardown vs
+attachments; (7) quiescence/conservation check. SHAPE OF THE RESULT: items
+1-4 are ONE departure rule (unlent → reclaim priority; receivables abandoned;
+recall serves returning owners only) seen from four sites; 5-6 settled the
+structural lifecycles (terminal inert latch + lock-free path compression;
+attachments empty by settlement, per-(wave,pool) discovery anchors); 7 is the
+tripwire net. Design still open after this block: queue token buffer
+(reservation item 6) and the severability protocol spec revived by item 5.
+
+ITEM 7 SETTLED — QUIESCENCE/CONSERVATION (PN agreed 2026-07-23): the at-rest
+invariant is a PER-POOL WAVE-QUIESCENCE property (pool objects outlive
+streampool.Wait by design; Wait adds worker-join + ctxpool.Clear only, pool.go:48):
+checked-out = Σ node.reserved + pool.inUse = 0; loans-outstanding = 0;
+waiting-claimants = 0; Resource free count = full capacity; FIFO empty; all
+nodes recycled (no pinned latched-inert stragglers); all anchors empty. LEAK
+MAP: departure bug → reserved residue; abandonment bug → lent residue /
+phantom debt (release finds no lender); freeze bug → stranded claimants +
+never-inert chain; splice/refcount bug → node leak (omnipool get/put
+imbalance); attachment bug → anchors-empty assert; double-release → counter
+underflow, stays a PANIC (counts.release precedent — teardown bugs loud,
+never absorbed). CHECK TIERS: (1) debug asserts — Done-implies-queues-empty,
+no-attachments-at-Reset, NEW node-inert-at-recycle (nonzero words on a pooled
+node's return = items 1-4 bug at the exact seam); (2) sim checkers extended
+to the new ledger (reserved/lent/claimants/loans-outstanding zero at episode
+end, per pool) — the real gate; (3) NEW sim obligation: CHAIN-BOUNDEDNESS
+checker under a generational-relay workload (live chain length stays O(live
+ancestry)) — the only regression coverage for item-5 compression, since only
+the leak betrays it.
+
+ITEM 6 SETTLED — WAVE TEARDOWN VS ATTACHMENTS (PN agreed 2026-07-23): NO
+teardown protocol needed — settlement already empties attachments before Done
+can fire. Registrations: a postponed work is in-flight on the wave's queues,
+in-flight pins Done, cancellation drains it through item-2 departure first.
+Episodes: borrowers are works of the pumped wave; completion repays via
+repayment-priority tier 1 (own-wave episode receivables) and departure repays
+via the same routing at Free, so Done ⇒ all episode receivables zero; pumpers
+wake on the state.Done() arm (wave.go:686), claims settle against fully-
+repaid loans, episodes die with their park frames. Reset's warm-queue
+preservation never sees an attachment. PROMOTED TO LOAD-BEARING: decision-B's
+Done-implies-queues-empty assert (the registration argument is that property
+in permit form) + sibling assert no-attachments-at-Reset/recycle. Use-after-
+free already structural: pumpers hold per-holder wave refs, waveImpl can't
+recycle before last unwind. SETTLED CHOICE: PER-(WAVE,POOL) ATTACHMENT
+ANCHORS — each pool's discovery walk reads only anchors under its own p.mu
+(single-mutex walk discipline preserved); explicitly a pure DISCOVERY anchor,
+no accounting, no conflation revival (bodies hold permits, never waves —
+untouched); lazily created at first attachment, empty at Done (same assert).
+Rejected: wave-global attachment list (own lock + cross-pool-mutex ordering
+story).
+
+ITEM 5 SETTLED — INERTNESS + SPLICE, AMENDED BY THE CHAIN-GROWTH CATCH (PN
+caught, option 1 chosen 2026-07-23): criterion unchanged (exited ∧
+reserved==0 ∧ lent==0 ∧ claimants==0 — attachments imply un-departed owners;
+absentia loans already in lent; episodes over inert nodes are empty and die
+with parks). Prompt criterion, LAZY compression, refcounts own memory. THE
+CATCH (PN): the all-happy path never takes p.mu ⇒ nothing ever walks ⇒ the
+GENERATIONAL RELAY (each body completes by dispatching its successor and
+exiting) grows the chain one pinned inert node per generation, UNBOUNDED —
+memory leak + O(generations) first-walk under the pool-wide mutex. Fan-out
+doesn't accumulate (leaves recycle); relays do. THIRD job the old wave-node
+conflation quietly did (continuations reused the same (wave,pool) cache —
+bounded by construction); body-1:1 created the exposure. No child lists ⇒
+eager exit-relink impossible; compression must be child-driven. DECIDED
+(option 1): LOCK-FREE PATH COMPRESSION on the pointer structure — inertness
+becomes a TERMINAL single-word latch (terminal is sound: an inert node can
+never receive units — no owner, no lent, delivery routes only to lenders/
+claimants) stored as settlement's last act; parent pointers always CAS;
+compression at the two happy-path moments: node CREATION links to nearest
+LIVE ancestor (skipping latched-inert), and a body's CLAIM spends one atomic
+load validating its parent, CAS to grandparent if dead (union-find
+path-halving, amortized O(1), ref-before-CAS handoff). Ledger walks (margin/
+lent/shifts) stay MUTEX-ONLY — the lock-free reader touches STRUCTURE
+(parent ptr + inert latch + refcount), never money. CONSEQUENCE: the
+severability open item is REVIVED as a real narrow protocol spec for exactly
+those three words (not folded away, and not the mu-only triviality item 5
+briefly hoped for). Rejected: child lists (walks back the restructure, per-
+dispatch maintenance); forced periodic walks (controller band-aid).
+
+ITEM 4 SETTLED — EXIT-SETTLEMENT PROPER (PN agreed 2026-07-23): the ORIGIN of
+the unified departure rule. How lent>0 reaches completion (real, not
+degenerate): normalization debt-shift lands inner lenders' debt on a node's
+margin (a node can carry lent without ever parking); loans stand against
+STANDING MARGIN (reserved beyond the claim). Park-time loans can't survive
+resumption (waking IS a claim — recall + wait settles each unwind). THE
+SYMMETRY: exit settles DEBTS BY ROUTING (the in-use release's reclaim
+priority tier 2 — root-most own-chain lender — is debt repayment) and CREDITS
+BY ABANDONMENT (lent zeroes; borrowers' later releases route past the
+vanished lender emergently). Residual standing margin = unlent reserved,
+released by the same priority. Node meets inertness immediately. RELOCATION
+FLAGGED (not settled, belongs to the wave-granularity-admission feature): the
+mechanics block's wave-held standing-reservation amortizer has no home under
+body-1:1 (per-admission nodes die at completion); coherent restatement =
+CREATOR-HELD MARGIN (wave's works claim it as chain margin, being
+descendants); teardown constrains it — the creator's exit abandons/releases
+that margin, so wave-admission can't outlive its creator's node without new
+design. Pins: completedFn before errSink (reaffirmed); panic = completion
+with an error, same defers, no distinct settlement path.
+
+ITEM 3 SETTLED — CLAIM-FAILURE PATHS (PN agreed 2026-07-23): only failure is
+CANCELLATION (wave-done impossible — in-flight pins Done; overdraft is
+reserve-time only; exits = covered or cancelled). Disposition = un-freeze +
+departure in ONE p.mu section: decrement claimants self→root, unlink from
+claimant dll, then item-1 departure (home units by reclaim priority, locked
+receivables abandoned — running borrowers' releases route past the vanished
+lender). No standing inUse debit at failure (debit-first miss already
+refunded). PINNED: (1) a CLAIMING owner is EXEMPT from absentia — its wake is
+repayment from running borrowers (unconditional, pass-verified), never a
+stranger-wave tunnel; ownership ladder now RUNNING=tenure, PARKED=lendable,
+CLAIMING=earmarked (naming what the ratified freeze already implied — "a
+claiming node is not a valid shift target"). (2) Wake-race conserves: a
+claimant cancelled after consuming a repayment wake re-emits it — the
+departure release of the now-covered units IS the next capacity event. (3)
+Joint mid-sequence abort is per-rank in canonical order: claimed-below →
+ordinary release; waiting rank → un-freeze+departure; reserved-above → plain
+departure; same idempotent recursion as the gate.
+
+ITEM 2 SETTLED — FREE-WITHOUT-EXECUTING (PN agreed 2026-07-23): no new rule —
+item 1's departure settlement given its call sites. Four states at Free:
+never-gated (recycle+Close, unchanged); RESERVED (postponed or pre-handoff) →
+departure settlement, made an EXPLICIT step in Free under ONE p.mu section
+(attachment removal + deregistration + lent-zeroing together) instead of
+today's implicit Invalidate inside handle Reset (permithandle.go:570 —
+departure is settlement now, not recycling hygiene); CLAIMED-never-executed
+(claim-abort) → ordinary release, safe by debit-first/never-invisible;
+completed → backstop no-ops (idempotency latch becomes the handle's
+reserved/claimed/released state, contract unchanged). Pinned deliberate:
+release-BEFORE-Close ordering survives (a Done wave never has a drained
+work's units outstanding — item 6 leans on this); joint set settles
+recursively as release()/Reset recurse today (wave.go:273-285). Deletion
+confirmed: funnel releasePermit on handoff postpone (funnel.go:959, callers
+:1061/:1070) — twin of limiter.go:180 — dies with acquire-as-reserved; Free
+is the sole departure point; task path already has no equivalent.
+
+ITEM 1 SETTLED — DEPARTURE SETTLEMENT (PN agreed 2026-07-23): walk-away IS
+exit-settlement for an owner that never ran — ONE unified "owner departure"
+rule (shared with agenda item 4): unlent reserved releases by ordinary
+reclaim priority; receivables ABANDONED, never recalled (recall serves
+RETURNING owners' claims; departure has no claim to serve — the two ends of
+the ownership story). No debt-reassignment bookkeeping: a borrower's later
+release-walk finds no lent>0 above and lands in the next tier (pool) —
+emergent routing, receivable is accounting overlay, physical units stay at
+borrowers. Registration attachment dies atomically with deregistration under
+the same p.mu section (no transiently-discoverable departed lender). The
+head-withdrawal cascade (permits.go:617-622, successor offered the turn, one
+minted token) survives unchanged. Conservation identity holds through
+departure; the departed node meets inertness (exited ∧ reserved==0 ∧ lent==0
+∧ claimants==0) and splices — agenda item 5 gets it free. OLD sites grounded:
+blockAcquire cancel (permithandle.go:525), reclaim plain-park cancel (:268),
+withdraw bracket (dying per headship record); Invalidate mechanics
+permits.go:605-628 (hoard drains via cache destroy, Decision-1 no-give-back
+comment at :596-599).**
+
+**►►► HEADSHIP WEDGE: CORE DISSOLVED (PN agreed 2026-07-23; boundary case
+open, discussion in flight). The item-4 leftover — a registered demand D at
+pool P's head while its owner G is deep in foreign help, no unit to
+re-attribute. OLD anatomy: head-directed delivery earmarks capacity to D
+while G is buried in a help item; if the help chain transitively needs P, the
+cycle closes (help chain → P → D → G's unwind → help chain). OLD answer: the
+withdraw bracket (h.withdraw permithandle.go:518 → withdrawDemands :538) —
+forfeit position+hoard before the first help item; correct but IS the
+residual-2 churn engine. DISSOLUTION: under durable registration, D's
+accumulating reservation is a REGISTRATION ATTACHMENT on G's wave A (pass
+item 5), discoverable by A's nested subtree (item 6). G's help is always A's
+own queue, so the first-level item is hop-zero; every deeper dispatch —
+including cross-wave submits into unrelated waves — has a chain passing
+through that item's body whose home wave is A. The works G's unwind can wait
+on are exactly the works that can borrow D's earmarked units; G's eventual
+claim recalls unstarted borrowers (revocable-loan rule), waits only on
+running ones. No surviving withdraw bracket; the churn engine dies with it.
+
+BOUNDARY CASE RESOLVED — ABSENTIA LENDING (PN chose option 2, 2026-07-23).
+The stranger cycle is constructible from ordinary shapes: helped body
+cross-submits into unrelated Y, parks on Y's governor; a STRANGER-fed
+accumulate body of Y (downstream pressure held until body COMPLETION,
+funnel.go:1064 → Free :1010) dispatches gated sub-work needing pool P whose
+capacity sits in D; sub-work's chain (through the stranger patron) and Y's
+episodes never reach D. Not head-specific — same construction against G's
+below-prefix. RULE: while its owner is parked-helping (between the old
+withdraw-bracket point and unwind), a reservation is a lending source WITHOUT
+subtree restriction (pool scope); loans revocable until borrower starts; the
+returning owner's claim recalls unstarted borrowers and waits only on running
+ones. Keeps progress-monotonicity (recall ≠ re-gather). Fairness rule
+survives: during absence, liveness demonstrably requires stranger reach.
+Rejected: narrow withdraw survival (progress-regressive, re-gather
+starvation); delivery passover (takes pre-help progress too).
+
+FUNNEL PARENTAGE RESOLVED (PN, 2026-07-23): no multi-parent problem — funnel
+bodies are individual ACCUMULATE CALLS, nothing special; each homes under its
+submitting body's node like any dispatch (per-call permit gate funnel.go:949
+already matches). The instance's held accumulator state and flushing are SIDE
+EFFECTS riding those calls — flow is data, not operations; flush is
+permit-free (funnel.go:465) and needs no node.
+
+ABSENTIA GENERALIZED TO ALL PARKED OWNERS (PN agreed 2026-07-23): the same
+stranger cycle constructs against a parked-DRAINING owner (work of pumped S
+cross-submits into Z; Z's stranger-fed accumulate body's gated sub-work needs
+the drainer's pool) — the absent-owner condition is PARKED, not helping;
+cross-wave submits tunnel wake paths through stranger waves from any park
+kind. CONSOLIDATED OWNERSHIP MODEL: a RUNNING body's in-use units are tenure
+(untouchable); a PARKED owner's reserved units are lendable — subtree
+channels (chain margin, episodes, registrations) as the ordinary tiers,
+POOL-SCOPE as the escalation tier when normal discovery exhausts, at the same
+dry-forest escalation point where strangerSuspended sits today
+(permits.go:946); ownership survives as RECALL PRIORITY, not exclusivity
+(unstarted borrowers recalled at owner return; started ones settled by the
+running-borrowers-only claim wait; recall is never re-gather —
+progress-monotone). "Only a running body's in-use is tenure" restores the old
+model's ownership story verbatim; the reservation model's real contribution
+is the structured priority of who reaches parked units first + guaranteed
+recall, replacing unstructured pool-wide steal. Subtree channels stay
+load-bearing for the hot path and fairness ordering; the wall becomes a toll
+gate at escalation. AMENDS: ratified block's "never freely stealable;
+creditable ONLY down-chain" and the mechanics block's no-steal language —
+annotated in place.**
+
 **►►► PINNED-INVARIANT VERIFICATION PASS (2026-07-23, in progress with PN).
 Verifying: every wait whose liveness requires lending across is a SUBMISSION
 EDGE or a PUMP EPISODE. Method: full park inventory (every production select/
@@ -320,7 +538,10 @@ the releaser's own chain, (3) pool free capacity. (Phase-2 directed delivery wil
 split tier 3 into waiting-demand reservations then the free pot.) Node state
 collapses to: parent pointer, refcount, (reserved, lent), and a root-lender hint
 (validated anchor-style — follow, check, re-walk if stale). NO child lists, NO
-steal — searchList/stealOutUpTo/tryPin/touch/walkCounts all die; cache-don't-
+steal [2026-07-23: no steal MACHINERY — absentia lending reaches parked
+owners' units pool-scope at escalation via the loan/recall rules, not via
+searchList-style taking; see top block] —
+searchList/stealOutUpTo/tryPin/touch/walkCounts all die; cache-don't-
 return is RETIRED (locality amortized the acquire walk; with pool-first draw
 there is no walk to amortize — and release always hit the pool mutex via
 notifyCapacity anyway, so the forest never saved the release side). Root-first
@@ -405,7 +626,11 @@ of the permit lifecycle.
 
 LIFECYCLE (the settled state machine):
   acquire (per rank, canonical order) → RESERVED — capacity is the holder's;
-    never freely stealable; creditable ONLY down-chain (see credit rule).
+    never freely stealable; creditable ONLY down-chain (see credit rule)
+    [AMENDED 2026-07-23, headship/absentia: while the owner is PARKED its
+    reserved units are lendable pool-scope at the dry-forest escalation tier,
+    subtree channels first; ownership = recall priority, not exclusivity —
+    see the absentia block at top].
   claim/commit (NEW pre-Starting gate) → settlement — waits (attended) or fails
     while non-stranger loans are outstanding; BARRIER: once claiming, no new
     loans against this source (else start starvation).

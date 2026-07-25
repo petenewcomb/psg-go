@@ -2,6 +2,47 @@
 
 ---
 
+# Meta-chain relay pinning (2026-07-25) — DESIGN WORK ITEM, needs its own session
+
+**The law:** a fire-and-forget generational relay (each body dispatches its
+successor from its body context and exits) pins O(generations) `ctxMeta`s: the
+live generation's meta transitively holds every ancestor meta back to the
+origin, all freed in one iterative `unrefMeta` cascade only when the last
+generation completes. Happy (uncontended) relays included — no permit nodes
+involved. Invisible to `TestCtxMetaConservation` (the hook balances at
+quiescence, after the cascade has already run).
+
+**Origin:** the 2026-07-08 parent-refcount fix
+(`docs/decisions/ctxmeta-parent-refcount.md`). Before it, `borrowBodyContext`
+severed `parent` at async boundaries — relay chains could not form; the sever
+was quietly doing the same bounding job on the meta chain that the old
+wave-node conflation did on the permit forest. The fix removed the sever's
+lifetime role (keeping only its isolation role, `permitRoot`) to close the
+`borrowSrcCtx` use-after-free — trading a ~1/400 race for an unbounded pin
+under this one workload shape.
+
+**Why the ref is forced to lifetime (the real problem):** a body context is
+`ctxpool.WithValue(srcCtx, m)` — it *descends from* the dispatch context, so
+every `Value`/`Done`/`Deadline` lookup on the body's context (and anything
+derived from it) traverses `srcCtx`'s chain for the body's entire lifetime.
+The meta ref exists to keep that chain pool-valid. Releasing it early is not
+an option; the fix must sever the **context descent itself** at async
+boundaries.
+
+**Constraints any fix must preserve:** the body's context must still supply,
+from bounded sources — cancellation and deadlines (a submitter's ctx deadline
+applying to the body is a user-visible contract today), flow riders (already
+copied pointers with their own refs), and the body's own meta. Touches the
+07-08 decision record, the driver-link tracing plans (which wanted the
+walkable chain), and ctxpool descent semantics.
+
+**Consequence elsewhere:** under `docs/plan/forest-severability.md`, permit
+nodes are memory-backstopped by a meta-held lifetime ref, so contended relays'
+nodes currently ride this same curve. Fixing the meta chain improves the node
+memory curve with zero changes to the forest design.
+
+---
+
 # Phase 3 cleanup audit (2026-07-13) — CURRENT
 
 Compiled from a four-dimension smell audit (naming, public-API consistency, test

@@ -1,6 +1,7 @@
 # The Conservation Rework
 
-**Status: plan agreed 2026-07-17; implementation not started.** This plan
+**Status: plan agreed 2026-07-17; implementation not started. Amended
+2026-07-26: see "Amendment: the waiter-set balance" at the end.** This plan
 consolidates the design walk-through of 2026-07-16/17 on the `combiner` branch.
 It replaces the earlier "settled build spec" notes in `WORKING_NOTES.md`
 (2026-07-15), most of whose wake-side design is rejected. The governing document
@@ -166,3 +167,96 @@ weighted events; suspension flags as wake-routing state; the
 `SuspendableWork` postpone-door hook; "total wake" listener actions on
 user-goroutine queues; re-forbidding sub-wave driving from skim handlers;
 reifying blocked acquisitions as retryable work items.
+
+## Amendment (2026-07-26): the waiter-set balance
+
+**Design settled with PN 2026-07-26 (reservation agenda item 6); not built.**
+This closes the delivery model's last lossy arm. Within this plan it
+supersedes seam 4's user-goroutine-queue decline arm: under the
+mode-directed delivery that landed after this plan was agreed (`e33ba48`,
+2026-07-19, revising `notification-conservation.md`), a declined wake has
+no conserved walk to rejoin — the attendant fired one-shot — so "decline
+and walk on" is replaced by "bank in the balance."
+
+**The hole.** `Waiters.Notify` on a queue with no spawn hook silently drops
+a wake that finds no parked waiter (the nil-fallback noop,
+internal/rdvq/waiters.go). For most flows that is harmless — work-supply and
+lifecycle wakes announce facts a parking waiter's `confirmFn` re-derives
+from queue state. But the relay-attendant wake announces a fact that lives
+nowhere else: a registered demand's capacity event was consumed one-shot
+pool-side (the head's attendant fired and cleared), and an unattended head
+absorbs later events under the attempt-on-arrival presumption. Dropping
+that one wake severs the whole signal chain — the quiet wedge of hang
+diagnosis 6 (WORKING_NOTES, 2026-07-20): a postponed gated admission whose
+only readiness signal relayed into an empty waiter set, followed by
+19.8 seconds of silence over a fully free pool.
+
+**The design.** `rdvq.Waiters` gains a **balance** — a counter of banked
+wakes — making `Notify` total by construction:
+
+- `Notify(missFn)`: wake one parked waiter; on a **miss** (no waiter took
+  it), run `missFn` if provided, else bank the wake in the balance.
+  Worker-minting queues pass their spawn signal as `missFn` and never bank;
+  the signature and every call site (`Accepted.relay` included) are
+  otherwise unchanged — the wedge closes with zero workq code.
+- Consumption sits in the wait path as **register → `confirmFn` →
+  try-consume → block**: a successful consume returns as a received wake
+  without parking. The consume-implies-retry-sweep guarantee rides the
+  existing caller structure (`ExecuteOrWait` re-attempts work after any
+  received wake); no new coupling. A `confirmFn` decline leaves the balance
+  untouched — decline-implies-sweep holds for workq's `ShouldWait` but is
+  not provable for arbitrary callers at the primitive level; the cost is
+  one bounded extra spin per token, never a loop.
+- The balance is a **counter, not a sticky bit**. Pumping is legal from
+  multiple goroutines (skim handlers need only be concurrency-safe), so N
+  banked wakes must be able to abort N park attempts — service multiplicity
+  matching event multiplicity. A bit collapses them and serializes ready
+  work onto one pumper while its siblings park beside actionable items
+  (liveness survives via the pumping loop; parallelism does not).
+- `NotifyAll` stays **balance-neutral**: its broadcast is a re-check prompt
+  whose information the re-check re-derives, and clearing the balance there
+  would globalize a terminal-only argument — a mid-life `NotifyAll` with
+  nobody parked would destroy live banked wakes, reopening the wedge.
+- Lifecycle: `waveImpl.Reset` **zeroes the balance** with the other
+  per-cycle clears (single-owner at refs==0, quiescent; the warm queues'
+  never-re-Init contract is untouched). A nonzero balance on a *Done* wave
+  is legitimate staleness — a banked wake whose ready item an arriving
+  pumper swept before anyone parked — so the zero assertion binds
+  post-Reset, not at Done.
+
+**The race-closing invariant, in checkable form:** "balance > 0 while a
+waiter is parked" is never a stable state. Transient overlap is legal;
+stable overlap is a missed wake. Enforced at build by serializing the
+failed-wake→bank step against register→confirm→consume→park under the
+waiter queue's existing internal discipline.
+
+**Vocabulary.** The parameter renames `fallback` → `missFn`: with the
+balance beneath it, it is no longer a last resort, and "miss" joins the
+attempt-found-nothing family the codebase already uses (a retry misses when
+capacity is absent; a wake misses when no waiter is parked). The balance is
+precisely what makes a miss *not* a classic missed wakeup. Rejected names:
+`underflowFn` (side-ambiguous — underflow of waiters is overflow of
+notifications), `unansweredFn`, `shortfallFn`, `surplusFn`.
+
+**Verification.** Asserts: the balance never goes negative; balance == 0
+immediately post-Reset. Sim: an idle-point probe asserting the invariant
+above at every global-quiescence observation; mint/consume accounting per
+waiter set (the Sequencing item-7 counters, now load-bearing); the
+regression gate is the existing sim configurations that produced the quiet
+wedge (~1/12 on the filtered loop, ~1/100 combined on the x8 loop) running
+clean in large `-race` batches, with `hunt_quiet.sh` retained as the
+capture harness. rdvq black-box suite: bank-then-immediate-Wait, N wakes
+wake N sequential waiters, non-nil `missFn` never banks, decline leaves
+balance, NotifyAll balance-neutrality; plus a rapid property test asserting
+no Wait blocks while the balance is positive.
+
+**The completed model** (fold into `docs/notification-conservation.md` at
+build): every delivery endpoint is total — mode-directed attendants
+(reserved resources), worker-minting `missFn` (worker-backed queues), the
+balance (waiter sets). Nothing anywhere drops a token.
+
+**Rejected en route:** the sticky bit (under-wakes concurrent pumpers);
+`NotifyAll`-clears-balance (terminal-only argument globalized); consuming
+the balance before `confirmFn` (bypasses the contracted veto and the
+`Blocking()` once-only sequencing); consuming on `confirmFn` decline
+(unprovable at the primitive level).

@@ -1,5 +1,33 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► TOKEN BUFFER SETTLED — THE WAITER-SET BALANCE (2026-07-26, with PN;
+reservation agenda item 6, the LAST open item — the reservation design
+conversation is COMPLETE. Record: conservation-rework.md §"Amendment
+(2026-07-26): the waiter-set balance"; NOT built.) SHAPE: rdvq.Waiters gains
+a BALANCE (counter of banked wakes); Notify becomes TOTAL — wake one, on a
+MISS run missFn if provided (the spawn arm; worker-minting queues never
+bank), else bank. Zero workq changes — Accepted.relay's wedge (diagnosis 6's
+quiet wedge: relay-attendant token noop-dropped into an empty waiter set,
+waiters.go:124-131) closes inside the primitive. COUNTER NOT BIT (PN:
+pumping may be concurrent — N banked wakes must abort N parks; a bit
+serializes ready work onto one pumper). Wait path: register → confirmFn →
+try-consume → block; consume = received wake, sweep rides ExecuteOrWait's
+loop; confirmFn decline leaves the balance (one bounded extra spin).
+NotifyAll BALANCE-NEUTRAL (mid-life clear would destroy live banked wakes);
+lifecycle handled at waveImpl.Reset (zeroes balance, single-owner quiescent);
+balance>0 at Done = legitimate staleness. Invariant (checkable): "balance>0 ∧
+waiter parked" never stable. VOCABULARY: fallback → missFn ("miss" joins the
+attempt-found-nothing family; the balance is what makes a miss not a missed
+wakeup); rejected: underflowFn (side-ambiguous), unansweredFn, shortfallFn,
+surplusFn. VERIFICATION: never-negative + post-Reset-zero asserts,
+idle-point invariant probe, mint/consume accounting (sequencing item 7 now
+load-bearing), regression = the quiet-wedge sim configs (~1/12 filtered,
+~1/100 x8) clean in large -race batches, rdvq black-box + rapid suite.
+SUPERSEDES conservation-rework seam 4's decline arm (no conserved walk to
+rejoin under mode-directed delivery). NEXT per the 07-22 sequencing: the
+phase-2 DIRECTED-DELIVERY design conversation, or start building phase 1
+(reservation model + lazy forest + balance).**
+
 **►►► SEVERABILITY SETTLED — LAZY FOREST (2026-07-23..25, turn-by-turn with
 PN; spec: docs/plan/forest-severability.md, NOT built; vocabulary pass
 2026-07-26). TERMINOLOGY SETTLED 2026-07-26: the forest object is an ACCOUNT

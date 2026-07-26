@@ -8,7 +8,7 @@
 successor from its body context and exits) pins O(generations) `ctxMeta`s: the
 live generation's meta transitively holds every ancestor meta back to the
 origin, all freed in one iterative `unrefMeta` cascade only when the last
-generation completes. Happy (uncontended) relays included — no permit nodes
+generation completes. Happy (uncontended) relays included — no permit accounts
 involved. Invisible to `TestCtxMetaConservation` (the hook balances at
 quiescence, after the cascade has already run).
 
@@ -16,7 +16,7 @@ quiescence, after the cascade has already run).
 (`docs/decisions/ctxmeta-parent-refcount.md`). Before it, `borrowBodyContext`
 severed `parent` at async boundaries — relay chains could not form; the sever
 was quietly doing the same bounding job on the meta chain that the old
-wave-node conflation did on the permit forest. The fix removed the sever's
+wave-level cache conflation did on the permit forest. The fix removed the sever's
 lifetime role (keeping only its isolation role, `permitRoot`) to close the
 `borrowSrcCtx` use-after-free — trading a ~1/400 race for an unbounded pin
 under this one workload shape.
@@ -33,13 +33,31 @@ boundaries.
 from bounded sources — cancellation and deadlines (a submitter's ctx deadline
 applying to the body is a user-visible contract today), flow riders (already
 copied pointers with their own refs), and the body's own meta. Touches the
-07-08 decision record, the driver-link tracing plans (which wanted the
+07-08 decision record, the "driver-link" tracing plans (which wanted the
 walkable chain), and ctxpool descent semantics.
 
 **Consequence elsewhere:** under `docs/plan/forest-severability.md`, permit
-nodes are memory-backstopped by a meta-held lifetime ref, so contended relays'
-nodes currently ride this same curve. Fixing the meta chain improves the node
-memory curve with zero changes to the forest design.
+accounts are memory-backstopped by a meta-held lifetime ref, so contended
+relays' accounts currently ride this same curve. Fixing the meta chain
+improves the account memory curve with zero changes to the forest design.
+
+---
+
+# Scheduled Submits (2026-07-26) — FEATURE CONSIDERATION, needs design
+
+Allow a Submit to be scheduled for a future time rather than admitted
+immediately. Machinery candidates exist: the workq timed/due path and
+`internal/delayq` already serve deferred flushes on the scheduler queue
+(spawn-capable, so due-time wakes conserve). Design questions to work
+through: where gating happens (admission gate at schedule time vs at due
+time — presumably due time, so a scheduled item is not yet a registered
+demand); backpressure semantics (Submit's blocking contract moves to the
+due-time worker); wave lifecycle (does a scheduled-not-yet-due submit pin
+the wave Open, and what do Close/CloseAndSkimAll/cancellation do with it);
+context semantics (submitter ctx cancellation/deadline before due time —
+note this holds the dispatch meta pinned for the delay, interacting with
+"Meta-chain relay pinning" above); API shape (attributive `With*` config on
+the op builder per naming conventions).
 
 ---
 

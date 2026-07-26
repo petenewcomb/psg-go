@@ -1,31 +1,36 @@
 # PSG-Go Combiner Branch Working Notes
 
 **►►► SEVERABILITY SETTLED — LAZY FOREST (2026-07-23..25, turn-by-turn with
-PN; spec: docs/plan/forest-severability.md, NOT built). SUPERSEDES teardown
-item 5's lock-free-compression choice (option 1) and the restructure block's
-node-per-admission ("cost accepted" REVOKED). SHAPE: nodes materialize ONLY at
-discoverability need — T1 park-while-holding-units, T2 postponement; blocking
-claim DERIVED (private reservations can't be lent against, so a first claim
-never blocks); prefix materialization over the meta ancestry (refcounted,
-pinned — ctxmeta.go:43-58) closes the retroactive-ancestor gap; per-meta node
-slot with single-transition CAS (empty→node|tombstone), exit tombstones — ONE
-uncontended CAS per body exit is the design's entire hot-path cost. ALL forest
-structure under p.mu (reachable-implies-pinned + frozen liveness make walks
-guard-free); lock-free surface = happy-claim parent load + slot CAS + latch
-read + refcounts. parent==nil ENCODES ancestry-dead (latch stays two-state);
-root-reaching walks sever dead intermediates under mu, leaving them meta-ref'd
-only. Refs: meta→node LIFETIME ref (armed ref handed through the slot) +
+PN; spec: docs/plan/forest-severability.md, NOT built; vocabulary pass
+2026-07-26). TERMINOLOGY SETTLED 2026-07-26: the forest object is an ACCOUNT
+(Cache's successor name — "node" ambiguous across dll/nbcq/ctxpool/riders,
+"slot" retired 07-16); an account is OPEN until settlement CLOSES it
+(terminal flag); the meta's per-admission word is the ACCOUNT WORD
+(unopened→account|never-opened); nil parent = ANCESTRY-CLOSED. SUPERSEDES
+teardown item 5's lock-free-compression choice (option 1) and the restructure
+block's eager account-per-admission ("cost accepted" REVOKED). SHAPE: accounts
+open ONLY at discoverability need — T1 park-while-holding-units, T2
+postponement; blocking claim DERIVED (private reservations can't be lent
+against, so a first claim never blocks); prefix materialization over the meta
+ancestry (refcounted, pinned — ctxmeta.go:43-58) closes the
+retroactive-ancestor gap; account-word single-transition CAS, exit marks
+never-opened — ONE uncontended CAS per body exit is the design's entire
+hot-path cost. ALL forest structure under p.mu (reachable-implies-pinned +
+frozen liveness make walks guard-free); lock-free surface = happy-claim
+parent load + account-word CAS + closed-flag read + refcounts. Root-reaching
+walks sever closed intermediates under mu, leaving them meta-ref'd only.
+Refs: meta→account LIFETIME ref (armed ref handed through the account word) +
 child edges (mu-managed); NO gen-counted handles anywhere; meta-to-meta chain
-UNTOUCHED. Fully happy lineages (incl. happy relays) create no nodes, take no
-mutex — the relay growth law mostly evaporates rather than compressing away.
-DISCOVERED en route: the 07-08 ctxmeta parent-refcount fix made fire-and-
-forget relays pin O(generations) metas (the async-borrow sever used to bound
-this; ctxpool context descent forces lifetime refs) — recorded as its own
-design work item in TODO.md ("Meta-chain relay pinning"); node memory rides
-that curve via the meta-held ref and improves for free when it's fixed.
+UNTOUCHED. Fully happy lineages (incl. happy relays) open no accounts, take
+no mutex — the relay growth law mostly evaporates rather than compressing
+away. DISCOVERED en route: the 07-08 ctxmeta parent-refcount fix made fire-
+and-forget relays pin O(generations) metas (the async-borrow sever used to
+bound this; ctxpool context descent forces lifetime refs) — recorded as its
+own design work item in TODO.md ("Meta-chain relay pinning"); account memory
+rides that curve via the meta-held ref and improves for free when it's fixed.
 STILL OPEN from the reservation agenda: queue token buffer (item 6); spec's
-build-time seams (slot per-pool layout, happy-load placement) listed in the
-plan's Open points.**
+build-time seams (account-word per-pool layout, happy-load placement) listed
+in the plan's Open points.**
 
 **►►► TEARDOWN SETTLEMENT — CONCLUDED (agenda item 5 of the reservation
 design; 2026-07-23, all seven items settled with PN). AGENDA: (1) walk-away

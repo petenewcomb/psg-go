@@ -2,13 +2,19 @@
 
 ---
 
-# Meta-chain relay pinning (2026-07-25) — DESIGN WORK ITEM, needs its own session
+# Meta-chain relay pinning (2026-07-25) — DESIGN SETTLED 2026-07-26, needs build
 
-**The law:** a fire-and-forget generational relay (each body dispatches its
-successor from its body context and exits) pins O(generations) `ctxMeta`s: the
+**Record: `docs/plan/meta-chain.md`** (the construction rule — pooled
+children always build on their user base, never stack; exit-splice with the
+greedy shared skip test; the step protocol for async walkers; accounting
+table and verification obligations). The item text below is the original
+problem statement, kept for context.
+
+**The law:** a fire-and-forget relay (each body dispatches its
+successor from its body context and exits) pins O(relay length) `ctxMeta`s: the
 live generation's meta transitively holds every ancestor meta back to the
 origin, all freed in one iterative `unrefMeta` cascade only when the last
-generation completes. Happy (uncontended) relays included — no permit accounts
+hop completes. Happy (uncontended) relays included — no permit accounts
 involved. Invisible to `TestCtxMetaConservation` (the hook balances at
 quiescence, after the cascade has already run).
 

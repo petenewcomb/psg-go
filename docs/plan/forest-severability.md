@@ -22,9 +22,9 @@ structure/ledger mutex.
 
 The body-1:1 restructure gave every admission its own account, chained by
 submission ancestry. That exposed a growth law the old wave-level conflation
-had quietly bounded: in a generational relay — each body completes by
+had quietly bounded: in a fire-and-forget relay — each body completes by
 dispatching its successor and exiting — the successor's account pins its
-dead dispatcher's account, one per generation, unbounded. The first settled
+dead dispatcher's account, one per hop, unbounded. The first settled
 fix (teardown item 5, option 1) was lock-free path compression: a terminal
 closed flag, always-CAS parent pointers, and splice-past-the-closed at
 account creation and at each claim.
@@ -91,7 +91,7 @@ account).
 Two consequences worth stating as design facts: accounts open only on an
 already-blocking path (both triggers fire on the way into a park or
 postponement — the cost hides behind an imminent block); and a fully happy
-lineage — including a fully happy generational relay — opens no accounts,
+lineage — including a fully happy relay — opens no accounts,
 takes no `p.mu`, and closes nothing. The relay growth law largely evaporates
 rather than being compressed away.
 
@@ -116,7 +116,7 @@ become a lender. The invariant is then preserved exactly: any ancestor that
 could ever lend to me was live at my opening and is on my chain.
 
 Rejected: *dispatchers always open* (kills the gap but forfeits the
-happy-relay win — an account and a closing exit per generation again).
+happy-relay win — an account and a closing exit per hop again).
 
 ## The account word
 
@@ -227,7 +227,7 @@ through the claimant's own edge chain.
 **Scoping decision (explicit):** meta-to-meta chain lifetime is *out of
 scope*. Child metas hold parent metas for their lifetime (the 2026-07-08
 parent-refcount contract, forced by ctxpool context descent), so a
-fire-and-forget relay pins O(generations) metas until its final cascade —
+fire-and-forget relay pins O(relay length) metas until its final cascade —
 and contended relays' accounts ride that curve through ref kind 1. This
 design is strictly no worse than the eager forest on that axis and strictly
 simpler than any early-release variant; the meta-chain fix is its own work
@@ -259,7 +259,7 @@ Sim checkers (the real gate, per DEVELOPMENT.md's `-race` batch rule):
 
 - the per-pool quiescence ledger: reserved/lent/claimants/loans-outstanding
   all zero at episode end;
-- **chain-boundedness under a generational-relay workload**: live chain
+- **chain-boundedness under a relay workload**: live chain
   length stays O(live ancestry) — under this design the bound is enforced by
   splice-at-claim plus sever-at-root rather than lock-free halving, and the
   relay case additionally asserts near-zero account opening;

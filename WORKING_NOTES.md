@@ -1,5 +1,60 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► META-CHAIN SESSION CONCLUDED (2026-07-26, with PN; the TODO
+"Meta-chain relay pinning" design session — ALL SIX ITEMS SETTLED; record:
+docs/plan/meta-chain.md; TODO item updated to needs-build. Items 4-6 beyond
+the block below: ACCOUNTING — clean relays O(1) live metas (live hop + one
+dead, eaten greedily at next exit-splice); fan-out ≤1 dead dispatcher meta
+per live child-set; interleaved relays stay O(relay length) with LIFETIME
+pins (early release proven UNSOUND — nested delegation needs the transitive
+wrapper chain), excused by Go-parity: the user's own ctx chain is already
+O(relay length), ours rides it at a constant factor. THE LAW: the framework
+never adds a per-hop growth law the user didn't already create. GREEDY
+SPLICE confirmed (PN): exit-splice eats the whole dead prefix to the nearest
+keeper; skip test SHARED with prefix materialization (skip never-opened +
+account-closed; stop at unopened-live or open account); search is ref-free
+(transitive pins + dead-edge finality), one AddRef + one release, iterative
+cascade; lock-free where the account splice has p.mu — single-writer +
+finality do the mutex's work. SEMANTIC EDGES: dissolved by construction
+(delegation reaches the same user content); residual = build-time audit
+list. VERIFICATION: ctxpool-flatness assert; expected-value edge stores;
+ctxMetaAllocHook + ctxpool HIGH-WATER marks (peak-live is the observable —
+end-state balance was always blind); borrowSrcCtx regression both
+directions (clean case now asserts correctness AFTER source recycle);
+semantics-parity tests; relay sim workload (shared with the forest
+chain-boundedness checker) with contention onset at random hops racing the
+step protocol, large -race batches.
+ITEMS 1+2 SETTLED — THE CONSTRUCTION RULE: a pooled ctx child is ALWAYS
+built on the nearest non-framework ancestor (its "user base"); detection =
+srcCtx == srcMeta.selfCtx (clean pass-through) vs user-derived srcCtx (build
+on it as the base). Framework wrappers contribute only their meta stamp to
+the ctx chain (nearest-wins reads); parentWaves/riders/ancestry all travel
+META-side, so skipping our wrappers loses nothing. CONSEQUENCES: pooled
+children never stack (ctxpool tree depth 1 — debug assert "a pooled child's
+parent is never our own wrapper"); clean relay ctx chain = child → user ctx
+directly, ZERO meta refs needed for ctx safety; interleaved user derivations
+pin ONE stamped meta below the base, never transitively. FLOWS accounted:
+WithFlow wrappers skip like any framework wrapper (riders travel via
+meta-copy + async dispatch-time capture refs); flush/fire stash sites =
+user base of the LAST accumulate's drive ctx (aligned with severed path
+riders / inst.enclosing; heads the verification list for no-cancel-wrapper-
+skipped); flowBoundaryAboveWave is sync ⇒ unaffected.
+ITEM 3 SETTLED — EXIT-SPLICE: ctx decoupling alone fixes nothing (refs still
+chain); the release policy is SPLICE-TO-NEAREST-LIVE AT OWNER'S EXIT (after
+the account-word CAS): parent dead ⇒ AddRef nearest live ancestor (or nil),
+swing edge, release old parent, unrefMeta cascade frees the segment. SINGLE
+WRITER PER EDGE EVER (owner, once, at exit — no observer severs). Relay:
+O(1) live metas (live hop + one dead hop). Live body's dead-prefix residue
+bounded by its own peak ancestry, cleaned at its exit; structured trees
+never splice (children exit first — never was the leak). PRICE: async
+meta-chain walkers (prefix materialization; future driver-link tracing)
+adopt the STEP PROTOCOL — read edge → TryAddRef target (RefCounter has it) →
+re-read edge (unchanged ⇒ right incarnation; changed/nil ⇒ retry higher or
+stop); sync walkers unchanged (open-scope pins); walk liveness test = the
+account word (no new meta state). VOCABULARY (swept through spec/TODO/recent
+blocks): "generation" reserved for omnipool's recycle counter; ancestry
+sense = RELAY / HOP / RELAY LENGTH.**
+
 **►►► TOKEN BUFFER SETTLED — THE WAITER-SET BALANCE (2026-07-26, with PN;
 reservation agenda item 6, the LAST open item — the reservation design
 conversation is COMPLETE. Record: conservation-rework.md §"Amendment
@@ -52,7 +107,7 @@ child edges (mu-managed); NO gen-counted handles anywhere; meta-to-meta chain
 UNTOUCHED. Fully happy lineages (incl. happy relays) open no accounts, take
 no mutex — the relay growth law mostly evaporates rather than compressing
 away. DISCOVERED en route: the 07-08 ctxmeta parent-refcount fix made fire-
-and-forget relays pin O(generations) metas (the async-borrow sever used to
+and-forget relays pin O(relay length) metas (the async-borrow sever used to
 bound this; ctxpool context descent forces lifetime refs) — recorded as its
 own design work item in TODO.md ("Meta-chain relay pinning"); account memory
 rides that curve via the meta-held ref and improves for free when it's fixed.

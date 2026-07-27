@@ -91,3 +91,12 @@ See `notification-conservation.md` for the model these terms belong to.
   (`Skim`→`Pump`, `SkimAll`→`Drain`, `CloseAndSkimAll`→`CloseAndDrain`): a
   stroke may run any pending item, not only a result handler, so "skim"
   over-promised. The **Skimmer** op and its handlers keep the name.
+- **owner (of units or a reservation)** — retired 2026-07-26 in favor of
+  **holder**: the party a reservation belongs to, a parked body or a
+  registered demand. What "ownership" meant survives as recall priority
+  (`plan/directed-delivery.md`).
+- **bank / banked** — unendorsed coinage swept 2026-07-26. Deliveries
+  **fill** reservations and drains empty them; the waiter-set balance counts
+  **missed notifications** (`plan/conservation-rework.md` §Amendment).
+- **earmark** — retired 2026-07-26: a claimant's partially repaid units are
+  simply its **reservation**; there is no separate concept.

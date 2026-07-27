@@ -1,5 +1,58 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► DIRECTED DELIVERY SETTLED — RESERVATION PHASE 2 (2026-07-26, with PN;
+record: docs/plan/directed-delivery.md, NOT built; the reservation design is
+COMPLETE end to end). DELIVERY ORDER: od excess home → CLAIMANT QUEUE
+(repayment pool-scoped ALWAYS — chain repayment, root-lender hint, root-first
+rationale RETIRED; fungibility + no pairwise debt; every receivable ends by
+claim or departure abandonment; claim liveness STRENGTHENS: front claimant
+repaid by anyone's release) → DEMAND QUEUE (arrival order) → pot. SPILL: fill
+the front-most shortfall, continue past satisfied entries; POT-EMPTY
+INVARIANT (pot>0 ⇒ no shortfall in either queue); releases touch the Resource
+only for residue (otherwise ledger transfers under p.mu). ANCHOR = head-most
+unsatisfied demand or nil — spill target + drain entry + barrier gate (fast
+path gated iff a shortfall exists); demand queue front-loaded at rest (modulo
+arrival races + in-subtree borrows); claimant queue NEVER front-loaded
+(arrivals carry their unlent residue). WAKE = COMPLETION SIGNAL (reserve-side
+retry cannot miss absent an intervening drain); start order decouples from
+arrival order (a satisfied front no longer delays successors). CLAIM-ONLY
+RETIREMENT: the claim retires the demand, uniformly (executor bodies, funnel
+accumulates, future inline-gated work); demand queue = registered admissions
+not yet running / claimant queue = blocked at the run boundary / inUse =
+running — exact partition; SUPERSEDES verification-pass item-1 vacuity (the
+entry IS the pending-claim ledger state; drain-vs-claim collision handled by
+claimant promotion, rare by ordering, last-resort by discipline). DRAIN
+DISCIPLINE (borrow = recall = ONE mechanism): beneficiary-relative service
+order (claimant queue then demand queue, front→tail; parked bodies join at
+tail on return); behind-sources drain freely deepest-first (demands
+tail-first → parked bodies → junior claimants tail-first), ahead-sources
+last resort (nearest-front last); NO exclusions — claimant protection is
+delivery order, not a rule; head claimant's recall = the discipline with
+nothing ahead. CLAIM-GATE PROTECTIONS RETIRED: per-account claimant counters
+(self→root), refuse-new-loans freeze, account-targeted wake scan; surviving =
+claimant queue + one pool-level waiting-claimants guard; convergence (front
+claimant repaid by every release) CHECKED via sim mint/consume accounting.
+REVOCABILITY GENERALIZED: all backing of a not-yet-started admission is
+revocable, however funded. RESOURCE TAXONOMY:
+HoldableResource{TryAcquireUpTo;Release}; OverdraftResource{Holdable;
+Overdraft}; EphemeralResource{TryAcquire} — an ephemeral pool degenerates to
+an admission gate (no reservations/lending/claimants/forest); re-drive design
+DEFERRED (sketch: TryAcquire returns a don't-retry-until time.Time).
+TryAcquireUpTo subsumes the happy path (a partial take is the registering
+front's initial reservation); best practice: single atomic min(free,n) draw.
+CONTINGENCY RE-MARKS: the skimmer WithLimits prohibition
+(limiter-suspend-resume.md:404) and flush-unlimited are OLD-MODEL-CONTINGENT
+(episodes + reservation lending cover gated drain work — funnel bodies are
+the existing proof); revisit items in TODO ("Gated drain-side ops").
+VOCABULARY: HOLDER (owner retired), RESERVATION (bank retired — my coinage,
+corrected), MISSED NOTIFICATIONS (banked-wakes coinage corrected in
+conservation-rework §Amendment and the block below), earmark retired (= the
+claimant's reservation); glossary Retired-terms updated now, full glossary
+reconciliation at build (its Notifications section still teaches token
+conservation). OPEN: barrier-exemption classes (exemptFromBarrier,
+permits.go:813) restated against the anchor-as-queue-boundary; ephemeral
+re-drive. NEXT: build (phases 1+2 together), or the meta-chain build.**
+
 **►►► META-CHAIN SESSION CONCLUDED (2026-07-26, with PN; the TODO
 "Meta-chain relay pinning" design session — ALL SIX ITEMS SETTLED; record:
 docs/plan/meta-chain.md; TODO item updated to needs-build. Items 4-6 beyond
@@ -59,16 +112,16 @@ sense = RELAY / HOP / RELAY LENGTH.**
 reservation agenda item 6, the LAST open item — the reservation design
 conversation is COMPLETE. Record: conservation-rework.md §"Amendment
 (2026-07-26): the waiter-set balance"; NOT built.) SHAPE: rdvq.Waiters gains
-a BALANCE (counter of banked wakes); Notify becomes TOTAL — wake one, on a
-MISS run missFn if provided (the spawn arm; worker-minting queues never
-bank), else bank. Zero workq changes — Accepted.relay's wedge (diagnosis 6's
+a BALANCE (counter of missed notifications); Notify becomes TOTAL — wake
+one, on a MISS run missFn if provided (the spawn arm; worker-minting queues'
+misses never reach the balance), else record the miss. Zero workq changes — Accepted.relay's wedge (diagnosis 6's
 quiet wedge: relay-attendant token noop-dropped into an empty waiter set,
 waiters.go:124-131) closes inside the primitive. COUNTER NOT BIT (PN:
-pumping may be concurrent — N banked wakes must abort N parks; a bit
+pumping may be concurrent — N recorded misses must abort N parks; a bit
 serializes ready work onto one pumper). Wait path: register → confirmFn →
 try-consume → block; consume = received wake, sweep rides ExecuteOrWait's
 loop; confirmFn decline leaves the balance (one bounded extra spin).
-NotifyAll BALANCE-NEUTRAL (mid-life clear would destroy live banked wakes);
+NotifyAll BALANCE-NEUTRAL (mid-life clear would destroy live recorded misses);
 lifecycle handled at waveImpl.Reset (zeroes balance, single-owner quiescent);
 balance>0 at Done = legitimate staleness. Invariant (checkable): "balance>0 ∧
 waiter parked" never stable. VOCABULARY: fallback → missFn ("miss" joins the

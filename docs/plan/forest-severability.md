@@ -154,7 +154,10 @@ closed account's word and a never-opened marker identically (skip).
 forest, splicing, severing, closing, and every walk that traverses other
 bodies' accounts (the money walks: release routing by reclaim priority, the
 blocking claim's claimants increment/decrement, delivery to claimants,
-credit discovery and escalation). The complete lock-free surface is:
+credit discovery and escalation). [Amended 2026-07-26: directed delivery
+(`directed-delivery.md`) replaces the claimant increments/decrements and
+account-targeted delivery with the claimant queue and delivery order; the
+walks themselves remain mutex-owned.] The complete lock-free surface is:
 
 | operation | discipline |
 |---|---|
@@ -306,5 +309,9 @@ Sim checkers (the real gate, per DEVELOPMENT.md's `-race` batch rule):
 - **Placement of the happy-claim parent load** in the built claim path
   (relative to the existing Starting hook, accepted.go), and of the opening
   call on the two trigger paths.
-- The queue-level **token buffer** (reservation item 6) remains the last
-  unsettled item of the reservation agenda, independent of this plan.
+- The queue-level **token buffer** (reservation item 6) was settled
+  2026-07-26 (`conservation-rework.md` §Amendment — the missed-notification
+  balance), and directed delivery (phase 2, `directed-delivery.md`) settled
+  the same day, completing the reservation agenda. That plan's "What this
+  retires" lists the pieces of this spec it supersedes (the per-account
+  claimant counters and account-targeted delivery).

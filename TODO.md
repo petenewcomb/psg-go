@@ -2,6 +2,32 @@
 
 ---
 
+# Directed delivery — reservation model phase 2 (2026-07-26) — DESIGN SETTLED, needs build
+
+**Record: `docs/plan/directed-delivery.md`** (vocabulary, delivery order,
+spill + anchor, claim-only retirement, drain discipline, Resource taxonomy,
+verification obligations). Settles the last open piece of the reservation
+design — the agenda is complete end to end. Phase-1 records:
+`docs/plan/forest-severability.md` and `docs/plan/conservation-rework.md`
+(+ §Amendment). Build covers phases 1 and 2 together; the phase-1 details
+this supersedes (chain repayment, the root-lender hint, the claim-gate
+freeze machinery) are listed in the plan's "What this retires."
+
+---
+
+# Gated drain-side ops (2026-07-26) — FEATURE CONSIDERATION, unblocked
+
+Directed delivery removes the structural obstacle to permit-gating
+drain-side work: episodes and reservation lending cover the deadlock cycle
+that forced the old prohibitions (funnel bodies are the existing proof),
+and claim-only retirement serves inline execution on the pumping goroutine.
+Revisit together, as one family: the Skimmer `WithLimits` prohibition
+(`docs/limiter-suspend-resume.md:404`, now re-marked contingent rather than
+axiomatic), limits for funnel flushes ("flush unlimited"), and D3's funnel
+multi-limiter unification (below).
+
+---
+
 # Meta-chain relay pinning (2026-07-25) — DESIGN SETTLED 2026-07-26, needs build
 
 **Record: `docs/plan/meta-chain.md`** (the construction rule — pooled

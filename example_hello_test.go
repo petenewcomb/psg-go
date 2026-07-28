@@ -1,7 +1,7 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
@@ -9,35 +9,38 @@ import (
 	"strings"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	// Superfluous alias needed to work around
+	// https://github.com/golang/go/issues/12794
+	"github.com/petenewcomb/streampool"
 )
 
-func newTask(s string) psg.TaskFunc[string] {
-	return func(context.Context) (string, error) {
-		time.Sleep(1 * time.Millisecond)
-		return s, nil
-	}
-}
-
-// "Hello world" example that uses psg to run a couple of tasks and gather their
+// "Hello world" example that uses psg to run a couple of tasks and skim their
 // results.
 //
-//nolint:errcheck
+//nolint:errcheck,gosec // concise example code for readme
 func Example_hello() {
 	ctx := context.Background()
-	pool := psg.NewPool(2)
-	job := psg.NewJob(ctx, pool)
-	defer job.CancelAndWait()
+	wave := streampool.NewWave()
 
 	var results []string
-	gather := func(ctx context.Context, result string, err error) error {
-		results = append(results, result)
-		return nil
+	skimmer := streampool.NewFnSkimmer(
+		func(ctx context.Context, result string, err error) error {
+			results = append(results, result)
+			return nil
+		},
+	)
+
+	// Bind a string to a task that submits it to the skimmer after a short delay.
+	newRunner := func(s string) streampool.TaskLauncher {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
+			time.Sleep(1 * time.Millisecond)
+			return skimmer.Submit(ctx, s)
+		})
 	}
 
-	psg.Scatter(ctx, pool, newTask("Hello"), gather)
-	psg.Scatter(ctx, pool, newTask("world!"), gather)
+	newRunner("Hello").In(wave).Start(ctx)
+	newRunner("world!").In(wave).Start(ctx)
 
-	job.CloseAndGatherAll(ctx)
+	wave.CloseAndSkimAll(ctx)
 	fmt.Println(strings.Join(results, " "))
 }

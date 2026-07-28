@@ -1,0 +1,82 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+package workq
+
+import (
+	"context"
+	"fmt"
+	"sync/atomic"
+)
+
+// TODO: update
+// WorkFunc represents a work item that will execute immediately or provide
+// notification for later retry. If ex.Starting is nil, the work function is
+// being abandoned and must release any acquired resources and exit without
+// executing its work. Otherwise, the work function must call ex.Starting before
+// starting execution to confirm it will execute, and must not call ex.Starting
+// if it cannot execute. If not executing immediately and ex.AddToListeners is not
+// nil, it must call ex.AddToListeners to register for notification when execution
+// should be retried (e.g., when resources become available).
+//
+// IMPORTANT: After calling ex.AddToListeners the work function must re-check the
+// condition that caused it to not execute and execute anyway if the condition
+// allows. This avoids a race in which the condition becomes true between the
+// initial check and the registration of the ReadyFn.
+type WorkFunc func(context.Context, Execution) error
+
+type Work interface {
+	ID() WorkID
+	Group() GroupID
+	Execute(context.Context, Execution) error
+
+	// Free is called exactly once when this Work is no longer needed. After
+	// the call to Free is initiated, no further access to the Work will be
+	// attempted. This allows Free to deallocate or pool resources associated
+	// with the Work, including the Work itself.
+	Free()
+}
+
+var workIDCounter atomic.Int64
+
+type WorkID int64
+type GroupID int64
+
+const InvalidWorkID = WorkID(0)
+const InvalidGroupID = GroupID(0)
+
+func NewWorkID() WorkID {
+	return WorkID(workIDCounter.Add(1))
+}
+
+func NewGroupID() GroupID {
+	return GroupID(workIDCounter.Add(1))
+}
+
+type WorkItem struct {
+	id    WorkID
+	group GroupID
+}
+
+func (wi *WorkItem) Init(group GroupID) {
+	wi.id = NewWorkID()
+	if group <= InvalidGroupID {
+		panic("must supply valid group ID")
+	}
+	wi.group = group
+}
+
+func (wi *WorkItem) ID() WorkID {
+	return wi.id
+}
+
+func (wi *WorkItem) Group() GroupID {
+	return wi.group
+}
+
+func (wi *WorkItem) Free() {
+}
+
+func (wi *WorkItem) String() string {
+	return fmt.Sprintf("WorkItem#%d", wi.id)
+}

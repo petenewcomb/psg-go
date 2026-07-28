@@ -5,290 +5,802 @@ package sim
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
-	"github.com/stretchr/testify/require"
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/internal/timerp"
+	"github.com/petenewcomb/streampool/internal/trace"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func Run(t require.TestingT, ctx context.Context, plan *Plan, debug bool) (map[*Plan]*Result, error) {
-	pools := make([]*psg.Pool, len(plan.Config.ConcurrencyLimits))
-	for i, limit := range plan.Config.ConcurrencyLimits {
-		pools[i] = psg.NewPool(limit)
-	}
-	c := &controller{
-		Plan:                 plan,
-		Pools:                pools,
-		ConcurrencyByPool:    make([]atomic.Int64, len(pools)),
-		MaxConcurrencyByPool: make([]atomicMinMaxInt64, len(pools)),
-		ResultMap:            make(map[*Plan]*Result),
-		Debug:                debug,
-	}
-	c.MinScatterDelay.Store(math.MaxInt64)
-	c.MinGatherDelay.Store(math.MaxInt64)
-	return c.Run(t, ctx)
+// Run executes the given Plan against the psg API via an adapter that
+// translates the Plan's static structure onto Wave/Launcher/Skimmer/Funnel
+// shapes. Real data routing uses Submit/TrySubmit.
+func Run(ctx context.Context, t assert.TestingT, plan *Plan) error {
+	return run(ctx, t, plan, nil)
 }
 
+// run executes a Plan; parent is the enclosing controller when plan is a
+// Subjob's nested Plan (enables cross-subjob limiter inheritance), nil at
+// top level.
+func run(ctx context.Context, t assert.TestingT, plan *Plan, parent *controller) error {
+	traceRegion := "sim.Run"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "%v", plan)
+
+	// Fresh Wave; owns no ctx; it drains via CloseAndSkimAll (below in
+	// controller.Run). Cancellation rides the drive ctx.
+	wave := streampool.NewWave()
+
+	c := newController(plan, wave, parent)
+	if plan.CancelTriggerRunnerID >= 0 {
+		// Plan-baked mid-flight cancellation: the designated launcher's body
+		// (see newLauncher) calls c.cancel while holding its permit, with
+		// siblings likely blocked acquiring the shared limiter.
+		ctx, c.cancel = context.WithCancel(ctx)
+	}
+	return c.Run(ctx, t)
+}
+
+// newController builds the per-Plan runtime adapter state. parent is the
+// enclosing controller for a Subjob's nested Plan, nil at top level.
+func newController(plan *Plan, wave streampool.Wave, parent *controller) *controller {
+	return &controller{
+		Plan:                  plan,
+		Wave:                  wave,
+		parent:                parent,
+		TaskLimiters:          make([]streampool.Limiter, len(plan.TaskLimiters)),
+		TaskWeightedLimiters:  make([]streampool.WeightedLimiter, len(plan.TaskLimiters)),
+		FunnelLimiters:        make([]streampool.Limiter, len(plan.FunnelLimiters)),
+		Skimmers:              make([]*streampool.Skimmer[*simValue], len(plan.Skimmers)),
+		Funnels:               make([]*streampool.Funnel[*simValue], len(plan.Funnels)),
+		taskLimiterTrackers:   make([]*limiterTracker, len(plan.TaskLimiters)),
+		funnelLimiterTrackers: make([]*limiterTracker, len(plan.FunnelLimiters)),
+		skimmerInvocations:    make([]atomic.Int64, len(plan.Skimmers)),
+	}
+}
+
+// limiterTracker measures observed *active* concurrency for one Plan
+// limiter: bodies enter() at start and exit() at end, and additionally
+// exit()/enter() around driving a subwave — the span over which the
+// framework suspends the body's permit (docs/limiter-suspend-resume.md,
+// "Measuring concurrency under suspension"). Shared by pointer with
+// subjob controllers when the underlying limiter is inherited, so the
+// observed-max assertion covers the joint topology (split counters would
+// each check a subset and could miss a joint violation).
+type limiterTracker struct {
+	cur atomic.Int64
+	max atomicMaxInt64
+}
+
+// enter/exit take the body's permit weight (1 for a plain limiter), so the
+// tracker measures the max concurrent WEIGHT held — which the framework caps at
+// the ceiling exactly as it caps a plain count.
+func (lt *limiterTracker) enter(weight int64) {
+	lt.max.UpdateMax(lt.cur.Add(weight))
+}
+
+func (lt *limiterTracker) exit(weight int64) {
+	lt.cur.Add(-weight)
+}
+
+// activeLimit pairs one of a body's bound limiters with the weight it holds there. A
+// multi-limiter body carries several; the set is threaded down so a Subjob step can drop
+// (and restore) the body's contribution to EVERY bound limiter while it drives a subwave.
+type activeLimit struct {
+	tracker *limiterTracker
+	weight  int64
+}
+
+// simValue is the uniform value type that flows through all sim ops.
+// Carries minimal metadata for assertion-checking.
+type simValue struct {
+	OriginRunnerID int
+	DispatchTime   time.Time
+}
+
+// controller is the per-Plan runtime adapter state. Owns the psg API
+// objects backing the Plan's static vocabulary.
 type controller struct {
-	Plan                 *Plan
-	Pools                []*psg.Pool
-	ConcurrencyByPool    []atomic.Int64
-	MaxConcurrencyByPool []atomicMinMaxInt64
-	GatheredCount        atomic.Int64
-	ResultMapMutex       sync.Mutex
-	ResultMap            map[*Plan]*Result
-	StartTime            time.Time
-	MinScatterDelay      atomicMinMaxInt64
-	MinGatherDelay       atomicMinMaxInt64
-	Debug                bool
+	Plan           *Plan
+	Wave           streampool.Wave
+	TaskLimiters   []streampool.Limiter
+	FunnelLimiters []streampool.Limiter
+	// TaskWeightedLimiters[i] is non-nil iff TaskLimiters[i] is weighted; the
+	// launcher binds it via WithWeightLimits with a per-runner weigher. The
+	// plain TaskLimiters[i] slot is left zero for a weighted entry.
+	TaskWeightedLimiters []streampool.WeightedLimiter
+	Skimmers             []*streampool.Skimmer[*simValue]
+	Funnels              []*streampool.Funnel[*simValue]
+	// Launchers holds one streampool.TaskLauncher per Plan Launcher. The
+	// closure inside each runs the runner's Body Func, which Submits
+	// directly to downstream Skimmers/Funnels.
+	Launchers []streampool.TaskLauncher
+
+	limitersOnce sync.Once
+
+	// parent is the enclosing controller when this Plan runs as a
+	// Subjob; nil at top level. Read-only after construction; used by
+	// ensurePools to alias inherited limiters and trackers.
+	parent *controller
+
+	// cancel is non-nil only when this Plan is baked for mid-flight
+	// cancellation (Plan.CancelTriggerRunnerID >= 0); the trigger
+	// launcher's body invokes it. Idempotent (context.CancelFunc).
+	cancel context.CancelFunc
+
+	taskLimiterTrackers   []*limiterTracker
+	funnelLimiterTrackers []*limiterTracker
+	skimmerInvocations    []atomic.Int64
+	StartTime             time.Time
+
+	// flow is the flow-scope oracle state (internal/sim/flow.go); nil when
+	// this plan is unscoped and no ancestor expectation survives at entry.
+	flow *flowState
 }
 
-func (c *controller) Run(t require.TestingT, ctx context.Context) (map[*Plan]*Result, error) {
+func (c *controller) Run(ctx context.Context, t assert.TestingT) error {
+	// Flow-scope oracle setup: probe inherited expectations from the entry
+	// ctx (a flush-descended subjob sees severed values), then mint this
+	// plan's own scope identities when the plan is flow-scoped.
+	expects := flowExpectsForCtx(ctx, t, c.parent)
+	if c.Plan.Flow {
+		expects = append(expects, flowExpect{
+			key: streampool.NewFlowKey[int](),
+			val: c.Plan.ID,
+			tag: streampool.NewFlowTag(),
+		})
+	}
+	if len(expects) > 0 {
+		c.flow = &flowState{
+			expects:   expects,
+			own:       c.Plan.Flow,
+			stepsOnly: c.Plan.Flow && c.Plan.FlowSteps,
+			// The carrier conservation oracle holds only when every dispatched
+			// unit completes; plan-baked cancellation abandons units without
+			// running them, stranding the sim-side count.
+			carrierAssert: c.Plan.Flow && c.Plan.CancelTriggerRunnerID < 0,
+		}
+	}
+	return c.runWithFlowScope(ctx, t, func(ctx context.Context) error {
+		return c.runInner(ctx, t)
+	})
+}
+
+func (c *controller) runInner(ctx context.Context, t assert.TestingT) error {
+	traceRegion := "sim.controller.Run"
 	c.StartTime = time.Now()
-	c.debugf("%v starting %v", time.Since(c.StartTime), c.Plan)
 
-	job := psg.NewJob(ctx, c.Pools...)
-	defer job.CancelAndWait()
+	c.ensurePools()
 
-	for _, task := range c.Plan.RootTasks {
-		c.scatterTask(t, ctx, task)
+	// Construct Skimmers and Funnels against the Pool. Order matters:
+	// Funnels reference Skimmers (in body Submits), so Skimmers must
+	// exist first.
+	// Alternate explicit-wave (even idx) vs nil-wave (odd idx) to
+	// exercise both the bound-wave path and the nil-sentinel
+	// ctx-resolution path. Nil-wave ops resolve the dispatching wave
+	// from the ctx at Submit time (top-level ctx, or the worker-
+	// stamped ctx inside task / accumulate bodies).
+	for i, g := range c.Plan.Skimmers {
+		gp := g
+		idx := i
+		var w streampool.Wave
+		if i%2 == 0 {
+			w = c.Wave
+		}
+		skimmer := streampool.NewSkimmer(c.newSkimmerHandler(t, gp, idx)).In(w)
+		c.Skimmers[i] = &skimmer
+	}
+	for i, cmb := range c.Plan.Funnels {
+		cp := cmb
+		idx := i
+		var limits []streampool.Limiter
+		if len(cp.LimiterIndexes) > 0 {
+			limits = append(limits, c.FunnelLimiters[cp.LimiterIndexes[0]])
+		}
+		funnel := streampool.NewFunnel(c.Wave, c.newFunnelFactory(t, cp, idx)).WithLimits(limits...)
+		c.Funnels[i] = &funnel
+	}
+	// Construct Launchers after Funnels/Skimmers so the bodies can
+	// reference them via Submit. Launcher Bodies may StartTask other
+	// runners, but only after the entire array is populated (a runner's
+	// Body never runs during construction).
+	// Alternate explicit-wave (even idx) vs nil-wave (odd idx) for
+	// Launchers too — same rationale as the Skimmer construction
+	// above.
+	c.Launchers = make([]streampool.TaskLauncher, len(c.Plan.Launchers))
+	for i, runner := range c.Plan.Launchers {
+		c.Launchers[i] = c.newLauncher(t, runner, i%2 == 0)
 	}
 
-	chk := require.New(t)
-	err := job.CloseAndGatherAll(ctx)
-	overallDuration := time.Since(c.StartTime)
-	if ge, ok := err.(expectedGatherError); ok {
-		chk.True(ge.task.ReturnErrorFromGather)
+	// Execute top-level Steps. A steps-only flow scope wraps EXACTLY this
+	// loop: the scope exits with dispatched work still outstanding, so the
+	// follow-up fires asynchronously (the flowFireWork executor path) when
+	// the last carrier releases during the drain below.
+	chk := assert.New(t)
+	runSteps := func(ctx context.Context) error {
+		for i, step := range c.Plan.Steps {
+			trace.Logf(ctx, traceRegion, "%v step %d/%d: %T", c.Plan, i+1, len(c.Plan.Steps)+1, step)
+			c.executeStep(ctx, t, step)
+		}
+		return nil
+	}
+	if fs := c.flow; fs != nil && fs.own && fs.stepsOnly {
+		own := &fs.expects[len(fs.expects)-1]
+		err := streampool.WithFlow(ctx, runSteps,
+			own.key.Value(own.val),
+			own.tag.FollowUpFn(c.flowFollowUpFn(t)))
+		// runSteps and the oracle fn both return nil; an inline fire at scope
+		// exit (all work already complete) is legal and also error-free.
+		chk.NoErrorf(err, "steps-only flow scope returned an error (Plan#%d)", c.Plan.ID)
+		if fs.fires.Load() == 0 {
+			flowStepsAsyncFires.Add(1) // fire still pending at scope exit → async path
+		}
 	} else {
-		chk.NoError(err)
-	}
-	gatheredCount := c.GatheredCount.Load()
-	chk.Equal(int64(c.Plan.TaskCount), gatheredCount)
-
-	maxConcurrencyByPool := make([]int64, len(c.MaxConcurrencyByPool))
-	for i := range len(maxConcurrencyByPool) {
-		maxConcurrencyByPool[i] = c.MaxConcurrencyByPool[i].Load()
+		_ = runSteps(ctx)
 	}
 
-	c.addResultMap(t, map[*Plan]*Result{
-		c.Plan: {
-			MaxConcurrencyByPool: maxConcurrencyByPool,
-			OverallDuration:      overallDuration,
-		},
-	})
-	c.debugf("%v ended %v with min delays scatter=%v gather=%v", overallDuration, c.Plan,
-		time.Duration(c.MinScatterDelay.Load()), time.Duration(c.MinGatherDelay.Load()))
-	return c.ResultMap, nil
-}
-
-func (c *controller) addResultMap(t require.TestingT, rm map[*Plan]*Result) {
-	chk := require.New(t)
-	c.ResultMapMutex.Lock()
-	defer c.ResultMapMutex.Unlock()
-	for p, r := range rm {
-		chk.Nil(c.ResultMap[p])
-		c.ResultMap[p] = r
-	}
-}
-
-func (c *controller) scatterTask(t require.TestingT, ctx context.Context, task *Task) {
-	err := psg.Scatter(
-		ctx,
-		c.Pools[task.Pool],
-		c.newTaskFunc(task, &c.ConcurrencyByPool[task.Pool]),
-		c.newGatherFunc(t, task),
-	)
-	chk := require.New(t)
-	if ge, ok := err.(expectedGatherError); ok {
-		chk.True(ge.task.ReturnErrorFromGather)
-	} else {
-		chk.NoError(err)
-	}
-}
-
-type localT struct {
-	calls []func(require.TestingT)
-}
-
-func (lt *localT) Errorf(format string, args ...any) {
-	lt.calls = append(lt.calls, func(t require.TestingT) {
-		t.Errorf(format, args...)
-	})
-}
-
-func (lt *localT) FailNow() {
-	lt.calls = append(lt.calls, func(t require.TestingT) {
-		t.FailNow()
-	})
-	panic(lt)
-}
-
-func (lt *localT) DrainTo(t require.TestingT) {
-	for _, call := range lt.calls {
-		call(t)
-	}
-}
-
-func (lt *localT) Error() string {
-	return "localT passthrough error"
-}
-
-func (c *controller) newTaskFunc(task *Task, concurrency *atomic.Int64) psg.TaskFunc[*taskResult] {
-	lt := &localT{}
-	scatterTime := time.Now()
-	return func(ctx context.Context) (res *taskResult, err error) {
-		c.MinScatterDelay.UpdateMin(int64(time.Since(scatterTime)))
-
-		defer func() {
-			if r := recover(); r != nil {
-				if lt, ok := r.(*localT); ok {
-					err = lt
-				} else {
-					panic(r)
-				}
-			}
-		}()
-
-		chk := require.New(lt)
-
-		res = &taskResult{
-			Task:               task,
-			ConcurrencyAtStart: concurrency.Add(1),
-		}
-		c.debugf("%v starting %v on pool %d, concurrency now %d", time.Since(c.StartTime), task, task.Pool, res.ConcurrencyAtStart)
-		chk.Greater(res.ConcurrencyAtStart, int64(0))
-		defer func() {
-			res.ConcurrencyAfter = concurrency.Add(-1)
-			elapsedTime := time.Since(c.StartTime)
-			c.debugf("%v ended %v on pool %d, concurrency now %d", elapsedTime, task, task.Pool, res.ConcurrencyAfter)
-			chk.GreaterOrEqual(elapsedTime, task.PathDurationAtTaskEnd)
-			res.TaskEndTime = time.Now()
-		}()
-		for i, d := range task.SelfTimes {
-			if i > 0 {
-				subjobPlan := task.Subjobs[i-1]
-				resultMap, err := Run(lt, ctx, subjobPlan, c.Debug)
-				chk.NoError(err)
-				c.addResultMap(lt, resultMap)
-			}
-			select {
-			case <-time.After(d):
-			case <-ctx.Done():
-				return res, ctx.Err()
-			}
-		}
-		if task.ReturnErrorFromTask {
-			return res, fmt.Errorf("%v error", task)
-		} else {
-			return res, nil
-		}
-	}
-}
-
-func (c *controller) newGatherFunc(t require.TestingT, task *Task) psg.GatherFunc[*taskResult] {
-	chk := require.New(t)
-	return func(ctx context.Context, res *taskResult, err error) error {
-		c.MinGatherDelay.UpdateMin(int64(time.Since(res.TaskEndTime)))
-
-		if lt, ok := err.(*localT); ok {
-			lt.DrainTo(t)
-		} else if task.ReturnErrorFromTask {
-			chk.Error(err)
-		} else {
+	// Drain.
+	for {
+		err := c.Wave.CloseAndSkimAll(ctx)
+		if d := classify(err); d == dispRetry {
+			// Skimmer.Handle returned an error as expected.
+			continue
+		} else if d == dispFail {
 			chk.NoError(err)
 		}
-
-		pool := task.Pool
-		gatheredCount := c.GatheredCount.Add(1)
-
-		c.debugf("%v gathering %v, gathered count now %d", time.Since(c.StartTime), task, gatheredCount)
-
-		chk.LessOrEqual(gatheredCount, int64(c.Plan.TaskCount))
-		chk.Greater(res.ConcurrencyAtStart, int64(0))
-		chk.LessOrEqual(res.ConcurrencyAtStart, int64(c.Plan.Config.ConcurrencyLimits[pool]))
-		chk.GreaterOrEqual(res.ConcurrencyAfter, int64(0))
-		chk.Less(res.ConcurrencyAfter, int64(c.Plan.Config.ConcurrencyLimits[pool]))
-
-		c.MaxConcurrencyByPool[pool].UpdateMax(res.ConcurrencyAtStart)
-
-		for i, d := range task.GatherTimes {
-			if i > 0 {
-				child := task.Children[i-1]
-				c.scatterTask(t, ctx, child)
-			}
-			select {
-			case <-time.After(d):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+		break
+	}
+	if c.flow != nil {
+		c.flow.drained.Store(true)
+		if c.flow.own && c.flow.stepsOnly {
+			// The steps-only scope exited before the drain; its async fire is
+			// due now that the wave has drained (the wave keep-alive makes the
+			// drain wait for a dispatched fire; only the flush ctx's adopted
+			// refs can release just after the barrier — see assertFlowFired).
+			c.assertFlowFired(t)
 		}
+	}
 
-		if task.ReturnErrorFromGather {
-			return expectedGatherError{task}
+	// Per-Skimmer sink-invocation bounds.
+	for i, want := range c.Plan.MinSkimmerInvocations {
+		got := c.skimmerInvocations[i].Load()
+		chk.GreaterOrEqualf(got, int64(want),
+			"Plan#%d Skimmer#%d min invocations (got %d, want >=%d)",
+			c.Plan.ID, c.Plan.Skimmers[i].ID, got, want)
+	}
+	for i, want := range c.Plan.MaxSkimmerInvocations {
+		got := c.skimmerInvocations[i].Load()
+		chk.LessOrEqualf(got, int64(want),
+			"Plan#%d Skimmer#%d max invocations (got %d, want <=%d)",
+			c.Plan.ID, c.Plan.Skimmers[i].ID, got, want)
+	}
+	// Per-Limiter aggregate concurrency: observed max must not exceed
+	// configured permits. Inherited limiters are skipped — the tracker
+	// is shared with (and asserted by) the owning ancestor plan, whose
+	// run encloses this one.
+	for i, lim := range c.Plan.TaskLimiters {
+		if lim.InheritFromParent >= 0 {
+			continue
+		}
+		observed := c.taskLimiterTrackers[i].max.Load()
+		chk.LessOrEqualf(observed, int64(lim.Permits),
+			"TaskLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
+	}
+	for i, lim := range c.Plan.FunnelLimiters {
+		if lim.InheritFromParent >= 0 {
+			continue
+		}
+		observed := c.funnelLimiterTrackers[i].max.Load()
+		chk.LessOrEqualf(observed, int64(lim.Permits),
+			"FunnelLimiter#%d observed concurrency %d > permits %d", lim.ID, observed, lim.Permits)
+	}
+	// Path-duration lower bound: total elapsed wall-clock must be at
+	// least MaxPathDuration. Only enforced in Deterministic mode where
+	// SelfTime distributions are collapsed to their Med values; in
+	// probabilistic mode the per-invocation draws can come in below
+	// Med.
+	if c.Plan != nil && (c.Plan.MaxPathDuration > 0) {
+		elapsed := time.Since(c.StartTime)
+		chk.GreaterOrEqualf(elapsed, c.Plan.MaxPathDuration,
+			"elapsed %v < MaxPathDuration %v", elapsed, c.Plan.MaxPathDuration)
+	}
+
+	return nil
+}
+
+// ensurePools lazily constructs the streampool.Limiter and streampool.FunnelPool
+// instances backing the Plan's Limiters. One Limiter per
+// Plan.TaskLimiters and Plan.FunnelLimiters entry. A single
+// FunnelPool hosts all Funnels — per-Funnel concurrency is
+// enforced via the FunnelLimiters bound to each Funnel via
+// streampool.WithLimits.
+func (c *controller) ensurePools() {
+	c.limitersOnce.Do(func() {
+		for i, lim := range c.Plan.TaskLimiters {
+			if c.parent != nil && lim.InheritFromParent >= 0 {
+				// Shared limiter across the subjob boundary: alias the
+				// parent's streampool.Limiter AND its tracker so permits and the
+				// observed-max assertion both cover the joint topology.
+				c.TaskLimiters[i] = c.parent.TaskLimiters[lim.InheritFromParent]
+				c.TaskWeightedLimiters[i] = c.parent.TaskWeightedLimiters[lim.InheritFromParent]
+				c.taskLimiterTrackers[i] = c.parent.taskLimiterTrackers[lim.InheritFromParent]
+				continue
+			}
+			if lim.Weighted {
+				c.TaskWeightedLimiters[i] = streampool.NewWeightedSemaphore(lim.Permits)
+			} else {
+				c.TaskLimiters[i] = streampool.NewSemaphore(lim.Permits)
+			}
+			c.taskLimiterTrackers[i] = &limiterTracker{}
+		}
+		for i, lim := range c.Plan.FunnelLimiters {
+			if c.parent != nil && lim.InheritFromParent >= 0 {
+				c.FunnelLimiters[i] = c.parent.FunnelLimiters[lim.InheritFromParent]
+				c.funnelLimiterTrackers[i] = c.parent.funnelLimiterTrackers[lim.InheritFromParent]
+				continue
+			}
+			c.FunnelLimiters[i] = streampool.NewSemaphore(lim.Permits)
+			c.funnelLimiterTrackers[i] = &limiterTracker{}
+		}
+	})
+}
+
+// executeStep dispatches a top-level Step.
+func (c *controller) executeStep(ctx context.Context, t assert.TestingT, step Step) {
+	chk := assert.New(t)
+	switch s := step.(type) {
+	case StartTask:
+		c.startTask(ctx, t, s.RunnerIndex)
+	case Submit:
+		c.submitFresh(ctx, t, s)
+	case SelfTime:
+		// Top-level SelfTime is unusual but allowed; just sleep.
+		timer := timerp.Get()
+		defer timerp.Put(timer)
+		timerp.Reset(timer, c.drawDuration(s.Dist))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+	case Subjob:
+		c.runSubjob(ctx, t, s)
+	default:
+		chk.Fail(fmt.Sprintf("unknown Step type %T", step))
+	}
+}
+
+// runSubjob executes a Subjob step by spinning up a fresh streampool.Wave and
+// recursing into Run with the nested Plan. This exercises cross-wave
+// boundary code (a key race-coverage objective).
+func (c *controller) runSubjob(ctx context.Context, t assert.TestingT, s Subjob) {
+	if s.Plan == nil {
+		return
+	}
+	if !c.rollProb(s.Prob) {
+		return
+	}
+	err := run(ctx, t, s.Plan, c)
+	if classify(err) == dispFail {
+		assert.New(t).NoError(err)
+	}
+}
+
+// newLauncher constructs the streampool.TaskLauncher that backs a Plan
+// Launcher. The task body walks the Plan's Body Func; Submits go
+// directly to downstream sinks (Funnels/Skimmers) via Submit, and
+// StartTask is skipped because the current API forbids dispatching new
+// work from a task body.
+func (c *controller) newLauncher(t assert.TestingT, runner *Launcher, bindWave bool) streampool.TaskLauncher {
+	// Concurrency tracking: bump the TaskLimiter tracker on entry to the
+	// task body, decrement on exit; the tracker also rides down the Func
+	// walk so Subjob steps can drop the contribution while the body
+	// drives the subwave. Used by the per-Limiter max-concurrency
+	// assertion in Run.
+	// Bind every task limiter this runner draws (joint AND-composition), each with its
+	// own per-limiter weight and concurrency tracker.
+	actives := make([]activeLimit, 0, len(runner.LimiterIndexes))
+	var limits []streampool.Limiter
+	var wLimits []streampool.WeightLimiter[struct{}]
+	for k, limIdx := range runner.LimiterIndexes {
+		weight := 1 // hand-built plans (e.g. inherit_test) may omit LimiterWeights: plain, weight 1
+		if k < len(runner.LimiterWeights) {
+			weight = runner.LimiterWeights[k]
+		}
+		//nolint:gosec // G115: weight is a small positive plan value bounded by permits
+		actives = append(actives, activeLimit{tracker: c.taskLimiterTrackers[limIdx], weight: int64(weight)})
+		if wl := c.TaskWeightedLimiters[limIdx]; wl != nil {
+			w := weight // per-binding constant weigher over the void value
+			wLimits = append(wLimits, streampool.NewWeightLimiter(wl, func(struct{}) int { return w }))
 		} else {
-			return nil
+			limits = append(limits, c.TaskLimiters[limIdx])
 		}
 	}
+	body := streampool.NewTask(func(ctx context.Context) error {
+		// Carrier oracle: this body's unit was counted at startTask; it stops
+		// carrying the flow scope when the body completes (the framework's
+		// rider release strictly follows).
+		defer c.carrierAdd(-1)
+		for _, a := range actives {
+			a.tracker.enter(a.weight)
+		}
+		defer func() {
+			for _, a := range actives {
+				a.tracker.exit(a.weight)
+			}
+		}()
+		// Plan-baked structural cancellation trigger: this designated
+		// launcher's body cancels the subwave while holding its permit,
+		// with siblings likely blocked acquiring the shared limiter. The
+		// leak surfaces only when scheduling lands the cancel in a blocked
+		// acquire's grant window.
+		if c.cancel != nil && runner.ID == c.Plan.CancelTriggerRunnerID {
+			c.cancel()
+		}
+		c.assertFlowInBody(ctx, t, "launcher body")
+		v := &simValue{OriginRunnerID: runner.ID, DispatchTime: time.Now()}
+		if err := c.executeFuncInTask(ctx, t, runner.Body, v, actives); err != nil {
+			return err
+		}
+		if c.shouldReturnError(runner.Body) {
+			return ExpectedHandlerError{OpKind: "Launcher", OpID: runner.ID}
+		}
+		return nil
+	})
+	var w streampool.Wave
+	if bindWave {
+		w = c.Wave
+	}
+	return streampool.NewLauncher(body).WithLimits(limits...).WithWeightLimits(wLimits...).In(w)
 }
 
-func (c *controller) debugf(format string, args ...interface{}) {
-	if c.Debug {
-		fmt.Printf(format+"\n", args...)
+// disposition tells an op driver how to react to an error returned by a psg
+// operation.
+type disposition int
+
+const (
+	dispDone    disposition = iota // completed (err == nil)
+	dispRetry                      // injected handler error: work was Free'd, re-drive
+	dispAbandon                    // cancellation / wave teardown: stop without completing
+	dispFail                       // unexpected: fail the test
+)
+
+// classify maps an error from a psg operation to a driver disposition. It is
+// the single point that decides which errors the sim tolerates as expected
+// disruptions: injected handler errors (re-drive — the work was Free'd, not
+// queued) and cancellation / wave-done (abandon — the op legitimately did not
+// complete). Anything else is a real failure. dispAbandon is dormant until a
+// disruption (e.g. mid-run cancellation) is injected; absent that, these
+// errors never surface here.
+func classify(err error) disposition {
+	var expected ExpectedHandlerError
+	switch {
+	case err == nil:
+		return dispDone
+	case errors.As(err, &expected):
+		return dispRetry
+	case errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, streampool.ErrWaveDone):
+		return dispAbandon
+	default:
+		return dispFail
 	}
 }
 
-// Result represents the result of executing a simulated task.
-type taskResult struct {
-	Task               *Task
-	ConcurrencyAtStart int64
-	ConcurrencyAfter   int64
-	TaskEndTime        time.Time
+// startTask dispatches a Plan Launcher. The Launcher was pre-built
+// in Run(); Start can return an ExpectedHandlerError from internal
+// backpressure-yielding (a previously-queued sink handler returned an
+// injected error). In that case the work was Free()'d and NOT queued;
+// retry until Start either succeeds or returns a non-injected error.
+func (c *controller) startTask(ctx context.Context, t assert.TestingT, runnerIdx int) {
+	chk := assert.New(t)
+	runner := &c.Launchers[runnerIdx]
+	// Carrier oracle: the dispatched task carries the flow scope from here
+	// until its body completes (the body's own defer decrements). A retry
+	// keeps the count (the freed work never ran; the retry re-dispatches the
+	// same unit); a dispatch that ends any other way than success gives it
+	// back (no body will run).
+	c.carrierAdd(1)
+	for {
+		// Top-level dispatch binds the wave (a bare top-level ctx carries no ambient
+		// wave). Nil-wave launchers stay exercised for their in-body submits.
+		err := runner.In(c.Wave).Start(ctx)
+		d := classify(err)
+		if d == dispRetry {
+			continue
+		}
+		if d == dispFail {
+			chk.NoError(err)
+		}
+		if d != dispDone {
+			c.carrierAdd(-1)
+		}
+		return
+	}
 }
 
-type expectedGatherError struct {
-	task *Task
+// submitFresh handles a top-level Submit by constructing a fresh
+// simValue (no upstream context) and Submit-ing it to the target sink.
+func (c *controller) submitFresh(ctx context.Context, t assert.TestingT, s Submit) {
+	v := &simValue{DispatchTime: time.Now()}
+	c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
 }
 
-func (e expectedGatherError) Error() string {
-	return fmt.Sprintf("%v gather error", e.task)
+// submitTo routes a value into a Plan-level sink — a thin wrapper around
+// the op's Submit.
+// Retry on ExpectedHandlerError covers the case where Submit yields
+// for backpressure and a previously-queued sink handler returns an
+// injected error.
+func (c *controller) submitTo(
+	ctx context.Context, t assert.TestingT, kind SinkKind, idx int, v *simValue, valErr error,
+) {
+	chk := assert.New(t)
+	// Carrier oracle: the submitted item carries the flow scope from here until
+	// its skim handler completes (handler defer) or its funnel instance's flush
+	// body completes (per-instance count in newFunnelFactory). Retry keeps the
+	// count (the freed submit never queued; the loop re-submits the same item);
+	// any other non-success gives it back.
+	c.carrierAdd(1)
+	for {
+		var err error
+		switch kind {
+		case SinkFunnel:
+			err = c.Funnels[idx].SubmitResult(ctx, v, valErr)
+		case SinkSkimmer:
+			err = c.Skimmers[idx].SubmitResult(ctx, v, valErr)
+		default:
+			chk.Fail(fmt.Sprintf("unknown SinkKind %v", kind))
+			c.carrierAdd(-1)
+			return
+		}
+		d := classify(err)
+		if d == dispRetry {
+			continue
+		}
+		if d == dispFail {
+			chk.NoError(err)
+		}
+		if d != dispDone {
+			c.carrierAdd(-1)
+		}
+		return
+	}
 }
 
-type atomicMinMaxInt64 struct {
+// newSkimmerHandler builds the handler function for a Plan Skimmer —
+// walks its Handle Func, accounting invocations. Upstream errors
+// (valErr) are NOT propagated back; the streampool.Handler returns either nil or
+// its own injected ExpectedHandlerError:
+// errors flow alongside values into the handler for it to act on, but
+// the handler doesn't re-propagate them — that would short-circuit
+// the framework's drain and cause subsequent queued work to be lost.
+func (c *controller) newSkimmerHandler(t assert.TestingT, g *Skimmer, idx int) streampool.HandlerFunc[*simValue] {
+	return func(ctx context.Context, v *simValue, valErr error) error {
+		_ = valErr
+		_ = v
+		// Carrier oracle: one invocation consumes one submitted item (counted
+		// in submitTo); it stops carrying the flow scope when the handler
+		// completes (the framework's rider release strictly follows).
+		defer c.carrierAdd(-1)
+		c.skimmerInvocations[idx].Add(1)
+		c.assertFlowInBody(ctx, t, "skim handler")
+		// Skimmers are deliberately limiter-free (drain must stay
+		// permit-free — see docs/limiter-suspend-resume.md), so no
+		// tracker rides this walk.
+		if err := c.executeFunc(ctx, t, g.Handle, v, nil); err != nil {
+			return ExpectedHandlerError{OpKind: opNameSkimmer, OpID: g.ID, Err: err}
+		}
+		if c.shouldReturnError(g.Handle) {
+			return ExpectedHandlerError{OpKind: opNameSkimmer, OpID: g.ID}
+		}
+		return nil
+	}
+}
+
+// newFunnelFactory builds the funnel factory that the framework
+// invokes per-instance. Accumulate and Flush bodies are walked from
+// inside AccumulateFn/FlushFn; downstream Submits go through submitTo.
+func (c *controller) newFunnelFactory(
+	t assert.TestingT, cmb *Funnel, idx int,
+) streampool.AccumulatorFactory[*simValue] {
+	_ = idx
+	// Concurrency tracking: bump the FunnelLimiter tracker on entry to
+	// Accumulate or Flush, decrement on exit; the tracker also rides
+	// down the Func walk so Subjob steps can drop the contribution while
+	// the body drives the subwave.
+	var tracker *limiterTracker
+	var active []activeLimit
+	if len(cmb.LimiterIndexes) > 0 {
+		tracker = c.funnelLimiterTrackers[cmb.LimiterIndexes[0]]
+		active = []activeLimit{{tracker: tracker, weight: 1}} // funnels are plain, weight 1
+	}
+	return streampool.NewAccumulatorFactory(func() streampool.Accumulator[*simValue] {
+		// Carrier oracle: accumulated counts this INSTANCE's items (one factory
+		// call = one instance; accumulate and flush serialize under the
+		// instance mutex, so a plain int suffices). Their submitTo counts are
+		// given back when the flush body completes — the funnel holds the
+		// scope's tag refs until the flush ctx releases, strictly after.
+		var accumulated int64
+		return streampool.FuncAccumulator[*simValue]{
+			AccumulateFn: func(ctx context.Context, v *simValue, valErr error) (time.Time, error) {
+				accumulated++
+				if tracker != nil {
+					tracker.enter(1) // funnels are plain: one body execution == weight 1
+					defer tracker.exit(1)
+				}
+				c.assertFlowInBody(ctx, t, "accumulate body")
+				err := c.executeFunc(ctx, t, cmb.Accumulate, v, active)
+				if err == nil && c.shouldReturnError(cmb.Accumulate) {
+					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
+				}
+				// No flush deadline in v1.
+				_ = valErr
+				return time.Time{}, err
+			},
+			FlushFn: func(ctx context.Context) error {
+				// Flush is deliberately NOT counted against the limiter
+				// tracker: the funnel limiter gates funnelWork (the
+				// Accumulate dispatch) only; funnelInstance.flush never
+				// acquires the permit. Counting Flush would assert more
+				// than the limiter gates — and under cross-subjob sharing
+				// a parent op's end-of-work Flush legitimately overlaps a
+				// subjob op's Accumulate on the shared tracker. Pass nil
+				// so Subjob steps in a Flush body don't drop a
+				// contribution that was never added.
+				defer func() {
+					c.carrierAdd(-accumulated)
+					accumulated = 0
+				}()
+				c.assertFlowInFlush(ctx, t)
+				v := &simValue{DispatchTime: time.Now()}
+				err := c.executeFunc(ctx, t, cmb.Flush, v, nil)
+				if err == nil && c.shouldReturnError(cmb.Flush) {
+					err = ExpectedHandlerError{OpKind: opNameFunnel, OpID: cmb.ID}
+				}
+				return err
+			},
+		}
+	})
+}
+
+// executeFunc walks a Func's Steps from a context where new tasks may
+// be started (skim/funnel handler bodies, top-level dispatch).
+// SelfTime sleeps for the drawn duration; Submit routes to the target
+// sink; StartTask dispatches a runner; Subjob spawns a nested Pool.
+// active is the enclosing body's concurrency tracker (nil when the body
+// is not limiter-bound), threaded down so Subjob steps can drop the
+// body's contribution while it drives the subwave. weight is that body's
+// permit weight (1 for a plain limiter or none), dropped/restored with it.
+func (c *controller) executeFunc(
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active []activeLimit,
+) error {
+	return c.executeFuncBody(ctx, t, fn, v, true, active)
+}
+
+// executeFuncInTask walks a Func's Steps from a task body, including StartTask
+// (task-to-task scatter into the ambient wave).
+func (c *controller) executeFuncInTask(
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, active []activeLimit,
+) error {
+	return c.executeFuncBody(ctx, t, fn, v, true, active)
+}
+
+func (c *controller) executeFuncBody(
+	ctx context.Context, t assert.TestingT, fn *Func, v *simValue, allowStartTask bool,
+	active []activeLimit,
+) error {
+	chk := assert.New(t)
+	timer := timerp.Get()
+	defer timerp.Put(timer)
+	for _, step := range fn.Steps {
+		switch s := step.(type) {
+		case SelfTime:
+			d := c.drawDuration(s.Dist)
+			if d > 0 {
+				timerp.Reset(timer, d)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		case Submit:
+			if !c.rollProb(s.Prob) {
+				continue
+			}
+			c.submitTo(ctx, t, s.SinkKind, s.SinkIndex, v, nil)
+		case StartTask:
+			if !allowStartTask {
+				continue
+			}
+			if !c.rollProb(s.Prob) {
+				continue
+			}
+			c.startTask(ctx, t, s.RunnerIndex)
+		case Subjob:
+			// Active-concurrency measurement: drop this body's
+			// contribution while it drives the subwave — the span over
+			// which the framework suspends the body's permit. Dropping
+			// before the actual suspend and restoring after the reclaim
+			// completes means both edges skew toward under-counting,
+			// keeping the `observed ≤ permits` assertion sound.
+			for _, a := range active {
+				a.tracker.exit(a.weight)
+			}
+			c.runSubjob(ctx, t, s)
+			for _, a := range active {
+				a.tracker.enter(a.weight)
+			}
+		default:
+			chk.Fail(fmt.Sprintf("unknown Step type %T", step))
+		}
+	}
+	return nil
+}
+
+// drawDuration picks a duration from a SelfTime distribution at
+// runtime; it always uses the Med value.
+func (c *controller) drawDuration(d BiasedDurationConfig) time.Duration {
+	return d.Med
+}
+
+// rollProb returns true with probability p. The generator emits only
+// Prob=1.0, so a threshold check suffices (no RNG).
+func (c *controller) rollProb(p float64) bool {
+	return p >= 1.0
+}
+
+// shouldReturnError reports whether this Func invocation should
+// surface an error. The generator forces ReturnErrorProb to 0 or 1,
+// so a threshold check suffices (no RNG).
+func (c *controller) shouldReturnError(fn *Func) bool {
+	return fn.ReturnErrorProb >= 1.0
+}
+
+// ExpectedHandlerError marks a deliberately-returned error from a
+// Skimmer Handle, Funnel Accumulate, or Funnel Flush body —
+// distinguished from infrastructure errors so the drain loop can
+// continue past them.
+type ExpectedHandlerError struct {
+	OpKind string
+	OpID   int
+	Err    error
+}
+
+func (e ExpectedHandlerError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("expected %s#%d error: %v", e.OpKind, e.OpID, e.Err)
+	}
+	return fmt.Sprintf("expected %s#%d error", e.OpKind, e.OpID)
+}
+
+func (e ExpectedHandlerError) Unwrap() error {
+	return e.Err
+}
+
+// atomicMaxInt64 tracks a monotonically non-decreasing observed maximum.
+type atomicMaxInt64 struct {
 	value atomic.Int64
 }
 
-func (mm *atomicMinMaxInt64) Store(x int64) {
-	mm.value.Store(x)
-}
-
-func (mm *atomicMinMaxInt64) Load() int64 {
+func (mm *atomicMaxInt64) Load() int64 {
 	return mm.value.Load()
 }
 
-func (mm *atomicMinMaxInt64) UpdateMax(x int64) {
-	mm.update(x, func(a, b int64) bool {
-		return a > b
-	})
-}
-
-func (mm *atomicMinMaxInt64) UpdateMin(x int64) {
-	mm.update(x, func(a, b int64) bool {
-		return a > b
-	})
-}
-
-func (mm *atomicMinMaxInt64) update(x int64, t func(a, b int64) bool) {
+func (mm *atomicMaxInt64) UpdateMax(x int64) {
 	for {
 		old := mm.value.Load()
-		if !t(x, old) {
-			break
+		if x <= old {
+			return
 		}
 		if mm.value.CompareAndSwap(old, x) {
-			break
+			return
 		}
 	}
 }

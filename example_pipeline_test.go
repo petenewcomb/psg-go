@@ -1,18 +1,18 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // non-cryptographic use case
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 
-	"github.com/petenewcomb/psg-go"
+	"github.com/petenewcomb/streampool"
 )
 
 // Pipeline demonstrates the use of multiple psg pools to re-implement the
@@ -38,51 +38,53 @@ func Example_pipeline() {
 // fails or any read operation fails, MD5All returns an error.
 func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error) {
 
-	// Run digesting tasks in a Pool limited to the number of cores available to
-	// the program, since it should be CPU-bound.
-	digesterPool := psg.NewPool(runtime.NumCPU())
-	newDigestingTask := func(data []byte) psg.TaskFunc[[md5.Size]byte] {
-		return func(ctx context.Context) ([md5.Size]byte, error) {
-			return md5.Sum(data), nil
-		}
-	}
+	// Create the scatter-gather wave.
+	wave := streampool.NewWave()
+
+	// Cap concurrent digesting tasks at the number of cores available
+	// to the program, since they should be CPU-bound.
+	digestLimit := streampool.NewSemaphore(runtime.GOMAXPROCS(-1))
 
 	// Collects the final results in m as they are completed
 	m := make(map[string][md5.Size]byte)
-	newDigestGather := func(path string) psg.GatherFunc[[md5.Size]byte] {
-		return func(ctx context.Context, sum [md5.Size]byte, err error) error {
-			m[path] = sum
-			return nil
-		}
+	newDigestSkimmer := func(path string) streampool.Skimmer[[md5.Size]byte] {
+		return streampool.NewFnSkimmer(
+			func(ctx context.Context, sum [md5.Size]byte, err error) error {
+				m[path] = sum
+				return nil
+			},
+		)
 	}
 
-	// Allow many file reading tasks to run concurrently since they should be
-	// I/O-bound.
-	readerPool := psg.NewPool(100)
-	newReadingTask := func(path string) psg.TaskFunc[[]byte] {
-		return func(ctx context.Context) ([]byte, error) {
-			return os.ReadFile(path)
-		}
+	newDigestingRunner := func(path string, data []byte) streampool.TaskLauncher {
+		skimmer := newDigestSkimmer(path)
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
+			//nolint:gosec // non-cryptographic use case
+			return skimmer.Submit(ctx, md5.Sum(data))
+		}).WithLimits(digestLimit)
 	}
 
-	// Creates gather functions for reading tasks that launch digesting tasks.
-	newReadGather := func(path string) psg.GatherFunc[[]byte] {
-		return func(ctx context.Context, data []byte, err error) error {
-			return psg.Scatter(
-				ctx,
-				digesterPool,
-				newDigestingTask(data),
-				newDigestGather(path),
-			)
-		}
+	// Creates a skimmer for a reading task whose handler dispatches a
+	// digesting task with the bytes that were read.
+	newReadSkimmer := func(path string) streampool.Skimmer[[]byte] {
+		return streampool.NewFnSkimmer(
+			func(ctx context.Context, data []byte, err error) error {
+				return newDigestingRunner(path, data).Start(ctx)
+			},
+		)
 	}
 
-	// Create the scatter-gather job, setting up a deferred call to Cancel to
-	// terminate outstanding tasks in case of error. Errors will propagate from
-	// task functions to gather functions, where they will bubble up through the
-	// calls to Scatter or GatherAll.
-	job := psg.NewJob(ctx, readerPool, digesterPool)
-	defer job.CancelAndWait()
+	// No need for a pool to limit how many file reading tasks run concurrently
+	// since they should be I/O-bound and will be subject to backpressure from
+	// the digesters.
+	newReadingRunner := func(path string) streampool.TaskLauncher {
+		skimmer := newReadSkimmer(path)
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
+			//nolint:gosec // path from known source
+			data, err := os.ReadFile(path)
+			return skimmer.SubmitResult(ctx, data, err)
+		})
+	}
 
 	// Walk the tree and launch a reading task for each regular file.
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -92,19 +94,14 @@ func MD5All(ctx context.Context, root string) (map[string][md5.Size]byte, error)
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		return psg.Scatter(
-			ctx,
-			readerPool,
-			newReadingTask(path),
-			newReadGather(path),
-		)
+		return newReadingRunner(path).In(wave).Start(ctx)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Gather task results until there are no more outstanding tasks.
-	if err := job.CloseAndGatherAll(ctx); err != nil {
+	// Skim task results until there are no more outstanding tasks.
+	if err := wave.CloseAndSkimAll(ctx); err != nil {
 		return nil, err
 	}
 

@@ -1,0 +1,77 @@
+# This file contains the configuration for golangci-lint
+# See https://golangci-lint.run/usage/configuration/ for details
+
+# Configuration version
+version: "2"
+
+linters:
+  enable:
+    # Default linters (enabled by default)
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    
+    # Security-focused
+    - gosec
+    - bodyclose
+    - errchkjson
+    - noctx
+    - rowserrcheck
+    
+    # Performance/efficiency
+    - gocritic
+    - prealloc
+    - unconvert
+    - makezero
+    
+    # Code quality/maintainability
+    - asciicheck
+    - bidichk
+    - containedctx
+    - contextcheck
+    - misspell
+    - goconst
+    # - cyclop
+    - dupl
+    - mnd
+    - lll
+    
+    # Error handling
+    - errorlint
+    - nilerr
+    
+    # Testing
+    - testifylint
+    - thelper
+
+  settings:
+    #cyclop:
+    #  max-complexity: 15
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+    prealloc:
+      simple: true
+      range-loops: true
+    testifylint:
+      disable:
+        # Don't force use of require when checking error values, since we often
+        # can't use require due to concurrency not obvious to the linter.
+        - require-error
+  exclusions:
+    rules:
+      # Allow complex test functions
+      - path: _test\.go
+        linters:
+          - cyclop
+          - funlen
+
+run:
+  timeout: 5m
+  tests: true

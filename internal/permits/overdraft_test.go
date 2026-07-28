@@ -1,0 +1,489 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+package permits
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+// Overdraft-path tests (weighted-acquisition.md §Overdraft). The shared newTestPool
+// carries a standing-promise Overdraft so tests built on it keep plain
+// blocking semantics; the pools here exercise the grant (a bare semaphore — the
+// non-implementing default) and refuse behaviors, plus the episode machinery those
+// unlock: the standing sentinel, allowance claims, extensions, the infeasibility
+// proof, and the suspension-counter stranger check.
+
+// newGrantTestPool draws on a bare semaphore — no Overdraft capability, so the pool
+// defaults to GRANT at a proven-infeasible point.
+func newGrantTestPool(capacity int) *testPool {
+	sem := &semaphore{capacity: capacity}
+	return &testPool{Pool: NewPool(sem), sem: sem}
+}
+
+// refuseResource refuses every overdraft with its own error.
+type refuseResource struct {
+	*semaphore
+	err error
+}
+
+func (r refuseResource) Overdraft(int) (bool, error) { return false, r.err }
+
+// countingGrantResource grants every overdraft, recording the asked amounts.
+type countingGrantResource struct {
+	*semaphore
+	asks []int
+}
+
+func (r *countingGrantResource) Overdraft(n int) (bool, error) {
+	r.asks = append(r.asks, n)
+	return true, nil
+}
+
+// standingSentinel returns the standing episode's sentinel demand, or nil.
+func (p *Pool) standingSentinel() *Demand {
+	if od := p.od.Load(); od != nil {
+		return &od.sentinel
+	}
+	return nil
+}
+
+// episodeAnchor returns the standing episode's anchor cache, or nil.
+func (p *Pool) episodeAnchor() *Cache {
+	if od := p.od.Load(); od != nil {
+		return od.sentinel.cache.Load()
+	}
+	return nil
+}
+
+// allowanceRemaining returns the standing episode's un-claimed allowance (0 when
+// no episode stands).
+func (p *Pool) allowanceRemaining() uint64 {
+	if od := p.od.Load(); od != nil {
+		return od.allowance.Load()
+	}
+	return 0
+}
+
+// checkEpisode asserts the overdraft invariants at a quiescent point: conservation
+// untouched by grants (Σheld == inFlight ≤ capacity), the episode equation
+// Σ max(inUse−held, 0) + allowance == the episode's grant total (all zero outside an
+// episode), and the overdraft concurrency bound ΣinUse ≤ capacity + grant (== the
+// ordinary ΣinUse ≤ capacity when no episode stands).
+func (tp *testPool) checkEpisode(t require.TestingT) {
+	var sumHeld, sumInUse, excess uint64
+	for _, c := range tp.snapshot() {
+		h, u := c.counts.load()
+		sumHeld += h
+		sumInUse += u
+		excess += excessOver(h, u)
+	}
+	//nolint:gosec // G115: small non-negative test values
+	inFlight, capacity := uint64(tp.sem.inFlight.Load()), uint64(tp.sem.capacity)
+	require.Equal(t, inFlight, sumHeld, "conservation: Σheld == checkedOut, untouched by grants")
+	require.LessOrEqual(t, inFlight, capacity)
+	var total, allowance uint64
+	if od := tp.od.Load(); od != nil {
+		od.mu.Lock()
+		total = od.total
+		od.mu.Unlock()
+		allowance = od.allowance.Load()
+	}
+	require.Equal(t, total, excess+allowance,
+		"episode invariant: Σ excess + allowance == the episode's grant total")
+	require.LessOrEqual(t, sumInUse, capacity+total,
+		"concurrency bound: ΣinUse ≤ capacity + episode grant")
+}
+
+// The full arc of a granted overdraft: proven-infeasible head → grant → standing
+// sentinel (arrivals stay gated and queue behind it) → exempt descendant claims and
+// extends → owner park/resume round-trips its excess through the allowance → the
+// body cache's destroy ends the episode, promoting the queued successor.
+func TestOverdraftGrantStandingEpisode(t *testing.T) {
+	sem := &semaphore{capacity: 3}
+	res := &countingGrantResource{semaphore: sem}
+	tp := &testPool{Pool: NewPool(res), sem: sem}
+	tp.tb = t
+	v := makeIdle(tp, 3) // all capacity checked out and idle: gatherable, none free
+
+	g := tp.NewCache()
+	d := NewDemand()
+	pm, err := g.Acquire(d, 5)
+	require.NoError(t, err)
+	require.True(t, pm.Held(), "w=5 on capacity 3: gather 3, overdraft 2")
+	require.Same(t, d.cache.Load(), pm.backing)
+	require.Equal(t, []int{2}, res.asks, "the ask is the post-gather shortfall")
+	require.Same(t, tp.standingSentinel(), tp.head(), "the sentinel stands: gate closed")
+	require.Same(t, d.cache.Load(), tp.episodeAnchor())
+	require.Equal(t, uint64(0), tp.allowanceRemaining(), "the head's occupy claimed the whole grant")
+	require.Equal(t, uint64(2), excessOverCache(d.cache.Load()), "inUse runs past held by the grant")
+	tp.checkEpisode(t)
+
+	// Arrivals stay gated and queue BEHIND the standing episode — no successor
+	// gathers into the over-committed window.
+	w1 := tp.NewCache()
+	d1 := NewDemand()
+	p1, err := w1.Acquire(d1, 1)
+	require.NoError(t, err)
+	require.False(t, p1.Held(), "weight-1 is gated while the episode stands")
+	require.True(t, d1.queued(), "and queues in arrival order like every weight")
+	b := tp.NewCache()
+	db := NewDemand()
+	pb, err := b.Acquire(db, 2)
+	require.NoError(t, err)
+	require.False(t, pb.Held(), "a w≥2 arrival queues behind the sentinel")
+	require.True(t, db.queued())
+
+	// The owner parks: its excess flows home to the allowance.
+	pm.Release()
+	require.Equal(t, uint64(2), tp.allowanceRemaining(), "park returned the excess")
+	tp.checkEpisode(t)
+
+	// An exempt descendant borrows the parked hoard, then a bigger one extends the
+	// episode: the same capability call, for the shortfall only, added to the
+	// aggregate.
+	ch := d.cache.Load().NewChild()
+	dch := NewDemand()
+	pch, err := ch.Acquire(dch, 1)
+	require.NoError(t, err)
+	require.True(t, pch.Held(), "the exempt descendant inherits the parked hoard")
+	require.Same(t, d.cache.Load(), pch.backing)
+	pch.Release()
+
+	dbig := NewDemand()
+	pbig, err := ch.Acquire(dbig, 6)
+	require.NoError(t, err)
+	require.True(t, pbig.Held(), "the descendant extends: 3 borrowable + 2 allowance + 1 fresh grant")
+	require.Equal(t, []int{2, 1}, res.asks, "the extension asked only the shortfall")
+	tp.checkEpisode(t)
+	pbig.Release()
+	dbig.Invalidate()
+
+	// The owner resumes into its home, claiming its excess back from the allowance.
+	pm2, err := g.Acquire(d, 5)
+	require.NoError(t, err)
+	require.True(t, pm2.Held(), "resume reacquire: the episode owner is exempt at its own anchor")
+	require.Same(t, d.cache.Load(), pm2.backing)
+	tp.checkEpisode(t)
+	pm2.Release()
+
+	// Completion: the demand's ref drops and the drained subtree destroys the body
+	// cache — the episode ends with the allowance necessarily home, and the FIRST
+	// arrival (the weight-1 demand, which queued before b under the unified queue)
+	// is promoted to a live head.
+	ch.ReleaseRef()
+	d.Invalidate()
+	require.Nil(t, tp.od.Load(), "episode end retired the pooled episode state")
+	require.Same(t, d1, tp.head(), "arrival order: the weight-1 demand promoted first")
+	tp.checkEpisode(t)
+
+	p1b, err := w1.Acquire(d1, 1)
+	require.NoError(t, err)
+	require.True(t, p1b.Held(), "the weight-1 head gathers from the drained capacity")
+	require.Same(t, db, tp.head(), "then b is promoted in turn")
+
+	pb2, err := b.Acquire(db, 2)
+	require.NoError(t, err)
+	require.True(t, pb2.Held(), "the next head gathers the remaining capacity")
+	pb2.Release()
+	p1b.Release()
+	db.Invalidate()
+	d1.Invalidate()
+	for _, c := range []*Cache{v, g, w1, b} {
+		c.ReleaseRef()
+	}
+	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
+	require.Nil(t, tp.head())
+	tp.checkEpisode(t)
+}
+
+// A refused overdraft fails the unit with the resource's own error, dequeues the
+// demand (passing the barrier), and leaves the pool fully usable.
+func TestOverdraftRefusalFailsUnitAndPassesBarrier(t *testing.T) {
+	refuseErr := errors.New("memory wall: 4 exceeds any capacity I will reach")
+	sem := &semaphore{capacity: 3}
+	tp := &testPool{Pool: NewPool(refuseResource{sem, refuseErr}), sem: sem}
+	tp.tb = t
+	v := makeIdle(tp, 2) // 2 idle + 1 free < 4
+
+	g := tp.NewCache()
+	d := NewDemand()
+	_, err := g.Acquire(d, 4)
+	require.ErrorIs(t, err, refuseErr, "the refusal error is the resource's own")
+	require.Nil(t, tp.head(), "the refused sole head was retired")
+	require.Nil(t, d.pool.Load(), "the refused demand was deregistered")
+	d.Invalidate() // the caller's error path releases the home (and its hoard)
+	require.Equal(t, 0, tp.totalHeld(), "the drained hoard returned to the Resource")
+
+	// The pool is unharmed: a feasible acquire proceeds.
+	d2 := NewDemand()
+	pm, err := g.Acquire(d2, 3)
+	require.NoError(t, err)
+	require.True(t, pm.Held())
+	pm.Release()
+	d2.Invalidate()
+	g.ReleaseRef()
+	v.ReleaseRef()
+	tp.check(t)
+}
+
+// The blocking-acquire protocol surfaces a refusal as its error and invalidates
+// the demand.
+func TestOverdraftRefusalThroughBlockingAcquire(t *testing.T) {
+	refuseErr := errors.New("refused")
+	sem := &semaphore{capacity: 2}
+	tp := &testPool{Pool: NewPool(refuseResource{sem, refuseErr}), sem: sem}
+
+	g := tp.NewCache()
+	d := NewDemand()
+	_, err := acquireWait(context.Background(), g, d, 3)
+	require.ErrorIs(t, err, refuseErr)
+	require.Nil(t, d.pool.Load())
+	require.Nil(t, d.cache.Load(), "the error path invalidated the demand")
+	require.Nil(t, tp.head())
+	g.ReleaseRef()
+	require.Equal(t, 0, tp.totalHeld())
+}
+
+// The infeasibility proof gates the grant: while anything runs (inUse > 0 anywhere),
+// releases can still move the world, so even a granting resource is not consulted —
+// the head waits.
+func TestOverdraftWaitsWhileAnythingRuns(t *testing.T) {
+	tp := newGrantTestPool(3)
+	hog := tp.NewCache()
+	dh := NewDemand()
+	ph, err := hog.Acquire(dh, 1)
+	require.NoError(t, err)
+	require.True(t, ph.Held()) // a running body: inUse=1 somewhere
+
+	g := tp.NewCache()
+	d := NewDemand()
+	pg, err := g.Acquire(d, 4)
+	require.NoError(t, err)
+	require.False(t, pg.Held(), "no grant while a release could still change the answer")
+	require.Same(t, d, tp.head(), "the head stands, waiting")
+
+	ph.Release() // the last runner parks; now the proof can pass
+	pg, err = g.Acquire(d, 4)
+	require.NoError(t, err)
+	require.True(t, pg.Held(), "zero inUse everywhere: the gather takes the idle permit and the grant covers the rest")
+	tp.checkEpisode(t)
+
+	pg.Release()
+	d.Invalidate()
+	dh.Invalidate()
+	g.ReleaseRef()
+	hog.ReleaseRef()
+	require.Equal(t, 0, tp.totalHeld())
+}
+
+// The ancestor-exempt trigger: a suspended holder OFF the head's driver chain is a
+// stranger — its resume races the over-commitment — so the grant waits for the
+// suspension to end; a suspension ON the chain (an ancestor drive the head runs
+// causally inside) does not block.
+func TestOverdraftStrangerSuspensionBlocksGrant(t *testing.T) {
+	tp := newGrantTestPool(2)
+	tp.tb = t
+	v := makeIdle(tp, 2)
+
+	stranger := tp.NewCache() // an unrelated wave's cache: off the head's chain
+	stranger.Suspend()
+
+	g := tp.NewCache()
+	d := NewDemand()
+	pg, err := g.Acquire(d, 3)
+	require.NoError(t, err)
+	require.False(t, pg.Held(), "a stranger's suspension blocks the grant")
+
+	stranger.Resume() // ends the suspension (and nudges the armed pool)
+	pg, err = g.Acquire(d, 3)
+	require.NoError(t, err)
+	require.True(t, pg.Held(), "with the stranger visible again, the grant proceeds")
+	tp.checkEpisode(t)
+	pg.Release()
+	d.Invalidate()
+
+	// On-chain suspension: a driver parked INTO the registering cache's own wave.
+	g2 := tp.NewCache()
+	g2.Suspend() // the demand registers under g2 → g2 is on the head's chain
+	d2 := NewDemand()
+	pg2, err := g2.Acquire(d2, 3)
+	require.NoError(t, err)
+	require.True(t, pg2.Held(), "an on-chain suspension is causally inside the head — no stranger")
+	tp.checkEpisode(t)
+	pg2.Release()
+	d2.Invalidate()
+	g2.Resume()
+
+	for _, c := range []*Cache{v, stranger, g, g2} {
+		c.ReleaseRef()
+	}
+	require.Equal(t, 0, tp.totalHeld())
+	require.Nil(t, tp.head())
+}
+
+// A parked exempt claimant is woken by a release routed through the sentinel's
+// claimant fan-out: while
+// the episode stands, freed capacity must reach the subtree's waiters (the satisfied
+// head consumes no wakes, and everyone else is gated).
+func TestEpisodeReleaseWakesParkedExemptClaimant(t *testing.T) {
+	tp := newGrantTestPool(1)
+	g := tp.NewCache()
+	d := NewDemand()
+	pm, err := g.Acquire(d, 2) // infeasible on capacity 1 → grant → episode
+	require.NoError(t, err)
+	require.True(t, pm.Held())
+	require.Same(t, tp.standingSentinel(), tp.head())
+
+	// A descendant needs weight the busy episode cannot spare: AcquireWait
+	// registers it as a claimant and parks.
+	ch := d.cache.Load().NewChild()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	got := make(chan error, 1)
+	go func() {
+		dch := NewDemand()
+		defer dch.Invalidate()
+		pch, err := acquireWait(ctx, ch, dch, 1)
+		if err == nil {
+			pch.Release()
+		}
+		got <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let the claimant park
+	pm.Release()                      // the owner parks: excess home → wake → episodeNotify
+
+	select {
+	case err := <-got:
+		require.NoError(t, err, "the parked exempt claimant must be woken by the release")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the release never reached the parked claimant")
+	}
+
+	ch.ReleaseRef()
+	d.Invalidate()
+	require.Nil(t, tp.head())
+	g.ReleaseRef()
+	require.Equal(t, 0, tp.totalHeld())
+	tp.checkEpisode(t)
+}
+
+// Serialized episodes under -race: every contender's weight exceeds capacity, so
+// every satisfaction is a full grant→episode→end cycle, with successors queued
+// behind each standing sentinel and promoted at its end. Wake routing, the sentinel
+// swap, allowance round-trips, and endEpisode all race each other here; a lost wake
+// or a stuck sentinel surfaces as a ctx-deadline failure.
+func TestConcurrentOverdraftEpisodes(t *testing.T) {
+	const capacity, workers, iters = 2, 4, 300
+	tp := newGrantTestPool(capacity)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var failed atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := tp.NewCache()
+			defer c.ReleaseRef()
+			for range iters {
+				d := NewDemand()
+				pm, err := acquireWait(ctx, c, d, capacity+1)
+				if err != nil {
+					failed.Add(1)
+					return
+				}
+				pm.Release()
+				d.Invalidate() // completes the episode; the successor promotes
+			}
+		}()
+	}
+	wg.Wait()
+
+	require.Equal(t, int64(0), failed.Load(), "every over-capacity demand must complete via its episode")
+	require.Nil(t, tp.head(), "no head stands at quiescence")
+	require.Nil(t, tp.od.Load(), "quiescence retires the episode state")
+	require.Equal(t, 0, tp.totalHeld(), "no permit leaked")
+	tp.checkEpisode(t)
+}
+
+// excessOverCache reads a cache's current overdraft excess, for tests.
+func excessOverCache(c *Cache) uint64 {
+	h, u := c.counts.load()
+	return excessOver(h, u)
+}
+
+// The eager-confirm-latch scenario's permits-level semantics (WORKING_NOTES
+// diagnosis 5): a driver's hold is suspended for a drive episode, a stranger
+// takes the freed permit and keeps running, and the episode's deep admission
+// gathers against anyInUse=1 suspended=1. The own-chain suspension does not
+// block it (strangerSuspended discriminates), but a running stranger does —
+// its release can move the world — so the head WAITS, and is admitted by its
+// next re-presentation once the stranger releases. (The wedge this scenario
+// once produced came from a mid-help confirm latching the "stranger" permit on
+// the waiter's own stack, where no release could ever come — fixed in the gate
+// loops, not here.)
+func TestDeepAcquireUnderOwnSuspension(t *testing.T) {
+	tp := newGrantTestPool(1)
+
+	owner := tp.NewCache()
+	dOwner := NewDemand()
+	pOwner, err := owner.Acquire(dOwner, 1)
+	require.NoError(t, err)
+	require.True(t, pOwner.Held()) // the enclosing body's hold
+
+	// A stranger's demand arrives and waits its turn behind the full pool.
+	stranger := tp.NewCache()
+	dStranger := NewDemand()
+	pStranger, err := stranger.Acquire(dStranger, 1)
+	require.NoError(t, err)
+	require.False(t, pStranger.Held())
+	require.Same(t, dStranger, tp.head())
+
+	// The drive-episode bracket: the hold is lent to the episode targeting the
+	// driven wave's cache, and the permit frees.
+	target := tp.NewCache()
+	target.Suspend()
+	pOwner.Release()
+
+	// The stranger takes the freed permit and keeps running.
+	pStranger, err = stranger.Acquire(dStranger, 1)
+	require.NoError(t, err)
+	require.True(t, pStranger.Held())
+
+	// The episode's own deep admission, through the drive target's subtree:
+	// the own-chain suspension does not block it, the running stranger does.
+	dDeep := NewDemand()
+	pDeep, err := target.Acquire(dDeep, 1)
+	require.NoError(t, err)
+	require.False(t, pDeep.Held(), "a running stranger's release can move the world: wait")
+	require.Same(t, dDeep, tp.head())
+
+	// The stranger's body returns; the freed capacity admits the head on its
+	// next re-presentation.
+	pStranger.Release()
+	pDeep, err = target.Acquire(dDeep, 1)
+	require.NoError(t, err)
+	require.True(t, pDeep.Held(), "the stranger released: the head's re-presentation takes the permit")
+
+	pDeep.Release()
+	dDeep.Invalidate()
+	dStranger.Invalidate()
+	dOwner.Invalidate()
+	target.Resume()
+	for _, c := range []*Cache{owner, stranger, target} {
+		c.ReleaseRef()
+	}
+	require.Equal(t, 0, tp.totalHeld())
+	require.Nil(t, tp.head())
+}

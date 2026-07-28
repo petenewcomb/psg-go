@@ -1,0 +1,869 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+package main
+
+import (
+	"flag"
+	"fmt"
+	"image/color"
+	"log"
+	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/perf/benchfmt"
+	"golang.org/x/perf/benchmath"
+	"golang.org/x/perf/benchproc"
+	"golang.org/x/perf/benchunit"
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/palette/brewer"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/plotutil"
+	"gonum.org/v1/plot/vg"
+	"gonum.org/v1/plot/vg/draw"
+	"gonum.org/v1/plot/vg/vgsvg"
+)
+
+type seriesPoints struct {
+	plotter.YErrorBars
+	Labels []string
+}
+
+func (sp *seriesPoints) Label(i int) string {
+	return sp.Labels[i]
+}
+
+var _ plotter.Labeller = &seriesPoints{}
+
+type chart struct {
+	Title           string
+	YAxisLabel      string
+	XAxisLabel      string
+	XTickLabels     []string
+	XTickPositions  []float64
+	SeriesLabels    []string
+	SeriesPoints    []seriesPoints
+	YAxisGrowFactor float64
+	FileBasename    string
+}
+
+func setupPlot(c *chart) *plot.Plot {
+	p := plot.New()
+
+	p.Title.Text = c.Title
+	p.X.Label.Text = c.XAxisLabel
+	p.Y.Label.Text = c.YAxisLabel
+
+	p.Title.TextStyle.Color = color.Gray{128}
+	p.X.Color = color.Gray{128}
+	p.Y.Color = color.Gray{128}
+	p.X.Label.TextStyle.Color = color.Gray{128}
+	p.Y.Label.TextStyle.Color = color.Gray{128}
+	p.X.Tick.Color = color.Gray{128}
+	p.Y.Tick.Color = color.Gray{128}
+	p.X.Tick.Label.Color = color.Gray{128}
+	p.Y.Tick.Label.Color = color.Gray{128}
+	p.Legend.TextStyle.Color = color.Gray{128}
+
+	p.BackgroundColor = color.Transparent
+
+	return p
+}
+
+func plotScatter(c *chart, outputDir string) error {
+	p := setupPlot(c)
+
+	palette, err := brewer.GetPalette(brewer.TypeQualitative, "Paired", len(c.SeriesLabels))
+	if err != nil {
+		return err
+	}
+	plotutil.DefaultColors = palette.Colors()
+
+	series := make([]any, 0, 2*len(c.SeriesLabels)) //nolint:mnd // label + points
+	for i, label := range c.SeriesLabels {
+		series = append(series, label, c.SeriesPoints[i])
+	}
+	if err := plotutil.AddScatters(p, series...); err != nil {
+		return err
+	}
+
+	p.X.Min = 1.0 / float64(time.Millisecond)
+	p.Y.Min = 0
+
+	//nolint:gocritic // useful for debugging
+	// p.Add(plotter.NewGlyphBoxes())
+
+	const aspect = 10.0 / 6.0
+	return savePlot(c, p, aspect, outputDir)
+}
+
+func plotBars(c *chart, outputDir string) error {
+	p := setupPlot(c)
+
+	p.X.Scale = plot.LogScale{}
+
+	xTicks := make([]plot.Tick, len(c.XTickLabels))
+	for i := range c.XTickLabels {
+		t := &xTicks[i]
+		t.Label = c.XTickLabels[i]
+		t.Value = c.XTickPositions[i]
+	}
+	p.X.Tick.Marker = plot.ConstantTicks(xTicks)
+
+	palette, err := brewer.GetPalette(brewer.TypeQualitative, "Paired", len(c.SeriesLabels))
+	if err != nil {
+		return err
+	}
+	colors := palette.Colors()
+
+	const barSpacingPoints = 3
+	const barWidthPoints = 24
+
+	// Calculate the total width of the bar group, center to center.
+	groupWidth := vg.Points(barWidthPoints+barSpacingPoints) * vg.Length(len(c.SeriesPoints)-1)
+
+	for i, label := range c.SeriesLabels {
+		points := c.SeriesPoints[i]
+		bc, err := newBarChart(points, vg.Points(barWidthPoints))
+		if err != nil {
+			return err
+		}
+		bc.Offset = vg.Points(barWidthPoints+barSpacingPoints)*vg.Length(i) - groupWidth/2 //nolint:mnd // centering
+		bc.Color = colors[i]
+		bc.LineStyle.Width = 0
+		bc.ErrorStyle.Color = color.Gray{128}
+		bc.ErrorStyle.Width = 0.2 * vg.Millimeter //nolint:mnd // legit magic number
+		bc.LabelStyle = p.Y.Label.TextStyle
+		bc.LabelStyle.Font.Size *= 0.7
+		bc.LabelOffsets = make([]vg.Point, points.Len())
+		for j := range bc.LabelOffsets {
+			bc.LabelOffsets[j].Y = vg.Points(10) //nolint:mnd // legit magic number
+		}
+
+		p.Add(bc)
+		p.Legend.Add(label, bc)
+	}
+
+	p.Y.Min = 0
+	p.Y.Max *= c.YAxisGrowFactor
+
+	//nolint:gocritic // useful for debugging
+	// p.Add(plotter.NewGlyphBoxes())
+
+	const aspect = 16.0 / 6.0
+	return savePlot(c, p, aspect, outputDir)
+}
+
+func savePlot(c *chart, p *plot.Plot, aspect float64, outputDir string) error {
+	height := 6 * vg.Inch //nolint:mnd // legit magic number
+	width := vg.Length(aspect * float64(height))
+	svg := vgsvg.New(width, height)
+	dc := draw.New(svg)
+
+	p.Legend.Top = true
+	p.Legend.Left = true
+	p.Legend.Padding = vg.Points(6) //nolint:mnd // legit magic number
+	// Calculate the width of the legend.
+	r := p.Legend.Rectangle(dc)
+	legendHeight := r.Max.Y - r.Min.Y
+	legendHeight += p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding
+	legendWidth := r.Max.X - r.Min.X + p.Legend.Padding/2 //nolint:mnd // centering
+	ddc := p.DataCanvas(dc)
+	ldc := draw.Crop(dc, dc.Max.X-legendWidth, 0, 0, -(ddc.Max.Y-ddc.Min.Y)/2+legendHeight/2) //nolint:mnd // centering
+	p.Legend.Draw(ldc)
+
+	r = p.Legend.Rectangle(ldc)
+	r.Max.Y += p.Legend.Padding / 2                                          //nolint:mnd // centering
+	r.Min.Y -= p.Legend.TextStyle.FontExtents().Descent + p.Legend.Padding/2 //nolint:mnd // centering
+	ldc.StrokeLines(draw.LineStyle{
+		Color: color.Gray{128},
+		Width: vg.Points(1),
+	}, []vg.Point{
+		{X: r.Min.X, Y: r.Min.Y}, {X: r.Min.X, Y: r.Max.Y}, {X: r.Max.X, Y: r.Max.Y},
+		{X: r.Max.X, Y: r.Min.Y}, {X: r.Min.X, Y: r.Min.Y},
+	})
+
+	p.Legend = plot.NewLegend()
+
+	// Make space for the legend.
+	dc = draw.Crop(dc, 0, -legendWidth-vg.Points(16), 0, 0) //nolint:mnd // legit magic number
+
+	p.Draw(dc)
+
+	// Create directory if it doesn't exist
+	if err := os.MkdirAll(outputDir, 0o750); err != nil { //nolint:mnd // legit magic number
+		return err
+	}
+
+	//nolint:gosec // not sensitive
+	w, err := os.Create(filepath.Join(outputDir, c.FileBasename+".svg"))
+	if err != nil {
+		return err
+	}
+
+	if _, err = svg.WriteTo(w); err != nil {
+		return err
+	}
+
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type MethodKey struct{ benchproc.Key }
+type WorkloadKey struct{ benchproc.Key }
+type WorkloadDurationKey struct{ benchproc.Key }
+type FlushPeriodKey struct{ benchproc.Key }
+
+type Data struct {
+	Values  []float64
+	Sample  benchmath.Sample
+	Summary benchmath.Summary
+}
+
+func main() {
+	var outputDir = flag.String("o", "charts", "Output directory for SVG files")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-o outputdir] [input.txt]...\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Generates SVG charts from benchmark results.\n")
+		fmt.Fprintf(os.Stderr, "If no input files are specified, reads from stdin.\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	var pp benchproc.ProjectionParser
+	methodP, err := pp.Parse("/method,/combinerLimit", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	workloadP, err := pp.Parse("/workload", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	workloadDurationP, err := pp.Parse("/duration", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	flushPeriodP, err := pp.Parse("/flushPeriod", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	residueP := pp.Residue()
+
+	dataByMethodWorkloadDurationFlushPeriodUnit := make(
+		map[MethodKey]map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
+	methodKeySet := make(map[MethodKey]struct{})
+	workloadKeySet := make(map[WorkloadKey]struct{})
+	workloadDurationKeySet := make(map[WorkloadDurationKey]struct{})
+	flushPeriodKeySet := make(map[FlushPeriodKey]struct{})
+	var residues []benchproc.Key
+	project := func(res *benchfmt.Result) {
+
+		methodKey := MethodKey{methodP.Project(res)}
+		dataByWorkloadDurationFlushPeriodUnit, ok := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+		if !ok {
+			dataByWorkloadDurationFlushPeriodUnit = make(
+				map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
+			dataByMethodWorkloadDurationFlushPeriodUnit[methodKey] = dataByWorkloadDurationFlushPeriodUnit
+			methodKeySet[methodKey] = struct{}{}
+		}
+
+		workloadKey := WorkloadKey{workloadP.Project(res)}
+		dataByDurationFlushPeriodUnit, ok := dataByWorkloadDurationFlushPeriodUnit[workloadKey]
+		if !ok {
+			dataByDurationFlushPeriodUnit = make(map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data)
+			dataByWorkloadDurationFlushPeriodUnit[workloadKey] = dataByDurationFlushPeriodUnit
+			workloadKeySet[workloadKey] = struct{}{}
+		}
+
+		workloadDurationKey := WorkloadDurationKey{workloadDurationP.Project(res)}
+		dataByFlushPeriodUnit, ok := dataByDurationFlushPeriodUnit[workloadDurationKey]
+		if !ok {
+			dataByFlushPeriodUnit = make(map[FlushPeriodKey]map[string]*Data)
+			dataByDurationFlushPeriodUnit[workloadDurationKey] = dataByFlushPeriodUnit
+			workloadDurationKeySet[workloadDurationKey] = struct{}{}
+		}
+
+		flushPeriodKey := FlushPeriodKey{flushPeriodP.Project(res)}
+		dataByUnit, ok := dataByFlushPeriodUnit[flushPeriodKey]
+		if !ok {
+			dataByUnit = make(map[string]*Data)
+			dataByFlushPeriodUnit[flushPeriodKey] = dataByUnit
+			flushPeriodKeySet[flushPeriodKey] = struct{}{}
+		}
+
+		for _, v := range res.Values {
+			v.Value, v.Unit = benchunit.Tidy(v.Value, v.Unit)
+			data := dataByUnit[v.Unit]
+			if data == nil {
+				data = &Data{}
+				dataByUnit[v.Unit] = data
+			}
+			data.Values = append(data.Values, v.Value)
+		}
+
+		residue := residueP.Project(res)
+		residues = append(residues, residue)
+	}
+
+	// Read the benchmark results.
+	skimOnlyMatcher := regexp.MustCompile(`/method=skimOnly/`)
+	var skimOnlyResults []*benchfmt.Result
+	benchFiles := &benchfmt.Files{
+		Paths:       flag.Args(),
+		AllowStdin:  true,
+		AllowLabels: true,
+	}
+	for benchFiles.Scan() {
+		var res *benchfmt.Result
+		switch rec := benchFiles.Result(); rec := rec.(type) {
+		case *benchfmt.Result:
+			res = rec
+		case *benchfmt.SyntaxError:
+			// Report a non-fatal parse error.
+			log.Print(err)
+			continue
+		default:
+			// Unknown record type. Ignore.
+			continue
+		}
+
+		// Scale values to match the number of tasks completed during each
+		// iteration.
+		if tasksPerOp, ok := res.Value("tasks/op"); ok {
+			res.Iters = int(math.Round(float64(res.Iters) * tasksPerOp))
+			for i := range res.Values {
+				v := &res.Values[i]
+				if strings.HasSuffix(v.Unit, "/op") {
+					v.Value /= tasksPerOp
+				}
+			}
+		}
+
+		// Need to save these to expand and match the appropriate sets of
+		// flushPeriod values later.
+		if skimOnlyMatcher.Match(res.Name) {
+			skimOnlyResults = append(skimOnlyResults, res.Clone())
+			continue
+		}
+
+		project(res)
+	}
+	if err := benchFiles.Err(); err != nil {
+		log.Fatalf("Error reading benchmark files: %v", err)
+	}
+
+	flushPeriodKeySetByWorkloadDuration := make(map[WorkloadDurationKey]map[FlushPeriodKey]struct{})
+	for _, dataByWorkloadDurationFlushPeriodUnit := range dataByMethodWorkloadDurationFlushPeriodUnit {
+		for _, dataByDurationFlushPeriodUnit := range dataByWorkloadDurationFlushPeriodUnit {
+			for workloadDurationKey, dataByFlushPeriodUnit := range dataByDurationFlushPeriodUnit {
+				flushPeriodKeySet := flushPeriodKeySetByWorkloadDuration[workloadDurationKey]
+				if flushPeriodKeySet == nil {
+					flushPeriodKeySet = make(map[FlushPeriodKey]struct{})
+					flushPeriodKeySetByWorkloadDuration[workloadDurationKey] = flushPeriodKeySet
+				}
+				for flushPeriodKey := range dataByFlushPeriodUnit {
+					flushPeriodKeySet[flushPeriodKey] = struct{}{}
+				}
+			}
+		}
+	}
+
+	flushPeriods := make(map[FlushPeriodKey]time.Duration)
+	for flushPeriodKey := range flushPeriodKeySet {
+		d, err := time.ParseDuration(flushPeriodKey.Get(flushPeriodP.Fields()[0]))
+		if err != nil {
+			log.Fatalf("Error parsing workload duration %q: %v\n", d, err)
+		}
+		flushPeriods[flushPeriodKey] = d
+	}
+
+	flushPeriodKeysByWorkloadDuration := make(map[WorkloadDurationKey][]FlushPeriodKey)
+	flushPeriodKeysPerWorkloadDuration := -1
+	for workloadDurationKey, flushPeriodKeyMap := range flushPeriodKeySetByWorkloadDuration {
+		flushPeriodKeys := make([]FlushPeriodKey, 0, len(flushPeriodKeyMap))
+		for flushPeriodKey := range flushPeriodKeyMap {
+			flushPeriodKeys = append(flushPeriodKeys, flushPeriodKey)
+		}
+		slices.SortFunc(flushPeriodKeys, func(a, b FlushPeriodKey) int {
+			dA, dB := flushPeriods[a], flushPeriods[b]
+			switch {
+			case dA < dB:
+				return -1
+			case dA == dB:
+				return 0
+			default:
+				return 1
+			}
+		})
+		flushPeriodKeysByWorkloadDuration[workloadDurationKey] = flushPeriodKeys
+		if flushPeriodKeysPerWorkloadDuration == -1 {
+			flushPeriodKeysPerWorkloadDuration = len(flushPeriodKeys)
+		} else if len(flushPeriodKeys) != flushPeriodKeysPerWorkloadDuration {
+			log.Fatalf("%v has %d flush period keys, expected %d",
+				workloadDurationKey, len(flushPeriodKeys), flushPeriodKeysPerWorkloadDuration)
+		}
+	}
+
+	// Expand each skimOnly result to cover all relevant values for
+	// flushPeriod
+	flushPeriodReplacer := regexp.MustCompile(`(/flushPeriod=)[^/]*`)
+	for _, res := range skimOnlyResults {
+		workloadDurationKey := WorkloadDurationKey{workloadDurationP.Project(res)}
+		for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
+			res.Name = flushPeriodReplacer.ReplaceAll(res.Name, []byte(`${1}`+flushPeriodKey.Get(flushPeriodP.Fields()[0])))
+			project(res)
+		}
+	}
+
+	concurrencyLimits := make(map[MethodKey]int64)
+	methodKeys := make([]MethodKey, 0, len(methodKeySet))
+	for methodKey := range methodKeySet {
+		methodKeys = append(methodKeys, methodKey)
+		s := methodKey.Get(methodP.Fields()[1])
+		x, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			log.Fatalf("Error parsing concurrency limit %q: %v\n", s, err)
+		}
+		concurrencyLimits[methodKey] = x
+	}
+	slices.SortFunc(methodKeys, func(a, b MethodKey) int {
+		av := concurrencyLimits[a]
+		if av == -1 {
+			av = math.MaxInt / 2 //nolint:mnd // effectively infinite without fear of wrapping
+		}
+		bv := concurrencyLimits[b]
+		if bv == -1 {
+			bv = math.MaxInt / 2 //nolint:mnd // effectively infinite without fear of wrapping
+		}
+		d := av - bv
+		switch {
+		case d < 0:
+			return -1
+		case d == 0:
+			return 0
+		default:
+			return 1
+		}
+	})
+	methodKeyIndexes := make(map[MethodKey]int)
+	for i, methodKey := range methodKeys {
+		methodKeyIndexes[methodKey] = i
+	}
+
+	workloadKeys := make([]WorkloadKey, 0, len(workloadKeySet))
+	for workloadKey := range workloadKeySet {
+		workloadKeys = append(workloadKeys, workloadKey)
+	}
+
+	// Parse numeric values from keys
+	workloadDurationKeys := make([]WorkloadDurationKey, 0, len(workloadDurationKeySet))
+	workloadDurations := make(map[WorkloadDurationKey]time.Duration)
+	for workloadDurationKey := range workloadDurationKeySet {
+		workloadDurationKeys = append(workloadDurationKeys, workloadDurationKey)
+		d, err := time.ParseDuration(workloadDurationKey.Get(workloadDurationP.Fields()[0]))
+		if err != nil {
+			log.Fatalf("Error parsing workload duration %q: %v\n", d, err)
+		}
+		workloadDurations[workloadDurationKey] = d
+	}
+	slices.SortFunc(workloadDurationKeys, func(a, b WorkloadDurationKey) int {
+		d := workloadDurations[a] - workloadDurations[b]
+		switch {
+		case d < 0:
+			return -1
+		case d == 0:
+			return 0
+		default:
+			return 1
+		}
+	})
+	var minLogWorkloadDurationSpreadRatio float64
+	for i := range workloadDurationKeys {
+		if i == 0 {
+			continue
+		}
+		logSpreadRatio := math.Log(
+			float64(workloadDurations[workloadDurationKeys[i]]) /
+				float64(workloadDurations[workloadDurationKeys[i-1]]),
+		)
+		if i == 1 || logSpreadRatio < minLogWorkloadDurationSpreadRatio {
+			minLogWorkloadDurationSpreadRatio = logSpreadRatio
+		}
+	}
+
+	nonsingular := benchproc.NonSingularFields(residues)
+	if len(nonsingular) > 0 {
+		fmt.Printf("warning: results vary in %s\n", nonsingular)
+	}
+
+	confidence := 0.95
+	thresholds := benchmath.DefaultThresholds
+	connectAndDoMath := func(
+		dataByWorkloadDurationFlushPeriodUnit map[WorkloadKey]map[WorkloadDurationKey]map[FlushPeriodKey]map[string]*Data,
+	) {
+		for _, dataByDurationFlushPeriodUnit := range dataByWorkloadDurationFlushPeriodUnit {
+			for _, dataByFlushPeriodUnit := range dataByDurationFlushPeriodUnit {
+				for _, dataByUnit := range dataByFlushPeriodUnit {
+					for _, data := range dataByUnit {
+						data.Sample = *benchmath.NewSample(data.Values, &thresholds)
+						for _, w := range data.Sample.Warnings {
+							log.Printf("sample warning: %v", w)
+						}
+						data.Summary = benchmath.AssumeNothing.Summary(&data.Sample, confidence)
+						for _, w := range data.Summary.Warnings {
+							if w.Error() != "all samples are equal" {
+								log.Printf("summary warning: %v", w)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, dataByWorkloadDurationFlushPeriodUnit := range dataByMethodWorkloadDurationFlushPeriodUnit {
+		connectAndDoMath(dataByWorkloadDurationFlushPeriodUnit)
+	}
+
+	// Create separate sets of charts for each workload type
+	for _, workloadKey := range workloadKeys {
+
+		workloadName := workloadKey.Get(workloadP.Fields()[0])
+		workloadDisplayName := workloadName
+		switch workloadName {
+		case "processing":
+			workloadDisplayName = "Processing"
+		case "waiting":
+			workloadDisplayName = "Waiting"
+		}
+
+		for _, workloadDurationKey := range workloadDurationKeys {
+			for _, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
+
+				workloadDurationString := workloadDurationKey.Get(workloadDurationP.Fields()[0])
+				flushPeriodString := flushPeriodKey.Get(flushPeriodP.Fields()[0])
+
+				chart := chart{
+					Title: fmt.Sprintf("Throughput vs. P99 Latency\n(%v %s workload flushing every %v)",
+						workloadDurationString, workloadName, flushPeriodString),
+					XAxisLabel:   "P99 Workflow Latency (milliseconds)",
+					YAxisLabel:   "Workflow Throughput (tasks per second)",
+					SeriesLabels: make([]string, 0, len(methodKeys)),
+					SeriesPoints: make([]seriesPoints, 0, len(methodKeys)),
+					FileBasename: fmt.Sprintf("%s_%v@%v_throughput_vs_latency",
+						workloadName, workloadDurationString, flushPeriodString),
+					YAxisGrowFactor: 1.2, //nolint:mnd // legit magic number
+				}
+
+				// Create lines for each workload type
+				for _, methodKey := range methodKeys {
+
+					methodName := methodKey.Get(methodP.Fields()[0])
+					concurrencyLimit := concurrencyLimits[methodKey]
+
+					var methodDisplayName string
+					switch methodName {
+					case "skimOnly":
+						continue
+					case "funnel":
+						if concurrencyLimit == -1 {
+							methodDisplayName = "Unlimited"
+						} else {
+							methodDisplayName = fmt.Sprintf("Limit %d", concurrencyLimit)
+						}
+					default:
+						methodDisplayName = fmt.Sprintf("%s (limit %d)", methodName, concurrencyLimit)
+					}
+
+					data := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey][workloadKey][workloadDurationKey][flushPeriodKey]
+					if data == nil {
+						continue
+					}
+					throughput := data["tasks/sec"].Values
+					latency := data["p99-workflow-latency-sec"].Values
+
+					chart.SeriesLabels = append(chart.SeriesLabels, methodDisplayName)
+					var points seriesPoints
+					points.XYs = make(plotter.XYs, len(latency))
+					for i, x := range latency {
+						points.XYs[i].X = x * 1000 //nolint:mnd // scale to millseconds
+						points.XYs[i].Y = throughput[i]
+					}
+					chart.SeriesPoints = append(chart.SeriesPoints, points)
+
+				}
+
+				if err := plotScatter(&chart, *outputDir); err != nil {
+					log.Fatalf("Error creating chart: %v", err)
+				}
+			}
+		}
+
+		const xAxisLabel = "Aggregation Workload Duration @ Flush Period"
+
+		throughputChart := chart{
+			Title:           fmt.Sprintf("Aggregation Workload Throughput (%s)", workloadDisplayName),
+			XAxisLabel:      xAxisLabel,
+			YAxisLabel:      "Tasks / Second",
+			XTickLabels:     make([]string, flushPeriodKeysPerWorkloadDuration),
+			XTickPositions:  make([]float64, flushPeriodKeysPerWorkloadDuration),
+			SeriesLabels:    make([]string, len(methodKeys)),
+			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
+			FileBasename:    workloadName + "_aggregation_throughput",
+			YAxisGrowFactor: 1.2, //nolint:mnd // legit magic number
+		}
+
+		speedupChart := chart{
+			Title:           fmt.Sprintf("Aggregation Workload Speedup (%s)", workloadDisplayName),
+			XAxisLabel:      xAxisLabel,
+			YAxisLabel:      "Throughput vs. Direct",
+			XTickLabels:     make([]string, len(workloadDurationKeys)),
+			XTickPositions:  make([]float64, len(workloadDurationKeys)),
+			SeriesLabels:    make([]string, len(methodKeys)),
+			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
+			FileBasename:    workloadName + "_aggregation_speedup",
+			YAxisGrowFactor: 1.2, //nolint:mnd // legit magic number
+		}
+
+		allocationsChart := chart{
+			Title:           fmt.Sprintf("Allocations Per Task Aggregated (%s)", workloadDisplayName),
+			XAxisLabel:      xAxisLabel,
+			YAxisLabel:      "Allocations / Task",
+			XTickLabels:     make([]string, len(workloadDurationKeys)),
+			XTickPositions:  make([]float64, len(workloadDurationKeys)),
+			SeriesLabels:    make([]string, len(methodKeys)),
+			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
+			FileBasename:    workloadName + "_aggregation_allocations",
+			YAxisGrowFactor: 1.6, //nolint:mnd // legit magic number
+		}
+
+		allocBytesChart := chart{
+			Title:           fmt.Sprintf("Bytes Allocated Per Task Aggregated (%s)", workloadDisplayName),
+			XAxisLabel:      xAxisLabel,
+			YAxisLabel:      "Allocated Bytes / Task",
+			XTickLabels:     make([]string, len(workloadDurationKeys)),
+			XTickPositions:  make([]float64, len(workloadDurationKeys)),
+			SeriesLabels:    make([]string, len(methodKeys)),
+			SeriesPoints:    make([]seriesPoints, len(methodKeys)),
+			FileBasename:    workloadName + "_aggregation_bytes",
+			YAxisGrowFactor: 1.6, //nolint:mnd // legit magic number
+		}
+
+		// Create lines for each workload type
+		for lineIndex, methodKey := range methodKeys {
+
+			methodName := methodKey.Get(methodP.Fields()[0])
+			concurrencyLimit := concurrencyLimits[methodKey]
+
+			var methodDisplayName string
+			switch methodName {
+			case "skimOnly":
+				methodDisplayName = "Skim Only"
+			case "funnel":
+				if concurrencyLimit == -1 {
+					methodDisplayName = "Funnel (unlimited)"
+				} else {
+					methodDisplayName = fmt.Sprintf("Funnel (limit %d)", concurrencyLimit)
+				}
+			default:
+				methodDisplayName = fmt.Sprintf("%s (limit %d)", methodName, concurrencyLimit)
+			}
+
+			throughputChart.SeriesLabels[lineIndex] = methodDisplayName
+			throughputPoints := &throughputChart.SeriesPoints[lineIndex]
+			throughputPoints.XYs = make(plotter.XYs, flushPeriodKeysPerWorkloadDuration)
+			throughputPoints.YErrors = make(plotter.YErrors, flushPeriodKeysPerWorkloadDuration)
+			throughputPoints.Labels = make([]string, flushPeriodKeysPerWorkloadDuration)
+
+			speedupChart.SeriesLabels[lineIndex] = methodDisplayName
+			speedupPoints := &speedupChart.SeriesPoints[lineIndex]
+			speedupPoints.XYs = make(plotter.XYs, len(workloadDurationKeys))
+			speedupPoints.YErrors = make(plotter.YErrors, len(workloadDurationKeys))
+			speedupPoints.Labels = make([]string, len(workloadDurationKeys))
+
+			allocationsChart.SeriesLabels[lineIndex] = methodDisplayName
+			allocationsPoints := &allocationsChart.SeriesPoints[lineIndex]
+			allocationsPoints.XYs = make(plotter.XYs, len(workloadDurationKeys))
+			allocationsPoints.YErrors = make(plotter.YErrors, len(workloadDurationKeys))
+			allocationsPoints.Labels = make([]string, len(workloadDurationKeys))
+
+			allocBytesChart.SeriesLabels[lineIndex] = methodDisplayName
+			allocBytesPoints := &allocBytesChart.SeriesPoints[lineIndex]
+			allocBytesPoints.XYs = make(plotter.XYs, len(workloadDurationKeys))
+			allocBytesPoints.YErrors = make(plotter.YErrors, len(workloadDurationKeys))
+			allocBytesPoints.Labels = make([]string, len(workloadDurationKeys))
+
+			workloadDurationKey := workloadDurationKeys[len(workloadDurationKeys)-1]
+			for pointIndex, flushPeriodKey := range flushPeriodKeysByWorkloadDuration[workloadDurationKey] {
+
+				flushPeriod := float64(flushPeriods[flushPeriodKey])
+
+				xTickLabel := fmt.Sprintf("%s @ %s",
+					workloadDurationKey.Get(workloadDurationP.Fields()[0]),
+					flushPeriodKey.Get(flushPeriodP.Fields()[0]),
+				)
+				throughputChart.XTickPositions[pointIndex] = flushPeriod
+				throughputChart.XTickLabels[pointIndex] = xTickLabel
+
+				func() {
+					throughputPoints.XYs[pointIndex].X = flushPeriod
+
+					unit := "tasks/sec"
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
+
+					throughputPoints.XYs[pointIndex].Y = data.Summary.Center
+					throughputPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center
+					throughputPoints.YErrors[pointIndex].Low = data.Summary.Center - data.Summary.Lo
+
+					throughputPoints.Labels[pointIndex] = formatSummary(&data.Summary, benchunit.Decimal)
+				}()
+			}
+
+			for pointIndex, workloadDurationKey := range workloadDurationKeys {
+				workloadDuration := float64(workloadDurations[workloadDurationKey])
+
+				// Get the longest flush period for the workload duration
+				workloadDurationFlushPeriodKeys := flushPeriodKeysByWorkloadDuration[workloadDurationKey]
+				flushPeriodKey := workloadDurationFlushPeriodKeys[len(workloadDurationFlushPeriodKeys)-1]
+
+				xTickLabel := fmt.Sprintf("%s @ %s",
+					workloadDurationKey.Get(workloadDurationP.Fields()[0]),
+					flushPeriodKey.Get(flushPeriodP.Fields()[0]),
+				)
+				speedupChart.XTickPositions[pointIndex] = workloadDuration
+				speedupChart.XTickLabels[pointIndex] = xTickLabel
+				allocationsChart.XTickPositions[pointIndex] = workloadDuration
+				allocationsChart.XTickLabels[pointIndex] = xTickLabel
+				allocBytesChart.XTickPositions[pointIndex] = workloadDuration
+				allocBytesChart.XTickLabels[pointIndex] = xTickLabel
+
+				func() {
+					speedupPoints.XYs[pointIndex].X = workloadDuration
+
+					unit := "tasks/sec"
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
+
+					referenceThroughput := float64(time.Second) / workloadDuration
+					y := data.Summary.Center / referenceThroughput
+					speedupPoints.XYs[pointIndex].Y = y
+
+					plus := (data.Summary.Hi - data.Summary.Center) / referenceThroughput
+					minus := (data.Summary.Center - data.Summary.Lo) / referenceThroughput
+					speedupPoints.YErrors[pointIndex].High = plus
+					speedupPoints.YErrors[pointIndex].Low = minus
+
+					speedupPoints.Labels[pointIndex] = formatSummary(&benchmath.Summary{
+						Center: y,
+						Hi:     y + plus,
+						Lo:     y - minus,
+					}, benchunit.Decimal)
+				}()
+
+				func() {
+					allocationsPoints.XYs[pointIndex].X = workloadDuration
+
+					unit := "allocs/op"
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
+
+					allocationsPoints.XYs[pointIndex].Y = data.Summary.Center
+
+					allocationsPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center
+					allocationsPoints.YErrors[pointIndex].Low = data.Summary.Center - data.Summary.Lo
+
+					allocationsPoints.Labels[pointIndex] = formatSummary(&data.Summary, benchunit.Decimal)
+				}()
+
+				func() {
+					allocBytesPoints.XYs[pointIndex].X = workloadDuration
+
+					unit := "B/op"
+					methodData := dataByMethodWorkloadDurationFlushPeriodUnit[methodKey]
+					data := methodData[workloadKey][workloadDurationKey][flushPeriodKey][unit]
+					if data == nil {
+						return
+					}
+
+					allocBytesPoints.XYs[pointIndex].Y = data.Summary.Center
+
+					allocBytesPoints.YErrors[pointIndex].High = data.Summary.Hi - data.Summary.Center
+					allocBytesPoints.YErrors[pointIndex].Low = data.Summary.Center - data.Summary.Lo
+
+					allocBytesPoints.Labels[pointIndex] = formatSummary(&data.Summary, benchunit.Decimal)
+				}()
+			}
+
+		}
+
+		if err := plotBars(&throughputChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
+
+		if err := plotBars(&speedupChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
+
+		if err := plotBars(&allocationsChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
+
+		if err := plotBars(&allocBytesChart, *outputDir); err != nil {
+			log.Fatalf("Error creating chart: %v", err)
+		}
+	}
+
+	fmt.Printf("Charts generated successfully in the '%s' directory.\n", *outputDir)
+}
+
+func formatRatio(n, d float64) string {
+	switch {
+	case d == 0:
+		if n == 0 {
+			return "0%"
+		}
+		return fmt.Sprintf("%.2g", n)
+	case math.Abs(n/d) < 1:
+		return fmt.Sprintf("%.2g%%", math.Round(100*n/d))
+	default:
+		return fmt.Sprintf("%.2gx", n/d)
+	}
+}
+
+func formatSummary(s *benchmath.Summary, class benchunit.Class) string {
+	var center string
+	switch {
+	case math.Abs(s.Center) > 0.0001 && math.Abs(s.Center) < 1:
+		center = fmt.Sprintf("%.3f", s.Center)
+	case math.Abs(s.Center) >= 1000 && math.Abs(s.Center) < 10000:
+		center = fmt.Sprintf("%.0f", s.Center)
+	default:
+		center = benchunit.Scale(s.Center, class)
+	}
+	plus := formatRatio(s.Hi-s.Center, s.Center)
+	minus := formatRatio(s.Center-s.Lo, s.Center)
+	switch plus {
+	case minus:
+		return fmt.Sprintf("%s\n+/-\n%s", center, plus)
+	default:
+		return fmt.Sprintf("%s\n+%s\n-%s", center, plus, minus)
+	}
+}

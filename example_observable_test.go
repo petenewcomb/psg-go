@@ -1,80 +1,92 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg_test
+package streampool_test
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	"github.com/petenewcomb/psg-go"
+	// Superfluous alias needed to work around
+	// https://github.com/golang/go/issues/12794
+	"github.com/petenewcomb/streampool"
+	"github.com/petenewcomb/streampool/internal/exmpclk"
 )
-
-// Define a factory to bind task-specific inputs to generic task functions
-func newTaskFunc(taskName string, msSinceStart func() int64) psg.TaskFunc[string] {
-	return func(context.Context) (string, error) {
-		// Simulate latency
-		if taskName == "A" {
-			// Force A to finish last. Combined with the pool's concurrency
-			// limit this stabilizes the test output
-			time.Sleep(30 * time.Millisecond)
-		} else {
-			time.Sleep(10 * time.Millisecond)
-		}
-		fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
-		// Return mock data
-		return "result for task " + taskName, nil
-	}
-}
 
 // Observable uses psg to run a few tasks and produce logging that demonstrate
 // the sequence of events.
 func Example_observable() {
-	startTime := time.Now()
+	// VirtualClock: the timeline is driven entirely by clock.Sleep, so virtual time keeps
+	// the printed timestamps deterministic regardless of real-sleep jitter or co-running
+	// test load (the framework still runs the work concurrently for real).
+	var clock exmpclk.VirtualClock
+	clock.Start()
 	msSinceStart := func() int64 {
-		// Truncate to the nearest 50ms to make the output stable across runs
-		ms := time.Since(startTime).Milliseconds() / 10
-		return ms * 10
+		return clock.Elapsed(10 * time.Millisecond).Milliseconds()
 	}
 
-	// Define a result aggregation function, which will run in
-	var results []string
-	gatherFunc := func(ctx context.Context, result string, err error) error {
-		fmt.Printf("%3dms:   gathering result %q\n", msSinceStart(), result)
-		// Safe because gatherFunc will only ever be called from the current
-		// goroutine within calls to Scatter and GatherAll below.
-		results = append(results, result)
-		return err
-	}
-
-	// Create a scatter-gather pool with concurrency limit 2
-	pool := psg.NewPool(2)
-
-	// Create a scatter-gather job with the above pool
 	ctx := context.Background()
-	job := psg.NewJob(ctx, pool)
-	defer job.CancelAndWait()
+
+	// Create a scatter-gather wave
+	wave := streampool.NewWave()
+
+	// Define a result aggregation function, which will run in the top-level
+	// goroutine from within calls to Start and SkimAll.
+	var results []string
+	skimmer := streampool.NewFnSkimmer(
+		func(ctx context.Context, result string, err error) error {
+			clock.Sleep(10 * time.Millisecond)
+			fmt.Printf("%3dms:   skimmed result %q\n", msSinceStart(), result)
+			// Safe because skim will only ever be called from the current
+			// goroutine within calls to Start and SkimAll below.
+			results = append(results, result)
+			return err
+		},
+	)
+
+	// Limit dispatch concurrency to 2.
+	limit := streampool.NewSemaphore(2)
+
+	// Define a factory to bind task-specific inputs and resources into a
+	// Launcher. The task body Submits its result to the skimmer.
+	newRunner := func(taskName string) streampool.TaskLauncher {
+		return streampool.NewTaskLauncher(func(ctx context.Context) error {
+			// Simulate latency
+			switch taskName {
+			case "A":
+				clock.Sleep(60 * time.Millisecond)
+			case "B":
+				clock.Sleep(10 * time.Millisecond)
+			case "C":
+				clock.Sleep(30 * time.Millisecond)
+			}
+			fmt.Printf("%3dms:   task %q complete\n", msSinceStart(), taskName)
+			// Return mock data
+			return skimmer.Submit(ctx, "result for task "+taskName)
+		}).WithLimits(limit)
+	}
 
 	// Launch some tasks
 	fmt.Println("starting job")
 	for _, taskName := range []string{"A", "B", "C"} {
-		fmt.Printf("%3dms: launching task %q\n", msSinceStart(), taskName)
-		taskFunc := newTaskFunc(taskName, msSinceStart)
-		err := psg.Scatter(ctx, pool, taskFunc, gatherFunc)
+		err := newRunner(taskName).In(wave).Start(ctx)
 		if err != nil {
 			fmt.Printf("error launching task %q: %v\n", taskName, err)
 		}
 		fmt.Printf("%3dms: launched task %q\n", msSinceStart(), taskName)
 	}
 
+	// Wait a bit to ensure stable output
+	clock.Sleep(10 * time.Millisecond)
+
 	// Wait for all tasks to complete
-	fmt.Printf("%3dms: gathering remaining tasks\n", msSinceStart())
-	err := job.CloseAndGatherAll(ctx)
+	fmt.Printf("%3dms: skimming remaining tasks\n", msSinceStart())
+	err := wave.CloseAndSkimAll(ctx)
 	if err != nil {
-		fmt.Printf("error during gather: %v\n", err)
+		fmt.Printf("error during skim: %v\n", err)
 	}
-	fmt.Printf("%3dms: gathering complete\n", msSinceStart())
+	fmt.Printf("%3dms: skimming complete\n", msSinceStart())
 
 	// Print the aggregated results
 	for i, result := range results {
@@ -83,20 +95,17 @@ func Example_observable() {
 
 	// Output:
 	// starting job
-	//   0ms: launching task "A"
 	//   0ms: launched task "A"
-	//   0ms: launching task "B"
 	//   0ms: launched task "B"
-	//   0ms: launching task "C"
 	//  10ms:   task "B" complete
-	//  10ms:   gathering result "result for task B"
 	//  10ms: launched task "C"
-	//  10ms: gathering remaining tasks
-	//  20ms:   task "C" complete
-	//  20ms:   gathering result "result for task C"
-	//  30ms:   task "A" complete
-	//  30ms:   gathering result "result for task A"
-	//  30ms: gathering complete
+	//  20ms: skimming remaining tasks
+	//  30ms:   skimmed result "result for task B"
+	//  40ms:   task "C" complete
+	//  50ms:   skimmed result "result for task C"
+	//  60ms:   task "A" complete
+	//  70ms:   skimmed result "result for task A"
+	//  70ms: skimming complete
 	// results[0]="result for task B"
 	// results[1]="result for task C"
 	// results[2]="result for task A"

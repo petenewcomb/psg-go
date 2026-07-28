@@ -1,9 +1,35 @@
 #!/bin/bash
 
 set -e
-set -x
 
-go vet
-gofmt -s -w .
-golangci-lint run
-go test -short ./...
+echo "$0: Entering directory \``pwd`'"
+
+# Operate on THIS worktree only: .claude hosts session state and nested git
+# worktrees (other sessions' in-flight checkouts). Formatting or validating
+# them from here both mutates concurrent work in place (goimports/gofmt/tidy/
+# generate all write) and fails this commit on a foreign tree's transient
+# state.
+find . -name .claude -prune -o -type f -name '*.go' -print0 | xargs -0 -r goimports -w
+find . -name .claude -prune -o -type f -name '*.go' -print0 | xargs -0 -r gofmt -s -w
+
+find . -name .claude -prune -o -type f -name go.mod -print0 | while IFS= read -r -d '' file; do (
+    set -e
+    cd "${file%/*}"
+    echo "$0: Entering directory \``pwd`'"
+    set -x
+    go mod tidy
+    go test -short ./...
+    go generate ./...
+    go vet ./...
+    golangci-lint config verify
+    golangci-lint run
+
+    # Explicitly ignoring stdlib modules to work around https://github.com/google/go-licenses/issues/244
+    go-licenses check --include_tests $(go-licenses-ignore .) --ignore="$(go list std | awk 'NR > 1 { printf(",") } { printf("%s",$0) } END { print "" }')" ./...
+
+); echo; done
+
+echo "$0: Entering directory \``pwd`'"
+
+set -x
+! git status --porcelain -uno | grep '^[^ ][^ ]'

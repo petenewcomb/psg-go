@@ -1,136 +1,84 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-package psg
+package streampool
 
 import (
 	"context"
-	"sync/atomic"
 
-	"github.com/petenewcomb/psg-go/internal/state"
+	"github.com/petenewcomb/streampool/internal/ctxpool"
+	"github.com/petenewcomb/streampool/internal/execpool"
+	"github.com/petenewcomb/streampool/internal/workq"
 )
 
-// A Pool defines a virtual set of task execution slots and optionally places a
-// limit on its size. Use [Scatter] to launch tasks into a Pool. A Pool must be
-// bound to a [Job] before a task can be launched into it.
+// The dispatch/execution split (Phase 2b C2). Two package-level pools all Waves share:
 //
-// The zero value of Pool is unbound and has a limit of zero. [NewPool]
-// provides a convenient way to create a new pool with a non-zero limit.
-type Pool struct {
-	limit    atomic.Int64
-	job      *Job
-	inFlight state.InFlightCounter
+//   - defaultPool — the SCHEDULER (workq.Scheduler): admits work (governor + limiter
+//     permits) and hands the admitted BODY to the executor. It never runs a user body, so
+//     it is always promptly available (the always-live-dispatcher invariant). It drives the
+//     fresh/postponed priority engine plus scheduled flushes; NESTED admission is dropped to
+//     its intake Handoff (see [workerExEnv.ExecuteNowOrQueue]) whose block-as-demand spawns
+//     workers by COUNTER (bounded, not per-call), while top-level admission runs inline on
+//     the per-wave workQueue.
+//   - bodyExecutor — the EXECUTOR: a demand-spawned pool of workers that run the blocking
+//     user bodies (task, funnel-accumulate, funnel-flush) handed to them over an unbuffered
+//     rendezvous. It MAY block — that is its job — so a blocking body never pins a scheduler.
+//     Each *PostWork.Execute PushBacks its body here; the body runs Run(ee) against the
+//     worker's environment and frees itself. Funnel-flush is the same shape: the scheduler
+//     surfaces a due flush (funnelInstance.Execute) and hands the flush body to the executor
+//     (funnelInstance.Run), so a blocking user Flush never pins a scheduler either (CP-B1b).
+var defaultPool = workq.NewScheduler()
+
+// bodyExecutor runs user bodies off the scheduler. Per-worker environments are fresh
+// workerExEnv values (the body's wave/cancellation ride its borrowed body context, not the
+// worker — so the executor needs no per-worker context).
+var bodyExecutor = execpool.NewExecutor(func() *workerExEnv { return &workerExEnv{} })
+
+// Wait blocks until every worker goroutine of the default pool has exited. It
+// waits for all in-flight Waves to finish on their own and then reaps the idle
+// workers — it does NOT cancel running work (a Wave that never drains makes Wait
+// block forever, like sync.WaitGroup.Wait). The pool is reusable afterward.
+//
+// The worker join makes this the one quiescent point at which clearing the
+// process-wide ctxpool reuse caches is safe: with no workers left there are no
+// body-context borrowers, so the caches now only pin cached child contexts (and
+// their values) until each parent ctx is GC'd via AfterFunc. Clearing reclaims
+// them eagerly. ctxpool.Clear swaps in a fresh map, so a Wave dispatched after
+// Wait returns (the pool is reusable) simply repopulates clean.
+func Wait() {
+	// Reap the executor first (it runs bodies, which the scheduler feeds), then the
+	// scheduler. Both join only their idle workers — neither cancels in-flight work — so
+	// this is safe only at quiescence (every Wave drained on its own, as SkimAll enforces).
+	bodyExecutor.Wait()
+	defaultPool.Wait()
+	ctxpool.Clear()
 }
 
-// Creates a new [Pool] with the given limit. See [Pool.SetLimit] for the range
-// of allowed values and their semantics.
-func NewPool(limit int) *Pool {
-	p := &Pool{}
-	p.limit.Store(int64(limit))
-	return p
+// workerExEnv is the context-free unified execution environment each default-pool
+// worker holds: the integration surface (pooled rdvq sender + receiver + group/
+// queue stacks) that task and funnel bodies run against. It is deliberately
+// wave-agnostic — per-execution context (wave, cancellation) rides the
+// work item, which the worker runs under its borrowed body context,
+// stamping this exEnv in. Lock/Unlock are no-ops: the
+// exEnv is per-goroutine and runs one body at a time.
+type workerExEnv struct {
+	integrationExEnv
 }
 
-// Sets the active concurrency limit for the pool. A negative value means no
-// limit (tasks will always be launched regardless of how many are currently
-// running). Zero means no new tasks will be launched (i.e., [Scatter] will block
-// indefinitely) until SetLimit is called with a non-zero value. SetLimit is
-// always thread-safe, even for a Pool in a single-threaded [Job].
-func (p *Pool) SetLimit(limit int) {
-	if p.limit.Swap(int64(limit)) == 0 && limit != 0 {
-		j := p.job
-		if j != nil {
-			j.wakeGatherers()
-		}
-	}
-}
+var _ executionEnvironment = (*workerExEnv)(nil)
 
-func (p *Pool) launch(ctx context.Context, task boundTaskFunc, block bool) (bool, error) {
+func (ee *workerExEnv) Lock()   {}
+func (ee *workerExEnv) Unlock() {}
 
-	j := p.job
-	if j == nil {
-		panic("pool not bound to a job")
-	}
-
-	if j.isTaskContext(ctx) {
-		// Don't launch if the provided context is a task context within the
-		// current job, since that may lead to deadlock.
-		panic("psg.Scatter called from within TaskFunc; move call to GatherFunc instead")
-	}
-
-	// Don't launch if the provided context has been canceled.
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-
-	// Don't launch if the job context has been canceled.
-	if err := j.ctx.Err(); err != nil {
-		return false, err
-	}
-
-	// Register the task with the job to make sure that any calls to gather will
-	// block until the task is completed.
-	j.inFlight.Increment()
-
-	// Bookkeeping: make sure that the job-scope count incremented above gets
-	// decremented unless the launch actually happens
-	launched := false
-	defer func() {
-		if !launched {
-			j.decrementInFlight()
-		}
-	}()
-
-	// Apply backpressure if launching a new task would exceed the pool's
-	// concurrency limit.
-	for !p.incrementInFlightIfUnderLimit() {
-		if !block {
-			return false, nil
-		}
-		// Gather a result to make room to launch the new task. As long as there
-		// wasn't an error, we don't care whether a task was actually gathered
-		// by this call. Either way, it's time to re-check the in-flight count
-		// for this pool.
-		if _, err := j.GatherOne(ctx); err != nil {
-			return false, err
-		}
-	}
-
-	// Launch the task in a new goroutine.
-	launched = true
-	j.wg.Add(1)
-	go func() {
-		defer j.wg.Done()
-		task(j.ctx)
-	}()
-
-	return true, nil
-}
-
-type boundTaskFunc func(ctx context.Context)
-
-func (p *Pool) incrementInFlightIfUnderLimit() bool {
-	limit := p.limit.Load()
-	switch {
-	case limit < 0:
-		p.inFlight.Increment()
-		return true
-	case limit == 0:
-		return false
-	default:
-		return p.inFlight.IncrementIfUnder(int(limit))
-	}
-}
-
-func (p *Pool) postGather(gather boundGatherFunc) {
-	// Decrement the pool's in-flight count BEFORE waiting on the gather
-	// channel. This makes it safe for gatherFunc to call `Scatter` with this
-	// same `Pool` instance without deadlock, as there is guaranteed to be at
-	// least one slot available.
-	p.inFlight.Decrement()
-
-	j := p.job
-	select {
-	case j.gatherChannel <- gather:
-	case <-j.ctx.Done():
-	}
+// ExecuteNowOrQueue is the synchronous-dispatch entry a body uses to run sub-work — but on
+// an EXECUTOR goroutine it must NOT run admission inline. Inline admission would, on success,
+// PushBack the sub-body to the executor and block THIS executor goroutine waiting for another
+// executor: a self-deadlock once the executor pool is saturated. So drop the scatter-work to
+// the scheduler's intake: Post blocks only until a scheduler worker ACCEPTS it (the intake
+// Handoff's block-as-demand spawns one by COUNTER if none waits — bounded, NOT a per-call
+// spawn), then the scheduler runs admission and the blocking handoff off this goroutine.
+// Brief, deadlock-free (the scheduler is a separate pool), and demand-bounded. (ex is unused:
+// the scatter-work re-runs under the scheduler controller's own Execution.)
+func (ee *workerExEnv) ExecuteNowOrQueue(ctx context.Context, _ workq.Execution, work workq.Work) error {
+	return defaultPool.Post(ctx, work)
 }

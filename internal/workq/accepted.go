@@ -1,0 +1,870 @@
+// Copyright (c) Peter Newcomb. All rights reserved.
+// Licensed under the MIT License.
+
+package workq
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/petenewcomb/streampool/internal/trace"
+
+	"github.com/petenewcomb/streampool/internal/cerr"
+	"github.com/petenewcomb/streampool/internal/delayq"
+	"github.com/petenewcomb/streampool/internal/nbcq"
+	"github.com/petenewcomb/streampool/internal/omnipool"
+	"github.com/petenewcomb/streampool/internal/rdvq"
+)
+
+// Accepted manages work items with single-item processing logic across two
+// accepted-work queues, fresh and postponed. A selection pass drains fresh,
+// then postponed, and only then ACCEPTS new work — so, despite appearances,
+// fresh-before-postponed does not prioritize new arrivals over retries:
+// postponed work is re-attempted before any new work is accepted, and the
+// fresh queue can only hold work accepted after the previous postponed retry
+// (plus newly-due scheduled items). A worker blocked accepting new work is
+// likewise interrupted by a postponed item's readiness wake, which restarts
+// the pass at the accepted queues — by the time fresh work exists, every
+// pending postponed item was just attempted.
+//
+// The effective guarantee, and the reason for the two-queue design: work that
+// could not start earlier (typically for lack of permits) is retried
+// consistently ahead of accepting new work that might consume overlapping
+// resources, while single-item processing and non-blocking retries preserve
+// liveness. Ordering within each queue is FIFO.
+type Accepted struct {
+	fresh     nbcq.Queue[Work]
+	postponed nbcq.Queue[Work]
+	waiters   rdvq.Waiters
+	listener  *rdvq.Listener
+
+	// scheduled holds [ScheduledWork] that is not yet due. Items whose
+	// deadline has arrived are drained into the fresh queue during work
+	// selection and then execute like any other work. The delayq wake
+	// hook nudges a parked worker when a sooner deadline is scheduled.
+	scheduled delayq.Queue[ScheduledWork]
+
+	// unmetDemandFn is the pool's worker-spawn signal. Fired (via
+	// missHandler) when excess fresh work accumulates (queueFresh), when a
+	// scheduled item is forced (Expedite), and when a flush deadline comes
+	// due. Nil for queues whose pool does not spawn on demand (e.g. the
+	// per-wave workQueue, which never schedules and drives its own work).
+	unmetDemandFn func()
+
+	// missHandler is the fate of a waiter-set wake that finds no parked
+	// worker, bound once at Init: the spawn signal (unmetDemandFn) when the
+	// pool spawns on demand, else [rdvq.PersistMiss] — the miss is recorded
+	// in the waiter set's balance and aborts the next park attempt, so a
+	// relay wake whose fact was consumed one-shot at its source is never
+	// lost on a driver-driven queue.
+	missHandler rdvq.MissHandler
+
+	// schedTimer is the single, queue-owned timer that honors scheduled-work deadlines
+	// (Design B): workers carry no deadline timers of their own and scale fully to
+	// zero, while this timer — re-armed from [Accepted.armScheduledTimer]
+	// whenever the earliest deadline changes — fires at the earliest deadline to wake a
+	// parked worker (or spawn one via unmetDemandFn) so the now-due item is drained. nil
+	// until first armed; only the scheduler ever schedules work, so per-wave workQueues
+	// never create it. schedTimerMu serializes Reset against the authoritative-atomic read.
+	schedTimerMu sync.Mutex
+	schedTimer   *time.Timer
+}
+
+// Init initializes the work queue. unmetDemandFn is the demand-spawn
+// signal (see the field); pass nil for queues that do not spawn on
+// demand.
+//
+//nolint:contextcheck // background context used only for tracing
+func (q *Accepted) Init(unmetDemandFn func()) {
+	traceRegion := "workq.Accepted.Init"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+	trace.Logf(context.Background(), traceRegion,
+		"Accepted=%p, fresh=%p, postponed=%p, waiters=%p, listener=%p",
+		q, &q.fresh, &q.postponed, &q.waiters, q.listener)
+
+	q.fresh.Init()
+	q.postponed.Init()
+	q.waiters.Init()
+	// The queue's relay: wake one parked worker to run a retry sweep, or —
+	// with none parked — run the miss handler: spawn a worker on a
+	// spawn-capable queue, else persist the miss in the waiter set's balance
+	// (the relayed fact was consumed one-shot at its source and lives
+	// nowhere else). Fired by a capacity domain that holds it, either as a
+	// registered demand's attendant or as a planted fallback-interest
+	// listener; its outcome never narrows delivery
+	// (docs/notification-conservation.md).
+	q.listener = rdvq.NewListener(q.relay)
+	q.scheduled.Init(q.wakeScheduled)
+	q.unmetDemandFn = unmetDemandFn
+	if unmetDemandFn != nil {
+		q.missHandler = rdvq.MissFunc(unmetDemandFn)
+	} else {
+		q.missHandler = rdvq.PersistMiss
+	}
+}
+
+func (q *Accepted) relay() {
+	q.waiters.Notify(q.missHandler)
+}
+
+// Listener returns the queue's wake relay, for use as a registered demand's
+// attendant or as a planted fallback-interest listener.
+func (q *Accepted) Listener() *rdvq.Listener {
+	return q.listener
+}
+
+// Reset returns the queue to its rest state for its single owner's next
+// cycle: the waiter set is reset (balance zeroed, stale registration hints
+// discarded) and the scheduled-work timer is disarmed. Quiescence is the
+// caller's contract — no worker parked, no wake in flight — under which the
+// finished cycle must also have drained all accepted and scheduled work
+// (Done implies the queues are empty), so residue here is a framework bug
+// and panics. The warm queues' never-re-Init contract is untouched:
+// draining and the waiter-set reset are ordinary operations.
+func (q *Accepted) Reset() {
+	if _, ok := q.fresh.TryPopFront(); ok {
+		panic("workq: Accepted.Reset with fresh work queued")
+	}
+	if _, ok := q.postponed.TryPopFront(); ok {
+		panic("workq: Accepted.Reset with postponed work queued")
+	}
+	if !q.scheduled.NextDeadline().IsZero() {
+		panic("workq: Accepted.Reset with scheduled work pending")
+	}
+	q.armScheduledTimer()
+	q.waiters.Reset()
+}
+
+// wakeScheduled is the delayq wake hook, fired when a newly scheduled deadline beats the
+// current earliest. Under Design B it (re)arms the queue-owned timer for the new earliest
+// rather than waking a worker now: a future deadline needs no worker until it comes due, and
+// the timer fires then. (A deadline that is already due arms for ~now → fires immediately.)
+func (q *Accepted) wakeScheduled() {
+	q.armScheduledTimer()
+}
+
+// armScheduledTimer (re)arms the queue-owned scheduled-work timer to fire at the earliest
+// currently-known deadline, or stops it when nothing is scheduled. It reads the AUTHORITATIVE
+// earliest from delayq under schedTimerMu (never a passed, possibly-stale value), so
+// concurrent callers — the delayq wake-on-lowering and a worker re-arming after a drain —
+// serialize and the last one always reflects the true earliest; a Schedule that lowered the
+// deadline can never be lost to a racing later re-arm. Lazily creates the timer on first use
+// (only a queue that schedules work — the scheduler — ever does).
+func (q *Accepted) armScheduledTimer() {
+	q.schedTimerMu.Lock()
+	defer q.schedTimerMu.Unlock()
+	next := q.scheduled.NextDeadline()
+	if next.IsZero() {
+		if q.schedTimer != nil {
+			q.schedTimer.Stop()
+		}
+		return
+	}
+	d := time.Until(next)
+	if d < 0 {
+		d = 0
+	}
+	if q.schedTimer == nil {
+		q.schedTimer = time.AfterFunc(d, q.scheduledDeadlineFired)
+	} else {
+		q.schedTimer.Reset(d)
+	}
+}
+
+// scheduledDeadlineFired runs when the scheduled-work timer expires: a deadline has come due.
+// It wakes a parked worker to re-drive — whose drainScheduled promotes the now-due item to
+// fresh and runs it — or, if the pool scaled to zero, spawns one via unmetDemandFn. Mirrors
+// [Accepted.ForceFresh]'s wake-or-spawn. A spurious early fire (the item was already drained
+// by a worker woken another way) is harmless: the re-drive finds nothing due and re-arms.
+func (q *Accepted) scheduledDeadlineFired() {
+	// A parked worker takes the wake, or the miss handler spawns one (only
+	// the scheduler's queue schedules work, and it spawns on demand).
+	q.waiters.Notify(q.missHandler)
+}
+
+// Schedule hands w to the queue to become fresh work at the given time.
+// Calling Schedule again on an already-scheduled w replaces its time, so
+// it doubles as reschedule. Safe for concurrent callers. See
+// [delayq.Queue.Schedule] for the at-vs-deadline naming and the zero-time
+// contract.
+func (q *Accepted) Schedule(w ScheduledWork, at time.Time) {
+	q.scheduled.Schedule(w, at)
+}
+
+// Remove cancels a previously [Accepted.Schedule]d w. Safe to call on a
+// w that was never scheduled or has already become due. Safe for
+// concurrent callers.
+func (q *Accepted) Remove(w ScheduledWork) {
+	q.scheduled.Remove(w)
+}
+
+// Reschedule synchronously ensures w is scheduled to become fresh at at,
+// returning whether it did so (false if w was already drained or
+// removed, meaning a flush for it is already in flight). See
+// [delayq.Queue.Reschedule]. Unlike [Accepted.Schedule] it lets a caller
+// holding its own per-item lock learn, atomically with the queue state,
+// whether w is still schedulable.
+func (q *Accepted) Reschedule(w ScheduledWork, at time.Time) bool {
+	return q.scheduled.Reschedule(w, at)
+}
+
+// ClaimForFlush arbitrates whether the caller may flush w out-of-band,
+// returning true if so (false if w was already drained, i.e. some
+// deadline-driven execution already claimed it). It removes any pending
+// scheduled entry for w when granting the claim. See
+// [delayq.Queue.ClaimForFlush].
+func (q *Accepted) ClaimForFlush(w ScheduledWork) bool {
+	return q.scheduled.ClaimForFlush(w)
+}
+
+// Expedite promotes an already-[Accepted.Schedule]d w straight into the
+// fresh queue so the next worker runs it now, regardless of its
+// deadline. It is backpressure-neutral — w already passed admission at
+// Schedule, so this adds no new outstanding work — and therefore safe
+// to call from any context, including outside the ExecuteOne flow
+// (e.g. an end-of-work force sweep).
+//
+// If w is not currently in the scheduled queue (never scheduled, already
+// due-drained, already removed, or already expedited) Expedite is a
+// no-op: it does not re-enqueue w. A caller that force-flushes a set of
+// instances it believes are scheduled tolerates this — an item that
+// just drained on its deadline is already on its way through fresh.
+//
+//nolint:contextcheck // background context used only for tracing
+func (q *Accepted) Expedite(w ScheduledWork) {
+	traceRegion := "workq.Accepted.Expedite"
+	item, ok := q.scheduled.Expedite(w)
+	if !ok {
+		trace.Logf(context.Background(), traceRegion, "Accepted(%p) %v already drained, no-op", q, w)
+		return
+	}
+	trace.Logf(context.Background(), traceRegion, "Accepted(%p) promoting %v to fresh", q, item)
+	q.fresh.PushBack(item)
+	// Signal demand for the promoted item, matching queueFresh: with a
+	// spawn fn this can start a worker to run it; with none it falls back
+	// to nudging a parked worker. Forced items always signal (there is no
+	// running controller to absorb one on the current worker).
+	q.waiters.Notify(q.missHandler)
+}
+
+// ForceFresh promotes w straight into the fresh queue so the next worker runs it
+// now, and fires demand (spawning a worker if none is idle). Unlike [Accepted.Expedite]
+// it does NOT consult the scheduled queue, so it works for work that was never scheduled
+// — e.g. a no-deadline funnel instance the end-of-work sweep flushes. The caller is
+// responsible for any admission/arbitration (the funnel sweep gates each push behind
+// ClaimForFlush); this is purely the promote-and-signal step.
+func (q *Accepted) ForceFresh(w Work) {
+	q.fresh.PushBack(w)
+	// Wake a parked worker if one is waiting; otherwise spawn one. Notify is total: it
+	// hands the wake to a parked waiter, and — TryPushBack finding no worker inbox — runs
+	// unmetDemandFn to spawn a driver rather than strand w in fresh (the funnel-sweep
+	// wedge, when every worker is busy inside a body and none is parked). Mirrors
+	// Queue.Post's fireDemand.
+	q.waiters.Notify(q.missHandler)
+}
+
+// drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllScheduled]
+// so every scheduled item — including far-future no-deadline placeholders —
+// is treated as due. Matches the funnel pool's no-deadline placeholder skew.
+const drainAllSkew = 24 * time.Hour
+
+// DrainAllScheduled removes every scheduled work item regardless of its
+// deadline, appending them to dst and returning it. Unlike the per-deadline
+// draining inside ExecuteOne, the caller takes ownership of the returned
+// items and is responsible for running them — used at end-of-work to flush
+// instances whose deadline has not yet arrived. Safe for concurrent callers
+// (delayq.Drain serializes internally).
+func (q *Accepted) DrainAllScheduled(dst []ScheduledWork) []ScheduledWork {
+	due, _ := q.scheduled.Drain(time.Now().Add(drainAllSkew), dst)
+	// The scheduled queue is now empty; stop the queue-owned timer explicitly rather than
+	// leave it armed for a just-drained deadline (a benign spurious fire otherwise — the
+	// next drainScheduled would stop it — but the end-of-work sweep is the last drive, so
+	// make it definitive). Re-arms cleanly if anything is scheduled afterward.
+	q.armScheduledTimer()
+	return due
+}
+
+// AddWorkFunc provides new work to the queue processor. It is called with a
+// waiters set to park in when there is nothing to do. If waiters is nil,
+// AddWorkFunc should not block. A queueFn is provided that should be called
+// for each work item accepted.
+//
+// Scheduled-work deadlines are handled by the queue-owned
+// timer (Design B, [Accepted.armScheduledTimer]), which wakes a parked worker or spawns
+// one when a deadline comes due, so a blocking AddWorkFunc need not watch one.
+type AddWorkFunc func(
+	ctx context.Context,
+	queueFn QueueWorkFunc,
+	waiters *rdvq.Waiters,
+	confirmWaitFn func() bool,
+) error
+
+// QueueWorkFunc is called by AddWorkFunc to add new work items to processing.
+type QueueWorkFunc func(Work)
+
+// Signals the end of work
+const ErrEndOfWork = cerr.Error("end of work")
+
+func (q *Accepted) ExecuteNowOrQueue(
+	ctx context.Context,
+	ex Execution,
+	work Work,
+) error {
+	traceRegion := "workq.Accepted.ExecuteNowOrQueue"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	err := work.Execute(ctx, ex)
+	if err == nil && !ex.Started() {
+		// Unreachable by design: a top-level dispatch blocks to started-or-error,
+		// and a nested dispatch queues through the driving controller's installed
+		// QueueFunc — postponed is written only by a controller's requeue door.
+		panic("workq: ExecuteNowOrQueue dispatch neither started nor errored")
+	}
+	work.Free()
+	return err
+}
+
+// ExecuteOne processes exactly one work item using priority-based processing.
+// It tries newly accepted work first (exhausting the queue), then postponed
+// work (exhausting that queue), then new work via addWorkFn, all as non-blocking
+// operations. If no immediately executable work is found, waits for new work
+// or notification that a postponed work item is ready.
+//
+// Pass order: fresh → postponed → new work. This is not a prioritization of
+// new arrivals over retries — new work is accepted only after the postponed
+// queue was just exhausted, so every acceptance is immediately preceded by a
+// full postponed retry (see the [Accepted] type comment).
+//
+// The queue's demand-spawn signal (see [Accepted.Init]) is fired when
+// excess fresh work accumulates (count > 1) and no idle worker is
+// available, enabling new workers to be spawned when needed.
+//
+// Returns the error value from the work item if one was executed, the error
+// value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
+// been called but was nil.
+// onSecure, if non-nil, fires exactly once just before the first work body runs
+// (see [controller.execute]) — on EVERY path work reaches execution (fresh,
+// postponed-from-ExecuteNowOrQueue, or pulled-from-incoming), not only the pull
+// path. A worker.Pool driver passes its spawn-token release here: the token must
+// drop before the body runs because the body may block (a task draining a nested
+// subwave, a blocking Post), and a blocking body that still pinned the token would
+// starve the demand that needs another worker. nil for non-pool drivers (the
+// funnel flusher, the wave skim/block drains) which hold no spawn token.
+func (q *Accepted) ExecuteOne(ctx context.Context, addWorkFn AddWorkFunc, onSecure func()) error {
+	traceRegion := "workq.Accepted.ExecuteOne"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "Accepted=%p", q)
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	c := newController(q)
+	c.addWorkFn = addWorkFn
+	c.onSecure = onSecure
+	defer c.Free()
+
+	for {
+		workExecuted, err := c.ExecuteOne(ctx)
+		if workExecuted || err != nil {
+			return err
+		}
+
+		err = ctx.Err()
+		if err != nil {
+			return err
+		}
+
+		c.ResetForRetry()
+	}
+}
+
+// TryAddWorkFunc provides new work for non-blocking execution attempts.
+// It should call queueFn for each available work item.
+type TryAddWorkFunc func(context.Context, QueueWorkFunc) error
+
+// TryExecuteOne attempts to process exactly one work item using priority-based processing.
+// It tries newly accepted work first (exhausting the queue), then postponed work
+// (exhausting that queue), then new work via addWorkFn, all as non-blocking operations.
+// If no immediately executable work is found, returns false without blocking.
+//
+// Pass order: fresh → postponed → new work — not a prioritization of new
+// arrivals over retries; see [Accepted.ExecuteOne] and the [Accepted] type
+// comment.
+//
+// Returns true if a work item was executed, false if no work was ready to execute.
+//
+// Returns the error value from the work item if one was executed, the error
+// value from addWorkFn if called, or [ErrEndOfWork] if addWorkFn would have
+// been called but was nil.
+func (q *Accepted) TryExecuteOne(ctx context.Context, addWorkFn TryAddWorkFunc) (bool, error) {
+	err := ctx.Err()
+	if err != nil {
+		return false, err
+	}
+
+	c := newController(q)
+	c.tryAddWorkFn = addWorkFn
+	defer c.Free()
+
+	c.drainScheduled()
+
+	// Try accepted work first
+	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
+		return c.ex.Started(), err
+	}
+
+	if addWorkFn == nil {
+		if c.workWasPostponed {
+			return false, nil
+		} else {
+			return false, ErrEndOfWork
+		}
+	}
+
+	// Requeue immediately because there's no need to hold buffered items to
+	// recheck before waiting.
+	c.requeueBuffer()
+
+	// Try adding new work
+	workAdded, addErr := c.TryAddNew(ctx)
+	if !workAdded || (addErr != nil && !errors.Is(addErr, ErrEndOfWork)) {
+		return false, addErr
+	}
+
+	c.workWasPostponed = false
+	err = c.TryAccepted(ctx, false)
+	if !c.workWasPostponed && err == nil {
+		err = addErr
+	}
+	return c.ex.Started(), err
+}
+
+type controller struct {
+	q                   *Accepted
+	executor            Executor
+	buffer              []bufferedWork
+	currentIndex        int
+	currentWasPostponed bool
+	othersReleased      bool
+	addWorkFn           AddWorkFunc
+	tryAddWorkFn        TryAddWorkFunc
+	onSecure            func() // released the driver's spawn token before the first body; see ExecuteOne
+	securedFired        bool   // onSecure already fired for this drive
+	workAddedCount      int
+	workWasPostponed    bool
+	endOfWorkErr        error
+
+	scheduledScratch []ScheduledWork // reusable Drain buffer
+
+	ex Execution // avoid closure reallocations
+
+	queueFreshFn QueueWorkFunc // avoid closure reallocations
+
+	shouldStillWaitFn  func() bool     // avoid closure reallocations
+	shouldStillWaitCtx context.Context //nolint:containedctx // temporary to avoid closure allocation
+	shouldStillWaitErr error
+}
+
+// Init implements omnipool.Initer to set up self-referential closures
+func (c *controller) Init() {
+	// Allocate reusable self-referential closures
+	c.ex = c.executor.BaseEx()
+	c.ex.Blocking = c.blocking
+	c.ex.Starting = c.starting
+	c.queueFreshFn = c.queueFresh
+	c.ex.Queue = c.queueFreshFn
+	c.shouldStillWaitFn = c.shouldStillWait
+}
+
+// Reset implements omnipool.Resetter to clear state while preserving allocations
+func (c *controller) Reset() {
+	c.executor.Reset()
+
+	// Reset internal state before returning to pool
+	c.ResetForRetry()
+
+	// Clear all but reusable allocations
+	*c = controller{
+		buffer:            c.buffer[:0],
+		scheduledScratch:  c.scheduledScratch[:0],
+		ex:                c.ex,
+		queueFreshFn:      c.queueFreshFn,
+		shouldStillWaitFn: c.shouldStillWaitFn,
+	}
+}
+
+var controllerPool = omnipool.For[controller]()
+
+func newController(q *Accepted) *controller {
+	c := controllerPool.Get()
+	c.q = q
+	return c
+}
+
+func (c *controller) ExecuteOne(ctx context.Context) (bool, error) {
+
+	c.drainScheduled()
+
+	var err error
+	if err := c.TryAccepted(ctx, false); c.ex.Started() || err != nil {
+		return c.ex.Started(), err
+	}
+
+	if !c.workWasPostponed && c.endOfWorkErr != nil {
+		return false, c.endOfWorkErr
+	}
+
+	// Avoid full blocking protocol if we can
+	workAdded, err := c.TryAddNew(ctx)
+	if err != nil {
+		if errors.Is(err, ErrEndOfWork) {
+			c.endOfWorkErr = err
+			return false, nil
+		}
+		return false, err
+	}
+	if workAdded {
+		return false, nil
+	}
+
+	// Block and wait for work to become available
+	err = c.WaitForNew(ctx)
+	if c.ex.Started() {
+		return true, err
+	}
+	if err != nil && errors.Is(err, ErrEndOfWork) {
+		c.endOfWorkErr = err
+		return false, nil
+	}
+	return false, err
+}
+
+// drainScheduled moves any scheduled work whose deadline has arrived into
+// the fresh queue, where it will be picked up and executed like any
+// other work, then re-arms the queue-owned scheduled timer (Design B) for
+// the new earliest deadline (the drain may have advanced or emptied it).
+//
+// Due items are promoted through queueFresh (not a bare fresh PushBack)
+// so they carry the same excess-work bookkeeping as any other accepted
+// work: a batch of newly-due flushes can trip unmetDemandFn and spawn
+// additional workers, letting the sweep run in parallel rather than
+// serializing on whichever worker happened to drain it.
+func (c *controller) drainScheduled() {
+	// armScheduledTimer reads the authoritative earliest deadline itself, so the next
+	// value Drain returns is intentionally discarded here.
+	due, _ := c.q.scheduled.Drain(time.Now(), c.scheduledScratch[:0])
+	c.scheduledScratch = due
+	for _, w := range due {
+		c.queueFresh(w)
+	}
+	c.q.armScheduledTimer()
+}
+
+// TryAccepted attempts to execute work from both accepted queues, postponed
+// first: already-admitted work has priority over fresh, so a pass that goes
+// deep into fresh work (a skim body) never strands an attempted-and-waiting
+// postponed claim behind it.
+func (c *controller) TryAccepted(ctx context.Context, blockOrListen bool) error {
+	traceRegion := "workq.controller.TryAccepted"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	trace.Logf(ctx, traceRegion, "blockOrListen=%v", blockOrListen)
+	if err := c.tryAccepted(ctx, &c.q.postponed, blockOrListen); c.ex.Started() || err != nil {
+		trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
+		return err
+	}
+	err := c.tryAccepted(ctx, &c.q.fresh, blockOrListen)
+	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
+	return err
+}
+
+func (c *controller) tryAccepted(ctx context.Context, q *nbcq.Queue[Work], blockOrListen bool) error {
+	for c.collectAccepted(q) {
+		if err := c.execute(ctx, blockOrListen); c.ex.Started() || err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (c *controller) queueFresh(work Work) {
+	traceRegion := "workq.Accepted.queueFresh"
+	trace.Logf(context.Background(), traceRegion, "Accepted(%p) adding fresh %v", c.q, work)
+	c.q.fresh.PushBack(work)
+	c.workAddedCount++
+	if c.workAddedCount > 1 && c.q.unmetDemandFn != nil {
+		c.q.waiters.Notify(c.q.missHandler)
+	}
+}
+
+func (c *controller) TryAddNew(ctx context.Context) (bool, error) {
+	traceRegion := "workq.controller.TryAddNew"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	if c.tryAddWorkFn == nil && c.addWorkFn == nil {
+		trace.Logf(ctx, traceRegion, "returning workAdded=false err=ErrEndOfWork")
+		return false, ErrEndOfWork
+	}
+
+	c.workAddedCount = 0
+	defer func() {
+		c.workAddedCount = 0
+	}()
+
+	var err error
+	if c.tryAddWorkFn != nil {
+		err = c.tryAddWorkFn(ctx, c.queueFreshFn)
+	} else {
+		err = c.addWorkFn(ctx, c.queueFreshFn, nil, nil)
+	}
+	workWasAdded := c.workAddedCount > 0
+	trace.Logf(ctx, traceRegion, "returning workAdded=%v err=%v", workWasAdded, err)
+	return workWasAdded, err
+}
+
+func (c *controller) WaitForNew(ctx context.Context) error {
+	traceRegion := "workq.controller.WaitForNew"
+	defer trace.StartRegion(ctx, traceRegion).End()
+	if c.addWorkFn == nil {
+		trace.Logf(ctx, traceRegion, "returning workExecuted=false err=ErrEndOfWork")
+		return ErrEndOfWork
+	}
+
+	c.shouldStillWaitCtx = ctx
+	c.shouldStillWaitErr = nil
+	defer func() {
+		c.shouldStillWaitCtx = nil
+		c.shouldStillWaitErr = nil
+	}()
+
+	// Scheduled-work deadlines are honored by the queue-owned timer (Design B,
+	// [Accepted.armScheduledTimer]): it wakes a parked worker or spawns one when a deadline
+	// comes due, so the park arms no timer of its own.
+	var err error
+	err = c.addWorkFn(ctx, c.queueFreshFn, &c.q.waiters, c.shouldStillWaitFn)
+	if err == nil {
+		err = c.shouldStillWaitErr
+	} else if c.shouldStillWaitErr != nil {
+		err = errors.Join(c.shouldStillWaitErr, err)
+	}
+
+	trace.Logf(ctx, traceRegion, "returning workExecuted=%v err=%v", c.ex.Started(), err)
+	return err
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (c *controller) collectAccepted(q *nbcq.Queue[Work]) bool {
+	c.currentIndex = len(c.buffer)
+	work, ok := q.TryPopFront()
+	if !ok {
+		return false
+	}
+	c.addToBuffer(work, q == &c.q.postponed)
+	return true
+}
+
+func (c *controller) execute(ctx context.Context, blockOrListen bool) error {
+	traceRegion := "workq.Accepted.execute"
+	defer trace.StartRegion(ctx, traceRegion).End()
+
+	bw := c.buffer[c.currentIndex]
+	c.currentWasPostponed = bw.wasPostponed
+
+	if trace.IsEnabled() {
+		if bw.wasPostponed {
+			trace.Logf(ctx, traceRegion, "executing postponed %v at buffer index %d", bw.work, c.currentIndex)
+		} else {
+			trace.Logf(ctx, traceRegion, "executing fresh %v at buffer index %d", bw.work, c.currentIndex)
+		}
+	}
+
+	ex := c.ex
+	ex.Listener = c.q.listener
+	ex.CanListen = blockOrListen
+
+	if c.ex.Started() {
+		panic("started should not be set before execution")
+	}
+
+	// Release the driver's spawn token before running ANY body, on every path
+	// work reaches here (fresh, postponed, or pulled). The body may block
+	// (nested-subwave drain, blocking Post), so a token still held across it
+	// would starve the demand for a replacement worker. Fires once per drive;
+	// the worker side is itself idempotent. See ExecuteOne's onSecure.
+	if c.onSecure != nil && !c.securedFired {
+		c.securedFired = true
+		c.onSecure()
+	}
+
+	err := bw.work.Execute(ctx, ex)
+
+	if err != nil {
+		trace.Logf(ctx, traceRegion, "%v returned err=%v", bw.work, err)
+	}
+
+	if c.ex.Started() {
+		bw.work.Free()
+	} else {
+		c.workWasPostponed = true
+	}
+
+	if errors.Is(err, ErrEndOfWork) {
+		panic("ErrEndOfWork received from work function")
+	}
+
+	return err
+}
+
+func (c *controller) ResetForRetry() {
+	c.requeueBuffer()
+	if c.ex.Started() {
+		panic("Reset called after work was executed")
+	}
+	c.workAddedCount = 0
+	c.currentWasPostponed = false
+	c.othersReleased = false
+	c.workWasPostponed = false
+}
+
+func (c *controller) blocking() {
+	traceRegion := "workq.controller.blocking"
+	if c.currentWasPostponed {
+		trace.Logf(context.Background(), traceRegion, "postponed work at index %d blocking", c.currentIndex)
+	} else {
+		trace.Logf(context.Background(), traceRegion, "fresh work at index %d blocking", c.currentIndex)
+	}
+	c.releaseOthers()
+}
+
+func (c *controller) starting() {
+	traceRegion := "workq.controller.starting"
+	if c.currentWasPostponed {
+		trace.Logf(context.Background(), traceRegion, "postponed work at index %d started", c.currentIndex)
+	} else {
+		trace.Logf(context.Background(), traceRegion, "fresh work at index %d started", c.currentIndex)
+	}
+	c.executor.Starting()
+	c.releaseOthers()
+}
+
+func (c *controller) releaseOthers() {
+	if !c.othersReleased {
+		c.othersReleased = true
+		// Make sure we don't requeue the executing item
+		c.buffer[c.currentIndex].work = nil
+		// Requeue the remaining work items before actually
+		// executing the work function
+		c.requeueBuffer()
+	}
+}
+
+// shouldStillWait handles the race condition where work might arrive
+// between our last attempt and registering as a waiter. It first checks both
+// accepted queues for any new work, then retries postponed work items with
+// the notification function to register for later wake-up.
+func (c *controller) shouldStillWait() bool {
+	// Walk through the postponed work items to retry (i.e., verify that the wait
+	// is still needed) and pass the notification function to them.
+	if c.buffer != nil {
+		// Iterate through the buffer and retry each work item while giving each
+		// a chance to register for notifications
+		for c.currentIndex = range c.buffer {
+			c.shouldStillWaitErr = c.execute(c.shouldStillWaitCtx, true)
+			if c.ex.Started() || c.shouldStillWaitErr != nil {
+				return false
+			}
+		}
+	}
+
+	// Re-drain scheduled work: a Schedule that landed after the ExecuteOne
+	// drainScheduled but before we registered as a waiter may have produced
+	// now-due work. Draining promotes due items into fresh (caught by the
+	// TryAccepted below) and re-arms the queue-owned scheduled timer (Design B)
+	// for any future deadline — so a sooner deadline that appeared is honored by
+	// the timer firing, not by aborting this wait.
+	c.drainScheduled()
+
+	// Check to make sure nothing else accumulated before we registered as a
+	// waiter.
+	if c.shouldStillWaitErr = c.TryAccepted(c.shouldStillWaitCtx, true); c.ex.Started() || c.shouldStillWaitErr != nil {
+		return false
+	}
+
+	// Requeue the remaining work items before waiting.
+	c.requeueBuffer()
+	return true
+}
+
+// requeueBuffer moves all non-executed work items from the temp buffer to the
+// postponed queue, then returns the buffer to the pool. It is THE postpone
+// door: nothing else writes the postponed queue.
+//
+//nolint:contextcheck // background context used only for tracing
+func (c *controller) requeueBuffer() {
+	traceRegion := "workq.controller.requeueBuffer"
+	defer trace.StartRegion(context.Background(), traceRegion).End()
+
+	// Minimize latencies, especially tail latencies, by ensuring that collected
+	// work items are sorted by ascending group and work IDs before requeuing.
+	// This prioritizes older work groups and items over newer ones, preventing
+	// individual items from being starved by shuffling.
+	slices.SortFunc(c.buffer, func(a, b bufferedWork) int {
+		switch {
+		case a.work == nil && b.work == nil:
+			return 0
+		case a.work == nil:
+			return 1
+		case b.work == nil:
+			return -1
+		case a.work.Group() < b.work.Group():
+			return -1
+		case a.work.Group() > b.work.Group():
+			return 1
+		case a.work.ID() < b.work.ID():
+			return -1
+		case a.work.ID() > b.work.ID():
+			return 1
+		default:
+			panic("unexpected equal IDs in requeueBuffer")
+		}
+	})
+	for i := range c.buffer {
+		bw := &c.buffer[i]
+		work := bw.work
+		if work == nil {
+			// All nil from here on out
+			break
+		}
+		bw.work = nil
+		trace.Logf(context.Background(), traceRegion, "pushing %v to postponed queue", work)
+		c.q.postponed.PushBack(work)
+	}
+	c.buffer = c.buffer[:0]
+	c.currentIndex = 0
+}
+
+//nolint:contextcheck // background context used only for tracing
+func (c *controller) addToBuffer(work Work, wasPostponed bool) {
+	traceRegion := "workq.controller.addToBuffer"
+	c.buffer = append(c.buffer, bufferedWork{
+		work:         work,
+		wasPostponed: wasPostponed,
+	})
+	if trace.IsEnabled() {
+		trace.Logf(context.Background(), traceRegion,
+			"added %v at index %d, wasPostponed=%v", work, len(c.buffer)-1, wasPostponed)
+	}
+}
+
+func (c *controller) Free() {
+	controllerPool.Release(c)
+}
+
+type bufferedWork struct {
+	work         Work
+	wasPostponed bool
+}

@@ -1,24 +1,22 @@
 // Copyright (c) Peter Newcomb. All rights reserved.
 // Licensed under the MIT License.
 
-module github.com/petenewcomb/psg-go
+module github.com/petenewcomb/streampool
 
-// Go 1.24 is the latest stable release at time of writing and at least 1.23
-// with GOEXPERIMENT=aliastypeparams is required for the generic type aliases
-// used to define TaskFunc and GatherFunc
-go 1.24
+go 1.25
 
 require (
-	github.com/addrummond/heap v1.3.1
-	github.com/gammazero/deque v1.0.0
-	github.com/stretchr/testify v1.10.0
+	github.com/influxdata/tdigest v0.0.2-0.20210216194612-fc98d27c9e8b
+	github.com/petenewcomb/atomic128-go v0.0.3
+	github.com/stretchr/testify v1.11.1
 	pgregory.net/rapid v1.2.0
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/google/go-cmp v0.6.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/savsgio/gotils v0.0.0-20230208104028-c358bd845dee // indirect
-	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63 // indirect
+	golang.org/x/sys v0.37.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -52,6 +52,18 @@ func (l *List[T]) Next(item T) T {
 	return item.ListLinks().next
 }
 
+// Back returns the last item in the list, or the zero value of T if the
+// list is empty.
+func (l *List[T]) Back() T {
+	return l.back
+}
+
+// Prev returns the item before item, or the zero value of T if item is
+// the first. item must be in the list.
+func (l *List[T]) Prev(item T) T {
+	return item.ListLinks().prev
+}
+
 // Owns reports whether item is currently linked into this list.
 func (l *List[T]) Owns(item T) bool {
 	return item.ListLinks().list == any(l)

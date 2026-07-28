@@ -11,10 +11,6 @@ import (
 	"github.com/petenewcomb/streampool/internal/nbcq"
 )
 
-// noop is the default fallback for wake operations with no explicit fallback
-// action: a never-nil terminal so callers need no nil check.
-func noop() {}
-
 // Listeners manages a queue of one-shot wake relays. It provides a planting
 // mechanism for queues to register interest in a domain's capacity events.
 type Listeners struct {

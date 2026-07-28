@@ -47,15 +47,20 @@ type Accepted struct {
 	// hook nudges a parked worker when a sooner deadline is scheduled.
 	scheduled delayq.Queue[ScheduledWork]
 
-	// unmetDemandFn is the pool's worker-spawn signal, passed as the
-	// fallback to waiters.Notify: a parked worker takes the wake, or —
-	// with none parked — Notify's total conservation runs unmetDemandFn to
-	// spawn one. Fired when excess fresh work accumulates (queueFresh),
-	// when a scheduled item is forced (Expedite), and when a flush deadline
-	// comes due. Nil for queues whose pool does not spawn on demand (e.g.
-	// the per-wave workQueue, which never schedules and drives its own
-	// work); a nil fallback defaults to noop.
+	// unmetDemandFn is the pool's worker-spawn signal. Fired (via
+	// missHandler) when excess fresh work accumulates (queueFresh), when a
+	// scheduled item is forced (Expedite), and when a flush deadline comes
+	// due. Nil for queues whose pool does not spawn on demand (e.g. the
+	// per-wave workQueue, which never schedules and drives its own work).
 	unmetDemandFn func()
+
+	// missHandler is the fate of a waiter-set wake that finds no parked
+	// worker, bound once at Init: the spawn signal (unmetDemandFn) when the
+	// pool spawns on demand, else [rdvq.PersistMiss] — the miss is recorded
+	// in the waiter set's balance and aborts the next park attempt, so a
+	// relay wake whose fact was consumed one-shot at its source is never
+	// lost on a driver-driven queue.
+	missHandler rdvq.MissHandler
 
 	// schedTimer is the single, queue-owned timer that honors scheduled-work deadlines
 	// (Design B): workers carry no deadline timers of their own and scale fully to
@@ -83,24 +88,54 @@ func (q *Accepted) Init(unmetDemandFn func()) {
 	q.fresh.Init()
 	q.postponed.Init()
 	q.waiters.Init()
-	// The queue's relay: wake one parked worker to run a retry sweep, or — with
-	// none parked — spawn one on a spawn-capable queue (the fallback). Fired by
-	// a capacity domain that holds it, either as a registered demand's
-	// attendant or as a planted fallback-interest listener; its outcome never
-	// narrows delivery (docs/notification-conservation.md).
+	// The queue's relay: wake one parked worker to run a retry sweep, or —
+	// with none parked — run the miss handler: spawn a worker on a
+	// spawn-capable queue, else persist the miss in the waiter set's balance
+	// (the relayed fact was consumed one-shot at its source and lives
+	// nowhere else). Fired by a capacity domain that holds it, either as a
+	// registered demand's attendant or as a planted fallback-interest
+	// listener; its outcome never narrows delivery
+	// (docs/notification-conservation.md).
 	q.listener = rdvq.NewListener(q.relay)
 	q.scheduled.Init(q.wakeScheduled)
 	q.unmetDemandFn = unmetDemandFn
+	if unmetDemandFn != nil {
+		q.missHandler = rdvq.MissFunc(unmetDemandFn)
+	} else {
+		q.missHandler = rdvq.PersistMiss
+	}
 }
 
 func (q *Accepted) relay() {
-	q.waiters.Notify(q.unmetDemandFn)
+	q.waiters.Notify(q.missHandler)
 }
 
 // Listener returns the queue's wake relay, for use as a registered demand's
 // attendant or as a planted fallback-interest listener.
 func (q *Accepted) Listener() *rdvq.Listener {
 	return q.listener
+}
+
+// Reset returns the queue to its rest state for its single owner's next
+// cycle: the waiter set is reset (balance zeroed, stale registration hints
+// discarded) and the scheduled-work timer is disarmed. Quiescence is the
+// caller's contract — no worker parked, no wake in flight — under which the
+// finished cycle must also have drained all accepted and scheduled work
+// (Done implies the queues are empty), so residue here is a framework bug
+// and panics. The warm queues' never-re-Init contract is untouched:
+// draining and the waiter-set reset are ordinary operations.
+func (q *Accepted) Reset() {
+	if _, ok := q.fresh.TryPopFront(); ok {
+		panic("workq: Accepted.Reset with fresh work queued")
+	}
+	if _, ok := q.postponed.TryPopFront(); ok {
+		panic("workq: Accepted.Reset with postponed work queued")
+	}
+	if !q.scheduled.NextDeadline().IsZero() {
+		panic("workq: Accepted.Reset with scheduled work pending")
+	}
+	q.armScheduledTimer()
+	q.waiters.Reset()
 }
 
 // wakeScheduled is the delayq wake hook, fired when a newly scheduled deadline beats the
@@ -145,8 +180,9 @@ func (q *Accepted) armScheduledTimer() {
 // [Accepted.ForceFresh]'s wake-or-spawn. A spurious early fire (the item was already drained
 // by a worker woken another way) is harmless: the re-drive finds nothing due and re-arms.
 func (q *Accepted) scheduledDeadlineFired() {
-	// Total Notify: a parked worker takes the wake, or unmetDemandFn spawns one.
-	q.waiters.Notify(q.unmetDemandFn)
+	// A parked worker takes the wake, or the miss handler spawns one (only
+	// the scheduler's queue schedules work, and it spawns on demand).
+	q.waiters.Notify(q.missHandler)
 }
 
 // Schedule hands w to the queue to become fresh work at the given time.
@@ -211,7 +247,7 @@ func (q *Accepted) Expedite(w ScheduledWork) {
 	// spawn fn this can start a worker to run it; with none it falls back
 	// to nudging a parked worker. Forced items always signal (there is no
 	// running controller to absorb one on the current worker).
-	q.waiters.Notify(q.unmetDemandFn)
+	q.waiters.Notify(q.missHandler)
 }
 
 // ForceFresh promotes w straight into the fresh queue so the next worker runs it
@@ -227,7 +263,7 @@ func (q *Accepted) ForceFresh(w Work) {
 	// unmetDemandFn to spawn a driver rather than strand w in fresh (the funnel-sweep
 	// wedge, when every worker is busy inside a body and none is parked). Mirrors
 	// Queue.Post's fireDemand.
-	q.waiters.Notify(q.unmetDemandFn)
+	q.waiters.Notify(q.missHandler)
 }
 
 // drainAllSkew is the offset added to time.Now() by [Accepted.DrainAllScheduled]
@@ -562,7 +598,7 @@ func (c *controller) queueFresh(work Work) {
 	c.q.fresh.PushBack(work)
 	c.workAddedCount++
 	if c.workAddedCount > 1 && c.q.unmetDemandFn != nil {
-		c.q.waiters.Notify(c.q.unmetDemandFn)
+		c.q.waiters.Notify(c.q.missHandler)
 	}
 }
 

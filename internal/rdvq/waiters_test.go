@@ -16,9 +16,6 @@ func TestWaiters_BasicNotification(t *testing.T) {
 	var waiters rdvq.Waiters
 	waiters.Init()
 
-	// No waiters - notification should be dropped
-	waiters.Notify(nil)
-
 	notified := make(chan bool, 1)
 	waiterStarted := make(chan struct{})
 
@@ -250,7 +247,10 @@ func TestWaiters_OrphanedNotifications(t *testing.T) {
 	// Give waiter time to register and abandon
 	time.Sleep(10 * time.Millisecond)
 
-	// Send notification - should be orphaned
+	// Send a notification aimed at the abandoned registration: it either loses
+	// the claim race (stale hint, miss dropped — the nil handler) or wins it
+	// (the abandoner drains the orphaned wake). Neither path may strand the
+	// waiter below, which gets its own notification.
 	waiters.Notify(nil)
 
 	notified := make(chan bool, 1)

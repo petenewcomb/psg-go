@@ -314,17 +314,22 @@ func (wv *waveImpl) Init() {
 }
 
 // Reset re-opens a recycled impl to a fresh Open cycle on the last-reference release
-// ([omnipool.Resetter]). It clears the per-cycle payload and re-opens wavestate
-// (stage→Open, fresh doneChan, counters already drained to zero) WITHOUT re-Init'ing
-// the warm queues and WITHOUT touching the embedded RefCount (whose generation must
-// survive). It runs single-owner — a recycle means refs hit zero — so the map clear and
-// the state re-open are quiescent (no live holder, no concurrent skim). The onDone
-// callback (releaseCaches) has already cleared wv.caches by the time Done was reached.
+// ([omnipool.Resetter]). It clears the per-cycle payload — including the workQueue's
+// rest-state reset, which zeroes the waiter set's missed-notification balance (whose
+// recorded misses carry relay notifications of the finished cycle) and asserts the
+// cycle drained its queues — and re-opens wavestate (stage→Open, fresh doneChan,
+// counters already drained to zero) WITHOUT re-Init'ing the warm queues and WITHOUT
+// touching the embedded RefCount (whose generation must survive). It runs
+// single-owner — a recycle means refs hit zero — so the map clear, the queue reset,
+// and the state re-open are quiescent (no live holder, no concurrent skim). The
+// onDone callback (releaseCaches) has already cleared wv.caches by the time Done was
+// reached.
 func (wv *waveImpl) Reset() {
 	wv.funnelInstances.Range(func(k, _ any) bool {
 		wv.funnelInstances.Delete(k)
 		return true
 	})
+	wv.workQueue.Reset()
 	wv.state.Init(wv.sweepFunnels, wv.releaseCaches)
 }
 

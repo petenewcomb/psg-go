@@ -97,6 +97,19 @@ func (q *inboxOnlyQueue[T, C, CT]) reapStale() {
 	}
 }
 
+// drainHints discards every hint in the collection, returning its storage to
+// the pools. For quiescent single-owner resets only: with no registration
+// live, every remaining hint is stale, so none may be restored (contrast
+// reapStale, which must preserve the first live hint it meets).
+func (q *inboxOnlyQueue[T, C, CT]) drainHints() {
+	var ct CT
+	for {
+		if _, ok := ct.TryPop(&q.emptyInboxes); !ok {
+			return
+		}
+	}
+}
+
 // emptyInboxesTrait is the internal interface for managing collections of
 // waiting consumer inboxes. It provides a unified abstraction over FIFO and LIFO
 // consumer selection - the queue itself always delivers items in FIFO order, but

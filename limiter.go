@@ -90,21 +90,19 @@ type semaphoreResource struct {
 	capacityChangedFn func() // mints into the pool notifier when the ceiling is raised
 }
 
-// TryAcquire and Release implement [permits.Resource]. n is the weight: the whole
-// amount is admitted atomically or not at all (a partial admit would strand the
-// remainder — the same all-or-nothing contract the gather's shortfall arm assumes).
-func (s *semaphoreResource) TryAcquire(n int) bool {
+// TryAcquireUpTo and Release implement [permits.HoldableResource]. n is the
+// weight; the draw commits min(free, n) in one atomic step (AddUpTo), per the
+// interface's single-draw contract — a partial draw is the caller's starting
+// reservation balance, never a stranded remainder.
+func (s *semaphoreResource) TryAcquireUpTo(n int) int {
 	limit := s.maxConcurrency.Load()
 	switch {
 	case limit < 0:
-		for range n {
-			s.inFlight.Increment()
-		}
-		return true
+		return s.inFlight.AddUpTo(n, math.MaxInt)
 	case limit == 0:
-		return false
+		return 0
 	default:
-		return s.inFlight.AddIfUnder(n, int(limit))
+		return s.inFlight.AddUpTo(n, int(limit))
 	}
 }
 

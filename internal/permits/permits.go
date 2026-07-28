@@ -7,6 +7,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/petenewcomb/streampool/internal/dll"
 	"github.com/petenewcomb/streampool/internal/omnipool"
@@ -57,14 +58,42 @@ import (
 //     held back to the Resource (counts.drain, coordinating with a concurrent stealOut
 //     so conservation holds), and decrements the parent's refs (cascade).
 
-// Resource is the pluggable accounting object permits are drawn from — the open
-// extension point (semaphore, memory, rate, weighted); n carries the amount being
-// checked out: a whole weight on the single-grant fast path, or the gather's current
-// shortfall (all-or-nothing until the TryAcquireUpTo capability lands,
-// weighted-acquisition.md sequencing step 3).
-type Resource interface {
-	TryAcquire(n int) bool
+// HoldableResource is the pluggable accounting object permits are drawn from —
+// the extension point for resources whose units can be held idle and returned
+// (semaphore, memory, weighted). Holdability is what admits a resource to the
+// full reservation model: queues, reservations, lending, and claims all move
+// units that Release will eventually bring home
+// (docs/plan/directed-delivery.md §Resource taxonomy).
+//
+// TryAcquireUpTo checks out min(free, n) units and returns the amount drawn
+// (0 when nothing is free). A partial draw is not a failure: the caller keeps
+// what was drawn as the starting balance of its reservation and registers for
+// the shortfall. Implementations should commit the draw as a single atomic
+// min(free, n) step — one observed free state then yields at most one partial
+// grant, concurrent claimants resolve without double-counting, and the window
+// between draw and registration is closed by the registration's pool-mutex
+// sweep with the drain discipline as backstop.
+type HoldableResource interface {
+	TryAcquireUpTo(n int) int
 	Release(n int)
+}
+
+// EphemeralResource is the extension point for consume-on-acquire resources —
+// units that are spent at acquisition and never released (rate is the
+// canonical example). With no releases there are no capacity events, so an
+// ephemeral resource cannot back the reservation model: its pool degenerates
+// to an admission gate (barrier, FIFO, all-or-nothing head retry — no
+// reservations, no lending, no claimants, no forest), and the resource itself
+// must supply the re-drive that releases supply elsewhere. That channel is
+// the refusal's retryAt: the earliest instant a retry could succeed (a rate
+// resource folds its refill schedule into the refusal), which the admission
+// gate uses to schedule the head's next attempt; it is meaningless when ok
+// is true. Pools do not yet accept one — the admission-gate degeneration is
+// unbuilt (docs/plan/directed-delivery.md §Resource taxonomy); the interface
+// fixes the taxonomy so holdable-only machinery states its requirement as a
+// type.
+type EphemeralResource interface {
+	TryAcquire(n int) (ok bool, retryAt time.Time)
 }
 
 // OverdraftResource is the optional holdable capability consulted when the Pool has
@@ -97,7 +126,7 @@ type Resource interface {
 // killed unit. Resources whose limits are hard safety walls (e.g. memory) implement
 // the capability to refuse.
 type OverdraftResource interface {
-	Resource
+	HoldableResource
 	Overdraft(n int) (granted bool, err error)
 }
 
@@ -176,7 +205,7 @@ var cacheDestroyHook atomic.Pointer[func(*Cache)]
 
 // Pool is the Resource boundary and the root of a forest of caches.
 type Pool struct {
-	resource Resource
+	resource HoldableResource
 	roots    cacheList
 
 	// mu guards the demand FIFO and the anchor install. Registration,
@@ -361,9 +390,9 @@ func (od *overdraft) Reset() {
 var overdraftPool = omnipool.For[overdraft]()
 
 // NewPool returns a Pool drawing permits from r.
-func NewPool(r Resource) *Pool {
+func NewPool(r HoldableResource) *Pool {
 	if r == nil {
-		panic("permits: nil Resource")
+		panic("permits: nil HoldableResource")
 	}
 	p := &Pool{resource: r, rank: nextPoolRank.Add(1)}
 	if odr, ok := r.(OverdraftResource); ok {
@@ -381,8 +410,24 @@ func NewPool(r Resource) *Pool {
 // typed handle kept by the constructor — naturally a distinct Semaphore surface
 // carrying the method — since callers needing Resource-specific controls had the
 // concrete pointer at construction.
-func (p *Pool) Resource() Resource {
+func (p *Pool) Resource() HoldableResource {
 	return p.resource
+}
+
+// tryAcquireAll checks out exactly n units or none, putting a partial draw
+// straight back. It bridges the all-or-nothing engine onto TryAcquireUpTo
+// until directed delivery lands (docs/plan/directed-delivery.md): there a
+// partial draw survives as the registering front's initial reservation
+// instead of bouncing off the Resource, and this shim disappears.
+func (p *Pool) tryAcquireAll(n int) bool {
+	take := p.resource.TryAcquireUpTo(n)
+	if take == n {
+		return true
+	}
+	if take > 0 {
+		p.resource.Release(take)
+	}
+	return false
 }
 
 // NewCache creates a top-level cache (a tree root drawing on the Pool).
@@ -549,6 +594,13 @@ type Demand struct {
 	// w is the registered weight (0 when not registered) — stamped at
 	// registration; retries must re-present it unchanged (weigh-once).
 	w uint64
+
+	// account homes the demand's standing reservation under directed
+	// delivery (docs/plan/directed-delivery.md): deliveries fill it in
+	// service order, and the claim consumes it at the run boundary.
+	// Owner-serialized like the demand itself; other goroutines reach it
+	// only through the ledger mutex.
+	account *Account
 
 	// attendant is the demand's wake target — nil while the owner is running
 	// (unattended-but-cycling). A property of the demand, not the registration:
@@ -761,7 +813,7 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 	// runs through headGather.acquireInto, not this path, so it still steals.)
 	if od := p.od.Load(); od != nil {
 		if oa := od.sentinel.cache.Load(); oa != nil && exemptFromBarrier(c, home, oa) {
-			if p.resource.TryAcquire(w) {
+			if p.tryAcquireAll(w) {
 				c.counts.checkout(uw)
 				return Permit{backing: c, weight: uw}, nil
 			}
@@ -780,7 +832,7 @@ func (c *Cache) Acquire(d *Demand, w int) (Permit, error) {
 	// arm — it is atomic, so it is not freelance gathering. No single-victim steal
 	// here: a partial take would strand loose permits or freelance-deposit them;
 	// the head's gather harvests victims instead.
-	if p.resource.TryAcquire(w) {
+	if p.tryAcquireAll(w) {
 		c.counts.checkout(uw)
 		return Permit{backing: c, weight: uw}, nil
 	}
@@ -964,7 +1016,7 @@ func (p *Pool) headGather(d *Demand, uw uint64) (Permit, error) {
 			continue // raced coverable — the next acquireInto pass occupies
 		}
 		//nolint:gosec // G115: need ≤ uw, which came from the int w
-		if p.resource.TryAcquire(int(need)) {
+		if p.tryAcquireAll(int(need)) {
 			if home.counts.depositOccupy(need, uw) {
 				p.retire(d)
 				return Permit{backing: home, weight: uw}, nil
@@ -1232,7 +1284,7 @@ func (p *Pool) endEpisode(c *Cache) {
 func (p *Pool) acquireInto(c *Cache, w int) *Cache {
 	//nolint:gosec // G115: w >= 1, validated by Acquire (the only caller)
 	uw := uint64(w)
-	if p.resource.TryAcquire(w) {
+	if p.tryAcquireAll(w) {
 		c.counts.checkout(uw)
 		return c
 	}
@@ -1246,7 +1298,7 @@ func (p *Pool) acquireInto(c *Cache, w int) *Cache {
 		}
 		need := inUse + uw - held
 		//nolint:gosec // G115: need ≤ uw, which came from the int w
-		if p.resource.TryAcquire(int(need)) {
+		if p.tryAcquireAll(int(need)) {
 			if c.counts.depositOccupy(need, uw) {
 				return c
 			}

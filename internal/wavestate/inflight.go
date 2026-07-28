@@ -61,6 +61,27 @@ func (c *InFlightCounter) AddIfUnder(n, limit int) bool {
 	}
 }
 
+// AddUpTo atomically adds min(n, limit-current) and returns the amount added
+// (0 when the counter is at or over limit) — the partial-draw form of
+// AddIfUnder backing a resource's TryAcquireUpTo: one CAS commits a single
+// min(free, n) draw, so one observed free state yields at most one partial
+// grant and concurrent claimants resolve without double-counting.
+func (c *InFlightCounter) AddUpTo(n, limit int) int {
+	for {
+		cur := c.v.Load()
+		take := int64(limit) - cur
+		if take > int64(n) {
+			take = int64(n)
+		}
+		if take <= 0 {
+			return 0
+		}
+		if c.v.CompareAndSwap(cur, cur+take) {
+			return int(take)
+		}
+	}
+}
+
 //nolint:contextcheck // background context used only for tracing
 func (c *InFlightCounter) IncrementIfUnder(limit int) bool {
 	traceRegion := "InFlightCounter.IncrementIfUnder"

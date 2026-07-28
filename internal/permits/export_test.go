@@ -25,14 +25,18 @@ type semaphore struct {
 	inFlight atomic.Int64
 }
 
-func (s *semaphore) TryAcquire(n int) bool {
+func (s *semaphore) TryAcquireUpTo(n int) int {
 	for {
 		cur := s.inFlight.Load()
-		if cur+int64(n) > int64(s.capacity) {
-			return false
+		take := int64(s.capacity) - cur
+		if take > int64(n) {
+			take = int64(n)
 		}
-		if s.inFlight.CompareAndSwap(cur, cur+int64(n)) {
-			return true
+		if take <= 0 {
+			return 0
+		}
+		if s.inFlight.CompareAndSwap(cur, cur+take) {
+			return int(take)
 		}
 	}
 }

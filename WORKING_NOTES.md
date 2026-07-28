@@ -1,5 +1,166 @@
 # PSG-Go Combiner Branch Working Notes
 
+**►►► RESERVATION BUILD STARTED — TAXONOMY CHECKPOINT GREEN (2026-07-27;
+uncommitted, atop the balance work). Build 1 of 5 (directed-delivery
+§Resource taxonomy) landed: HoldableResource{TryAcquireUpTo;Release} with
+the single-atomic min(free,n) draw contract (InFlightCounter.AddUpTo is
+the CAS primitive); OverdraftResource embeds Holdable (hook unchanged);
+EphemeralResource{TryAcquire(n)(ok bool, retryAt time.Time)} — PN adopted
+the don't-retry-until sketch INTO the signature (refusal carries the
+earliest useful retry instant; the admission-gate pool degeneration
+remains unbuilt). semaphoreResource (+weighted embed) and the permits test
+fakes draw partially; the old all-or-nothing engine runs on
+Pool.tryAcquireAll (draw, putback-if-short — a documented bridge that
+build 2 deletes when partial draws survive as the registering front's
+initial reservation). Gates: vet, repo -short, permits -race, 200-check
+short-mode -race sim green (plus a 400-check batch on the balance
+checkpoint). BUILD 2 CORE LANDED (2026-07-27, uncommitted): the directed-delivery
+ledger as a self-contained layer in internal/permits — account.go
+(Account: reserved atomic / lent under mu / terminal closed / parent edge;
+claimant frames with direct rdvq.Waiter), ledger.go (ledger: pot via
+HoldableResource, inUse/loansOutstanding/waitingClaimants pool atomics,
+anchor as atomic head-most-unsatisfied-demand, demand+claimant dll queues,
+deliver with spill past satisfied entries, release fast path behind the
+guards, sweepPot, recallToFront + drain), claim.go (tryReserve barrier
+fast path, register with partial-draw starting balance, claimPrivate,
+claimRegistered one-mu-section claim-only retirement, awaitClaim on the
+completion-signal waiter with finishClaim's under-mu wholeness re-check,
+depart = the unified owner-departure rule). dll gained Back/Prev
+(tail-first drains). The OLD engine still serves all existing callers
+(cutover pending); the core is exercised by ledger_test.go — behavior
+tests for every settled property + an 8-worker conservation hammer with a
+stall-dump harness. TWO REAL RACES FOUND AND CLOSED BY THE HAMMER under
+-race: (1) claimant-side deposit race — release's fast-path pot deposit
+vs claimant registration needed the full Dekker pair (guarded() re-check
+incl. waitingClaimants on the deposit side + sweepPot inside
+claimRegistered's miss arm), mirror of register's demand-side sweep; (2)
+THE FRONT-CLAIMANT RECALL IS LOAD-BEARING LIVENESS, empirically: without
+the drain discipline the hammer wedges with all capacity fragmented
+across parked claimants' partial reservations (inUse 0, every wake owed
+already fired) — the dump reproduced directed-delivery's §drain
+rationale verbatim; recallToFront (demands tail-first then junior
+claimants tail-first, plain ledger transfers, no pairwise debt) runs at
+register/claimRegistered/finishClaim/depart. Gates: permits+dll -race
+green, hammer x15 -race zero stalls, repo -short green. LENDING LAYER LANDED (same session): borrow (drain + receivable:
+lender.lent, pool loansOutstanding forces releases through delivery),
+repay folded into every transfer arm — the FUNGIBLE RULE: units entering
+any reservation settle that account's receivable first, whoever released
+them (fill and drain both) — claimParked (returning parked body joins the
+claimant TAIL per the discipline's service order; gateClaim = shared run
+boundary body with claimRegistered), depart abandons receivables (lent
+zeroed + guard decremented). Tests: borrow→claim-short→repay-through-
+delivery→settle lifecycle; lender-departure abandonment with emergent
+routing; all green -race, hammer x10 clean, repo -short green.
+SEQUENCING FINDING (from reading the old engine before cutover): the
+caller cutover CANNOT land green alone — the old model's canonical nested
+scenarios resolve via chain-inheritance + the suspend bracket, whose new-
+model replacements are park-as-reserved lending (build 4) — so the final
+rewire of permithandle.go/wave.go onto the core is ONE ATOMIC CUT with
+the root integration, as TODO's "phases 1+2 built together" anticipated.
+Green-alongside strategy accordingly: keep extending the core (next:
+episode + registration-attachment discovery structures per-(wave,pool),
+chain-margin walk over account parents, normalization debt-shift,
+overdraft tier-1 integration), THEN the single coordinated cut. BARRIER-EXEMPTION OPEN POINT SETTLED (2026-07-27 with PN): the barrier
+DISSOLVES rather than restates — no exemption classes. The old
+exemptFromBarrier's three jobs redistribute: episode-owner resume enters
+through the claim gate (never an arrival); causal-subtree liveness is
+served by the credit channels funding REGISTERED demands (a borrower is
+by definition parked or postponed — no inline borrow at arrival, no pot
+bypass; the borrow-drain serves the standing reservation from
+registration's mutex section on); the overdraft-episode subtree claims
+against the allowance (its own gate). "Fresh arrival" = attempt with no
+standing state at this pool (per-(admission,pool); re-arrival after
+departure is fresh again, the recorded withdrawal cost). The anchor check
+is NOT a barrier but the pot's FIRST-CLAIM rule (while a shortfall stands
+the pot belongs to the queue; nearly vacuous at rest by pot-empty, load
+closes transient delivery windows) — barred() dissolved into tryReserve
+accordingly; exemptFromBarrier/chainPassesThrough/claimStartFor die at
+cutover; "barrier gate" vocabulary to be reconciled at doc fold-in.
+ATTACHMENT LAYER LANDED (2026-07-27, after the barrier + account-field
+settlements): attachments.go — Attachments (per-(wave,pool) pure-discovery
+anchor under the pool mutex; Empty() = the teardown assert), Episode
+(parked lender's loan offer, dies with the park, loans survive on the
+lender's account), registrationAttachment (separate node — the demand's
+own links belong to the pool queue), borrowFromAnchor (drain-discipline
+behind-source order: registrations tail-first then episodes tail-first;
+loans recorded per source; anchor republished for reopened shortfalls),
+shiftDebt (normalization's one move: ancestor margin makes the inner
+lender whole via drain — the fungible arrival rule settles — then the
+receivable re-records on the ancestor; pool loan count invariant). Tests:
+borrow-order + reopened-shortfall + delivery-order repayment
+(re-completion re-fires the completion signal; the parked lender's
+receivable stands while queue members outrank it); shiftDebt caps and
+conservation. All -race green, repo -short green. REMAINING in build 2
+before the cut: overdraft tier-1 (mapping the existing od-episode
+machinery into delivery's tier 1 — likely lands WITH the cutover, since
+its evaluation sites live in the old engine) and the chain-margin WALK
+(meta-side, arrives with build 3's prefix materialization; the ledger
+primitives it composes — borrow, borrowFromAnchor, shiftDebt — are done). VOCABULARY (PN 2026-07-27): "account word" is RETIRED — it is the meta's
+ACCOUNT FIELD, plainly (the machine-word/single-CAS property is the
+field's documented contract — states unopened → account | never-opened,
+one successful transition ever — not name material); sweep
+forest-severability.md and meta-chain.md at doc fold-in. ACCOUNT-FIELD LAYOUT SETTLED (2026-07-27 with PN): ONE atomic head field
+on the admission's meta; the admission's accounts (one per gate pool) form
+a PREPEND-ONLY INTRUSIVE LIST (owner-list link inside Account; entries
+compare pool pointers, O(gate arity) — a structural bound, not workload-
+dependent; debug assert list ≤ dispatching op's limiter arity). The
+spec's "exactly one successful CAS ever" amends to a MONOTONE discipline:
+nil → {never-opened sentinel | growing list}, never shrinking, sentinel
+terminal, installs prepend-CAS with the adoption rule (same-pool loser
+adopts; other-pool loser retries on new head; sentinel won ⇒ skip
+forever). EXIT stays one CAS attempt (nil→sentinel; failure ⇒ accounts
+exist ⇒ exit settles each and closes). Splice skip test: sentinel→skip;
+nil→live-stop; list→skip iff all closed. sync.Map REJECTED (loses the
+single-cell tri-state latch → two-word flag/map race; alloc+Clear churn
+on recycled metas; hash lookup loses to 1-3 hop walk). Scopes pinned:
+per-admission = meta + ≤arity accounts; per-wave = attachment anchors
+only; per-pool = ledger. Then build 3 lazy forest (layout now settled),
+build 4 root integration (the atomic cut), build 5 sim checkers.**
+
+**►►► BALANCE BUILT (MissHandler shape settled with PN 2026-07-27) — SIM
+GATE BLOCKED ON PRE-EXISTING WEDGE FAMILIES (uncommitted). The waiter-set
+balance (conservation-rework §Amendment) is implemented and unit-green,
+with two PN-directed revisions to the amendment's literal shape: (1)
+DELIVERY-FATE POLARITY INVERTED — Notify(nil) DROPS the miss (the
+durable-fact exemption: sound only for wakes whose fact every parker's
+confirmFn re-derives after registration — publishFull, Handoff
+wake-on-register, Queue double-wake keep Notify(nil) unchanged; the
+proof obligation is documented on Notify's nil arm), and persistence is
+an explicit sentinel: rdvq.MissHandler{HandleMiss(*Waiters)} — an OPEN
+interface (custom handlers allowed), but PersistMiss is a PURE SENTINEL:
+its own HandleMiss panics, and Notify recognizes it by identity and swaps
+in the private persistMiss implementation (the only handler with access to
+recordMiss: record-then-re-offer-then-reclaim closes the register/record
+race; "balance>0 while a waiter is parked" never stable). MissFunc adapts
+plain funcs (spawn signals). Identity compare is safe against
+non-comparable MissFunc operands (differing dynamic types ⇒ false). workq.Accepted binds
+missHandler once at Init: MissFunc(unmetDemandFn) for spawn-capable
+pools, PersistMiss for driver-driven queues (wave workQueue) — the relay
+wake's one-shot fact is what the balance exists for. Rationale: recording
+re-derivable facts manufactures service obligations that don't exist
+(balance grows unboundedly relative to parks; parkers spin-drain stale
+misses; also self-feeding livelock, below). (2) Reset IS A FULL RESET —
+Waiters.Reset (zero balance + drain stale hints; quiescent single-owner
+contract) replaces ClearBalance; Accepted.Reset (waiters.Reset + disarm
+sched timer + PANIC asserts fresh/postponed/scheduled empty — the
+Done-implies-queues-empty obligation, now enforced every wave recycle)
+called from waveImpl.Reset. Gates: vet+build clean, rdvq/workq -race
+green, repo -short green (recycle asserts silent). Consume step
+unchanged: WaitFunc register→confirm→try-consume→park; NotifyAll
+balance-neutral. SIM STATUS UNCHANGED: full-config TestBySimulation
+checks=100 hangs on BOTH trees — baseline control (scratchpad control/
+worktree, unmodified HEAD) hits a QUIET wedge (0 runnable —
+control100.log); the balance tree LIVELOCKS at the same config (1
+runnable forever in blockAcquire→blockAndHelp→ExecuteOne — sim100.log):
+the relay token now survives as designed, but an unproductive retry's
+interest-walk RE-MINTS one each cycle while the only pumper's own
+mid-admission joint-acquire holds the capacity (the W1 shape; lending not
+yet built) = perpetual motion. The balance is NOT independently landable
+at full sim config; the amendment's regression gate binds only after the
+acquire-side seams (conservation-rework 5-7) / reservation lending.
+NB the branch builds only via untracked go.work + local ../atomic128-go
+checkout (control worktree needed an absolute-path go.work copy).**
+
 **►►► DIRECTED DELIVERY SETTLED — RESERVATION PHASE 2 (2026-07-26, with PN;
 record: docs/plan/directed-delivery.md, NOT built; the reservation design is
 COMPLETE end to end). DELIVERY ORDER: od excess home → CLAIMANT QUEUE
